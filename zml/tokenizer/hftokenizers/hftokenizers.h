@@ -8,6 +8,7 @@
 typedef struct hftokenizers hftokenizers;
 
 hftokenizers *hftokenizers_new(zig_slice);
+hftokenizers *hftokenizers_new_from_bytes(zig_slice);
 void hftokenizers_drop(hftokenizers *tokenizer);
 zig_slice hftokenizers_encode(hftokenizers *tokenizer, zig_slice text);
 void hftokenizers_tokens_drop(zig_slice tokens);

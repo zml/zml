@@ -6,53 +6,82 @@
 // Namespaces
 const std = @import("std");
 
-pub const platform_specific = @import("c");
-pub const tokenizer = @import("zml/tokenizer");
+const c = @import("c");
+const runfiles = @import("runfiles");
 
-pub const aio = @import("aio.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
-pub const Bufferized = @import("tensor.zig").Bufferized;
-pub const callback = @import("callback.zig");
-pub const CompilationOptions = @import("platform.zig").CompilationOptions;
-pub const context = @import("context.zig");
-pub const Context = @import("context.zig").Context;
-pub const Data = @import("dtype.zig").Data;
-pub const DataType = @import("dtype.zig").DataType;
+pub const constants = @import("constants.zig");
+pub const dtype = @import("dtype.zig");
+pub const Data = dtype.Data;
+pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
-pub const compile = exe.compile;
-pub const compileWithPrefix = exe.compileWithPrefix;
-pub const compileFn = exe.compileFn;
-pub const compileModel = exe.compileModel;
-pub const FnExe = exe.FnExe;
-pub const ModuleExe = exe.ModuleExe;
-pub const ModuleSignature = exe.ModuleSignature;
+pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
-pub const helpers = @import("helpers.zig");
-pub const HostBuffer = @import("hostbuffer.zig").HostBuffer;
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
 pub const module = @import("module.zig");
 pub const nn = @import("nn.zig");
-pub const ops = @import("ops.zig");
-pub const call = ops.call;
 pub const pjrt = @import("pjrtx.zig");
+pub const io = @import("io.zig");
 pub const platform = @import("platform.zig");
-pub const Platform = @import("platform.zig").Platform;
-pub const Shape = @import("shape.zig").Shape;
-pub const ShapeOf = @import("tensor.zig").ShapeOf;
-pub const Target = @import("platform.zig").Target;
-pub const Tensor = @import("tensor.zig").Tensor;
+pub const Platform = platform.Platform;
+pub const Target = platform.Target;
+pub const CompilationOptions = platform.CompilationOptions;
+pub const shape = @import("shape.zig");
+pub const Shape = shape.Shape;
+pub const safetensors = @import("safetensors.zig");
+pub const slice = @import("slice.zig");
+pub const Slice = slice.Slice;
+pub const ConstSlice = slice.ConstSlice;
+pub const tensor = @import("tensor.zig");
+pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
-pub const torch = @import("torch.zig");
+pub const tokenizer = @import("zml/tokenizer");
 
-pub const tools = struct {
-    pub const Tracer = @import("tools/tracer.zig").Tracer;
-};
+var runfiles_once = std.once(struct {
+    fn call_() !void {
+        if (std.process.hasEnvVarConstant("RUNFILES_MANIFEST_FILE") or std.process.hasEnvVarConstant("RUNFILES_DIR")) {
+            return;
+        }
 
-pub const log = std.log.scoped(.zml);
+        var io_: std.Io.Threaded = .init_single_threaded;
+        defer io_.deinit();
 
-test {
-    // NOTE : testing entrypoint.
-    // Don't forget to import your module if you want to declare tests declarations that will be run by //zml:test
+        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+        const allocator = arena.allocator();
+        defer arena.deinit();
+
+        var envMap = std.process.EnvMap.init(allocator);
+        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io_.io() })) orelse return;
+        try r.environment(&envMap);
+
+        var it = envMap.iterator();
+        while (it.next()) |entry| {
+            const keyZ = try allocator.dupeZ(u8, entry.key_ptr.*);
+            const valueZ = try allocator.dupeZ(u8, entry.value_ptr.*);
+            _ = c.setenv(keyZ.ptr, valueZ.ptr, 1);
+        }
+    }
+
+    fn call() void {
+        call_() catch @panic("Unable to init runfiles env");
+    }
+}.call);
+
+pub fn init() void {
+    runfiles_once.call();
+    mlir.once.call();
+}
+
+pub fn deinit() void {}
+
+/// Return a clone of a type with Tensors replaced by Buffer.
+/// Non-Tensor metadata is stripped out of the resulting struct.
+/// Recursively descends into the type.
+pub fn Bufferized(comptime T: type) type {
+    return meta.MapRestrict(Tensor, Buffer).map(T);
+}
+
+test "zml" {
     std.testing.refAllDecls(@This());
 }

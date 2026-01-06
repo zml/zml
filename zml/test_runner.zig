@@ -3,8 +3,6 @@ const std = @import("std");
 const testing = std.testing;
 const builtin = @import("builtin");
 
-const async = @import("async");
-
 // note: std_options.log_level does not respect testing.log_level
 // ref: https://github.com/ziglang/zig/issues/5738
 const log_level: std.log.Level = .warn;
@@ -17,12 +15,9 @@ var log_err_count: usize = 0;
 var fba_buffer: [8192]u8 = undefined;
 var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
 
-pub fn main() anyerror!void {
+pub fn main() !void {
     testing.log_level = log_level;
-    try async.AsyncThread.main(testing.allocator, asyncMain);
-}
 
-pub fn asyncMain() !void {
     const test_fn_list: []const std.builtin.TestFn = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;
@@ -58,6 +53,9 @@ pub fn asyncMain() !void {
             }
         }
 
+        testing.io_instance = .init(testing.allocator_instance.allocator());
+        defer testing.io_instance.deinit();
+
         const test_node = root_node.start(test_fn.name, 0);
         if (!have_tty) {
             std.debug.print("{d}/{d} {s}...", .{ i + 1, test_fn_list.len, test_fn.name });
@@ -86,7 +84,7 @@ pub fn asyncMain() !void {
                     std.debug.print("FAIL ({s})\n", .{@errorName(err)});
                 }
                 if (@errorReturnTrace()) |trace| {
-                    std.debug.dumpStackTrace(trace.*);
+                    std.debug.dumpStackTrace(trace);
                 }
                 test_node.end();
             },

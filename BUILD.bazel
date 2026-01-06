@@ -1,21 +1,10 @@
-load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("//third_party/zls:zls_completion.bzl", "zls_completion")
-
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_binary")
-
-zig_binary(
-    name = "http",
-    main = "http.zig",
-    visibility = ["//visibility:public"],
-)
 
 zls_completion(
     name = "completion",
     visibility = ["//visibility:public"],
     deps = [
-        #"//examples/llama",
         "//stdx",
-        "//zml2:zml",
+        "//zml:zml",
     ],
 )

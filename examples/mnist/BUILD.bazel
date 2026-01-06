@@ -14,7 +14,7 @@ zig_binary(
     main = "mnist.zig",
     deps = [
         "//stdx",
-        "//zml2:zml",
+        "//zml",
     ],
 )
 

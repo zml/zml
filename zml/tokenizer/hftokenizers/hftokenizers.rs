@@ -25,6 +25,14 @@ extern "C" fn hftokenizers_new(path: ZigSlice<u8>) -> *mut tokenizers::Tokenizer
 }
 
 #[no_mangle]
+extern "C" fn hftokenizers_new_from_bytes(bytes: ZigSlice<u8>) -> *mut tokenizers::Tokenizer {
+    return Box::into_raw(Box::new(
+        tokenizers::Tokenizer::from_bytes(bytes.as_slice())
+        .unwrap(),
+    ));
+}
+
+#[no_mangle]
 extern "C" fn hftokenizers_drop(t: *mut tokenizers::Tokenizer) {
     drop(unsafe { Box::from_raw(t) });
 }

@@ -1,55 +1,37 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
-const callback = @import("callback.zig");
+const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
-const Data = @import("dtype.zig").Data;
+const constants = @import("constants.zig");
+const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
-const HostBuffer = @import("hostbuffer.zig").HostBuffer;
-const Memory = @import("buffer.zig").Buffer.Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Memory = Buffer.Memory;
 
-const EnumLiteral = @TypeOf(.enum_literal);
-
-const dialect = struct {
-    const stablehlo = @import("mlir/dialects").stablehlo;
-};
-
-const scoped_log = std.log.scoped(.@"zml/tensor");
-
-test {
-    std.testing.refAllDecls(Tensor);
-}
-
-/// Represents an abstract Tensor object, which can be the input,
-/// output, weight or activations of a neural network.
-/// Tensor are abstract in the sense they only represent a computation,
-/// but not a specific memory buffer.
-/// Tensor namespace contains most of linear algebra needed to
-/// represent mathematical operations.
-/// More operations are available in `zml.nn` and `zml.torch` namespaces.
 pub const Tensor = struct {
+    var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
+
+    id: usize,
+    auto_broadcast: bool = false,
     _shape: Shape,
-    _id: _Id,
-    _donation: _Donation = .no_buffer,
-    _output_memory_kind: Memory = .device,
+    _value: ?*const mlir.Value = null,
 
-    pub const _Donation = union(enum) { no_buffer, input_buffer, arg: u16 };
-    pub const _Id = union(enum) { mlir: mlir.Value, buffer_id: u64, arg_id: u64 };
-    pub const MAX_RANK = Shape.MAX_RANK;
+    pub fn init(shape_like: anytype, dt: DataType) Tensor {
+        return .fromShape(.init(shape_like, dt));
+    }
 
-    /// Returns the current compilation context.
-    pub fn getContext(self: Tensor) *CompilationContext {
-        _ = self;
-        return CompilationContext.current();
+    pub fn fromShape(shape_: Shape) Tensor {
+        return .{ .id = Tensor.current_id.fetchAdd(1, .seq_cst), ._shape = shape_ };
     }
 
     pub fn format(self: Tensor, writer: *std.Io.Writer) !void {
@@ -67,7 +49,7 @@ pub const Tensor = struct {
     }
 
     /// Returns the rank of a Tensor.
-    pub inline fn rank(self: Tensor) u4 {
+    pub fn rank(self: Tensor) u4 {
         return self._shape.rank();
     }
 
@@ -84,10 +66,11 @@ pub const Tensor = struct {
     /// Internal use
     ///
     /// Creates a tensor from a Shape and an mlir.Value.
-    pub fn _result(sh: Shape, val: mlir.Value) Tensor {
+    pub fn _result(sh: Shape, val: *const mlir.Value) Tensor {
         const res: Tensor = .{
             ._shape = sh,
-            ._id = .{ .mlir = val },
+            ._value = val,
+            .id = Tensor.current_id.fetchAdd(1, .seq_cst),
         };
 
         if (builtin.mode == .Debug) {
@@ -102,19 +85,20 @@ pub const Tensor = struct {
     /// Creates a Tensor from a mlir.Value
     ///
     /// The shape is derived from the type of the mlir.Value.
-    pub fn fromMlirValue(val: mlir.Value) Tensor {
-        const ranked_tensor = val.getType().as(mlir.RankedTensorType).?;
-        const n = ranked_tensor.getRank();
+    pub fn fromMlirValue(val: *const mlir.Value) Tensor {
+        const ranked_tensor = val.type_().isA(mlir.RankedTensorType).?;
+        const n = ranked_tensor.rank();
 
-        stdx.debug.assert(n <= MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, MAX_RANK });
+        stdx.debug.assert(n <= constants.MAX_RANK, "Can't represent MLIR tensor of rank {}, max supported rank is {}.", .{ n, constants.MAX_RANK });
 
-        var sh: Shape = .{ ._dtype = mlirx.Type.toDType(ranked_tensor.getElementType()) };
+        var sh: Shape = .{ ._dtype = mlirx.Type.toDType(mlirCtx(), ranked_tensor.elementType()) };
         for (0..n) |i| {
-            sh._dims.appendAssumeCapacity(ranked_tensor.getDimension(i));
+            sh._dims.appendAssumeCapacity(ranked_tensor.dimension(i));
         }
         sh._tags.resize(n) catch unreachable;
+        sh._partitioning.resize(n) catch unreachable;
 
-        return .{ ._shape = sh, ._id = .{ .mlir = val } };
+        return .{ ._shape = sh, ._value = val, .id = Tensor.current_id.fetchAdd(1, .seq_cst) };
     }
 
     /// Returns the dimension of axis 'axis_'.
@@ -139,7 +123,7 @@ pub const Tensor = struct {
     /// Returns the indices of each of the given axes.
     ///
     /// 'axis_' can be an integer or a tag.
-    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, Tensor.MAX_RANK) {
+    pub fn axes(self: Tensor, axes_: anytype) stdx.BoundedArray(u3, constants.MAX_RANK) {
         return self._shape.axes(axes_);
     }
 
@@ -159,68 +143,39 @@ pub const Tensor = struct {
         return res;
     }
 
+    // TODO(Corentin)
     pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
-        return switch (self._id) {
-            .arg_id, .mlir => {
-                const ctx = self.getContext();
-                const mlir_ctx = ctx.mlirCtx();
-                var res = self;
-                res._shape = self._shape.withSharding(axes_);
-
-                if (ctx.numPartitions() <= 1) return self;
-                const op = dialect.stablehlo.custom_call(
-                    mlir_ctx,
-                    &.{self.value()},
-                    .{
-                        .call_target_name = "Sharding",
-                        .has_side_effect = false,
-                        .backend_config = null,
-                        .additional_attributes = &.{.{ "mhlo.sharding", ctx.getShardingAttr(res._shape) }},
-                        .api_version = .original,
-                    },
-                    &.{self.value().getType()},
-                    mlir_ctx.location(@src()),
-                );
-
-                return _result(res._shape, op.result(0));
-            },
-            .buffer_id => {
-                var res = self;
-                res._shape = self._shape.withSharding(axes_);
-                return res;
-            },
-        };
+        _ = self;
+        _ = axes_;
+        @panic("Unimplemented");
     }
 
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {
-        return switch (self._id) {
-            .arg_id, .mlir => {
-                const ctx = self.getContext();
-                const mlir_ctx = ctx.mlirCtx();
-                if (ctx.target() == .cpu) return self;
+        const ctx = CompilationContext.current();
+        if (ctx.platform.target == .cpu) return self;
 
-                const frontend_attributes = mlir.Attribute.dict(mlir_ctx, &.{
-                    .{ "_xla_buffer_placement", .string(mlir_ctx, kind.pjrtName()) },
-                });
+        const frontend_attributes = mlir.dictionaryAttribute(ctx.mlir_ctx, &.{
+            .named(ctx.mlir_ctx, "_xla_buffer_placement", mlir.stringAttribute(ctx.mlir_ctx, kind.pjrtName())),
+        });
 
-                const op = dialect.stablehlo.custom_call(mlir_ctx, &.{self.value()}, .{
-                    .call_target_name = "annotate_device_placement",
-                    .has_side_effect = true,
-                    .backend_config = null,
-                    .additional_attributes = &.{.{ "mhlo.frontend_attributes", frontend_attributes }},
-                    .api_version = .original,
-                }, &.{self.value().getType()}, mlir_ctx.location(@src()));
-
-                var res = _result(self._shape, op.result(0));
-                res._output_memory_kind = kind;
-                return res;
+        const op = dialects.stablehlo.custom_call(
+            ctx.mlir_ctx,
+            &.{self.value()},
+            &.{self.value().type_()},
+            .{
+                .call_target_name = "annotate_device_placement",
+                .has_side_effect = true,
+                .backend_config = .{ .original = "" },
+                .additional_attributes = &.{
+                    .named(ctx.mlir_ctx, "mhlo.frontend_attributes", frontend_attributes),
+                },
             },
-            .buffer_id => {
-                var res = self;
-                res._output_memory_kind = kind;
-                return res;
-            },
-        };
+            .unknown(ctx.mlir_ctx),
+        ).appendTo(currentBlock());
+
+        var res = _result(self._shape, op.result(0));
+        ctx.currentScope().id_to_output_memory_kind.put(ctx.currentScope().arena.allocator(), res.id, kind) catch unreachable;
+        return res;
     }
 
     /// Returns a Tensor with new tag names.
@@ -230,7 +185,7 @@ pub const Tensor = struct {
         return res;
     }
 
-    pub fn renameAxis(self: Tensor, ax: i8, name: EnumLiteral) Tensor {
+    pub fn renameAxis(self: Tensor, ax: i8, name: @EnumLiteral()) Tensor {
         var res = self;
         res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
         return res;
@@ -239,8 +194,12 @@ pub const Tensor = struct {
     /// Returns the mlir.Value associated with the Tensor.
     ///
     /// This will fail if used outside of a compilation context.
-    pub fn value(self: Tensor) mlir.Value {
-        return self.getContext().getValueAndDonation(self)[0];
+    pub fn value(self: Tensor) *const mlir.Value {
+        if (CompilationContext.current().currentScope().id_to_argument.get(self.id)) |argument_index| {
+            return CompilationContext.current().currentScope().block.argument(argument_index);
+        } else if (self._value) |v| {
+            return v;
+        } else @panic("Something went really wrong, tensor is not an argument nor has an mlir.Value");
     }
 
     /// Tell PJRT compiler that memory should be reuse between the two tensors.
@@ -251,20 +210,21 @@ pub const Tensor = struct {
     /// is not allowed to reuse the donated input buffer after the call.
     /// For `reuseBuffer` to be effective, it needs to propagate all the way through the output.
     pub fn reuseBuffer(self: Tensor, origin: Tensor) Tensor {
-        // Note: check donation docs, this may be too permissive.
-        stdx.debug.assert(self.byteSize() == origin.byteSize(), "Can't reuse buffers between tensors of different size: {f} and {f}", .{ self, origin });
-
-        // TODO: should we store all donations inside the context ?
-        var res = self;
-        res._donation = self.getContext().getValueAndDonation(origin)[1];
-
-        return res;
+        const compilation_context = CompilationContext.current();
+        const scope = compilation_context.currentScope();
+        if (scope.id_to_argument.get(origin.id)) |argument_index| {
+            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+            gop.value_ptr.* = argument_index;
+        } else if (scope.id_to_donation.get(origin.id)) |origin_donation| {
+            const gop = scope.id_to_donation.getOrPut(scope.arena.allocator(), self.id) catch unreachable;
+            gop.value_ptr.* = origin_donation;
+        }
+        return self;
     }
 
     /// Returns a Tensor containing the absolute value of each element of the input Tensor.
     pub fn abs(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.abs(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.abs(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         const dt = switch (self.dtype()) {
             .c64 => .f32,
             .c128 => .f64,
@@ -295,13 +255,12 @@ pub const Tensor = struct {
 
         res_shape = res_shape.withDtype(dt);
 
-        const loc = self.getContext().location(@src(), "bitCast({s})", .{@tagName(dt)});
-        const op = dialect.stablehlo.bitcast_convert(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.bitcast_convert(
+            mlirCtx(),
             self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), res_shape),
-            loc,
-        );
+            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(res_shape, op.result(0));
     }
@@ -313,30 +272,26 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the element-wise number of leading 0 bits in the input Tensor.
     pub fn countLeadingZeros(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.count_leading_zeros(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.count_leading_zeros(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing booleans indicating if each element of the input Tensor is finite.
     pub fn isFinite(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.is_finite(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.is_finite(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise number of bits set in the input Tensor.
     pub fn popcnt(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isInteger(), "popcnt expects tensor type to be an integer, got {}", .{self.dtype()});
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.popcnt(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.popcnt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sign of the input Tensor element-wise.
     pub fn sign(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.sign(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.sign(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -344,7 +299,7 @@ pub const Tensor = struct {
     ///
     /// See https://pytorch.org/docs/stable/generated/torch.fmod.html for more details.
     pub fn fmod(self: Tensor, divisor: f32) Tensor {
-        return self.remainder(Tensor.scalar(divisor, .f32).broadcast(self._shape, &.{}));
+        return self.remainder(scalar(divisor, .f32).broadcast(self._shape, &.{}));
     }
 
     test fmod {
@@ -356,26 +311,33 @@ pub const Tensor = struct {
         const divisors: [2]f32 = .{ 2, -1.5 };
 
         inline for (inputs, expectations, divisors) |i, e, d| {
-            const input = try zml.Buffer.fromSlice(platform, .{6}, &i);
-            const output = try zml.testing.compileAndCall(platform, Tensor.fmod, .{ input, d });
+            const input: zml.Tensor = .init(.{6}, .f32);
 
-            try zml.testing.expectClose(zml.HostBuffer.fromSlice(.{6}, &e), output, 1e-4);
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.fmod, .{ input, d }, platform);
+            defer exe.deinit();
+
+            const input_buffer = try zml.Buffer.fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&i));
+            defer input_buffer.deinit();
+
+            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
+
+            try zml.testing.expectClose(std.testing.io, ConstSlice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
         }
     }
 
     /// Returns a Tensor containing the element-wise left-shift operation of 'self' by 'other'.
     pub fn shiftLeft(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "shiftLeft", dialect.stablehlo.shift_left)(self, other);
+        return binaryOp("shiftLeft", dialects.stablehlo.shift_left)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise arithmetic right-shift operation of 'self' by 'other'.
     pub fn shiftRightArithmetic(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "shiftRightArithmetic", dialect.stablehlo.shift_right_arithmetic)(self, other);
+        return binaryOp("shiftRightArithmetic", dialects.stablehlo.shift_right_arithmetic)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise logical right-shift operation of 'self' by 'other'.
     pub fn shiftRightLogical(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "shiftRightLogical", dialect.stablehlo.shift_right_logical)(self, other);
+        return binaryOp("shiftRightLogical", dialects.stablehlo.shift_right_logical)(self, other);
     }
 
     /// Returns the Cholesky decomposition of the input Tensor.
@@ -385,18 +347,16 @@ pub const Tensor = struct {
     pub fn cholesky(self: Tensor, lower: bool) Tensor {
         stdx.debug.assert(self.rank() <= 2, "cholesky expects tensor rank to be <= 2, got {}", .{self.rank()});
 
-        const loc = self.getContext().location(@src(), "lower={}", .{lower});
-        const op = dialect.stablehlo.cholesky(self.getContext().mlirCtx(), self.value(), lower, loc);
+        const op = dialects.stablehlo.cholesky(mlirCtx(), self.value(), lower, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Solves the system of linear equations formed by the input tensors.
-    pub fn triangularSolve(self: Tensor, other: Tensor, opts: dialect.stablehlo.TriangularSolveOpts) Tensor {
+    pub fn triangularSolve(self: Tensor, other: Tensor, opts: dialects.stablehlo.TriangularSolveOpts) Tensor {
         stdx.debug.assert(self.dtype() == other.dtype(), "triangularSolve expects tensors to be of the same type, got {} and {}", .{ self.dtype(), other.dtype() });
         stdx.debug.assert(self.rank() <= 2 and self.rank() == other.rank(), "triangularSolve expects tensors to have the same rank and be <= 2, got {} and {}", .{ self.rank(), other.rank() });
 
-        const loc = self.getContext().location(@src(), "triangularSolve({f}, {})", .{ self, opts });
-        const op = dialect.stablehlo.triangular_solve(self.getContext().mlirCtx(), self.value(), other.value(), loc, opts);
+        const op = dialects.stablehlo.triangular_solve(mlirCtx(), self.value(), other.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -404,8 +364,7 @@ pub const Tensor = struct {
     pub fn roundNearestAfz(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestAfz expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.round_nearest_afz(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.round_nearest_afz(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -413,8 +372,7 @@ pub const Tensor = struct {
     pub fn roundNearestEven(self: Tensor) Tensor {
         stdx.debug.assert(self.dtype().isFloat(), "roundNearestEven expects tensor type to be a float, got {}", .{self.dtype()});
 
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.round_nearest_even(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -423,8 +381,7 @@ pub const Tensor = struct {
         stdx.debug.assert(re._shape.eql(im._shape), "complex expects tensor shapes to match, got {f} and {f}", .{ re._shape, im._shape });
         stdx.debug.assert(re.dtype() == .f32 or re.dtype() == .f64, "complex expects tensors type to be f32 or f64, got {}", .{re.dtype()});
 
-        const loc = re.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.complex(re.getContext().mlirCtx(), re.value(), im.value(), loc);
+        const op = dialects.stablehlo.complex(mlirCtx(), re.value(), im.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         const dt: DataType = if (re.dtype() == .f32) .c64 else .c128;
         return _result(re._shape.withDtype(dt), op.result(0));
     }
@@ -444,8 +401,7 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.real(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.real(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
@@ -457,7 +413,7 @@ pub const Tensor = struct {
 
         // Real tensors don't have imaginary part.
         if (self.dtype().isFloat()) {
-            return Tensor.constant(self._shape, self.dtype().zero());
+            return Tensor.constant(self.dtype().zero()).broad(self._shape);
         }
 
         const dt: DataType = switch (self.dtype()) {
@@ -466,13 +422,12 @@ pub const Tensor = struct {
             .c128 => .f64,
             else => unreachable,
         };
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.imag(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.imag(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(dt), op.result(0));
     }
 
     /// Returns the Fast Fourier Transform (FFT) of the input Tensor.
-    pub fn fft(self: Tensor, opts: dialect.stablehlo.FftOpts) Tensor {
+    pub fn fft(self: Tensor, opts: dialects.stablehlo.FftOpts) Tensor {
         // TODO: support tagged API.
 
         stdx.debug.assert(1 <= opts.length.len and opts.length.len <= 3, "fft expects 'opts.length' length to be between 1 and 3 (inclusive), got {}", .{opts.length.len});
@@ -508,25 +463,26 @@ pub const Tensor = struct {
             },
         };
 
-        const loc = self.getContext().location(@src(), "fft({f},{})", .{ self, opts });
-        const op = dialect.stablehlo.fft(self.getContext().mlirCtx(), self.value(), loc, opts);
+        const op = dialects.stablehlo.fft(mlirCtx(), self.value(), opts, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(sh, op.result(0));
     }
 
     pub const Rng = struct {
-        _state: Tensor = .{ ._shape = .init(.{2}, .u64), ._id = .{ .buffer_id = 0 } },
-        algorithm: dialect.stablehlo.RngAlgorithm.Type = .DEFAULT,
+        _state: Tensor,
+        algorithm: dialects.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
-        pub fn shape() ShapeOf(Rng) {
+        pub fn init() Rng {
+            return .{ ._state = .init(.{2}, .u64) };
+        }
+
+        pub fn initBuffer(platform: Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
             return .{
-                ._state = Shape.init(.{2}, .u64),
+                ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), std.mem.asBytes(&seed)),
             };
         }
 
-        pub fn init(platform: Platform, seed: u128) !Bufferized(Rng) {
-            return .{
-                ._state = try Buffer.fromBytes(platform, Rng.shape()._state, std.mem.asBytes(&seed)),
-            };
+        pub fn deinitBuffer(self: *Bufferized(Rng)) void {
+            self._state.deinit();
         }
 
         /// Returns a Tensor of the given shape, filled with uniform random bits, and a new Rng state.
@@ -535,20 +491,18 @@ pub const Tensor = struct {
         /// The output is guaranteed to be deterministic function of `self` Rng state,
         /// but it is not guaranteed to be deterministic between implementations.
         pub fn bitGenerator(self: Rng, sh: Shape) struct { Rng, Tensor } {
-            const ctx = CompilationContext.current();
-            const loc = ctx.location(@src(), "rand.bitGen({f})", .{sh});
-            const op = dialect.stablehlo.rng_bit_generator(
-                ctx.mlirCtx(),
+            const op = dialects.stablehlo.rng_bit_generator(
+                mlirCtx(),
                 self.algorithm,
                 self._state.value(),
-                mlirx.tensorType(ctx.mlirCtx(), self._state._shape),
-                mlirx.tensorType(ctx.mlirCtx(), sh),
-                loc,
-            );
+                mlir.rankedTensorType(self._state.dims(), mlirx.Type.fromDType(mlirCtx(), self._state.dtype())),
+                mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+                .unknown(mlirCtx()),
+            ).appendTo(currentBlock());
             return .{ self.update(op.result(0)), _result(sh, op.result(1)) };
         }
 
-        fn update(self: Rng, new_state: mlir.Value) Rng {
+        fn update(self: Rng, new_state: *const mlir.Value) Rng {
             return .{
                 ._state = _result(self._state._shape, new_state).reuseBuffer(self._state),
                 .algorithm = self.algorithm,
@@ -623,30 +577,36 @@ pub const Tensor = struct {
 
             const platform = zml.testing.env();
             // Compute stats over a uniform distribution on [-2, 10].
-            const rand, const stats = try zml.testing.compileAndCallWithTensors(
-                platform,
-                Stats.uniformStats,
-                .{ Rng.shape(), zml.Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } },
-                .{try Rng.init(platform, 1234)},
-            );
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform);
+            defer exe.deinit();
+
+            const rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            defer rng_buffer._state.deinit();
+
+            const rand, const stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
+            defer rand._state.deinit();
+            defer stats.mean.deinit();
+            defer stats.variance.deinit();
+            defer stats.min.deinit();
+            defer stats.max.deinit();
 
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(u128) != 1234);
+            try std.testing.expect(try rand._state.getValue(u128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
-            const mean_ = try stats.mean.getValue(f32);
+            const mean_ = try stats.mean.getValue(f32, std.testing.io);
             try std.testing.expectApproxEqAbs(4, mean_, 0.03);
 
-            const variance = try stats.variance.getValue(f32);
+            const variance = try stats.variance.getValue(f32, std.testing.io);
             try std.testing.expectApproxEqAbs(12.0 * 12.0 / 12.0, variance, 0.01);
 
             // Check that no value is outside of the interval
             // and we have samples close to the edges.
-            const min_ = try stats.min.getValue(f32);
+            const min_ = try stats.min.getValue(f32, std.testing.io);
             try std.testing.expect(min_ >= -2);
             try std.testing.expectApproxEqAbs(-2, min_, 0.05);
 
-            const max_ = try stats.max.getValue(f32);
+            const max_ = try stats.max.getValue(f32, std.testing.io);
             try std.testing.expect(max_ < 10);
             try std.testing.expectApproxEqAbs(10, max_, 0.05);
         }
@@ -658,12 +618,10 @@ pub const Tensor = struct {
         pub fn normal(sh: Shape, opts: struct { mean: f64 = 0, stddev: f64 = 1 }) Tensor {
             stdx.debug.assert(sh.dtype().isFloat(), "normal expects tensor type to be a float, got {}", .{sh.dtype()});
 
-            const ctx = CompilationContext.current();
-            const loc = ctx.location(@src(), "rand.normal({f}, mean={},stddev={})", .{ sh, opts.mean, opts.stddev });
-            const a = Tensor.constant(.{}, Data.init(sh.dtype(), opts.mean));
-            const b = Tensor.constant(.{}, Data.init(sh.dtype(), opts.stddev));
-            const res_shape = Tensor.constantTensor(HostBuffer.fromSlice(.{sh.rank()}, sh.dims()));
-            const op = dialect.stablehlo.rng(ctx.mlirCtx(), a.value(), b.value(), res_shape.value(), .NORMAL, loc);
+            const a = Tensor.constant(DataType.Value.init(sh.dtype(), opts.mean));
+            const b = Tensor.constant(DataType.Value.init(sh.dtype(), opts.stddev));
+            const res_tensor_shape = Tensor.constantTensor(Shape.init(.{sh.rank()}, .i64), std.mem.sliceAsBytes(sh.dims()));
+            const op = dialects.stablehlo.rng(mlirCtx(), a.value(), b.value(), res_tensor_shape.value(), .NORMAL, .unknown(mlirCtx())).appendTo(currentBlock());
             return _result(sh, op.result(0));
         }
 
@@ -715,7 +673,7 @@ pub const Tensor = struct {
                         for (&powers, 0..) |*p, i| p.* = std.math.pow(u64, 2, i * 16);
                         break :blk powers;
                     };
-                    const values = Tensor.constantTensor(HostBuffer.fromArray(&powers)).withTags(.{.d});
+                    const values = Tensor.constantTensor(Shape.init(.{4}, .u64), std.mem.sliceAsBytes(&powers)).withTags(.{.d});
                     const counts = values.gather(.{ .d = samples }, .{}).sum(.n).bitCast(.u16);
                     const actual_dist = counts.reshape(target_dist.shape()).convert(target_dist.dtype()).divByConst(s.dim(.n));
                     return .{ rng, .{ .mean = mean_, .variance = variance, .actual_dist = actual_dist } };
@@ -723,28 +681,37 @@ pub const Tensor = struct {
             };
 
             const platform = zml.testing.env();
-            const tgt_dist = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
-            const rand, const stats = try zml.testing.compileAndCallWithTensors(
-                platform,
-                Stats.gumbelStats,
-                .{ Rng.shape(), zml.Shape.init(.{tgt_dist.len}, .f32) },
-                .{ try Rng.init(platform, 1234), try .fromArray(platform, tgt_dist) },
-            );
+            const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
+            const tgt_dist: Tensor = .init(.{tgt_dist_data.len}, .f32);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform);
+            defer exe.deinit();
+
+            const rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            defer rng_buffer._state.deinit();
+            const tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), std.mem.sliceAsBytes(&tgt_dist_data));
+            defer tgt_dist_buffer.deinit();
+
+            const rand, const stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
+            defer rand._state.deinit();
+            defer stats.mean.deinit();
+            defer stats.variance.deinit();
+            defer stats.actual_dist.deinit();
+
             // Check the Rng state has been modified.
-            try std.testing.expect(try rand._state.getValue(i128) != 1234);
+            try std.testing.expect(try rand._state.getValue(i128, std.testing.io) != 1234);
 
             // Check the mean and variance are close to theoritical values.
-            const mean_ = try stats.mean.getValue(f32);
+            const mean_ = try stats.mean.getValue(f32, std.testing.io);
             try std.testing.expectApproxEqAbs(0.5772, mean_, 0.02);
 
-            const variance = try stats.variance.getValue(f32);
+            const variance = try stats.variance.getValue(f32, std.testing.io);
             const pi = std.math.pi;
             try std.testing.expectApproxEqAbs(pi * pi / 6.0, variance, 0.03);
 
             // Check the distribution obtained with the gumbel trick matches the target distribution.
-            const actual_dist = try stats.actual_dist.getValue([4]f32);
-            scoped_log.debug("tgt_dist: {d}, actual_dist: {d}", .{ tgt_dist, actual_dist });
-            for (tgt_dist, actual_dist) |tgt, actual| {
+            const actual_dist = try stats.actual_dist.getValue([4]f32, std.testing.io);
+            for (tgt_dist_data, actual_dist) |tgt, actual| {
                 // We normalize tgt_dist to make it a well formed distribution.
                 // We didn't do it before calling gumbel, because the gumbel trick
                 // doesn't require normalized distributions as input.
@@ -759,12 +726,11 @@ pub const Tensor = struct {
         stdx.debug.assert(1 <= exponent_bits, "reducePrecision expects 'exponent_bits' to be >= 1, got {}", .{exponent_bits});
         stdx.debug.assert(0 <= mantissa_bits, "reducePrecision expects 'mantissa_bits' to be positive, got {}", .{mantissa_bits});
 
-        const loc = self.getContext().location(@src(), "reducePrecision(exponent_bits={}, mantissa_bits={})", .{ exponent_bits, mantissa_bits });
-        const op = dialect.stablehlo.reduce_precision(self.getContext().mlirCtx(), self.value(), exponent_bits, mantissa_bits, loc);
+        const op = dialects.stablehlo.reduce_precision(mlirCtx(), self.value(), exponent_bits, mantissa_bits, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
-    inline fn convolution(self: Tensor, other: Tensor, opts: dialect.stablehlo.ConvolutionOpts, loc: mlir.Location) Tensor {
+    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());
@@ -847,14 +813,14 @@ pub const Tensor = struct {
         }
 
         // inferred shape '[1, 256, 1, 12008]' is incompatible with return type of operation '[1, 256, 1, 11978]'
-        const op = dialect.stablehlo.convolution(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.convolution(
+            mlirCtx(),
             self.value(),
             other.value(),
+            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
             used_opts,
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(new_shape, op.result(0));
     }
@@ -882,7 +848,6 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = &.{opts.window_strides},
             .pad_value = opts.padding,
@@ -900,7 +865,7 @@ pub const Tensor = struct {
             .output_spatial_dimensions = &.{opts.output_spatial_dimensions},
             .feature_group_count = opts.feature_group_count,
             .batch_group_count = opts.batch_group_count,
-        }, loc);
+        });
     }
 
     /// Returns a Tensor containing the result of the 2D convolution of 'input' by 'kernel'.
@@ -927,7 +892,6 @@ pub const Tensor = struct {
             batch_group_count: i64 = 1,
         },
     ) Tensor {
-        const loc = input.getContext().location(@src(), "opts={}", .{opts});
         return input.convolution(kernel, .{
             .window_strides = opts.window_strides,
             .pad_value = opts.padding,
@@ -945,47 +909,47 @@ pub const Tensor = struct {
             .output_spatial_dimensions = opts.output_spatial_dimensions,
             .feature_group_count = opts.feature_group_count,
             .batch_group_count = opts.batch_group_count,
-        }, loc);
+        });
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "add", dialect.stablehlo.add)(self, other);
+        return binaryOp("add", dialects.stablehlo.add)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise subtraction of the input Tensors.
     pub fn sub(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "subtract", dialect.stablehlo.subtract)(self, other);
+        return binaryOp("subtract", dialects.stablehlo.subtract)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensors.
     pub fn mul(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "mul", dialect.stablehlo.multiply)(self, other);
+        return binaryOp("mul", dialects.stablehlo.multiply)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise division of the input Tensors.
     pub fn div(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "div", dialect.stablehlo.divide)(self, other);
+        return binaryOp("div", dialects.stablehlo.divide)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise exponentiation of the input Tensors.
     pub fn pow(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "pow", dialect.stablehlo.power)(self, other);
+        return binaryOp("pow", dialects.stablehlo.power)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise maximum operation of the input Tensors.
     pub fn maximum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "maximum", dialect.stablehlo.maximum)(self, other);
+        return binaryOp("maximum", dialects.stablehlo.maximum)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise minimum operation of the input Tensors.
     pub fn minimum(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "minimum", dialect.stablehlo.minimum)(self, other);
+        return binaryOp("minimum", dialects.stablehlo.minimum)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise remainder of dividend 'self' and divisor 'other'.
     pub fn remainder(self: Tensor, other: Tensor) Tensor {
-        return binaryOp(@src(), "remainder", dialect.stablehlo.remainder)(self, other);
+        return binaryOp("remainder", dialects.stablehlo.remainder)(self, other);
     }
 
     /// Returns a Tensor containing the element-wise addition of the input Tensor with a constant.
@@ -1004,7 +968,7 @@ pub const Tensor = struct {
     }
 
     /// Returns a Tensor containing the element-wise multiplication of the input Tensor by a constant.
-    pub inline fn scale(self: Tensor, val: anytype) Tensor {
+    pub fn scale(self: Tensor, val: anytype) Tensor {
         return self.mul(.scalar(val, self.dtype()));
     }
 
@@ -1013,22 +977,20 @@ pub const Tensor = struct {
     /// Returns a Tensor containing the element-wise logical operation of the input Tensors.
     pub fn logical(self: Tensor, comptime logical_op: LogicalOp, other: Tensor) Tensor {
         return switch (logical_op) {
-            .OR => binaryOp(@src(), "or", dialect.stablehlo.or_)(self, other),
-            .XOR => binaryOp(@src(), "xor", dialect.stablehlo.xor)(self, other),
-            .AND => binaryOp(@src(), "and", dialect.stablehlo.and_)(self, other),
+            .OR => binaryOp("or", dialects.stablehlo.or_)(self, other),
+            .XOR => binaryOp("xor", dialects.stablehlo.xor)(self, other),
+            .AND => binaryOp("and", dialects.stablehlo.and_)(self, other),
         };
     }
 
     /// Returns a Tensor containing the element-wise floor operation of the input Tensor.
     pub fn floor(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        return _result(self._shape, dialect.stablehlo.floor(self.getContext().mlirCtx(), self.value(), loc).result(0));
+        return _result(self._shape, dialects.stablehlo.floor(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise ceil operation of the input Tensor.
     pub fn ceil(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        return _result(self._shape, dialect.stablehlo.ceil(self.getContext().mlirCtx(), self.value(), loc).result(0));
+        return _result(self._shape, dialects.stablehlo.ceil(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock()).result(0));
     }
 
     /// Returns a Tensor containing the element-wise conversion to another type.
@@ -1036,11 +998,9 @@ pub const Tensor = struct {
         if (to == self.dtype()) {
             return self;
         }
-        const loc = self.getContext().location(@src(), "convert({f},to={s})", .{ self, @tagName(to) });
 
-        const mlir_ctx = self.getContext().mlirCtx();
-        const res_type = mlirx.tensorType(mlir_ctx, self.shape().withDtype(to));
-        const op = dialect.stablehlo.convert(mlir_ctx, self.value(), res_type, loc);
+        const res_type = mlir.rankedTensorType(self.shape().dims(), mlirx.Type.fromDType(mlirCtx(), to));
+        const op = dialects.stablehlo.convert(mlirCtx(), self.value(), res_type, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape.withDtype(to), op.result(0));
     }
 
@@ -1055,12 +1015,19 @@ pub const Tensor = struct {
             var x_f4: [x.len]floats.Float4E2M1 = undefined;
             for (&x_f4, &x) |*xi_f4, xi| xi_f4.* = .fromF32(xi);
 
-            const x_d = try zml.Buffer.fromArray(platform, x);
-            const x_f4_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f4e2m1 });
+            const x_d: Tensor = .init(.{x.len}, .f32);
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f4e2m1 }, platform);
+            defer exe.deinit();
 
-            const x_f4_xla = x_f4_xla_d.getValue(@TypeOf(x_f4));
+            const x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), std.mem.sliceAsBytes(&x));
+            defer x_d_buffer.deinit();
+
+            const x_f4_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+            const x_f4_xla = try x_f4_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer x_f4_xla.free(std.testing.allocator);
+
             errdefer std.log.warn("convert(.f4e2m1) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f4, x_f4_xla });
-            try std.testing.expectEqualDeep(x_f4, x_f4_xla);
+            try std.testing.expectEqualDeep(&x_f4, x_f4_xla.items(floats.Float4E2M1));
         }
 
         // f8e3m4
@@ -1069,108 +1036,93 @@ pub const Tensor = struct {
             var x_f8e3: [x.len]floats.Float8E3M4 = undefined;
             for (&x_f8e3, &x) |*xi_f8e3, xi| xi_f8e3.* = .fromF32(xi);
 
-            const x_d = try zml.Buffer.fromArray(platform, x);
-            const x_f8e3_xla_d = try zml.testing.compileAndCall(platform, Tensor.convert, .{ x_d, .f8e3m4 });
+            const x_d: Tensor = .init(.{x.len}, .f32);
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.convert, .{ x_d, .f8e3m4 }, platform);
+            defer exe.deinit();
 
-            const x_f8e3_xla = x_f8e3_xla_d.getValue(@TypeOf(x_f8e3));
+            const x_d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x_d.shape(), std.mem.sliceAsBytes(&x));
+            defer x_d_buffer.deinit();
+
+            const x_f8e3_xla_d = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.convert, .{x_d_buffer});
+            const x_f8e3_xla = try x_f8e3_xla_d.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer x_f8e3_xla.free(std.testing.allocator);
+
             errdefer std.log.warn("convert(.f8e3m4) failed !\ninput f32:\n{e}\nzml.floats computed:\n{any}\nxla computed:\n{any}", .{ stdx.fmt.slice(&x), x_f8e3, x_f8e3_xla });
-            try std.testing.expectEqualDeep(x_f8e3, x_f8e3_xla);
+            try std.testing.expectEqualDeep(&x_f8e3, x_f8e3_xla.items(floats.Float8E3M4));
         }
     }
 
     /// Returns a Tensor containing the element-wise rounding operation of the input Tensor.
     pub fn round(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const sine_op = dialect.stablehlo.round_nearest_even(self.getContext().mlirCtx(), self.value(), loc);
-        return _result(self._shape, sine_op.result(0));
+        const round_op = dialects.stablehlo.round_nearest_even(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
+        return _result(self._shape, round_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise clamping operation of the input Tensor.
     pub fn clamp(self: Tensor, min_: Tensor, max_: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.clamp(self.getContext().mlirCtx(), min_.value(), self.value(), max_.value(), loc);
+        const op = dialects.stablehlo.clamp(mlirCtx(), min_.value(), self.value(), max_.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
-    /// See torch.matmul
-    pub fn matmul(lhs: Tensor, rhs: Tensor) Tensor {
-        return @import("torch.zig").matmul(lhs, rhs);
-    }
-
     /// Matrix multiplication, where contracting axes are specified using their tags.
-    /// eg dot(.{ .a, .b, .c }, .{ .a, .c, .d }, .{ .c }) -> .{ .a, .c, .d }
+    /// eg dot(.{ .a, .b, .c }, .{ .a, .c, .d }, .c) -> .{ .a, .b, .d }
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
-    pub fn dot(lhs: Tensor, rhs: Tensor, comptime contracting: anytype) Tensor {
-        var contracting_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
-        if (@TypeOf(contracting) == EnumLiteral) {
-            contracting_axes.appendAssumeCapacity(.{ lhs.axis(contracting), rhs.axis(contracting) });
-        } else {
-            inline for (contracting) |c| {
-                contracting_axes.appendAssumeCapacity(.{ lhs.axis(c), rhs.axis(c) });
+    pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
+        const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
+        const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
+
+        var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .{};
+        for (0..lhs.rank()) |lhs_tag_index| {
+            const lhs_tag = lhs.shape().tag(lhs_tag_index);
+            if (lhs_tag == Shape.toTag(args)) continue;
+            if (rhs.shape().hasTag(lhs_tag)) |rhs_tag_index| {
+                batching_axes.appendAssumeCapacity(.{ @intCast(lhs_tag_index), @intCast(rhs_tag_index) });
             }
         }
-
-        var batching_axes: stdx.BoundedArray([2]i8, MAX_RANK) = .{};
-        for (lhs._shape.tags(), 0..) |l, li| {
-            stdx.debug.assert(l != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, lhs });
-
-            for (rhs._shape.tags(), 0..) |r, ri| {
-                stdx.debug.assert(r != Shape.TagUnknown, "Can't use `dot(..., {any})` on {any}, it need to be explictily tagged.", .{ contracting, rhs });
-
-                if (l == r) {
-                    for (contracting_axes.slice()) |ct| {
-                        if (l == lhs._shape.tag(ct[0])) {
-                            break;
-                        }
-                    } else {
-                        // tag is both in lhs and rhs but not in contracting -> it's a batching dim.
-                        batching_axes.appendAssumeCapacity(.{ @intCast(li), @intCast(ri) });
-                    }
-                }
-            }
-        }
-
-        return dotGeneral(lhs, rhs, contracting_axes.slice(), batching_axes.slice());
+        return lhs.dotGeneral(rhs, &.{.{ lhs_contracting_dim, rhs_contracting_dim }}, batching_axes.slice());
     }
 
     test dot {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
-        defer comp.deinit();
-
-        comp.activate();
-        defer comp.deactivate();
-
         inline for (.{
-            .{ .{ .c = 20 }, .{ .c = 20 }, .{.c}, .{} },
+            .{ .{ .c = 20 }, .{ .c = 20 }, .c, .{} },
             .{
                 .{ .a = 20, .b = 21, .c = 22 },
                 .{ .a = 20, .d = 23, .c = 22 },
-                .{.c},
+                .c,
                 .{ .a = 20, .b = 21, .d = 23 },
             },
             .{
                 .{ .a = 20, .b = 21, .c = 22 },
                 .{ .c = 22, .d = 23, .e = 24 },
-                .{.c},
+                .c,
                 .{ .a = 20, .b = 21, .d = 23, .e = 24 },
             },
-            .{
-                .{ .a = 20, .b = 21, .c = 22 },
-                .{ .c = 22, .d = 23, .a = 20 },
-                .{ .c, .a },
-                .{ .b = 21, .d = 23 },
-            },
+            // TODO(Corentin): Re-enable that
+            //.{
+            //    .{ .a = 20, .b = 21, .c = 22 },
+            //    .{ .c = 22, .d = 23, .a = 20 },
+            //    .{ .c, .a },
+            //    .{ .b = 21, .d = 23 },
+            //},
         }) |testcase| {
-            const x_shape, const y_shape, const ctr, const z_shape = testcase;
-            const x = Tensor.constant(x_shape, .{ .f32 = 0.0 });
-            const y = Tensor.constant(y_shape, .{ .f32 = 0.0 });
-            const z = x.dot(y, ctr);
+            const x: Tensor = .init(testcase[0], .f32);
+            const y: Tensor = .init(testcase[1], .f32);
+            const ctr = Shape.toTag(testcase[2]);
+            const z_shape: Shape = .init(testcase[3], .f32);
+            const forward = struct {
+                fn forward(x_: Tensor, y_: Tensor, tag: Shape.Tag) Tensor {
+                    return x_.dot(y_, tag);
+                }
+            }.forward;
 
-            try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), z.shape());
+            const exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, y, ctr }, platform);
+            defer exe.deinit();
+
+            try zml.testing.expectEqualShapes(Shape.init(z_shape, .f32), exe.output_shapes[0]);
         }
     }
 
@@ -1184,9 +1136,9 @@ pub const Tensor = struct {
         contracting_axes: []const [2]i8,
         batching_axes: []const [2]i8,
     ) Tensor {
-        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {f} and {f}", .{ lhs, rhs });
+        stdx.debug.assert(lhs.dtype() == rhs.dtype(), "dotGeneral expects tensors to be of the same type, got {} and {}", .{ lhs.dtype(), rhs.dtype() });
 
-        const Axes = stdx.BoundedArray(i64, MAX_RANK);
+        const Axes = stdx.BoundedArray(i64, constants.MAX_RANK);
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
@@ -1194,7 +1146,7 @@ pub const Tensor = struct {
         var rhs_batching_axes: Axes = .{};
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
-            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {d} and {d} in {f} and {f}", .{ l, r, lhs, rhs });
+            stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
             var t = lhs._shape.tag(l);
             if (t == Shape.TagUnknown) t = rhs._shape.tag(r);
             res_shape = res_shape.appendDim(lhs._shape.dim(l), t);
@@ -1234,29 +1186,26 @@ pub const Tensor = struct {
             res_shape = res_shape.appendDim(rhs._shape.dim(r), rhs._shape.tag(r));
         }
 
-        const mlir_ctx = lhs.getContext().mlirCtx();
-        const loc = lhs.getContext().location(@src(), "dot({f},{f},contracting={any},batching={any}", .{ lhs, rhs, contracting_axes, batching_axes });
-        const op = dialect.stablehlo.dot_general(
-            mlir_ctx,
+        const op = dialects.stablehlo.dot_general(
+            mlirCtx(),
             lhs.value(),
             rhs.value(),
-            mlirx.tensorType(mlir_ctx, res_shape),
-            loc,
+            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
             .{
                 .lhs_batching_dimensions = lhs_batching_axes.constSlice(),
                 .rhs_batching_dimensions = rhs_batching_axes.constSlice(),
                 .lhs_contracting_dimensions = lhs_contracting_axes.constSlice(),
                 .rhs_contracting_dimensions = rhs_contracting_axes.constSlice(),
-                .precision = .fast,
+                .dot_precision = .fast,
             },
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
     /// Returns a Tensor containing the sigmoid function applied to each element of the input Tensor.
     pub fn sigmoid(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.logistic(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.logistic(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -1264,7 +1213,7 @@ pub const Tensor = struct {
 
     /// Returns a Tensor containing the ReLU activation function applied to each element of the input Tensor.
     pub fn relu(self: Tensor) Tensor {
-        return self.maximum(Tensor.constant(self.dims(), self.dtype().zero()));
+        return self.maximum(Tensor.constant(self.dtype().zero()).broad(.init(self.dims(), self.dtype())));
     }
 
     /// Returns a Tensor containing the leaky-ReLU activation function applied to each element of the input Tensor.
@@ -1272,7 +1221,7 @@ pub const Tensor = struct {
     /// LeakyReLU(x) = max(0,x) + negative_slope * min(0,x)
     /// ref: https://paperswithcode.com/method/leaky-relu
     pub fn leakyReLU(self: Tensor, negative_slope: f32) Tensor {
-        const below_zero = self.scale(negative_slope).minimum(Tensor.scalar(0, self.dtype()));
+        const below_zero = self.scale(negative_slope).minimum(.scalar(0, self.dtype()));
         return self.relu().add(below_zero);
     }
 
@@ -1280,19 +1229,26 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const input = try zml.Buffer.fromSlice(platform, .{2}, &[_]f32{ -0.6884, 1.6795 });
-        const res = try zml.testing.compileAndCall(platform, leakyReLU, .{ input, 0.1 });
+        const input: Tensor = .init(.{2}, .f32);
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.leakyReLU, .{ input, 0.1 }, platform);
+        defer exe.deinit();
 
-        const expectation = zml.HostBuffer.fromArray(&[2]f32{ -0.0688, 1.6795 });
-        try zml.testing.expectClose(expectation, res, 1e-4);
+        const input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6884, 1.6795 }));
+        defer input_buffer.deinit();
+
+        const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
+        defer res.deinit();
+
+        const expectation: ConstSlice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
+        try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
     }
 
     /// Returns a Tensor containing the SwiGLU activation function applied to the input Tensor.
-    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor) Tensor {
-        const sigmoid_tensor = self.mul(Tensor.constant(self._shape, Data.init(self.dtype(), beta))).sigmoid();
-        const one_minus_sigmoid_tensor = Tensor.constant(self._shape, Data.init(self.dtype(), 1)).sub(sigmoid_tensor);
+    pub fn swiglu(self: Tensor, beta: f32, w: Tensor, b: Tensor, tag: Shape.Tag) Tensor {
+        const sigmoid_tensor = self.mul(Tensor.constant(DataType.Value.init(self.dtype(), beta)).broad(.init(self._shape, self.dtype()))).sigmoid();
+        const one_minus_sigmoid_tensor = Tensor.constant(.init(self.dtype(), 1)).broad(.init(self._shape, self.dtype())).sub(sigmoid_tensor);
 
-        return self.mul(sigmoid_tensor).add(one_minus_sigmoid_tensor.mul(w.matmul(self).add(b)));
+        return self.mul(sigmoid_tensor).add(one_minus_sigmoid_tensor.mul(w.dot(self, tag).add(b)));
     }
 
     /// Returns a Tensor containing the Gaussian Error Linear Units (GeLU) activation function applied to each element of the input Tensor.
@@ -1356,26 +1312,21 @@ pub const Tensor = struct {
     pub fn logSumExp(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         // stabilization: shift `self` by it's max value before passing to exponent.
-        const M = self.max(a);
-        const log_sum_exp = log(sum(exp(self.sub(M.broad(self._shape))), a));
+        const max_ = self.max(a);
+        const log_sum_exp = log(sum(exp(self.sub(max_.broad(self._shape))), a));
         // restore the shift again
-        return M.add(log_sum_exp);
+        return max_.add(log_sum_exp);
     }
 
     /// Returns a Tensor containing the sum of elements over the given axis.
     /// Output shape is the input shape with the axis_ dim set to 1.
     pub fn sum(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
-        return ops.reduce(
-            struct {
-                pub fn acc(x: Tensor, res: Tensor) Tensor {
-                    return res.add(x.convert(res.dtype()));
-                }
-            }.acc,
-            self,
-            Tensor.scalar(0, self.dtype()),
-            &.{a},
-        );
+        return ops.reduce(.{self}, .{Tensor.constant(self.dtype().zero())}, &.{a}, struct {
+            pub fn acc(args: ops.ReduceArgs) struct { Tensor } {
+                return .{args.right.add(args.left.convert(args.right.dtype()))};
+            }
+        }.acc, .{})[0];
     }
 
     /// Returns a Tensor containing the mean of elements over the given axis.
@@ -1392,16 +1343,15 @@ pub const Tensor = struct {
         const rk = self.rank();
         const a = self.axis(axis_);
 
-        const ones = [_]i64{1} ** MAX_RANK;
+        const ones = [_]i64{1} ** constants.MAX_RANK;
         var window_dimensions = ones;
         window_dimensions[a] = self.dim(a);
-        var padding = [_][2]i64{.{ 0, 0 }} ** MAX_RANK;
+        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a] = .{ self.dim(a) - 1, 0 };
 
-        return ops.reduceWindow(
-            Tensor.add,
-            self,
-            Tensor.scalar(0, self.dtype()),
+        const result = ops.reduceWindow(
+            .{self},
+            .{Tensor.scalar(0, self.dtype())},
             .{
                 .base_dilations = ones[0..rk],
                 .window_dilations = ones[0..rk],
@@ -1409,7 +1359,15 @@ pub const Tensor = struct {
                 .window_dimensions = window_dimensions[0..rk],
                 .padding = padding[0..rk],
             },
+            struct {
+                fn add(values: ops.ReduceArgs) struct { Tensor } {
+                    return .{values.left.add(values.right)};
+                }
+            }.add,
+            .{},
         );
+
+        return result[0];
     }
 
     test cumulativeSum {
@@ -1426,29 +1384,36 @@ pub const Tensor = struct {
             }
         };
 
-        const x = try zml.Buffer.fromArray(
-            platform,
-            [2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } },
-        );
-        const res = try zml.testing.compileAndCall(platform, Local._cumsum, .{x});
-        try std.testing.expectEqual(
-            [2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } },
-            try res.getValue([2][5]f32),
-        );
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
+
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cumsum, .{x}, platform);
+        defer exe.deinit();
+
+        const x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 1, 0, 1 }, .{ 3, 1, 0, 2, 1 } }));
+        defer x_buffer.deinit();
+
+        const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cumsum, .{x_buffer});
+        defer res.deinit();
+
+        try std.testing.expectEqual([2][5]f32{ .{ 0, 1, 2, 2, 3 }, .{ 3, 4, 4, 6, 7 } }, try res.getValue([2][5]f32, std.testing.io));
     }
 
     /// Returns a transposed Tensor computed using the given axes.
     pub fn transpose(self: Tensor, axes_: anytype) Tensor {
         const axes__ = self.axes(axes_).constSlice();
-        const default_perm = [MAX_RANK]i64{ 7, 6, 5, 4, 3, 2, 1, 0 };
-        const no_op = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
+        const no_op = constants.AXES_IOTA;
+        const default_perm = b: {
+            var buf = constants.AXES_IOTA;
+            std.mem.reverse(i64, &buf);
+            break :b buf;
+        };
 
         const permutation: []const i64 = if (axes__.len == 0)
-            default_perm[MAX_RANK - self.rank() ..]
+            default_perm[constants.MAX_RANK - self.rank() ..]
         else
-            toI64(axes__);
+            toI64(axes__).constSlice();
 
-        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, MAX_RANK + 2)] });
+        stdx.debug.assert(permutation.len == self.rank(), "transpose expects input tensor rank and 'axes_' length to be equal, got {f} and {any}", .{ self, permutation[0..@min(permutation.len, constants.MAX_RANK + 2)] });
 
         if (std.mem.eql(i64, permutation, no_op[0..self.rank()])) {
             return self;
@@ -1459,14 +1424,13 @@ pub const Tensor = struct {
             return self.reshape(res_shape);
         }
 
-        const loc = self.getContext().location(@src(), "transpose({f}, {any})", .{ self, permutation });
-        const op = dialect.stablehlo.transpose(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.transpose(
+            mlirCtx(),
             self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), res_shape),
-            loc,
-            .{ .permutation = toI64(permutation) },
-        );
+            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .{ .permutation = toI64(permutation).constSlice() },
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
@@ -1486,19 +1450,18 @@ pub const Tensor = struct {
     /// unflatten((d0, d1, axis_m, d3), 2, n) -> (d0, d1, n, d2_m, d3)
     pub fn unflatten(self: Tensor, axis_: i8, n: i64) Tensor {
         // TODO: move to torch.zig, this equivalent to `spitAxis`
-        stdx.debug.assert(self.rank() < Tensor.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ Tensor.MAX_RANK, self.rank() });
+        stdx.debug.assert(self.rank() < constants.MAX_RANK, "unflatten expects input tensor rank to be less than {}, got {}", .{ constants.MAX_RANK, self.rank() });
 
         const a = if (axis_ >= 0) self.axis(axis_) else self.axis(axis_) + 1;
         const new_dim = std.math.divExact(i64, self.dim(a), n) catch std.debug.panic("unflatten expects chosen dimension to be divisible by 'n' but {} is not divisible by {}", .{ self.dim(a), n });
         const new_shape = self._shape.set(a, n).insert(a + 1, .{ ._ = new_dim });
 
-        const loc = self.getContext().location(@src(), "axis={}, n={}", .{ axis_, n });
-        const reshaped_val = dialect.stablehlo.reshape(
-            self.getContext().mlirCtx(),
+        const reshaped_val = dialects.stablehlo.reshape(
+            mlirCtx(),
             self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
-            loc,
-        );
+            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
 
@@ -1509,13 +1472,12 @@ pub const Tensor = struct {
     pub fn splitAxis(self: Tensor, ax: anytype, split_shape: anytype) Tensor {
         const new_shape = self._shape.splitAxis(ax, split_shape);
 
-        const loc = self.getContext().location(@src(), "splitAxis({}, {any})", .{ ax, split_shape });
-        const reshaped_val = dialect.stablehlo.reshape(
-            self.getContext().mlirCtx(),
+        const reshaped_val = dialects.stablehlo.reshape(
+            mlirCtx(),
             self.value(),
-            mlirx.tensorType(self.getContext().mlirCtx(), new_shape),
-            loc,
-        );
+            mlir.rankedTensorType(new_shape.dims(), mlirx.Type.fromDType(mlirCtx(), new_shape.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(new_shape, reshaped_val.result(0));
     }
 
@@ -1527,7 +1489,7 @@ pub const Tensor = struct {
     /// Merges two or more non-contiguous axes into one axis.
     /// Will make a transpose if needed.
     /// .{ .a, .b, .c }.mergeTranspose(.{ .a, .c }, .ac) -> .{ .b, .ac }
-    pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: EnumLiteral) Tensor {
+    pub fn mergeTranspose(self: Tensor, axes_: anytype, merged: @EnumLiteral()) Tensor {
         const cont = self.contiguous(axes_);
         return cont.reshape(cont._shape.mergeAxis(merged, axes_));
     }
@@ -1539,7 +1501,7 @@ pub const Tensor = struct {
         return self.transpose(perm.constSlice());
     }
 
-    pub inline fn flatten(self: Tensor) Tensor {
+    pub fn flatten(self: Tensor) Tensor {
         return self.reshape(.{self.count()});
     }
 
@@ -1580,16 +1542,16 @@ pub const Tensor = struct {
 
     /// Slices the input Tensor over the given axis using the given parameters.
     pub fn slice1d(self: Tensor, axis_: anytype, s: Slice) Tensor {
-        var slices = [_]Slice{.{}} ** MAX_RANK;
+        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
         slices[self.axis(axis_)] = s;
         return self.slice(slices[0..self.rank()]);
     }
 
     /// Slices the input Tensor using the given parameters.
     pub fn slice(self: Tensor, slices: []const Slice) Tensor {
-        var start_indices: [MAX_RANK]i64 = undefined;
-        var strides: [MAX_RANK]i64 = undefined;
-        var limit_indices: [MAX_RANK]i64 = undefined;
+        var start_indices: [constants.MAX_RANK]i64 = undefined;
+        var strides: [constants.MAX_RANK]i64 = undefined;
+        var limit_indices: [constants.MAX_RANK]i64 = undefined;
         var res_shape: Shape = self._shape;
 
         for (slices, 0..) |s, a| {
@@ -1602,18 +1564,16 @@ pub const Tensor = struct {
             res_shape = res_shape.setDim(a, std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable);
         }
 
-        const mlir_ctx = self.getContext().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "slices={any}", .{slices});
-        const result_type = mlirx.tensorType(mlir_ctx, res_shape);
-        const slice_op = dialect.stablehlo.slice(
-            mlir_ctx,
+        const result_type = mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype()));
+        const slice_op = dialects.stablehlo.slice(
+            mlirCtx(),
             self.value(),
             start_indices[0..self.rank()],
             limit_indices[0..self.rank()],
             strides[0..self.rank()],
             result_type,
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         var res = _result(res_shape, slice_op.result(0));
         var to_remove: Shape.AxesArray = .{};
@@ -1627,7 +1587,10 @@ pub const Tensor = struct {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
 
-        const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
+        const x: Tensor = .init(.{ 2, 5 }, .f32);
+
+        const x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+        defer x_buffer.deinit();
 
         // Wrap slice1d to hide the anytype in the signature.
         const Local = struct {
@@ -1636,17 +1599,19 @@ pub const Tensor = struct {
             }
         };
 
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 0, .{ .end = 1 } });
-            try std.testing.expectEqual([5]f32{ 0, 1, 2, 3, 4 }, try res.getValue([5]f32));
-        }
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, 1, .{ .start = 1, .step = 2 } });
-            try std.testing.expectEqual([4]f32{ 1, 3, 6, 8 }, try res.getValue([4]f32));
-        }
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._slice1dAxis, .{ x, -1, .{ .start = -2 } });
-            try std.testing.expectEqual([4]f32{ 3, 4, 8, 9 }, try res.getValue([4]f32));
+        inline for (.{
+            .{ 0, Tensor.Slice{ .end = 1 }, [5]f32{ 0, 1, 2, 3, 4 } },
+            .{ 1, Tensor.Slice{ .start = 1, .step = 2 }, [4]f32{ 1, 3, 6, 8 } },
+            .{ -1, Tensor.Slice{ .start = -2 }, [4]f32{ 3, 4, 8, 9 } },
+        }) |testcase| {
+            const ax, const slice_, const expectation = testcase;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._slice1dAxis, .{ x, ax, slice_ }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._slice1dAxis, .{x_buffer});
+            defer res.deinit();
+
+            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
@@ -1660,7 +1625,7 @@ pub const Tensor = struct {
 
     pub fn choose(self: Tensor, offsets: anytype) Tensor {
         const off, const tags = Shape.parseDimensions(offsets);
-        var slices = [_]Slice{.{}} ** MAX_RANK;
+        var slices = [_]Slice{.{}} ** constants.MAX_RANK;
         for (off.constSlice(), tags.constSlice()) |o, t| {
             const ax = self.axis(t);
             slices[ax] = .single(o);
@@ -1672,7 +1637,7 @@ pub const Tensor = struct {
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
         stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
-        var buffer: [32]mlir.Value = undefined;
+        var buffer: [32]*const mlir.Value = undefined;
         std.debug.assert(tensors.len <= buffer.len);
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
@@ -1685,9 +1650,7 @@ pub const Tensor = struct {
         }
 
         const res_shape = tensors[0]._shape.set(a, concatenated_dim);
-        const ctx = tensors[0].getContext();
-        const loc = ctx.location(@src(), "axis={}", .{axis_});
-        const op = dialect.stablehlo.concatenate(ctx.mlirCtx(), buffer[0..tensors.len], a, loc);
+        const op = dialects.stablehlo.concatenate(mlirCtx(), buffer[0..tensors.len], a, .unknown(mlirCtx())).appendTo(currentBlock());
         // log.debug("concatenate({}, {}, {d}) -> {d}", .{ tensors[0], tensors[1], a, res_shape });
         return _result(res_shape, op.result(0));
     }
@@ -1715,7 +1678,7 @@ pub const Tensor = struct {
 
         // Be careful here: we need to resolve ax before calling concatenate,
         // because we added an axis, so all
-        const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             shape0.rank()
         else
             shape0.axis(axis_);
@@ -1765,23 +1728,21 @@ pub const Tensor = struct {
             }
         };
 
-        {
-            const inputs: [3]u8 = .{ 1, 2, 3 };
-            const expectations: [6]u8 = .{ 1, 2, 3, 1, 2, 3 };
+        inline for (.{
+            .{ [3]u8{ 1, 2, 3 }, Shape.init(.{3}, .u8), [6]u8{ 1, 2, 3, 1, 2, 3 }, 0, 2 },
+            .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } }, 1, 2 },
+        }) |testcase| {
+            const input_data, const shape_, const expectation, const ax, const reps = testcase;
+            const input: Tensor = .fromShape(shape_);
 
-            const input = try zml.Buffer.fromArray(platform, inputs);
-            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 0, 2 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.repeat1d, .{ input, ax, reps }, platform);
+            defer exe.deinit();
 
-            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
-        }
-        {
-            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
-            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
+            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
+            defer input_buffer.deinit();
 
-            const input = try zml.Buffer.fromArray(platform, inputs);
-            const output = try zml.testing.compileAndCall(platform, Local.repeat1d, .{ input, 1, 2 });
-
-            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.repeat1d, .{input_buffer});
+            try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
@@ -1821,111 +1782,98 @@ pub const Tensor = struct {
             }
         };
 
-        {
-            const inputs: [3]u8 = .{ 1, 2, 3 };
-            const expectations: [6]u8 = .{ 1, 1, 2, 2, 3, 3 };
+        inline for (.{
+            .{ [3]u8{ 1, 2, 3 }, Shape.init(.{3}, .u8), [6]u8{ 1, 1, 2, 2, 3, 3 }, 0, 2 },
+            .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 1, 2, 2, 3, 3 }, .{ 4, 4, 5, 5, 6, 6 } }, 1, 2 },
+            .{ [2][3]u8{ .{ 1, 2, 3 }, .{ 4, 5, 6 } }, Shape.init(.{ 2, 3 }, .u8), [2][6]u8{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } }, 0, 2 },
+        }) |testcase| {
+            const input_data, const shape_, const expectation, const ax, const reps = testcase;
+            const input: Tensor = .fromShape(shape_);
 
-            const input = try zml.Buffer.fromArray(platform, inputs);
-            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local.stutter1d, .{ input, ax, reps }, platform);
+            defer exe.deinit();
 
-            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
-        }
-        {
-            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
-            const expectations: [2][6]u8 = .{ .{ 1, 1, 2, 2, 3, 3 }, .{ 4, 4, 5, 5, 6, 6 } };
+            var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), std.mem.sliceAsBytes(&input_data));
+            defer input_buffer.deinit();
 
-            const input = try zml.Buffer.fromArray(platform, inputs);
-            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 1, 2 });
-
-            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
-        }
-        {
-            const inputs: [2][3]u8 = .{ .{ 1, 2, 3 }, .{ 4, 5, 6 } };
-            const expectations: [2][6]u8 = .{ .{ 1, 2, 3, 1, 2, 3 }, .{ 4, 5, 6, 4, 5, 6 } };
-
-            const input = try zml.Buffer.fromArray(platform, inputs);
-            const output = try zml.testing.compileAndCall(platform, Local.stutter1d, .{ input, 0, 2 });
-
-            try std.testing.expectEqual(expectations, output.getValue(@TypeOf(expectations)));
+            const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.stutter1d, .{input_buffer});
+            try std.testing.expectEqual(expectation, try output.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
     /// Returns a Tensor containing the element-wise negation of the input Tensor.
     pub fn negate(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const negate_op = dialect.stablehlo.negate(self.getContext().mlirCtx(), self.value(), loc);
+        const negate_op = dialects.stablehlo.negate(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, negate_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise cosine of the input Tensor.
     pub fn cos(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const cosine_op = dialect.stablehlo.cosine(self.getContext().mlirCtx(), self.value(), loc);
+        const cosine_op = dialects.stablehlo.cosine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, cosine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise sine of the input Tensor.
     pub fn sin(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const sine_op = dialect.stablehlo.sine(self.getContext().mlirCtx(), self.value(), loc);
+        const sine_op = dialects.stablehlo.sine(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, sine_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential operation of the input Tensor.
     pub fn exp(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.exponential(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.exponential(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise logarithm operation of the input Tensor.
     pub fn log(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.log(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.log(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise square-root of the input Tensor.
     pub fn sqrt(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const sqrt_op = dialect.stablehlo.sqrt(self.getContext().mlirCtx(), self.value(), loc);
+        const sqrt_op = dialects.stablehlo.sqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, sqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise reverse square-root of the input Tensor.
     pub fn rsqrt(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const rsqrt_op = dialect.stablehlo.rsqrt(self.getContext().mlirCtx(), self.value(), loc);
+        const rsqrt_op = dialects.stablehlo.rsqrt(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, rsqrt_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise hyperbolic tangent of the input Tensor.
     pub fn tanh(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const tanh_op = dialect.stablehlo.tanh(self.getContext().mlirCtx(), self.value(), loc);
+        const tanh_op = dialects.stablehlo.tanh(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, tanh_op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise exponential minus one operation of the input Tensor.
     pub fn exponentialMinusOne(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const expm1_op = dialect.stablehlo.exponential_minus_one(self.getContext().mlirCtx(), self.value(), loc);
+        const expm1_op = dialects.stablehlo.exponential_minus_one(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, expm1_op.result(0));
     }
 
-    pub const ArangeArgs = HostBuffer.ArangeArgs;
-
+    pub const ArangeArgs = struct {
+        start: i64 = 0,
+        end: i64,
+        step: i64 = 1,
+    };
+    ///
     /// Returns a Tensor containing evenly spaced values within a given interval.
     pub fn arange(args: ArangeArgs, dt: DataType) Tensor {
         stdx.debug.assert(args.start <= args.end, "arange expects 'args.start' to be less than 'args.end', got {} and {}", .{ args.start, args.end });
         stdx.debug.assert(args.step > 0, "arange expects 'args.step' to be positive, got {}", .{args.step});
 
-        const ctx = CompilationContext.current();
-        const loc = ctx.location(@src(), "arange({}, dtype={})", .{ args, dt });
-
         const n_steps = std.math.divCeil(i64, args.end - args.start, args.step) catch unreachable;
         const sh = Shape.init(.{n_steps}, dt);
-        var op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlirx.tensorType(ctx.mlirCtx(), sh), loc);
+        var op = dialects.stablehlo.iota(
+            mlirCtx(),
+            0,
+            mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         var res = _result(sh, op.result(0));
 
         if (args.step != 1) {
@@ -1948,16 +1896,13 @@ pub const Tensor = struct {
         const a = sh.axis(axis_);
         const dt: DataType = if (sh.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
         const res_shape = sh.withDtype(dt);
-        const ctx = CompilationContext.current();
-        const loc = ctx.location(@src(), "iota({f}, {})", .{ res_shape, a });
 
-        const mlir_ctx = ctx.mlirCtx();
-        var op = dialect.stablehlo.iota(
-            mlir_ctx,
+        var op = dialects.stablehlo.iota(
+            mlirCtx(),
             a,
-            mlirx.tensorType(mlir_ctx, res_shape),
-            loc,
-        );
+            mlir.rankedTensorType(res_shape.dims(), mlirx.Type.fromDType(mlirCtx(), res_shape.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
@@ -1973,11 +1918,13 @@ pub const Tensor = struct {
         stdx.debug.assert(args.steps > 0, "linspace expects 'args.steps' to be positive, got {}", .{args.steps});
         stdx.debug.assert(dt.isFloat(), "linspace expects type to be a float, got {} (hint: use arange instead)", .{dt});
 
-        const ctx = CompilationContext.current();
-        const loc = ctx.location(@src(), "linspace({}, dtype={})", .{ args, dt });
-
         const sh = Shape.init(.{args.steps}, dt);
-        var iota_op = dialect.stablehlo.iota(ctx.mlirCtx(), 0, mlirx.tensorType(ctx.mlirCtx(), sh), loc);
+        var iota_op = dialects.stablehlo.iota(
+            mlirCtx(),
+            0,
+            mlir.rankedTensorType(sh.dims(), mlirx.Type.fromDType(mlirCtx(), sh.dtype())),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         var res = _result(sh, iota_op.result(0));
 
         if (args.steps != 1) {
@@ -1993,12 +1940,12 @@ pub const Tensor = struct {
 
     /// Returns a 0-rank Tensor with the given value.
     pub fn scalar(val: anytype, dt: DataType) Tensor {
-        const data = Data.init(dt, val);
+        const data = DataType.Value.init(dt, val);
         switch (dt.class()) {
             .float => stdx.debug.assert(!std.math.isNan(val), "scalar(NaN) is probably due to compiling a model with an uninitialized field", .{}),
             else => {},
         }
-        return Tensor.constant(.{}, data);
+        return Tensor.constant(data);
     }
 
     test scalar {
@@ -2014,40 +1961,32 @@ pub const Tensor = struct {
             }
         };
 
-        _ = try zml.testing.compileAndCall(platform, Local._fwd, .{});
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{}, platform);
+        defer exe.deinit();
     }
 
     /// Returns a constant Tensor with the given value.
-    pub fn constant(dimz: anytype, val: Data) Tensor {
-        const sh = Shape.init(dimz, val.dtype());
-        const ctx = CompilationContext.current().mlirCtx();
-        const loc = CompilationContext.current().location(@src(), "dims={f}, value={}", .{ sh, val });
-
-        var constant_op = if (mlirx.denseElementAttrType(val.dtype())) |elem_type|
-            dialect.stablehlo.constant(ctx, &.{}, elem_type, val.constSlice(), loc)
-        else blk: {
-            // Not all dtype can be serialized in the IR. If that's not possible, use f32.
-            const val_f32 = val.as(f32);
-            break :blk dialect.stablehlo.constant(ctx, &.{}, .f32, std.mem.asBytes(&val_f32), loc);
-        };
-
-        if (sh.rank() > 0) {
-            constant_op = dialect.stablehlo.broadcast_in_dim(ctx, constant_op.result(0), &.{}, mlirx.tensorType(ctx, sh), loc);
-        }
-        return _result(sh, constant_op.result(0)).convert(val.dtype());
+    pub fn constant(val: DataType.Value) Tensor {
+        const op = dialects.stablehlo.constant(
+            mlirCtx(),
+            &.{},
+            mlirx.Type.fromDType(mlirCtx(), val.dtype()),
+            val.asBytes(),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
+        return _result(.init(&.{}, val.dtype()), op.result(0));
     }
 
     pub fn zeroes(sh: Shape) Tensor {
-        return .constant(sh, sh.dtype().zero());
+        return Tensor.constant(sh.dtype().zero()).broad(sh);
     }
 
     /// Embeds a buffer with concrete values into an Mlir program.
-    pub fn constantTensor(val: HostBuffer) Tensor {
-        const ctx = CompilationContext.current().mlirCtx();
-        const loc = ctx.location(@src());
-        const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
-        const constant_op = dialect.stablehlo.constant(ctx, val.shape().dims(), elem_type, val.bytes(), loc);
-        return _result(val.shape(), constant_op.result(0));
+    pub fn constantTensor(sh: Shape, bytes_: []const u8) Tensor {
+        const elem_type = mlirx.Type.fromDType(mlirCtx(), sh.dtype());
+        //const elem_type = mlirx.denseElementAttrType(val.dtype()) orelse std.debug.panic("constantTensor expects a dtype that can be serialized to MLIR, like f32 or i32, got {f}", .{val.shape()});
+        const constant_op = dialects.stablehlo.constant(mlirCtx(), sh.dims(), elem_type, bytes_, .unknown(mlirCtx())).appendTo(currentBlock());
+        return _result(sh, constant_op.result(0));
     }
 
     /// Returns a Tensor containing the result of the outer product between the input Tensors.
@@ -2081,11 +2020,11 @@ pub const Tensor = struct {
             // but we propagate output_shape tags.
             return _result(res_shape, self.value());
         }
-        const ctx = self.getContext();
-        const result_type = mlirx.tensorType(ctx.mlirCtx(), res_shape);
-        const loc = ctx.location(@src(), "broadcast({f}, {f}, axes={any})", .{ self, res_shape, axes_ });
-        const broadcast_op = dialect.stablehlo.broadcast_in_dim(ctx.mlirCtx(), self.value(), axes_, result_type, loc);
-
+        const result_type = mlir.rankedTensorType(
+            res_shape.dims(),
+            mlirx.Type.fromDType(mlirCtx(), res_shape.dtype()),
+        );
+        const broadcast_op = dialects.stablehlo.broadcast_in_dim(mlirCtx(), self.value(), axes_, result_type, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(res_shape, broadcast_op.result(0));
     }
 
@@ -2125,12 +2064,11 @@ pub const Tensor = struct {
         // TODO: broad is error prone because of this:
         // it will happily broadcast .{ .a = 10, .b = 1 } to .{ .b = 10, .a = 5 }
         if (self._shape.rank() == 0 or self._shape.rank() == other.rank()) {
-            const all_axes = [MAX_RANK]i64{ 0, 1, 2, 3, 4, 5, 6, 7 };
-            return self.broadcast(other, all_axes[0..self.rank()]);
+            return self.broadcast(other, constants.AXES_IOTA[0..self.rank()]);
         }
 
         // check that each axis of self maps to an axis of other
-        var axes_: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
         for (self._shape.tags()) |t| {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
@@ -2140,9 +2078,8 @@ pub const Tensor = struct {
     /// Reshapes the input Tensor with the given shape.
     pub fn reshape(self: Tensor, output_shape_: anytype) Tensor {
         const output_shape = self._shape.reshape(output_shape_);
-        const tensor_type = mlirx.tensorType(self.getContext().mlirCtx(), output_shape);
-        const loc = self.getContext().location(@src(), "reshape({f})", .{output_shape});
-        const reshape_value = dialect.stablehlo.reshape(self.getContext().mlirCtx(), self.value(), tensor_type, loc);
+        const tensor_type = mlir.rankedTensorType(output_shape.dims(), mlirx.Type.fromDType(mlirCtx(), output_shape.dtype()));
+        const reshape_value = dialects.stablehlo.reshape(mlirCtx(), self.value(), tensor_type, .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(output_shape, reshape_value.result(0));
     }
 
@@ -2163,7 +2100,7 @@ pub const Tensor = struct {
     pub fn pad(self: Tensor, padding_value: anytype, paddings: anytype) Tensor {
         const _paddings = self.shape().parseAxesOptions(Pad, paddings, .{});
 
-        const ZEROS = [_]i64{0} ** MAX_RANK;
+        const ZEROS = [_]i64{0} ** constants.MAX_RANK;
         var low = ZEROS;
         var high = ZEROS;
         var interior = ZEROS;
@@ -2180,15 +2117,13 @@ pub const Tensor = struct {
         }
 
         const rk = self.rank();
-        const mlir_ctx = self.getContext().mlirCtx();
-        const loc = mlir_ctx.location(@src()).namedFmt(mlir_ctx, "pad({},{})", .{ padding_value, _paddings });
-        const pad_op = dialect.stablehlo.pad(
-            mlir_ctx,
+        const pad_op = dialects.stablehlo.pad(
+            mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
             .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));
     }
@@ -2197,13 +2132,13 @@ pub const Tensor = struct {
     /// `.{.a = 5, .b = 4}.insert(.b, .{ .c, .d }) -> .{ .a = 5, .c = 1, .d = 1, .b = 4 }`
     pub fn insertAxes(self: Tensor, axis_: anytype, tags: anytype) Tensor {
         const tags_ = Shape.parseTags(tags);
-        const ax = if (@TypeOf(axis_) == EnumLiteral and axis_ == .last)
+        const ax = if (@TypeOf(axis_) == @EnumLiteral() and axis_ == .last)
             self.rank()
         else
             self.axis(axis_);
 
         var res_shape = self._shape;
-        const ones = [_]i64{1} ** MAX_RANK;
+        const ones = [_]i64{1} ** constants.MAX_RANK;
         res_shape._dims.insertSlice(ax, ones[0..tags_.len]) catch unreachable;
         res_shape._tags.insertSlice(ax, tags_.constSlice()) catch unreachable;
 
@@ -2232,12 +2167,11 @@ pub const Tensor = struct {
     pub fn reverse(self: Tensor, axes_: anytype) Tensor {
         const actual_axes = self._shape.axes(axes_);
 
-        const loc = self.getContext().location(@src(), "reverse({any})", .{axes_});
-        const reverse_op = dialect.stablehlo.reverse(self.getContext().mlirCtx(), self.value(), toI64(actual_axes.constSlice()), loc);
+        const reverse_op = dialects.stablehlo.reverse(mlirCtx(), self.value(), toI64(actual_axes.constSlice()).constSlice(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, reverse_op.result(0));
     }
 
-    pub const GatherOpts = struct { indices_are_sorted: bool = false };
+    pub const GatherOpts = ops.GatherOpts;
 
     /// `gather` extracts slices from the given tensor at the specified offsets.
     /// example: `values.gather(.{ .a = idx }, .{})`
@@ -2276,113 +2210,7 @@ pub const Tensor = struct {
         }
 
         // TODO: sort indices following self.shape instead of asking the user to do it.
-        return self.gather_(idx_axes.slice(), idx_per_axis.slice(), opts);
-    }
-
-    pub fn gather_(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, opts: GatherOpts) Tensor {
-        stdx.debug.assert(idx_axes.len > 0, "gather expects 1 or more axes to operate one, received none. Example: `x.gather(.a, indices, .{{}})`", .{});
-        for (idx_axes, 0..) |a, i| {
-            if (i > 0) {
-                stdx.debug.assert(a == idx_axes[i - 1] + 1, "gather expects 'idx_axes' to be sequential. But {any} aren't sequential in {f}", .{ idx_axes, self });
-            }
-        }
-        var indices_shape = idx_per_axis[0].shape();
-        for (idx_per_axis[1..]) |idx| {
-            if (idx.rank() > indices_shape.rank()) {
-                indices_shape = idx.shape();
-            }
-        }
-        for (idx_per_axis) |idx| {
-            stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "gather indices can't be broadcasted together {any}", .{idx_per_axis});
-        }
-
-        var idx_batch_axes: Shape.DimsArray = .{};
-
-        const AxisKind = enum { batching, offset, collapsed, indices };
-        var self_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
-
-        for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
-            const is_gather_axis = std.mem.containsAtLeastScalar(u3, idx_axes, 1, @intCast(self_ax));
-            if (indices_shape.hasTag(t)) |id_ax| {
-                // tag is both in self and indices -> it's a batching dim
-                // Note: tags are required for batching.
-                self_kind.buffer[self_ax] = .batching;
-                idx_batch_axes.appendAssumeCapacity(id_ax);
-                stdx.debug.assert(!is_gather_axis, "gather expects axes to appear at most twice. Axis {s} has been found both in 'self={f}', in 'idx_axes={any}' and in 'indices={f}'", .{ t, self, idx_axes, indices_shape });
-            } else if (is_gather_axis) {
-                // we collapsed all gathered axes
-                self_kind.buffer[self_ax] = .collapsed;
-                // idx_kind.buffer[id_ax] = .indices;
-            } else {
-                self_kind.buffer[self_ax] = .offset;
-            }
-        }
-
-        // compute res shape
-        var res_shape = Shape.init(.{}, self.dtype());
-        var res_kind: stdx.BoundedArray(AxisKind, MAX_RANK) = .{};
-        for (self_kind.slice(), 0..) |kind, ax_usize| {
-            const ax: u3 = @intCast(ax_usize);
-            if (ax == idx_axes[0]) {
-                // The first val_ax is special cause this is the place where we insert indices axes.
-                for (0.., indices_shape.tags(), indices_shape.dims()) |id_axis_order, id_axis, id_inserted_dim| {
-                    const is_batching_axis = std.mem.containsAtLeastScalar(i64, idx_batch_axes.constSlice(), 1, @intCast(id_axis_order));
-                    // Batching axis is already in self.
-                    if (is_batching_axis) continue;
-
-                    res_shape = res_shape.appendDim(id_inserted_dim, id_axis);
-                    res_kind.appendAssumeCapacity(.indices);
-                }
-            }
-            switch (kind) {
-                .collapsed => continue,
-                else => {
-                    res_shape = res_shape.appendDim(self.dim(ax), self._shape.tag(ax));
-                    res_kind.appendAssumeCapacity(kind);
-                },
-            }
-        }
-
-        // This is not a gather, but a dynamicSlice.
-        // Sometimes the backend recognize this pattern, but not always.
-        // So let us handle that.
-        if (indices_shape.count() == 1 and idx_axes.len == 1) {
-            return self.dynamicSlice1d(idx_axes[0], .{ .start = idx_per_axis[0].asScalar(), .len = 1 }).reshape(res_shape);
-        }
-
-        var slice_dims: Shape.DimsArray = .{};
-        for (self_kind.slice(), self.dims()) |k, d| {
-            slice_dims.appendAssumeCapacity(switch (k) {
-                .batching, .collapsed => 1,
-                .offset => d,
-                .indices => unreachable,
-            });
-        }
-
-        // TODO: try changing .last by other axis and see the perf impact.
-        const indices = Tensor.stack(idx_per_axis, .last, .coord);
-        // scoped_log.debug("gather --> {} {any}", .{ res_shape, res_kind.constSlice() });
-        const loc = self.getContext().mlirCtx().location(@src());
-        const gather_op = dialect.stablehlo.gather(
-            self.getContext().mlirCtx(),
-            self.value(),
-            indices.value(),
-            slice_dims.constSlice(),
-            loc,
-            .{
-                .offset_dims = _collectAxes(AxisKind, res_kind, .offset).constSlice(),
-                .collapsed_slice_dims = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .operand_batching_dims = _collectAxes(AxisKind, self_kind, .batching).constSlice(),
-                .start_indices_batching_dims = idx_batch_axes.constSlice(),
-                .start_index_map = _collectAxes(AxisKind, self_kind, .collapsed).constSlice(),
-                .index_vector_dim = indices.axis(.coord),
-                .indices_are_sorted = opts.indices_are_sorted,
-            },
-        );
-
-        const mlir_shape = fromMlirValue(gather_op.result(0)).shape();
-        stdx.debug.assert(mlir_shape.eql(res_shape), "gather expects that batching indices appear in the same order in 'self' and 'indices', got: self={f}, indices={f}. You should transpose one or the other.", .{ self, indices });
-        return _result(res_shape, gather_op.result(0));
+        return ops.gather(self, idx_axes.slice(), idx_per_axis.slice(), opts);
     }
 
     test gather {
@@ -2391,7 +2219,7 @@ pub const Tensor = struct {
 
         const Local = struct {
             pub fn _idx(idx_shape: anytype) Tensor {
-                return Tensor.constant(idx_shape, .{ .i32 = 0 });
+                return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i64));
             }
         };
 
@@ -2399,10 +2227,14 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
+
+            const block = mlir.Block.init(&.{}, &.{});
+            comp.pushBlock(block);
+            defer comp.popBlock();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{ .a = idx(.{}) }, .{} },
@@ -2425,7 +2257,7 @@ pub const Tensor = struct {
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .n = 8 } },
             }) |testcase| {
                 const x_shape, const indices, const res_shape = testcase;
-                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .i64));
                 const y = gather(x, indices, .{});
                 try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
                 try std.testing.expect(y.value().owner().verify());
@@ -2435,8 +2267,8 @@ pub const Tensor = struct {
                 .{ .{ 10, 20 }, &[_]u3{ 0, 1 }, &[_]Tensor{ idx(.{8}), idx(.{8}) }, .{8} },
             }) |testcase| {
                 const x_shape, const idx_axes, const idx_per_axis, const res_shape = testcase;
-                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-                const y = gather_(x, idx_axes, idx_per_axis, .{});
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .i64));
+                const y = ops.gather(x, idx_axes, idx_per_axis, .{});
                 try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
                 try std.testing.expect(y.value().owner().verify());
             }
@@ -2486,10 +2318,10 @@ pub const Tensor = struct {
         // Compute result shape
         var res_shape = indices._shape.remove(index_coord_axis).withDtype(self.dtype());
         var slice_dims = self._shape._dims;
-        var self_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var indices_batch_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var start_index_map: stdx.BoundedArray(i64, MAX_RANK) = .{};
-        var self_offset_axes: stdx.BoundedArray(i64, MAX_RANK) = .{};
+        var self_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var indices_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var start_index_map: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var self_offset_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_slice_ax: ?u3 = if (tagged_api) slice_shape.hasTag(t) else @intCast(self_ax);
 
@@ -2516,13 +2348,11 @@ pub const Tensor = struct {
             }
         }
 
-        const loc = self.getContext().location(@src(), "gatherSlices({f}, slice_shape={f}, idx={f})", .{ self, slice_shape, indices });
-        const gather_op = dialect.stablehlo.gather(
-            self.getContext().mlirCtx(),
+        const gather_op = dialects.stablehlo.gather(
+            mlirCtx(),
             self.value(),
             indices.value(),
             slice_dims.constSlice(),
-            loc,
             .{
                 .offset_dims = self_offset_axes.constSlice(),
                 .collapsed_slice_dims = &.{},
@@ -2532,7 +2362,8 @@ pub const Tensor = struct {
                 .index_vector_dim = index_coord_axis,
                 .indices_are_sorted = opts.indices_are_sorted,
             },
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(res_shape, gather_op.result(0));
     }
 
@@ -2548,10 +2379,14 @@ pub const Tensor = struct {
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
+
+            const block = mlir.Block.init(&.{}, &.{});
+            comp.pushBlock(block);
+            defer comp.popBlock();
 
             inline for (.{
                 .{ .{ .a = 10 }, .{}, .{ ._ = 0 }, .{ .a = 10 } },
@@ -2573,34 +2408,42 @@ pub const Tensor = struct {
                 .{ .{ .b = 200, .a = 100, .c = 300 }, .{ .c = 300 }, .{ .a = 100, .b = 200, ._ = 1 }, .{ .a = 100, .b = 200, .c = 300 } },
             }) |testcase| {
                 const x_shape, const slice_dims, const idx_shape, const res_shape = testcase;
-                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
                 const slice_shape = Shape.init(slice_dims, .u16);
-                const idx = Tensor.constant(idx_shape, .{ .i32 = 0 });
+                const idx = Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
                 const y = gatherSlices(x, slice_shape, idx, .{});
                 try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
                 try std.testing.expect(y.value().owner().verify());
 
-                const mod = try zml.compileFn(
-                    std.testing.allocator,
-                    Local._gatherSlices,
-                    .{ x.shape(), slice_shape, idx.shape(), .{ .indices_are_sorted = true } },
-                    platform,
-                );
-                defer mod.deinit();
+                _ = Local._gatherSlices(x, slice_shape, idx, .{ .indices_are_sorted = true });
             }
         }
 
         // Test with actual values.
-        const range = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 2 * 4 * 6 }, .u16);
-        defer range.deinit(std.testing.allocator);
-        const operand = try range.reshape(.{ .a = 2, .b = 4, .c = 6 }).toDevice(platform);
-        defer operand.deinit();
-        const start_indices = (try zml.Buffer.fromArray(platform, [2][2]i32{ .{ 2, 1 }, .{ 0, 3 } })).withTags(.{ .n, ._ });
-        defer start_indices.deinit();
+        const operand: Tensor = .init(.{ .a = 2, .b = 4, .c = 6 }, .u16);
+        const indices: Tensor = .init(.{ .n = 2, ._ = 2 }, .i32);
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), indices, .{} }, platform);
+        defer exe.deinit();
 
-        const result = try zml.testing.compileAndCall(platform, Local._gatherSlices, .{ operand, Shape.init(.{ .b = 2, .c = 3 }, .u16), start_indices, .{} });
+        const indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, indices.shape(), std.mem.sliceAsBytes(&[2][2]i32{ .{ 2, 1 }, .{ 0, 3 } }));
+        defer indices_buffer.deinit();
+        const operand_buffer: zml.Buffer = b: {
+            const temp_func = struct {
+                fn forward() Tensor {
+                    return Tensor.arange(.{ .end = 2 * 4 * 6 }, .u16).reshape(.{ .a = 2, .b = 4, .c = 6 });
+                }
+            }.forward;
+            var temp_exe = try zml.module.compile(std.testing.allocator, std.testing.io, temp_func, .{}, platform);
+            defer temp_exe.deinit();
 
-        const expected = zml.HostBuffer.fromArray(&[2][2][2][3]u16{
+            const buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &temp_exe, temp_func, {});
+            break :b buffer;
+        };
+        defer operand_buffer.deinit();
+        const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
+        defer result.deinit();
+
+        const expected: ConstSlice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
             .{
                 .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
                 .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },
@@ -2609,8 +2452,8 @@ pub const Tensor = struct {
                 .{ .{ 3, 4, 5 }, .{ 9, 10, 11 } },
                 .{ .{ 27, 28, 29 }, .{ 33, 34, 35 } },
             },
-        });
-        try zml.testing.expectClose(expected, result, 0);
+        }));
+        try zml.testing.expectClose(std.testing.io, expected, result, 0);
     }
 
     pub const ScatterOpts = struct {
@@ -2628,15 +2471,14 @@ pub const Tensor = struct {
         /// then you should make sure the slices don't overlap,
         /// otherwise the result will depend on the runtime scheduling
         /// of the operator which is backend specific.
-        update_fn: *const fn (Tensor, Tensor) Tensor = increment,
+        update_fn: *const fn (ops.ScatterArgs) struct { Tensor } = increment,
 
-        pub fn increment(old_value: Tensor, new_value: Tensor) Tensor {
-            return old_value.add(new_value);
+        pub fn increment(values: ops.ScatterArgs) struct { Tensor } {
+            return .{values.input.add(values.update)};
         }
 
-        pub fn override(old_value: Tensor, new_value: Tensor) Tensor {
-            _ = old_value;
-            return new_value;
+        pub fn override(values: ops.ScatterArgs) struct { Tensor } {
+            return .{values.update};
         }
     };
 
@@ -2714,17 +2556,17 @@ pub const Tensor = struct {
     /// that requires host<->device synchronization.
     /// ZML tries to generate the easiest to optimize IR, and will warn you if it generates known problematic IR.
     pub fn scatterSlices(self: Tensor, indices: anytype, updates: Tensor, opts: ScatterOpts) Tensor {
-        scoped_log.debug("scatterSlices({f}, {any}, {f})", .{ self, indices, updates });
+        //scoped_log.debug("scatterSlices({}, {any}, {})", .{ self, indices, updates });
 
         const UpdateType = @TypeOf(ScatterOpts.increment);
 
         const Custom = struct {
-            pub fn inc(custom: *const UpdateType, old_value: Tensor, new_value: Tensor) Tensor {
-                return @call(.auto, custom, .{ old_value, new_value });
+            pub fn inc(values: ops.ScatterArgs, custom: *const UpdateType) struct { Tensor } {
+                return @call(.auto, custom, .{values});
             }
         };
 
-        return ops.scatter(Tensor, *const UpdateType, Custom.inc, self, opts.update_fn, indices, updates, opts);
+        return ops.scatter(.{self}, indices, .{updates}, Custom.inc, .{opts.update_fn}, opts)[0];
     }
 
     test scatterSlices {
@@ -2749,16 +2591,22 @@ pub const Tensor = struct {
             }
 
             pub fn _idx(idx_shape: anytype) Tensor {
-                return Tensor.constant(idx_shape, .{ .i32 = 0 });
+                return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
             }
         };
 
         {
             // Only test shapes
-            var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+            var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
             defer comp.deinit();
             comp.activate();
             defer comp.deactivate();
+
+            const block = mlir.Block.init(&.{}, &.{});
+            defer block.deinit();
+            comp.pushBlock(block);
+            defer comp.popBlock();
+
             const idx = Local._idx;
 
             inline for (.{
@@ -2776,8 +2624,8 @@ pub const Tensor = struct {
                 .{ .{ .a = 10, .b = 20 }, .{ .a = idx(.{ .n = 8 }), .b = idx(.{ .n = 8 }) }, .{ .a = 3, .n = 8, .b = 2 } },
             }) |testcase| {
                 const x_shape, const indices, const updates_shapes = testcase;
-                const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-                const updates = Tensor.constant(updates_shapes, .{ .f16 = 0 });
+                const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+                const updates = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(updates_shapes, .f16));
 
                 const y = scatterSlices(x, indices, updates, .{});
                 // Shape doesn't change with scatterSlices
@@ -2787,70 +2635,79 @@ pub const Tensor = struct {
         }
         // Test with actual values, no batching.
         {
-            const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-            const a = (try zml.Buffer.from(platform, a_host.reshape(.{ 3, 3 }), .{})).withTags(.{ .a, .b });
-            defer a.deinit();
-            a_host.deinit(std.testing.allocator);
+            const a: Tensor = .init(.{ 3, 3 }, .i32);
 
-            const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 0, 2 });
-            const updates = try zml.Buffer.fromArray(platform, [2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } });
+            const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
+            const updates = Tensor.init(.{ 2, 3 }, .i32).withTags(.{ .n, .b });
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
+            defer exe.deinit();
+
+            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
+            defer a_buffer.deinit();
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), std.mem.sliceAsBytes(&[2]i32{ 0, 2 }));
+            defer scatter_indices_buffer.deinit();
+            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
+            defer updates_buffer.deinit();
+
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            defer result.deinit();
 
             const expected = [3][3]i32{ .{ 10, 21, 32 }, .{ 3, 4, 5 }, .{ 76, 87, 98 } };
-            const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
-                a,
-                &.{scatter_indices.withTags(.{.n})},
-                updates.withTags(.{ .n, .b }),
-            });
             try std.testing.expect(a.shape().eql(result.shape()));
-            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
         }
         // Test with setting individual values (no batching)
         {
-            const a_host = try zml.HostBuffer.arange(std.testing.allocator, .{ .end = 9 }, .i32);
-            const a = try zml.Buffer.from(platform, a_host, .{});
-            defer a.deinit();
-            a_host.deinit(std.testing.allocator);
+            const a: Tensor = .init(.{9}, .i32);
 
-            const scatter_indices = try zml.Buffer.fromArray(platform, [2]i32{ 2, 7 });
-            const updates = try zml.Buffer.fromArray(platform, [2]i32{ 20, 70 });
+            const scatter_indices = Tensor.init(.{2}, .i32).withTags(.{.n});
+            const updates = Tensor.init(.{2}, .i32).withTags(.{.n});
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatter, .{ a, &.{scatter_indices}, updates }, platform);
+            defer exe.deinit();
+
+            var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
+            defer a_buffer.deinit();
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), std.mem.sliceAsBytes(&[2]i32{ 2, 7 }));
+            defer scatter_indices_buffer.deinit();
+            var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), std.mem.sliceAsBytes(&[2]i32{ 20, 70 }));
+            defer updates_buffer.deinit();
+
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatter, .{ a_buffer, &.{scatter_indices_buffer}, updates_buffer });
+            defer result.deinit();
 
             const expected = [9]i32{ 0, 1, 22, 3, 4, 5, 6, 77, 8 };
-            const result = try zml.testing.compileAndCall(platform, Local._scatter, .{
-                a,
-                &.{scatter_indices.withTags(.{.n})},
-                updates.withTags(.{.n}),
-            });
             try std.testing.expect(a.shape().eql(result.shape()));
-            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
         }
         {
             // Test with actual values and batching along axis .a
-            const operand = try zml.Buffer.constant(platform, Shape.init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16), 0, .{});
-            defer operand.deinit();
-            const start_indices = (try zml.Buffer.fromArray(
-                platform,
-                [2][2][3][2]i32{
-                    .{
-                        .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
-                        .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
-                    },
-                    .{
-                        .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
-                        .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
-                    },
+            const operand: Tensor = .init(.{ .a = 2, .b = 3, .c = 4, .d = 2 }, .u16);
+            const start_indices: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .coord = 2 }, .i32);
+            const values: Tensor = .init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._scatterCB, .{ operand, start_indices, values }, platform);
+            defer exe.deinit();
+
+            var operand_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, operand.shape(), std.mem.sliceAsBytes(&@as([2 * 3 * 4 * 2]u16, @splat(0))));
+            defer operand_buffer.deinit();
+            var start_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, start_indices.shape(), std.mem.sliceAsBytes(&[2][2][3][2]i32{
+                .{
+                    .{ .{ 0, 0 }, .{ 1, 0 }, .{ 2, 1 } },
+                    .{ .{ 0, 1 }, .{ 1, 1 }, .{ 0, 9 } },
                 },
-            )).withTags(.{ .n, .a, .m, .coord });
-            defer start_indices.deinit();
+                .{
+                    .{ .{ 0, 0 }, .{ 2, 1 }, .{ 2, 2 } },
+                    .{ .{ 1, 2 }, .{ 0, 1 }, .{ 1, 0 } },
+                },
+            }));
+            defer start_indices_buffer.deinit();
+            var values_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, values.shape(), std.mem.sliceAsBytes(&@as([2 * 2 * 3 * 2 * 2]u16, @splat(1))));
+            defer values_buffer.deinit();
 
-            const values = try zml.Buffer.constant(
-                platform,
-                Shape.init(.{ .n = 2, .a = 2, .m = 3, .c = 2, .d = 2 }, .u16),
-                1,
-                .{},
-            );
-            defer values.deinit();
-
-            const result = try zml.testing.compileAndCall(platform, Local._scatterCB, .{ operand, start_indices, values });
+            var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._scatterCB, .{ operand_buffer, start_indices_buffer, values_buffer });
+            defer result.deinit();
 
             const expected = [2][3][4][2]u16{
                 .{
@@ -2865,7 +2722,7 @@ pub const Tensor = struct {
                 },
             };
             try std.testing.expect(operand.shape().eql(result.shape()));
-            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected)));
+            try std.testing.expectEqual(expected, result.getValue(@TypeOf(expected), std.testing.io));
         }
     }
 
@@ -2873,74 +2730,68 @@ pub const Tensor = struct {
     pub fn max(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         return ops.reduce(
+            .{self},
+            .{Tensor.constant(self.dtype().minValue())},
+            &.{a},
             struct {
-                pub fn cmp(x: Tensor, res: Tensor) Tensor {
-                    return res.maximum(x.convert(res.dtype()));
+                pub fn cmp(args: ops.ReduceArgs) struct { Tensor } {
+                    return .{args.left.maximum(args.right)};
                 }
             }.cmp,
-            self,
-            Tensor.constant(&.{}, self.dtype().minValue()),
-            &.{a},
-        );
+            .{},
+        )[0];
     }
 
     /// Returns a Tensor containing the minimum over a given axis.
     pub fn min(self: Tensor, axis_: anytype) Tensor {
         const a = self.axis(axis_);
         return ops.reduce(
+            .{self},
+            .{Tensor.constant(self.dtype().maxValue())},
+            &.{a},
             struct {
-                pub fn cmp(x: Tensor, res: Tensor) Tensor {
-                    return res.minimum(x.convert(res.dtype()));
+                pub fn cmp(args: ops.ReduceArgs) struct { Tensor } {
+                    return .{args.left.minimum(args.right)};
                 }
             }.cmp,
-            self,
-            Tensor.constant(&.{}, self.dtype().maxValue()),
-            &.{a},
-        );
+            .{},
+        )[0];
     }
 
     pub const ArgMaxRes = struct {
         values: Tensor,
         indices: Tensor,
 
-        fn cmp(left: ArgMaxRes, right: ArgMaxRes) ArgMaxRes {
-            const left_val = left.values;
-            const right_val = right.values;
-            const left_idx = left.indices;
-            const right_idx = right.indices;
-
-            const left_gt_right = left_val.cmp(.GT, right_val);
-            const is_nan = left_val.cmp(.NE, left_val);
+        fn cmp(values: ops.ReduceArgs, indices: ops.ReduceArgs) struct { Tensor, Tensor } {
+            const left_gt_right = values.left.cmp(.GT, values.right);
+            const is_nan = values.left.cmp(.NE, values.left);
             const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
             // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(left_val, right_val);
+            const max_val = left_gt_or_nan.select(values.left, values.right);
 
-            // If left_val == right_val: keep the smallest idx.
-            const is_same = left_val.cmp(.EQ, right_val);
-            const is_first = left_idx.cmp(.LT, right_idx);
+            // If values.left == values.right: keep the smallest idx.
+            const is_same = values.left.cmp(.EQ, values.right);
+            const is_first = indices.left.cmp(.LT, indices.right);
             const is_same_but_first = is_same.logical(.AND, is_first);
             const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
-            const max_idx = keep_left_idx.select(left_idx, right_idx);
+            const max_idx = keep_left_idx.select(indices.left, indices.right);
 
-            return .{ .values = max_val, .indices = max_idx };
+            return .{ max_val, max_idx };
         }
     };
 
-    /// Returns two Tensors containing the maximum and the index of this maximum over a given axis.
-    ///
-    /// Stable argmax:
-    /// * bubbles up Nan
-    /// * in case of equality the smallest index matching the maximum
     pub fn argMax(x: Tensor, axis_: anytype) ArgMaxRes {
         const a = x.axis(axis_);
         const dt: DataType = if (x.dim(a) <= std.math.maxInt(i32)) .i32 else .i64;
 
-        return ops.reduce(
-            ArgMaxRes.cmp,
-            .{ .values = x, .indices = Tensor.arange(.{ .end = x.dim(a) }, dt).broadcast(x.shape(), &.{a}) },
-            .{ .values = Tensor.constant(&.{}, x.dtype().minValue()), .indices = Tensor.scalar(0, dt) },
+        const values, const indices = ops.reduce(
+            .{ x, Tensor.arange(.{ .end = x.dim(axis_) }, dt).broadcast(x.shape(), &.{a}) },
+            .{ Tensor.constant(x.dtype().minValue()), Tensor.constant(dt.zero()) },
             &.{a},
+            ArgMaxRes.cmp,
+            .{},
         );
+        return .{ .values = values, .indices = indices };
     }
 
     test argMax {
@@ -2953,25 +2804,33 @@ pub const Tensor = struct {
             }
         };
 
-        const argmax = try zml.compileFn(allocator, ArgMaxTest._fwd, .{Shape.init(.{ 1, 5 }, .f32)}, platform);
-        defer argmax.deinit();
-        // Test with tie
+        const x: Tensor = .init(.{ 1, 5 }, .f32);
+        var exe = try zml.module.compile(allocator, std.testing.io, ArgMaxTest._fwd, .{x}, platform);
+        defer exe.deinit();
+
         {
-            const x = try zml.Buffer.fromArray(platform, [1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }});
-            const res = argmax.call(.{x});
-            const max_ = res.values.getValue(f32);
-            const max_idx = res.indices.getValue(i32);
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, 4.1, 7.9, 0, 7.9 }}));
+            defer x_buffer.deinit();
+
+            const res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            defer res.values.deinit();
+            defer res.indices.deinit();
+            const max_ = res.values.getValue(f32, std.testing.io);
+            const max_idx = res.indices.getValue(i32, std.testing.io);
             try std.testing.expectEqual(max_, 7.9);
             // We should always return the first max found.
             try std.testing.expectEqual(max_idx, 2);
         }
 
-        // Test with Nan
         {
-            const x = try zml.Buffer.fromArray(platform, [1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }});
-            const res = argmax.call(.{x});
-            const max_ = try res.values.getValue(f32);
-            const max_idx = try res.indices.getValue(i32);
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[1][5]f32{.{ 5.0, std.math.nan(f32), 7.9, 0, 7.9 }}));
+            defer x_buffer.deinit();
+
+            const res = try zml.testing.autoCall(allocator, std.testing.io, &exe, ArgMaxTest._fwd, .{x_buffer});
+            defer res.values.deinit();
+            defer res.indices.deinit();
+            const max_ = try res.values.getValue(f32, std.testing.io);
+            const max_idx = try res.indices.getValue(i32, std.testing.io);
             try std.testing.expect(std.math.isNan(max_));
             try std.testing.expectEqual(max_idx, 1);
         }
@@ -2979,25 +2838,22 @@ pub const Tensor = struct {
 
     pub const SortRes = ArgMaxRes;
 
+    pub const SortOpts = struct { descending: bool = false };
+
     /// Returns two Tensors. The first contains the sorted values and the second one contains the sorted indices.
-    pub fn sort(self: Tensor, axis_: anytype, opts: struct { descending: bool = false }) SortRes {
+    pub fn sort(self: Tensor, axis_: anytype, opts: SortOpts) SortRes {
         const a = self.axis(axis_);
         const indices = Tensor.arange(.{ .end = self.dim(a) }, .i32).broadcast(self._shape, &.{a});
-        const res = ops.sort(
-            struct {
-                fn call(direction: dialect.stablehlo.ComparisonDirection.Direction, lhs: Tensor, rhs: Tensor, _: Tensor, _: Tensor) Tensor {
-                    return lhs.cmp(direction, rhs);
-                }
-            }.call,
-            if (opts.descending) .GT else .LT,
-            .{ self, indices },
-            self.axis(axis_),
-            true,
-        );
+        const direction: dialects.stablehlo.ComparisonDirection.Direction = if (opts.descending) .GT else .LT;
+        const res = ops.sort(.{ self, indices }, a, struct {
+            fn call(values: ops.SortArgs, _: ops.SortArgs, direction_: dialects.stablehlo.ComparisonDirection.Direction) Tensor {
+                return values.left.cmp(direction_, values.right);
+            }
+        }.call, .{direction}, true);
         return .{ .values = res[0], .indices = res[1] };
     }
 
-    pub const ArgSortOpts = struct { descending: bool = false };
+    pub const ArgSortOpts = SortOpts;
 
     /// Returns a Tensor containing the indices corresponding to the sorted values over the given axis.
     pub fn argsort(self: Tensor, axis_: anytype, opts: ArgSortOpts) Tensor {
@@ -3014,38 +2870,64 @@ pub const Tensor = struct {
             }
         };
 
-        var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
-        defer arena_state.deinit();
-        const allocator = arena_state.allocator();
         // 2D Tensor - dim = 1, ascending
         {
-            const x = try zml.Buffer.fromSlice(platform, .{ 2, 5 }, &[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 });
-            const res = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{} });
-            const res_cpu = try res.toHostAlloc(allocator);
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{} }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.9264, 0.7156, 1.0202, 0.3992, 1.2349, 1.0003, -0.1932, 1.3935, 0.7316, 0.0851 }));
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
+
             try std.testing.expectEqualSlices(i32, &.{ 0, 3, 1, 2, 4, 1, 4, 3, 0, 2 }, res_cpu.items(i32));
         }
+
         // 3D Tensor, dim = 1, descending
         {
-            const x = try zml.Buffer.fromSlice(platform, .{ 1, 5, 10 }, &[_]f16{
+            const x: Tensor = .init(.{ 1, 5, 10 }, .f16);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 1, .{ .descending = true } }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]f16{
                 -0.2505, 1.2520,  -0.7041, 0.1066,  1.2773,  -1.7246, 0.8389,  1.1094,  0.0601,  1.0684,
                 0.9619,  1.3916,  1.2246,  -0.1406, 0.3674,  -1.2480, -1.7051, -0.0934, 0.3435,  0.4373,
                 1.3809,  0.5444,  -0.6079, 1.2031,  -0.6880, 1.2979,  -0.1869, 0.2991,  0.0156,  0.1847,
                 0.6626,  -0.3040, -0.8726, -1.4805, -1.6943, 1.1055,  -2.0078, -0.5288, 0.8813,  0.8008,
                 2.0527,  1.1230,  0.5430,  0.2494,  -0.9434, 0.7876,  0.1818,  0.9258,  -2.4902, 1.5918,
-            });
-            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 1, .{ .descending = true } });
-            const res = try res_dev.toHostAlloc(allocator);
+            }));
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
+
             try std.testing.expectEqualSlices(i32, &.{
                 4, 1, 1, 2, 0, 2, 0, 0, 3, 4,
                 2, 0, 4, 4, 1, 3, 4, 4, 1, 0,
                 1, 4, 2, 0, 2, 4, 2, 2, 0, 3,
                 3, 2, 0, 1, 4, 1, 1, 1, 2, 1,
                 0, 3, 3, 3, 3, 0, 3, 3, 4, 2,
-            }, res.items(i32));
+            }, res_cpu.items(i32));
         }
+
         // 4D Tensor, dim = 3, ascending
         {
-            const x = try zml.Buffer.fromSlice(platform, .{ 4, 2, 1, 4 }, &[_]i32{
+            const x: Tensor = .init(.{ 4, 2, 1, 4 }, .i32);
+
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._argsort, .{ x, 3, .{} }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{
                 89, 31, 22, 42,
                 64, 39, 0,  30,
                 64, 71, 46, 31,
@@ -3054,9 +2936,15 @@ pub const Tensor = struct {
                 93, 24, 45, 72,
                 64, 86, 62, 88,
                 57, 21, 19, 12,
-            });
-            const res_dev = try zml.testing.compileAndCall(platform, Local._argsort, .{ x, 3, .{} });
-            const res = try res_dev.toHostAlloc(allocator);
+            }));
+            defer x_buffer.deinit();
+
+            var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._argsort, .{x_buffer});
+            defer res.deinit();
+
+            const res_cpu = try res.toSliceAlloc(std.testing.allocator, std.testing.io);
+            defer res_cpu.free(std.testing.allocator);
+
             try std.testing.expectEqualSlices(i32, &.{
                 2, 1, 3, 0,
                 2, 3, 1, 0,
@@ -3066,12 +2954,14 @@ pub const Tensor = struct {
                 1, 2, 3, 0,
                 2, 0, 1, 3,
                 3, 2, 1, 0,
-            }, res.items(i32));
+            }, res_cpu.items(i32));
         }
     }
 
+    pub const TopKOpts = struct { descending: bool = true };
+
     /// Returns a Tensor representing the result of Top-K over the given axis.
-    pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: struct { descending: bool = true }) SortRes {
+    pub fn topK(self: Tensor, named_axis_: anytype, k: u32, opts: TopKOpts) SortRes {
         stdx.debug.assert(k > 0, "topK expects a k > 0, got 0", .{});
         const err_msg = "topK named axis should be an integer or a named axis, eg `x.topK(.{{ .best_token = .token }}, 16)` or `x.topK(-1, 16)`";
         const has_name: ?[:0]const u8, const a = switch (@typeInfo(@TypeOf(named_axis_))) {
@@ -3113,7 +3003,7 @@ pub const Tensor = struct {
 
         // TODO: support maxPool on non last axis
         const a = self.axis(-1);
-        const ones = [_]i64{1} ** Tensor.MAX_RANK;
+        const ones = [_]i64{1} ** constants.MAX_RANK;
         var window_dimensions = ones;
         window_dimensions[a] = opts.window_dimensions;
         var window_strides = window_dimensions;
@@ -3124,13 +3014,12 @@ pub const Tensor = struct {
         var window_dilations = ones;
         window_dilations[a] = opts.window_dilations;
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a] = opts.padding;
 
-        return ops.reduceWindow(
-            MaxPoolRes.cmp,
-            .{ .values = self, .indices = iota(self._shape, a) },
-            .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
+        const result = ops.reduceWindow(
+            .{ self, iota(self._shape, a) },
+            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
                 .window_strides = window_strides[0..self.rank()],
@@ -3138,7 +3027,10 @@ pub const Tensor = struct {
                 .window_dilations = window_dilations[0..self.rank()],
                 .padding = padding[0..self.rank()],
             },
+            MaxPoolRes.cmp,
+            .{},
         );
+        return .{ .values = result[0], .indices = result[1] };
     }
 
     /// Computes the 2d maxPool operation on the input Tensor.
@@ -3161,14 +3053,13 @@ pub const Tensor = struct {
         const base_dilation = initPoolArg(self.rank(), &opts.base_dilations);
         const window_dilations = initPoolArg(self.rank(), &opts.window_dilations);
 
-        var padding = [_][2]i64{.{ 0, 0 }} ** Tensor.MAX_RANK;
+        var padding = [_][2]i64{.{ 0, 0 }} ** constants.MAX_RANK;
         padding[a - 1] = opts.padding[0];
         padding[a] = opts.padding[1];
 
-        return ops.reduceWindow(
-            MaxPoolRes.cmp,
-            .{ .values = self, .indices = iota(self._shape, a) },
-            .{ .values = Tensor.constant(.{}, self.dtype().minValue()), .indices = Tensor.scalar(0, .i32) },
+        const result = ops.reduceWindow(
+            .{ self, iota(self._shape, a) },
+            .{ Tensor.constant(self.dtype().minValue()), Tensor.scalar(0, .i32) },
             .{
                 .window_dimensions = window_dimensions[0..self.rank()],
                 .window_strides = window_strides[0..self.rank()],
@@ -3176,7 +3067,10 @@ pub const Tensor = struct {
                 .window_dilations = window_dilations[0..self.rank()],
                 .padding = padding[0..self.rank()],
             },
+            MaxPoolRes.cmp,
+            .{},
         );
+        return .{ .values = result[0], .indices = result[1] };
     }
 
     /// Chunk a given tensor into exactly n parts of equal shape.
@@ -3198,10 +3092,15 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
         inline for (.{
             .{ .{ .a = 12 }, .a, 3, .{ .a = 4 } },
@@ -3209,7 +3108,7 @@ pub const Tensor = struct {
             .{ .{ 12, 2 }, 0, 3, .{ 4, 2 } },
         }) |testcase| {
             const x_shape, const ax, const n_chunks, const res = testcase;
-            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
+            const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
             const chunks = x.chunkExact(ax, n_chunks);
 
             const res_shape = Shape.init(res, .f16);
@@ -3225,14 +3124,17 @@ pub const Tensor = struct {
         self: Tensor,
         axis_: i64,
         n_chunks: comptime_int,
-    ) []Tensor {
+    ) ![]Tensor {
         const a = self.axis(axis_);
         const d = self.dim(a);
         const chunk_size: i64 = @divFloor(d, n_chunks);
         const tail_chunk_size: i64 = @rem(d, chunk_size);
 
-        const allocator = self.getContext().allocator();
+        const allocator = CompilationContext.current().arena.allocator();
+
         var chunks = std.ArrayList(Tensor).initCapacity(allocator, n_chunks + 1) catch @panic("OOM");
+        defer chunks.deinit(allocator);
+
         for (0..n_chunks) |i| {
             const start: i64 = @as(i64, @intCast(i)) * chunk_size;
             chunks.appendAssumeCapacity(
@@ -3243,7 +3145,7 @@ pub const Tensor = struct {
             const start: i64 = n_chunks * chunk_size;
             chunks.appendAssumeCapacity(self.slice1d(a, .{ .start = start }));
         }
-        return chunks.items;
+        return chunks.toOwnedSlice(allocator);
     }
 
     test chunkAllowTrailing {
@@ -3251,10 +3153,15 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         // Only test shapes
-        var comp = try zml.module.CompilationContext.init(std.testing.allocator, "test", platform);
+        var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
         defer comp.deinit();
         comp.activate();
         defer comp.deactivate();
+
+        const block = mlir.Block.init(&.{}, &.{});
+        defer block.deinit();
+        comp.pushBlock(block);
+        defer comp.popBlock();
 
         inline for (.{
             .{ .{ .a = 10 }, .a, 3, .{ .a = 3 }, .{ .a = 1 } },
@@ -3263,8 +3170,8 @@ pub const Tensor = struct {
             .{ .{ 12, 2 }, 0, 3, .{ 4, 2 }, .{} },
         }) |testcase| {
             const x_shape, const ax, const n_chunks, const res, const trailing = testcase;
-            const x = Tensor.constant(x_shape, .{ .f16 = 0 });
-            const chunks = x.chunkAllowTrailing(x.axis(ax), n_chunks);
+            const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+            const chunks = try x.chunkAllowTrailing(x.axis(ax), n_chunks);
 
             const res_shape = Shape.init(res, .f16);
             for (chunks[0..n_chunks]) |chk| {
@@ -3289,9 +3196,10 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        const allocator = self.getContext().allocator();
-        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
-        errdefer allocator.dealloc(res);
+        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+        defer arena.deinit();
+
+        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {
@@ -3309,18 +3217,17 @@ pub const Tensor = struct {
 
         const a = self.axis(axis_);
         const new_shape = self._shape.set(a, slice_.len);
-        const loc = self.getContext().location(@src(), "dynSlice({}, len={})", .{ axis_, slice_.len });
 
-        var start_indices = [_]mlir.Value{constant(.{}, slice_.start.dtype().zero()).value()} ** MAX_RANK;
+        var start_indices = [_]*const mlir.Value{constant(slice_.start.dtype().zero()).value()} ** constants.MAX_RANK;
         start_indices[a] = slice_.start.value();
 
-        const op = dialect.stablehlo.dynamic_slice(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.dynamic_slice(
+            mlirCtx(),
             self.value(),
             new_shape.dims(),
             start_indices[0..self.rank()],
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(new_shape, op.result(0));
     }
@@ -3349,11 +3256,10 @@ pub const Tensor = struct {
         // TODO use slices and slices_tags for the format.
         // Currently this prints: "dynSlice(struct{q: struct{start: tensor.Tensor, comptime len: comptime_int = 1}}{ .q = struct{start: tensor.Tensor, comptime len: comptime_int = 1}{ .start = Tensor({1,10}, dtype=.i64), .len = 1 } })"
         // which is kinda ugly.
-        const loc = self.getContext().location(@src(), "dynSlice({any})", .{slices_});
 
         const idx_dtype = if (slices.len > 0) slices.get(0).start.dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values = [_]mlir.Value{zero} ** MAX_RANK;
+        var offset_values = [_]*const mlir.Value{zero} ** constants.MAX_RANK;
         var res_shape = self._shape;
         for (slices.constSlice(), 0..) |slice_, i| {
             const offset = slice_.start;
@@ -3375,30 +3281,34 @@ pub const Tensor = struct {
                 res_shape._dims.set(a, len);
             }
         }
-        const op = dialect.stablehlo.dynamic_slice(self.getContext().mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], loc);
+        const op = dialects.stablehlo.dynamic_slice(mlirCtx(), self.value(), res_shape.dims(), offset_values[0..self.rank()], .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(res_shape, op.result(0));
     }
 
     test dynamicSlice {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const T = f32;
 
-        {
-            const x = try zml.Buffer.fromArray(platform, [10]T{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-            const z = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 0, .{ .len = 2, .start = z } });
+        inline for (.{
+            .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
+            .{ [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }, Shape.init(.{ 2, 5 }, .f32), [4]f32{ 3, 4, 8, 9 }, 3, 1 },
+        }) |testcase| {
+            const x_data, const x_shape, const expectation, const z_value: i32, const ax = testcase;
+            const x: Tensor = .fromShape(x_shape);
+            const z: Tensor = .init(.{}, .i32);
 
-            try std.testing.expectEqual([2]T{ 4, 5 }, try res.getValue([2]T));
-        }
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Tensor.dynamicSlice1d, .{ x, ax, .{ .len = 2, .start = z } }, platform);
+            defer exe.deinit();
 
-        {
-            // Strided
-            const x = try zml.Buffer.fromArray(platform, [2][5]T{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-            const z = try zml.Buffer.scalar(platform, 3, .i32);
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&x_data));
+            defer x_buffer.deinit();
+            var z_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, z.shape(), std.mem.asBytes(&z_value));
+            defer z_buffer.deinit();
 
-            const res = try zml.testing.compileAndCall(platform, Tensor.dynamicSlice1d, .{ x, 1, .{ .len = 2, .start = z } });
-            try std.testing.expectEqual([4]T{ 3, 4, 8, 9 }, res.getValue([4]T));
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.dynamicSlice1d, .{ x_buffer, .{ .start = z_buffer } });
+            defer res.deinit();
+
+            try std.testing.expectEqual(expectation, try res.getValue(@TypeOf(expectation), std.testing.io));
         }
     }
 
@@ -3406,7 +3316,7 @@ pub const Tensor = struct {
     /// Note this is the untagged api, if you have tags, you should use dynamicUpdateSlice directly.
     pub fn dynamicUpdateSlice1d(self: Tensor, update: Tensor, axis_: i64, offset: Tensor) Tensor {
         const placeholder = Tensor.scalar(0, .i32);
-        var start_indices = [_]Tensor{placeholder} ** MAX_RANK;
+        var start_indices = [_]Tensor{placeholder} ** constants.MAX_RANK;
         start_indices[self.axis(axis_)] = offset;
         return self.dynamicUpdateSlice(start_indices[0..self.rank()], update);
     }
@@ -3470,7 +3380,7 @@ pub const Tensor = struct {
 
         const idx_dtype = if (offset.len > 0) offset.get(0).dtype() else .i32;
         const zero = Tensor.scalar(0, idx_dtype).value();
-        var offset_values: [MAX_RANK]mlir.Value = undefined;
+        var offset_values: [constants.MAX_RANK]*const mlir.Value = undefined;
         if (offset_tags.len == 0) {
             // Without offset tags we need the same number of offset than rank.
             stdx.debug.assert(self.rank() == offset.len, "dynamicUpdateSlice expects input tensor rank and 'offset_' length to be equal, got {} and {}", .{ self.rank(), offset.len });
@@ -3481,21 +3391,20 @@ pub const Tensor = struct {
         } else {
             // If an axis isn't specified, update the full slice.
             // This is only allowed when using tagged sliced.
-            offset_values = .{zero} ** MAX_RANK;
+            offset_values = .{zero} ** constants.MAX_RANK;
             for (offset.constSlice(), offset_tags.constSlice()) |start, t| {
                 const a = self._shape.hasTag(t) orelse stdx.debug.panic("dynamicUpdateSlice expects input tensor to have tags used in 'offset_' but {s} is missing (input shape is {f})", .{ t, self._shape });
                 offset_values[a] = start.value();
             }
         }
 
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.dynamic_update_slice(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.dynamic_update_slice(
+            mlirCtx(),
             self.value(),
             update.value(),
             offset_values[0..self.rank()],
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -3504,104 +3413,155 @@ pub const Tensor = struct {
         const platform = zml.testing.env();
 
         {
-            const x = try zml.Buffer.fromArray(platform, [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 });
-            const y = try zml.Buffer.fromArray(platform, [2]f32{ -1, -1 });
-            const idx = try zml.Buffer.scalar(platform, 4, .i32);
-            const res = try zml.testing.compileAndCall(
-                platform,
-                struct {
-                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
-                        return x_.dynamicUpdateSlice(idx_, y_);
-                    }
-                }._fwd,
-                .{ x.withTags(.{.a}), .{ .a = idx }, y.withTags(.{.a}) },
-            );
-            try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32));
+            const x = Tensor.init(.{10}, .f32).withTags(.{.a});
+            const y = Tensor.init(.{2}, .f32).withTags(.{.a});
+            const ids: Tensor = .init(.{}, .i32);
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor }, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(idx_, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = ids }, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }));
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{4}));
+            defer ids_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = ids_buffer }, y_buffer });
+            defer res.deinit();
+
+            try std.testing.expectEqual([10]f32{ 0, 1, 2, 3, -1, -1, 6, 7, 8, 9 }, try res.getValue([10]f32, std.testing.io));
         }
 
         {
             // Updates 2D, tagged api
-            const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-            const y = try zml.Buffer.fromArray(platform, [2]f32{ -1, -1 });
-            const idx = try zml.Buffer.scalar(platform, 3, .i32);
+            const x = Tensor.init(.{ 2, 5 }, .f32).withTags(.{ .a, .b });
+            const y = Tensor.init(.{2}, .f32).withTags(.{.a});
+            const ids: Tensor = .init(.{}, .i32);
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform);
+            defer exe.deinit();
 
-            const res = try zml.testing.compileAndCall(
-                platform,
-                struct {
-                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
-                        return x_.dynamicUpdateSlice(.{ .b = idx_ }, y_);
-                    }
-                }._fwd,
-                .{ x.withTags(.{ .a, .b }), idx, y.withTags(.{.a}) },
-            );
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2]f32{ -1, -1 }));
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
+            defer ids_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            defer res.deinit();
+
             try std.testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
-                try res.getValue([2][5]f32),
+                try res.getValue([2][5]f32, std.testing.io),
             );
         }
 
         {
             // Updates 2D slice, un-tagged api. Note that `y` needs to have a 1 dimension axis.
-            const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-            const y = try zml.Buffer.fromArray(platform, [2][1]f32{ .{-1}, .{-1} });
-            const idx = try zml.Buffer.scalar(platform, 3, .i32);
-            const res = try zml.testing.compileAndCall(
-                platform,
-                struct {
-                    pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
-                        return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
-                    }
-                }._fwd,
-                .{ x, idx, y },
-            );
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
+            const y: Tensor = .init(.{ 2, 1 }, .f32);
+            const ids: Tensor = .init(.{}, .i32);
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: Tensor, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(.{ zml.Tensor.scalar(0, .i32), idx_ }, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, ids, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[2][1]f32{ .{-1}, .{-1} }));
+            defer y_buffer.deinit();
+            var ids_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, ids.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
+            defer ids_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, ids_buffer, y_buffer });
+            defer res.deinit();
+
             try std.testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, -1, 4 }, .{ 5, 6, 7, -1, 9 } },
-                res.getValue([2][5]f32),
+                res.getValue([2][5]f32, std.testing.io),
             );
         }
 
         {
             // Updates 2D, partial update
-            const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-            const y = try zml.Buffer.fromArray(platform, [1]f32{-1});
-            const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
-            const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
-            const res = try zml.testing.compileAndCall(
-                platform,
-                struct {
-                    pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
-                        return x_.dynamicUpdateSlice(idx_, y_);
-                    }
-                }._fwd,
-                .{ x.withTags(.{ .a, .b }), .{ .a = idx_a, .b = idx_b }, y.withTags(.{.a}) },
-            );
+            const x = Tensor.init(.{ 2, 5 }, .f32).withTags(.{ .a, .b });
+            const y = Tensor.init(.{1}, .f32).withTags(.{.a});
+            const idx_a: Tensor = .init(.{}, .i32);
+            const idx_b: Tensor = .init(.{}, .i32);
+            const forward = struct {
+                pub fn _fwd(x_: Tensor, idx_: struct { a: Tensor, b: Tensor }, y_: Tensor) Tensor {
+                    return x_.dynamicUpdateSlice(idx_, y_);
+                }
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ .a = idx_a, .b = idx_b }, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[1]f32{-1}));
+            defer y_buffer.deinit();
+            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}));
+            defer idx_a_buffer.deinit();
+            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
+            defer idx_b_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ .a = idx_a_buffer, .b = idx_b_buffer }, y_buffer });
+            defer res.deinit();
+
             try std.testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
-                res.getValue([2][5]f32),
+                res.getValue([2][5]f32, std.testing.io),
             );
         }
 
         {
             // Updates 2D, partial update, un-tagged api.
-            const x = try zml.Buffer.fromArray(platform, [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } });
-            const y = try zml.Buffer.fromArray(platform, [1][1]f32{.{-1}});
-            const idx_a = try zml.Buffer.scalar(platform, 1, .i32);
-            const idx_b = try zml.Buffer.scalar(platform, 3, .i32);
-            const A = struct {
+            const x: Tensor = .init(.{ 2, 5 }, .f32);
+            const y: Tensor = .init(.{ 1, 1 }, .f32);
+            const idx_a: Tensor = .init(.{}, .i32);
+            const idx_b: Tensor = .init(.{}, .i32);
+            const forward = struct {
                 pub fn _fwd(x_: Tensor, idx_: [2]Tensor, y_: Tensor) Tensor {
                     return x_.dynamicUpdateSlice(&idx_, y_);
                 }
-            };
-            const res = try zml.testing.compileAndCall(platform, A._fwd, .{ x, .{ idx_a, idx_b }, y });
+            }._fwd;
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, forward, .{ x, .{ idx_a, idx_b }, y }, platform);
+            defer exe.deinit();
+
+            var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, 8, 9 } }));
+            defer x_buffer.deinit();
+            var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[1][1]f32{.{-1}}));
+            defer y_buffer.deinit();
+            var idx_a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_a.shape(), std.mem.sliceAsBytes(&[1]i32{1}));
+            defer idx_a_buffer.deinit();
+            var idx_b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, idx_b.shape(), std.mem.sliceAsBytes(&[1]i32{3}));
+            defer idx_b_buffer.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, forward, .{ x_buffer, .{ idx_a_buffer, idx_b_buffer }, y_buffer });
+            defer res.deinit();
+
             try std.testing.expectEqualDeep(
                 [2][5]f32{ .{ 0, 1, 2, 3, 4 }, .{ 5, 6, 7, -1, 9 } },
-                res.getValue([2][5]f32),
+                res.getValue([2][5]f32, std.testing.io),
             );
         }
     }
 
     /// Returns a Tensor containing the element-wise result of the given 'cmp' comparison between the two input Tensors.
-    pub fn cmp(self: Tensor, direction: dialect.stablehlo.ComparisonDirection.Direction, other: Tensor) Tensor {
+    pub fn cmp(self: Tensor, direction: dialects.stablehlo.ComparisonDirection.Direction, other: Tensor) Tensor {
         stdx.debug.assert(self.dtype() == other.dtype(), "cmp expects input tensors to be of the same type, got {t} and {t}", .{ self.dtype(), other.dtype() });
 
         if (self.rank() == 0 and other.rank() != 0) return self.broadcast(other._shape, &.{}).cmp(direction, other);
@@ -3609,31 +3569,33 @@ pub const Tensor = struct {
 
         stdx.debug.assert(self._shape.eql(other._shape), "cmp expects input tensor shapes to match, got {f} and {f}", .{ self._shape, other._shape });
 
-        const loc = self.getContext().location(@src(), "cmp(.{s})", .{@tagName(direction)});
-        const op = dialect.stablehlo.compare(
-            self.getContext().mlirCtx(),
+        const op = dialects.stablehlo.compare(
+            mlirCtx(),
             self.value(),
             other.value(),
-            dialect.stablehlo.ComparisonDirection.init(self.getContext().mlirCtx(), direction),
-            getComparisonType(self.getContext().mlirCtx(), self.dtype()),
-            loc,
-        );
+            dialects.stablehlo.ComparisonDirection.init(mlirCtx(), direction).getValue(),
+            getComparisonType(mlirCtx(), self.dtype()).getValue(),
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(self._shape.withDtype(.bool), op.result(0));
     }
 
     /// For each vector in the input tensor,
     /// creates a diagonal-matrix where diagonal values are set to the vector values.
-    pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]EnumLiteral) Tensor {
-        stdx.debug.assert(self.rank() < MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ MAX_RANK - 1, self });
+    pub fn toDiagonal(self: Tensor, axis_: anytype, new_tags: [2]@EnumLiteral()) Tensor {
+        stdx.debug.assert(self.rank() < constants.MAX_RANK - 1, "toDiagonal expects input up to {d} rank, got {f}", .{ constants.MAX_RANK - 1, self });
         const a = self.axis(axis_);
         const d = self.dim(a);
+        const p = self.shape()._partitioning.get(a);
         var res_shape = self._shape;
         res_shape._dims.replaceRange(a, 1, &.{ d, d }) catch unreachable;
         res_shape._tags.replaceRange(a, 1, &.{ @tagName(new_tags[0]), @tagName(new_tags[1]) }) catch unreachable;
+        // TODO(Corentin): Not sure about that
+        res_shape._partitioning.replaceRange(a, 1, &.{ p, p }) catch unreachable;
 
         const values = self.insertAxes(a + 1, .{new_tags[1]}).broad(res_shape);
-        const zeros = Tensor.constant(res_shape, self.dtype().zero());
+        const zeros = Tensor.constant(self.dtype().zero()).broad(res_shape);
 
         const x = Tensor.iota(res_shape, a);
         const y = Tensor.iota(res_shape, a + 1);
@@ -3655,20 +3617,26 @@ pub const Tensor = struct {
             }
         };
 
-        const x = try zml.Buffer.fromArray(platform, [2][2]u8{ .{ 1, 2 }, .{ 3, 4 } });
-        {
-            const res = try zml.testing.compileAndCall(platform, Local._toDiag, .{x});
-            try std.testing.expectEqual(
-                [2][2][2]u8{ .{
-                    .{ 1, 0 },
-                    .{ 0, 2 },
-                }, .{
-                    .{ 3, 0 },
-                    .{ 0, 4 },
-                } },
-                try res.getValue([2][2][2]u8),
-            );
-        }
+        const x: Tensor = .init(.{ 2, 2 }, .u8);
+
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._toDiag, .{x}, platform);
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[2][2]u8{ .{ 1, 2 }, .{ 3, 4 } }));
+        defer x_buffer.deinit();
+
+        const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._toDiag, .{x_buffer});
+        defer res.deinit();
+        try std.testing.expectEqual(
+            [2][2][2]u8{ .{
+                .{ 1, 0 },
+                .{ 0, 2 },
+            }, .{
+                .{ 3, 0 },
+                .{ 0, 4 },
+            } },
+            try res.getValue([2][2][2]u8, std.testing.io),
+        );
     }
 
     /// For each matrix specified by the two axes, returns the lower triangular part of it.
@@ -3688,7 +3656,7 @@ pub const Tensor = struct {
         const x = Tensor.iota(self.shape(), _axes.get(0));
         const y = Tensor.iota(self.shape(), _axes.get(1));
 
-        const zeros = Tensor.constant(self.shape(), self.dtype().zero());
+        const zeros = Tensor.constant(self.dtype().zero()).broad(self.shape());
         return x.addConstant(num_diagonals).cmp(.GE, y).select(self, zeros);
     }
 
@@ -3702,42 +3670,61 @@ pub const Tensor = struct {
             }
         };
 
-        const x = try zml.Buffer.fromArray(platform, [3][3]u8{
+        const x: Tensor = .init(.{ 3, 3 }, .u8);
+
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[3][3]u8{
             .{ 1, 1, 1 },
             .{ 1, 1, 1 },
             .{ 1, 1, 1 },
-        });
+        }));
+        defer x_buffer.deinit();
+
         {
-            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 0 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 0 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
             try std.testing.expectEqual(
                 [3][3]u8{
                     .{ 1, 0, 0 },
                     .{ 1, 1, 0 },
                     .{ 1, 1, 1 },
                 },
-                try res.getValue([3][3]u8),
+                try res.getValue([3][3]u8, std.testing.io),
             );
         }
         {
-            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, 1 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, 1 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
             try std.testing.expectEqual(
                 [3][3]u8{
                     .{ 1, 1, 0 },
                     .{ 1, 1, 1 },
                     .{ 1, 1, 1 },
                 },
-                try res.getValue([3][3]u8),
+                try res.getValue([3][3]u8, std.testing.io),
             );
         }
         {
-            const res = try zml.testing.compileAndCall(platform, Local._tri, .{ x, -1 });
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._tri, .{ x, -1 }, platform);
+            defer exe.deinit();
+
+            const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._tri, .{x_buffer});
+            defer res.deinit();
+
             try std.testing.expectEqual(
                 [3][3]u8{
                     .{ 0, 0, 0 },
                     .{ 1, 0, 0 },
                     .{ 1, 1, 0 },
                 },
-                try res.getValue([3][3]u8),
+                try res.getValue([3][3]u8, std.testing.io),
             );
         }
     }
@@ -3758,22 +3745,20 @@ pub const Tensor = struct {
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_true._shape), "select expects input tensor and 'on_true' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_true._shape });
         stdx.debug.assert(bool_tensor._shape.eqlDims(on_false._shape), "select expects input tensor and 'on_false' tensor dimensions to match, got {f} and {f}", .{ bool_tensor._shape, on_false._shape });
 
-        const loc = bool_tensor.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.select(
-            bool_tensor.getContext().mlirCtx(),
+        const op = dialects.stablehlo.select(
+            mlirCtx(),
             bool_tensor.value(),
             on_true.value(),
             on_false.value(),
-            loc,
-        );
+            .unknown(mlirCtx()),
+        ).appendTo(currentBlock());
 
         return _result(on_true._shape, op.result(0));
     }
 
     /// Returns a Tensor containing the element-wise not logical operation of the input Tensor.
     pub fn not(self: Tensor) Tensor {
-        const loc = self.getContext().mlirCtx().location(@src());
-        const op = dialect.stablehlo.not(self.getContext().mlirCtx(), self.value(), loc);
+        const op = dialects.stablehlo.not(mlirCtx(), self.value(), .unknown(mlirCtx())).appendTo(currentBlock());
         return _result(self._shape, op.result(0));
     }
 
@@ -3781,30 +3766,32 @@ pub const Tensor = struct {
     pub fn any(self: Tensor, axis_: anytype) Tensor {
         const pred = self.cmp(.NE, Tensor.constant(self.dims(), self.dtype().zero()));
         return ops.reduce(
+            .{pred},
+            .{Tensor.scalar(false, .bool)},
+            &.{self.axis(axis_)},
             struct {
-                pub fn acc(x: Tensor, res: Tensor) Tensor {
-                    return res.logical(.OR, x);
+                pub fn acc(args: ops.ReduceArgs) Tensor {
+                    return args.left.logical(.OR, args.right);
                 }
             }.acc,
-            pred,
-            Tensor.scalar(false, .bool),
-            &.{self.axis(axis_)},
-        );
+            .{},
+        )[0];
     }
 
     /// Returns a Tensor containing boolean indicating if there is a non-zero value over the given axis.
     pub fn all(self: Tensor, axis_: anytype) Tensor {
         const pred = if (self.dtype() == .bool) self else self.cmp(.NE, Tensor.scalar(0, self.dtype()));
         return ops.reduce(
+            .{pred},
+            .{Tensor.scalar(true, .bool)},
+            &.{self.axis(axis_)},
             struct {
-                pub fn acc(x: Tensor, res: Tensor) Tensor {
-                    return res.logical(.AND, x);
+                pub fn acc(args: ops.ReduceArgs) Tensor {
+                    return args.left.logical(.AND, args.right);
                 }
             }.acc,
-            pred,
-            Tensor.scalar(true, .bool),
-            &.{self.axis(axis_)},
-        );
+            .{},
+        )[0];
     }
 
     /// Given a set of N vectors of lengths A, B, C, D,
@@ -3827,7 +3814,7 @@ pub const Tensor = struct {
 
     fn _cartesianProduct(vectors: []const Tensor, out: []Tensor) void {
         stdx.debug.assert(vectors.len >= 1, "cartesianProduct expects at least one input.", .{});
-        stdx.debug.assert(vectors.len < Tensor.MAX_RANK, "cartesianProduct expects at most {} input vectors, received {} !", .{ Tensor.MAX_RANK - 1, vectors.len });
+        stdx.debug.assert(vectors.len < constants.MAX_RANK, "cartesianProduct expects at most {} input vectors, received {} !", .{ constants.MAX_RANK - 1, vectors.len });
         for (vectors) |x| {
             stdx.debug.assert(x.rank() <= 1, "cartesianProduct expects 0 or 1 rank input vectors. Got: {any}", .{vectors});
             stdx.debug.assert(vectors[0].dtype() == x.dtype(), "cartesianProduct expects input vectors to have all the same dtype. Got: {any}", .{vectors});
@@ -3849,10 +3836,10 @@ pub const Tensor = struct {
 
     test cartesianProduct {
         const zml = @import("zml.zig");
-        const client = zml.testing.env();
+        const platform = zml.testing.env();
 
-        const x = try zml.Buffer.fromSlice(client, .{6}, &[_]i32{ 0, 1, 2, 3, 4, 5 });
-        const y = try zml.Buffer.fromSlice(client, .{4}, &[_]i32{ 0, 1, 2, 3 });
+        const x: Tensor = .init(.{6}, .i32);
+        const y: Tensor = .init(.{4}, .i32);
 
         const Local = struct {
             pub fn _cartesianProduct2(a: Tensor, b: Tensor) [2]Tensor {
@@ -3860,33 +3847,42 @@ pub const Tensor = struct {
             }
         };
 
-        {
-            const xs, const ys = try zml.testing.compileAndCall(client, Local._cartesianProduct2, .{ x, y });
-            try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, xs.shape().dims());
-            try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, ys.shape().dims());
-            try std.testing.expectEqualDeep(
-                [6][4]i32{
-                    .{ 0, 0, 0, 0 },
-                    .{ 1, 1, 1, 1 },
-                    .{ 2, 2, 2, 2 },
-                    .{ 3, 3, 3, 3 },
-                    .{ 4, 4, 4, 4 },
-                    .{ 5, 5, 5, 5 },
-                },
-                try xs.getValue([6][4]i32),
-            );
-            try std.testing.expectEqualDeep(
-                [6][4]i32{
-                    .{ 0, 1, 2, 3 },
-                    .{ 0, 1, 2, 3 },
-                    .{ 0, 1, 2, 3 },
-                    .{ 0, 1, 2, 3 },
-                    .{ 0, 1, 2, 3 },
-                    .{ 0, 1, 2, 3 },
-                },
-                try ys.getValue([6][4]i32),
-            );
-        }
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._cartesianProduct2, .{ x, y }, platform);
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
+        defer x_buffer.deinit();
+        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
+        defer y_buffer.deinit();
+
+        var xs, var ys = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._cartesianProduct2, .{ x_buffer, y_buffer });
+        defer xs.deinit();
+        defer ys.deinit();
+
+        try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, xs.shape().dims());
+        try std.testing.expectEqualSlices(i64, &.{ 6, 4 }, ys.shape().dims());
+        try std.testing.expectEqualDeep(
+            [6][4]i32{
+                .{ 0, 0, 0, 0 },
+                .{ 1, 1, 1, 1 },
+                .{ 2, 2, 2, 2 },
+                .{ 3, 3, 3, 3 },
+                .{ 4, 4, 4, 4 },
+                .{ 5, 5, 5, 5 },
+            },
+            try xs.getValue([6][4]i32, std.testing.io),
+        );
+        try std.testing.expectEqualDeep(
+            [6][4]i32{
+                .{ 0, 1, 2, 3 },
+                .{ 0, 1, 2, 3 },
+                .{ 0, 1, 2, 3 },
+                .{ 0, 1, 2, 3 },
+                .{ 0, 1, 2, 3 },
+                .{ 0, 1, 2, 3 },
+            },
+            try ys.getValue([6][4]i32, std.testing.io),
+        );
     }
 
     /// Given a set of N vectors of lengths A, B, C, D,
@@ -3895,7 +3891,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = stdx.BoundedArray(Tensor, Tensor.MAX_RANK).init(vectors.len) catch unreachable;
+        var out = stdx.BoundedArray(Tensor, constants.MAX_RANK).init(vectors.len) catch unreachable;
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
@@ -3904,8 +3900,8 @@ pub const Tensor = struct {
     test cartesianProductStacked {
         const zml = @import("zml.zig");
         const platform = zml.testing.env();
-        const x = try zml.Buffer.fromSlice(platform, .{6}, &[_]i32{ 0, 1, 2, 3, 4, 5 });
-        const y = try zml.Buffer.fromSlice(platform, .{4}, &[_]i32{ 0, 1, 2, 3 });
+        const x: Tensor = .init(.{6}, .i32);
+        const y: Tensor = .init(.{4}, .i32);
 
         const Local = struct {
             pub fn _fwd(a: Tensor, b: Tensor) Tensor {
@@ -3913,7 +3909,17 @@ pub const Tensor = struct {
             }
         };
 
-        const z = try zml.testing.compileAndCall(platform, Local._fwd, .{ x, y });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, y }, platform);
+        defer exe.deinit();
+
+        var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3, 4, 5 }));
+        defer x_buffer.deinit();
+        var y_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, y.shape(), std.mem.sliceAsBytes(&[_]i32{ 0, 1, 2, 3 }));
+        defer y_buffer.deinit();
+
+        var z = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._fwd, .{ x_buffer, y_buffer });
+        defer z.deinit();
+
         try std.testing.expectEqualDeep(
             [6][4][2]i32{
                 .{ .{ 0, 0 }, .{ 0, 1 }, .{ 0, 2 }, .{ 0, 3 } },
@@ -3923,14 +3929,13 @@ pub const Tensor = struct {
                 .{ .{ 4, 0 }, .{ 4, 1 }, .{ 4, 2 }, .{ 4, 3 } },
                 .{ .{ 5, 0 }, .{ 5, 1 }, .{ 5, 2 }, .{ 5, 3 } },
             },
-            try z.getValue([6][4][2]i32),
+            try z.getValue([6][4][2]i32, std.testing.io),
         );
     }
 
     fn binaryOp(
-        src: std.builtin.SourceLocation,
         op_name: []const u8,
-        op_fn: fn (mlir.Context, mlir.Value, mlir.Value, mlir.Location) mlir.Operation,
+        op_fn: fn (*mlir.Context, *const mlir.Value, *const mlir.Value, *const mlir.Location) *mlir.Operation,
     ) fn (Tensor, Tensor) Tensor {
         return struct {
             pub fn binaryOpHelper(self: Tensor, other: Tensor) Tensor {
@@ -3955,9 +3960,7 @@ pub const Tensor = struct {
 
                 stdx.debug.assert(same_shape, "{s} expects tensor shapes to match, got {f} and {f}", .{ op_name, self._shape, other._shape });
 
-                const ctx = self.getContext();
-                const location = ctx.location(src, "{s}({f}, {f})", .{ op_name, self, other_ });
-                const ret = @call(.auto, op_fn, .{ ctx.mlirCtx(), self.value(), other_.value(), location });
+                const ret = @call(.auto, op_fn, .{ mlirCtx(), self.value(), other_.value(), mlir.Location.unknown(mlirCtx()) }).appendTo(currentBlock());
                 return _result(self._shape, ret.result(0));
             }
         }.binaryOpHelper;
@@ -3967,28 +3970,48 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor) Tensor {
-        return callback.call(callback.Print, .{input}, &.{input.shape()})[0];
+        // TODO(Corentin)
+        _ = input;
+        @panic("Unimplemented");
+    }
+
+    fn mlirCtx() *mlir.Context {
+        return CompilationContext.current().mlir_ctx;
+    }
+
+    fn currentBlock() *mlir.Block {
+        return CompilationContext.current().currentScope().block;
+    }
+
+    /// Returns the donation data of the tensor.
+    pub fn donation(self: Tensor) ?usize {
+        return CompilationContext.current().currentScope().id_to_donation.get(self.id);
+    }
+
+    /// Returns the output memory kind of the tensor.
+    pub fn outputMemoryKind(self: Tensor) Buffer.Memory {
+        return CompilationContext.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
     }
 };
 
-fn initPoolArg(rank: usize, data: []const i64) [Tensor.MAX_RANK]i64 {
+fn initPoolArg(rank: usize, data: []const i64) [constants.MAX_RANK]i64 {
     // TODO use shape
-    var result = [_]i64{1} ** Tensor.MAX_RANK;
+    var result = [_]i64{1} ** constants.MAX_RANK;
     const start = rank - data.len;
     @memcpy(result[start .. start + data.len], data);
     return result;
 }
 
-fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Tensor.MAX_RANK, i64), padding: []const i64, window_dimensions: @Vector(Tensor.MAX_RANK, i64), window_dilations: @Vector(Tensor.MAX_RANK, i64), window_strides: @Vector(Tensor.MAX_RANK, i64)) Shape {
+fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(constants.MAX_RANK, i64), padding: []const i64, window_dimensions: @Vector(constants.MAX_RANK, i64), window_dilations: @Vector(constants.MAX_RANK, i64), window_strides: @Vector(constants.MAX_RANK, i64)) Shape {
     // TODO use shape
-    var input_dims = [_]i64{1} ** Tensor.MAX_RANK;
+    var input_dims = [_]i64{1} ** constants.MAX_RANK;
     @memcpy(input_dims[0..in_dims.len], in_dims);
 
-    const input_dims_: @Vector(Tensor.MAX_RANK, i64) = input_dims;
-    const splat_one: @Vector(Tensor.MAX_RANK, i64) = @splat(1);
-    const dilated_input_shape: @Vector(Tensor.MAX_RANK, i64) = (input_dims_ - splat_one) * base_dilations + splat_one;
-    var pad_slice0: @Vector(Tensor.MAX_RANK, i64) = @splat(padding[0]);
-    var pad_slice1: @Vector(Tensor.MAX_RANK, i64) = @splat(padding[0]);
+    const input_dims_: @Vector(constants.MAX_RANK, i64) = input_dims;
+    const splat_one: @Vector(constants.MAX_RANK, i64) = @splat(1);
+    const dilated_input_shape: @Vector(constants.MAX_RANK, i64) = (input_dims_ - splat_one) * base_dilations + splat_one;
+    var pad_slice0: @Vector(constants.MAX_RANK, i64) = @splat(padding[0]);
+    var pad_slice1: @Vector(constants.MAX_RANK, i64) = @splat(padding[0]);
     if (padding.len > 1) {
         var idx: usize = 0;
         while (idx < in_dims.len * 2) : (idx += 2) {
@@ -3996,15 +4019,15 @@ fn getPoolResDims(dt: DataType, in_dims: []const i64, base_dilations: @Vector(Te
             pad_slice1[idx / 2] = padding[idx + 1];
         }
     }
-    const padded_input_shape: @Vector(Tensor.MAX_RANK, i64) = pad_slice0 + dilated_input_shape + pad_slice1;
+    const padded_input_shape: @Vector(constants.MAX_RANK, i64) = pad_slice0 + dilated_input_shape + pad_slice1;
     const dilated_window_shape = (window_dimensions - splat_one) * window_dilations + splat_one;
     const dims = @divFloor(padded_input_shape - dilated_window_shape, window_strides) + splat_one;
-    const dims_arr: [Tensor.MAX_RANK]i64 = @bitCast(dims);
+    const dims_arr: [constants.MAX_RANK]i64 = @bitCast(dims);
     return Shape.init(dims_arr[0..in_dims.len], dt);
 }
 
-fn getComparisonType(ctx: mlir.Context, dtype: DataType) dialect.stablehlo.CompareType {
-    return dialect.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
+fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const dialects.stablehlo.CompareType {
+    return dialects.stablehlo.CompareType.init(ctx, switch (dtype.class()) {
         .bool => .UNSIGNED,
         .integer => if (dtype.isSignedInt()) .SIGNED else .UNSIGNED,
         .float => .FLOAT,
@@ -4028,8 +4051,18 @@ test "Tensor.maxPool1d" {
     var data: [20]f32 = undefined;
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
 
-    const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5 }, &data);
-    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
+    const x: Tensor = .init(.{ 2, 2, 5 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
+    defer exe.deinit();
+
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
+    defer x_buffer.deinit();
+
+    const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    defer result.values.deinit();
+    defer result.indices.deinit();
+
     try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(.init(.{ 2, 2, 2 }, .i32), result.indices.shape());
     try std.testing.expectEqualDeep(
@@ -4037,7 +4070,7 @@ test "Tensor.maxPool1d" {
             .{ .{ 2, 4 }, .{ 7, 9 } },
             .{ .{ 12, 14 }, .{ 17, 19 } },
         },
-        result.values.getValue([2][2][2]f32),
+        result.values.getValue([2][2][2]f32, std.testing.io),
     );
 }
 
@@ -4056,13 +4089,23 @@ test "Tensor.maxPool2d" {
 
     var data: [100]f32 = undefined;
     for (&data, 0..) |*v, i| v.* = @floatFromInt(i);
-    const x = try zml.Buffer.fromSlice(platform, .{ 2, 2, 5, 5 }, &data);
 
-    const result = try zml.testing.compileAndCall(platform, MaxPool._fwd, .{x});
+    const x: Tensor = .init(.{ 2, 2, 5, 5 }, .f32);
+
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, MaxPool._fwd, .{x}, platform);
+    defer exe.deinit();
+
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), std.mem.sliceAsBytes(&data));
+    defer x_buffer.deinit();
+
+    const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, MaxPool._fwd, .{x_buffer});
+    defer result.values.deinit();
+    defer result.indices.deinit();
+
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .f32), result.values.shape());
     try zml.testing.expectEqualShapes(Shape.init(.{ 2, 2, 2, 4 }, .i32), result.indices.shape());
     var buffer: [2][2][2][4]f32 = undefined;
-    _ = try result.values.toHost(std.mem.asBytes(&buffer));
+    _ = try result.values.toSlice(std.testing.io, .init(result.values.shape(), std.mem.asBytes(&buffer)));
     try std.testing.expectEqualDeep(
         [2][2][2][4]f32{
             .{
@@ -4078,147 +4121,26 @@ test "Tensor.maxPool2d" {
     );
 }
 
-/// Return a clone of a type with Tensors replaced by Buffer.
-/// Non-Tensor metadata is stripped out of the resulting struct.
-/// Recursively descends into the type.
-pub fn Bufferized(comptime T: type) type {
-    return meta.MapRestrict(Tensor, Buffer).map(T);
-}
-
-/// Return a clone of a type with Tensors replaced by Shapes.
-/// Recursively descends into the type.
-/// See also: shapesOf() and its tests, and meta.MapType().
-pub fn ShapeOf(comptime T: type) type {
-    const M = meta.MapType(Tensor, Shape);
-    return M.map(T);
-}
-
-/// Return a clone of the argument where each instance of a Tensor is replaced
-/// by its Shape. This is similar to ShapeOf(), but with runtime values.
-/// See also: meta.mapAlloc().
-pub fn shapesOf(model: anytype, allocator: std.mem.Allocator) !ShapeOf(@TypeOf(model)) {
-    var shapes: ShapeOf(@TypeOf(model)) = undefined;
-    try meta.mapAlloc(struct {
-        fn shapeFromTensorCallback(_: void, tensor: Tensor) Shape {
-            return tensor.shape();
-        }
-    }.shapeFromTensorCallback, allocator, {}, model, &shapes);
-    return shapes;
-}
-
-test shapesOf {
-    const alloc = std.testing.allocator;
-
-    // Tensor in struct
-    {
-        const S = struct {
-            a: Tensor,
-        };
-        const shape = Shape.init(.{ 28, 28 }, .f32);
-        const s: S = .{
-            .a = Tensor{ ._shape = shape, ._id = undefined },
-        };
-        const shapes = try shapesOf(s, alloc);
-        try std.testing.expectEqual(shape, shapes.a);
-    }
-
-    // single Tensor
-    {
-        const shape = Shape.init(.{ 28, 28 }, .f32);
-        const tensor = Tensor{ ._shape = shape, ._id = undefined };
-        const shapes = try shapesOf(tensor, alloc);
-        try std.testing.expectEqual(shape, shapes);
-    }
-
-    // nn linear layer, no bias
-    {
-        const nn = @import("nn.zig");
-        const shape = Shape.init(.{ 28, 28 }, .f32);
-        const layer: nn.Linear = .{
-            .weight = Tensor{ ._shape = shape, ._id = undefined },
-            .bias = null,
-        };
-
-        const shapes = try shapesOf(layer, alloc);
-        try std.testing.expectEqual(shape, shapes.weight);
-        try std.testing.expectEqual(null, shapes.bias);
-    }
-
-    // model
-    {
-        const Mnist = struct {
-            fc1: Layer,
-            fc2: Layer,
-
-            const Layer = struct {
-                weight: Tensor,
-                bias: Tensor,
-            };
-        };
-
-        const fc1_weight_shape = Shape.init(.{ 500, 784 }, .f32);
-        const fc1_bias_shape = Shape.init(.{500}, .f32);
-        const fc2_weight_shape = Shape.init(.{ 10, 500 }, .f32);
-        const fc2_bias_shape = Shape.init(.{10}, .f32);
-        const mnist: Mnist = .{
-            .fc1 = .{
-                .weight = Tensor{ ._shape = fc1_weight_shape, ._id = undefined },
-                .bias = Tensor{ ._shape = fc1_bias_shape, ._id = undefined },
-            },
-            .fc2 = .{
-                .weight = Tensor{ ._shape = fc2_weight_shape, ._id = undefined },
-                .bias = Tensor{ ._shape = fc2_bias_shape, ._id = undefined },
-            },
-        };
-
-        const shapes = try shapesOf(mnist, alloc);
-        try std.testing.expectEqual(fc1_weight_shape, shapes.fc1.weight);
-        try std.testing.expectEqual(fc1_bias_shape, shapes.fc1.bias);
-        try std.testing.expectEqual(fc2_weight_shape, shapes.fc2.weight);
-        try std.testing.expectEqual(fc2_bias_shape, shapes.fc2.bias);
-    }
-}
-
-pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, Tensor.MAX_RANK), value: T) stdx.BoundedArray(i64, Tensor.MAX_RANK) {
-    var res: stdx.BoundedArray(i64, Tensor.MAX_RANK) = .{};
-    for (bounded_array.constSlice(), 0..) |v, ax| {
-        if (v == value) {
-            res.appendAssumeCapacity(@intCast(ax));
-        }
-    }
-    return res;
-}
-
-fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, Tensor.MAX_RANK) } {
+fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedArray(u3, constants.MAX_RANK) } {
     const AxesT = @TypeOf(axes_);
-    const axes_is_scalar = AxesT == EnumLiteral or AxesT == comptime_int or @typeInfo(AxesT) == .int;
+    const axes_is_scalar = AxesT == @EnumLiteral() or AxesT == comptime_int or @typeInfo(AxesT) == .int;
 
     const coord_axes = if (axes_is_scalar)
-        stdx.BoundedArray(u3, Tensor.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
+        stdx.BoundedArray(u3, constants.MAX_RANK).fromSlice(&.{self.axis(axes_)}) catch unreachable
     else
         self.axes(axes_);
 
     return .{ axes_is_scalar, coord_axes };
 }
 
-fn parseArrayInfo(T: type) Shape {
-    return switch (@typeInfo(T)) {
-        .Array => |arr| {
-            const s = parseArrayInfo(arr.child);
-            return s.insert(0, .{arr.len});
-        },
-        else => .{ ._dtype = DataType.fromZigType(T) },
-    };
-}
-
-inline fn toI64(values: anytype) []i64 {
-    var res: [Tensor.MAX_RANK]i64 = undefined;
-    for (values, 0..) |val, i| res[i] = @intCast(val);
-    return res[0..values.len];
+fn toI64(values: anytype) stdx.BoundedArray(i64, constants.MAX_RANK) {
+    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    for (values) |val| res.appendAssumeCapacity(@intCast(val));
+    return res;
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: stdx.BoundedArray(struct { u8, bool }, Tensor.MAX_RANK) = .{};
+    var perm: stdx.BoundedArray(struct { u8, bool }, constants.MAX_RANK) = .{};
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {
@@ -4270,6 +4192,6 @@ test "unused tensor" {
         }
     };
 
-    const mod = try zml.compileFn(std.testing.allocator, Local._fwd, .{Shape.init(.{10}, .f32)}, platform);
-    defer mod.deinit();
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{Tensor.init(.{10}, .f32)}, platform);
+    defer exe.deinit();
 }

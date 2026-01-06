@@ -1,6 +1,6 @@
 load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -20,51 +20,36 @@ cc_library(
 zig_library(
     name = "zml",
     srcs = [
-        "aio.zig",
-        "aio/json.zig",
-        "aio/safetensors.zig",
-        "aio/tinyllama.zig",
-        "aio/torch.zig",
-        "aio/torch/eval.zig",
-        "aio/torch/file.zig",
-        "aio/torch/pickle.zig",
-        "aio/torch/py.zig",
         "buffer.zig",
-        "context.zig",
-        "callback.zig",
+        "constants.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",
-        "helpers.zig",
-        "hostbuffer.zig",
+        "io.zig",
         "meta.zig",
         "mlirx.zig",
         "module.zig",
         "nn.zig",
-        "nn/cuda.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
-        "posix.zig",
-        "quantization.zig",
+        "safetensors.zig",
         "shape.zig",
+        "slice.zig",
         "tensor.zig",
-        "test_runner.zig",
         "testing.zig",
-        "torch.zig",
         "zml.zig",
     ],
+    main = "zml.zig",
+    visibility = ["//visibility:public"],
     zigopts = [
         "-lc",
         "-freference-trace=20",
     ],
-    main = "zml.zig",
-    visibility = ["//visibility:public"],
     deps = [
         ":posix",
         ":xla_compile_options_upb",
         ":xla_data_upb",
-        "//async",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
@@ -72,7 +57,7 @@ zig_library(
         "//stdx",
         "//upb",
         "//zml/tokenizer",
-        "//zml/tools",
+        "//zml/io",
         "@rules_zig//zig/runfiles",
     ],
 )
@@ -82,11 +67,11 @@ zig_library(
 zig_test(
     name = "test",
     data = [
-        "aio/torch/simple.pt",
-        "aio/torch/simple_test_4.pickle",
+        #"aio/torch/simple.pt",
+        #"aio/torch/simple_test_4.pickle",
     ],
     test_runner = ":test_runner",
-    deps = [":zml"],
+    deps = ["//zml"],
 )
 
 filegroup(

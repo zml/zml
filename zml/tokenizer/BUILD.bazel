@@ -21,7 +21,6 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = [
         ":tokenizer",
-        "//async",
         "//stdx",
     ],
 )
@@ -31,7 +30,6 @@ zig_test(
     main = "homemade.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "//async",
         "//ffi:zig",
         "//stdx",
     ],

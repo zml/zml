@@ -10,12 +10,6 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/tokenizer");
 
-test {
-    std.testing.refAllDecls(@This());
-    std.testing.refAllDecls(Normalizer);
-    std.testing.refAllDecls(Tokenizer);
-}
-
 /// Byte Pair Encoding tokenizer generally used for LLM.
 pub const Tokenizer = struct {
     tokens: [][]const u8,
@@ -479,7 +473,7 @@ pub const Decoder = struct {
     }
 
     pub fn string(self: *const Decoder) []const u8 {
-        return self.current_string;
+        return self.current_string orelse "";
     }
 
     pub fn next(self: *Decoder, token_id: u32) !?[]const u8 {
@@ -1058,14 +1052,21 @@ test Gpt2TextDecoder {
 }
 
 /// Open a json file in HF format and load the vocab from it.
-pub fn fromHfJson(allocator: std.mem.Allocator, tokenizer_path: []const u8) !Tokenizer {
+pub fn fromHfJson(allocator: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8) !Tokenizer {
     const file = try std.fs.cwd().openFile(tokenizer_path, .{});
     defer file.close();
 
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
-    const file_content = try file.readToEndAlloc(arena, 32 * 1024 * 1024);
+    const file_content = b: {
+        var reader = file.reader(io, &.{});
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+        _ = try reader.interface.streamRemaining(&writer.writer);
+        break :b try writer.toOwnedSlice();
+    };
+    defer allocator.free(file_content);
 
     const info = try std.json.parseFromSliceLeaky(std.json.Value, arena, file_content, .{
         .duplicate_field_behavior = .use_last,
@@ -1201,11 +1202,11 @@ fn objectGet(
     return @field(val, @tagName(kind));
 }
 
-pub fn fromTinyLlamaFile(allocator: std.mem.Allocator, tokenizer_path: []const u8, vocab_size: u32) !Tokenizer {
+pub fn fromTinyLlamaFile(allocator: std.mem.Allocator, io: std.Io, tokenizer_path: []const u8, vocab_size: u32) !Tokenizer {
     const tokenizer_file = try std.fs.cwd().openFile(tokenizer_path, .{});
     defer tokenizer_file.close();
     var read_buff: [4096]u8 = undefined;
-    var tok_reader = tokenizer_file.reader(&read_buff);
+    var tok_reader = tokenizer_file.reader(io, &read_buff);
     const r: *std.Io.Reader = &tok_reader.interface;
 
     const max_token_len = try readValueLE(u32, r);

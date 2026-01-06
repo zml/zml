@@ -6,7 +6,7 @@ zig_binary(
     main = "main.zig",
     deps = [
         "//stdx",
-        "//zml2:zml",
+        "//zml",
     ],
 )
 

@@ -9,6 +9,6 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
-        "//zml2/io/vfs",
+        "//zml/io/vfs",
     ],
 )

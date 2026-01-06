@@ -378,6 +378,7 @@ pub const VFSBase = struct {
     }
 
     pub fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
+        std.log.info("cocou bg", .{});
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.fileWriteFilePositional(self.inner.userdata, file, header, reader, limit, offset);
     }

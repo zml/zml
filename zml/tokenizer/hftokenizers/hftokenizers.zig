@@ -97,6 +97,10 @@ pub const HFTokenizer = opaque {
         return @ptrCast(c.hftokenizers_new(ffi.ZigSlice.from(model)));
     }
 
+    pub fn fromBytes(bytes: []const u8) !*HFTokenizer {
+        return @ptrCast(c.hftokenizers_new_from_bytes(ffi.ZigSlice.from(bytes)));
+    }
+
     pub fn deinit(self: *HFTokenizer) void {
         return c.hftokenizers_drop(@ptrCast(self));
     }

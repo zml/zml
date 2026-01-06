@@ -1,6 +1,5 @@
 const std = @import("std");
 
-const async = @import("async");
 const stdx = @import("stdx");
 const zml_tokenizer = @import("zml/tokenizer");
 
@@ -14,17 +13,18 @@ const Flags = struct {
 };
 
 pub fn main() !void {
-    try async.AsyncThread.main(std.heap.c_allocator, asyncMain);
-}
-
-pub fn asyncMain() !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     const allocator = gpa.allocator();
+
+    var threaded: std.Io.Threaded = .init(allocator);
+    defer threaded.deinit();
+
+    const io = threaded.io();
 
     const args = stdx.flags.parseProcessArgs(Flags);
 
     log.info("\tLoading tokenizer from {s}", .{args.tokenizer});
-    var tokenizer = try zml_tokenizer.Tokenizer.fromFile(allocator, args.tokenizer);
+    var tokenizer = try zml_tokenizer.Tokenizer.fromFile(allocator, io, args.tokenizer);
     log.info("✅\tLoaded tokenizer from {s}", .{args.tokenizer});
     defer tokenizer.deinit();
 
