@@ -1,8 +1,8 @@
 const std = @import("std");
 const log = std.log;
 
-const stdx = @import("stdx");
 const zml = @import("zml");
+const stdx = zml.stdx;
 
 pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k);

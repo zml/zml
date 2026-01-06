@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
 const zml = @import("zml");
+const stdx = zml.stdx;
 
 const log = std.log.scoped(.mnist);
 

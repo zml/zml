@@ -1,10 +1,10 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
 const zml = @import("zml");
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
+const stdx = zml.stdx;
 
 const llama = @import("llama.zig");
 const LlamaLM = llama.LlamaLM;

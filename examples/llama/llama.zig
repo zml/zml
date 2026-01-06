@@ -1,11 +1,11 @@
 const std = @import("std");
 const testing = std.testing;
 
-const stdx = @import("stdx");
 const zml = @import("zml");
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
+const stdx = zml.stdx;
 
 const log = std.log.scoped(.llama);
 

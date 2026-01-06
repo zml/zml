@@ -9,6 +9,7 @@ const std = @import("std");
 const c = @import("c");
 pub const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
+pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const Buffer = @import("buffer.zig").Buffer;

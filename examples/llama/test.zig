@@ -1,13 +1,13 @@
-const async = @import("async");
 const std = @import("std");
-const stdx = @import("stdx");
+
+const async = @import("async");
 const zml = @import("zml");
+const Tensor = zml.Tensor;
+const stdx = zml.stdx;
 const flags = stdx.flags;
 
 const llama_mod = @import("./llama.zig");
 const LlamaLM = llama_mod.LlamaLM;
-
-const Tensor = zml.Tensor;
 
 pub fn main() !void {
     try async.AsyncThread.main(std.heap.c_allocator, asyncMain);

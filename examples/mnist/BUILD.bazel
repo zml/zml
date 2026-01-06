@@ -12,10 +12,7 @@ zig_binary(
         "@mnist//:t10k-images.idx3-ubyte",
     ],
     main = "mnist.zig",
-    deps = [
-        "//stdx",
-        "//zml",
-    ],
+    deps = ["//zml"],
 )
 
 build_test(
