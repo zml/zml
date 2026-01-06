@@ -228,26 +228,20 @@ pub const InterLayer = struct {
         Mlp.unloadBuffers(&self.mlp);
     }
 
-    // Votre logique Forward exacte
     pub fn forward(
         self: InterLayer,
         x0: Tensor, // [B,  d]
         attn: Tensor, // [B, h, hd]
         token_pos: Tensor, // [B, S]
     ) struct { Tensor, Tensor, Tensor, Tensor } {
-
-        // 1. O_Proj sur l'Attention simulée
         const attn_flat = attn.mergeTranspose(.{ .h, .hd }, .d);
-        // x1 = x0 + o_proj(attn)
         const x1 = x0.add(self.o_proj.forward(attn_flat));
 
-        // 2. Norm + MLP + Residual
         const x1_norm = self.post_attention_layernorm.forward(x1);
         const x2 = self.mlp.forward(x1_norm).add(x1);
 
         log.info("x2 shape after MLP: {f}", .{x2.shape()});
 
-        // 3. Prep Next Layer (Norm + QKV)
         const x_next = self.pre_attn_layer_norm.forward(x2);
 
         log.info("x_next shape after Pre-Attn Norm: {f}", .{x_next.shape()});
@@ -260,11 +254,9 @@ pub const InterLayer = struct {
         log.info("k shape after K_Proj: {f}", .{k.shape()});
         log.info("v shape after V_Proj: {f}", .{v.shape()});
 
-        // Split Heads
         q = q.splitAxis(.d, .{ .h = self.num_heads, .hd = self.head_dim });
         k = k.splitAxis(.dh, .{ .h = self.num_kv_heads, .hd = self.head_dim });
 
-        // RoPE
         const rope_opts = zml.nn.RopeOpts{ .freq_base = 10000.0 };
         q = zml.nn.rope(q, token_pos, rope_opts);
         k = zml.nn.rope(k, token_pos, rope_opts);
