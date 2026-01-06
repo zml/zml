@@ -1,38 +1,89 @@
 const std = @import("std");
 
-const stdx = @import("stdx");
-
 const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
 pub const API = struct {
-    const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}";
     const TREESIZE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/treesize/{[rev]s}/{[path]s}";
-    const RAW_FILE_URL_REMPLATE = "https://huggingface.co/{model}/raw/{rev}/{path}";
     const LFS_FILE_URL_TEMPLATE = "https://huggingface.co/{[repo]s}/{[model]s}/resolve/{[rev]s}/{[path]s}";
 
-    pub const Entry = struct {
-        pub const Type = enum {
-            file,
-            directory,
-        };
-
-        pub const LFS = struct {
-            oid: []const u8,
-            size: u64,
-            pointerSize: u64,
-        };
-
-        type: Type,
-        oid: []const u8,
-        size: u64,
+    pub const TreeSize = struct {
         path: []const u8,
-        lfs: ?LFS = null,
+        size: u64,
     };
 };
 
 pub const HF = struct {
+    pub const Auth = union(enum) {
+        none,
+        hf_token: []const u8,
+
+        pub const AuthError = error{
+            MissingHFToken,
+            InvalidHFToken,
+            MissingHomePath,
+            MissingConfigFile,
+            Unexpected,
+        };
+
+        pub fn deinit(self: *Auth, allocator: std.mem.Allocator) void {
+            switch (self.*) {
+                .none => {},
+                .hf_token => |token| {
+                    allocator.free(token);
+                },
+            }
+        }
+
+        pub fn auto(allocator: std.mem.Allocator, io_: std.Io) AuthError!Auth {
+            return fromHomeConfig(allocator, io_) catch |err| switch (err) {
+                AuthError.MissingHomePath, AuthError.MissingConfigFile => return fromEnv(allocator) catch |e| switch (e) {
+                    AuthError.MissingHFToken => {
+                        log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
+                        return .none;
+                    },
+                    else => return AuthError.Unexpected,
+                },
+                else => return AuthError.Unexpected,
+            };
+        }
+
+        pub fn fromEnv(allocator: std.mem.Allocator) AuthError!Auth {
+            const token = std.process.getEnvVarOwned(allocator, "HF_TOKEN") catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => return AuthError.MissingHFToken,
+                else => return AuthError.Unexpected,
+            };
+            defer allocator.free(token);
+
+            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) catch return AuthError.Unexpected };
+        }
+
+        pub fn fromHomeConfig(allocator: std.mem.Allocator, base_io: std.Io) AuthError!Auth {
+            const home_path = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
+                error.EnvironmentVariableNotFound => return AuthError.MissingHomePath,
+                else => return AuthError.Unexpected,
+            };
+            defer allocator.free(home_path);
+
+            const token_path = std.fmt.allocPrint(allocator, "{s}/.cache/huggingface/token", .{home_path}) catch return AuthError.Unexpected;
+            defer allocator.free(token_path);
+
+            const file = std.Io.Dir.openFileAbsolute(base_io, token_path, .{ .mode = .read_only }) catch |err| switch (err) {
+                error.FileNotFound => return AuthError.MissingConfigFile,
+                else => return AuthError.Unexpected,
+            };
+
+            var reader = file.reader(base_io, &.{});
+            const size = reader.getSize() catch return AuthError.Unexpected;
+
+            const token = reader.interface.readAlloc(allocator, size) catch return AuthError.Unexpected;
+            defer allocator.free(token);
+
+            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, "\n")}) catch return AuthError.Unexpected };
+        }
+    };
+
     pub const Repo = struct {
         repo: []const u8,
         model: []const u8,
@@ -55,79 +106,98 @@ pub const HF = struct {
         }
     };
 
-    pub const Handle = struct {
+    const Handle = struct {
         pub const Type = enum {
             file,
             directory,
         };
 
         type: Type,
-        url: []const u8,
-        uri: std.Uri,
+        uri: []const u8,
         pos: u64,
         size: u64,
 
-        pub fn init(allocator: std.mem.Allocator, type_: Type, sub_path: []const u8, size: u64) Handle {
-            const repo = Repo.parse(sub_path) catch unreachable;
-            const lfs_url = std.fmt.allocPrint(allocator, API.LFS_FILE_URL_TEMPLATE, repo) catch unreachable;
-            errdefer allocator.free(lfs_url);
-
+        pub fn init(allocator: std.mem.Allocator, type_: Type, path: []const u8, size: u64) Handle {
             return .{
                 .type = type_,
-                .url = lfs_url,
-                .uri = std.Uri.parse(lfs_url) catch unreachable,
+                .uri = allocator.dupe(u8, path) catch unreachable,
                 .pos = 0,
                 .size = size,
             };
         }
 
         pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
-            allocator.free(self.url);
+            allocator.free(self.uri);
         }
     };
 
-    base: VFSBase,
-    authorization: std.http.Client.Request.Headers.Value = .default,
+    const Config = struct {
+        http_client: *std.http.Client,
+        auth: Auth = .none,
+    };
+
     allocator: std.mem.Allocator,
     client: *std.http.Client,
+    authorization: std.http.Client.Request.Headers.Value = .default,
     handles: std.ArrayList(Handle) = .{},
     closed_handles: std.ArrayList(u32) = .{},
+    base: VFSBase,
 
-    pub fn init(allocator: std.mem.Allocator, io_: std.Io, http_client_: *std.http.Client) !HF {
-        return .{
+    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, config: Config) !HF {
+        var hf: HF = .{
             .allocator = allocator,
-            .base = .init(io_),
-            .client = http_client_,
-            .authorization = .{
-                .override = "Bearer xxxx",
-            },
+            .base = .init(base_io),
+            .client = config.http_client,
         };
+
+        switch (config.auth) {
+            .hf_token => |token| {
+                hf.authorization = .{ .override = token };
+            },
+            .none => {},
+        }
+
+        return hf;
     }
 
     pub fn deinit(self: *HF) void {
-        _ = self; // autofix
+        self.handles.deinit(self.allocator);
+        self.closed_handles.deinit(self.allocator);
     }
 
     pub fn io(self: *HF) std.Io {
         return .{
             .userdata = &self.base,
             .vtable = &comptime VFSBase.vtable(.{
+                .dirOpenDir = dirOpenDir,
+                .dirStat = dirStat,
+                .dirStatFile = dirStatFile,
+                .dirAccess = dirAccess,
                 .dirOpenFile = dirOpenFile,
-                .fileReadPositional = fileReadPositional,
-                .fileReadStreaming = fileReadStreaming,
+                .dirClose = dirClose,
+                .dirRealPath = dirRealPath,
+                .dirRealPathFile = dirRealPathFile,
+                .fileStat = fileStat,
+                .fileLength = fileLength,
                 .fileClose = fileClose,
+                .fileReadStreaming = fileReadStreaming,
+                .fileReadPositional = fileReadPositional,
+                .fileSeekBy = fileSeekBy,
+                .fileSeekTo = fileSeekTo,
+                .fileRealPath = fileRealPath,
             }),
         };
     }
 
-    pub fn openHandle(self: *HF) !struct { u32, *Handle } {
+    fn openHandle(self: *HF) !struct { u32, *Handle } {
         if (self.closed_handles.pop()) |idx| {
             return .{ idx, &self.handles.items[idx] };
         }
         return .{ @intCast(self.handles.items.len), try self.handles.addOne(self.allocator) };
     }
 
-    pub fn closeHandle(self: *HF, idx: u32) !void {
+    fn closeHandle(self: *HF, idx: u32) !void {
+        self.handles.items[idx].deinit(self.allocator);
         try self.closed_handles.append(self.allocator, idx);
     }
 
@@ -135,132 +205,129 @@ pub const HF = struct {
         return &self.handles.items[@intCast(file.handle)];
     }
 
-    fn parseContentRange(value: []const u8) struct { u64, u64, u64 } {
-        const space = std.mem.indexOfScalar(u8, value, ' ').?;
-        const range = std.mem.indexOfScalar(u8, value, '-').?;
-        const slash = std.mem.indexOfScalar(u8, value, '/').?;
+    fn getDirHandle(self: *HF, dir: std.Io.Dir) *Handle {
+        return &self.handles.items[@intCast(dir.handle)];
+    }
+
+    fn resolvePath(self: *HF, dir: std.Io.Dir, sub_path: []const u8, out_buffer: []u8) ![]u8 {
+        if (std.meta.eql(dir, std.Io.Dir.cwd())) {
+            return try std.fmt.bufPrint(out_buffer, "{s}", .{sub_path});
+        }
+
+        const handle = self.getDirHandle(dir);
+        return try std.fmt.bufPrint(out_buffer, "{s}/{s}", .{ handle.uri, sub_path });
+    }
+
+    fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        const size = self.fetchSize(dir, sub_path) catch |err| {
+            log.err("Failed to fetch size for directory with path {s}: {any}", .{ sub_path, err });
+            return std.Io.Dir.OpenError.Unexpected;
+        };
+
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
+
+        const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
+        handle.* = .init(self.allocator, .directory, path, size);
+
+        return .{ .handle = @intCast(idx) };
+    }
+
+    fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getDirHandle(dir);
 
         return .{
-            std.fmt.parseInt(u64, value[space + 1 .. range], 10) catch 0,
-            std.fmt.parseInt(u64, value[range + 1 .. slash], 10) catch 0,
-            std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch 0,
+            .inode = @intCast(dir.handle),
+            .nlink = 0,
+            .size = handle.size,
+            .permissions = .fromMode(0o444),
+            .kind = .directory,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
         };
     }
 
-    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
-        _ = dir; // autofix
-        _ = flags; // autofix
-        // _ = flags; // autofix
+    fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
+
+        return .{
+            .inode = @intCast(dir.handle),
+            .nlink = 0,
+            .size = size,
+            .permissions = .fromMode(0o444),
+            .kind = .file,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
+        };
+    }
+
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        _ = self.fetchSize(dir, sub_path) catch return std.Io.Dir.AccessError.FileNotFound;
+    }
+
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
-        var url_buffer: [1024]u8 = undefined;
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var aux_buffer: []u8 = &redirect_buffer;
+        const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
 
-        const repo = Repo.parse(sub_path) catch return std.Io.File.OpenError.BadPathName;
-        const url: []const u8 = std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo) catch return std.Io.File.OpenError.BadPathName;
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
 
-        log.info("Opening url: {s}", .{url});
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = .init(self.allocator, .file, path, size);
 
-        var uri = std.Uri.parse(url) catch return std.Io.File.OpenError.BadPathName;
-        while (true) {
-            var req = self.client.request(.HEAD, uri, .{
-                .headers = .{ .authorization = self.authorization },
-                .redirect_behavior = .not_allowed,
-            }) catch return std.Io.File.Reader.Error.Unexpected;
-            defer req.deinit();
-
-            req.sendBodiless() catch {
-                log.err("Failed to send HTTP request for HF model size API URL", .{});
-                return std.Io.File.Reader.Error.Unexpected;
-            };
-
-            var resp = req.receiveHead(&.{}) catch {
-                log.err("Failed to receive HTTP response for HF model size API URL", .{});
-                return std.Io.File.Reader.Error.Unexpected;
-            };
-
-            if (resp.head.status.class() == .redirect) {
-                const location = resp.head.location.?;
-                @memcpy(aux_buffer[0..location.len], location);
-                uri = uri.resolveInPlace(location.len, &aux_buffer) catch unreachable;
-                log.info("Redirect {f}", .{uri});
-                continue;
-            }
-
-            const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
-            handle.* = .init(self.allocator, .file, sub_path, resp.head.content_length.?);
-
-            return .{ .handle = @intCast(idx) };
-        }
+        return .{ .handle = @intCast(idx) };
     }
 
-    pub fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) std.Io.File.Reader.Error!usize {
-        if (offset >= handle.size) {
-            log.info("EOF", .{});
-            return 0;
-        }
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = blk: {
-            var total_bytes: u64 = 0;
-            for (data) |buf| {
-                total_bytes += buf.len;
-            }
-            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, @min(handle.size - offset, offset + total_bytes) }) catch unreachable;
-        };
-
-        var req = self.client.request(.GET, handle.uri, .{
-            .headers = .{ .authorization = self.authorization },
-            .extra_headers = &.{
-                .{ .name = "Range", .value = range_header },
-            },
-        }) catch return std.Io.File.Reader.Error.Unexpected;
-        defer req.deinit();
-
-        req.sendBodiless() catch {
-            log.err("Failed to send HTTP request for HF model size API URL", .{});
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-
-        var redirect_buffer: [8 * 1024]u8 = undefined;
-        var resp = req.receiveHead(&redirect_buffer) catch {
-            log.err("Failed to receive HTTP response for HF model size API URL", .{});
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-
-        const range = blk: {
-            var it = resp.head.iterateHeaders();
-            while (it.next()) |header| {
-                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
-                    break :blk parseContentRange(header.value);
-                }
-            } else break :blk .{ 0, 0, 0 };
-        };
-
-        log.info(">>>>> {any}", .{range});
-
-        const reader = resp.reader(&.{});
-
-        if (range.@"0" < offset) {
-            reader.discardAll(offset - range.@"0") catch return std.Io.File.Reader.Error.Unexpected;
-        }
-
-        return reader.readSliceShort(data[0]) catch return std.Io.File.Reader.Error.Unexpected;
-    }
-
-    pub fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+    fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        for (dirs) |dir| {
+            self.closeHandle(@intCast(dir.handle)) catch unreachable;
+        }
+    }
+
+    fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getDirHandle(dir);
+        const len = handle.uri.len;
+        @memcpy(out_buffer[0..len], handle.uri);
+        return len;
+    }
+
+    fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getDirHandle(dir);
+        const full_path = std.fmt.bufPrint(out_buffer, "{s}/{s}", .{ handle.uri, path_name }) catch return std.Io.Dir.RealPathFileError.NameTooLong;
+        return full_path.len;
+    }
+
+    fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
         const handle = self.getFileHandle(file);
-        return try self.performRead(handle, data, offset);
+
+        return .{
+            .inode = @intCast(file.handle),
+            .nlink = 0,
+            .size = handle.size,
+            .permissions = .fromMode(0o444),
+            .kind = .file,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
+        };
     }
 
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
+    fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
-        const handle = self.getFileHandle(file);
-        const total = try self.performRead(handle, data, handle.pos);
-        handle.pos += @intCast(total);
-        return total;
+        return self.getFileHandle(file).size;
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
@@ -269,48 +336,168 @@ pub const HF = struct {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
+
+    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const total = self.performRead(handle, data, handle.pos) catch |err| {
+            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+            return std.Io.File.Reader.Error.Unexpected;
+        };
+        handle.pos += @intCast(total);
+        return total;
+    }
+
+    fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        return self.performRead(handle, data, offset) catch |err| {
+            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+            return std.Io.File.Reader.Error.Unexpected;
+        };
+    }
+
+    fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+
+        handle.pos = if (relative_offset >= 0)
+            handle.pos + @as(u64, @intCast(relative_offset))
+        else
+            handle.pos - @as(u64, @intCast(-relative_offset));
+    }
+
+    fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        handle.pos = absolute_offset;
+    }
+
+    fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const len = handle.uri.len;
+        @memcpy(out_buffer[0..len], handle.uri);
+        return len;
+    }
+
+    fn fetchSize(self: *HF, dir: std.Io.Dir, sub_path: []const u8) !u64 {
+        var path_buffer: [8 * 1024]u8 = undefined;
+        var url_buffer: [8 * 1024]u8 = undefined;
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+
+        const path = try self.resolvePath(dir, sub_path, &path_buffer);
+
+        const repo = Repo.parse(path) catch return std.Io.File.OpenError.BadPathName;
+        const url: []const u8 = try std.fmt.bufPrint(&url_buffer, API.TREESIZE_URL_TEMPLATE, repo);
+        const uri = std.Uri.parse(url) catch return std.Io.Dir.OpenError.BadPathName;
+
+        var req = try self.client.request(.GET, uri, .{
+            .headers = .{ .authorization = self.authorization },
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var res = try req.receiveHead(&redirect_buffer);
+
+        if (res.head.status != .ok) {
+            log.err("Failed to fetch tree size for {s}", .{url});
+            log.err("{s}", .{res.head.bytes});
+        }
+
+        const body = try res.reader(&.{}).readAlloc(self.allocator, res.head.content_length.?);
+        defer self.allocator.free(body);
+
+        if (res.head.status != .ok) {
+            log.err("{s}", .{body});
+            return error.RequestFailed;
+        }
+
+        const parsed = try std.json.parseFromSlice(
+            API.TreeSize,
+            self.allocator,
+            body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer parsed.deinit();
+
+        return parsed.value.size;
+    }
+
+    fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
+        if (offset >= handle.size) return 0;
+
+        var range_buf: [64]u8 = undefined;
+        const range_header = blk: {
+            var total_bytes: u64 = 0;
+            for (data) |buf| {
+                total_bytes += @as(u64, buf.len);
+            }
+            const remaining = handle.size - offset;
+            const take = @min(remaining, total_bytes);
+            const end = offset + take - 1;
+            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
+        };
+
+        const repo: Repo = try .parse(handle.uri);
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const url: []const u8 = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
+
+        const uri: std.Uri = try .parse(url);
+        var req = try self.client.request(.GET, uri, .{
+            .headers = .{ .authorization = self.authorization },
+            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var res = try req.receiveHead(&redirect_buffer);
+
+        if (res.head.status != .partial_content) {
+            log.err("Failed to perform read for {s}", .{url});
+            log.err("{s}", .{res.head.bytes});
+            return error.RequestFailed;
+        }
+
+        const reader = res.reader(&.{});
+
+        const content_range = blk: {
+            var it = res.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                    break :blk parseContentRange(header.value);
+                }
+            }
+            break :blk null;
+        };
+
+        if (content_range) |range| {
+            if (range.start < offset) {
+                try reader.discardAll(offset - range.start);
+            }
+        }
+
+        return try reader.readSliceShort(data[0]);
+    }
+
+    const ContentRange = struct {
+        start: u64,
+        end: u64,
+        total: u64,
+    };
+
+    fn parseContentRange(value: []const u8) ?ContentRange {
+        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
+        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
+        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
+
+        return .{
+            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
+            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
+            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
+        };
+    }
 };
-
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    var client: std.http.Client = .{
-        .allocator = allocator,
-        .io = threaded.io(),
-    };
-
-    try client.initDefaultProxies(allocator);
-    defer client.deinit();
-
-    var hf: HF = try .init(allocator, threaded.io(), &client);
-    defer hf.deinit();
-
-    const io = hf.io();
-
-    const file = std.Io.Dir.cwd().openFile(io, "Qwen/Qwen3-8B/model-00001-of-00005.safetensors", .{}) catch |err| {
-        log.err("Failed to open HF file: {any}", .{err});
-        unreachable;
-    };
-
-    log.info(">>>>>>> {any}", .{file});
-
-    var reader = file.reader(io, &.{});
-    reader.mode = reader.mode.toSimple();
-    defer log.info("DONE", .{});
-
-    // const data = try reader.interface.readAlloc(allocator, 1024);
-    // defer allocator.free(data);
-    // log.info("READ {s}", .{data});
-
-    const buffer = try allocator.alloc(u8, 256 * 1024 * 1024);
-    var stdout_writer = std.Io.File.stdout().writer(io, buffer);
-    defer stdout_writer.interface.flush() catch {};
-
-    _ = reader.interface.streamRemaining(&stdout_writer.interface) catch |err| {
-        log.err("Failed to stream HF file: {any}", .{err});
-        unreachable;
-    };
-}

@@ -3,49 +3,6 @@ const std = @import("std");
 const stdx = @import("stdx");
 
 pub const VFSBase = struct {
-    pub fn HandleRegistry(comptime InnerType: type) type {
-        return struct {
-            const Self = @This();
-
-            const Node = struct {
-                value: InnerType,
-                next_closed: ?usize = null,
-            };
-
-            mutex: std.Io.Mutex = .init,
-            handles: stdx.SegmentedList(InnerType, 0) = .{},
-            next_closed: ?usize = null,
-
-            pub fn open(self: *Self, allocator: std.mem.Allocator, io: std.Io) !struct { usize, *InnerType } {
-                self.mutex.lockUncancelable(io);
-                defer self.mutex.unlock(io);
-
-                if (self.next_closed) |handle| {
-                    const node = self.handles.at(handle);
-                    self.next_closed = node.next_closed;
-                    return .{ handle, node.value };
-                }
-                return .{ self.handles.count(), try self.handles.addOne(allocator) };
-            }
-
-            pub fn close(self: *Self, io: std.Io, handle: usize) void {
-                self.mutex.lockUncancelable(io);
-                defer self.mutex.unlock(io);
-
-                const node = self.handles.at(handle);
-                node.next_closed = self.next_closed;
-                self.next_closed = handle;
-            }
-
-            pub fn get(self: *Self, io: std.Io, handle: usize) *InnerType {
-                self.mutex.lockUncancelable(io);
-                defer self.mutex.unlock(io);
-
-                return &self.handles.at(handle).value;
-            }
-        };
-    }
-
     inner: std.Io,
 
     pub fn init(io: std.Io) VFSBase {

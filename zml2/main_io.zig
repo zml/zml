@@ -23,7 +23,7 @@ pub fn main() !void {
 
     // const allocator = std.heap.smp_allocator;
 
-    var threaded: std.Io.Threaded = .init(allocator);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
     if (try std.process.hasEnvVar(allocator, "ASYNC_LIMIT")) {
@@ -46,18 +46,18 @@ pub fn main() !void {
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(
-        allocator,
-        threaded.io(),
-        .{
-            .direct_io = true,
-            .direct_io_alignment = .fromByteUnits(4 * 1024),
-        },
-    );
-    defer vfs_file.deinit();
+    // var vfs_file: zml.io.VFS.File = .init(
+    //     allocator,
+    //     threaded.io(),
+    //     .{
+    //         .direct_io = true,
+    //         .direct_io_alignment = .fromByteUnits(4 * 1024),
+    //     },
+    // );
+    // defer vfs_file.deinit();
 
-    var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
-    defer vfs_http.deinit();
+    // var vfs_http: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .{});
+    // defer vfs_http.deinit();
 
     var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
     defer hf_auth.deinit(allocator);
@@ -65,22 +65,19 @@ pub fn main() !void {
     var hf_vfs: zml.io.VFS.HF = try .init(
         allocator,
         threaded.io(),
-        &http_client,
         .{
-            .request_range_min = 8 * 1024,
-            .request_range_max = 128 * 1024 * 1024,
-            .hf_pagination_limit = 100,
+            .http_client = &http_client,
             .auth = hf_auth,
         },
     );
     defer hf_vfs.deinit();
 
-    var vfs: zml.io.VFS = .init(allocator, threaded.io());
+    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
     defer vfs.deinit();
 
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("http", vfs_http.io());
-    try vfs.register("https", vfs_http.io());
+    // try vfs.register("file", vfs_file.io());
+    // try vfs.register("http", vfs_http.io());
+    // try vfs.register("https", vfs_http.io());
     try vfs.register("hf", hf_vfs.io());
 
     const io = vfs.io();
@@ -100,11 +97,16 @@ pub fn main() !void {
         log.info("Using default repo URI: {s}", .{default_uri});
         break :blk default_uri;
     };
+    _ = uri; // autofix
 
     {
         const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+        // const local_uri = "hf://meta-llama/Llama-3.1-8B-Instruct@main";
         const repo = try std.Io.Dir.openDir(.cwd(), io, local_uri, .{});
         defer repo.close(io);
+
+        const stat_from_dir = try repo.statFile(io, "model.safetensors.index.json", .{});
+        log.info("Stat local index file size from dir: {d} bytes", .{stat_from_dir.size});
 
         const index_file = try repo.openFile(io, "model.safetensors.index.json", .{});
         defer index_file.close(io);
@@ -115,41 +117,74 @@ pub fn main() !void {
         const original = try repo.openDir(io, "original", .{});
         defer original.close(io);
 
-        const original_config = try original.openFile(io, "config.json", .{});
-        defer original_config.close(io);
+        var origin_real_path_buf: [512]u8 = undefined;
+        const origin_real_path_len = try original.realPath(io, &origin_real_path_buf);
+        log.info("Original real path: {s}", .{origin_real_path_buf[0..origin_real_path_len]});
 
-        // dir access / stat
+        repo.access(io, "non_existing", .{}) catch |err| {
+            log.info("Accessing non_existing dir failed as expected: {any}", .{err});
+        };
 
-        const stat_config = try original_config.stat(io);
+        var config_real_path_from_dir_buf: [512]u8 = undefined;
+        const config_real_path_from_dir = try repo.realPathFile(io, "config.json", &config_real_path_from_dir_buf);
+        log.info("Config real path from dir: {s}", .{config_real_path_from_dir_buf[0..config_real_path_from_dir]});
+
+        const config = try original.openFile(io, "config.json", .{});
+        defer config.close(io);
+
+        var config_real_path_buf: [512]u8 = undefined;
+        const config_real_path_len = try config.realPath(io, &config_real_path_buf);
+        log.info("Config real path: {s}", .{config_real_path_buf[0..config_real_path_len]});
+
+        const stat_config = try config.stat(io);
         log.info("Opened local original/config.json file with size: {d} bytes", .{stat_config.size});
+
+        const safetensors_file = try repo.openFile(io, "model-00000-of-00002.safetensors", .{});
+        defer safetensors_file.close(io);
+
+        const safetensors_file_length = try safetensors_file.length(io);
+        log.info("Opened local model-00000-of-00004.safetensors file with length: {d} bytes", .{safetensors_file_length});
+
+        var reader_buf: [256]u8 = undefined;
+        var reader = safetensors_file.reader(io, &reader_buf);
+
+        try reader.seekTo(safetensors_file_length);
+        try reader.seekBy(-128);
+
+        var writer: std.Io.Writer.Allocating = .init(allocator);
+        defer writer.deinit();
+
+        const writer_read = try reader.interface.streamRemaining(&writer.writer);
+        log.info("Read last {d} bytes of safetensors file", .{writer_read});
+        log.info("Reader pos: {d}", .{reader.pos});
     }
 
-    {
-        const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
-        const repo = try std.Io.Dir.openDir(.cwd(), io, local_uri, .{});
-        defer repo.close(io);
+    // {
+    //     const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+    //     const repo = try std.Io.Dir.openDir(.cwd(), io, local_uri, .{});
+    //     defer repo.close(io);
 
-        const original_config = try repo.openFile(io, "original/config.json", .{});
-        defer original_config.close(io);
+    //     const original_config = try repo.openFile(io, "original/config.json", .{});
+    //     defer original_config.close(io);
 
-        const stat_config = try original_config.stat(io);
-        log.info("Opened local original/config.json file with size: {d} bytes", .{stat_config.size});
-    }
+    //     const stat_config = try original_config.stat(io);
+    //     log.info("Opened local original/config.json file with size: {d} bytes", .{stat_config.size});
+    // }
 
-    {
-        const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
-        const original_uri = try std.fmt.allocPrint(allocator, "{s}/original", .{local_uri});
-        defer allocator.free(original_uri);
+    // {
+    //     const local_uri = "hf://openai/gpt-oss-20b@6cee5e8";
+    //     const original_uri = try std.fmt.allocPrint(allocator, "{s}/original", .{local_uri});
+    //     defer allocator.free(original_uri);
 
-        const repo = try std.Io.Dir.openDir(.cwd(), io, original_uri, .{});
-        defer repo.close(io);
+    //     const repo = try std.Io.Dir.openDir(.cwd(), io, original_uri, .{});
+    //     defer repo.close(io);
 
-        const original_config = try repo.openFile(io, "config.json", .{});
-        defer original_config.close(io);
+    //     const original_config = try repo.openFile(io, "config.json", .{});
+    //     defer original_config.close(io);
 
-        const stat_config = try original_config.stat(io);
-        log.info("Opened local original/config.json file with size: {d} bytes", .{stat_config.size});
-    }
+    //     const stat_config = try original_config.stat(io);
+    //     log.info("Opened local original/config.json file with size: {d} bytes", .{stat_config.size});
+    // }
 
     // {
     //     const repo = try std.Io.Dir.openDir(.cwd(), io, "file:///home/hugo/Llama-3.1-8B-Instruct/", .{});
@@ -200,51 +235,51 @@ pub fn main() !void {
     //     }
     // }
 
-    {
-        var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
-        defer pool.deinit(io);
+    // {
+    //     var pool: MemoryPool = try .init(allocator, threaded.async_limit.toInt() orelse 16, 256 * 1024 * 1024);
+    //     defer pool.deinit(io);
 
-        var timer: std.time.Timer = try .start();
-        defer {
-            const elapsed = timer.read();
-            log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
-        }
+    //     var timer: std.time.Timer = try .start();
+    //     defer {
+    //         const elapsed = timer.read();
+    //         log.info("Completed in {d} ms", .{elapsed / std.time.ns_per_ms});
+    //     }
 
-        var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
-        defer registry.deinit();
+    //     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, uri);
+    //     defer registry.deinit();
 
-        log.info("Parsed {d} tensors", .{registry.tensors.count()});
+    //     log.info("Parsed {d} tensors", .{registry.tensors.count()});
 
-        var err: ?anyerror = null;
+    //     var err: ?anyerror = null;
 
-        var group: std.Io.Group = .init;
-        defer group.cancel(io);
+    //     var group: std.Io.Group = .init;
+    //     defer group.cancel(io);
 
-        var timer_async_read: std.time.Timer = try .start();
-        var it = registry.iterator();
+    //     var timer_async_read: std.time.Timer = try .start();
+    //     var it = registry.iterator();
 
-        while (it.next()) |entry| {
-            const tensor_name = entry.key_ptr.*;
-            group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
-        }
+    //     while (it.next()) |entry| {
+    //         const tensor_name = entry.key_ptr.*;
+    //         group.async(io, readTensor, .{ io, &pool, &registry, tensor_name, &err });
+    //     }
 
-        group.wait(io);
+    //     group.wait(io);
 
-        if (err) |e| {
-            log.err("Error reading tensor: {any}", .{e});
-            return e;
-        }
+    //     if (err) |e| {
+    //         log.err("Error reading tensor: {any}", .{e});
+    //         return e;
+    //     }
 
-        const elapsed = timer_async_read.read();
-        const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
-        const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
-        log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
-            read_mb,
-            read_time_s,
-            read_mb / read_time_s,
-            (read_mb * 8.0) / 1024.0 / read_time_s,
-        });
-    }
+    //     const elapsed = timer_async_read.read();
+    //     const read_mb = @as(f64, @floatFromInt(registry.totalBytes())) / (1024.0 * 1024.0);
+    //     const read_time_s = @as(f64, @floatFromInt(elapsed)) / @as(f64, std.time.ns_per_s);
+    //     log.info("Throughput: {d:.2} MB in {d:.2} s = {d:.2} MB/s | {d:.2} Gbps", .{
+    //         read_mb,
+    //         read_time_s,
+    //         read_mb / read_time_s,
+    //         (read_mb * 8.0) / 1024.0 / read_time_s,
+    //     });
+    // }
 
     // {
     //     const root_dir = try vfs.openAbsoluteDir(io, "https://storage.googleapis.com", .{});
