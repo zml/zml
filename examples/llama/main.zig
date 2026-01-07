@@ -89,14 +89,21 @@ pub fn generateText(
     defer tracer.deinit();
 
     // init RNG and buffers
-    const generated_token_buffer = try allocator.alloc(u32, b);
+    const generated_token_buffer = try allocator.alignedAlloc(u32, .@"64", b);
 
     const probs_shape = mod_prefill.inner.result_shapes[0];
     std.debug.assert(probs_shape.eql(mod_generate.inner.result_shapes[0]));
 
     const TokenSampler = @import("isaac/TokenSampler.zig");
-    const strategy: TokenSampler.Strategy = .{ .top_k = 16, .seed = @truncate(seed) };
-    var sampler: TokenSampler = try .init(allocator, strategy);
+    const strategy: TokenSampler.Strategy = .{ .top_k = 16, .batchsize = b };
+
+    var sampler: TokenSampler = switch (b) {
+        1 => try TokenSampler.single.SingleTopK(.bf16).init(strategy, allocator, @truncate(seed)),
+        4 => try TokenSampler.batched.BatchedTopK(4, .bf16).init(strategy, allocator, @splat(@truncate(seed))),
+        8 => try TokenSampler.batched.BatchedTopK(8, .bf16).init(strategy, allocator, @splat(@truncate(seed))),
+        16 => try TokenSampler.batched.BatchedTopK(16, .bf16).init(strategy, allocator, @splat(@truncate(seed))),
+        else => @panic("unsupported --batch-size"),
+    };
     defer sampler.deinit();
 
     var kv_cache = prefill: {
@@ -135,7 +142,7 @@ pub fn generateText(
 
     generation: for (0..output_tokens_len + 1) |i| {
         // collect and print generated sequence
-        num_tokens_generated += 1;
+        num_tokens_generated += b;
         const generated_token = generated_token_buffer[0];
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try writer.writeAll(chunk);
@@ -297,9 +304,9 @@ pub fn asyncMain() !void {
 
     const dtype = llama_tensors.model.embed_tokens.weight.dtype();
     const kv_shape = zml.Shape.init(.{
-        .b = b,
         .layer = llama_tensors.model.layers.len,
         .k = seq_len,
+        .b = b,
         .h = config.num_key_value_heads,
         .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
     }, dtype).withSharding(.{.h});
