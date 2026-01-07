@@ -5,6 +5,7 @@ const c = @import("c");
 const stdx = @import("stdx");
 
 pub const ffi = @import("ffi.zig");
+pub const layout = @import("layout.zig");
 
 const log = std.log.scoped(.pjrt);
 
@@ -61,9 +62,9 @@ pub const ApiError = error{
     Unauthenticated,
 };
 
-fn InnerMixin(comptime innerT: type) type {
+pub fn InnerMixin(comptime innerT: type) type {
     return struct {
-        fn inner(self: anytype) *innerT {
+        pub fn inner(self: anytype) *innerT {
             return @ptrCast(@alignCast(@constCast(self)));
         }
     };
@@ -292,7 +293,7 @@ pub const ShapeSpec = extern struct {
 pub const Stream = opaque {};
 
 pub const Client = opaque {
-    const inner = InnerMixin(c.PJRT_Client).inner;
+    pub const inner = InnerMixin(c.PJRT_Client).inner;
 
     pub const ProgramFormat = enum {
         hlo,
@@ -424,14 +425,14 @@ pub const Client = opaque {
     };
 
     pub fn createViewOfDeviceBuffer(self: *const Client, api: *const Api, args: CreateViewOfDeviceBufferArgs) ApiError!*Buffer {
-        const layout = args.layout.toCStruct();
+        const layout_ = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateViewOfDeviceBuffer, .{
             .client = self.inner(),
             .device_buffer_ptr = @constCast(args.data),
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
-            .layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(@constCast(&layout))),
+            .layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(@constCast(&layout_))),
             .device = @as(?*c.PJRT_Device, @ptrCast(@constCast(args.device))),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
@@ -494,17 +495,25 @@ pub const Client = opaque {
     };
 
     pub fn createUninitializedBuffer(self: *const Client, api: *const Api, args: CreateUninitializedBufferArgs) ApiError!*Buffer {
-        var layout = args.layout.toCStruct();
+        var layout_ = args.layout.toCStruct();
         const ret = try api.call(.PJRT_Client_CreateUninitializedBuffer, .{
             .client = self.inner(),
             .shape_dims = args.dims.ptr,
             .shape_num_dims = @as(usize, @intCast(args.dims.len)),
             .shape_element_type = @intFromEnum(args.element_type),
-            .shape_layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(&layout)),
+            .shape_layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(&layout_)),
             .device = if (args.dst == .device) @as(?*c.PJRT_Device, @ptrCast(@constCast(args.dst.device))) else null,
             .memory = if (args.dst == .memory) @as(?*c.PJRT_Memory, @ptrCast(@constCast(args.dst.memory))) else null,
         });
         return @ptrCast(ret.buffer.?);
+    }
+
+    pub fn topologyDescription(self: *const Client, api: *const Api) ApiError!*TopologyDescription {
+        const ret = try api.call(.PJRT_Client_TopologyDescription, .{
+            .client = self.inner(),
+        });
+
+        return @ptrCast(ret.topology.?);
     }
 };
 
@@ -673,7 +682,7 @@ pub const ExecuteContext = opaque {
 };
 
 pub const Executable = opaque {
-    const inner = InnerMixin(c.PJRT_Executable).inner;
+    pub const inner = InnerMixin(c.PJRT_Executable).inner;
 
     pub fn deinit(self: *Executable, api: *const Api) void {
         _ = api.call(.PJRT_Executable_Destroy, .{
@@ -1354,6 +1363,10 @@ pub const NamedValue = extern struct {
         }
         try writer.writeAll("}");
     }
+};
+
+pub const TopologyDescription = opaque {
+    pub const inner = InnerMixin(c.PJRT_TopologyDescription).inner;
 };
 
 pub const Ffi = extern struct {

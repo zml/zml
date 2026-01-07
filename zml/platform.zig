@@ -240,6 +240,10 @@ pub const Platform = struct {
         return zml.module.compile(allocator, io, func, args, self);
     }
 
+    pub fn layoutExtension(self: Platform) ?*const pjrt.layout.LayoutExtension {
+        return self.pjrt_api.lookupExtension(pjrt.layout.LayoutExtension, pjrt.layout.LayoutExtension.extension_id);
+    }
+
     pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {{ ", .{@tagName(self.target)});
         const devices = self.getDevices();

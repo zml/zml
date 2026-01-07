@@ -113,7 +113,31 @@ pub fn main() !void {
         log.info("\t- {f}", .{device});
     }
 
-    var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters });
+    const topology_description = try platform.pjrt_client.topologyDescription(platform.pjrt_api);
+
+    const layout_extension = platform.layoutExtension() orelse return error.LayoutExtensionUnavailable;
+
+    {
+        const client_default_layout = try layout_extension.clientGetDefaultLayout(platform.pjrt_api, .{ .client = platform.pjrt_client, .type = zml.pjrt.BufferType.bf16, .dims = &.{ 16, 512, 8, 64 } });
+        defer client_default_layout.deinit(layout_extension, platform.pjrt_api);
+
+        const serialized_layout = try client_default_layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
+        defer allocator.free(serialized_layout);
+
+        std.log.info("Client default layout: {s}", .{serialized_layout});
+    }
+
+    {
+        const topology_default_layout = try layout_extension.topologyGetDefaultLayout(platform.pjrt_api, .{ .topology_description = topology_description, .type = zml.pjrt.BufferType.bf16, .dims = &.{ 16, 512, 8, 64 } });
+        defer topology_default_layout.deinit(layout_extension, platform.pjrt_api);
+
+        const serialized_layout = try topology_default_layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
+        defer allocator.free(serialized_layout);
+
+        std.log.info("Topology default layout: {s}", .{serialized_layout});
+    }
+
+    var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, layout_extension });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
         defer v.prefill_exe.deinit();
         defer v.decode_exe.deinit();
@@ -216,7 +240,7 @@ const CompileModelResult = struct {
     decode_exe: zml.Exe,
 };
 
-fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, llama_model: llama.LlamaLM, parameters: LlamaParameters) !CompileModelResult {
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, llama_model: llama.LlamaLM, parameters: LlamaParameters, layout_extension: *const zml.pjrt.layout.LayoutExtension) !CompileModelResult {
     var timer = try std.time.Timer.start();
     log.info("Compiling model", .{});
     defer log.info("Compiled model [{D}]", .{timer.read()});
@@ -244,6 +268,32 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
 
     const prefill_exe = try prefill_future.await(io);
     const decode_exe = try decode_future.await(io);
+
+    {
+        const exe: *zml.pjrt.Executable = try prefill_exe.exe.getExecutable(platform.pjrt_api);
+        defer exe.deinit(platform.pjrt_api);
+
+        const output_layouts = try layout_extension.executableGetOutputLayouts(platform.pjrt_api, exe);
+        for (output_layouts, 0..) |layout, index| {
+            const serialized_layout = try layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
+            defer allocator.free(serialized_layout);
+
+            std.log.info("Prefill exe output #{d} layout: {s}", .{ index, serialized_layout });
+        }
+    }
+
+    {
+        const exe: *zml.pjrt.Executable = try decode_exe.exe.getExecutable(platform.pjrt_api);
+        defer exe.deinit(platform.pjrt_api);
+
+        const output_layouts = try layout_extension.executableGetOutputLayouts(platform.pjrt_api, exe);
+        for (output_layouts, 0..) |layout, index| {
+            const serialized_layout = try layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
+            defer allocator.free(serialized_layout);
+
+            std.log.info("Decode exe output #{d} layout: {s}", .{ index, serialized_layout });
+        }
+    }
 
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
 }

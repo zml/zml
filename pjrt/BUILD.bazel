@@ -2,7 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "pjrt",
-    srcs = ["ffi.zig"],
+    srcs = ["ffi.zig", "layout.zig"],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],
     deps = [
@@ -12,5 +12,6 @@ zig_library(
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_layouts_extension_hdrs",
     ],
 )
