@@ -405,14 +405,6 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory = .device };
 
     pub fn uninitialized(platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
-        if (opts.memory != .device) {
-            // XLA uninitialized doesn't respect memory see https://github.com/openxla/xla/pull/31292
-            // TODO: use uninitialized when it works again.
-            const host_buffer: HostBuffer = try .empty(std.heap.smp_allocator, shape_);
-            defer host_buffer.deinit(std.heap.smp_allocator);
-            return try .from(platform, host_buffer, .{ .wait = true, .memory = opts.memory });
-        }
-
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._shape = shape_,
