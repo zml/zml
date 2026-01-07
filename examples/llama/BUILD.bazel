@@ -16,7 +16,6 @@ zig_binary(
     name = "llama_layers",
     main = "main_layers.zig",
     srcs = [
-        "llama_layers.zig",
         "llama.zig"
     ],
     deps = [

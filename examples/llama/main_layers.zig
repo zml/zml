@@ -304,7 +304,7 @@ pub fn compile(
     }.call, .{ allocator, io, platform, llama_model.model.norm, hidden_states_decode });
     errdefer if (norm_decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    // --- SAMPLING ---
+    // sampling
     var sampling_prefill_future = io.async(struct {
         fn call(alloc: std.mem.Allocator, io_: std.Io, plt: zml.Platform, model: llama.LlamaLM, head: zml.nn.Linear, hidden: zml.Tensor, rng: zml.Tensor.Rng, opts: zml.nn.SamplingStrategy) !zml.Exe {
             return plt.compile(alloc, io_, model, .sampleTokens, .{ head, hidden, rng, opts });
