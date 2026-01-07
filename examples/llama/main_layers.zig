@@ -236,77 +236,6 @@ const CompileModelResult = struct {
     sampling_decode_exe: zml.Exe,
 };
 
-// pub fn compile(
-//     allocator: std.mem.Allocator,
-//     io: std.Io,
-//     platform: zml.Platform,
-//     llama_model: llama.LlamaLM,
-//     parameters: LlamaParameters,
-// ) !CompileModelResult {
-//     var timer = try std.time.Timer.start();
-//     log.info("Compiling model", .{});
-//     defer log.info("Compiled model [{D}]", .{timer.read()});
-//     const dtype = llama_model.model.embed_tokens.weight.dtype();
-//     const hidden_dim = llama_model.config.hidden_size;
-
-//     // Build hidden states tensors for prefill and decode compilation
-//     // .s = max_seq_len for prefill
-//     const hidden_shape_prefill = zml.Shape.init(.{ .s = parameters.prefill_tokens.dim(.s), .d = hidden_dim }, dtype);
-//     const hidden_states_prefill = zml.Tensor.init(hidden_shape_prefill, dtype);
-
-//     // .s = 1 for decode
-//     const hidden_shape_decode = zml.Shape.init(.{ .s = parameters.decode_tokens.dim(.s), .d = hidden_dim }, dtype);
-//     const hidden_states_decode = zml.Tensor.init(hidden_shape_decode, dtype);
-
-//     // Compile embedding module for prefill and decode
-//     const embedding_module = llama_model.model.embed_tokens;
-//     // const embedding_prefill_exe = try platform.compile(allocator, io, embedding_module, .forward, .{parameters.prefill_tokens});
-//     // const embedding_decode_exe = try platform.compile(allocator, io, embedding_module, .forward, .{parameters.decode_tokens});
-
-//     var embedding_prefill_future = io.async(platform.compile(), .{ allocator, io, embedding_module, .forward, .{parameters.prefill_tokens} });
-//     var embedding_decode_future = io.async(platform.compile(), .{ allocator, io, embedding_module, .forward, .{parameters.decode_tokens} });
-
-//     // Compile one layer
-//     const layer_module = llama_model.model.layers[0];
-//     // COMPRENDS PAS PQ CA MARCHE ICI
-//     // const layer_prefill_exe = try platform.compile(allocator, io, layer_module, .forward, .{ hidden_states_prefill, parameters.token_index, parameters.kv_cache });
-//     // const layer_decode_exe = try platform.compile(allocator, io, layer_module, .forward, .{ hidden_states_decode, parameters.token_index, parameters.kv_cache });
-//     const layer_prefill_exe_future = io.async(platform.compile(), .{ allocator, io, layer_module, .forward, .{ hidden_states_prefill, parameters.token_index, parameters.kv_cache } });
-//     const layer_decode_exe_future = io.async(platform.compile(), .{ allocator, io, layer_module, .forward, .{ hidden_states_decode, parameters.token_index, parameters.kv_cache } });
-
-//     // Compile final norm
-//     const norm_module = llama_model.model.norm;
-//     // const norm_prefill_exe = try platform.compile(allocator, io, norm_module, .forward, .{hidden_states_prefill});
-//     // const norm_decode_exe = try platform.compile(allocator, io, norm_module, .forward, .{hidden_states_decode});
-//     const norm_prefill_exe_future = io.async(platform.compile(), .{ allocator, io, norm_module, .forward, .{hidden_states_prefill} });
-//     const norm_decode_exe_future = io.async(platform.compile(), .{ allocator, io, norm_module, .forward, .{hidden_states_decode} });
-
-//     // Compile sampling
-//     // const sampling_prefill_exe = try platform.compile(allocator, io, llama_model, .sampleTokens, .{ llama_model.lm_head, hidden_states_prefill, parameters.rng, llama_model.gen_opts });
-//     // const sampling_decode_exe = try platform.compile(allocator, io, llama_model, .sampleTokens, .{ llama_model.lm_head, hidden_states_decode, parameters.rng, llama_model.gen_opts });
-//     const sampling_prefill_exe_future = io.async(platform.compile(), .{ allocator, io, llama_model, .sampleTokens, .{ llama_model.lm_head, hidden_states_prefill, parameters.rng, llama_model.gen_opts } });
-//     const sampling_decode_exe_future = io.async(platform.compile(), .{ allocator, io, llama_model, .sampleTokens, .{ llama_model.lm_head, hidden_states_decode, parameters.rng, llama_model.gen_opts } });
-
-//     const embedding_prefill_exe = try embedding_prefill_future.await(io);
-//     const embedding_decode_exe = try embedding_decode_future.await(io);
-//     const layer_prefill_exe = try layer_prefill_exe_future.await(io);
-//     const layer_decode_exe = try layer_decode_exe_future.await(io);
-//     const norm_prefill_exe = try norm_prefill_exe_future.await(io);
-//     const norm_decode_exe = try norm_decode_exe_future.await(io);
-//     const sampling_prefill_exe = try sampling_prefill_exe_future.await(io);
-//     const sampling_decode_exe = try sampling_decode_exe_future.await(io);
-//     return .{
-//         .embedding_prefill_exe = embedding_prefill_exe,
-//         .embedding_decode_exe = embedding_decode_exe,
-//         .layer_prefill_exe = layer_prefill_exe,
-//         .layer_decode_exe = layer_decode_exe,
-//         .norm_prefill_exe = norm_prefill_exe,
-//         .norm_decode_exe = norm_decode_exe,
-//         .sampling_prefill_exe = sampling_prefill_exe,
-//         .sampling_decode_exe = sampling_decode_exe,
-//     };
-// }
-
 pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -321,16 +250,14 @@ pub fn compile(
     const dtype = llama_model.model.embed_tokens.weight.dtype();
     const hidden_dim = llama_model.config.hidden_size;
 
-    // 1. Préparation des formes et tenseurs (Inputs fictifs pour la compilation)
+    // Build hidden states tensors for prefill and decode compilation
     const hidden_shape_prefill = zml.Shape.init(.{ .s = parameters.prefill_tokens.dim(.s), .d = hidden_dim }, dtype);
     const hidden_states_prefill = zml.Tensor.init(hidden_shape_prefill, dtype);
 
     const hidden_shape_decode = zml.Shape.init(.{ .s = parameters.decode_tokens.dim(.s), .d = hidden_dim }, dtype);
     const hidden_states_decode = zml.Tensor.init(hidden_shape_decode, dtype);
 
-    // 2. Lancement des tâches asynchrones
-
-    // --- EMBEDDING ---
+    // embedding
     var embed_prefill_future = io.async(struct {
         fn call(alloc: std.mem.Allocator, io_: std.Io, plt: zml.Platform, mod: zml.nn.TokenEmbedding, input: zml.Tensor) !zml.Exe {
             return plt.compile(alloc, io_, mod, .forward, .{input});
@@ -345,8 +272,7 @@ pub fn compile(
     }.call, .{ allocator, io, platform, llama_model.model.embed_tokens, parameters.decode_tokens });
     errdefer if (embed_decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    // --- LAYER ---
-    // Note: On compile seulement la couche 0 comme modèle pour toutes les couches
+    // layer
     const layer_module = llama_model.model.layers[0];
 
     var layer_prefill_future = io.async(struct {
@@ -363,7 +289,7 @@ pub fn compile(
     }.call, .{ allocator, io, platform, layer_module, hidden_states_decode, parameters.token_index, parameters.kv_cache });
     errdefer if (layer_decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    // --- NORM ---
+    // norm
     var norm_prefill_future = io.async(struct {
         fn call(alloc: std.mem.Allocator, io_: std.Io, plt: zml.Platform, mod: llama.RmsNorm, hidden: zml.Tensor) !zml.Exe {
             return plt.compile(alloc, io_, mod, .forward, .{hidden});
@@ -393,8 +319,7 @@ pub fn compile(
     }.call, .{ allocator, io, platform, llama_model, llama_model.lm_head.?, hidden_states_decode, parameters.rng, llama_model.gen_opts });
     errdefer if (sampling_decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    // 3. Attente des résultats (Await)
-    // L'ordre n'a pas d'importance ici, ils sont déjà lancés.
+    // Wait for execs compiled
     const embedding_prefill_exe = try embed_prefill_future.await(io);
     const embedding_decode_exe = try embed_decode_future.await(io);
 
