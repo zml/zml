@@ -242,7 +242,7 @@ pub const TransformerLayer = struct {
     }
 };
 
-const RmsNorm = struct {
+pub const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-5,
 
