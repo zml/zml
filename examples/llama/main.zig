@@ -21,21 +21,25 @@ pub const std_options: std.Options = .{
 
 pub const Args = struct {
     model: ?[]const u8 = null,
+    prompt: ?[]const u8 = null,
     seqlen: u32 = 512,
+    reader_buffer_size_mb: u32 = 32,
+    writer_buffer_size_mb: u32 = 32,
+    async_limit: ?usize = null,
 };
 
 pub fn main() !void {
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
-    const allocator = std.heap.c_allocator;
+    var debug_allocator: ?std.heap.DebugAllocator(.{}) = null;
+    const allocator = if (@import("builtin").mode == .Debug) blk: {
+        debug_allocator = .init;
+        break :blk debug_allocator.?.allocator();
+    } else std.heap.c_allocator;
+    defer if (debug_allocator) |*da| std.debug.assert(da.deinit() == .ok);
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
-
-    const io = threaded.io();
-
-    zml.init();
-    defer zml.deinit();
 
     const args: Args = blk: {
         var ret: Args = .{};
@@ -46,6 +50,14 @@ pub fn main() !void {
                 ret.model = arg["--model=".len..];
             } else if (std.mem.startsWith(u8, arg, "--seqlen=")) {
                 ret.seqlen = try std.fmt.parseUnsigned(u32, arg["--seqlen=".len..], 10);
+            } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
+                ret.prompt = arg["--prompt=".len..];
+            } else if (std.mem.startsWith(u8, arg, "--reader-buffer-size-mb=")) {
+                ret.reader_buffer_size_mb = try std.fmt.parseUnsigned(u32, arg["--reader-buffer-size-mb=".len..], 10);
+            } else if (std.mem.startsWith(u8, arg, "--writer-buffer-size-mb=")) {
+                ret.writer_buffer_size_mb = try std.fmt.parseUnsigned(u32, arg["--writer-buffer-size-mb=".len..], 10);
+            } else if (std.mem.startsWith(u8, arg, "--async-limit=")) {
+                ret.async_limit = try std.fmt.parseUnsigned(usize, arg["--async-limit=".len..], 10);
             }
         }
 
@@ -57,11 +69,66 @@ pub fn main() !void {
         break :blk ret;
     };
 
-    log.info("Resolving Model repo", .{});
-    var repo = try zml.safetensors.resolveModelRepo(allocator, io, args.model.?);
-    defer repo.deinit(allocator, io);
+    if (args.async_limit) |limit| threaded.setAsyncLimit(.limited(limit));
 
-    const parsed_config = try parseConfig(allocator, io, repo.dir);
+    log.info("Running with threaded io async limit set to {?d}", .{threaded.async_limit.toInt()});
+
+    var http_client: std.http.Client = .{
+        .allocator = allocator,
+        .io = threaded.io(),
+        .connection_pool = .{
+            .free_size = threaded.async_limit.toInt() orelse 16,
+        },
+    };
+
+    try http_client.initDefaultProxies(allocator);
+    defer http_client.deinit();
+
+    var vfs_file: zml.io.VFS.File = .init(
+        allocator,
+        threaded.io(),
+        .{
+            .direct_io = true,
+            .direct_io_alignment = .fromByteUnits(4 * 1024),
+        },
+    );
+    defer vfs_file.deinit();
+
+    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), .{
+        .http_client = &http_client,
+        .protocol = .https,
+    });
+    defer vfs_https.deinit();
+
+    var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
+    defer hf_auth.deinit(allocator);
+
+    var hf_vfs: zml.io.VFS.HF = try .init(
+        allocator,
+        threaded.io(),
+        .{
+            .http_client = &http_client,
+            .auth = hf_auth,
+        },
+    );
+    defer hf_vfs.deinit();
+
+    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("https", vfs_https.io());
+    try vfs.register("hf", hf_vfs.io());
+
+    const io = vfs.io();
+
+    zml.init();
+    defer zml.deinit();
+
+    log.info("Resolving model repo", .{});
+    const repo = try zml.safetensors.resolveModelRepo(io, args.model.?);
+
+    const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
     const config = parsed_config.value;
 
@@ -99,7 +166,7 @@ pub fn main() !void {
         .rng = .init(),
     };
 
-    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo.dir });
+    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
     errdefer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
@@ -119,7 +186,33 @@ pub fn main() !void {
         defer v.decode_exe.deinit();
     } else |_| {};
 
-    var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, platform, &store, llama_model });
+    var load_model_buffers: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 16);
+    defer {
+        load_model_buffers.cancel(io);
+        load_model_buffers.deinit();
+    }
+
+    var read_pool, var write_pool = try zml.io.ConcurrentBufferPool.initRW(
+        allocator,
+        platform,
+        .{
+            .size = args.reader_buffer_size_mb * 1024 * 1024,
+            .concurrency = load_model_buffers.limit,
+            .dma = true,
+        },
+        .{
+            .size = args.writer_buffer_size_mb * 1024 * 1024,
+            .concurrency = load_model_buffers.limit,
+            .dma = true,
+        },
+    );
+    defer {
+        read_pool.deinit();
+        write_pool.deinit();
+    }
+
+    var progress = std.Progress.start(io, .{ .root_name = args.model.?, .estimated_total_items = store.view().count() });
+    var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers, &read_pool, &write_pool, platform, &store, llama_model });
     errdefer b: {
         var v = llama_buffers_future.cancel(io) catch break :b;
         LlamaLM.unloadBuffers(&v, allocator);
@@ -131,6 +224,7 @@ pub fn main() !void {
 
     var llama_buffers = try llama_buffers_future.await(io);
     defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
+    progress.end();
 
     log.info("Creating KvCache", .{});
     var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
@@ -139,13 +233,11 @@ pub fn main() !void {
     var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
 
-    const prompt = blk: {
+    const prompt = if (args.prompt) |p| p else blk: {
         var reader = std.Io.File.stdin().reader(io, &.{});
         break :blk try reader.interface.allocRemaining(allocator, .unlimited);
     };
-    defer allocator.free(prompt);
 
-    // const prompt = cli.args.prompt orelse "What is the capital of France?";
     log.info("✅\tPrompt: {s}", .{prompt});
 
     // Unbuffered writing of the tokens to stdout.
@@ -248,11 +340,77 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
 }
 
-fn loadModelBuffers(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, store: *zml.io.TensorStore, llama_model: llama.LlamaLM) !zml.Bufferized(llama.LlamaLM) {
-    var timer = try std.time.Timer.start();
+fn loadModelBuffers(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    progress: *std.Progress.Node,
+    group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+    read_pool: *zml.io.ConcurrentBufferPool,
+    write_pool: *zml.io.ConcurrentBufferPool,
+    platform: zml.Platform,
+    store: *zml.io.TensorStore,
+    llama_model: llama.LlamaLM,
+) !zml.Bufferized(llama.LlamaLM) {
+    var transferred_bytes: usize = 0;
+    var timer = try stdx.time.Timer.start();
     log.info("Loading model", .{});
-    defer log.info("Loaded model [{D}]", .{timer.read()});
-    return llama_model.loadBuffers(allocator, io, store.view(), platform);
+    defer {
+        const duration = timer.read();
+        const seconds = @as(f64, @floatFromInt(duration.ns)) / 1e9;
+        const gb_per_sec = @as(f64, @floatFromInt(transferred_bytes)) / (1024.0 * 1024.0 * 1024.0) / seconds;
+        const gbps = gb_per_sec * 8.0;
+        log.info("Loaded model [{D} {d:.3} GB/s {d:.3} gbps]", .{ duration, gb_per_sec, gbps });
+    }
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    const bufferize_ctx: zml.io.BufferizeContext(llama.TransferCtx) = .{
+        .allocator = allocator,
+        .arena = &arena,
+        .io = io,
+        .platform = platform,
+        .cb_ctx = .{ .read_pool = read_pool, .write_pool = write_pool, .transferred_bytes = &transferred_bytes, .progress = progress },
+    };
+
+    const bufferized = llama_model.loadBuffers(
+        bufferize_ctx,
+        group,
+        store.view(),
+        transferBuffer,
+    );
+
+    try group.await(io);
+
+    return bufferized;
+}
+
+fn transferBuffer(ctx: zml.io.TensorBufferTransfer(llama.TransferCtx)) !void {
+    const read_pool = ctx.cb_ctx.read_pool;
+    const write_pool = ctx.cb_ctx.write_pool;
+    const progress = ctx.cb_ctx.progress;
+
+    const read_buffer = read_pool.acquire(ctx.io) catch unreachable;
+    defer read_pool.release(ctx.io, read_buffer) catch {};
+
+    const write_buffer = write_pool.acquire(ctx.io) catch unreachable;
+    defer write_pool.release(ctx.io, write_buffer) catch {};
+
+    var transfer_progress = progress.start(ctx.tensor.name, ctx.tensor.byteSize());
+
+    var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, read_buffer) catch unreachable;
+    defer reader.deinit();
+
+    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.buffer, .device, write_buffer) catch unreachable;
+    defer {
+        writer.interface.flush() catch unreachable;
+        writer.deinit();
+    }
+
+    _ = reader.interface.streamRemaining(&writer.interface) catch unreachable;
+
+    transfer_progress.end();
+    ctx.cb_ctx.transferred_bytes.* += ctx.tensor.byteSize();
 }
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {

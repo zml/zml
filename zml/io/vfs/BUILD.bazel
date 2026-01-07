@@ -6,17 +6,11 @@ zig_library(
         "base.zig",
         "file.zig",
         "hf.zig",
-        "proxy.zig",
         "http.zig",
     ],
+    deps = [
+        "//stdx",
+    ],
     main = "index.zig",
-    visibility = ["//visibility:public"],
-)
-
-zig_binary(
-    name = "hf2",
-    main = "hf2.zig",
-    srcs = ["base.zig"],
-    deps = ["//stdx"],
     visibility = ["//visibility:public"],
 )

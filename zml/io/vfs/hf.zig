@@ -1,420 +1,54 @@
-const json = @import("std").json;
 const std = @import("std");
+
+const stdx = @import("stdx");
+
+const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/hf");
 
-const HFApi = struct {
-    pub const Error = error{
-        MalformedURI,
-        RequestFailed,
-        ResponseParsingFailed,
-    } || std.mem.Allocator.Error;
+pub const API = struct {
+    const TREE_URL_TEMPLATE = "https://huggingface.co/api/models/{[repo]s}/{[model]s}/tree/{[rev]s}/{[path]s}?expand=false&recursive=true&limit=1000";
+    const LFS_FILE_URL_TEMPLATE = "https://huggingface.co/{[repo]s}/{[model]s}/resolve/{[rev]s}/{[path]s}";
 
-    const PickleImport = struct {
-        module: []const u8,
-        name: []const u8,
-        safety: []const u8,
-    };
-
-    const Scan = struct {
-        status: ?[]const u8 = null,
-        message: ?[]const u8 = null,
-        reportLink: ?[]const u8 = null,
-        reportLabel: ?[]const u8 = null,
-        pickleImports: ?[]PickleImport = null,
-        version: ?[]const u8 = null,
-    };
-
-    const SecurityFileStatus = struct {
-        status: ?[]const u8 = null,
-        jFrogScan: ?Scan = null,
-        protectAiScan: ?Scan = null,
-        avScan: ?Scan = null,
-        pickleImportScan: ?Scan = null,
-        virusTotalScan: ?Scan = null,
-    };
-
-    const LastCommit = struct {
-        id: []const u8,
-        title: []const u8,
-        date: []const u8,
-    };
-
-    const Lfs = struct {
+    pub const Tree = struct {
         oid: []const u8,
-        size: u64,
-        pointerSize: u64,
-    };
-
-    pub const TreeEntry = struct {
+        path: []const u8,
         type: []const u8,
-        oid: []const u8,
-        path: []const u8,
-        size: u64,
-        lfs: ?Lfs = null,
-        lastCommit: ?LastCommit = null,
-        xetHash: ?[]const u8 = null,
-        securityFileStatus: ?SecurityFileStatus = null,
-    };
-
-    pub const TreeSize = struct {
-        path: []const u8,
         size: u64,
     };
+};
 
-    pub const Model = struct {
-        namespace: []const u8,
-        repo: []const u8,
-        revision: ?[]const u8,
-    };
+const ReadState = struct {
+    children: []const TreeNode,
+    index: usize,
+};
 
-    pub fn modelFromUri(uri: []const u8) Error!Model {
-        const parsed = std.Uri.parse(uri) catch {
-            log.err("Failed to parse HF model URI: {s}", .{uri});
-            return Error.MalformedURI;
-        };
+pub const TreeNode = struct {
+    name: []const u8,
+    kind: std.Io.File.Kind,
+    size: u64,
+    children: ?std.ArrayList(TreeNode),
 
-        const namespace = parsed.host.?.percent_encoded;
-
-        var path = parsed.path.percent_encoded;
-        // strip leading slash
-        if (path.len > 0 and path[0] == '/') path = path[1..];
-        // strip trailing slash
-        if (path.len > 0 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
-
-        var it = std.mem.splitSequence(u8, path, "/");
-        const repo_and_rev = it.next();
-
-        if (repo_and_rev == null) {
-            log.err("Malformed HF model URI, missing repo: {s}", .{uri});
-            return Error.MalformedURI;
+    fn deinit(self: *TreeNode, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        if (self.children) |*children| {
+            for (children.items) |*child| child.deinit(allocator);
+            children.deinit(allocator);
         }
-
-        // repo may contain an optional @revision suffix
-        var rev: ?[]const u8 = null;
-        var repo = repo_and_rev.?;
-        const at_index = std.mem.indexOf(u8, repo_and_rev.?, "@");
-        if (at_index) |idx| {
-            repo = repo_and_rev.?[0..idx];
-            rev = repo_and_rev.?[idx + 1 ..];
-            if (rev.?.len == 0) rev = null;
-        }
-
-        return .{
-            .namespace = namespace,
-            .repo = repo,
-            .revision = rev,
-        };
-    }
-
-    pub fn filePathFromUri(uri: []const u8) Error![]const u8 {
-        const parsed = std.Uri.parse(uri) catch {
-            log.err("Failed to parse HF file URI: {s}", .{uri});
-            return Error.MalformedURI;
-        };
-
-        var path = parsed.path.percent_encoded;
-        // strip leading slash
-        if (path.len > 0 and path[0] == '/') path = path[1..];
-        // strip trailing slash
-        if (path.len > 0 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
-
-        // Remove the first segment (repo[@rev])
-        var it = std.mem.splitSequence(u8, path, "/");
-        _ = it.next(); // skip repo[@rev]
-        const rest = it.rest();
-        path = rest;
-
-        return path;
-    }
-
-    pub fn isModelPath(uri: []const u8) bool {
-        // Determine whether the directory URI represents an HF repo root.
-        // Valid root examples:
-        //   hf://user/repo
-        //   hf://user/repo/
-        //   hf://user/repo@rev
-        //   hf://user/repo@rev/
-        // Invalid examples:
-        //   hf://
-        //   hf://user
-        //   hf://user/
-        //   hf://user/repo/some/path
-
-        const parsed_uri = std.Uri.parse(uri) catch return false;
-
-        // Must be hf scheme with a host
-        if (!std.mem.eql(u8, parsed_uri.scheme, "hf")) return false;
-        if (parsed_uri.host == null) return false;
-
-        var path = parsed_uri.path.percent_encoded;
-
-        // No path or root-only path ("/") are not repo roots
-        if (path.len == 0) return false;
-        if (path.len == 1 and path[0] == '/') return false;
-
-        // Strip leading slash if present
-        if (path[0] == '/') path = path[1..];
-
-        // Strip trailing slash if present
-        if (path.len > 0 and path[path.len - 1] == '/') path = path[0 .. path.len - 1];
-
-        // After trimming, there must be exactly one segment (no additional '/')
-        if (path.len == 0) return false;
-
-        // Check for additional '/' in the path
-        var i: usize = 0;
-        while (i < path.len) : (i += 1) {
-            if (path[i] == '/') return false;
-        }
-
-        return true;
-    }
-
-    pub fn fetchModelSize(
-        allocator: std.mem.Allocator,
-        client: *std.http.Client,
-        extra_headers: []std.http.Header,
-        repo_uri: []const u8,
-    ) Error!json.Parsed(TreeSize) {
-        const model = try HFApi.modelFromUri(repo_uri);
-        const rev = model.revision orelse blk: {
-            log.debug("No revision specified in repo URI; defaulting to 'main'", .{});
-            break :blk "main";
-        };
-
-        var redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const api_url = std.fmt.bufPrint(
-            &url_buf,
-            "https://huggingface.co/api/models/{s}/{s}/treesize/{s}/",
-            .{ model.namespace, model.repo, rev },
-        ) catch {
-            log.err("Failed to format HF model size API URL for repo URI {s}", .{repo_uri});
-            return Error.OutOfMemory;
-        };
-
-        var req = try allocator.create(std.http.Client.Request);
-        defer allocator.destroy(req);
-
-        const api_uri = std.Uri.parse(api_url) catch {
-            log.err("Failed to parse HF model size API URL {s}", .{api_url});
-            return Error.MalformedURI;
-        };
-
-        req.* = client.request(.GET, api_uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = extra_headers,
-        }) catch {
-            log.err("Failed to create HTTP request for HF model size API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-        defer req.deinit();
-
-        req.sendBodiless() catch {
-            log.err("Failed to send HTTP request for HF model size API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-
-        var resp = req.receiveHead(&redirect_buffer) catch {
-            log.err("Failed to receive HTTP response for HF model size API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-
-        if (resp.head.status != .ok) {
-            log.err("Failed to fetch HF model size, got {s} for {s}", .{ @tagName(resp.head.status), api_url });
-            return Error.RequestFailed;
-        }
-
-        const content_length = resp.head.content_length orelse {
-            log.err("Missing Content-Length in HF model size response for {s}", .{api_url});
-            return Error.ResponseParsingFailed;
-        };
-
-        const body = resp.reader(&.{}).readAlloc(allocator, content_length) catch {
-            log.err("Failed to read HF model size response body for {s} of content length {d}", .{ api_url, content_length });
-            return Error.ResponseParsingFailed;
-        };
-        defer allocator.free(body);
-
-        const parsed = json.parseFromSlice(
-            HFApi.TreeSize,
-            allocator,
-            body,
-            .{ .ignore_unknown_fields = true },
-        ) catch {
-            log.err("Failed to parse HF model size response JSON for {s}", .{api_url});
-            return Error.ResponseParsingFailed;
-        };
-
-        return parsed;
     }
 };
 
-// todo: ref counters
-const HFRecords = struct {
-    pub const Error = HFApi.Error || std.mem.Allocator.Error;
+const RepoKey = struct {
+    repo: []const u8,
+    model: []const u8,
+    rev: []const u8,
 
-    const Mapping = std.StringArrayHashMapUnmanaged(HFApi.TreeEntry);
-
-    arena: std.heap.ArenaAllocator,
-    mapping: Mapping,
-
-    pub fn init(allocator: std.mem.Allocator) HFRecords {
-        return .{
-            .arena = std.heap.ArenaAllocator.init(allocator),
-            .mapping = .{},
-        };
+    fn format(self: RepoKey, buffer: []u8) ![]u8 {
+        return std.fmt.bufPrint(buffer, "{s}/{s}@{s}", .{ self.repo, self.model, self.rev });
     }
 
-    pub fn get(self: *HFRecords, key: []const u8) ?HFApi.TreeEntry {
-        // Normalize key by stripping directory trailing slash if present
-        const normalized_key = if (key.len > 0 and key[key.len - 1] == '/') key[0 .. key.len - 1] else key;
-
-        return self.mapping.get(normalized_key);
-    }
-
-    pub fn containsPathPrefix(self: *HFRecords, prefix: []const u8) bool {
-        var it = self.mapping.iterator();
-        while (it.next()) |kv| {
-            const key = kv.key_ptr.*;
-            if (key.len >= prefix.len and std.mem.startsWith(u8, key, prefix)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    pub fn fetch(
-        self: *HFRecords,
-        client: *std.http.Client,
-        limit: usize,
-        extra_headers: []std.http.Header,
-        repo_uri: []const u8,
-        url: ?[]const u8, // used for pagination
-    ) Error!void {
-        const allocator = self.arena.allocator();
-
-        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-
-        const api_url = url orelse blk: {
-            const model = try HFApi.modelFromUri(repo_uri);
-            const rev = model.revision orelse blk_: {
-                log.debug("No revision specified in repo URI; defaulting to 'main'", .{});
-                break :blk_ "main";
-            };
-
-            break :blk std.fmt.bufPrint(
-                &url_buf,
-                "https://huggingface.co/api/models/{s}/{s}/tree/{s}/?expand=true&recursive=true&limit={d}",
-                .{ model.namespace, model.repo, rev, limit },
-            ) catch {
-                log.err("Failed to format HF repo tree API URL for repo URI {s}", .{repo_uri});
-                return Error.OutOfMemory;
-            };
-        };
-
-        const api_uri = std.Uri.parse(api_url) catch {
-            log.err("Failed to parse HF repo tree API URL {s}", .{api_url});
-            return Error.MalformedURI;
-        };
-
-        var req = try allocator.create(std.http.Client.Request);
-        defer allocator.destroy(req);
-
-        req.* = client.request(.GET, api_uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = extra_headers,
-        }) catch {
-            log.err("Failed to create HTTP request for HF repo tree API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-        defer req.deinit();
-
-        req.sendBodiless() catch {
-            log.err("Failed to send HTTP request for HF repo tree API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-
-        var resp = req.receiveHead(&redirect_buffer) catch {
-            log.err("Failed to receive HTTP response for HF repo tree API URL {s}", .{api_url});
-            return Error.RequestFailed;
-        };
-        if (resp.head.status != .ok) {
-            log.err("Failed to fetch HF repo tree, got {s} for {s}", .{ @tagName(resp.head.status), api_url });
-            return Error.RequestFailed;
-        }
-
-        var next_url: ?[]const u8 = null;
-        var it = resp.head.iterateHeaders();
-        while (it.next()) |hdr| {
-            if (std.mem.eql(u8, hdr.name, "Link") or std.mem.eql(u8, hdr.name, "link")) {
-                const hv = hdr.value;
-                var i: usize = 0;
-                while (i < hv.len) : (i += 1) {
-                    const lt = std.mem.indexOf(u8, hv[i..], "<");
-                    if (lt == null) break;
-                    const start = i + lt.? + 1;
-                    const gt = std.mem.indexOf(u8, hv[start..], ">");
-                    if (gt == null) break;
-                    const end = start + gt.?;
-                    const url_slice = hv[start..end];
-                    const after = hv[end..];
-                    if (std.mem.indexOf(u8, after, "rel=\"next\"") != null) {
-                        next_url = url_slice;
-                        break;
-                    }
-                    i = end + 1;
-                }
-            }
-        }
-
-        const content_length = resp.head.content_length orelse {
-            log.err("Missing Content-Length in HF repo tree response for {s}", .{api_url});
-            return Error.ResponseParsingFailed;
-        };
-        const body = resp.reader(&.{}).readAlloc(allocator, content_length) catch {
-            log.err("Failed to read HF repo tree response body for {s} of content length {d}", .{ api_url, content_length });
-            return Error.ResponseParsingFailed;
-        };
-
-        const entries = json.parseFromSliceLeaky(
-            []HFApi.TreeEntry,
-            allocator,
-            body,
-            .{ .ignore_unknown_fields = true },
-        ) catch {
-            log.err("Failed to parse HF repo tree response JSON for {s}", .{api_url});
-            return Error.ResponseParsingFailed;
-        };
-
-        for (entries) |entry| {
-            try self.add(repo_uri, entry);
-        }
-
-        if (next_url) |url_| {
-            try self.fetch(client, limit, extra_headers, repo_uri, url_);
-        }
-    }
-
-    fn add(self: *HFRecords, repo_uri: []const u8, entry: HFApi.TreeEntry) Error!void {
-        const allocator = self.arena.allocator();
-
-        // Ensure keys are built from the canonical repo root (hf://namespace/repo[@rev]/)
-        const model = try HFApi.modelFromUri(repo_uri);
-        const base = if (model.revision) |rev| blk: {
-            break :blk try std.fmt.allocPrint(allocator, "hf://{s}/{s}@{s}/", .{ model.namespace, model.repo, rev });
-        } else blk: {
-            break :blk try std.fmt.allocPrint(allocator, "hf://{s}/{s}/", .{ model.namespace, model.repo });
-        };
-        const key = try std.fmt.allocPrint(allocator, "{s}{s}", .{ base, entry.path });
-        try self.mapping.put(allocator, key, entry);
-    }
-
-    pub fn deinit(self: *HFRecords) void {
-        self.arena.deinit();
+    fn allocFormat(self: RepoKey, allocator: std.mem.Allocator) ![]u8 {
+        return std.fmt.allocPrint(allocator, "{s}/{s}@{s}", .{ self.repo, self.model, self.rev });
     }
 };
 
@@ -428,7 +62,8 @@ pub const HF = struct {
             InvalidHFToken,
             MissingHomePath,
             MissingConfigFile,
-        } || std.process.GetEnvVarOwnedError || std.fs.File.OpenError || std.fs.File.Reader.Error || std.Io.Reader.ReadAllocError || std.mem.Allocator.Error;
+            Unexpected,
+        };
 
         pub fn deinit(self: *Auth, allocator: std.mem.Allocator) void {
             switch (self.*) {
@@ -446,902 +81,737 @@ pub const HF = struct {
                         log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
                         return .none;
                     },
-                    else => return e,
+                    else => return AuthError.Unexpected,
                 },
-                else => |e| return e,
+                else => return AuthError.Unexpected,
             };
         }
 
         pub fn fromEnv(allocator: std.mem.Allocator) AuthError!Auth {
             const token = std.process.getEnvVarOwned(allocator, "HF_TOKEN") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return AuthError.MissingHFToken,
-                else => |e| return e,
+                else => return AuthError.Unexpected,
             };
             defer allocator.free(token);
 
-            return .{ .hf_token = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) };
+            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) catch return AuthError.Unexpected };
         }
 
-        pub fn fromHomeConfig(allocator: std.mem.Allocator, io_: std.Io) AuthError!Auth {
+        pub fn fromHomeConfig(allocator: std.mem.Allocator, base_io: std.Io) AuthError!Auth {
             const home_path = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
                 error.EnvironmentVariableNotFound => return AuthError.MissingHomePath,
-                else => |e| return e,
+                else => return AuthError.Unexpected,
             };
             defer allocator.free(home_path);
 
-            const token_path = try std.fmt.allocPrint(allocator, "{s}/.cache/huggingface/token", .{home_path});
+            const token_path = std.fmt.allocPrint(allocator, "{s}/.cache/huggingface/token", .{home_path}) catch return AuthError.Unexpected;
             defer allocator.free(token_path);
 
-            const file = std.Io.File.openAbsolute(io_, token_path, .{ .mode = .read_only }) catch |err| switch (err) {
+            const file = std.Io.Dir.openFileAbsolute(base_io, token_path, .{ .mode = .read_only }) catch |err| switch (err) {
                 error.FileNotFound => return AuthError.MissingConfigFile,
-                else => |e| return e,
+                else => return AuthError.Unexpected,
             };
 
-            var reader = file.reader(io_, &.{});
-            const size = reader.getSize() catch unreachable;
+            var reader = file.reader(base_io, &.{});
+            const size = reader.getSize() catch return AuthError.Unexpected;
 
-            const token = try reader.interface.readAlloc(allocator, size);
+            const token = reader.interface.readAlloc(allocator, size) catch return AuthError.Unexpected;
             defer allocator.free(token);
 
-            return .{ .hf_token = try std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) };
+            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, "\n")}) catch return AuthError.Unexpected };
         }
     };
 
-    const HandleId = i32;
+    pub const Repo = struct {
+        repo: []const u8,
+        model: []const u8,
+        rev: []const u8,
+        path: []const u8,
 
-    pub const InitHandleError = error{
-        PathTooLong,
-        PathUnresolvable,
-        FailedToFetchRemoteResource,
-        MissingRessource,
-    } || std.mem.Allocator.Error;
+        pub fn parse(uri: []const u8) !Repo {
+            var parts = std.mem.splitScalar(u8, uri, '/');
+            var repo: Repo = .{
+                .repo = parts.first(),
+                .model = parts.next() orelse return error.InvalidURI,
+                .rev = "main",
+                .path = std.mem.trimEnd(u8, parts.rest(), "/"),
+            };
+            if (std.mem.findScalar(u8, repo.model, '@')) |at_index| {
+                repo.rev = repo.model[at_index + 1 ..];
+                repo.model = repo.model[0..at_index];
+            }
+            return repo;
+        }
 
-    pub const FileHandle = struct {
-        allocator: std.mem.Allocator,
+        fn toKey(self: Repo) RepoKey {
+            return .{ .repo = self.repo, .model = self.model, .rev = self.rev };
+        }
+    };
 
+    const Handle = struct {
+        pub const Type = enum {
+            file,
+            directory,
+        };
+
+        type: Type,
         uri: []const u8,
         pos: u64,
         size: u64,
-        redirect_buffer: [std.Io.Dir.max_path_bytes]u8 = undefined,
-        request: ?*std.http.Client.Request = null,
-        response: ?std.http.Client.Response = null,
-        body_reader: ?*std.Io.Reader = null,
 
-        total_requests: u64 = 0,
-        total_latency_ns: u64 = 0,
-        min_latency_ns: u64 = std.math.maxInt(u64),
-        max_latency_ns: u64 = 0,
-
-        pub fn deinit(self: *FileHandle) void {
-            self.releaseRequest();
-            self.allocator.free(self.uri);
-            self.allocator.destroy(self);
+        pub fn init(allocator: std.mem.Allocator, handle_type: Type, uri: []const u8, size: u64) !Handle {
+            return .{
+                .type = handle_type,
+                .uri = try allocator.dupe(u8, uri),
+                .pos = 0,
+                .size = size,
+            };
         }
 
-        pub fn releaseRequest(self: *FileHandle) void {
-            if (self.request) |req| {
-                req.deinit();
-                self.allocator.destroy(req);
-                self.request = null;
-                self.response = null;
-                self.body_reader = null;
-            }
-        }
-
-        pub fn recordLatency(self: *FileHandle, latency_ns: u64) void {
-            self.total_requests += 1;
-            self.total_latency_ns += latency_ns;
-            self.min_latency_ns = @min(self.min_latency_ns, latency_ns);
-            self.max_latency_ns = @max(self.max_latency_ns, latency_ns);
-        }
-
-        pub fn avgLatencyMs(self: *FileHandle) u64 {
-            if (self.total_requests == 0) return 0;
-            return (self.total_latency_ns / self.total_requests) / std.time.ns_per_ms;
+        pub fn deinit(self: *Handle, allocator: std.mem.Allocator) void {
+            allocator.free(self.uri);
         }
     };
 
-    pub const DirHandle = struct {
-        allocator: std.mem.Allocator,
-        uri: []const u8,
-        size: u64,
-
-        pub fn deinit(self: *DirHandle) void {
-            self.allocator.free(self.uri);
-            self.allocator.destroy(self);
-        }
-    };
-
-    pub const Config = struct {
+    const Config = struct {
+        http_client: *std.http.Client,
         auth: Auth = .none,
-        request_range_min: u64 = 8 * 1024,
-        request_range_max: u64 = 128 * 1024 * 1024,
-        hf_pagination_limit: usize = 100,
     };
 
     allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex,
-
-    file_handles: std.AutoHashMapUnmanaged(HandleId, *FileHandle),
-    dir_handles: std.AutoHashMapUnmanaged(HandleId, *DirHandle),
-    next_file_handle_id: HandleId,
-    next_dir_handle_id: HandleId,
-
-    hf_records: HFRecords,
-
+    mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
-    http_headers: []std.http.Header,
-    config: Config,
+    authorization: std.http.Client.Request.Headers.Value = .default,
+    handles: stdx.SegmentedList(Handle, 0),
+    closed_handles: std.ArrayList(u32) = .{},
+    base: VFSBase,
+    trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
+    dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
-    vtable: std.Io.VTable,
-
-    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, http_client: *std.http.Client, config: Config) std.mem.Allocator.Error!HF {
-        var self: HF = .{
-            .allocator = allocator,
-            .mutex = .init,
-            .file_handles = .{},
-            .dir_handles = .{},
-            .next_file_handle_id = 0,
-            .next_dir_handle_id = 0,
-            .hf_records = .init(allocator),
-            .client = http_client,
-            .http_headers = try allocator.alloc(std.http.Header, 2),
-            .config = config,
-            .vtable = makeVTable(base_io),
+    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, config: Config) !HF {
+        var handles: stdx.SegmentedList(Handle, 0) = .{};
+        // cwd
+        const handle = try handles.addOne(allocator);
+        handle.* = .{
+            .type = .directory,
+            .uri = "",
+            .pos = 0,
+            .size = 0,
         };
 
-        switch (self.config.auth) {
+        var hf: HF = .{
+            .allocator = allocator,
+            .handles = handles,
+            .base = .init(base_io),
+            .client = config.http_client,
+        };
+
+        switch (config.auth) {
             .hf_token => |token| {
-                self.http_headers[0] = .{ .name = "Authorization", .value = token };
+                hf.authorization = .{ .override = token };
             },
-            else => {},
+            .none => {},
         }
 
-        return self;
+        return hf;
     }
 
     pub fn deinit(self: *HF) void {
-        var file_it = self.file_handles.valueIterator();
-        while (file_it.next()) |handle_ptr| {
-            handle_ptr.*.deinit();
-        }
-        self.file_handles.deinit(self.allocator);
+        var idx: usize = 0;
+        while (idx < self.handles.len) : (idx += 1) {
+            const is_closed = for (self.closed_handles.items) |closed_idx| {
+                if (closed_idx == idx) break true;
+            } else false;
 
-        var dir_it = self.dir_handles.valueIterator();
-        while (dir_it.next()) |handle_ptr| {
-            handle_ptr.*.deinit();
+            if (!is_closed) {
+                self.handles.at(idx).deinit(self.allocator);
+            }
         }
-        self.dir_handles.deinit(self.allocator);
-        self.hf_records.deinit();
-        self.allocator.free(self.http_headers);
+        self.handles.deinit(self.allocator);
+        self.closed_handles.deinit(self.allocator);
+
+        var it = self.trees.iterator();
+        while (it.next()) |entry| {
+            for (entry.value_ptr.items) |*node| {
+                node.deinit(self.allocator);
+            }
+            entry.value_ptr.deinit(self.allocator);
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.trees.deinit(self.allocator);
+        self.dir_read_states.deinit(self.allocator);
     }
 
     pub fn io(self: *HF) std.Io {
         return .{
-            .vtable = &self.vtable,
-            .userdata = self,
+            .userdata = &self.base,
+            .vtable = &comptime VFSBase.vtable(.{
+                .dirOpenDir = dirOpenDir,
+                .dirStat = dirStat,
+                .dirStatFile = dirStatFile,
+                .dirAccess = dirAccess,
+                .dirOpenFile = dirOpenFile,
+                .dirClose = dirClose,
+                .dirRead = dirRead,
+                .dirRealPath = dirRealPath,
+                .dirRealPathFile = dirRealPathFile,
+                .fileStat = fileStat,
+                .fileLength = fileLength,
+                .fileClose = fileClose,
+                .fileReadStreaming = fileReadStreaming,
+                .fileReadPositional = fileReadPositional,
+                .fileSeekBy = fileSeekBy,
+                .fileSeekTo = fileSeekTo,
+                .fileRealPath = fileRealPath,
+            }),
         };
     }
 
-    const URIKind = union(enum) {
-        dir,
-        file,
-    };
+    fn openHandle(self: *HF) !struct { u32, *Handle } {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
 
-    fn resolveUri(self: *HF, parent_path: []const u8, sub_path: []const u8, kind: URIKind) InitHandleError![]const u8 {
-        if (std.mem.startsWith(u8, sub_path, "hf://")) {
-            if (kind == .dir and !std.mem.endsWith(u8, sub_path, "/")) {
-                return std.fmt.allocPrint(self.allocator, "{s}/", .{sub_path});
-            } else {
-                return try self.allocator.dupe(u8, sub_path);
-            }
+        if (self.closed_handles.pop()) |idx| {
+            return .{ idx, self.handles.at(idx) };
         }
-
-        const base_uri = std.Uri.parse(parent_path) catch return InitHandleError.PathUnresolvable;
-        var aux_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-
-        if (sub_path.len > aux_buf.len) return InitHandleError.PathTooLong;
-
-        @memcpy(aux_buf[0..sub_path.len], sub_path);
-        var aux_slice: []u8 = aux_buf[0..];
-        const resolved = std.Uri.resolveInPlace(base_uri, sub_path.len, &aux_slice) catch return InitHandleError.PathUnresolvable;
-        if (kind == .dir and !std.mem.endsWith(u8, resolved.path.percent_encoded, "/")) {
-            return std.fmt.allocPrint(self.allocator, "{f}/", .{resolved.fmt(.{
-                .scheme = true,
-                .authority = true,
-                .path = true,
-                .query = false,
-                .fragment = false,
-            })});
-        } else {
-            return std.fmt.allocPrint(self.allocator, "{f}", .{resolved.fmt(.{
-                .scheme = true,
-                .authority = true,
-                .path = true,
-                .query = false,
-                .fragment = false,
-            })});
-        }
+        const len: u32 = @intCast(self.handles.len);
+        return .{ len, try self.handles.addOne(self.allocator) };
     }
 
-    fn fetchHFRecordsIfNeeded(
-        self: *HF,
-        uri: []const u8,
-    ) HFRecords.Error!void {
-        var extra_headers: []std.http.Header = &.{};
-        switch (self.config.auth) {
-            .hf_token => |_| {
-                extra_headers = self.http_headers[0..1];
-            },
-            else => {},
-        }
+    fn closeHandle(self: *HF, idx: u32) !void {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
 
-        if (!self.hf_records.containsPathPrefix(uri)) {
-            log.debug("Fetching HF records for URI {s}", .{uri});
-            try self.hf_records.fetch(self.client, self.config.hf_pagination_limit, extra_headers, uri, null);
-        }
+        self.handles.at(idx).deinit(self.allocator);
+        try self.closed_handles.append(self.allocator, idx);
     }
 
-    fn dirSize(self: *HF, uri: []const u8) HFApi.Error!u64 {
-        var extra_headers: []std.http.Header = &.{};
-        switch (self.config.auth) {
-            .hf_token => |_| {
-                extra_headers = self.http_headers[0..1];
-            },
-            else => {},
-        }
-
-        if (HFApi.isModelPath(uri)) {
-            const model_size = HFApi.fetchModelSize(
-                self.allocator,
-                self.client,
-                extra_headers,
-                uri,
-            ) catch |err| {
-                log.err("Failed to fetch model size for dirSize with URI {s}", .{uri});
-                return err;
-            };
-            defer model_size.deinit();
-
-            return model_size.value.size;
-        } else {
-            const entry = self.hf_records.get(uri) orelse {
-                log.err("Directory path not found in repo tree entries with URI {s}", .{uri});
-                return HFApi.Error.ResponseParsingFailed;
-            };
-
-            return entry.size;
-        }
+    fn getFileHandle(self: *HF, file: std.Io.File) *Handle {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+        return self.handles.at(@intCast(file.handle));
     }
 
-    fn initFileHandle(
-        self: *HF,
-        dir: DirHandle,
-        sub_path: []const u8,
-    ) InitHandleError!*FileHandle {
-        const handle = try self.allocator.create(FileHandle);
-        errdefer self.allocator.destroy(handle);
-
-        const uri = try self.resolveUri(dir.uri, sub_path, .file);
-        errdefer self.allocator.free(uri);
-
-        self.fetchHFRecordsIfNeeded(uri) catch {
-            log.err("Failed to fetch records in dirOpenFile for URI {s}", .{uri});
-            return InitHandleError.FailedToFetchRemoteResource;
-        };
-
-        const entry = self.hf_records.get(uri) orelse {
-            log.err("Directory path not found in repo tree entries with URI {s}", .{uri});
-            return InitHandleError.MissingRessource;
-        };
-
-        handle.* = .{
-            .allocator = self.allocator,
-            .uri = uri,
-            .pos = 0,
-            .size = entry.size,
-        };
-
-        return handle;
+    fn getDirHandle(self: *HF, dir: std.Io.Dir) *Handle {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+        return self.handles.at(@intCast(dir.handle));
     }
 
-    fn registerFileHandle(self: *HF, handle: *FileHandle) std.mem.Allocator.Error!HandleId {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
-        const handle_id = self.next_file_handle_id;
-        self.next_file_handle_id += 1;
-
-        try self.file_handles.put(self.allocator, handle_id, handle);
-
-        return handle_id;
-    }
-
-    fn fileHandle(self: *HF, file: std.Io.File) ?*FileHandle {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
-        return self.file_handles.get(file.handle);
-    }
-
-    fn initDirHandle(
-        self: *HF,
-        parent_path: []const u8,
-        sub_path: []const u8,
-    ) InitHandleError!*DirHandle {
-        const dir_handle = try self.allocator.create(DirHandle);
-        errdefer self.allocator.destroy(dir_handle);
-
-        const uri = try self.resolveUri(parent_path, sub_path, .dir);
-        errdefer self.allocator.free(uri);
-
-        self.fetchHFRecordsIfNeeded(uri) catch {
-            log.err("Failed to fetch HF records in dirOpenFile for URI {s}", .{uri});
-            return InitHandleError.FailedToFetchRemoteResource;
-        };
-
-        const dir_size = self.dirSize(uri) catch {
-            log.err("Failed to get directory size in dirOpenFile for URI {s}", .{uri});
-            return InitHandleError.FailedToFetchRemoteResource;
-        };
-
-        dir_handle.* = .{
-            .allocator = self.allocator,
-            .uri = uri,
-            .size = dir_size,
-        };
-
-        return dir_handle;
-    }
-
-    fn registerDirHandle(self: *HF, handle: *DirHandle) std.mem.Allocator.Error!HandleId {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
-        const handle_id = self.next_dir_handle_id;
-        self.next_dir_handle_id += 1;
-
-        try self.dir_handles.put(self.allocator, handle_id, handle);
-
-        return handle_id;
-    }
-
-    fn dirHandle(self: *HF, dir: std.Io.Dir) ?DirHandle {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
+    fn resolvePath(self: *HF, dir: std.Io.Dir, sub_path: []const u8, out_buffer: []u8) ![]u8 {
         if (std.meta.eql(dir, std.Io.Dir.cwd())) {
-            return .{
-                .allocator = self.allocator,
-                .uri = "",
-                .size = 0,
-            };
+            return try std.fmt.bufPrint(out_buffer, "{s}", .{sub_path});
         }
 
-        if (self.dir_handles.get(dir.handle)) |handle_ptr| {
-            return handle_ptr.*;
-        } else {
-            return null;
-        }
+        const handle = self.getDirHandle(dir);
+
+        const trimmed_uri = std.mem.trimEnd(u8, handle.uri, "/");
+        const trimmed_sub_path = std.mem.trimStart(u8, sub_path, "/");
+
+        if (trimmed_uri.len == 0) return try std.fmt.bufPrint(out_buffer, "{s}", .{trimmed_sub_path});
+        if (trimmed_sub_path.len == 0) return try std.fmt.bufPrint(out_buffer, "{s}", .{trimmed_uri});
+        return try std.fmt.bufPrint(out_buffer, "{s}/{s}", .{ trimmed_uri, trimmed_sub_path });
     }
 
-    fn openFile(
-        self: *HF,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-    ) std.Io.File.OpenError!std.Io.File {
-        const dir_handle = self.dirHandle(dir) orelse {
-            log.warn("Directory handle not found for dirOpenFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
-            return std.Io.File.OpenError.FileNotFound;
-        };
+    fn getOrFetchTree(self: *HF, repo: Repo) !*std.ArrayList(TreeNode) {
+        const key = repo.toKey();
 
-        const handle = self.initFileHandle(dir_handle, sub_path) catch {
-            log.warn("Failed to init FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
-            return std.Io.File.OpenError.SystemResources;
-        };
+        var cache_key_buffer: [512]u8 = undefined;
 
-        const handle_id = self.registerFileHandle(handle) catch {
-            log.warn("Failed to register FileHandle in openFile with dir={any} sub_path={s}", .{ dir.handle, sub_path });
-            return std.Io.File.OpenError.SystemResources;
-        };
+        const cache_key_lookup = try key.format(&cache_key_buffer);
 
-        return .{ .handle = @intCast(handle_id) };
-    }
+        if (self.trees.getPtr(cache_key_lookup)) |tree_ptr| return tree_ptr;
 
-    fn openDir(
-        self: *HF,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-    ) std.Io.Dir.OpenError!std.Io.Dir {
-        const dir_handle = self.dirHandle(dir) orelse {
-            log.warn("Directory handle not found for dirOpenFile", .{});
-            return std.Io.Dir.OpenError.FileNotFound;
-        };
+        const cache_key = try key.allocFormat(self.allocator);
+        errdefer self.allocator.free(cache_key);
 
-        const handle = self.initDirHandle(dir_handle.uri, sub_path) catch {
-            log.warn("Failed to init DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
-            return std.Io.Dir.OpenError.SystemResources;
-        };
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
 
-        const handle_id = self.registerDirHandle(handle) catch {
-            log.warn("Failed to register DirHandle in openDir with dir={any} sub_path={s}", .{ dir.handle, sub_path });
-            return std.Io.Dir.OpenError.SystemResources;
-        };
+        const gop = try self.trees.getOrPut(self.allocator, cache_key);
+        errdefer _ = self.trees.remove(cache_key);
 
-        return .{ .handle = @intCast(handle_id) };
-    }
-
-    fn closeDir(self: *HF, dir: std.Io.Dir) void {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
-        const handle_kv = self.dir_handles.fetchRemove(dir.handle) orelse {
-            log.warn("Attempted to close non-existent dir handle: {d}", .{dir.handle});
-            return;
-        };
-
-        handle_kv.value.deinit();
-    }
-
-    fn closeFile(self: *HF, file: std.Io.File) void {
-        self.mutex.lockUncancelable(self.io());
-        defer self.mutex.unlock(self.io());
-
-        const handle_kv = self.file_handles.fetchRemove(file.handle) orelse {
-            log.warn("Attempted to close non-existent file handle: {d}", .{file.handle});
-            return;
-        };
-
-        handle_kv.value.deinit();
-    }
-
-    fn setAbsolutePos(self: *HF, file: std.Io.File, pos: u64) std.Io.File.SeekError!void {
-        const handle = self.fileHandle(file) orelse return std.Io.File.SeekError.Unexpected;
-        handle.releaseRequest();
-        handle.pos = pos;
-    }
-
-    fn setRelativeOffset(self: *HF, file: std.Io.File, offset: i64) std.Io.File.SeekError!void {
-        const handle = self.fileHandle(file) orelse return std.Io.File.SeekError.Unexpected;
-        handle.releaseRequest();
-
-        const new_pos = @as(i64, @intCast(handle.pos)) + offset;
-        handle.pos = @intCast(new_pos);
-    }
-
-    fn performPositionalRead(self: *HF, file: std.Io.File, data: [][]u8, offset: u64) std.Io.File.ReadPositionalError!usize {
-        const handle = self.fileHandle(file) orelse return std.Io.File.ReadPositionalError.Unexpected;
-
-        const saved_pos = handle.pos;
-
-        if (handle.pos != offset) {
-            handle.releaseRequest();
-            handle.pos = offset;
+        if (gop.found_existing) {
+            self.allocator.free(cache_key);
+            return gop.value_ptr;
         }
 
-        const bytes_read = try self.performRead(file, data);
+        const tree_root = try self.fetchTreeFromAPI(repo);
+        gop.value_ptr.* = tree_root;
 
-        handle.pos = saved_pos;
-        handle.releaseRequest();
-
-        return bytes_read;
+        return gop.value_ptr;
     }
 
-    fn performRead(self: *HF, file: std.Io.File, data: [][]u8) std.Io.File.Reader.Error!usize {
-        const handle = self.fileHandle(file) orelse {
-            log.err("Invalid file handle in VFS read", .{});
-            return std.Io.File.Reader.Error.Unexpected;
-        };
+    fn fetchTreeFromAPI(self: *HF, repo: Repo) !std.ArrayList(TreeNode) {
+        var url_buffer: [8 * 1024]u8 = undefined;
+        var redirect_buffer: [8 * 1024]u8 = undefined;
 
-        if (data.len == 0) return 0;
-
-        var total_read: usize = 0;
-
-        for (data) |buf| {
-            var offset: usize = 0;
-
-            while (offset < buf.len) {
-                // Check EOF against known file size
-                if (handle.pos >= handle.size) {
-                    return total_read;
-                }
-
-                const start = handle.pos;
-                var desired_read_len: u64 = @max(@as(u64, @intCast(buf.len)), self.config.request_range_min);
-                if (desired_read_len > self.config.request_range_max) desired_read_len = self.config.request_range_max;
-
-                const end = if (handle.size > 0 and start < handle.size) @min(start + desired_read_len - 1, handle.size - 1) else start + desired_read_len - 1;
-
-                try self.requestRead(file, start, end);
-                const reader = handle.body_reader.?;
-
-                const dest = buf[offset..];
-                var iov = [_][]u8{dest};
-
-                const n = reader.readVec(&iov) catch |err| switch (err) {
-                    error.EndOfStream => {
-                        log.debug("Reached EndOfStream for handle={d} pos={d}, will re-request remaining", .{ file.handle, handle.pos });
-                        handle.releaseRequest();
-                        continue;
-                    },
-                    else => {
-                        return std.Io.File.Reader.Error.Unexpected;
-                    },
-                };
-
-                offset += n;
-                handle.pos += n;
-                total_read += n;
-            }
-        }
-        return total_read;
-    }
-
-    fn requestRead(self: *HF, file: std.Io.File, start: u64, end: u64) std.Io.File.Reader.Error!void {
-        const handle = self.fileHandle(file) orelse return std.Io.File.Reader.Error.Unexpected;
-
-        if (handle.request) |_| return;
-
-        std.debug.assert(start <= end);
-
-        var range_buf: [64]u8 = undefined;
-        const range_header = std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ start, end }) catch unreachable;
-
-        var timer = std.time.Timer.start() catch {
-            log.err("Failed to start timer for request", .{});
-            return std.Io.File.Reader.Error.SystemResources;
-        };
-
-        const request = self.allocator.create(std.http.Client.Request) catch {
-            log.err("Failed to allocate request", .{});
-            return std.Io.File.Reader.Error.SystemResources;
-        };
-        errdefer self.allocator.destroy(request);
-
-        var url_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-
-        const path = HFApi.filePathFromUri(handle.uri) catch |err| {
-            log.err("Failed to extract file path from URI {s}: {}", .{ handle.uri, err });
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-
-        const api_url = blk: {
-            const model = HFApi.modelFromUri(handle.uri) catch |err| {
-                log.err("Failed to parse model from URI {s}: {}", .{ handle.uri, err });
-                return std.Io.File.Reader.Error.Unexpected;
-            };
-            const rev = model.revision orelse blk_: {
-                log.debug("No revision specified in repo URI; defaulting to 'main'", .{});
-                break :blk_ "main";
-            };
-
-            break :blk std.fmt.bufPrint(
-                &url_buf,
-                "https://huggingface.co/{s}/{s}/resolve/{s}/{s}",
-                .{ model.namespace, model.repo, rev, path },
-            ) catch {
-                log.err("Failed to format HF repo tree API URL for repo URI {s}", .{handle.uri});
-                return std.Io.File.Reader.Error.SystemResources;
-            };
-        };
-
-        const api_uri = std.Uri.parse(api_url) catch {
-            log.err("Failed to parse URL during read request", .{});
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-
-        self.http_headers[1] = .{ .name = "Range", .value = range_header };
-
-        var extra_headers: []std.http.Header = &.{};
-        switch (self.config.auth) {
-            .hf_token => |_| {
-                extra_headers = self.http_headers[0..2];
-            },
-            else => {
-                extra_headers = self.http_headers[1..2];
-            },
-        }
-
-        request.* = self.client.request(.GET, api_uri, .{
-            .headers = .{ .accept_encoding = .{ .override = "identity" } },
-            .extra_headers = extra_headers,
-        }) catch |err| {
-            log.err("Failed to create GET request: {}", .{err});
-            return std.Io.File.Reader.Error.SystemResources;
-        };
-        errdefer request.deinit();
-
-        request.sendBodiless() catch |err| {
-            log.err("Failed to send GET request: {}", .{err});
-            return std.Io.File.Reader.Error.SystemResources;
-        };
-
-        const response = request.receiveHead(&handle.redirect_buffer) catch {
-            log.err("Failed to receive header response for URL {s} ", .{api_url});
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-
-        const latency = timer.read();
-        handle.recordLatency(latency);
-
-        log.debug("GET call: handle={d} status={s} content_length={?} range={d}-{d} ({d}) latency={d}ms avg={d}ms min={d}ms max={d}ms for {s}", .{
-            file.handle,
-            @tagName(response.head.status),
-            response.head.content_length,
-            start,
-            end,
-            end - start + 1,
-            latency / std.time.ns_per_ms,
-            handle.avgLatencyMs(),
-            handle.min_latency_ns / std.time.ns_per_ms,
-            handle.max_latency_ns / std.time.ns_per_ms,
-            api_url,
+        const url = try std.fmt.bufPrint(&url_buffer, API.TREE_URL_TEMPLATE, .{
+            .repo = repo.repo,
+            .model = repo.model,
+            .rev = repo.rev,
+            .path = "",
         });
+        const uri = try std.Uri.parse(url);
 
-        if (response.head.status != .partial_content and response.head.status != .ok) {
-            log.err("Unexpected HTTP status ({s}) for GET {s}", .{ @tagName(response.head.status), api_url });
-            var it = response.head.iterateHeaders();
-            while (it.next()) |hdr| {
-                log.err("Header: {s}: {s}", .{ hdr.name, hdr.value });
+        var req = try self.client.request(.GET, uri, .{
+            .headers = .{ .authorization = self.authorization },
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var res = try req.receiveHead(&redirect_buffer);
+
+        if (res.head.status != .ok) {
+            log.err("Failed to fetch tree: status={}", .{res.head.status});
+            return error.RequestFailed;
+        }
+
+        const body = try res.reader(&.{}).readAlloc(self.allocator, res.head.content_length.?);
+        defer self.allocator.free(body);
+
+        const parsed = try std.json.parseFromSlice(
+            []API.Tree,
+            self.allocator,
+            body,
+            .{ .ignore_unknown_fields = true },
+        );
+        defer parsed.deinit();
+
+        var tree_root: std.ArrayList(TreeNode) = .{};
+        for (parsed.value) |item| {
+            try insertTreeNode(self.allocator, &tree_root, item);
+        }
+
+        return tree_root;
+    }
+
+    fn findDirChildren(tree_items: []const TreeNode, dir_path: []const u8) ?[]const TreeNode {
+        if (dir_path.len == 0) {
+            return tree_items;
+        }
+
+        var parts = std.mem.tokenizeScalar(u8, dir_path, '/');
+        var current = tree_items;
+
+        while (parts.next()) |part| {
+            var found: ?*const TreeNode = null;
+            for (current) |*node| {
+                if (std.mem.eql(u8, node.name, part)) {
+                    found = node;
+                    break;
+                }
             }
 
-            if (response.head.status == .unauthorized) {
-                return std.Io.File.Reader.Error.AccessDenied;
+            if (found) |node| {
+                if (node.children) |children| {
+                    current = children.items;
+                } else {
+                    return null;
+                }
             } else {
-                return std.Io.File.Reader.Error.Unexpected;
+                return null;
             }
         }
 
-        handle.request = request;
-        handle.response = response;
-        handle.body_reader = handle.response.?.reader(&.{});
+        return current;
     }
 
-    fn makeVTable(base_io: std.Io) std.Io.VTable {
-        var vtable = base_io.vtable.*;
-        vtable.dirMake = dirMake;
-        vtable.dirMakePath = dirMakePath;
-        vtable.dirMakeOpenPath = dirMakeOpenPath;
-        vtable.dirStat = dirStat;
-        vtable.dirStatPath = dirStatPath;
-        vtable.dirAccess = dirAccess;
-        vtable.dirCreateFile = dirCreateFile;
-        vtable.dirOpenFile = dirOpenFile;
-        vtable.dirOpenDir = dirOpenDir;
-        vtable.dirClose = dirClose;
-        vtable.fileStat = fileStat;
-        vtable.fileClose = fileClose;
-        vtable.fileWriteStreaming = fileWriteStreaming;
-        vtable.fileWritePositional = fileWritePositional;
-        vtable.fileReadStreaming = fileReadStreaming;
-        vtable.fileReadPositional = fileReadPositional;
-        vtable.fileSeekBy = fileSeekBy;
-        vtable.fileSeekTo = fileSeekTo;
-        vtable.openSelfExe = openSelfExe;
+    fn findNode(tree_items: []const TreeNode, path: []const u8) ?*const TreeNode {
+        if (path.len == 0) return null;
 
-        return vtable;
-    }
+        var parts = std.mem.tokenizeScalar(u8, path, '/');
+        var current = tree_items;
 
-    fn dirMake(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        mode: std.Io.Dir.Mode,
-    ) std.Io.Dir.MakeError!void {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-        _ = mode;
-        log.err("VFS is read-only, dirMake not supported", .{});
-        return std.Io.Dir.MakeError.ReadOnlyFileSystem;
-    }
+        while (parts.next()) |part| {
+            const is_last = parts.peek() == null;
 
-    fn dirMakePath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        mode: std.Io.Dir.Mode,
-    ) std.Io.Dir.MakeError!void {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-        _ = mode;
-        log.err("VFS is read-only, dirMakePath not supported", .{});
-        return std.Io.Dir.MakeError.ReadOnlyFileSystem;
-    }
+            var found: ?*const TreeNode = null;
+            for (current) |*node| {
+                if (std.mem.eql(u8, node.name, part)) {
+                    found = node;
+                    break;
+                }
+            }
 
-    fn dirMakeOpenPath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.OpenOptions,
-    ) std.Io.Dir.MakeOpenPathError!std.Io.Dir {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-        _ = options;
-        log.err("VFS is read-only, dirMakeOpenPath not supported", .{});
-        return std.Io.Dir.MakeOpenPathError.Unexpected;
-    }
-
-    fn dirStat(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-    ) std.Io.Dir.StatError!std.Io.Dir.Stat {
-        _ = userdata;
-        _ = dir;
-        log.err("VFS does not support dirStat", .{});
-        return std.Io.Dir.StatError.AccessDenied;
-    }
-
-    fn dirStatPath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.StatPathOptions,
-    ) std.Io.Dir.StatPathError!std.Io.File.Stat {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-        _ = options;
-        @panic("TODO: implement VFS dirStatPath");
-    }
-
-    fn dirAccess(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.AccessOptions,
-    ) std.Io.Dir.AccessError!void {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-
-        if (options.write) {
-            return std.Io.Dir.AccessError.ReadOnlyFileSystem;
+            if (found) |node| {
+                if (is_last) return node;
+                if (node.children) |children| {
+                    current = children.items;
+                } else {
+                    return null;
+                }
+            } else {
+                return null;
+            }
         }
 
-        log.err("VFS does not support dirAccess", .{});
-        return std.Io.Dir.AccessError.AccessDenied;
+        return null;
     }
 
-    fn dirCreateFile(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        flags: std.Io.File.CreateFlags,
-    ) std.Io.File.OpenError!std.Io.File {
-        _ = userdata;
-        _ = dir;
-        _ = sub_path;
-        _ = flags;
-        log.err("VFS is read-only, dirCreateFile not supported", .{});
-        return std.Io.File.OpenError.Unexpected;
+    fn getSizeFromTree(tree: *std.ArrayList(TreeNode), path: []const u8) ?u64 {
+        if (path.len == 0) {
+            var total: u64 = 0;
+            for (tree.items) |*node| {
+                if (node.kind == .file) total += node.size;
+            }
+            return total;
+        }
+
+        const node = findNode(tree.items, path) orelse return null;
+        return node.size;
     }
 
-    fn dirOpenFile(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        flags: std.Io.File.OpenFlags,
-    ) std.Io.File.OpenError!std.Io.File {
-        _ = flags;
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        return try self.openFile(dir, sub_path);
+    fn insertTreeNode(allocator: std.mem.Allocator, root: *std.ArrayList(TreeNode), item: API.Tree) !void {
+        var parts = std.mem.tokenizeScalar(u8, item.path, '/');
+        var current_list = root;
+
+        var parents: std.ArrayList(*TreeNode) = .{};
+        defer parents.deinit(allocator);
+
+        while (true) {
+            const part = parts.next() orelse break;
+            const is_last = parts.peek() == null;
+
+            var found: ?*TreeNode = null;
+            for (current_list.items) |*node| {
+                if (std.mem.eql(u8, node.name, part)) {
+                    found = node;
+                    break;
+                }
+            }
+
+            if (found) |f| {
+                if (!is_last) {
+                    try parents.append(allocator, f);
+                    if (f.children == null) {
+                        f.children = .{};
+                    }
+                    current_list = &f.children.?;
+                } else if (std.mem.eql(u8, item.type, "file")) {
+                    f.size = item.size;
+                }
+            } else {
+                const is_file = is_last and std.mem.eql(u8, item.type, "file");
+                const new_node: TreeNode = .{
+                    .name = try allocator.dupe(u8, part),
+                    .kind = if (is_file) .file else .directory,
+                    .size = if (is_last) item.size else 0,
+                    .children = if (is_file) null else .{},
+                };
+                try current_list.append(allocator, new_node);
+
+                if (!is_last) {
+                    const new_node_ptr = &current_list.items[current_list.items.len - 1];
+                    try parents.append(allocator, new_node_ptr);
+                    current_list = &new_node_ptr.children.?;
+                }
+            }
+        }
+
+        for (parents.items) |parent| {
+            parent.size += item.size;
+        }
     }
 
-    fn dirOpenDir(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.OpenOptions,
-    ) std.Io.Dir.OpenError!std.Io.Dir {
-        _ = options;
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        return try self.openDir(dir, sub_path);
+    fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.OpenError.SystemResources;
+
+        const repo = Repo.parse(full_path) catch return std.Io.Dir.OpenError.BadPathName;
+        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.OpenError.Unexpected;
+        const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.OpenError.FileNotFound;
+
+        const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
+        handle.* = Handle.init(self.allocator, .directory, full_path, size) catch return std.Io.Dir.OpenError.Unexpected;
+
+        return .{ .handle = @intCast(idx) };
     }
 
-    fn dirClose(userdata: ?*anyopaque, dir: std.Io.Dir) void {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        self.closeDir(dir);
-    }
+    fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getDirHandle(dir);
 
-    fn fileStat(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-    ) std.Io.File.StatError!std.Io.File.Stat {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        const handle = self.fileHandle(file) orelse {
-            log.err("Invalid file handle in VFS stat", .{});
-            return std.Io.File.StatError.Unexpected;
+        return .{
+            .inode = @intCast(dir.handle),
+            .nlink = 0,
+            .size = handle.size,
+            .permissions = .fromMode(0o444),
+            .kind = .directory,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
         };
+    }
+
+    fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.StatFileError.SystemResources;
+
+        const repo = Repo.parse(full_path) catch return std.Io.Dir.StatFileError.Unexpected;
+        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.StatFileError.Unexpected;
+        const node = findNode(tree.items, repo.path) orelse return std.Io.Dir.StatFileError.IsDir;
+
+        if (node.kind == .directory) return std.Io.Dir.StatFileError.IsDir;
+        const size = getSizeFromTree(tree, repo.path) orelse return std.Io.Dir.StatFileError.FileNotFound;
+
+        return .{
+            .inode = @intCast(0),
+            .nlink = 0,
+            .size = size,
+            .permissions = .fromMode(0o444),
+            .kind = .file,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
+        };
+    }
+
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.Dir.AccessError.SystemResources;
+
+        const repo = Repo.parse(full_path) catch return std.Io.Dir.AccessError.FileNotFound;
+        const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.AccessError.Unexpected;
+
+        if (repo.path.len == 0) return;
+
+        const node = findNode(tree.items, repo.path);
+        if (node == null) return std.Io.Dir.AccessError.FileNotFound;
+    }
+
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        var path_buffer: [8 * 1024]u8 = undefined;
+        const full_path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
+
+        const repo = Repo.parse(full_path) catch return std.Io.File.OpenError.BadPathName;
+        const tree = self.getOrFetchTree(repo) catch return std.Io.File.OpenError.Unexpected;
+        const size = getSizeFromTree(tree, repo.path) orelse return std.Io.File.OpenError.FileNotFound;
+
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
+
+        return .{ .handle = @intCast(idx) };
+    }
+
+    fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        for (dirs) |d| {
+            self.closeHandle(@intCast(d.handle)) catch {};
+        }
+    }
+
+    fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        if (reader.state == .finished) return 0;
+
+        if (reader.state == .reset) {
+            _ = self.dir_read_states.remove(reader);
+
+            const handle = self.getDirHandle(reader.dir);
+            const repo = Repo.parse(handle.uri) catch return std.Io.Dir.Reader.Error.Unexpected;
+            const tree = self.getOrFetchTree(repo) catch return std.Io.Dir.Reader.Error.Unexpected;
+
+            const children = findDirChildren(tree.items, repo.path) orelse &.{};
+
+            self.dir_read_states.put(self.allocator, reader, .{
+                .children = children,
+                .index = 0,
+            }) catch return std.Io.Dir.Reader.Error.Unexpected;
+
+            reader.state = if (children.len > 0) .reading else .finished;
+            if (children.len == 0) return 0;
+        }
+
+        const state = self.dir_read_states.getPtr(reader) orelse return std.Io.Dir.Reader.Error.Unexpected;
+
+        var count: usize = 0;
+        while (count < entries.len and state.index < state.children.len) {
+            const node = &state.children[state.index];
+            entries[count] = .{
+                .name = node.name,
+                .kind = node.kind,
+                .inode = state.index,
+            };
+            count += 1;
+            state.index += 1;
+        }
+
+        if (state.index >= state.children.len) {
+            reader.state = .finished;
+            _ = self.dir_read_states.remove(reader);
+        }
+
+        return count;
+    }
+
+    fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getDirHandle(dir);
+        const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.Dir.RealPathError.SystemResources;
+        return path.len;
+    }
+
+    fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const real_path = self.resolvePath(dir, path_name, out_buffer) catch return std.Io.Dir.RealPathFileError.NameTooLong;
+        return real_path.len;
+    }
+
+    fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
 
         return .{
             .inode = @intCast(file.handle),
-            .kind = .file,
+            .nlink = 0,
             .size = handle.size,
-            .mode = 0o444,
-            .atime = .{ .nanoseconds = 0 },
-            .mtime = .{ .nanoseconds = 0 },
-            .ctime = .{ .nanoseconds = 0 },
+            .permissions = .fromMode(0o444),
+            .kind = .file,
+            .atime = null,
+            .mtime = std.Io.Timestamp.zero,
+            .ctime = std.Io.Timestamp.zero,
         };
     }
 
-    fn fileClose(userdata: ?*anyopaque, file: std.Io.File) void {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        self.closeFile(file);
+    fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.getFileHandle(file).size;
     }
 
-    fn fileWriteStreaming(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        buffer: [][]const u8,
-    ) std.Io.File.WriteStreamingError!usize {
-        _ = userdata;
-        _ = file;
-        _ = buffer;
-        log.err("VFS is read-only, fileWriteStreaming not supported", .{});
-        return std.Io.File.WriteStreamingError.Unexpected;
+    fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        for (files) |file| {
+            self.closeHandle(@intCast(file.handle)) catch unreachable;
+        }
     }
 
-    fn fileWritePositional(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        buffer: [][]const u8,
-        offset: u64,
-    ) std.Io.File.WritePositionalError!usize {
-        _ = userdata;
-        _ = file;
-        _ = buffer;
-        _ = offset;
-        log.err("VFS is read-only, fileWritePositional not supported", .{});
-        return std.Io.File.WritePositionalError.Unexpected;
+    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const total = self.performRead(handle, data, handle.pos) catch |err| {
+            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+            return std.Io.File.Reader.Error.Unexpected;
+        };
+        handle.pos += @intCast(total);
+        return total;
     }
 
-    fn fileReadStreaming(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        data: [][]u8,
-    ) std.Io.File.Reader.Error!usize {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        return try self.performRead(file, data);
+    fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        return self.performRead(handle, data, offset) catch |err| {
+            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
+            return std.Io.File.Reader.Error.Unexpected;
+        };
     }
 
-    fn fileReadPositional(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        data: [][]u8,
-        offset: u64,
-    ) std.Io.File.ReadPositionalError!usize {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        return try self.performPositionalRead(file, data, offset);
+    fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+
+        handle.pos = if (relative_offset >= 0)
+            handle.pos + @as(u64, @intCast(relative_offset))
+        else
+            handle.pos - @as(u64, @intCast(-relative_offset));
     }
 
-    fn fileSeekBy(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        relative_offset: i64,
-    ) std.Io.File.SeekError!void {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        try self.setRelativeOffset(file, relative_offset);
+    fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        handle.pos = absolute_offset;
     }
 
-    fn fileSeekTo(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        absolute_offset: u64,
-    ) std.Io.File.SeekError!void {
-        const self: *HF = @ptrCast(@alignCast(userdata orelse unreachable));
-        try self.setAbsolutePos(file, absolute_offset);
+    fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const path = std.fmt.bufPrint(out_buffer, "{s}", .{handle.uri}) catch return std.Io.File.RealPathError.SystemResources;
+        return path.len;
     }
 
-    fn openSelfExe(
-        userdata: ?*anyopaque,
-        flags: std.Io.File.OpenFlags,
-    ) std.Io.File.OpenSelfExeError!std.Io.File {
-        _ = userdata;
-        _ = flags;
-        log.err("VFS does not support openSelfExe", .{});
-        return std.Io.File.OpenSelfExeError.NotSupported;
+    fn performRead(self: *HF, handle: *Handle, data: []const []u8, offset: u64) !usize {
+        if (offset >= handle.size) return 0;
+
+        var range_buf: [64]u8 = undefined;
+        const range_header = blk: {
+            var total_bytes: u64 = 0;
+            for (data) |buf| {
+                total_bytes += @as(u64, buf.len);
+            }
+            const remaining = handle.size - offset;
+            const take = @min(remaining, total_bytes);
+            const end = offset + take - 1;
+            break :blk std.fmt.bufPrint(&range_buf, "bytes={d}-{d}", .{ offset, end }) catch unreachable;
+        };
+
+        const repo: Repo = try .parse(handle.uri);
+        var url_buffer: [8 * 1024]u8 = undefined;
+        const url: []const u8 = try std.fmt.bufPrint(&url_buffer, API.LFS_FILE_URL_TEMPLATE, repo);
+
+        const uri: std.Uri = try .parse(url);
+        var req = try self.client.request(.GET, uri, .{
+            .headers = .{ .authorization = self.authorization },
+            .extra_headers = &.{.{ .name = "Range", .value = range_header }},
+        });
+        defer req.deinit();
+
+        try req.sendBodiless();
+
+        var redirect_buffer: [8 * 1024]u8 = undefined;
+        var res = try req.receiveHead(&redirect_buffer);
+
+        if (res.head.status != .partial_content) {
+            log.err("Failed to perform read for {s}", .{url});
+            log.err("{s}", .{res.head.bytes});
+            return error.RequestFailed;
+        }
+
+        const content_range = blk: {
+            var it = res.head.iterateHeaders();
+            while (it.next()) |header| {
+                if (std.ascii.eqlIgnoreCase(header.name, "Content-Range")) {
+                    break :blk parseContentRange(header.value);
+                }
+            }
+            break :blk null;
+        };
+
+        const reader = res.reader(&.{});
+
+        if (content_range) |cr| {
+            if (cr.start < offset) {
+                try reader.discardAll(offset - cr.start);
+            }
+        }
+
+        return try reader.readSliceShort(data[0]);
+    }
+
+    const ContentRange = struct {
+        start: u64,
+        end: u64,
+        total: u64,
+    };
+
+    fn parseContentRange(value: []const u8) ?ContentRange {
+        const space = std.mem.indexOfScalar(u8, value, ' ') orelse return null;
+        const dash = std.mem.indexOfScalar(u8, value, '-') orelse return null;
+        const slash = std.mem.indexOfScalar(u8, value, '/') orelse return null;
+
+        return .{
+            .start = std.fmt.parseInt(u64, value[space + 1 .. dash], 10) catch return null,
+            .end = std.fmt.parseInt(u64, value[dash + 1 .. slash], 10) catch return null,
+            .total = std.fmt.parseInt(u64, value[slash + 1 ..], 10) catch return null,
+        };
     }
 };

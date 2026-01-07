@@ -216,6 +216,15 @@ pub const Buffer = struct {
         };
     }
 
+    pub fn fromIoBufferize(platform: Platform, shape_: Shape) Buffer {
+        return .{
+            ._api = platform.pjrt_api,
+            ._target = platform.target,
+            ._shape = shape_,
+            ._shards = .{},
+        };
+    }
+
     pub fn devicePtr(self: Buffer) *anyopaque {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
         return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;

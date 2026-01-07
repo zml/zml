@@ -15,6 +15,7 @@ zig_library(
         "queue.zig",
         "signature.zig",
         "time.zig",
+        "segmented_list.zig",
     ],
     zigopts = ["-lc"],
     main = "stdx.zig",
