@@ -9,6 +9,13 @@ const stdx = zml.stdx;
 
 const log = std.log.scoped(.llama);
 
+pub const TransferCtx = struct {
+    read_pool: *zml.io.ConcurrentBufferPool,
+    write_pool: *zml.io.ConcurrentBufferPool,
+    transferred_bytes: *usize,
+    progress: *std.Progress.Node,
+};
+
 /// Llama architecture, using huggingface transformers naming.
 /// Dimensions of activations: {.b, .s, .d}
 pub const LlamaLM = struct {
@@ -61,15 +68,25 @@ pub const LlamaLM = struct {
         self.model.deinit(allocator);
     }
 
-    pub fn loadBuffers(self: *const LlamaLM, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(LlamaLM) {
-        const lm_head = if (self.lm_head) |lm_head| try zml.io.loadBuffersFromId(allocator, io, lm_head, store.withPrefix("lm_head"), platform) else null;
-        // TODO(Corentin): errdefer
+    pub fn loadBuffers(
+        self: *const LlamaLM,
+        bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
+        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+        store: zml.io.TensorStore.View,
+        cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
+    ) !zml.Bufferized(LlamaLM) {
+        var lm_head_bufferized: ?zml.Bufferized(zml.nn.Linear) = null;
+        if (self.lm_head) |lm_head| {
+            lm_head_bufferized = undefined;
 
-        const model = try self.model.loadBuffers(allocator, io, store.withPrefix("model"), platform);
+            const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &lm_head, &lm_head_bufferized.?, store.withPrefix("lm_head"));
+            for (transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+        }
 
+        const model_bufferized = try self.model.loadBuffers(bufferize_ctx, group, store.withPrefix("model"), cb);
         return .{
-            .lm_head = lm_head,
-            .model = model,
+            .lm_head = lm_head_bufferized,
+            .model = model_bufferized,
         };
     }
 
@@ -154,19 +171,29 @@ pub const Llama = struct {
         allocator.free(self.layers);
     }
 
-    pub fn loadBuffers(self: *const Llama, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Llama) {
-        const layers = try allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
-        errdefer allocator.free(layers);
+    pub fn loadBuffers(
+        self: *const Llama,
+        bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
+        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+        store: zml.io.TensorStore.View,
+        cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
+    ) !zml.Bufferized(Llama) {
+        const bufferized_layers = try bufferize_ctx.allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
 
-        for (layers, 0..) |*layer, i| {
-            layer.* = try zml.io.loadBuffersFromId(allocator, io, self.layers[i], store.withLayer(i), platform);
+        var bufferized: zml.Bufferized(Llama) = .{ .embed_tokens = undefined, .norm = undefined, .layers = bufferized_layers };
+
+        const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.embed_tokens, &bufferized.embed_tokens, store.withPrefix("embed_tokens"));
+        for (transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+
+        const norm_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.norm, &bufferized.norm, store.withPrefix("norm"));
+        for (norm_transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+
+        for (self.layers, bufferized_layers, 0..) |layer, *buf_layer, i| {
+            const layer_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &layer, buf_layer, store.withPrefix("layers").withLayer(i));
+            for (layer_transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
         }
 
-        return .{
-            .embed_tokens = try zml.io.loadBuffersFromId(allocator, io, self.embed_tokens, store.withPrefix("embed_tokens"), platform),
-            .layers = layers,
-            .norm = try zml.io.loadBuffersFromId(allocator, io, self.norm, store.withPrefix("norm"), platform),
-        };
+        return bufferized;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Llama), allocator: std.mem.Allocator) void {

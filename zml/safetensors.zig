@@ -22,21 +22,17 @@ pub const FileType = enum {
 pub fn fetchRegistry(
     allocator: std.mem.Allocator,
     io: std.Io,
-    repo: ModelRepo,
-    entrypoint: ModelEntrypoint,
+    repo: std.Io.Dir,
+    model: std.Io.File,
 ) !TensorRegistry {
-    const file_type = resolveFiletype(entrypoint.path);
-    log.debug("Resolved file type: {any}", .{file_type});
+    const file_type = try resolveFiletype(io, model);
 
     return switch (file_type) {
         .index => blk: {
-            const index_file = try repo.dir.openFile(io, entrypoint.path, .{ .mode = .read_only });
-            defer index_file.close(io);
-
             const file_reader_buf = try allocator.alloc(u8, 64 * 1024);
             defer allocator.free(file_reader_buf);
 
-            var index_reader = index_file.reader(io, file_reader_buf);
+            var index_reader = model.reader(io, file_reader_buf);
 
             var safetensors_index = try parseSafetensorsIndex(
                 allocator,
@@ -49,8 +45,8 @@ pub fn fetchRegistry(
             try parseSafetensorsIndexFiles(
                 allocator,
                 io,
-                safetensors_index,
                 &registry,
+                safetensors_index,
                 repo,
             );
 
@@ -59,15 +55,7 @@ pub fn fetchRegistry(
         .safetensors => blk: {
             var registry: TensorRegistry = .init(allocator);
 
-            const file = try repo.dir.openFile(io, entrypoint.path, .{});
-            defer file.close(io);
-
-            const header_buf = try allocator.alloc(u8, 16 * 1024);
-            defer allocator.free(header_buf);
-
-            var reader = file.reader(io, header_buf);
-
-            try parseSafetensors(allocator, entrypoint.path, &reader.interface, &registry);
+            try parseSafetensors(allocator, io, &registry, model);
 
             break :blk registry;
         },
@@ -194,12 +182,9 @@ pub const TensorRegistry = struct {
     pub fn fromRepo(
         allocator: std.mem.Allocator,
         io: std.Io,
-        repo: ModelRepo,
+        repo: std.Io.Dir,
     ) !TensorRegistry {
-        var entrypoint = try resolveModelEntrypoint(allocator, io, repo);
-        defer entrypoint.deinit(allocator, io);
-        log.debug("Resolved model path entrypoint: {s}", .{entrypoint.path});
-
+        const entrypoint = try resolveModelEntrypoint(io, repo);
         return try fetchRegistry(allocator, io, repo, entrypoint);
     }
 
@@ -208,25 +193,14 @@ pub const TensorRegistry = struct {
         io: std.Io,
         path: []const u8,
     ) !TensorRegistry {
-        var repo = try resolveModelRepo(allocator, io, path);
-        defer repo.deinit(allocator, io);
+        var repo = try resolveModelRepo(io, path);
 
         if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
             std.mem.endsWith(u8, path, ".safetensors"))
         {
-            var entrypoint: ModelEntrypoint = .{
-                .file = try repo.dir.openFile(io, path, .{ .mode = .read_only }),
-                .path = try allocator.dupe(u8, path),
-            };
-            defer entrypoint.deinit(allocator, io);
-            log.debug("Resolved model path entrypoint: {s}", .{entrypoint.path});
-
-            return try fetchRegistry(allocator, io, repo, entrypoint);
+            return try fetchRegistry(allocator, io, repo, try repo.openFile(io, path, .{ .mode = .read_only }));
         } else {
-            var entrypoint = try resolveModelEntrypoint(allocator, io, repo);
-            defer entrypoint.deinit(allocator, io);
-            log.debug("Resolved model path entrypoint: {s}", .{entrypoint.path});
-
+            const entrypoint = try resolveModelEntrypoint(io, repo);
             return try fetchRegistry(allocator, io, repo, entrypoint);
         }
     }
@@ -313,20 +287,27 @@ pub const TensorRegistry = struct {
 
 pub fn parseSafetensors(
     allocator: std.mem.Allocator,
-    file_uri: []const u8,
-    reader: *std.Io.Reader,
+    io: std.Io,
     registry: *TensorRegistry,
+    file: std.Io.File,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const json_header_length: u64 = try reader.takeInt(u64, .little);
+    const header_buf = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(header_buf);
 
+    var reader = file.reader(io, header_buf);
+
+    var file_uri_buf: [1024]u8 = undefined;
+    const file_uri_len = try file.realPath(io, &file_uri_buf);
+    const file_uri = file_uri_buf[0..file_uri_len];
+
+    const json_header_length: u64 = try reader.interface.takeInt(u64, .little);
     const data_start_offset = BYTES_HEADER + json_header_length;
-
     const json_data = try arena.allocator().alloc(u8, @intCast(json_header_length));
 
-    try reader.readSliceAll(json_data);
+    try reader.interface.readSliceAll(json_data);
 
     const headers: std.json.Value = try std.json.parseFromSliceLeaky(
         std.json.Value,
@@ -379,7 +360,7 @@ pub fn parseSafetensors(
     }
 }
 
-pub const SafetensorsIndex = struct {
+const SafetensorsIndex = struct {
     pub const Map = std.StringArrayHashMapUnmanaged(std.ArrayList([]const u8));
 
     arena: std.heap.ArenaAllocator,
@@ -407,7 +388,7 @@ pub const SafetensorsIndex = struct {
     }
 };
 
-pub fn parseSafetensorsIndex(
+fn parseSafetensorsIndex(
     allocator: std.mem.Allocator,
     reader: *std.Io.Reader,
 ) !SafetensorsIndex {
@@ -452,12 +433,12 @@ pub fn parseSafetensorsIndex(
     return safetensors_index;
 }
 
-pub fn parseSafetensorsIndexFiles(
+fn parseSafetensorsIndexFiles(
     allocator: std.mem.Allocator,
     io: std.Io,
-    safetensors_index: SafetensorsIndex,
     registry: *TensorRegistry,
-    repo: ModelRepo,
+    safetensors_index: SafetensorsIndex,
+    repo: std.Io.Dir,
 ) !void {
     var group: std.Io.Group = .init;
     defer group.cancel(io);
@@ -490,7 +471,7 @@ const AsyncParseSafetensorsIndexFile = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         registry: *TensorRegistry,
-        repo: ModelRepo,
+        repo: std.Io.Dir,
         filename: []const u8,
         err_ptr: *?anyerror,
     ) void {
@@ -503,28 +484,23 @@ const AsyncParseSafetensorsIndexFile = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         registry: *TensorRegistry,
-        repo: ModelRepo,
+        repo: std.Io.Dir,
         filename: []const u8,
     ) !void {
-        const file_uri = try std.fs.path.join(allocator, &.{ repo.path, filename });
-        defer allocator.free(file_uri);
-
-        const file = try repo.dir.openFile(io, filename, .{});
+        const file = try repo.openFile(io, filename, .{});
         defer file.close(io);
 
-        const header_buf = try allocator.alloc(u8, 64 * 1024);
-        defer allocator.free(header_buf);
-
-        var reader = file.reader(io, header_buf);
-
-        try parseSafetensors(allocator, file_uri, &reader.interface, registry);
+        try parseSafetensors(allocator, io, registry, file);
     }
 };
 
-pub fn resolveFiletype(path: []const u8) FileType {
-    if (std.mem.endsWith(u8, path, ".safetensors.index.json")) {
+pub fn resolveFiletype(io: std.Io, file: std.Io.File) !FileType {
+    var path_buf: [1024]u8 = undefined;
+    const path_len = try file.realPath(io, &path_buf);
+
+    if (std.mem.endsWith(u8, path_buf[0..path_len], ".safetensors.index.json")) {
         return .index;
-    } else if (std.mem.endsWith(u8, path, ".safetensors")) {
+    } else if (std.mem.endsWith(u8, path_buf[0..path_len], ".safetensors")) {
         return .safetensors;
     } else {
         return .unknown;
@@ -536,108 +512,54 @@ pub const ModelPathResolutionError = error{
     InvalidPath,
 } || std.mem.Allocator.Error;
 
-pub const ModelRepo = struct {
-    dir: std.Io.Dir,
-    path: []const u8,
-
-    pub fn deinit(self: *ModelRepo, allocator: std.mem.Allocator, io: std.Io) void {
-        self.dir.close(io);
-        allocator.free(self.path);
-    }
-};
-
-// Helper to ensure trailing slash from the given user input path.
-fn ensureTrailingSlash(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
-    if (input.len == 0 or input[input.len - 1] == std.fs.path.sep) {
-        return try allocator.dupe(u8, input);
-    } else {
-        var out = try allocator.alloc(u8, input.len + 1);
-        @memcpy(out[0..input.len], input);
-        out[input.len] = std.fs.path.sep;
-        return out;
-    }
-}
-
 pub fn resolveModelRepo(
-    allocator: std.mem.Allocator,
     io: std.Io,
     path: []const u8,
-) ModelPathResolutionError!ModelRepo {
-    const resolved_path = try allocator.dupe(u8, path);
-
-    if (std.mem.endsWith(u8, resolved_path, ".safetensors.index.json") or
-        std.mem.endsWith(u8, resolved_path, ".safetensors"))
+) ModelPathResolutionError!std.Io.Dir {
+    if (std.mem.endsWith(u8, path, ".safetensors.index.json") or
+        std.mem.endsWith(u8, path, ".safetensors"))
     {
-        const dir_path = std.fs.path.dirname(resolved_path) orelse {
-            allocator.free(resolved_path);
-            return ModelPathResolutionError.InvalidPath;
-        };
+        const dir_path = std.fs.path.dirname(path) orelse return ModelPathResolutionError.InvalidPath;
 
-        const dir_path_with_slash = try ensureTrailingSlash(allocator, dir_path);
-        allocator.free(resolved_path);
-
-        const dir = std.Io.Dir.openDir(.cwd(), io, dir_path_with_slash, .{}) catch |e| {
-            allocator.free(dir_path_with_slash);
+        const dir = std.Io.Dir.openDir(.cwd(), io, dir_path, .{}) catch |e| {
             return switch (e) {
                 error.FileNotFound => ModelPathResolutionError.FileNotFound,
                 else => ModelPathResolutionError.InvalidPath,
             };
         };
 
-        return .{
-            .dir = dir,
-            .path = dir_path_with_slash,
-        };
+        return dir;
     }
 
-    const path_with_slash = try ensureTrailingSlash(allocator, resolved_path);
-    allocator.free(resolved_path);
-
-    const dir = std.Io.Dir.openDir(.cwd(), io, path_with_slash, .{}) catch |e| {
-        allocator.free(path_with_slash);
+    const dir = std.Io.Dir.openDir(.cwd(), io, path, .{}) catch |e| {
         return switch (e) {
             error.FileNotFound => ModelPathResolutionError.FileNotFound,
             else => ModelPathResolutionError.InvalidPath,
         };
     };
 
-    return .{
-        .dir = dir,
-        .path = path_with_slash,
-    };
+    return dir;
 }
 
-pub const ModelEntrypoint = struct {
-    file: std.Io.File,
-    path: []const u8,
-
-    pub fn deinit(self: *ModelEntrypoint, allocator: std.mem.Allocator, io: std.Io) void {
-        self.file.close(io);
-        allocator.free(self.path);
-    }
-};
-
-pub fn resolveModelEntrypoint(allocator: std.mem.Allocator, io: std.Io, repo: ModelRepo) ModelPathResolutionError!ModelEntrypoint {
+pub fn resolveModelEntrypoint(io: std.Io, repo: std.Io.Dir) ModelPathResolutionError!std.Io.File {
     {
         const index_name = "model.safetensors.index.json";
-        if (repo.dir.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
-            const index_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, index_name });
-            return .{ .file = index_file, .path = index_path };
+        if (repo.openFile(io, index_name, .{ .mode = .read_only })) |index_file| {
+            return index_file;
         } else |_| {}
     }
 
     {
         const model_name = "model.safetensors";
-        if (repo.dir.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
-            const model_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ repo.path, model_name });
-            return .{ .file = model_file, .path = model_path };
+        if (repo.openFile(io, model_name, .{ .mode = .read_only })) |model_file| {
+            return model_file;
         } else |_| {}
     }
 
     return ModelPathResolutionError.FileNotFound;
 }
 
-pub const Metadata = union(enum) {
+const Metadata = union(enum) {
     null: void,
     int: i64,
     float: f64,
@@ -774,7 +696,7 @@ pub const Metadata = union(enum) {
     }
 };
 
-pub fn stringToDtype(safetensor_type: []const u8) !DataType {
+fn stringToDtype(safetensor_type: []const u8) !DataType {
     const map = std.StaticStringMap(DataType).initComptime(.{
         .{ "F64", .f64 },
         .{ "F32", .f32 },

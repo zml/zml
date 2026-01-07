@@ -13,13 +13,14 @@ zig_library(
         "meta.zig",
         "process.zig",
         "queue.zig",
+        "segmented_list.zig",
         "signature.zig",
         "time.zig",
         "unicode.zig",
     ],
-    zigopts = ["-lc"],
     main = "stdx.zig",
     visibility = ["//visibility:public"],
+    zigopts = ["-lc"],
     zigopts = ["-lc"],
 )
 

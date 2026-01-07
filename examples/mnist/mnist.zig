@@ -37,8 +37,16 @@ const Mnist = struct {
         };
     }
 
-    pub fn loadBuffers(self: Mnist, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(Mnist) {
-        return zml.io.loadBuffersFromId(allocator, io, self, store, platform);
+    pub fn loadBuffers(
+        self: Mnist,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: zml.Platform,
+        store: zml.io.TensorStore.View,
+        read_pool_config: zml.io.ConcurrentBufferPool.Config,
+        write_pool_config: zml.io.ConcurrentBufferPool.Config,
+    ) !zml.Bufferized(Mnist) {
+        return zml.io.loadBuffersFromId(allocator, io, platform, self, store, read_pool_config, write_pool_config);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
@@ -50,7 +58,6 @@ const Mnist = struct {
 
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
-        // std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
         var x = input.flatten().convert(.f32).withTags(.{.d});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
@@ -62,24 +69,18 @@ const Mnist = struct {
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
-    //var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    //defer _ = gpa.deinit();
-
-    //const allocator = gpa.allocator();
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    // var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
 
-    // var vfs: zml.io.VFS = .init(allocator, threaded.io());
-    // defer vfs.deinit();
+    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
+    defer vfs.deinit();
 
-    // try vfs.register("file", vfs_file.io());
+    try vfs.register("file", vfs_file.io());
 
-    // const io = vfs.io();
-    //
-    const io = threaded.io();
+    const io = vfs.io();
 
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
@@ -114,7 +115,11 @@ pub fn main() !void {
         log.info("Transfering weights....", .{});
         var timer = try std.time.Timer.start();
         defer log.info("✅ Transferred weights in {D}", .{timer.read()});
-        break :blk try mnist_model.loadBuffers(allocator, io, store.view(), platform);
+
+        const read_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = 64 * 1024 * 1024, .concurrency = 10, .dma = true };
+        const write_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = 32 * 1024 * 1024, .concurrency = 10, .dma = true };
+
+        break :blk try mnist_model.loadBuffers(allocator, io, platform, store.view(), read_pool_config, write_pool_config);
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 

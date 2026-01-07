@@ -524,7 +524,7 @@ pub const Client = opaque {
     }
 
     pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaMap, .{
+        _ = try api.call(.PJRT_Client_DmaMap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data)),
             .size = @intCast(data.len),
@@ -532,7 +532,7 @@ pub const Client = opaque {
     }
 
     pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
-        try api.call(.PJRT_Client_DmaUnmap, .{
+        _ = try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
             .data = @ptrCast(@constCast(data)),
         });

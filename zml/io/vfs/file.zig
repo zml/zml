@@ -1,5 +1,9 @@
-const builtin = @import("builtin");
 const std = @import("std");
+const builtin = @import("builtin");
+
+const stdx = @import("stdx");
+
+const VFSBase = @import("base.zig").VFSBase;
 
 const log = std.log.scoped(.@"zml/io/vfs/file");
 
@@ -58,176 +62,145 @@ pub const File = struct {
         direct_io_alignment: std.mem.Alignment = .fromByteUnits(4 * 1024),
     };
 
-    allocator: std.mem.Allocator,
-    direct_io_map: std.AutoHashMapUnmanaged(std.Io.File.Handle, std.Io.File.Handle),
-    mutex: std.Io.Mutex,
-    config: Config,
+    const Handle = struct {
+        inner_handle: std.Io.File.Handle,
+        direct_io_handle: ?std.Io.File.Handle,
+    };
 
-    inner: std.Io,
-    vtable: std.Io.VTable,
+    allocator: std.mem.Allocator,
+    mutex: std.Io.Mutex = .init,
+    handles: stdx.SegmentedList(Handle, 0),
+    closed_handles: std.ArrayList(u32) = .{},
+    config: Config,
+    base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, config: Config) File {
-        var vtable = inner.vtable.*;
-        vtable.dirMake = dirMake;
-        vtable.dirMakePath = dirMakePath;
-        vtable.dirMakeOpenPath = dirMakeOpenPath;
-        vtable.dirStatPath = dirStatPath;
-        vtable.dirAccess = dirAccess;
-        vtable.dirCreateFile = dirCreateFile;
-        vtable.dirOpenFile = dirOpenFile;
-        vtable.fileClose = fileClose;
-        vtable.dirOpenDir = dirOpenDir;
-        vtable.fileReadPositional = fileReadPositional;
-        vtable.fileReadStreaming = fileReadStreaming;
-
         return .{
             .allocator = allocator,
-            .direct_io_map = .{},
-            .mutex = .init,
+            .handles = .{},
             .config = config,
-            .inner = inner,
-            .vtable = vtable,
+            .base = .init(inner),
         };
     }
 
     pub fn deinit(self: *File) void {
-        self.direct_io_map.deinit(self.allocator);
+        self.handles.deinit(self.allocator);
+        self.closed_handles.deinit(self.allocator);
     }
 
     pub fn io(self: *File) std.Io {
         return .{
-            .userdata = self,
-            .vtable = &self.vtable,
+            .userdata = &self.base,
+            .vtable = &comptime VFSBase.vtable(.{
+                .dirOpenDir = dirOpenDir,
+                .dirStat = dirStat,
+                .dirStatFile = dirStatFile,
+                .dirAccess = dirAccess,
+                .dirOpenFile = dirOpenFile,
+                .dirClose = dirClose,
+                .dirRead = dirRead,
+                .dirRealPath = dirRealPath,
+                .dirRealPathFile = dirRealPathFile,
+                .fileStat = fileStat,
+                .fileLength = fileLength,
+                .fileClose = fileClose,
+                .fileReadStreaming = fileReadStreaming,
+                .fileReadPositional = fileReadPositional,
+                .fileSeekBy = fileSeekBy,
+                .fileSeekTo = fileSeekTo,
+                .fileRealPath = fileRealPath,
+            }),
         };
     }
 
-    fn stripScheme(path: []const u8) []const u8 {
-        if (std.mem.startsWith(u8, path, "file://")) {
-            return path[7..];
+    fn openHandle(self: *File) !struct { u32, *Handle } {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+
+        if (self.closed_handles.pop()) |idx| {
+            return .{ idx, self.handles.at(idx) };
         }
-        return path;
+        return .{ @intCast(self.handles.len), try self.handles.addOne(self.allocator) };
+    }
+
+    fn closeHandle(self: *File, idx: u32) !void {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+
+        try self.closed_handles.append(self.allocator, idx);
+    }
+
+    fn getFileHandle(self: *File, file: std.Io.File) *Handle {
+        self.mutex.lockUncancelable(self.base.inner);
+        defer self.mutex.unlock(self.base.inner);
+
+        return self.handles.at(@intCast(file.handle));
     }
 
     fn canOpenWithDirectIO(self: *File, file: std.Io.File, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!bool {
-        const file_stat = self.inner.vtable.fileStat(self.inner.userdata, file) catch |err| switch (err) {
+        const file_stat = self.base.inner.vtable.fileStat(self.base.inner.userdata, file) catch |err| switch (err) {
             else => return std.Io.File.OpenError.Unexpected,
         };
 
         return self.config.direct_io and flags.mode == .read_only and file_stat.size >= self.config.direct_io_alignment.toByteUnits();
     }
 
-    fn innerFile(
-        self: *File,
-        file: std.Io.File,
-        buffers: [][]u8,
-        position: u64,
-    ) std.Io.File {
-        const alignment_bytes: usize = self.config.direct_io_alignment.toByteUnits();
-        var buffers_aligned = true;
+    fn innerFile(self: *File, file: std.Io.File, data: []const []u8, position: u64) std.Io.File {
+        const handle = self.getFileHandle(file);
+        const direct_io_handle = handle.direct_io_handle orelse return .{ .handle = handle.inner_handle };
 
-        for (buffers) |buf| {
-            const ptr_addr = @intFromPtr(buf.ptr);
-            if (!std.mem.isAligned(ptr_addr, alignment_bytes) or
-                !std.mem.isAligned(buf.len, alignment_bytes) or
-                (buf.len < alignment_bytes))
-            {
-                buffers_aligned = false;
-                break;
-            }
+        const alignment_bytes: usize = self.config.direct_io_alignment.toByteUnits();
+
+        if (!std.mem.isAligned(@as(usize, position), alignment_bytes)) {
+            return .{ .handle = handle.inner_handle };
         }
 
-        const pos_aligned = std.mem.isAligned(@as(usize, position), alignment_bytes);
-
-        self.mutex.lockUncancelable(self.inner);
-        const direct_io_handle = self.direct_io_map.get(file.handle);
-        self.mutex.unlock(self.inner);
-
-        return if (direct_io_handle) |handle| blk: {
-            if (buffers_aligned and pos_aligned) {
-                break :blk std.Io.File{ .handle = handle };
-            } else {
-                break :blk file;
+        var total_size: usize = 0;
+        for (data) |buf| {
+            if (!std.mem.isAligned(@intFromPtr(buf.ptr), alignment_bytes)) {
+                return .{ .handle = handle.inner_handle };
             }
-        } else blk: {
-            break :blk file;
-        };
+            total_size += buf.len;
+        }
+
+        if (!std.mem.isAligned(total_size, alignment_bytes)) {
+            return .{ .handle = handle.inner_handle };
+        }
+
+        return .{ .handle = direct_io_handle };
     }
 
-    fn dirMake(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        mode: std.Io.Dir.Mode,
-    ) std.Io.Dir.MakeError!void {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirMake(self.inner.userdata, dir, stripScheme(sub_path), mode);
+    fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirOpenDir(self.base.inner.userdata, dir, sub_path, options);
     }
 
-    fn dirMakePath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        mode: std.Io.Dir.Mode,
-    ) std.Io.Dir.MakeError!void {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirMakePath(self.inner.userdata, dir, stripScheme(sub_path), mode);
+    fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirStat(self.base.inner.userdata, dir);
     }
 
-    fn dirMakeOpenPath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.OpenOptions,
-    ) std.Io.Dir.MakeOpenPathError!std.Io.Dir {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirMakeOpenPath(self.inner.userdata, dir, stripScheme(sub_path), options);
+    fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirStatFile(self.base.inner.userdata, dir, sub_path, options);
     }
 
-    fn dirStatPath(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.StatPathOptions,
-    ) std.Io.Dir.StatPathError!std.Io.File.Stat {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirStatPath(self.inner.userdata, dir, stripScheme(sub_path), options);
+    fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirAccess(self.base.inner.userdata, dir, sub_path, options);
     }
 
-    fn dirAccess(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.AccessOptions,
-    ) std.Io.Dir.AccessError!void {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirAccess(self.inner.userdata, dir, stripScheme(sub_path), options);
-    }
+    fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const inner_file = try self.base.inner.vtable.dirOpenFile(self.base.inner.userdata, dir, sub_path, flags);
+        errdefer inner_file.close(self.base.inner);
 
-    fn dirCreateFile(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        flags: std.Io.File.CreateFlags,
-    ) std.Io.File.OpenError!std.Io.File {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirCreateFile(self.inner.userdata, dir, stripScheme(sub_path), flags);
-    }
+        const use_direct_io = try self.canOpenWithDirectIO(inner_file, flags);
 
-    fn dirOpenFile(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        flags: std.Io.File.OpenFlags,
-    ) std.Io.File.OpenError!std.Io.File {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        const file = try self.inner.vtable.dirOpenFile(self.inner.userdata, dir, stripScheme(sub_path), flags);
-
-        const use_direct_io = try self.canOpenWithDirectIO(file, flags);
-        errdefer file.close(self.inner);
-
+        var direct_io_handle: ?std.Io.File.Handle = null;
         if (use_direct_io) {
-            const direct_io_file = try self.inner.vtable.dirOpenFile(self.inner.userdata, dir, stripScheme(sub_path), flags);
-            errdefer direct_io_file.close(self.inner);
+            const direct_io_file = try self.base.inner.vtable.dirOpenFile(self.base.inner.userdata, dir, sub_path, flags);
+            defer if (direct_io_handle == null) direct_io_file.close(self.base.inner);
 
             switchToDirectIO(direct_io_file) catch |err| switch (err) {
                 DirectIoError.UnsupportedPlatform => {
@@ -239,67 +212,103 @@ pub const File = struct {
                 },
             };
 
-            self.mutex.lockUncancelable(self.inner);
-            defer self.mutex.unlock(self.inner);
-
-            self.direct_io_map.put(self.allocator, file.handle, direct_io_file.handle) catch |err| {
-                log.err("Failed to insert Direct I/O file into map: {any}", .{err});
-                return std.Io.File.OpenError.Unexpected;
-            };
+            if (useDirectIO(direct_io_file) catch false) {
+                direct_io_handle = direct_io_file.handle;
+            }
         }
 
-        return file;
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = .{
+            .inner_handle = inner_file.handle,
+            .direct_io_handle = direct_io_handle,
+        };
+
+        return .{ .handle = @intCast(idx) };
     }
 
-    fn fileClose(userdata: ?*anyopaque, file: std.Io.File) void {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
+    fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirClose(self.base.inner.userdata, dirs);
+    }
 
-        self.mutex.lockUncancelable(self.inner);
-        const direct_io_handle = self.direct_io_map.fetchRemove(file.handle);
-        self.mutex.unlock(self.inner);
+    fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirRead(self.base.inner.userdata, reader, entries);
+    }
 
-        if (direct_io_handle) |handle| {
-            const direct_io_file: std.Io.File = .{
-                .handle = handle.value,
-            };
+    fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirRealPath(self.base.inner.userdata, dir, out_buffer);
+    }
 
-            self.inner.vtable.fileClose(self.inner.userdata, direct_io_file);
+    fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        return self.base.inner.vtable.dirRealPathFile(self.base.inner.userdata, dir, path_name, out_buffer);
+    }
+
+    fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+        return self.base.inner.vtable.fileStat(self.base.inner.userdata, inner_file);
+    }
+
+    fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+        return self.base.inner.vtable.fileLength(self.base.inner.userdata, inner_file);
+    }
+
+    fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        for (files) |file| {
+            const handle = self.getFileHandle(file);
+
+            if (handle.direct_io_handle) |dio_handle| {
+                const direct_io_file: std.Io.File = .{ .handle = dio_handle };
+                self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{direct_io_file});
+            }
+
+            const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+            self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{inner_file});
+
+            self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
-
-        return self.inner.vtable.fileClose(self.inner.userdata, file);
     }
 
-    fn dirOpenDir(
-        userdata: ?*anyopaque,
-        dir: std.Io.Dir,
-        sub_path: []const u8,
-        options: std.Io.Dir.OpenOptions,
-    ) std.Io.Dir.OpenError!std.Io.Dir {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        return self.inner.vtable.dirOpenDir(self.inner.userdata, dir, stripScheme(sub_path), options);
+    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const position: u64 = @intCast(std.posix.system.lseek(handle.inner_handle, 0, std.posix.SEEK.CUR));
+        const inner_file = self.innerFile(file, data, position);
+        return self.base.inner.vtable.fileReadStreaming(self.base.inner.userdata, inner_file, data);
     }
 
-    fn fileReadPositional(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        buffer: [][]u8,
-        position: u64,
-    ) std.Io.File.ReadPositionalError!usize {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        const inner_file = self.innerFile(file, buffer, position);
-
-        return self.inner.vtable.fileReadPositional(self.inner.userdata, inner_file, buffer, position);
+    fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const inner_file = self.innerFile(file, data, offset);
+        return self.base.inner.vtable.fileReadPositional(self.base.inner.userdata, inner_file, data, offset);
     }
 
-    fn fileReadStreaming(
-        userdata: ?*anyopaque,
-        file: std.Io.File,
-        buffer: [][]u8,
-    ) std.Io.File.Reader.Error!usize {
-        const self: *File = @ptrCast(@alignCast(userdata orelse unreachable));
-        const position = std.posix.lseek_CUR_get(file.handle) catch return std.Io.File.Reader.Error.Unexpected;
-        const inner_file = self.innerFile(file, buffer, position);
+    fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+        return self.base.inner.vtable.fileSeekBy(self.base.inner.userdata, inner_file, relative_offset);
+    }
 
-        return self.inner.vtable.fileReadStreaming(self.inner.userdata, inner_file, buffer);
+    fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+        return self.base.inner.vtable.fileSeekTo(self.base.inner.userdata, inner_file, absolute_offset);
+    }
+
+    fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        const handle = self.getFileHandle(file);
+        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
+        return self.base.inner.vtable.fileRealPath(self.base.inner.userdata, inner_file, out_buffer);
     }
 };
