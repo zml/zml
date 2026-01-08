@@ -46,7 +46,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
         stdx.debug.panic("Unable to find runfiles", .{});
     };
 

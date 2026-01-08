@@ -8,6 +8,7 @@ const std = @import("std");
 
 const c = @import("c");
 pub const pjrt = @import("pjrt");
+pub const pjrtx = @import("pjrtx.zig");
 const runfiles = @import("runfiles");
 pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");

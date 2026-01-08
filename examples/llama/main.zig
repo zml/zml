@@ -114,27 +114,40 @@ pub fn main() !void {
     }
 
     const topology_description = try platform.pjrt_client.topologyDescription(platform.pjrt_api);
+    _ = topology_description; // autofix
 
     const layout_extension = platform.layoutExtension() orelse return error.LayoutExtensionUnavailable;
 
-    {
-        const client_default_layout = try layout_extension.clientGetDefaultLayout(platform.pjrt_api, .{ .client = platform.pjrt_client, .type = zml.pjrt.BufferType.bf16, .dims = &.{ 16, 512, 8, 64 } });
-        defer client_default_layout.deinit(layout_extension, platform.pjrt_api);
+    const LocalContext = struct {
+        layout_extension: *const zml.pjrt.layout.LayoutExtension,
+        allocator: std.mem.Allocator,
+        platform: zml.Platform,
+    };
+    var context: LocalContext = .{
+        .layout_extension = layout_extension,
+        .allocator = allocator,
+        .platform = platform,
+    };
+    try zml.meta.visit(struct {
+        fn cb(context_: *LocalContext, t: *const Tensor) !void {
+            const dims = t.shape().dims();
+            const buffer_type = zml.pjrtx.bufferTypeFromDtype(t.dtype());
+            const client_default_layout = try context_.layout_extension.clientGetDefaultLayout(context_.platform.pjrt_api, .{ .client = context_.platform.pjrt_client, .type = buffer_type, .dims = dims });
+            defer client_default_layout.deinit(context_.layout_extension, context_.platform.pjrt_api);
 
+            const serialized_layout = try client_default_layout.serializeAlloc(allocator, context_.layout_extension, context_.platform.pjrt_api);
+            defer allocator.free(serialized_layout);
+
+            std.log.info("Client default layout for {f}: {s}", .{ t.shape(), serialized_layout });
+        }
+    }.cb, &context, &llama_model);
+    {
+        const s: zml.Shape = .init(.{ 128, 128 }, .f16);
+        const client_default_layout = try layout_extension.clientGetDefaultLayout(platform.pjrt_api, .{ .client = platform.pjrt_client, .type = zml.pjrtx.bufferTypeFromDtype(s.dtype()), .dims = s.dims() });
         const serialized_layout = try client_default_layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
         defer allocator.free(serialized_layout);
 
-        std.log.info("Client default layout: {s}", .{serialized_layout});
-    }
-
-    {
-        const topology_default_layout = try layout_extension.topologyGetDefaultLayout(platform.pjrt_api, .{ .topology_description = topology_description, .type = zml.pjrt.BufferType.bf16, .dims = &.{ 16, 512, 8, 64 } });
-        defer topology_default_layout.deinit(layout_extension, platform.pjrt_api);
-
-        const serialized_layout = try topology_default_layout.serializeAlloc(allocator, layout_extension, platform.pjrt_api);
-        defer allocator.free(serialized_layout);
-
-        std.log.info("Topology default layout: {s}", .{serialized_layout});
+        std.log.info("Client default layout for: {s}", .{serialized_layout});
     }
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, layout_extension });

@@ -468,16 +468,39 @@ pub const Client = opaque {
 
     pub const CreateBuffersForAsyncHostToDeviceArgs = struct {
         shape_specs: []const ShapeSpec,
-        device_layouts: ?[]*const MemoryLayout = null,
+        device_layouts: ?[]const []const MemoryLayout = null,
         memory: *const Memory,
     };
+    const CreateBuffersForAsyncHostToDeviceError = ApiError || std.mem.Allocator.Error;
 
-    pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
+    pub fn createBuffersForAsyncHostToDevice(self: *const Client, allocator: std.mem.Allocator, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) CreateBuffersForAsyncHostToDeviceError!*AsyncHostToDeviceTransferManager {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        const device_layouts: [*c][*c]c.PJRT_Buffer_MemoryLayout = if (args.device_layouts) |device_layouts| b: {
+            const device_count = device_layouts.len;
+            const layout_count = device_layouts[0].len;
+            const device_layouts_slice = try arena.allocator().alloc([*]const c.PJRT_Buffer_MemoryLayout, device_count);
+
+            const temp = try arena.allocator().alloc(c.PJRT_Buffer_MemoryLayout, device_count * layout_count);
+            for (0..device_layouts.len) |device_index| {
+                std.debug.assert(device_layouts[device_index].len == layout_count);
+
+                const per_device_layouts = temp[device_index * layout_count ..][0..layout_count];
+                for (0..device_layouts[device_index].len) |i| {
+                    temp[i] = device_layouts[device_index][i].toCStruct();
+                }
+                device_layouts_slice[device_index] = per_device_layouts.ptr;
+            }
+
+            break :b @ptrCast(device_layouts_slice);
+        } else null;
+
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
             .shape_specs = @as([*c]c.PJRT_ShapeSpec, @ptrCast(@constCast(args.shape_specs.ptr))),
             .num_shape_specs = args.shape_specs.len,
-            .device_layouts = @as([*c][*c]c.PJRT_Buffer_MemoryLayout, if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null),
+            .device_layouts = device_layouts,
             .num_device_layouts = @as(usize, if (args.device_layouts) |layouts| @intCast(layouts.len) else 0),
             .memory = @as(?*c.PJRT_Memory, @ptrCast(@constCast(args.memory))),
         });

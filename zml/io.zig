@@ -372,7 +372,20 @@ pub const Transfer = struct {
 
         const memory = pjrtx.Client.memoryByKind(platform.pjrt_client, platform.pjrt_api, .device).?;
 
-        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{ .shape_specs = shape_specs, .memory = memory });
+        const buffer_memory_layout: pjrt.MemoryLayout = .{
+            .tiled = .{
+                .minor_to_major = &.{ 1, 0 },
+                .tile_dims = &.{ 8, 128, 2, 1 },
+                .tile_dims_sizes = &.{ 2, 2 },
+            },
+        };
+        const device_layouts: []const []const pjrt.MemoryLayout = &.{&.{buffer_memory_layout}};
+
+        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(allocator, platform.pjrt_api, .{
+            .shape_specs = shape_specs,
+            .memory = memory,
+            .device_layouts = device_layouts,
+        });
         errdefer transfer_manager.deinit(platform.pjrt_api);
 
         return .{
