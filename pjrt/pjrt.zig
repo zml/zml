@@ -648,6 +648,22 @@ pub const DeviceDescription = opaque {
         }) catch unreachable;
         return ret.to_string[0..ret.to_string_size];
     }
+
+    pub fn attributes(self: *const DeviceDescription, api: *const Api) []const NamedValue {
+        const ret = api.call(.PJRT_DeviceDescription_Attributes, .{
+            .device_description = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.attributes[0..ret.num_attributes]);
+    }
+
+    pub fn attribute(self: *const DeviceDescription, api: *const Api, name: []const u8) ?NamedValue.Value {
+        for (self.attributes(api)) |attr| {
+            if (std.mem.eql(u8, attr.name(), name)) {
+                return attr.value();
+            }
+        }
+        return null;
+    }
 };
 
 pub const GetCostAnalysisError = std.mem.Allocator.Error || ApiError;
