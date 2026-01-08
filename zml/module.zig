@@ -467,9 +467,28 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
             },
             .rocm => {
-                // Disable Triton GEMM on ROCM. For some reason it's much, much slower when
-                // enabled on CDNA and it's used on RDNA. Disable it altogether.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                // enable only on CDNA
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", gemm_blk: {
+                    var supported: std.StaticStringMap(void) = .initComptime(.{
+                        .{ "gfx950", {} },
+                        .{ "gfx950", {} },
+                        .{ "gfx942", {} },
+                        .{ "gfx942", {} },
+                        .{ "gfx942", {} },
+                        .{ "gfx90a", {} },
+                        .{ "gfx90a", {} },
+                        .{ "gfx90a", {} },
+                        .{ "gfx908", {} },
+                        .{ "gfx906", {} },
+                        .{ "gfx900", {} },
+                    });
+                    const first_device = platform.pjrt_client.getDevices(platform.pjrt_api)[0];
+                    const description = first_device.getDescription(platform.pjrt_api);
+                    break :gemm_blk if (description.attribute(platform.pjrt_api, "compute_capability")) |cc|
+                        supported.has(cc.string)
+                    else
+                        false;
+                }, upb_arena);
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
