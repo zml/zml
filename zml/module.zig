@@ -462,7 +462,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             .cuda => {
                 // NVIDIA recommends these settings
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
             },
