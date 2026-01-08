@@ -1263,6 +1263,14 @@ pub const NamedValue = extern struct {
         bool = c.PJRT_NamedValue_kBool,
     };
 
+    pub const Value = union(Kind) {
+        string: []const u8,
+        int64: i64,
+        int64list: []const i64,
+        float: f32,
+        bool: bool,
+    };
+
     pub fn kind(self: NamedValue) Kind {
         return @enumFromInt(self.inner.type);
     }
@@ -1271,86 +1279,47 @@ pub const NamedValue = extern struct {
         return self.inner.name[0..self.inner.name_size];
     }
 
-    pub fn from(name_: []const u8, value: anytype) NamedValue {
-        return switch (@TypeOf(value)) {
-            []u8, []const u8 => fromString(name_, value),
-            i64 => fromInt64(name_, value),
-            []i64, []const i64 => fromInt64List(name_, value),
-            f32 => fromFloat(name_, value),
-            bool => fromBool(name_, value),
-            else => fromString(name_, @tagName(value)),
+    pub fn value(self: NamedValue) Value {
+        return switch (self.kind()) {
+            .string => .{ .string = self.inner.unnamed_0.string_value[0..self.inner.value_size] },
+            .int64 => .{ .int64 = self.inner.unnamed_0.int64_value },
+            .int64list => .{ .int64list = self.inner.unnamed_0.int64_array_value[0..self.inner.value_size] },
+            .float => .{ .float = self.inner.unnamed_0.float_value },
+            .bool => .{ .bool = self.inner.unnamed_0.bool_value },
         };
     }
 
-    pub fn fromString(name_: []const u8, value: []const u8) NamedValue {
-        return .{ .inner = c.PJRT_NamedValue{
-            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
-            .extension_start = null,
-            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
-            .name_size = name_.len,
-            .type = c.PJRT_NamedValue_kString,
-            .unnamed_0 = .{ .string_value = @ptrCast(@constCast(value.ptr)) },
-            .value_size = value.len,
-        } };
-    }
-
-    pub fn fromInt64(name_: []const u8, value: i64) NamedValue {
-        return .{ .inner = c.PJRT_NamedValue{
-            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
-            .extension_start = null,
-            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
-            .name_size = name_.len,
-            .type = c.PJRT_NamedValue_kInt64,
-            .unnamed_0 = .{ .int64_value = value },
-            .value_size = 1,
-        } };
-    }
-
-    pub fn fromInt64List(name_: []const u8, value: []const i64) NamedValue {
-        return .{ .inner = c.PJRT_NamedValue{
-            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
-            .extension_start = null,
-            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
-            .name_size = name_.len,
-            .type = c.PJRT_NamedValue_kInt64List,
-            .unnamed_0 = .{ .int64_array_value = @ptrCast(@constCast(value.ptr)) },
-            .value_size = value.len,
-        } };
-    }
-
-    pub fn fromFloat(name_: []const u8, value: f32) NamedValue {
-        return .{ .inner = c.PJRT_NamedValue{
-            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
-            .extension_start = null,
-            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
-            .name_size = name_.len,
-            .type = c.PJRT_NamedValue_kFloat,
-            .unnamed_0 = .{ .float_value = value },
-            .value_size = 1,
-        } };
-    }
-
-    pub fn fromBool(name_: []const u8, value: bool) NamedValue {
-        return .{ .inner = c.PJRT_NamedValue{
-            .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
-            .extension_start = null,
-            .name = @as([*c]const u8, @ptrCast(@constCast(name_.ptr))),
-            .name_size = name_.len,
-            .type = c.PJRT_NamedValue_kBool,
-            .unnamed_0 = .{ .bool_value = value },
-            .value_size = 1,
-        } };
+    pub fn init(comptime kind_: Kind, name_: []const u8, value_: std.meta.fieldInfo(Value, kind_).type) NamedValue {
+        return .{
+            .inner = .{
+                .struct_size = c.PJRT_NamedValue_STRUCT_SIZE,
+                .extension_start = null,
+                .name = @ptrCast(name_),
+                .name_size = name_.len,
+                .type = @intFromEnum(kind_),
+                .unnamed_0 = switch (kind_) {
+                    .string => .{ .string_value = @ptrCast(@constCast(value_.ptr)) },
+                    .int64 => .{ .int64_value = value_ },
+                    .int64list => .{ .int64_array_value = @ptrCast(@constCast(value_.ptr)) },
+                    .float => .{ .float_value = value_ },
+                    .bool => .{ .bool_value = value_ },
+                },
+                .value_size = switch (kind_) {
+                    .string, .int64list => value_.len,
+                    inline else => 1,
+                },
+            },
+        };
     }
 
     pub fn format(self: NamedValue, writer: *std.Io.Writer) !void {
-        try writer.print("{s}{{ .name = {s},", .{ @typeName(NamedValue), self.inner.name[0..self.inner.name_size] });
-        const u = self.inner.unnamed_0;
-        switch (self.kind()) {
-            .string => try writer.print(" .string = {s} ", .{u.string_value[0..self.inner.value_size]}),
-            .int64 => try writer.print(" .int64 = {d} ", .{u.int64_value}),
-            .int64list => try writer.print(" .int64list = {any} ", .{u.int64_array_value[0..self.inner.value_size]}),
-            .float => try writer.print(" .float = {d} ", .{u.float_value}),
-            .bool => try writer.print(" .bool = {} ", .{u.bool_value}),
+        try writer.print("{s}{{ .name = {s},", .{ @typeName(NamedValue), self.name() });
+        switch (self.value()) {
+            .string => |v| try writer.print(" .string = \"{s}\" ", .{v}),
+            .int64 => |v| try writer.print(" .int64 = {d} ", .{v}),
+            .int64list => |v| try writer.print(" .int64list = {any} ", .{v}),
+            .float => |v| try writer.print(" .float = {d} ", .{v}),
+            .bool => |v| try writer.print(" .bool = {} ", .{v}),
         }
         try writer.writeAll("}");
     }

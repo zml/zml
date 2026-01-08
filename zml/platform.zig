@@ -267,7 +267,7 @@ pub const CreateOptions = struct {
         device_count: u32,
 
         fn writeNamedValues(self: Cpu, values: *std.ArrayList(pjrt.NamedValue)) void {
-            values.appendAssumeCapacity(pjrt.NamedValue.from("cpu_device_count", @as(i64, self.device_count)));
+            values.appendAssumeCapacity(.init(.int64, "cpu_device_count", self.device_count));
         }
     };
 
@@ -291,28 +291,27 @@ pub const CreateOptions = struct {
             pub const Options = struct {
                 preallocate: bool = true,
                 memory_fraction: f32 = 0.90,
-                collective_memory_size_mb: u32 = 0,
+                collective_memory_size_mb: i64 = 0,
             };
         };
 
         fn writeNamedValues(self: Cuda, values: *std.ArrayList(pjrt.NamedValue)) void {
             switch (self.allocator) {
                 .platform => {
-                    values.appendAssumeCapacity(.fromString("allocator", "platform"));
+                    values.appendAssumeCapacity(.init(.string, "allocator", "platform"));
                 },
                 .bfc, .async => |opt| {
-                    values.appendAssumeCapacity(.fromString("allocator", switch (self.allocator) {
+                    values.appendAssumeCapacity(.init(.string, "allocator", switch (self.allocator) {
                         .bfc => "bfc",
                         .async => "cuda_async",
                         .platform => unreachable,
                     }));
-                    values.appendAssumeCapacity(.from("preallocate", opt.preallocate));
+                    values.appendAssumeCapacity(.init(.bool, "preallocate", opt.preallocate));
                     if (opt.memory_fraction > 0) {
-                        values.appendAssumeCapacity(.from("memory_fraction", opt.memory_fraction));
+                        values.appendAssumeCapacity(.init(.float, "memory_fraction", opt.memory_fraction));
                     }
                     if (opt.collective_memory_size_mb > 0) {
-                        const collective = @as(i64, opt.collective_memory_size_mb) * 1024 * 1024;
-                        values.appendAssumeCapacity(.from("collective_memory_size", collective));
+                        values.appendAssumeCapacity(.init(.int64, "collective_memory_size", opt.collective_memory_size_mb * 1024 * 1024));
                     }
                 },
             }
