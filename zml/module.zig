@@ -468,7 +468,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             .rocm => {
                 // enable only on CDNA
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", gemm_blk: {
-                    var supported: std.StaticStringMap(void) = .initComptime(.{
+                    const supported: std.StaticStringMap(void) = .initComptime(.{
                         .{ "gfx950", {} },
                         .{ "gfx950", {} },
                         .{ "gfx942", {} },
@@ -483,10 +483,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                     });
                     const first_device = platform.pjrt_client.getDevices(platform.pjrt_api)[0];
                     const description = first_device.getDescription(platform.pjrt_api);
-                    break :gemm_blk if (description.attribute(platform.pjrt_api, "compute_capability")) |cc|
-                        supported.has(cc.string)
-                    else
-                        false;
+                    break :gemm_blk supported.has(description.attribute(platform.pjrt_api, "compute_capability").?.string);
                 }, upb_arena);
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
