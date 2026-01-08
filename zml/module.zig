@@ -492,6 +492,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
+                // Disable command buffer to avoid some weird crashes.
+                // This is what AMD recommended in the meantime.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
             },
             else => {},
         }
