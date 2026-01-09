@@ -6,6 +6,7 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
+const Memory = Buffer.Memory;
 const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
