@@ -7,18 +7,14 @@ const stdx = @import("stdx");
 
 const log = std.log.scoped(.@"zml/runtimes/neuron");
 
-fn findFreeTcpPort() !u16 {
-    var address = std.net.Address.initIp4(.{ 127, 0, 0, 1 }, 0);
-    const sockfd = try std.posix.socket(
-        std.posix.AF.INET,
-        std.posix.SOCK.STREAM,
-        std.posix.IPPROTO.TCP,
+fn findFreeTcpPort(io: std.Io) !u16 {
+    var server = try std.Io.net.IpAddress.listen(
+        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        io,
+        .{},
     );
-    defer std.posix.close(sockfd);
-    var socklen = address.getOsSockLen();
-    try std.posix.bind(sockfd, &address.any, socklen);
-    try std.posix.getsockname(sockfd, &address.any, &socklen);
-    return address.getPort();
+    defer server.deinit(io);
+    return server.socket.address.getPort();
 }
 
 pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
@@ -31,7 +27,7 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const new_filename: [*c]const u8 = if (filename) |f| blk: {
         const replacement = replacements.get(std.Io.Dir.path.basename(std.mem.span(f))) orelse break :blk f;
-        break :blk stdx.fs.path.bufJoinZ(&buf, &.{
+        break :blk stdx.Io.Dir.path.bufJoinZ(&buf, &.{
             stdx.process.selfSharedObjectDirPath(),
             replacement,
         }) catch unreachable;
@@ -41,11 +37,11 @@ pub export fn zmlxneuron_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaqu
 }
 
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-fn setupNeuronEnv() !void {
+fn setupNeuronEnv(io: std.Io) !void {
     var buf: [256]u8 = undefined;
     _ = setenv(
         "NEURON_RT_ROOT_COMM_ID",
-        try std.fmt.bufPrintZ(&buf, "127.0.0.1:{d}", .{try findFreeTcpPort()}),
+        try std.fmt.bufPrintZ(&buf, "127.0.0.1:{d}", .{try findFreeTcpPort(io)}),
         1,
     );
     _ = setenv(
@@ -80,6 +76,9 @@ fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MAX - 
     path_with_null[len] = 0;
     return path_with_null;
 }
+
+// redefine it because for some reason PyThreadState can't be sized
+extern fn PyEval_SaveThread() *anyopaque;
 
 fn setupPythonEnv(sandbox_path: []const u8) !void {
     const Static = struct {
@@ -126,7 +125,7 @@ fn setupPythonEnv(sandbox_path: []const u8) !void {
     pyStatusCheck(c.Py_InitializeFromConfig(&Static.py_config));
 
     // release the GIL
-    _ = c.PyEval_SaveThread();
+    _ = PyEval_SaveThread();
 }
 
 // Duplicates a PJRT Api object while being careful about struct size differences
@@ -141,6 +140,10 @@ fn dupePjrtApi(api: *c.PJRT_Api) c.PJRT_Api {
 }
 
 fn getPjrtApi() !*c.PJRT_Api {
+    var threaded: std.Io.Threaded = .init(std.heap.c_allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+
     const Static = struct {
         var inner: *c.PJRT_Api = undefined;
         var proxy: c.PJRT_Api = undefined;
@@ -152,7 +155,7 @@ fn getPjrtApi() !*c.PJRT_Api {
         "..",
     });
 
-    try setupNeuronEnv();
+    try setupNeuronEnv(io);
     try setupPythonEnv(sandbox_path);
 
     Static.inner = blk: {
@@ -181,15 +184,15 @@ fn getPjrtApi() !*c.PJRT_Api {
 
     Static.proxy = dupePjrtApi(Static.inner);
     // Setup the API proxy functions
-    Static.proxy.PJRT_Plugin_Attributes = &struct {
-        const STRUCT_SIZE = 24; // according to the failing assertion
+    // Static.proxy.PJRT_Plugin_Attributes = &struct {
+    //     const STRUCT_SIZE = 24; // according to the failing assertion
 
-        fn call(args: [*c]c.PJRT_Plugin_Attributes_Args) callconv(.c) ?*c.PJRT_Error {
-            var new_args = args.*;
-            new_args.struct_size = @min(new_args.struct_size, STRUCT_SIZE);
-            return Static.inner.PJRT_Plugin_Attributes.?(&new_args);
-        }
-    }.call;
+    //     fn call(args: [*c]c.PJRT_Plugin_Attributes_Args) callconv(.c) ?*c.PJRT_Error {
+    //         var new_args = args.*;
+    //         new_args.struct_size = @min(new_args.struct_size, STRUCT_SIZE);
+    //         return Static.inner.PJRT_Plugin_Attributes.?(&new_args);
+    //     }
+    // }.call;
 
     return &Static.proxy;
 }

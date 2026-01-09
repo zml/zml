@@ -80,6 +80,7 @@ pub const Api = struct {
     inner: c.PJRT_Api,
 
     pub fn loadFrom(library: [:0]const u8) !*const Api {
+        log.info("Loading library {s}...", .{library});
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux => blk: {
                 // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.

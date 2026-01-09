@@ -12,7 +12,7 @@ pub fn makeTempDir(io: std.Io, buf: []u8, prefix: []const u8) ![]const u8 {
         tmp_dir,
         std.Io.Dir.path.sep_str_posix,
         prefix,
-        std.time.microTimestamp(),
+        (try std.Io.Clock.now(.real, io)).toNanoseconds(),
     });
     try std.Io.Dir.createDir(.cwd(), io, ret, .fromMode(0o700));
     return ret;
@@ -23,7 +23,8 @@ const ModuleState = struct {
 };
 
 var module_def: c.PyModuleDef = .{
-    .m_base = .{},
+    .m_base = std.mem.zeroes(c.PyModuleDef_Base),
+    .m_doc = "Zig bindings for libneuronxla",
     .m_name = "libneuronxla",
     .m_size = @sizeOf(ModuleState),
     .m_methods = @constCast(&[_]c.PyMethodDef{
@@ -39,11 +40,11 @@ var module_def: c.PyModuleDef = .{
             .ml_flags = c.METH_FASTCALL,
             .ml_doc = "Return a greeting from Zig.",
         },
-        .{},
+        std.mem.zeroes(c.PyMethodDef),
     }),
     .m_slots = @constCast(&[_]c.PyModuleDef_Slot{
         .{ .slot = c.Py_mod_exec, .value = @ptrCast(@constCast(&module_exec)) },
-        .{},
+        std.mem.zeroes(c.PyModuleDef_Slot),
     }),
     .m_traverse = null,
     .m_clear = null,
@@ -51,7 +52,10 @@ var module_def: c.PyModuleDef = .{
 };
 
 fn module_exec(module: ?*c.PyObject) callconv(.c) c_int {
-    _ = module;
+    const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(module)));
+    state.* = .{
+        .threaded = .init(std.heap.c_allocator, .{}),
+    };
     return 0;
 }
 
@@ -104,7 +108,7 @@ fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, io: std.Io, hlo_code: []co
     c.xla_HloInstructionProto_set_custom_call_target(fused_root, upb.stringView("AwsNeuronNeff"));
     c.xla_HloInstructionProto_set_backend_config(
         fused_root,
-        try upb.stringView(
+        upb.stringView(
             try stdx.Io.Dir.readFileAlloc(.cwd(), io, neff_file_path, allocator, .unlimited),
         ),
     );
@@ -179,11 +183,11 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     };
 
     const code_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.code" });
-    {
-        const file = try std.Io.Dir.createFile(.cwd(), io, code_file, .{ .truncate = true });
-        defer file.close();
-        try file.writeAll(code);
-    }
+    try std.Io.Dir.writeFile(.cwd(), io, .{
+        .data = code,
+        .sub_path = code_file,
+        .flags = .{ .truncate = true },
+    });
 
     const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
@@ -199,7 +203,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         "--framework=XLA",
         "--target",
         target,
-        "--verbose=info",
+        "--verbose=user",
         "--enable-internal-neff-wrapper",
         "--output",
         neff_file,
@@ -219,7 +223,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     std.debug.print(">>>> {s}\n", .{tmp_dir});
 
-    const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), code, neff_file) catch |err| {
+    const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
         return err;
     };
@@ -248,15 +252,5 @@ fn neuronx_cc(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) 
 }
 
 pub export fn PyInit_libneuronxla() callconv(.c) ?*c.PyObject {
-    const module = c.PyModuleDef_Init(&module_def);
-    if (module == null) {
-        return null;
-    }
-
-    const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(module)));
-    state.* = .{
-        .threaded = .init(std.heap.c_allocator, .{}),
-    };
-
-    return module;
+    return c.PyModuleDef_Init(&module_def);
 }

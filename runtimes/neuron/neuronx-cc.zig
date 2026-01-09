@@ -22,7 +22,14 @@ pub fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MA
 }
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    const allocator = std.heap.c_allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
     {
@@ -43,7 +50,10 @@ pub fn main() !void {
     _ = c.PyConfig_SetBytesArgv(&config, @intCast(std.os.argv.len), @ptrCast(std.os.argv));
 
     var self_exe_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const self_exe_dir = try std.process.executableDirPath(io, &self_exe_dir_buf);
+    const self_exe_dir = blk: {
+        const n = try std.process.executableDirPath(io, &self_exe_dir_buf);
+        break :blk self_exe_dir_buf[0..n];
+    };
 
     {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;

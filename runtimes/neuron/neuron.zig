@@ -27,7 +27,7 @@ fn isRunningOnEC2(io: std.Io) !bool {
         try std.Io.Dir.readFile(
             .cwd(),
             io,
-            "/sys/devices/virtual/dmi/id/product_name",
+            "/sys/devices/virtual/dmi/id/sys_vendor",
             &buffer,
         ),
     );

@@ -41,6 +41,7 @@ copy_to_directory(
         "@rules_python//python:current_py_toolchain",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+        "@aws-neuronx-runtime-lib//:libnrtucode_extisa",
         "@aws-neuronx-collectives//:libnccom",
         "@zlib1g",
         "@libgomp1",
@@ -52,13 +53,14 @@ copy_to_directory(
         "libpjrt_neuron_so": "lib",
         "libnrt.patchelf": "lib",
         "libncfw.patchelf": "lib",
+        "libnrtucode_extisa": "lib",
         "lib/x86_64-linux-gnu": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
         "opt/neuron": "lib",
     },
     exclude_srcs_patterns = [
         "**/tests/**",
-        "**/include/**",
+        # "**/include/**",
         "**/_solib_*/**",
     ],
     include_srcs_patterns = [
