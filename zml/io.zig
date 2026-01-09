@@ -222,8 +222,8 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
 
     const shapes = try collectShapes(arena.allocator(), &model);
 
-    var transfer: Transfer = try .init(arena.allocator(), shapes, platform);
-    defer transfer.deinit(platform);
+    // var transfer: Transfer = try .init(arena.allocator(), shapes, platform);
+    // defer transfer.deinit(platform);
 
     const tensor_descs = try collectTensorDesc(arena.allocator(), store, &model);
 
@@ -237,7 +237,7 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
         tensor_descs: []safetensors.Tensor,
         shapes: []const Shape,
         platform: Platform,
-        transfer: *Transfer,
+        // transfer: *Transfer,
         index: usize = 0,
         buffer_reader: []u8,
         buffer_writer: []u8,
@@ -249,7 +249,7 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
         .tensor_descs = tensor_descs,
         .shapes = shapes,
         .platform = platform,
-        .transfer = &transfer,
+        // .transfer = &transfer,
         .buffer_reader = buffer_reader,
         .buffer_writer = buffer_writer,
         .store = store,
@@ -263,12 +263,19 @@ pub fn loadBuffersFromId(allocator: std.mem.Allocator, io: std.Io, model: anytyp
             var reader = try safetensors.TensorReader.init(context_.io, tensor_desc, context_.buffer_reader);
             defer reader.deinit();
 
-            var writer = try context_.transfer.getWriter(context_.io, context_.index, context_.buffer_writer);
+            // var writer = try context_.transfer.getWriter(context_.io, context_.index, context_.buffer_writer);
+            var writer = try BufferedDeviceWriter.init(
+                context_.allocator,
+                context_.io,
+                context_.platform,
+                context_.shapes[context_.index],
+            );
 
             _ = try reader.interface.streamRemaining(&writer.interface);
             try writer.interface.flush();
 
-            buffer.* = try context_.transfer.getBuffer(context_.index);
+            // buffer.* = try context_.transfer.getBuffer(context_.index);
+            buffer.* = writer.buffer.?;
             context_.index += 1;
         }
     }.cb, &context, &result);
@@ -396,5 +403,44 @@ pub const Transfer = struct {
     pub fn getWriter(self: *const Transfer, io: std.Io, index: usize, buffer: []u8) !SimpleWriter {
         const writer: SimpleWriter = .init(buffer, io, self.transfer_manager, self.shapes[index], index, self.platform);
         return writer;
+    }
+};
+
+pub const BufferedDeviceWriter = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    transfer_buffer: []u8,
+    platform: Platform,
+    shape: Shape,
+    buffer: ?Buffer = null,
+    interface: std.Io.Writer,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: Platform, shape: Shape) !BufferedDeviceWriter {
+        const transfer_buffer = try allocator.alloc(u8, shape.byteSize());
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .transfer_buffer = transfer_buffer,
+            .shape = shape,
+            .platform = platform,
+            .interface = .{
+                .buffer = transfer_buffer,
+                .vtable = &.{
+                    .drain = std.Io.Writer.fixedDrain,
+                    .flush = flush,
+                    .rebase = std.Io.Writer.failingRebase,
+                },
+            },
+        };
+    }
+
+    pub fn deinit(self: *BufferedDeviceWriter) void {
+        self.allocator.free(self.transfer_buffer);
+    }
+
+    pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *BufferedDeviceWriter = @alignCast(@fieldParentPtr("interface", w));
+        self.buffer = Buffer.fromBytes(self.io, self.platform, self.shape, self.transfer_buffer) catch return std.Io.Writer.Error.WriteFailed;
+        _ = self.buffer.?.await(self.io) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
