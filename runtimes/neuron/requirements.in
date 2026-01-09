@@ -1,4 +1,4 @@
 --find-links https://mirror.zml.ai/pypi/aws-neuronx-runtime-discovery/index.html
 --extra-index-url=https://pip.repos.neuron.amazonaws.com
-libneuronxla
-neuronx-cc
+libneuronxla>=2.2
+neuronx-cc>=2.22

@@ -20,7 +20,7 @@ bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_python", version = "1.5.3")
+bazel_dep(name = "rules_python", version = "1.8.0-rc1")
 bazel_dep(name = "rules_rust", version = "0.68.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.3.1")
@@ -60,16 +60,16 @@ uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = Tru
 uv.configure(version = "0.6.5")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
-python.toolchain(python_version = "3.11")
+python.toolchain(python_version = "3.12")
 use_repo(python, "python_versions")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     download_only = True,
     extra_pip_args = [
-        "--abi=cp311",
+        "--abi=cp312",
         "--implementation=cp",
-        "--python-version=311",
+        "--python-version=312",
         "--platform=linux_x86_64",
         "--platform=manylinux2014_x86_64",
         "--platform=manylinux_2_27_x86_64",
@@ -77,7 +77,7 @@ pip.parse(
         "--platform=manylinux_2_29_x86_64",
     ],
     hub_name = "neuron_py_deps",
-    python_version = "3.11",
+    python_version = "3.12",
     requirements_lock = "//runtimes/neuron:requirements.lock.txt",
 )
 use_repo(pip, "neuron_py_deps")
@@ -86,7 +86,7 @@ use_repo(pip, "neuron_py_deps")
 pip.parse(
     download_only = True,
     hub_name = "huggingface_hub",
-    python_version = "3.11",
+    python_version = "3.12",
     requirements_lock = "//tools/hf:requirements.lock.txt",
 )
 use_repo(pip, "huggingface_hub")

@@ -105,8 +105,9 @@ uv_lock(
         "--emit-find-links",
         "--index-strategy=unsafe-best-match",
         "--upgrade",
+        "--python-platform=x86_64-unknown-linux-gnu",
     ],
-    python_version = "3.11",
+    python_version = "3.12",
     tags = ["manual"],
 )
 
