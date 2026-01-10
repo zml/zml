@@ -1081,8 +1081,6 @@ pub const Event = opaque {
     }
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
-        defer self.deinit(api);
-
         if (self.isReady(api)) {
             return;
         }

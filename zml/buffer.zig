@@ -136,7 +136,9 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !Buffer {
         for (self._shards.constSlice()) |buffer| {
-            try buffer.getReadyEvent(self._api).await(self._api, io);
+            const ev = buffer.getReadyEvent(self._api);
+            defer ev.deinit(self._api);
+            try ev.await(self._api, io);
         }
 
         return self;
