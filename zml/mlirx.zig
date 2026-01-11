@@ -85,9 +85,3 @@ pub const Type = struct {
         std.debug.panic("Could not convert mlir.Type to DataType: {f}", .{mlir_type});
     }
 };
-
-pub var once = std.once(struct {
-    fn call() void {
-        mlir.registerPasses("Transforms");
-    }
-}.call);

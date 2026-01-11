@@ -24,9 +24,6 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    zml.init();
-    defer zml.deinit();
-
     // Auto-select platform
     const platform: zml.Platform = try .auto(io, .{});
 

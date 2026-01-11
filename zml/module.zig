@@ -58,8 +58,14 @@ pub const CompilationContext = struct {
 
     threadlocal var _current: ?*CompilationContext = null;
 
+    var mlir_once = std.once(struct {
+        fn call() void {
+            mlir.registerPasses("Transforms");
+        }
+    }.call);
+
     pub fn init(allocator: std.mem.Allocator, platform: Platform) CompilationContext {
-        mlir.registerPasses("Transforms");
+        mlir_once.call();
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);

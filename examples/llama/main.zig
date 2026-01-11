@@ -34,9 +34,6 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    zml.init();
-    defer zml.deinit();
-
     const args: Args = blk: {
         var ret: Args = .{};
         var it = std.process.args();

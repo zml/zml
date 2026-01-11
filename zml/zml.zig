@@ -39,43 +39,6 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
-var runfiles_once = std.once(struct {
-    fn call_() !void {
-        if (std.process.hasEnvVarConstant("RUNFILES_MANIFEST_FILE") or std.process.hasEnvVarConstant("RUNFILES_DIR")) {
-            return;
-        }
-
-        var io_: std.Io.Threaded = .init_single_threaded;
-        defer io_.deinit();
-
-        var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
-        const allocator = arena.allocator();
-        defer arena.deinit();
-
-        var envMap = std.process.EnvMap.init(allocator);
-        var r = (try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io_.io() })) orelse return;
-        try r.environment(&envMap);
-
-        var it = envMap.iterator();
-        while (it.next()) |entry| {
-            const keyZ = try allocator.dupeZ(u8, entry.key_ptr.*);
-            const valueZ = try allocator.dupeZ(u8, entry.value_ptr.*);
-            _ = c.setenv(keyZ.ptr, valueZ.ptr, 1);
-        }
-    }
-
-    fn call() void {
-        call_() catch @panic("Unable to init runfiles env");
-    }
-}.call);
-
-pub fn init() void {
-    runfiles_once.call();
-    mlir.once.call();
-}
-
-pub fn deinit() void {}
-
 /// Return a clone of a type with Tensors replaced by Buffer.
 /// Non-Tensor metadata is stripped out of the resulting struct.
 /// Recursively descends into the type.

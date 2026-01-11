@@ -81,9 +81,6 @@ pub fn main() !void {
     //
     const io = threaded.io();
 
-    zml.init();
-    defer zml.deinit();
-
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, process_args);
