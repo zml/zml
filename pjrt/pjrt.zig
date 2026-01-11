@@ -137,6 +137,9 @@ pub const Api = struct {
     }
 
     inline fn innerCall(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
+        if (@offsetOf(c.PJRT_Api, @tagName(method)) > self.inner.struct_size) {
+            std.debug.panic("PJRT Api method {s} not available in this plugin", .{@tagName(method)});
+        }
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(arg);
         if (@TypeOf(result) == void) {
