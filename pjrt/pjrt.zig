@@ -136,7 +136,7 @@ pub const Api = struct {
         };
     }
 
-    inline fn callInner(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
+    inline fn innerCall(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
         const fn_ptr = @field(&self.inner, @tagName(method)).?;
         const result = fn_ptr(arg);
         if (@TypeOf(result) == void) {
@@ -151,7 +151,7 @@ pub const Api = struct {
 
     inline fn call(self: *const Api, comptime method: Funcs, arg: PJRTFnArgWithDefault(method)) ApiError!PJRTFnArgWithDefault(method) {
         var ret = arg;
-        try callInner(self, method, @ptrCast(&ret));
+        try innerCall(self, method, @ptrCast(&ret));
         return ret;
     }
 
@@ -169,7 +169,7 @@ pub const Api = struct {
     }
 
     pub fn extension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
-        var it = extensions(self);
+        var it = self.extensions();
         while (it.next()) |ext| {
             if (ext.type == ext_id) {
                 return @ptrCast(@alignCast(ext));
