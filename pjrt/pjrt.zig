@@ -155,24 +155,64 @@ pub const Api = struct {
         return ret;
     }
 
-    pub const ExtensionsIterator = struct {
-        current: ?*const c.PJRT_Extension_Base,
+    pub const Extensions = struct {
+        pub const Type = enum(c.PJRT_Extension_Type) {
+            custom_call = c.PJRT_Extension_Type_Gpu_Custom_Call,
+            profiler = c.PJRT_Extension_Type_Profiler,
+            custom_partitioner = c.PJRT_Extension_Type_Custom_Partitioner,
+            stream = c.PJRT_Extension_Type_Stream,
+            layouts = c.PJRT_Extension_Type_Layouts,
+            ffi = c.PJRT_Extension_Type_FFI,
+            memory_descriptions = c.PJRT_Extension_Type_MemoryDescriptions,
+            triton = c.PJRT_Extension_Type_Triton,
+            raw_buffer = c.PJRT_Extension_Type_RawBuffer,
+            phase_compile = c.PJRT_Extension_Type_PhaseCompile,
+            unknown = c.PJRT_Extension_Type_Unknown,
+        };
 
-        pub fn next(self: *ExtensionsIterator) ?*const c.PJRT_Extension_Base {
-            self.current = self.current.next;
-            return self.current;
-        }
+        pub const Extension = union(Type) {
+            custom_call: *const c.PJRT_Gpu_Custom_Call,
+            profiler: *const c.PJRT_Profiler_Extension,
+            custom_partitioner: *const c.PJRT_Custom_Partitioner_Extension,
+            stream: *const c.PJRT_Stream_Extension,
+            layouts: *const c.PJRT_Layouts_Extension,
+            ffi: *const c.PJRT_FFI_Extension,
+            memory_descriptions: *const c.PJRT_MemoryDescriptions_Extension,
+            triton: *const c.PJRT_Triton_Extension,
+            raw_buffer: *const c.PJRT_RawBuffer_Extension,
+            phase_compile: *const c.PJRT_PhaseCompile_Extension,
+            unknown: *const c.PJRT_Extension_Base,
+        };
+
+        pub const Iterator = struct {
+            current: ?*const c.PJRT_Extension_Base,
+
+            pub fn next(self: *Iterator) ?Extension {
+                defer if (self.current) |cur| {
+                    self.current = cur.next;
+                };
+                if (self.current) |cur| {
+                    if (std.enums.fromInt(Extensions.Type, cur.type)) |e| {
+                        return switch (e) {
+                            inline else => |t| @unionInit(Extension, @tagName(t), @ptrCast(self.current)),
+                        };
+                    }
+                    return .{ .unknown = cur };
+                }
+                return null;
+            }
+        };
     };
 
-    pub fn extensions(self: *const Api) ExtensionsIterator {
+    pub fn extensions(self: *const Api) Extensions.Iterator {
         return .{ .current = @ptrCast(@alignCast(self.inner.extension_start)) };
     }
 
-    pub fn extension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
+    pub fn extension(self: *const Api, ext_type: Extensions.Type) ?Extensions.Extension {
         var it = self.extensions();
         while (it.next()) |ext| {
-            if (ext.type == ext_id) {
-                return @ptrCast(@alignCast(ext));
+            if (std.meta.activeTag(ext) == ext_type) {
+                return ext;
             }
         }
         return null;

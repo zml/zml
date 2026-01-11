@@ -8,9 +8,18 @@ zig_library(
     deps = [
         "//stdx",
         "@xla//xla/ffi/api:c_api",
+        # TODO: fix non conformance to C standard
+        # "@xla//xla/pjrt/c:pjrt_c_api_callback_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_custom_partitioner_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_ffi_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_gpu_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_layouts_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_memory_descriptions_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_phase_compile_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_profiler_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_raw_buffer_extension_hdrs",
+        "@xla//xla/pjrt/c:pjrt_c_api_stream_extension_hdrs",
         "@xla//xla/pjrt/c:pjrt_c_api_triton_extension_hdrs",
     ],
 )
