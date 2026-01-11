@@ -22,6 +22,7 @@ bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.8.0-rc1")
 bazel_dep(name = "rules_rust", version = "0.68.1")
+bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.3.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
@@ -126,7 +127,6 @@ use_repo(
     "local_config_tensorrt",
     "python_version_repo",
     "rules_ml_toolchain",
-    "rules_shell",
     "stablehlo",
     "sycl_configure",
     "sycl_configure_ext",

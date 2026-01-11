@@ -42,6 +42,7 @@ if_rocm_newer_than = always_newer_than
 is_rocm_configured = always_false
 if_gpu_is_configured = always_if_false
 if_cuda_or_rocm = always_if_false
+get_rbe_amdgpu_pool = always_false
 """,
     })
     simple_files(name = "local_config_sycl", files = {
@@ -69,14 +70,6 @@ if_sycl_is_configured = always_if_false
     })
     simple_files(name = "sycl_configure_ext", files = {})
     simple_files(name = "sycl_configure", files = {})
-    simple_files(name = "rules_shell", files = {
-        "BUILD.bazel": "",
-        "shell/BUILD.bazel": "",
-        "shell/sh_binary.bzl": """
-def sh_binary(**kwargs):
-    native.sh_binary(**kwargs)
-""",
-    })
 
 def _xla_impl(mctx):
     llvm("llvm-raw")
