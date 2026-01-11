@@ -12,35 +12,56 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-// We could calculate it like PJRT does, but it turns out that some of those
-// were wrong in PJRT itself [1], which gets propagated to binary plugins. In
-// order to mirror that, we just the value as computed by PJRT itself, through
-// comptime reflection. We could make the argument to remove that one day since
-// [1] has been fixed. The problem is that this problem could happen again in
-// as the way PJRT does it is not very robust.
-//
-// 1. https://github.com/openxla/xla/issues/10032
-pub fn pjrtStructSize(comptime T: type) usize {
-    // unsafe on purpose, we want this to fail if that ever changes
-    const typedef_name = comptime blk: {
-        const needle = ".struct_";
-        const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
-        break :blk @typeName(T)[idx + needle.len ..];
-    };
-    return @field(c, typedef_name ++ "_STRUCT_SIZE");
-}
+const meta = struct {
+    pub fn isPjrtStruct(comptime T: type) bool {
+        if (std.mem.indexOf(u8, @typeName(T), ".struct_PJRT_") == null) {
+            return false;
+        }
+        return true;
+    }
 
-pub inline fn pjrtStruct(v: anytype) @TypeOf(v) {
-    var ret = v;
-    ret.struct_size = pjrtStructSize(@TypeOf(v));
-    return ret;
-}
+    // We could calculate it like PJRT does, but it turns out that some of those
+    // were wrong in PJRT itself [1], which gets propagated to binary plugins. In
+    // order to mirror that, we just the value as computed by PJRT itself, through
+    // comptime reflection. We could make the argument to remove that one day since
+    // [1] has been fixed. The problem is that this problem could happen again in
+    // as the way PJRT does it is not very robust.
+    //
+    // 1. https://github.com/openxla/xla/issues/10032
+    pub fn structSize(comptime T: type) usize {
+        // unsafe on purpose, we want this to fail if that ever changes
+        const typedef_name = comptime blk: {
+            const needle = ".struct_";
+            const idx = std.mem.indexOf(u8, @typeName(T), needle).?;
+            break :blk @typeName(T)[idx + needle.len ..];
+        };
+        return @field(c, typedef_name ++ "_STRUCT_SIZE");
+    }
 
-pub fn pjrtStruct2(T: type, v: anytype) T {
-    var ret = std.mem.zeroInit(T, v);
-    ret.struct_size = pjrtStructSize(T);
-    return ret;
-}
+    pub fn Struct(comptime T: type) type {
+        const fields = std.meta.fields(T);
+        var names: [fields.len][]const u8 = undefined;
+        var types: [fields.len]type = undefined;
+        var attributes: [fields.len]std.builtin.Type.StructField.Attributes = undefined;
+        for (fields, &names, &types, &attributes) |field, *name, *type_, *attr| {
+            name.* = field.name;
+            type_.* = field.type;
+            attr.* = .{
+                .default_value_ptr = @ptrCast(if (std.mem.eql(u8, field.name, "struct_size"))
+                    &structSize(T)
+                else
+                    &std.mem.zeroes(field.type)),
+            };
+        }
+        return @Struct(
+            .@"extern",
+            null,
+            &names,
+            &types,
+            &attributes,
+        );
+    }
+};
 
 pub const ApiError = error{
     Cancelled,
@@ -101,12 +122,12 @@ pub const Api = struct {
 
         const api = DynGetPjrtApi();
         log.info("Loaded library: {s}", .{library});
-        _ = api.call(.PJRT_Plugin_Initialize, pjrtStruct2(c.PJRT_Plugin_Initialize_Args, .{})) catch unreachable;
+        _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
 
         return api;
     }
 
-    fn CallFnArgType(comptime func: Funcs) type {
+    fn PJRTFnArg(comptime func: Funcs) type {
         const fti = @typeInfo(@FieldType(c.PJRT_Api, @tagName(func)));
         const fn_ptr = @typeInfo(fti.optional.child);
         const fn_type_info = @typeInfo(fn_ptr.pointer.child);
@@ -114,20 +135,30 @@ pub const Api = struct {
         return arg_array_type_info.pointer.child;
     }
 
-    inline fn call(self: *const Api, comptime method: Funcs, arg: anytype) ApiError!CallFnArgType(method) {
-        var ret = pjrtStruct2(CallFnArgType(method), arg);
-        const fn_ptr = @field(&self.inner, @tagName(method)).?;
-        const result = fn_ptr(&ret);
-        if (@TypeOf(result) == void) {
-            return ret;
-        }
+    fn PJRTFnArgWithDefault(comptime func: Funcs) type {
+        const argT = PJRTFnArg(func);
+        return switch (@typeInfo(argT)) {
+            .@"struct" => meta.Struct(argT),
+            else => argT,
+        };
+    }
 
+    inline fn callInner(self: *const Api, comptime method: Funcs, arg: *PJRTFnArg(method)) ApiError!void {
+        const fn_ptr = @field(&self.inner, @tagName(method)).?;
+        const result = fn_ptr(arg);
+        if (@TypeOf(result) == void) {
+            return;
+        }
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("[{s}] {s}", .{ @tagName(method), pjrt_error.getMessage(self) });
             return pjrt_error.getCode(self).toApiError();
         }
+    }
 
+    inline fn call(self: *const Api, comptime method: Funcs, arg: PJRTFnArgWithDefault(method)) ApiError!PJRTFnArgWithDefault(method) {
+        var ret = arg;
+        try callInner(self, method, @ptrCast(&ret));
         return ret;
     }
 
@@ -269,15 +300,15 @@ pub const ShapeSpec = extern struct {
         std.debug.assert(@sizeOf(ShapeSpec) == @sizeOf(c.PJRT_ShapeSpec));
     }
 
-    inner: c.PJRT_ShapeSpec,
+    inner: meta.Struct(c.PJRT_ShapeSpec),
 
     pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
-            .inner = pjrtStruct2(c.PJRT_ShapeSpec, .{
+            .inner = .{
                 .dims = @as([*c]const i64, @ptrCast(@constCast(dims_.ptr))),
                 .num_dims = dims_.len,
                 .element_type = @intFromEnum(bt),
-            }),
+            },
         };
     }
 
@@ -303,12 +334,8 @@ pub const Client = opaque {
     pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
         // log.info("Loaded PJRT runtime plugin: {s}", .{api.Platform});
         const ret = try api.call(.PJRT_Client_Create, .{
-            .create_options = @as([*c]const c.PJRT_NamedValue, @ptrCast(create_options.ptr)),
+            .create_options = @ptrCast(create_options.ptr),
             .num_options = create_options.len,
-            .kv_get_callback = null,
-            .kv_put_callback = null,
-            .kv_put_user_arg = null,
-            .kv_get_user_arg = null,
         });
         return @ptrCast(ret.client.?);
     }
@@ -349,13 +376,13 @@ pub const Client = opaque {
     pub fn compileRaw(self: *const Client, api: *const Api, args: CompileArgs) ApiError!*LoadedExecutable {
         const bytecode_format_ = @tagName(args.bytecode_format);
         const ret = try api.call(.PJRT_Client_Compile, .{
-            .program = &pjrtStruct2(c.PJRT_Program, .{
-                .code = @as([*c]u8, @ptrCast(@constCast(args.bytecode.ptr))),
+            .program = @ptrCast(&meta.Struct(c.PJRT_Program){
+                .code = @ptrCast(@constCast(args.bytecode)),
                 .code_size = args.bytecode.len,
-                .format = @as([*c]const u8, @ptrCast(@constCast(bytecode_format_.ptr))),
+                .format = @ptrCast(@constCast(bytecode_format_)),
                 .format_size = bytecode_format_.len,
             }),
-            .compile_options = @as([*c]const u8, @ptrCast(@constCast(args.compile_options_pb.ptr))),
+            .compile_options = @ptrCast(@constCast(args.compile_options_pb)),
             .compile_options_size = args.compile_options_pb.len,
             .client = self.inner(),
         });
@@ -795,19 +822,13 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
-        var options = pjrtStruct2(c.PJRT_ExecuteOptions, .{
-            .send_callbacks = null,
-            .recv_callbacks = null,
-            .num_send_ops = 0,
-            .num_recv_ops = 0,
-            .launch_id = 0,
-            .non_donatable_input_indices = @as([*c]const i64, @ptrCast(args.non_donatable_input_indices.ptr)),
-            .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
-            .context = @as(?*c.PJRT_ExecuteContext, @ptrCast(args.context)),
-        });
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
-            .options = @as(*c.PJRT_ExecuteOptions, @ptrCast(&options)),
+            .options = &.{
+                .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
+                .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
+                .context = @ptrCast(args.context),
+            },
             .argument_lists = @as([*c]const [*c]const ?*c.PJRT_Buffer, @ptrCast(args.arguments.ptr)),
             .num_devices = @as(usize, @intCast(args.arguments.len)),
             .num_args = args.num_args,
