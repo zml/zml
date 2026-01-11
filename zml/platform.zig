@@ -35,9 +35,16 @@ fn StaticPlatformMap(comptime E: type, comptime T: type) type {
 var api_map: StaticPlatformMap(Target, ?*const pjrt.Api) = .{};
 
 fn disableXlaLogs() void {
+    // https://deepreg.readthedocs.io/en/latest/docs/logging.html#tensorflow-logging
+    const TF_CPP_LOG_LEVEL = struct {
+        const DEBUG = "0";
+        const INFO = "1";
+        const WARNING = "2";
+        const ERROR = "3";
+    };
     _ = c.setenv(
         "TF_CPP_MIN_LOG_LEVEL",
-        std.posix.getenv("TF_CPP_MIN_LOG_LEVEL") orelse "3",
+        std.posix.getenv("TF_CPP_MIN_LOG_LEVEL") orelse TF_CPP_LOG_LEVEL.ERROR,
         1,
     );
 }
