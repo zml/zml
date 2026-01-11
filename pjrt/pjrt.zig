@@ -274,20 +274,20 @@ pub const ErrorCode = enum(c.PJRT_Error_Code) {
 pub const Error = opaque {
     pub fn deinit(self: *Error, api: *const Api) void {
         _ = api.call(.PJRT_Error_Destroy, .{
-            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
+            .@"error" = @ptrCast(self),
         }) catch unreachable;
     }
 
     pub fn getCode(self: *Error, api: *const Api) ErrorCode {
         const ret = api.call(.PJRT_Error_GetCode, .{
-            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
+            .@"error" = @ptrCast(self),
         }) catch unreachable;
         return @enumFromInt(ret.code);
     }
 
     pub fn getMessage(self: *Error, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_Error_Message, .{
-            .@"error" = @as(*c.PJRT_Error, @ptrCast(self)),
+            .@"error" = @ptrCast(self),
         }) catch unreachable;
         return ret.message[0..ret.message_size];
     }
@@ -305,7 +305,7 @@ pub const ShapeSpec = extern struct {
     pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = .{
-                .dims = @as([*c]const i64, @ptrCast(@constCast(dims_.ptr))),
+                .dims = @ptrCast(@constCast(dims_.ptr)),
                 .num_dims = dims_.len,
                 .element_type = @intFromEnum(bt),
             },
@@ -411,13 +411,13 @@ pub const Client = opaque {
             .client = self.inner(),
             .data = @constCast(args.data),
             .type = @intFromEnum(args.buffer_type),
-            .dims = @as([*c]const i64, @ptrCast(@constCast(args.dims.ptr))),
+            .dims = @ptrCast(@constCast(args.dims.ptr)),
             .num_dims = args.dims.len,
-            .byte_strides = @as([*c]const i64, if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null),
+            .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
-            .device = @as(?*c.PJRT_Device, if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null),
-            .memory = @as(?*c.PJRT_Memory, if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
             .device_layout = null, // TODO
             .done_with_host_buffer = null, // out
             .buffer = null, // out
@@ -459,11 +459,11 @@ pub const Client = opaque {
             .dims = args.dims.ptr,
             .num_dims = args.dims.len,
             .element_type = @intFromEnum(args.element_type),
-            .layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(@constCast(&layout))),
-            .device = @as(?*c.PJRT_Device, @ptrCast(@constCast(args.device))),
+            .layout = @ptrCast(@constCast(&layout)),
+            .device = @ptrCast(@constCast(args.device)),
             .on_delete_callback = args.on_delete_callback,
             .on_delete_callback_arg = args.on_delete_callback_arg,
-            .stream = @as(isize, @bitCast(@intFromPtr(args.stream))),
+            .stream = @bitCast(@intFromPtr(args.stream)),
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -502,11 +502,11 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @as([*c]c.PJRT_ShapeSpec, @ptrCast(@constCast(args.shape_specs.ptr))),
+            .shape_specs = @ptrCast(@constCast(args.shape_specs.ptr)),
             .num_shape_specs = args.shape_specs.len,
-            .device_layouts = @as([*c][*c]c.PJRT_Buffer_MemoryLayout, if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null),
-            .num_device_layouts = @as(usize, if (args.device_layouts) |layouts| @intCast(layouts.len) else 0),
-            .memory = @as(?*c.PJRT_Memory, @ptrCast(@constCast(args.memory))),
+            .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
+            .num_device_layouts = if (args.device_layouts) |layouts| layouts.len else 0,
+            .memory = @ptrCast(@constCast(args.memory)),
         });
         return @ptrCast(ret.transfer_manager.?);
     }
@@ -526,11 +526,11 @@ pub const Client = opaque {
         const ret = try api.call(.PJRT_Client_CreateUninitializedBuffer, .{
             .client = self.inner(),
             .shape_dims = args.dims.ptr,
-            .shape_num_dims = @as(usize, @intCast(args.dims.len)),
+            .shape_num_dims = args.dims.len,
             .shape_element_type = @intFromEnum(args.element_type),
-            .shape_layout = @as([*c]c.PJRT_Buffer_MemoryLayout, @ptrCast(&layout)),
-            .device = if (args.dst == .device) @as(?*c.PJRT_Device, @ptrCast(@constCast(args.dst.device))) else null,
-            .memory = if (args.dst == .memory) @as(?*c.PJRT_Memory, @ptrCast(@constCast(args.dst.memory))) else null,
+            .shape_layout = @ptrCast(&layout),
+            .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
+            .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
         });
         return @ptrCast(ret.buffer.?);
     }
@@ -711,7 +711,7 @@ pub const SerializeResult = struct {
 pub const ExecuteContext = opaque {
     pub fn deinit(self: *ExecuteContext, api: *const Api) void {
         _ = api.call(.PJRT_ExecuteContext_Destroy, .{
-            .context = @as(?*c.PJRT_ExecuteContext, @ptrCast(self)),
+            .context = @ptrCast(self),
         }) catch {};
     }
 };
@@ -822,19 +822,19 @@ pub const LoadedExecutable = opaque {
     };
 
     pub fn execute(self: *const LoadedExecutable, api: *const Api, args: ExecuteArgs) ApiError!void {
+        var options: meta.Struct(c.PJRT_ExecuteOptions) = .{
+            .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
+            .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
+            .context = @ptrCast(args.context),
+        };
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
-            .options = &.{
-                .non_donatable_input_indices = @ptrCast(args.non_donatable_input_indices),
-                .num_non_donatable_input_indices = args.non_donatable_input_indices.len,
-                .context = @ptrCast(args.context),
-            },
-            .argument_lists = @as([*c]const [*c]const ?*c.PJRT_Buffer, @ptrCast(args.arguments.ptr)),
-            .num_devices = @as(usize, @intCast(args.arguments.len)),
+            .options = @ptrCast(&options),
+            .argument_lists = @ptrCast(args.arguments.ptr),
+            .num_devices = args.arguments.len,
             .num_args = args.num_args,
-            .output_lists = @as([*c]const [*c]?*c.PJRT_Buffer, @ptrCast(args.results.ptr)),
-            .device_complete_events = @as([*c]?*c.PJRT_Event, if (args.events) |ev| @ptrCast(ev.ptr) else null),
-            .execute_device = null,
+            .output_lists = @ptrCast(args.results.ptr),
+            .device_complete_events = if (args.events) |ev| @ptrCast(ev.ptr) else null,
         });
     }
 
@@ -1052,7 +1052,7 @@ pub const Buffer = opaque {
     pub fn copyToMemory(self: *const Buffer, api: *const Api, dst_memory: *const Memory) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToMemory, .{
             .buffer = self.inner(),
-            .dst_memory = @as(?*c.PJRT_Memory, @ptrCast(@constCast(dst_memory))),
+            .dst_memory = @ptrCast(@constCast(dst_memory)),
         });
         return @ptrCast(ret.dst_buffer);
     }
@@ -1094,10 +1094,10 @@ pub const Event = opaque {
     }
 
     pub fn getEventError(self: *const Event, api: *const Api) ?*Error {
-        var args = pjrtStruct2(c.PJRT_Event_Error_Args, .{
+        var args: meta.Struct(c.PJRT_Event_Error_Args) = .{
             .event = self.inner(),
-        });
-        const result: ?*c.PJRT_Error = api.inner.PJRT_Event_Error.?(&args);
+        };
+        const result: ?*c.PJRT_Error = api.inner.PJRT_Event_Error.?(@ptrCast(&args));
         return @ptrCast(result);
     }
 
@@ -1138,7 +1138,7 @@ pub const Event = opaque {
     pub fn onReady(self: *Event, api: *const Api, func: *const fn (err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void, user_arg: ?*anyopaque) ApiError!void {
         _ = try api.call(.PJRT_Event_OnReady, .{
             .event = self.inner(),
-            .callback = @as(c.PJRT_Event_OnReadyCallback, @ptrCast(func)),
+            .callback = @ptrCast(func),
             .user_arg = user_arg,
         });
     }
@@ -1226,10 +1226,10 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn transferData(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, data: []const u8, offset: i64, is_last_transfer: bool) ApiError!*Event {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_TransferData, .{
             .transfer_manager = self.inner(),
-            .buffer_index = @as(c_int, @intCast(buffer_index)),
+            .buffer_index = @intCast(buffer_index),
             .data = data.ptr,
             .offset = offset,
-            .transfer_size = @as(i64, @intCast(data.len)),
+            .transfer_size = @intCast(data.len),
             .is_last_transfer = is_last_transfer,
         });
         return @ptrCast(ret.done_with_h2d_transfer.?);
@@ -1238,7 +1238,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn retrieveBuffer(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!*Buffer {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_RetrieveBuffer, .{
             .transfer_manager = self.inner(),
-            .buffer_index = @as(c_int, @intCast(buffer_index)),
+            .buffer_index = @intCast(buffer_index),
         });
         return @ptrCast(ret.buffer_out.?);
     }
@@ -1260,7 +1260,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn bufferSize(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize) ApiError!usize {
         const ret = try api.call(.PJRT_AsyncHostToDeviceTransferManager_BufferSize, .{
             .transfer_manager = self.inner(),
-            .buffer_index = @as(c_int, @intCast(buffer_index)),
+            .buffer_index = @intCast(buffer_index),
         });
         return ret.buffer_size;
     }
@@ -1268,7 +1268,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn setBufferError(self: *AsyncHostToDeviceTransferManager, api: *const Api, buffer_index: usize, error_code: c.PJRT_Error_Code, error_message: []const u8) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_SetBufferError, .{
             .transfer_manager = self.inner(),
-            .buffer_index = @as(c_int, @intCast(buffer_index)),
+            .buffer_index = @intCast(buffer_index),
             .error_code = error_code,
             .error_message = error_message.ptr,
             .error_message_size = error_message.len,
@@ -1278,7 +1278,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_AddMetadata, .{
             .transfer_manager = self.inner(),
-            .transfer_metadata = @as([*c]const c.PJRT_NamedValue, @ptrCast(transfer_metadata.ptr)),
+            .transfer_metadata = @ptrCast(transfer_metadata.ptr),
             .num_metadata = transfer_metadata.len,
         });
     }
@@ -1400,14 +1400,14 @@ pub const Ffi = extern struct {
         func: *const ffi.Handler,
         traits: ffi.HandlerTraits,
     ) ApiError!void {
-        var ret = pjrtStruct2(c.PJRT_FFI_Register_Handler_Args, .{
+        var ret: meta.Struct(c.PJRT_FFI_Register_Handler_Args) = .{
             .target_name = target_name.ptr,
             .target_name_size = target_name.len,
             .handler = @ptrCast(@constCast(func)),
             .platform_name = platform_name.ptr,
             .platform_name_size = platform_name.len,
             .traits = @bitCast(traits),
-        });
+        };
         const result = self.inner.register_handler.?(&ret);
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
@@ -1417,12 +1417,12 @@ pub const Ffi = extern struct {
     }
 
     pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const c.PJRT_FFI_Type_Info) ApiError!ffi.TypeId {
-        var ret = pjrtStruct2(c.PJRT_FFI_Type_Register_Args, .{
+        var ret: meta.Struct(c.PJRT_FFI_Type_Register_Args) = .{
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
             .type_id = 0, // let the plugin assign a unique type ID
             .type_info = @ptrCast(@constCast(type_info)),
-        });
+        };
         const result = self.inner.type_register.?(&ret);
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
@@ -1433,10 +1433,10 @@ pub const Ffi = extern struct {
     }
 
     pub fn addUserData(self: *const Ffi, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
-        var ret = pjrtStruct2(c.PJRT_FFI_UserData_Add_Args, .{
+        var ret: meta.Struct(c.PJRT_FFI_UserData_Add_Args) = .{
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
-        });
+        };
         const result = self.inner.user_data_add.?(&ret);
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
