@@ -539,49 +539,6 @@ pub const Client = opaque {
     }
 };
 
-pub const MemoryStats = struct {
-    /// Number of bytes in use.
-    bytes_in_use: u64,
-    /// The peak bytes in use.
-    peak_bytes_in_use: ?u64,
-    /// Number of allocations.
-    num_allocs: ?u64,
-    /// The largest single allocation seen.
-    largest_alloc_size: ?u64,
-    /// The upper limit of user-allocatable device memory in bytes.
-    bytes_limit: ?u64,
-    /// Number of bytes reserved.
-    bytes_reserved: ?u64,
-    /// The peak number of bytes reserved.
-    peak_bytes_reserved: ?u64,
-    /// The upper limit on the number bytes of reservable memory.
-    bytes_reservable_limit: ?u64,
-    /// Largest free block size in bytes.
-    largest_free_block_bytes: ?u64,
-    /// Number of bytes of memory held by the allocator. This may be higher than
-    /// bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
-    pool_bytes: ?u64,
-    peak_pool_bytes: ?u64,
-
-    pub const zeroes = std.mem.zeroes(MemoryStats);
-
-    fn fromCStruct(v: c.PJRT_Device_MemoryStats_Args) MemoryStats {
-        return .{
-            .bytes_in_use = @intCast(v.bytes_in_use),
-            .peak_bytes_in_use = if (v.peak_bytes_in_use_is_set) @intCast(v.peak_bytes_in_use) else null,
-            .num_allocs = if (v.num_allocs_is_set) @intCast(v.num_allocs) else null,
-            .largest_alloc_size = if (v.largest_alloc_size_is_set) @intCast(v.largest_alloc_size) else null,
-            .bytes_limit = if (v.bytes_limit_is_set) @intCast(v.bytes_limit) else null,
-            .bytes_reserved = if (v.bytes_reserved_is_set) @intCast(v.bytes_reserved) else null,
-            .peak_bytes_reserved = if (v.peak_bytes_reserved_is_set) @intCast(v.peak_bytes_reserved) else null,
-            .bytes_reservable_limit = if (v.bytes_reservable_limit_is_set) @intCast(v.bytes_reservable_limit) else null,
-            .largest_free_block_bytes = if (v.largest_free_block_bytes_is_set) @intCast(v.largest_free_block_bytes) else null,
-            .pool_bytes = if (v.pool_bytes_is_set) @intCast(v.pool_bytes) else null,
-            .peak_pool_bytes = if (v.peak_pool_bytes_is_set) @intCast(v.peak_pool_bytes) else null,
-        };
-    }
-};
-
 pub const Device = opaque {
     const inner = InnerMixin(c.PJRT_Device).inner;
 
@@ -613,6 +570,49 @@ pub const Device = opaque {
         ) catch return &.{};
         return @ptrCast(ret.memories[0..ret.num_memories]);
     }
+
+    pub const MemoryStats = struct {
+        /// Number of bytes in use.
+        bytes_in_use: u64,
+        /// The peak bytes in use.
+        peak_bytes_in_use: ?u64,
+        /// Number of allocations.
+        num_allocs: ?u64,
+        /// The largest single allocation seen.
+        largest_alloc_size: ?u64,
+        /// The upper limit of user-allocatable device memory in bytes.
+        bytes_limit: ?u64,
+        /// Number of bytes reserved.
+        bytes_reserved: ?u64,
+        /// The peak number of bytes reserved.
+        peak_bytes_reserved: ?u64,
+        /// The upper limit on the number bytes of reservable memory.
+        bytes_reservable_limit: ?u64,
+        /// Largest free block size in bytes.
+        largest_free_block_bytes: ?u64,
+        /// Number of bytes of memory held by the allocator. This may be higher than
+        /// bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
+        pool_bytes: ?u64,
+        peak_pool_bytes: ?u64,
+
+        pub const zeroes = std.mem.zeroes(MemoryStats);
+
+        fn fromCStruct(v: c.PJRT_Device_MemoryStats_Args) MemoryStats {
+            return .{
+                .bytes_in_use = @intCast(v.bytes_in_use),
+                .peak_bytes_in_use = if (v.peak_bytes_in_use_is_set) @intCast(v.peak_bytes_in_use) else null,
+                .num_allocs = if (v.num_allocs_is_set) @intCast(v.num_allocs) else null,
+                .largest_alloc_size = if (v.largest_alloc_size_is_set) @intCast(v.largest_alloc_size) else null,
+                .bytes_limit = if (v.bytes_limit_is_set) @intCast(v.bytes_limit) else null,
+                .bytes_reserved = if (v.bytes_reserved_is_set) @intCast(v.bytes_reserved) else null,
+                .peak_bytes_reserved = if (v.peak_bytes_reserved_is_set) @intCast(v.peak_bytes_reserved) else null,
+                .bytes_reservable_limit = if (v.bytes_reservable_limit_is_set) @intCast(v.bytes_reservable_limit) else null,
+                .largest_free_block_bytes = if (v.largest_free_block_bytes_is_set) @intCast(v.largest_free_block_bytes) else null,
+                .pool_bytes = if (v.pool_bytes_is_set) @intCast(v.pool_bytes) else null,
+                .peak_pool_bytes = if (v.peak_pool_bytes_is_set) @intCast(v.peak_pool_bytes) else null,
+            };
+        }
+    };
 
     pub fn memoryStats(self: *const Device, api: *const Api) ApiError!MemoryStats {
         const ret = try api.call(.PJRT_Device_MemoryStats, .{
@@ -728,11 +728,28 @@ pub const Executable = opaque {
         };
     }
 
+    pub const CompiledMemoryStats = struct {
+        /// Mirrors xla::CompiledMemoryStats.
+        /// Device default memory (e.g., HBM for GPU/TPU) usage stats.
+        generated_code_size_in_bytes: u64,
+        argument_size_in_bytes: u64,
+        output_size_in_bytes: u64,
+        /// much: How argument is reused for output.
+        alias_size_in_bytes: u64,
+        temp_size_in_bytes: u64,
+
+        /// memory: Host usage stats.
+        host_generated_code_size_in_bytes: u64,
+        host_argument_size_in_bytes: u64,
+        host_output_size_in_bytes: u64,
+        host_alias_size_in_bytes: u64,
+        host_temp_size_in_bytes: u64,
+    };
+
     pub fn getCompiledMemoryStats(self: *const Executable, api: *const Api) ApiError!CompiledMemoryStats {
         const ret = try api.call(.PJRT_Executable_GetCompiledMemoryStats, .{
             .executable = self.inner(),
         });
-
         return .{
             .generated_code_size_in_bytes = @intCast(ret.generated_code_size_in_bytes),
             .argument_size_in_bytes = @intCast(ret.argument_size_in_bytes),
@@ -746,24 +763,6 @@ pub const Executable = opaque {
             .host_temp_size_in_bytes = @intCast(ret.host_temp_size_in_bytes),
         };
     }
-};
-
-pub const CompiledMemoryStats = struct {
-    // Mirrors xla::CompiledMemoryStats.
-    // Device default memory (e.g., HBM for GPU/TPU) usage stats.
-    generated_code_size_in_bytes: u64,
-    argument_size_in_bytes: u64,
-    output_size_in_bytes: u64,
-    // much: How argument is reused for output.
-    alias_size_in_bytes: u64,
-    temp_size_in_bytes: u64,
-
-    // memory: Host usage stats.
-    host_generated_code_size_in_bytes: u64,
-    host_argument_size_in_bytes: u64,
-    host_output_size_in_bytes: u64,
-    host_alias_size_in_bytes: u64,
-    host_temp_size_in_bytes: u64,
 };
 
 pub const LoadedExecutable = opaque {
