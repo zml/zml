@@ -96,7 +96,7 @@ pub const Platform = struct {
 
         pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
             const description = self.device.getDescription(self.api);
-            try writer.print("{s} ({s})", .{ description.getKind(self.api), description.debugString(self.api) });
+            try writer.print("{s} ({s})", .{ description.kind(self.api), description.debugString(self.api) });
         }
     };
 
@@ -105,7 +105,7 @@ pub const Platform = struct {
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
-        const true_num_devices = pjrt_client.getAddressableDevices(api).len;
+        const true_num_devices = pjrt_client.addressableDevices(api).len;
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
         }
@@ -143,7 +143,7 @@ pub const Platform = struct {
         try writer.print("Devices total={d}\n", .{devices.len});
         for (devices, 0..) |device, i| {
             const description = device.getDescription(self.pjrt_api);
-            try writer.print("\t#{d}: {s}\n", .{ i, description.getKind(self.pjrt_api) });
+            try writer.print("\t#{d}: {s}\n", .{ i, description.kind(self.pjrt_api) });
         }
     }
 
@@ -152,7 +152,7 @@ pub const Platform = struct {
     }
 
     pub fn getDevices(self: Platform) []const *const pjrt.Device {
-        const all_devices = self.pjrt_client.getAddressableDevices(self.pjrt_api);
+        const all_devices = self.pjrt_client.addressableDevices(self.pjrt_api);
         if (all_devices.len > MAX_NUM_DEVICES) {
             return all_devices[0..MAX_NUM_DEVICES];
         }
@@ -252,7 +252,7 @@ pub const Platform = struct {
         const devices = self.getDevices();
         for (0..devices.len) |i| {
             const description = devices[i].getDescription(self.pjrt_api);
-            try writer.print("{s}(\"{s}\")", .{ description.toString(self.pjrt_api), description.getKind(self.pjrt_api) });
+            try writer.print("{s}(\"{s}\")", .{ description.toString(self.pjrt_api), description.kind(self.pjrt_api) });
             if (i < devices.len - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");

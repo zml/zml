@@ -136,7 +136,7 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !Buffer {
         for (self._shards.constSlice()) |buffer| {
-            const ev = buffer.getReadyEvent(self._api);
+            const ev = buffer.readyEvent(self._api);
             defer ev.deinit(self._api);
             try ev.await(self._api, io);
         }
@@ -220,7 +220,7 @@ pub const Buffer = struct {
 
     pub fn devicePtr(self: Buffer) *anyopaque {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer", .{});
-        return self._shards.get(0).getOpaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+        return self._shards.get(0).opaqueDeviceMemoryDataPointer(self._api) catch unreachable;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.

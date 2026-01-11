@@ -487,7 +487,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                         .{ "gfx906", {} },
                         .{ "gfx900", {} },
                     });
-                    const first_device = platform.pjrt_client.getDevices(platform.pjrt_api)[0];
+                    const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
                     const description = first_device.getDescription(platform.pjrt_api);
                     break :gemm_blk supported.has(description.attribute(platform.pjrt_api, "compute_capability").?.string);
                 }, upb_arena);

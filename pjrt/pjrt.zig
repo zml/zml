@@ -394,21 +394,21 @@ pub const Client = opaque {
         }) catch {};
     }
 
-    pub fn getPlatformName(self: *const Client, api: *const Api) []const u8 {
+    pub fn platformName(self: *const Client, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_Client_PlatformName, .{
             .client = self.inner(),
         }) catch unreachable;
         return ret.platform_name[0..ret.platform_name_size];
     }
 
-    pub fn getDevices(self: *const Client, api: *const Api) []const *Device {
+    pub fn devices(self: *const Client, api: *const Api) []const *Device {
         const ret = api.call(.PJRT_Client_Devices, .{
             .client = self.inner(),
         }) catch unreachable;
         return @ptrCast(ret.devices[0..ret.num_devices]);
     }
 
-    pub fn getAddressableDevices(self: *const Client, api: *const Api) []const *Device {
+    pub fn addressableDevices(self: *const Client, api: *const Api) []const *Device {
         const ret = api.call(.PJRT_Client_AddressableDevices, .{
             .client = self.inner(),
         }) catch unreachable;
@@ -598,7 +598,7 @@ pub const Device = opaque {
         return ret.is_addressable;
     }
 
-    pub fn getLocalHardwareId(self: *const Device, api: *const Api) usize {
+    pub fn localHardwareId(self: *const Device, api: *const Api) usize {
         const ret = api.call(.PJRT_Device_LocalHardwareId, .{
             .device = self.inner(),
         }) catch unreachable;
@@ -676,21 +676,21 @@ pub const Device = opaque {
 pub const DeviceDescription = opaque {
     const inner = InnerMixin(c.PJRT_DeviceDescription).inner;
 
-    pub fn getId(self: *const DeviceDescription, api: *const Api) usize {
+    pub fn id(self: *const DeviceDescription, api: *const Api) usize {
         const ret = api.call(.PJRT_DeviceDescription_Id, .{
             .device_description = self.inner(),
         }) catch unreachable;
         return @intCast(ret.id);
     }
 
-    pub fn getProcessIndex(self: *const DeviceDescription, api: *const Api) usize {
+    pub fn processIndex(self: *const DeviceDescription, api: *const Api) usize {
         const ret = api.call(.PJRT_DeviceDescription_ProcessIndex, .{
             .device_description = self.inner(),
         }) catch unreachable;
         return @intCast(ret.process_index);
     }
 
-    pub fn getKind(self: *const DeviceDescription, api: *const Api) []const u8 {
+    pub fn kind(self: *const DeviceDescription, api: *const Api) []const u8 {
         const ret = api.call(.PJRT_DeviceDescription_Kind, .{
             .device_description = self.inner(),
         }) catch unreachable;
@@ -759,7 +759,7 @@ pub const Executable = opaque {
         }) catch unreachable;
     }
 
-    pub fn getCostAnalysis(self: *const Executable, api: *const Api) GetCostAnalysisError![]const NamedValue {
+    pub fn costAnalysis(self: *const Executable, api: *const Api) GetCostAnalysisError![]const NamedValue {
         const ret = try api.call(.PJRT_Executable_GetCostAnalysis, .{
             .executable = self.inner(),
         });
@@ -838,7 +838,7 @@ pub const LoadedExecutable = opaque {
         return ret.is_deleted;
     }
 
-    pub fn getAddressableDevices(self: *const LoadedExecutable, api: *const Api) []const *Device {
+    pub fn addressableDevices(self: *const LoadedExecutable, api: *const Api) []const *Device {
         const ret = api.call(.PJRT_LoadedExecutable_AddressableDevices, .{
             .executable = self.inner(),
         }) catch unreachable;
@@ -871,7 +871,7 @@ pub const LoadedExecutable = opaque {
         });
     }
 
-    pub fn getExecutable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {
+    pub fn executable(self: *const LoadedExecutable, api: *const Api) ApiError!*Executable {
         const ret = try api.call(.PJRT_LoadedExecutable_GetExecutable, .{
             .loaded_executable = self.inner(),
         });
@@ -983,7 +983,7 @@ pub const Buffer = opaque {
         }) catch unreachable;
     }
 
-    pub fn getDevice(self: *const Buffer, api: *const Api) ApiError!*Device {
+    pub fn device(self: *const Buffer, api: *const Api) ApiError!*Device {
         const ret = try api.call(.PJRT_Buffer_Device, .{
             .buffer = self.inner(),
         });
@@ -1019,14 +1019,14 @@ pub const Buffer = opaque {
         return @ptrCast(ret.event);
     }
 
-    pub fn getElementType(self: *const Buffer, api: *const Api) BufferType {
+    pub fn elementType(self: *const Buffer, api: *const Api) BufferType {
         const ret = api.call(.PJRT_Buffer_ElementType, .{
             .buffer = self.inner(),
         }) catch unreachable;
         return @enumFromInt(ret.type);
     }
 
-    pub fn getDimensions(self: *const Buffer, api: *const Api) []const i64 {
+    pub fn dimensions(self: *const Buffer, api: *const Api) []const i64 {
         const ret = api.call(.PJRT_Buffer_Dimensions, .{
             .buffer = self.inner(),
         }) catch unreachable;
@@ -1036,36 +1036,36 @@ pub const Buffer = opaque {
         return ret.dims[0..ret.num_dims];
     }
 
-    pub fn getUnpaddedDimensions(self: *const Buffer, api: *const Api) ApiError![]const i64 {
+    pub fn unpaddedDimensions(self: *const Buffer, api: *const Api) ApiError![]const i64 {
         const ret = try api.call(.PJRT_Buffer_UnpaddedDimensions, .{
             .buffer = self.inner(),
         });
         return ret.unpadded_dims[0..ret.num_dims];
     }
 
-    pub fn getOnDeviceSizeInBytes(self: *const Buffer, api: *const Api) ApiError!usize {
+    pub fn onDeviceSizeInBytes(self: *const Buffer, api: *const Api) ApiError!usize {
         const ret = try api.call(.PJRT_Buffer_OnDeviceSizeInBytes, .{
             .buffer = self.inner(),
         });
-        return ret.on_device_size_in_bytes;
+        return @intCast(ret.on_device_size_in_bytes);
     }
 
-    pub fn copyToDevice(self: *const Buffer, api: *const Api, device: *Device) ApiError!*Buffer {
+    pub fn copyToDevice(self: *const Buffer, api: *const Api, dst_device: *Device) ApiError!*Buffer {
         const ret = try api.call(.PJRT_Buffer_CopyToDevice, .{
             .buffer = self.inner(),
-            .dst_device = device.inner(),
+            .dst_device = dst_device.inner(),
         });
         return @ptrCast(ret.dst_buffer.?);
     }
 
-    pub fn getReadyEvent(self: *const Buffer, api: *const Api) *Event {
+    pub fn readyEvent(self: *const Buffer, api: *const Api) *Event {
         const ret = api.call(.PJRT_Buffer_ReadyEvent, .{
             .buffer = self.inner(),
         }) catch unreachable;
         return @ptrCast(ret.event.?);
     }
 
-    pub fn getOpaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
+    pub fn opaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
         const ret = try api.call(.PJRT_Buffer_OpaqueDeviceMemoryDataPointer, .{
             .buffer = self.inner(),
         });
