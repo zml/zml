@@ -2,7 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 const c = @import("c");
-const stdx = @import("stdx");
 
 pub const ffi = @import("ffi.zig");
 
