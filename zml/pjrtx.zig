@@ -45,15 +45,6 @@ pub const Client = opaque {
             .compile_options_pb = compile_options_pb,
         }));
     }
-
-    pub fn memoryByKind(client: *const pjrt.Client, api: *const pjrt.Api, kind: pjrt.Memory.Kind) ?*const pjrt.Memory {
-        for (client.addressableMemories(api)) |mem| {
-            if (mem.kind(api) == kind) {
-                return mem;
-            }
-        }
-        return null;
-    }
 };
 
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {

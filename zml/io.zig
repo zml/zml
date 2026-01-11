@@ -377,7 +377,7 @@ pub const Transfer = struct {
             spec.* = pjrt.ShapeSpec.init(dims, pjrtx.bufferTypeFromDtype(shape.dtype()));
         }
 
-        const memory = pjrtx.Client.memoryByKind(platform.pjrt_client, platform.pjrt_api, .device).?;
+        const memory = platform.pjrt_client.addressableMemory(platform.pjrt_api, .device).?;
 
         const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{ .shape_specs = shape_specs, .memory = memory });
         errdefer transfer_manager.deinit(platform.pjrt_api);

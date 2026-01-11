@@ -571,6 +571,15 @@ pub const Device = opaque {
         return @ptrCast(ret.memories[0..ret.num_memories]);
     }
 
+    pub fn addressableMemory(client: *const Client, api: *const Api, kind: Memory.Kind) ?*const Memory {
+        for (client.addressableMemories(api)) |mem| {
+            if (mem.kind(api) == kind) {
+                return mem;
+            }
+        }
+        return null;
+    }
+
     pub const MemoryStats = struct {
         /// Number of bytes in use.
         bytes_in_use: u64,
