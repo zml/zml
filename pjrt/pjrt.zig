@@ -13,13 +13,6 @@ test {
 }
 
 const meta = struct {
-    pub fn isPjrtStruct(comptime T: type) bool {
-        if (std.mem.indexOf(u8, @typeName(T), ".struct_PJRT_") == null) {
-            return false;
-        }
-        return true;
-    }
-
     // We could calculate it like PJRT does, but it turns out that some of those
     // were wrong in PJRT itself [1], which gets propagated to binary plugins. In
     // order to mirror that, we just the value as computed by PJRT itself, through
@@ -162,14 +155,26 @@ pub const Api = struct {
         return ret;
     }
 
-    pub fn lookupExtension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
-        var cur: [*c]const c.PJRT_Extension_Base = @ptrCast(@alignCast(self.inner.extension_start));
-        while (cur != null) : (cur = cur.*.next) {
-            if (cur.*.type == ext_id) {
-                return @ptrCast(@alignCast(cur));
+    pub const ExtensionsIterator = struct {
+        current: ?*const c.PJRT_Extension_Base,
+
+        pub fn next(self: *ExtensionsIterator) ?*const c.PJRT_Extension_Base {
+            self.current = self.current.next;
+            return self.current;
+        }
+    };
+
+    pub fn extensions(self: *const Api) ExtensionsIterator {
+        return .{ .current = @ptrCast(@alignCast(self.inner.extension_start)) };
+    }
+
+    pub fn extension(self: *const Api, comptime ExtensionT: type, ext_id: c_int) ?*const ExtensionT {
+        var it = extensions(self);
+        while (it.next()) |ext| {
+            if (ext.type == ext_id) {
+                return @ptrCast(@alignCast(ext));
             }
         }
-
         return null;
     }
 
@@ -188,11 +193,13 @@ pub const Api = struct {
         if (state.str) |str| {
             return str;
         }
-        if (self.getPluginAttribute("stablehlo_current_version")) |v| {
-            stdx.debug.assert(v.kind() == .int64list, "fetched attribute \"stablehlo_current_version\" from the plugin with type `{}`, expected `.int64list`", .{v.kind()});
-            stdx.debug.assert(v.inner.value_size == 3, "expect version format to have 3 elements representing `major.minor.patch` format, got {} elements", .{v.inner.value_size});
-            const value = v.inner.unnamed_0.int64_array_value[0..v.inner.value_size];
-            state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ value[0], value[1], value[2] }) catch unreachable;
+        if (self.getPluginAttribute("stablehlo_current_version")) |nv| {
+            switch (nv.value()) {
+                .int64list => |v| {
+                    state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
+                },
+                else => unreachable,
+            }
         }
         return state.str;
     }
@@ -203,7 +210,7 @@ pub const Api = struct {
     }
 
     pub fn ffi(api: *const Api) ?Ffi {
-        if (api.lookupExtension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
+        if (api.extension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
             return .{ .inner = ext };
         }
         return null;
@@ -216,7 +223,6 @@ pub const Api = struct {
                 return attr;
             }
         }
-
         return null;
     }
 
@@ -305,7 +311,7 @@ pub const ShapeSpec = extern struct {
     pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = .{
-                .dims = @ptrCast(@constCast(dims_.ptr)),
+                .dims = @ptrCast(@constCast(dims_)),
                 .num_dims = dims_.len,
                 .element_type = @intFromEnum(bt),
             },
@@ -334,7 +340,7 @@ pub const Client = opaque {
     pub fn init(api: *const Api, create_options: []const NamedValue) ClientInitError!*Client {
         // log.info("Loaded PJRT runtime plugin: {s}", .{api.Platform});
         const ret = try api.call(.PJRT_Client_Create, .{
-            .create_options = @ptrCast(create_options.ptr),
+            .create_options = @ptrCast(create_options),
             .num_options = create_options.len,
         });
         return @ptrCast(ret.client.?);
@@ -411,16 +417,13 @@ pub const Client = opaque {
             .client = self.inner(),
             .data = @constCast(args.data),
             .type = @intFromEnum(args.buffer_type),
-            .dims = @ptrCast(@constCast(args.dims.ptr)),
+            .dims = @ptrCast(@constCast(args.dims)),
             .num_dims = args.dims.len,
-            .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs.ptr)) else null,
+            .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
-            .device_layout = null, // TODO
-            .done_with_host_buffer = null, // out
-            .buffer = null, // out
         });
 
         return .{
@@ -481,7 +484,7 @@ pub const Client = opaque {
     pub fn dmaMap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
         try api.call(.PJRT_Client_DmaMap, .{
             .client = self.inner(),
-            .data = @ptrCast(@constCast(data.ptr)),
+            .data = @ptrCast(@constCast(data)),
             .size = @intCast(data.len),
         });
     }
@@ -489,7 +492,7 @@ pub const Client = opaque {
     pub fn dmaUnmap(self: *const Client, api: *const Api, data: []const u8) ApiError!void {
         try api.call(.PJRT_Client_DmaUnmap, .{
             .client = self.inner(),
-            .data = @ptrCast(@constCast(data.ptr)),
+            .data = @ptrCast(@constCast(data)),
         });
     }
 
@@ -502,9 +505,9 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
-            .shape_specs = @ptrCast(@constCast(args.shape_specs.ptr)),
+            .shape_specs = @ptrCast(@constCast(args.shape_specs)),
             .num_shape_specs = args.shape_specs.len,
-            .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts.ptr)) else null,
+            .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts)) else null,
             .num_device_layouts = if (args.device_layouts) |layouts| layouts.len else 0,
             .memory = @ptrCast(@constCast(args.memory)),
         });
@@ -537,44 +540,46 @@ pub const Client = opaque {
 };
 
 pub const MemoryStats = struct {
-    // Number of bytes in use.
-    bytes_in_use: u64, // out
-
-    // The peak bytes in use.
-    peak_bytes_in_use: u64, // out
-    peak_bytes_in_use_is_set: bool, // out
-    // Number of allocations.
-    num_allocs: u64, // out
-    num_allocs_is_set: bool, // out
-    // The largest single allocation seen.
-    largest_alloc_size: u64, // out
-    largest_alloc_size_is_set: bool, // out
-    // The upper limit of user-allocatable device memory in bytes.
-    bytes_limit: u64, // out
-    bytes_limit_is_set: bool, // out
-
-    // Number of bytes reserved.
-    bytes_reserved: u64, // out
-    bytes_reserved_is_set: bool, // out
-    // The peak number of bytes reserved.
-    peak_bytes_reserved: u64, // out
-    peak_bytes_reserved_is_set: bool, // out
-    // The upper limit on the number bytes of reservable memory.
-    bytes_reservable_limit: u64, // out
-    bytes_reservable_limit_is_set: bool, // out
-
-    // Largest free block size in bytes.
-    largest_free_block_bytes: u64, // out
-    largest_free_block_bytes_is_set: bool, // out
-
-    // Number of bytes of memory held by the allocator.  This may be higher than
-    // bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
-    pool_bytes: u64, // out
-    pool_bytes_is_set: bool, // out
-    peak_pool_bytes: u64, // out
-    peak_pool_bytes_is_set: bool, // out
+    /// Number of bytes in use.
+    bytes_in_use: u64,
+    /// The peak bytes in use.
+    peak_bytes_in_use: ?u64,
+    /// Number of allocations.
+    num_allocs: ?u64,
+    /// The largest single allocation seen.
+    largest_alloc_size: ?u64,
+    /// The upper limit of user-allocatable device memory in bytes.
+    bytes_limit: ?u64,
+    /// Number of bytes reserved.
+    bytes_reserved: ?u64,
+    /// The peak number of bytes reserved.
+    peak_bytes_reserved: ?u64,
+    /// The upper limit on the number bytes of reservable memory.
+    bytes_reservable_limit: ?u64,
+    /// Largest free block size in bytes.
+    largest_free_block_bytes: ?u64,
+    /// Number of bytes of memory held by the allocator. This may be higher than
+    /// bytes_in_use if the allocator holds a pool of memory (e.g. BFCAllocator).
+    pool_bytes: ?u64,
+    peak_pool_bytes: ?u64,
 
     pub const zeroes = std.mem.zeroes(MemoryStats);
+
+    fn fromCStruct(v: c.PJRT_Device_MemoryStats_Args) MemoryStats {
+        return .{
+            .bytes_in_use = @intCast(v.bytes_in_use),
+            .peak_bytes_in_use = if (v.peak_bytes_in_use_is_set) @intCast(v.peak_bytes_in_use) else null,
+            .num_allocs = if (v.num_allocs_is_set) @intCast(v.num_allocs) else null,
+            .largest_alloc_size = if (v.largest_alloc_size_is_set) @intCast(v.largest_alloc_size) else null,
+            .bytes_limit = if (v.bytes_limit_is_set) @intCast(v.bytes_limit) else null,
+            .bytes_reserved = if (v.bytes_reserved_is_set) @intCast(v.bytes_reserved) else null,
+            .peak_bytes_reserved = if (v.peak_bytes_reserved_is_set) @intCast(v.peak_bytes_reserved) else null,
+            .bytes_reservable_limit = if (v.bytes_reservable_limit_is_set) @intCast(v.bytes_reservable_limit) else null,
+            .largest_free_block_bytes = if (v.largest_free_block_bytes_is_set) @intCast(v.largest_free_block_bytes) else null,
+            .pool_bytes = if (v.pool_bytes_is_set) @intCast(v.pool_bytes) else null,
+            .peak_pool_bytes = if (v.peak_pool_bytes_is_set) @intCast(v.peak_pool_bytes) else null,
+        };
+    }
 };
 
 pub const Device = opaque {
@@ -613,29 +618,7 @@ pub const Device = opaque {
         const ret = try api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
         });
-        return .{
-            .bytes_in_use = @intCast(ret.bytes_in_use),
-            .peak_bytes_in_use = @intCast(ret.peak_bytes_in_use),
-            .peak_bytes_in_use_is_set = ret.peak_bytes_in_use_is_set,
-            .num_allocs = @intCast(ret.num_allocs),
-            .num_allocs_is_set = ret.num_allocs_is_set,
-            .largest_alloc_size = @intCast(ret.largest_alloc_size),
-            .largest_alloc_size_is_set = ret.largest_alloc_size_is_set,
-            .bytes_limit = @intCast(ret.bytes_limit),
-            .bytes_limit_is_set = ret.bytes_limit_is_set,
-            .bytes_reserved = @intCast(ret.bytes_reserved),
-            .bytes_reserved_is_set = ret.bytes_reserved_is_set,
-            .peak_bytes_reserved = @intCast(ret.peak_bytes_reserved),
-            .peak_bytes_reserved_is_set = ret.peak_bytes_reserved_is_set,
-            .bytes_reservable_limit = @intCast(ret.bytes_reservable_limit),
-            .bytes_reservable_limit_is_set = ret.bytes_reservable_limit_is_set,
-            .largest_free_block_bytes = @intCast(ret.largest_free_block_bytes),
-            .largest_free_block_bytes_is_set = ret.largest_free_block_bytes_is_set,
-            .pool_bytes = @intCast(ret.pool_bytes),
-            .pool_bytes_is_set = ret.pool_bytes_is_set,
-            .peak_pool_bytes = @intCast(ret.peak_pool_bytes),
-            .peak_pool_bytes_is_set = ret.peak_pool_bytes_is_set,
-        };
+        return .fromCStruct(ret);
     }
 };
 
@@ -830,11 +813,11 @@ pub const LoadedExecutable = opaque {
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
             .options = @ptrCast(&options),
-            .argument_lists = @ptrCast(args.arguments.ptr),
+            .argument_lists = @ptrCast(args.arguments),
             .num_devices = args.arguments.len,
             .num_args = args.num_args,
-            .output_lists = @ptrCast(args.results.ptr),
-            .device_complete_events = if (args.events) |ev| @ptrCast(ev.ptr) else null,
+            .output_lists = @ptrCast(args.results),
+            .device_complete_events = if (args.events) |ev| @ptrCast(ev) else null,
         });
     }
 
@@ -1042,7 +1025,7 @@ pub const Buffer = opaque {
     pub fn copyRawToHost(self: *const Buffer, api: *const Api, dst: []u8, offset: i64) ApiError!?*Event {
         const ret = try api.call(.PJRT_Buffer_CopyRawToHost, .{
             .buffer = self.inner(),
-            .dst = @ptrCast(dst.ptr),
+            .dst = @ptrCast(dst),
             .offset = offset,
             .transfer_size = @intCast(dst.len),
         });
@@ -1278,7 +1261,7 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_AddMetadata, .{
             .transfer_manager = self.inner(),
-            .transfer_metadata = @ptrCast(transfer_metadata.ptr),
+            .transfer_metadata = @ptrCast(transfer_metadata),
             .num_metadata = transfer_metadata.len,
         });
     }
@@ -1334,9 +1317,9 @@ pub const NamedValue = extern struct {
                 .name_size = name_.len,
                 .type = @intFromEnum(kind_),
                 .unnamed_0 = switch (kind_) {
-                    .string => .{ .string_value = @ptrCast(@constCast(value_.ptr)) },
+                    .string => .{ .string_value = @ptrCast(@constCast(value_)) },
                     .int64 => .{ .int64_value = value_ },
-                    .int64list => .{ .int64_array_value = @ptrCast(@constCast(value_.ptr)) },
+                    .int64list => .{ .int64_array_value = @ptrCast(@constCast(value_)) },
                     .float => .{ .float_value = value_ },
                     .bool => .{ .bool_value = value_ },
                 },
