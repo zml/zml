@@ -153,7 +153,6 @@ pub fn main() !void {
     const prompt_tok_buf = try allocator.alloc(u32, gpt_options.max_seq_len);
     defer allocator.free(prompt_tok_buf);
     const prompt_tok: []const u32 = try tokenizePrompt(tokenizer, prompt, false, prompt_tok_buf);
-    log.info("Generated prompt tokens: {any}", .{prompt_tok});
 
     try generateText(
         allocator,
@@ -312,27 +311,17 @@ pub fn generateText(
     writer: *std.Io.Writer,
     platform: zml.Platform,
 ) !void {
-    log.info("eos token {}", .{config.eos_token_id});
-
-    log.info("generateText tokenized prompt", .{});
     var tokenizer_decoder = try tokenizer.decoder();
-    // defer tokenizer_decoder.deinit();
-
-    const encoded_prompt = try tokenizer_decoder.decode(prompt_tok);
-    log.info("generateText tokenized prompt: {s}", .{encoded_prompt});
 
     const max_seq_len = options.max_seq_len;
 
     // init RNG and buffers
-    log.info("generateText init RNG", .{});
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    log.info("generateText init generated_token_slice", .{});
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
 
-    log.info("generateText prefill START", .{});
     {
         var prefill_args = try prefill_exe.args(allocator);
         defer prefill_args.deinit(allocator);
@@ -348,24 +337,17 @@ pub fn generateText(
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
         defer prefill_tokens_buffer.deinit();
 
-        log.info("generateText prefill token_pos_buffer", .{});
         var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
         defer prefill_token_pos_buffer.deinit();
 
-        log.info("generateText prefill set args", .{});
         prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
 
-        log.info("generateText prefill call", .{});
         prefill_exe.call(prefill_args, &prefill_results);
 
-        log.info("generateText prefill results fill", .{});
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
         try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
-        log.info("generateText prefill results fill done : {d}", .{prefill_tokens_slice.items(u32)[prompt_tok.len + 1]});
         generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
     }
-    log.info("generateText prefill DONE", .{});
-    log.info("first token generated: {}", .{generated_token_slice.items(u32)[0]});
 
     // Prepare for token-by-token generation,
 
