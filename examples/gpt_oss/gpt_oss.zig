@@ -1,7 +1,9 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
+const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
 
 const log = std.log.scoped(.gpt_oss);
@@ -33,17 +35,16 @@ pub const GptOss = struct {
         tokens_per_expert_ratio: f32,
     };
 
-    // Restored Mode to distinguish behavior
     pub const Mode = union(enum) {
-        /// In prefill mode, we pass the length of the prompt (to select the last token output).
-        /// The KV cache is updated linearly from 0.
+        /// In prefill mode we pass the actual len of the prompt
         prefill: zml.Tensor,
-        /// In gen mode, we pass the specific position of the current token.
+        /// In gen mode we pass the position of the next token
         gen: zml.Tensor,
     };
 
     lm_head: ?zml.nn.Linear,
     model: Model,
+
     config: Config,
     options: Options,
 
@@ -67,7 +68,10 @@ pub const GptOss = struct {
 
     pub fn loadBuffers(self: *const GptOss, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(GptOss) {
         const lm_head = if (self.lm_head) |lm_head| try zml.io.loadBuffersFromId(allocator, io, lm_head, store.withPrefix("lm_head"), platform) else null;
+        // what errdefer to do here pas de deinit pour linear? ;
+
         const model = try self.model.loadBuffers(allocator, io, store.withPrefix("model"), platform);
+
         return .{
             .lm_head = lm_head,
             .model = model,
@@ -75,58 +79,21 @@ pub const GptOss = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(GptOss), allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+        if (self.lm_head) |*lm_head| lm_head.weight.deinit();
+        Model.unloadBuffers(&self.model, allocator);
     }
 
     pub fn forward(
         self: GptOss,
         tokens_: zml.Tensor,
-        mode: Mode,
+        token_index: Tensor,
         kv_cache: KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
-        log.info(" tokens: {f}", .{tokens_.shape()});
-        switch (mode) {
-            .prefill => {
-                log.info("mode prefill {f}", .{mode.prefill.shape()});
-            },
-            .gen => {
-                log.info("mode gen {f}", .{mode.gen.shape()});
-            },
-        }
-
         const tokens = tokens_.withPartialTags(.{.s});
-
-        // Model forward returns the sequence of hidden states
-        var out, const updated_kv_cache = self.model.forward(tokens, mode, kv_cache);
-
-        log.info("out: {f}", .{out.shape()});
-
-        // Logic to select which token to predict
-        switch (mode) {
-            // In prefill, we only care about predicting the token AFTER the prompt.
-            // So we select the last hidden state: out[prompt_len - 1]
-            .prefill => |prompt_len| {
-                const last_idx = prompt_len.convert(.i32).sub(zml.Tensor.scalar(1, .i32));
-                out = out.gather(.{ .s = last_idx }, .{ .indices_are_sorted = true });
-            },
-            // In generation, we are processing 1 token, so we take the whole result.
-            .gen => {},
-        }
-
-        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.options.sampling_strategy);
-
-        // If we are in prefill, the output shape is {1} (the next token), but the input `tokens` was {seq_len}.
-        // We cannot reuseBuffer(tokens) in prefill because sizes differ.
-        const res = switch (mode) {
-            .gen => new_tokens.convert(tokens.dtype()).reuseBuffer(tokens),
-            .prefill => new_tokens.convert(tokens.dtype()).appendAxes(.{.s}),
-        };
-
-        log.info("Generated tokens: {f}", .{res.shape()});
-
-        return .{ res, updated_kv_cache, new_rng };
+        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache);
+        var new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.options.sampling_strategy);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
@@ -136,10 +103,11 @@ pub const GptOss = struct {
         rng: Tensor.Rng,
         opts: zml.nn.SamplingStrategy,
     ) struct { Tensor, Tensor.Rng } {
-        const out = out_.withPartialTags(.{.d});
+        const out = out_.withPartialTags(.{ .s, .d });
 
         var logits = blk: {
             if (lm_head_) |lm_head| {
+                //break :blk lm_head.forward(out).rename(.{ .dout = .d });
                 break :blk lm_head.forward(out);
             } else {
                 break :blk self.model.embed_tokens.weight.withTags(.{ .voc, .d }).dot(out, .d);
@@ -171,8 +139,8 @@ pub const Model = struct {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
 
-        for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), config, options);
+        for (layers, 0..) |*layer, layer_id| {
+            layer.* = try .init(store.withPrefix("layers").withLayer(layer_id), config, options, @intCast(layer_id));
         }
 
         return .{
@@ -201,13 +169,22 @@ pub const Model = struct {
         };
     }
 
-    pub fn forward(self: Model, tokens: Tensor, mode: GptOss.Mode, kv_cache: KvCache) struct { Tensor, KvCache } {
+    pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
+        self.embed_tokens.weight.deinit();
+        RmsNorm.unloadBuffers(&self.norm);
+        for (self.layers) |*layer| {
+            TransformerLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
+    }
+
+    pub fn forward(self: Model, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, mode, updated_kv_cache.atLayer(i));
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
         }
         const output = self.norm.forward(hidden);
 
@@ -225,29 +202,40 @@ pub const TransformerLayer = struct {
     post_attention_layernorm: RmsNorm,
     mlp: MoE,
 
-    pub fn init(store: zml.io.TensorStore.View, config: GptOss.Config, options: GptOss.Options) !TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: GptOss.Config, options: GptOss.Options, layer_id: u32) !TransformerLayer {
         return .{
             .input_layernorm = .init(store.withPrefix("input_layernorm"), config.rms_norm_eps),
-            .self_attn = try .init(store.withPrefix("self_attn"), config),
+            .self_attn = try .init(store.withPrefix("self_attn"), config, layer_id),
             .post_attention_layernorm = .init(store.withPrefix("post_attention_layernorm"), config.rms_norm_eps),
             .mlp = .init(store.withPrefix("mlp"), config, options),
         };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        SelfAttn.unloadBuffers(&self.self_attn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+        MoE.unloadBuffers(&self.mlp);
+    }
+
     pub fn forward(
         self: TransformerLayer,
         x0: Tensor,
-        mode: GptOss.Mode,
+        token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
+        // Self Attention
+        //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
         const x0_normalized = self.input_layernorm.forward(x0);
-        const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, mode, kv_cache);
+        const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache);
         const x1 = x0.add(delta0);
 
+        // Fully Connected
         const x1_normalized = self.post_attention_layernorm.forward(x1);
         const x2 = self.mlp.forward(x1_normalized).add(x1);
+        //const x2 = self.moe.forward(x1_normalized).add(x1).rename(.{ .dout = .d });
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
@@ -258,32 +246,34 @@ pub const SelfAttn = struct {
     k_proj: zml.nn.Linear,
     v_proj: zml.nn.Linear,
     sinks: Tensor,
-    o_proj: zml.nn.Linear,
 
     q_norm: ?RmsNorm,
     k_norm: ?RmsNorm,
 
+    sliding_window: ?u32,
+
+    o_proj: zml.nn.Linear,
     num_heads: i64 = undefined,
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
-    sliding_window: ?u32 = null,
 
     fn initProj(store: zml.io.TensorStore.View) zml.nn.Linear {
         return .init(store.createTensorWithTags("weight", .{ .dout, .d }), store.maybeCreateTensorWithTags("bias", .{.dout}), .d);
     }
 
-    pub fn init(store: zml.io.TensorStore.View, config: GptOss.Config) !SelfAttn {
+    pub fn init(store: zml.io.TensorStore.View, config: GptOss.Config, layer_id: u32) !SelfAttn {
         return .{
             .q_proj = initProj(store.withPrefix("q_proj")),
             .k_proj = initProj(store.withPrefix("k_proj")),
             .v_proj = initProj(store.withPrefix("v_proj")),
             .o_proj = initProj(store.withPrefix("o_proj")),
             .sinks = store.createTensorWithTags("sinks", .{.h}),
+            .sliding_window = if (layer_id % 2 == 0) config.sliding_window else null,
+            // TODO(Corentin): fix that
             .q_norm = null,
             .k_norm = null,
             .num_heads = @intCast(config.num_attention_heads),
             .num_kv_heads = @intCast(config.num_key_value_heads),
-            .sliding_window = if (config.sliding_window > 0) config.sliding_window else null,
             .rope_opts = .{
                 .layout = if (config.hf_rope_impl) .sequential else .interleaved,
                 .freq_base = config.rope_theta,
@@ -292,10 +282,32 @@ pub const SelfAttn = struct {
         };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*bias| bias.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*bias| bias.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*bias| bias.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*bias| bias.deinit();
+        self.sinks.deinit();
+
+        if (self.q_norm) |*q_norm| RmsNorm.unloadBuffers(q_norm);
+        if (self.k_norm) |*k_norm| RmsNorm.unloadBuffers(k_norm);
+    }
+
+    /// Self Attention.
+    ///   - If token_index is set, x is assumed to be the representation of one new token,
+    /// and kv_cache will be read for the previous tokens.
+    ///   - If token_index is not set, x is assumed to be the representation of all tokens
+    /// since the beginning of the sequence, and kv_cache won't be read.
+    /// In both case, kv_cache will be updated with the computed key and value.
+    /// x: {.b, .s, .d } -> .{.b, .s, .d}
     pub fn forward(
         self: SelfAttn,
         x: Tensor,
-        mode: GptOss.Mode,
+        token_index: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
@@ -307,18 +319,14 @@ pub const SelfAttn = struct {
         const seq_len = kv_cache.k.dim(.k);
         var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), self.sliding_window);
 
-        // Calculate Rope Offset and Mask Slicing
-        const rope_offset = switch (mode) {
-            .prefill => zml.Tensor.scalar(0, .u32),
-            .gen => |idx| idx,
-        };
+        // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
+        // then slice into it, but XLA is able to optimize this correctly.
+        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
 
-        // Slice the mask based on the current position
-        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), rope_offset.reshape(.{ .coord = 1 }), .{});
-
+        // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
-            const temp = Tensor.arange(.{ .end = x.dim(.s) }, rope_offset.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, rope_offset.dtype()));
-            break :b temp.add(rope_offset.broad(temp.shape()));
+            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+            break :b temp.add(token_index.broad(temp.shape()));
         };
 
         if (self.q_norm) |norm| q = norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -331,20 +339,12 @@ pub const SelfAttn = struct {
 
         const dtype = q.dtype();
 
-        // Determine KV Update Index:
-        // Prefill: null (auto-detect linear write)
-        // Gen: rope_offset (scalar index)
-        const kv_idx = switch (mode) {
-            .prefill => null,
-            .gen => |idx| idx.rename(.{ .s = .k }),
-        };
-
-        const new_kv_cache = kv_cache.update(k, v, kv_idx);
-
+        const new_kv_cache = kv_cache.update(k, v, token_index);
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
         const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .softmax_bias = self.sinks, .allow_cudnn = true });
+        // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };
     }
@@ -352,14 +352,20 @@ pub const SelfAttn = struct {
 
 const RmsNorm = struct {
     weight: Tensor,
-    eps: f32 = 1e-5,
+    eps: f32 = 1e-6,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
         return .{ .weight = store.createTensorWithTags("weight", .{.d}), .eps = eps };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    /// L2 normalization of input tensor along `.d` axis.
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        // Note: contrary to Llama here the full layer is done in .f32, not just the variance computation.
         const normalized = zml.nn.rmsNorm(x.convert(.f32), .d, self.eps);
         return normalized.mul(self.weight.convert(.f32).withTags(.{.d}).broad(x.shape())).convert(input.dtype());
     }
@@ -371,15 +377,32 @@ const MoE = struct {
     moe_opts: MoeOpts,
 
     pub fn init(store: zml.io.TensorStore.View, config: GptOss.Config, options: GptOss.Options) MoE {
+        //log.info("MoE.init: trying to load experts tensors...", .{});
         const moe_on_disk: OnDisk = .{ .router = zml.nn.Linear.init(store.createTensorWithTags("router.weight", .{ .exp, .d }), store.createTensorWithTags("router.bias", .{.exp}), .d), .experts = .{
-            .down_proj_bias = store.createTensorWithTags("experts.down_proj_bias", .{ .exp, .d }),
-            .down_proj_blocks = store.createTensorWithTags("experts.down_proj_blocks", .{ .exp, .out, .d, .d_blocks }),
-            .down_proj_scales = store.createTensorWithTags("experts.down_proj_scales", .{ .exp, .out, .d }),
-            .gate_up_proj_bias = store.createTensorWithTags("experts.gate_up_proj_bias", .{ .exp, .d }),
-            .gate_up_proj_blocks = store.createTensorWithTags("experts.gate_up_proj_blocks", .{ .exp, .out, .d, .d_blocks }),
-            .gate_up_proj_scales = store.createTensorWithTags("experts.gate_up_proj_scales", .{ .exp, .out, .d }),
+            .down_proj_bias = store.createTensorWithTags("experts.down_proj_bias", .{ .expert, .d }),
+            .down_proj_blocks = store.createTensorWithTags("experts.down_proj_blocks", .{ .expert, .out, .d, .d_blocks }),
+            .down_proj_scales = store.createTensorWithTags("experts.down_proj_scales", .{ .expert, .out, .d }),
+            .gate_up_proj_bias = store.createTensorWithTags("experts.gate_up_proj_bias", .{ .expert, .d }),
+            .gate_up_proj_blocks = store.createTensorWithTags("experts.gate_up_proj_blocks", .{ .expert, .out, .d, .d_blocks }),
+            .gate_up_proj_scales = store.createTensorWithTags("experts.gate_up_proj_scales", .{ .expert, .out, .d }),
         } };
         return OnDisk.rewrite(moe_on_disk, config.experts_per_token, options);
+    }
+
+    pub fn deinit(self: MoE, allocator: std.mem.Allocator) void {
+        self.experts.deinit(allocator);
+        //self.router.deinit(allocator);
+    }
+
+    pub fn loadBuffers(self: *const MoE, allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, platform: zml.Platform) !zml.Bufferized(MoE) {
+        const experts = zml.io.loadBuffersFromId(allocator, io, self.experts, store.withPrefix("experts"), platform);
+        const router = zml.io.loadBuffersFromId(allocator, io, self.router, store.withPrefix("router"), platform);
+        return .{ .experts = experts, .router = router };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(MoE)) void {
+        _ = self; // autofix
+        //to be filled
     }
 
     pub fn forward(self: MoE, input: Tensor) Tensor {
@@ -403,7 +426,9 @@ const MoE = struct {
             return .{
                 .experts = .{
                     .gate_up_proj = .{
+                        // We need to bitcast the scale cause safetensors doesn't encode f8 types correctly
                         .scale = e.gate_up_proj_scales.withTags(.{ .expert, .out, .d }),
+                        // We don't bitcast here because PJRT doesn't handle packed host buffers
                         .blocks = e.gate_up_proj_blocks.withTags(.{ .expert, .out, .d, .d_block }),
                         .blocks_dtype = .f4e2m1,
                         .bias = e.gate_up_proj_bias.withTags(.{ .expert, .d }),
@@ -415,7 +440,9 @@ const MoE = struct {
                         .bias = e.down_proj_bias.withTags(.{ .expert, .d }),
                     },
                 },
+
                 .router = zml.nn.Linear.init(on_disk.router.weight.withTags(.{ .expert, .d }), on_disk.router.bias.?.withTags(.{.expert}), .d),
+
                 .moe_opts = .{
                     .experts_per_token = experts_per_token,
                     .tokens_per_expert_ratio = options.tokens_per_expert_ratio,
@@ -435,8 +462,13 @@ pub const Mlp = struct {
         var gate, var up = zml.nn.splitRealImg(self.gate_up_proj.forward(x), .interleaved);
         gate = .minimum(gate, .scalar(7, dt));
         up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
+
         const out = gate.quickGelu().mul(up.addConstant(1));
         return self.down_proj.forward(out);
+    }
+
+    pub fn format(self: Mlp, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("Mlp(gate_up_proj=.{f}, down_proj=.{f})", .{ self.gate_up_proj, self.down_proj });
     }
 };
 
@@ -448,20 +480,30 @@ pub const BlockScaledLinear = struct {
 
     pub fn forward(self: BlockScaledLinear, x: zml.Tensor) zml.Tensor {
         const res_shape = x.shape().setDim(-1, self.blocks.dim(-3));
+
+        // Bitcast to our actual type. This allows to load weights in a packed layout.
         const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
         const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
+
         const scale = self.scale.bitCast(.f8e8m0);
 
+        // log.warn("BlockScaledLinear({}): {f} -> {f}", .{ self, x, res_shape });
         const y = y: {
             var dequantized_weight: zml.Tensor = .mul(
                 blocks.convert(x.dtype()),
                 scale.convert(x.dtype()).appendAxes(.{.d_block}),
             );
             var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .d);
+            // std.log.warn("output shape: {f}", .{y});
+            std.debug.assert(y.shape().eql(res_shape));
             y._shape = res_shape;
             break :y y;
         };
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    }
+
+    pub fn format(self: BlockScaledLinear, writer: *std.Io.Writer) !void {
+        try writer.print("BlockScaledLinear(blocks={f}, scale={f}, bias={?f}, dt={t})", .{ self.blocks, self.scale, self.bias, self.blocks_dtype });
     }
 };
 
@@ -469,12 +511,33 @@ const MoeOpts = struct {
     experts_per_token: u32,
     tokens_per_expert_ratio: ?f32 = 0.0,
     normalization: Normalization,
+
     pub const Normalization = enum { linear, softmax };
 };
 
+/// We have three algorithms,
+/// * one for single-stream inference (naive),
+/// * one for small batch sized with exact precision that sends all tokens to all experts.
+///   this isn't too costly as long as the batch size is small and the experts are IO bound.
+/// * one for big batch size that assign a fixed compute budget per expert and
+/// experts chose the tokens they want to handle. This introduces noise since it's possible
+/// a token doesn't get their requested expert.
+///   The parameter `tokens_per_expert_ratio` control how much compute budget is granted:
+///   expert_budget = ratio * (num_tokens * experts_per_token / num_experts).
+///   Bigger values of ratio will ensure it's rare a token doesn't get it's top 2 tokens.
+///
+/// The preferred algorithm is the batched one,
+/// it is selected as soon there is enough tokens to guarantee that experts will be active most of the time.
+///
+/// - input: .{ .s, .d } per-entry vector
+/// - gating: .{ .s, .expert } per-entry expert-affinity
+/// - experts: .{ .expert, .d_out, .d } expert layer (need to have a .forward method).
+/// -> output: .{ .s, .d_out }
 pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
+    log.warn("mixtureOfExperts({s}, {f}, {f}, {})", .{ @typeName(Expert), input, gating, opts });
     const num_tokens: u32 = @intCast(input.dim(.s));
     const num_experts = gating.dim(.expert);
+    stdx.debug.assert(opts.experts_per_token > 0, "mixtureOfExperts expects opts.experts_per_token > 0, got {}", .{opts});
 
     if (num_tokens == 1) {
         return moePerTokenRouting(Expert, experts, input, gating, opts);
@@ -483,6 +546,7 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
     const tokens_per_expert: u32 = if (opts.tokens_per_expert_ratio) |ratio| tpe: {
         const compute_budget = ratio * @as(f32, @floatFromInt(num_tokens * opts.experts_per_token));
         var tpe: u32 = @intFromFloat(stdx.math.divFloat(f32, compute_budget, num_experts));
+        // Round to next multiple of 8 to avoid weird shapes.
         if (tpe % 8 != 0) tpe += 8 - (tpe % 8);
         break :tpe tpe;
     } else num_tokens;
@@ -498,6 +562,8 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
         var output_per_expert = experts.forward(input_per_expert);
         output_per_expert = output_per_expert.mul(scores_per_expert.convert(output_per_expert.dtype()).broad(output_per_expert.shape()));
 
+        // Reverse engineer the normal output shape that one expert would have produced for all tokens.
+        // If this fall short, we could use the "sliced_expert" strategy and call forward ourselves.
         const output_shape = output_per_expert.shape().drop(.expert).rename(.{ .top_token = .s }).setDim(.s, num_tokens);
         const output = zml.Tensor.scatterSlices(
             .zeroes(output_shape),
@@ -505,14 +571,19 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
             output_per_expert,
             .{ .update_fn = zml.Tensor.ScatterOpts.increment },
         );
+
+        log.warn("mixtureOfExperts({s}, {f}, {f}) -> fixed budget impl tpe: {d}, tokens: {d}", .{ @typeName(Expert), input, gating, tokens_per_expert, num_tokens });
         return output;
     } else {
         return mixtureOfExpertsAllToAll(Expert, experts, input, gating, opts);
     }
 }
 
+/// Few tokens: most experts are unused, experts have at most one token.
+/// Select active experts and compute with that.
 pub fn moePerTokenRouting(Expert: type, experts: Expert, input: zml.Tensor, gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
     const num_tokens: u32 = @intCast(input.dim(.s));
+    stdx.debug.assert(num_tokens < 32, "Trying to unroll a lot of tokens !", .{});
     const per_token_outputs = zml.module.CompilationContext.current().allocator.alloc(Tensor, num_tokens) catch @panic("OOM");
 
     const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
@@ -533,6 +604,8 @@ pub fn moePerTokenRouting(Expert: type, experts: Expert, input: zml.Tensor, gati
                 }
             }.cb, stdx.noalloc, expert_id, experts, &sliced_expert) catch unreachable;
 
+            // TODO how does this work when the two experts are on different gpus?
+            // does the compute overlap ?
             var expert_output = sliced_expert.forward(input.choose(.{ .s = tok_id }));
             expert_output = .mul(
                 expert_output,
@@ -541,22 +614,32 @@ pub fn moePerTokenRouting(Expert: type, experts: Expert, input: zml.Tensor, gati
             output.* = if (expert_rank > 0) output.add(expert_output) else expert_output;
         }
     }
+
+    log.warn("mixtureOfExperts({s}, {f}, {f}) -> single-stream impl", .{ @typeName(Expert), input, gating });
     return .stack(per_token_outputs, 0, .s);
 }
 
+/// Send all tokens to all experts, and apply gating.
 pub fn mixtureOfExpertsAllToAll(Expert: type, experts: Expert, input: zml.Tensor, gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
+    log.warn("mixtureOfExperts({s}, {f}, {f}) -> all to all impl", .{ @typeName(Expert), input, gating });
     const num_experts = gating.dim(.expert);
-    const hard_gating = hardGating(gating, opts).print();
+    const hard_gating = hardGating(gating, opts);
+    // TODO: `input.insertAxes(0, .{.expert}).repeat1d(.expert, num_experts)` is too verbose for just broadcasting along a new axis`
     const output_per_expert = experts.forward(input.insertAxes(0, .{.expert}).repeat1d(.expert, @intCast(num_experts)));
     return output_per_expert.dot(hard_gating.convert(input.dtype()), .expert);
 }
 
+/// Given `(token, expert) -> scores`,
+/// keeps only the top-k expert per token, and normalize the scores accordingly.
+/// Non selected experts will have a 0 score.
 pub fn hardGating(gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
     const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+
     const per_token_score = switch (opts.normalization) {
         .linear => routing.values.div(routing.values.sum(.top_expert)),
         .softmax => routing.values.softmax(.top_expert),
     };
+
     return zml.Tensor.scatterSlices(
         .zeroes(gating.shape()),
         .{ .expert = routing.indices },
@@ -565,6 +648,10 @@ pub fn hardGating(gating: zml.Tensor, opts: MoeOpts) zml.Tensor {
     );
 }
 
+/// Lot of tokens, each experts chose their tokens.
+/// It means that some tokens may have only one expert assigned.
+/// Each token will get assigned to at least one expert IIF the input gating is sums up to 1 (typically softmax output).
+/// Returns the actual `(token, expert) -> scores` used.
 pub fn dispatchTokens(
     gating: zml.Tensor,
     opts: struct {
@@ -574,6 +661,7 @@ pub fn dispatchTokens(
     },
 ) [2]zml.Tensor {
     const num_experts = gating.dim(.expert);
+
     const token_pref = gating.argsort(.expert, .{ .descending = true });
     var expert_rank: zml.Tensor = .scatterSlices(
         .zeroes(gating.shape().withDtype(.i32)),
@@ -581,14 +669,20 @@ pub fn dispatchTokens(
         .addConstant(.iota(gating.shape(), .expert), 1),
         .{ .indices_are_unique = true },
     );
+    // The pow(expert_rank) here means that we strongly favor top 1 over top 2 and top 2 over top 3.
+    // expert_routing: (expert, top_token) -> token
     const expert_routing = gating.pow(expert_rank.convert(gating.dtype())).topK(.{ .top_token = .s }, opts.tokens_per_expert, .{});
     const scores_per_expert = gating.gather(.{ .s = expert_routing.indices }, .{});
+
+    // Update the gating coefficient to account for the expert routing.
+    // Each (token, expert) which can't be computed within the given budget is left to 0.
     const gating_v2: zml.Tensor = .scatterSlices(
         .zeroes(gating.shape()),
         .{ .s = expert_routing.indices },
         scores_per_expert,
         .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
     );
+    // Now set to zero the scores (token, expert) for tokens that have been assigned more than experts_per_token.
     const lowest_experts = gating_v2.topK(.{ .top_expert = .expert }, @intCast(num_experts - opts.experts_per_token), .{ .descending = false });
     var gating_v3: zml.Tensor = .scatterSlices(
         gating_v2,
@@ -596,11 +690,13 @@ pub fn dispatchTokens(
         .zeroes(lowest_experts.values.shape()),
         .{ .indices_are_unique = true, .update_fn = zml.Tensor.ScatterOpts.override },
     );
+    // Then normalize so the sum of experts scores for one token sums up to 1.
     gating_v3 = switch (opts.normalization) {
         .linear => gating_v3.div(gating_v3.sum(.expert)),
         .softmax => gating_v3.softmax(.expert),
     };
     const tokens_ids_per_expert = expert_routing.indices.transpose(.{ .expert, .top_token });
+
     return .{ gating_v3, tokens_ids_per_expert };
 }
 
@@ -617,13 +713,13 @@ pub const KvCache = struct {
         };
     }
 
-    // pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
-    //     return .{
-    //         .k = kv_shape,
-    //         .v = kv_shape,
-    //         .layer_index = zml.Shape.init(.{}, .u32),
-    //     };
-    // }
+    pub fn initShape(kv_shape: zml.Shape) ShapeOf(KvCache) {
+        return .{
+            .k = kv_shape,
+            .v = kv_shape,
+            .layer_index = zml.Shape.init(.{}, .u32),
+        };
+    }
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: zml.Platform) !zml.Bufferized(KvCache) {
         return .{
@@ -652,11 +748,7 @@ pub const KvCache = struct {
         var layer = self.layer_index;
         layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
 
-        // Reverted to robust logic: if token_index is null, we auto-arange from 0.
-        // This handles prefill (linear write) vs gen (scatter write).
-        const idx = if (token_index) |idx| idx else zml.Tensor.arange(.{ .end = new_k.dim(.k) }, .u32).withTags(.{.k});
-
-        return .{
+        return if (token_index) |idx| .{
             .k = self.k.scatterSlices(
                 .{ .layer = layer, .k = idx },
                 new_k.convert(self.k.dtype()).transpose(k_shape),
@@ -664,6 +756,18 @@ pub const KvCache = struct {
             ).reuseBuffer(self.k),
             .v = self.v.scatterSlices(
                 .{ .layer = layer, .k = idx },
+                new_v.convert(self.v.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.v),
+            .layer_index = self.layer_index,
+        } else .{
+            .k = self.k.scatterSlices(
+                .{ .layer = layer },
+                new_k.convert(self.k.dtype()).transpose(k_shape),
+                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
+            ).reuseBuffer(self.k),
+            .v = self.v.scatterSlices(
+                .{ .layer = layer },
                 new_v.convert(self.v.dtype()).transpose(k_shape),
                 .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
             ).reuseBuffer(self.v),

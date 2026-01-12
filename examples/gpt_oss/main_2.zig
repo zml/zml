@@ -3,7 +3,6 @@ const std = @import("std");
 const zml = @import("zml");
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
-const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
 
 const gpt_oss = @import("gpt_oss.zig");
@@ -85,10 +84,15 @@ pub fn main() !void {
 
     // Specify shapes of input arguments
     const dtype = gpt_model.model.embed_tokens.weight.dtype();
+
+    // We update GptParameters to handle the Mode union
     const gpt_parameters: GptOssParameters = .{
         .prefill_tokens = .init(.{ .s = gpt_options.max_seq_len }, .u32),
         .decode_tokens = .init(.{ .s = 1 }, .u32),
-        .token_index = .init(.{}, .u32),
+        // Define shape for the Mode union
+        .mode_prefill = .{ .prefill = .init(.{}, .u32) }, // Scalar prompt length
+        .mode_gen = .{ .gen = .init(.{ .s = 1 }, .u32) }, // Scalar token index
+
         .kv_cache = .init(.init(.{
             .layer = gpt_model.model.layers.len,
             .k = args.seqlen,
@@ -119,17 +123,12 @@ pub fn main() !void {
     } else |_| {};
 
     var gpt_buffers_future = io.async(loadModelBuffers, .{ allocator, io, platform, &store, gpt_model });
-    // errdefer b: {
-    //     var v = gpt_buffers_future.cancel(io) catch break :b;
-    //     GptOss.unloadBuffers(&v, allocator);
-    // }
 
     const compiled_model_result = try compiled_model_result_future.await(io);
     defer compiled_model_result.prefill_exe.deinit();
     defer compiled_model_result.decode_exe.deinit();
 
     const gpt_buffers = try gpt_buffers_future.await(io);
-    //defer GptOss.unloadBuffers(&gpt_buffers, allocator);
 
     log.info("Creating KvCache", .{});
     var kv_cache_buffers = try gpt_parameters.kv_cache.initBuffer(io, platform);
@@ -144,10 +143,8 @@ pub fn main() !void {
     };
     defer allocator.free(prompt);
 
-    // const prompt = cli.args.prompt orelse "What is the capital of France?";
     log.info("✅\tPrompt: {s}", .{prompt});
 
-    // Unbuffered writing of the tokens to stdout.
     var stdout = std.Io.File.stdout().writer(io, &.{});
 
     const prompt_tok_buf = try allocator.alloc(u32, gpt_options.max_seq_len);
@@ -173,6 +170,8 @@ pub fn main() !void {
         platform,
     );
 }
+
+// ... parseConfig, loadTokenizer remain the same ...
 
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(GptOss.Config) {
     var timer = try std.time.Timer.start();
@@ -211,7 +210,8 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml
 const GptOssParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
-    token_index: zml.Tensor,
+    mode_prefill: GptOss.Mode,
+    mode_gen: GptOss.Mode,
     kv_cache: gpt_oss.KvCache,
     rng: zml.Tensor.Rng,
 };
@@ -226,23 +226,26 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
     log.info("Compiling model", .{});
     defer log.info("Compiled model [{D}]", .{timer.read()});
 
-    // Compile the model twice, one for prefill, one for generation.
+    // Compile prefill with Mode.prefill
     var prefill_future = io.async(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
             var timer_ = try std.time.Timer.start();
             log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            // We pass parameters.mode_prefill here
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.prefill_tokens, parameters_.mode_prefill, parameters_.kv_cache, parameters_.rng });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
+    // Compile decode with Mode.gen
     var decode_future = io.async(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
             var timer_ = try std.time.Timer.start();
             log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            // We pass parameters.mode_gen here
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.decode_tokens, parameters_.mode_gen, parameters_.kv_cache, parameters_.rng });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -315,26 +318,26 @@ pub fn generateText(
     writer: *std.Io.Writer,
     platform: zml.Platform,
 ) !void {
-    _ = skip_llama3_encoding; // autofix    log.info("generateText START", .{});
+    _ = skip_llama3_encoding;
+    log.info("generateText START", .{});
     log.info("eos token {}", .{config.eos_token_id});
 
-    log.info("generateText tokenized prompt", .{});
     var tokenizer_decoder = try tokenizer.decoder();
-    // defer tokenizer_decoder.deinit();
-
-    const encoded_prompt = try tokenizer_decoder.decode(prompt_tok);
-    log.info("generateText tokenized prompt: {s}", .{encoded_prompt});
 
     const max_seq_len = options.max_seq_len;
 
-    // init RNG and buffers
     log.info("generateText init RNG", .{});
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
     log.info("generateText init generated_token_slice", .{});
+    // This buffer holds the single token generated at each step
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
+
+    // This buffer holds the single next-token output on device
+    var current_token_buffer = try zml.Buffer.uninitialized(io, platform, zml.Shape.init(.{ .s = 1 }, .u32), .{});
+    defer current_token_buffer.deinit();
 
     log.info("generateText prefill START", .{});
     {
@@ -344,7 +347,7 @@ pub fn generateText(
         var prefill_results = try prefill_exe.results(allocator);
         defer prefill_results.deinit(allocator);
 
-        // prepare device buffers for the prefill tokens and their positions
+        // Input tokens for prefill
         const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{max_seq_len}, .u32));
         defer prefill_tokens_slice.free(allocator);
         @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
@@ -352,26 +355,29 @@ pub fn generateText(
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
         defer prefill_tokens_buffer.deinit();
 
-        log.info("generateText prefill token_pos_buffer", .{});
-        var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
-        defer prefill_token_pos_buffer.deinit();
+        log.info("generateText prefill prompt_len buffer", .{});
+        // We pass prompt length for prefill logic
+        var prefill_len_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(prompt_tok.len)), .u32);
+        defer prefill_len_buffer.deinit();
 
         log.info("generateText prefill set args", .{});
-        prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
+        // Args correspond to: tokens, mode, kv, rng.
+        // prefill_len_buffer corresponds to Mode.prefill
+        prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_len_buffer, kv_cache_buffers, rng_buffers });
 
         log.info("generateText prefill call", .{});
         prefill_exe.call(prefill_args, &prefill_results);
 
         log.info("generateText prefill results fill", .{});
-        prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
-        try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
-        log.info("generateText prefill results fill done : {d}", .{prefill_tokens_slice.items(u32)[prompt_tok.len + 1]});
-        generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
+        // The output of prefill is {next_token, kv, rng}.
+        // We put next_token into current_token_buffer.
+        prefill_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
+
+        // Retrieve the generated token to print it
+        try current_token_buffer.toSlice(io, generated_token_slice);
     }
     log.info("generateText prefill DONE", .{});
     log.info("first token generated: {}", .{generated_token_slice.items(u32)[0]});
-
-    // Prepare for token-by-token generation,
 
     var decode_args = try decode_exe.args(allocator);
     defer decode_args.deinit(allocator);
@@ -379,26 +385,20 @@ pub fn generateText(
     var decode_results = try decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
-    // start with the token generated based on the full prompt.
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
-    defer current_token_buffer.deinit();
-
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
     var timer = try stdx.time.Timer.start();
 
-    // One token has alreadyh been generated by the prefill.
     var num_tokens_generated: usize = 1;
 
     generation: for (0..output_tokens_len + 1) |i| {
-        // collect and print generated sequence
         num_tokens_generated += 1;
         const generated_token = generated_token_slice.items(u32)[0];
+
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try writer.writeAll(chunk);
             try writer.flush();
         }
 
-        // check for eos
         if (i == output_tokens_len) break :generation;
         switch (config.eos_token_id.value) {
             .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
@@ -409,19 +409,16 @@ pub fn generateText(
             },
         }
 
-        // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
+        const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{ .s = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
         const token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
         defer token_pos_buffer.deinit();
 
-        // call to generate the next token
+        // Mode.gen corresponds to token_pos_buffer
         decode_args.set(.{ gpt_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
 
         decode_exe.call(decode_args, &decode_results);
-
         decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
 
-        // extract the generated token from the buffer
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
     const duration = timer.read();
