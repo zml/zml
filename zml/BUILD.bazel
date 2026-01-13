@@ -24,6 +24,7 @@ zig_library(
         "attention/flashattn.zig",
         "buffer.zig",
         "constants.zig",
+        "cublas_grouped_gemm.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",

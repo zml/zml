@@ -15,6 +15,7 @@ pub const tokenizer = @import("zml/tokenizer");
 pub const attention = @import("attention/attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const constants = @import("constants.zig");
+pub const cublas_grouped_gemm = @import("cublas_grouped_gemm.zig");
 pub const dtype = @import("dtype.zig");
 pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
