@@ -995,6 +995,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
             },
             else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
         };
+
         metadata_attributes[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
     }
 

@@ -1464,6 +1464,7 @@ pub const Ffi = extern struct {
             .traits = @bitCast(traits),
         };
         const result = self.inner.register_handler.?(@ptrCast(&ret));
+
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("registerFfi error: {s}", .{pjrt_error.getMessage(api)});

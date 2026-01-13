@@ -74,7 +74,7 @@ pub fn main() !void {
         .max_prompt_len = args.seqlen,
         .tokens_per_expert_ratio = 1.0,
         .sampling_strategy = .{
-            .topk = 5,
+            .topk = 2,
             .temperature = 0.8,
         },
     };

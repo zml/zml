@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@zml//bazel:cc_import.bzl", "cc_import")
+
+
+zig_binary(
+    name = "grouped_gemm",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rules_zig//zig/runfiles",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)

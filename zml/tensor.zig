@@ -26,6 +26,43 @@ pub const Tensor = struct {
     _shape: Shape,
     _value: ?*const mlir.Value = null,
 
+    /// Grouped batched GEMM using cuBLAS
+    pub fn gemmGroupedBatched(
+        lhs: Tensor,
+        rhs: Tensor,
+        opts: struct {
+            transa_array: []const cublas_grouped_gemm.cublasOperation_t,
+            transb_array: []const cublas_grouped_gemm.cublasOperation_t,
+            m_array: []const c_int,
+            n_array: []const c_int,
+            k_array: []const c_int,
+            alpha: f32 = 1.0,
+            beta: f32 = 1.0,
+            group_count: c_int,
+            group_size: []const c_int,
+            computeType: cublas_grouped_gemm.cublasComputeType_t,
+            output_shape: Shape,
+        },
+    ) Tensor {
+        return cublas_grouped_gemm.gemmGroupedBatched(
+            lhs,
+            rhs,
+            .{
+                .transa_array = opts.transa_array,
+                .transb_array = opts.transb_array,
+                .m_array = opts.m_array,
+                .n_array = opts.n_array,
+                .k_array = opts.k_array,
+                .alpha = opts.alpha,
+                .beta = opts.beta,
+                .group_count = opts.group_count,
+                .group_size = opts.group_size,
+                .computeType = opts.computeType,
+                .output_shape = opts.output_shape,
+            },
+        );
+    }
+
     pub fn init(shape_like: anytype, dt: DataType) Tensor {
         return .fromShape(.init(shape_like, dt));
     }
