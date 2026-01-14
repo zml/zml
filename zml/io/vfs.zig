@@ -21,7 +21,7 @@ pub const VFS = struct {
             directory,
         };
 
-        scheme: ?[]const u8,
+        idx: ?usize,
         type: Type,
         handle: u32,
 
@@ -33,7 +33,7 @@ pub const VFS = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
 
-    backends: std.StringHashMapUnmanaged(std.Io) = .{},
+    backends: std.StringArrayHashMapUnmanaged(std.Io) = .empty,
     handles: Handles = .{},
     closed_handles: ClosedHandles = .{},
 
@@ -44,7 +44,7 @@ pub const VFS = struct {
 
         var handles: Handles = .{};
         try handles.append(allocator, .{
-            .scheme = null,
+            .idx = null,
             .type = .directory,
             .handle = CWD_HANDLE,
         });
@@ -125,8 +125,8 @@ pub const VFS = struct {
         const handle = &self.handles.items[@intCast(file.handle)];
         self.mutex.unlock(self.base.inner);
 
-        const backend = if (handle.scheme) |s|
-            self.backends.get(s).?
+        const backend = if (handle.idx) |idx|
+            self.backends.entries.items(.value)[idx]
         else
             self.base.inner;
         return .{ handle, backend };
@@ -157,9 +157,10 @@ pub const VFS = struct {
             }
         } else {
             const handle = self.getDirHandle(dir);
-            if (handle.scheme) |s| {
-                const backend = self.backends.get(s) orelse return error.VFSNotRegistered;
-                return .{ s, .{ .handle = @intCast(handle.handle) }, backend };
+            if (handle.idx) |idx| {
+                const backend = self.backends.entries.items(.value)[idx];
+                const scheme = self.backends.entries.items(.key)[idx];
+                return .{ scheme, .{ .handle = @intCast(handle.handle) }, backend };
             } else {
                 return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
             }
@@ -180,7 +181,7 @@ pub const VFS = struct {
         const fs_dir = try backend.vtable.dirOpenDir(backend.userdata, dir_, stripScheme(sub_path), options);
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
         handle.* = .{
-            .scheme = scheme,
+            .idx = if (scheme) |s| self.backends.getIndex(s) else null,
             .type = .directory,
             .handle = @intCast(fs_dir.handle),
         };
@@ -223,7 +224,7 @@ pub const VFS = struct {
         const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(sub_path), flags);
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
         handle.* = .{
-            .scheme = scheme,
+            .idx = if (scheme) |s| self.backends.getIndex(s) else null,
             .type = .file,
             .handle = @intCast(file.handle),
         };
@@ -338,8 +339,9 @@ pub const VFS = struct {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
 
-        if (handle.scheme) |s| {
-            const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
+        if (handle.idx) |idx| {
+            const scheme = self.backends.entries.items(.key)[idx];
+            const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{scheme});
             const path_len = try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle) }, out_buffer[prefix.len..]);
             return prefix.len + path_len;
         } else {
