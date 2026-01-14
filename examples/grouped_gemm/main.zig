@@ -8,7 +8,7 @@ const CublasGemmGroupedBatchedExFunc = cublas_gg.CublasGemmGroupedBatchedExFunc;
 const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 
 const Demo = struct {
-    pub fn forward(A: zml.Tensor, B: zml.Tensor) zml.Tensor {
+    pub fn forward(A: zml.Tensor, B: zml.Tensor, tokens_per_exp: zml.Tensor) zml.Tensor {
         // group_count=1 demo
         const group_count: c_int = 3;
         const transa = [_]cublas_gg.cublasOperation_t{cublas_gg.CUBLAS_OP_N};
@@ -18,16 +18,16 @@ const Demo = struct {
         const n = [_]c_int{@intCast(B.dim(1))}; // dim out
         const group_size = [_]c_int{ 1, 1, 1 };
 
-        const out_shape = zml.Shape.init(.{ A.dim(0), B.dim(1) }, A.dtype());
+        const out_shape = zml.Shape.init(.{ 256, B.dim(1) }, A.dtype());
 
-        return zml.Tensor.gemmGroupedBatched(A, B, .{
+        return zml.Tensor.gemmGroupedBatched(A, B, tokens_per_exp, .{
             .transa_array = &transa,
             .transb_array = &transb,
             .m_array = &m,
             .n_array = &n,
             .k_array = &k,
             .alpha = 1.0,
-            .beta = 0.0,
+            .beta = 1.0,
             .group_count = group_count,
             .group_size = &group_size,
             .computeType = cublas_gg.CUBLAS_COMPUTE_32F,
@@ -61,17 +61,20 @@ pub fn main() !void {
     try cublas_gg.load(allocator);
 
     // Shapes: A[M,K], B[K,N]
-    const M: usize = 128;
-    const K: usize = 128;
-    const N: usize = 256;
+    const num_exp = 8;
 
-    const A_t: zml.Tensor = .init(.{ M, K }, .f16);
-    const B_t: zml.Tensor = .init(.{ K, N }, .f16);
+    const M: usize = 4096;
+    const K: usize = 1024;
+    const N: usize = 128;
+
+    const A_t: zml.Tensor = .init(.{ num_exp * M, K }, .f32);
+    const B_t: zml.Tensor = .init(.{ K, N }, .f32);
+    const tokens_per_exp_t: zml.Tensor = .init(.{num_exp}, .u32);
 
     log.info("Compiling custom call demo...", .{});
     const demo: Demo = .{};
     _ = demo; // autofix
-    var exe = try platform.compileFn(allocator, io, Demo.forward, .{ A_t, B_t });
+    var exe = try platform.compileFn(allocator, io, Demo.forward, .{ A_t, B_t, tokens_per_exp_t });
     defer exe.deinit();
     log.info("Compiled", .{});
 
@@ -82,29 +85,35 @@ pub fn main() !void {
     defer results.deinit(allocator);
 
     // Host data
-    var A_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ M, K }, .f16));
+    var A_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ num_exp * M, K }, .f32));
     defer A_host.free(allocator);
-    var B_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ K, N }, .f16));
+    var B_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ K, N }, .f32));
     defer B_host.free(allocator);
+    var tokens_per_exp_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{num_exp}, .u32));
+    defer tokens_per_exp_host.free(allocator);
 
     // Fill with something deterministic (all ones)
-    @memset(A_host.items(f16), @bitCast(@as(f16, 0x3C00))); // 1.0 in f16
-    @memset(B_host.items(f16), @bitCast(@as(f16, 0x3C00))); // 1.0 in f16
+    @memset(A_host.items(f32), 1.0); // 1.0 in f16
+    @memset(B_host.items(f32), 1.0); // 1.0 in f16
+
+    const data_u32: [num_exp]u32 = .{ 16, 16, 16, 16, 16, 16, 16, 16 };
+    @memcpy(tokens_per_exp_host.items(u32)[0..num_exp], &data_u32);
 
     var A_buf: zml.Buffer = try .fromSlice(io, platform, A_host);
     defer A_buf.deinit();
     var B_buf: zml.Buffer = try .fromSlice(io, platform, B_host);
     defer B_buf.deinit();
-
-    args.set(.{ A_buf, B_buf });
-    exe.call(args, &results);
+    const tokens_per_exp_buf: zml.Buffer = try .fromSlice(io, platform, tokens_per_exp_host);
+    defer tokens_per_exp_buf.deinit();
+    args.set(.{ A_buf, B_buf, tokens_per_exp_buf });
+    exe.callOpts(io, args, &results, .{ .wait = true });
 
     var C_buf: zml.Buffer = results.get(zml.Buffer);
     defer C_buf.deinit();
 
-    var C_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ M, N }, .f16));
+    var C_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ M, N }, .f32));
     defer C_host.free(allocator);
     try C_buf.toSlice(io, C_host);
 
-    log.info("C[0,0] (f16 bits) = 0x{x}", .{@as(u16, @bitCast(C_host.items(f16)[0]))});
+    log.info("C[0,0] : {d}", .{@as(f32, @bitCast(C_host.items(f32)[100]))});
 }

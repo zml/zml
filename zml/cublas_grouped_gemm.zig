@@ -154,6 +154,8 @@ fn bufferFromFfiBuffer(ffi_buffer: *const ffi.Buffer) struct { ptr: ?*anyopaque,
         .f16 => zml.DataType.f16,
         .bf16 => zml.DataType.bf16,
         .f64 => zml.DataType.f64,
+        .u32 => zml.DataType.u32,
+        .i32 => zml.DataType.i32,
         else => unreachable,
     };
     return .{
@@ -235,7 +237,29 @@ pub const GemmGroupedBatched = struct {
         // Get input and output buffers
         const A_buffer = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
         const B_buffer = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+        const tokens_per_exp_buffer = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
         const C_buffer = bufferFromFfiBuffer(call_frame.results.buffers()[0]);
+
+        const stream_ptr = call_frame.stream();
+        const cu_stream: c.CUstream = @ptrCast(@constCast(stream_ptr));
+
+        // 1) Déterminer le nombre d’éléments
+        const td = tokens_per_exp_buffer.shape.dims();
+        stdx.debug.assert(td.len == 1, "tokens_per_exp expected rank-1, got rank={d}", .{td.len});
+        const count: usize = @intCast(td[0]);
+
+        // 2) Allouer un array host
+        const host_tokens = arena.allocator().alloc(c_int, count) catch unreachable;
+
+        // 3) Copier device -> host
+        stdx.debug.assert(tokens_per_exp_buffer.ptr != null, "tokens_per_exp device ptr is null", .{});
+        const src_dev: c.CUdeviceptr = @intCast(@intFromPtr(tokens_per_exp_buffer.ptr.?));
+
+        const bytes: usize = count * @sizeOf(c_int);
+
+        try cuda.check(cuda.memcpyToHostAsync(host_tokens.ptr, src_dev, bytes, cu_stream));
+
+        //try cuda.check(cuda.streamSynchronize(cu_stream));
 
         const Ad = A_buffer.shape.dims();
         const Bd = B_buffer.shape.dims();
@@ -244,9 +268,31 @@ pub const GemmGroupedBatched = struct {
         stdx.debug.assert(Bd.len == 2, "Expected B to be rank-2 [k,n], got rank={d}", .{Bd.len});
         stdx.debug.assert(Ad[1] == Bd[0], "GEMM shape mismatch: A is {d}x{d}, B is {d}x{d}", .{ Ad[0], Ad[1], Bd[0], Bd[1] });
 
+        const elem_size: usize = switch (A_buffer.shape.dtype()) {
+            .f16, .bf16 => 2,
+            .f32 => 4,
+            .f64 => 8,
+            else => return error.UnsupportedDataType,
+        };
+
+        const Aarray = arena.allocator().alloc(?*const anyopaque, @intCast(group_count)) catch unreachable;
+        const Barray = arena.allocator().alloc(?*const anyopaque, @intCast(group_count)) catch unreachable;
+        const Carray = arena.allocator().alloc(?*anyopaque, @intCast(group_count)) catch unreachable;
+
+        // Base pointers as bytes for byte-offset arithmetic
+        const A_base: [*]const u8 = @ptrCast(@alignCast(A_buffer.ptr));
+        const B_base: [*]const u8 = @ptrCast(@alignCast(B_buffer.ptr));
+        const C_base: [*]u8 = @ptrCast(@alignCast(C_buffer.ptr));
+
+        var a_off_bytes: usize = 0;
+        var b_off_bytes: usize = 0;
+        var c_off_bytes: usize = 0;
+
         const m: c_int = @intCast(Ad[0]);
         const k: c_int = @intCast(Ad[1]);
-        const n: c_int = @intCast(Bd[1]);
+        n_array[0] = host_tokens[0];
+        n_array[1] = host_tokens[1];
+        n_array[2] = host_tokens[2];
 
         // We hard-code: 1 GEMM per group
         for (0..@intCast(group_count)) |gi| {
@@ -254,7 +300,6 @@ pub const GemmGroupedBatched = struct {
             transb_array[gi] = CUBLAS_OP_N;
 
             m_array[gi] = m;
-            n_array[gi] = n;
             k_array[gi] = k;
 
             // NOTE: cuBLAS assumes column-major.
@@ -265,6 +310,24 @@ pub const GemmGroupedBatched = struct {
             ldc_array[gi] = m;
 
             group_size[gi] = 1;
+
+            const lda: usize = @intCast(lda_array[gi]);
+            const ldb: usize = @intCast(ldb_array[gi]);
+            const ldc: usize = @intCast(ldc_array[gi]);
+            const k_g: usize = @intCast(k_array[gi]);
+            const n_g: usize = @intCast(n_array[gi]);
+
+            const A_elems: usize = lda * k_g;
+            const B_elems: usize = ldb * n_g;
+            const C_elems: usize = ldc * n_g;
+
+            Aarray[gi] = @ptrCast(A_base + a_off_bytes);
+            Barray[gi] = @ptrCast(B_base + b_off_bytes);
+            Carray[gi] = @ptrCast(C_base + c_off_bytes);
+
+            a_off_bytes += A_elems * elem_size;
+            b_off_bytes += B_elems * elem_size;
+            c_off_bytes += C_elems * elem_size;
         }
 
         // m_array[0] = 20;
@@ -303,21 +366,6 @@ pub const GemmGroupedBatched = struct {
         const Ctype: cudaDataType_t = Atype;
 
         // Prepare arrays of pointers
-        const Aarray = arena.allocator().alloc(?*const anyopaque, @intCast(group_count)) catch unreachable;
-        const Barray = arena.allocator().alloc(?*const anyopaque, @intCast(group_count)) catch unreachable;
-        const Carray = arena.allocator().alloc(?*anyopaque, @intCast(group_count)) catch unreachable;
-
-        // For grouped GEMM, you typically have multiple matrices
-        // This is a simplified version - you'll need to adapt based on your actual data layout
-        Aarray[0] = A_buffer.ptr;
-        Barray[0] = B_buffer.ptr;
-        Carray[0] = C_buffer.ptr;
-        Aarray[1] = A_buffer.ptr;
-        Barray[1] = B_buffer.ptr;
-        Carray[1] = C_buffer.ptr;
-        Aarray[2] = A_buffer.ptr;
-        Barray[2] = B_buffer.ptr;
-        Carray[2] = C_buffer.ptr;
 
         // Call cuBLAS function
         const status = cublas_gemm_grouped_batched_ex.?(
@@ -390,6 +438,7 @@ pub fn load(allocator: std.mem.Allocator) !void {
 pub fn gemmGroupedBatched(
     A: Tensor,
     B: Tensor,
+    tokens_per_exp: Tensor,
     opts: struct {
         transa_array: []const cublasOperation_t,
         transb_array: []const cublasOperation_t,
@@ -404,7 +453,7 @@ pub fn gemmGroupedBatched(
         output_shape: zml.Shape,
     },
 ) Tensor {
-    const inputs = .{ A, B };
+    const inputs = .{ A, B, tokens_per_exp };
     return zml.ops.customCall(
         GemmGroupedBatched.custom_call_name,
         inputs,
@@ -420,3 +469,14 @@ pub fn gemmGroupedBatched(
         .{ .has_side_effect = false },
     );
 }
+const cuda = struct {
+    const memcpyToDeviceAsync = @extern(*const @TypeOf(c.cuMemcpyHtoDAsync_v2), .{ .name = "cuMemcpyHtoDAsync_v2", .linkage = .weak }).?;
+    const memcpyToHostAsync = @extern(*const @TypeOf(c.cuMemcpyDtoHAsync_v2), .{ .name = "cuMemcpyDtoHAsync_v2", .linkage = .weak }).?;
+    const launchHostFunc = @extern(*const @TypeOf(c.cuLaunchHostFunc), .{ .name = "cuLaunchHostFunc", .linkage = .weak }).?;
+    const streamSynchronize = @extern(*const @TypeOf(c.cuStreamSynchronize), .{ .name = "cuStreamSynchronize", .linkage = .weak }).?;
+    pub fn check(result: c.CUresult) error{CudaError}!void {
+        if (result == c.CUDA_SUCCESS) return;
+        std.log.err("cuda error: {}", .{result});
+        return error.CudaError;
+    }
+};
