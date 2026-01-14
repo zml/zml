@@ -122,9 +122,6 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    zml.init();
-    defer zml.deinit();
-
     log.info("Resolving model repo", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model.?);
 

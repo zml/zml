@@ -21,7 +21,6 @@ zig_library(
     main = "stdx.zig",
     visibility = ["//visibility:public"],
     zigopts = ["-lc"],
-    zigopts = ["-lc"],
 )
 
 zig_test(
