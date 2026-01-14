@@ -211,7 +211,13 @@ pub fn main() !void {
         write_pool.deinit();
     }
 
-    var progress = std.Progress.start(io, .{ .root_name = args.model.?, .estimated_total_items = store.view().count() });
+    var model_name_it = std.mem.splitScalar(u8, args.model.?, '/');
+    var model_name = model_name_it.next() orelse args.model.?;
+    while (model_name_it.next()) |part| {
+        if (!std.mem.eql(u8, part, "")) model_name = part;
+    }
+
+    var progress = std.Progress.start(io, .{ .root_name = model_name, .estimated_total_items = store.view().count() });
     var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers, &read_pool, &write_pool, platform, &store, llama_model });
     errdefer b: {
         var v = llama_buffers_future.cancel(io) catch break :b;
