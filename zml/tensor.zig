@@ -30,6 +30,7 @@ pub const Tensor = struct {
     pub fn gemmGroupedBatched(
         lhs: Tensor,
         rhs: Tensor,
+        tokens_per_exp: Tensor,
         opts: struct {
             transa_array: []const cublas_grouped_gemm.cublasOperation_t,
             transb_array: []const cublas_grouped_gemm.cublasOperation_t,
@@ -47,6 +48,7 @@ pub const Tensor = struct {
         return cublas_grouped_gemm.gemmGroupedBatched(
             lhs,
             rhs,
+            tokens_per_exp,
             .{
                 .transa_array = opts.transa_array,
                 .transb_array = opts.transb_array,
