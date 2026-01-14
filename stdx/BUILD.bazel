@@ -15,10 +15,12 @@ zig_library(
         "queue.zig",
         "signature.zig",
         "time.zig",
+        "unicode.zig",
     ],
     zigopts = ["-lc"],
     main = "stdx.zig",
     visibility = ["//visibility:public"],
+    zigopts = ["-lc"],
 )
 
 zig_test(

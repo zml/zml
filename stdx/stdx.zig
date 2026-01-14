@@ -13,6 +13,7 @@ pub const meta = @import("meta.zig");
 pub const process = @import("process.zig");
 pub const queue = @import("queue.zig");
 pub const time = @import("time.zig");
+pub const unicode = @import("unicode.zig");
 
 test {
     std.testing.refAllDecls(@This());
