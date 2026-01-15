@@ -51,12 +51,16 @@ pub fn main() !void {
     var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
     defer hf_vfs.deinit();
 
+    var s3_vfs: zml.io.VFS.S3 = try .fromEnv(allocator, threaded.io(), &http_client);
+    defer s3_vfs.deinit();
+
     var vfs: zml.io.VFS = try .init(allocator, threaded.io());
     defer vfs.deinit();
 
     try vfs.register("file", vfs_file.io());
     try vfs.register("https", vfs_https.io());
     try vfs.register("hf", hf_vfs.io());
+    try vfs.register("s3", s3_vfs.io());
 
     const io = vfs.io();
 
