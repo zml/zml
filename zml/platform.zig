@@ -356,3 +356,18 @@ pub const CreateOptions = struct {
         return values.items;
     }
 };
+
+// TODO(Corendos): Consider moving that in its own file if its size increase too much.
+pub const cuda = struct {
+    pub fn tryGetComputeCapabilities(platform: zml.Platform, device: *const pjrt.Device) ?[]const u8 {
+        stdx.debug.assert(platform.target == .cuda, "tryGetComputeCapabilities expects .cuda platform, got {}", .{platform.target});
+        const description = device.getDescription(platform.pjrt_api);
+
+        const attributes = description.attributes(platform.pjrt_api);
+        return for (attributes) |attr| {
+            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
+                break attr.value().string;
+            }
+        } else null;
+    }
+};
