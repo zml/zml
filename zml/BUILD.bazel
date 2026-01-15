@@ -39,6 +39,8 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "zml.zig",
+        "attention/attention.zig",
+        "attention/flashattn/flashattn.zig",
     ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
@@ -59,6 +61,7 @@ zig_library(
         "//zml/tokenizer",
         "//zml/io",
         "@rules_zig//zig/runfiles",
+        "@flashattn//:c",
     ],
 )
 

@@ -39,6 +39,12 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
+    data = select({
+        "//runtimes:cuda.enabled": [
+            "@flashattn//:libflashattn"
+        ],
+        "//conditions:default": [":empty"],
+    }),
 )
 
 filegroup(

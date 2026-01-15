@@ -109,12 +109,28 @@ pub const Platform = struct {
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
         }
-        return .{
+
+        const platform: Platform = .{
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
             .compilation_options = .{},
         };
+
+        switch (target) {
+            .cuda => {
+                // TODO(Corentin): provide a better allocator
+                zml.attention.flashattn.load(std.heap.c_allocator, io) catch {
+                    log.warn("Failed to load flashattn", .{});
+                };
+                zml.attention.flashattn.register(platform) catch {
+                    log.warn("Failed to register flashattn custom call", .{});
+                };
+            },
+            else => {},
+        }
+
+        return platform;
     }
 
     pub fn auto(io: std.Io, options: CreateOptions) !Platform {
