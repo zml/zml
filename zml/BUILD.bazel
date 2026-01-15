@@ -41,6 +41,7 @@ zig_library(
         "zml.zig",
         "attention/attention.zig",
         "attention/flashattn/flashattn.zig",
+        "attention/flashattn/bindings.zig",
     ],
     main = "zml.zig",
     visibility = ["//visibility:public"],

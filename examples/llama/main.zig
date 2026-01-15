@@ -138,8 +138,8 @@ pub fn main() !void {
             .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
         }, dtype)),
         .rng = .init(),
-        //.attention_metadata = .init(.{ .flashattn = .{ .seqlen = @intCast(args.seqlen) } }),
-        //.attention_parameters = .init(.{ .flashattn = .{} }),
+        //.attention_metadata = .init(.{ .flashattn = .{ .fa3 = .{ .seqlen = @intCast(args.seqlen) } } }),
+        //.attention_parameters = .init(.{ .flashattn = .{ .fa3 = .{} } }),
         .attention_metadata = .init(.{ .vanilla = {} }),
         .attention_parameters = .init(.{ .vanilla = {} }),
     };
