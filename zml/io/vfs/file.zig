@@ -58,18 +58,15 @@ fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
 
 pub const File = struct {
     pub const Config = struct {
-        direct_io: bool = false,
+        direct_io: bool = true,
         direct_io_alignment: std.mem.Alignment = .fromByteUnits(4 * 1024),
     };
 
-    const Handle = struct {
-        inner_handle: std.Io.File.Handle,
-        direct_io_handle: ?std.Io.File.Handle,
-    };
+    const Handle = struct { inner_handle: std.Io.File.Handle, direct_io_handle: ?std.Io.File.Handle };
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
-    handles: stdx.SegmentedList(Handle, 0),
+    handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .{},
     config: Config,
     base: VFSBase,
@@ -77,7 +74,6 @@ pub const File = struct {
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, config: Config) File {
         return .{
             .allocator = allocator,
-            .handles = .{},
             .config = config,
             .base = .init(inner),
         };

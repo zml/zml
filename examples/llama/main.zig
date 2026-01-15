@@ -19,13 +19,34 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-pub const Args = struct {
-    model: ?[]const u8 = null,
+const CliArgs = struct {
+    model: []const u8,
     prompt: ?[]const u8 = null,
     seqlen: u32 = 512,
-    reader_buffer_size_mb: u32 = 32,
-    writer_buffer_size_mb: u32 = 32,
-    async_limit: ?usize = null,
+    reader_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
+    writer_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
+    async_limit: ?u32 = null,
+
+    pub const help =
+        \\Usage: llama --model=<path> [options]
+        \\
+        \\Run LLaMA inference on a model.
+        \\
+        \\Options:
+        \\  --model=<path>              Path to model (local path or HuggingFace repo)
+        \\  --prompt=<text>             Input prompt (reads from stdin if not provided)
+        \\  --seqlen=<n>                Maximum sequence length (default: 512)
+        \\  --reader-buffer-size=<size> Reader buffer size (default: 32MiB)
+        \\  --writer-buffer-size=<size> Writer buffer size (default: 32MiB)
+        \\  --async-limit=<n>           Async I/O concurrency limit
+        \\  -h, --help                  Show this help message
+        \\
+        \\Examples:
+        \\  llama --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="Hello, world!"
+        \\  llama --model=$(realpath ../Llama-3.1-8B-Instruct) --seqlen=1024
+        \\  echo "What is 2+2?" | llama --model=meta-llama/Llama-3.1-8B-Instruct
+        \\
+    ;
 };
 
 pub fn main() !void {
@@ -41,33 +62,7 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    const args: Args = blk: {
-        var ret: Args = .{};
-        var it = std.process.args();
-        defer it.deinit();
-        while (it.next()) |arg| {
-            if (std.mem.startsWith(u8, arg, "--model=")) {
-                ret.model = arg["--model=".len..];
-            } else if (std.mem.startsWith(u8, arg, "--seqlen=")) {
-                ret.seqlen = try std.fmt.parseUnsigned(u32, arg["--seqlen=".len..], 10);
-            } else if (std.mem.startsWith(u8, arg, "--prompt=")) {
-                ret.prompt = arg["--prompt=".len..];
-            } else if (std.mem.startsWith(u8, arg, "--reader-buffer-size-mb=")) {
-                ret.reader_buffer_size_mb = try std.fmt.parseUnsigned(u32, arg["--reader-buffer-size-mb=".len..], 10);
-            } else if (std.mem.startsWith(u8, arg, "--writer-buffer-size-mb=")) {
-                ret.writer_buffer_size_mb = try std.fmt.parseUnsigned(u32, arg["--writer-buffer-size-mb=".len..], 10);
-            } else if (std.mem.startsWith(u8, arg, "--async-limit=")) {
-                ret.async_limit = try std.fmt.parseUnsigned(usize, arg["--async-limit=".len..], 10);
-            }
-        }
-
-        if (ret.model == null) {
-            log.err("Missing --model", .{});
-            return;
-        }
-
-        break :blk ret;
-    };
+    const args = stdx.flags.parseProcessArgs(CliArgs);
 
     if (args.async_limit) |limit| threaded.setAsyncLimit(.limited(limit));
 
@@ -76,41 +71,19 @@ pub fn main() !void {
     var http_client: std.http.Client = .{
         .allocator = allocator,
         .io = threaded.io(),
-        .connection_pool = .{
-            .free_size = threaded.async_limit.toInt() orelse 16,
-        },
+        .connection_pool = .{ .free_size = threaded.async_limit.toInt() orelse 16 },
     };
 
     try http_client.initDefaultProxies(allocator);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(
-        allocator,
-        threaded.io(),
-        .{
-            .direct_io = true,
-            .direct_io_alignment = .fromByteUnits(4 * 1024),
-        },
-    );
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
     defer vfs_file.deinit();
 
-    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), .{
-        .http_client = &http_client,
-        .protocol = .https,
-    });
+    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
     defer vfs_https.deinit();
 
-    var hf_auth: zml.io.VFS.HF.Auth = try .auto(allocator, threaded.io());
-    defer hf_auth.deinit(allocator);
-
-    var hf_vfs: zml.io.VFS.HF = try .init(
-        allocator,
-        threaded.io(),
-        .{
-            .http_client = &http_client,
-            .auth = hf_auth,
-        },
-    );
+    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
     defer hf_vfs.deinit();
 
     var vfs: zml.io.VFS = try .init(allocator, threaded.io());
@@ -123,7 +96,7 @@ pub fn main() !void {
     const io = vfs.io();
 
     log.info("Resolving model repo", .{});
-    const repo = try zml.safetensors.resolveModelRepo(io, args.model.?);
+    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
 
     const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
@@ -193,12 +166,12 @@ pub fn main() !void {
         allocator,
         platform,
         .{
-            .size = args.reader_buffer_size_mb * 1024 * 1024,
+            .size = args.reader_buffer_size.bytes() * 1024 * 1024,
             .concurrency = load_model_buffers.limit,
             .dma = true,
         },
         .{
-            .size = args.writer_buffer_size_mb * 1024 * 1024,
+            .size = args.writer_buffer_size.bytes() * 1024 * 1024,
             .concurrency = load_model_buffers.limit,
             .dma = true,
         },
@@ -208,8 +181,8 @@ pub fn main() !void {
         write_pool.deinit();
     }
 
-    var model_name_it = std.mem.splitScalar(u8, args.model.?, '/');
-    var model_name = model_name_it.next() orelse args.model.?;
+    var model_name_it = std.mem.splitScalar(u8, args.model, '/');
+    var model_name = model_name_it.next() orelse args.model;
     while (model_name_it.next()) |part| {
         if (!std.mem.eql(u8, part, "")) model_name = part;
     }
