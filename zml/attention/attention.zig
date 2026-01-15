@@ -7,53 +7,96 @@ const Attention = @This();
 
 pub const Backend = enum {
     vanilla,
-    flashattn,
+    cuda_fa2,
+    cuda_fa3,
+
+    pub fn auto(platform: zml.Platform) Backend {
+        return switch (platform.target) {
+            .cuda => b: {
+                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+
+                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
+                    break :b if (std.mem.eql(u8, cc, "9.0"))
+                        .cuda_fa3
+                    else
+                        .cuda_fa2;
+                }
+
+                break :b .vanilla;
+            },
+            else => .vanilla,
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {
     vanilla: void,
-    flashattn: flashattn.Parameters,
+    cuda_fa2: flashattn.fa2.Parameters,
+    cuda_fa3: flashattn.fa3.Parameters,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
-        flashattn: flashattn.Parameters.InitOptions,
+        cuda_fa2: flashattn.fa2.Parameters.InitOptions,
+        cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+
+        pub fn fromBackend(backend: Backend) InitOptions {
+            return switch (backend) {
+                .vanilla => .{ .vanilla = {} },
+                .cuda_fa2 => .{ .cuda_fa2 = .{} },
+                .cuda_fa3 => .{ .cuda_fa3 = .{} },
+            };
+        }
     };
 
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
-            inline else => |v, tag| @unionInit(Parameters, @tagName(tag), @field(Attention, @tagName(tag)).Parameters.init(v)),
+            .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
+            .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
         };
     }
 };
 
 pub const Metadata = union(Backend) {
     vanilla: void,
-    flashattn: flashattn.Metadata,
+    cuda_fa2: flashattn.fa2.Metadata,
+    cuda_fa3: flashattn.fa3.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
-        flashattn: flashattn.Metadata.InitOptions,
+        cuda_fa2: flashattn.fa2.Metadata.InitOptions,
+        cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+
+        pub fn fromBackend(backend: Backend, seqlen: i64) InitOptions {
+            return switch (backend) {
+                .vanilla => .{ .vanilla = {} },
+                .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen } },
+                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen } },
+            };
+        }
     };
 
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
-            inline else => |v, tag| @unionInit(Metadata, @tagName(tag), @field(Attention, @tagName(tag)).Metadata.init(v)),
+            .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
+            .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
         };
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
-            inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
+            .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform) },
+            .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform) },
         };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
             .vanilla => {},
-            inline else => |*v, tag| @field(Attention, @tagName(tag)).Metadata.deinitBuffer(v),
+            .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
+            .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
         }
     }
 };
@@ -71,6 +114,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
             break :b attn_output;
         },
-        .flashattn => flashattn.attention(q, k, v, token_index, metadata.flashattn, parameters.flashattn),
+        .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
+        .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
     };
 }

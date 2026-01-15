@@ -121,9 +121,20 @@ pub fn main() !void {
         },
     };
 
+    var platform: zml.Platform = try .auto(io, .{});
+    defer platform.deinit();
+    var it = platform.devicesIterator();
+    log.info("Devices:", .{});
+    while (it.next()) |device| {
+        log.info("\t- {f}", .{device});
+    }
+
     // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
     const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
     defer llama_model.deinit(allocator);
+
+    const backend: zml.attention.Backend = .auto(platform);
+    log.info("Selected backend: {}", .{backend});
 
     // Specify shapes of input arguments
     const dtype = llama_model.model.embed_tokens.weight.dtype();
@@ -138,24 +149,14 @@ pub fn main() !void {
             .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
         }, dtype)),
         .rng = .init(),
-        //.attention_metadata = .init(.{ .flashattn = .{ .fa3 = .{ .seqlen = @intCast(args.seqlen) } } }),
-        //.attention_parameters = .init(.{ .flashattn = .{ .fa3 = .{} } }),
-        .attention_metadata = .init(.{ .vanilla = {} }),
-        .attention_parameters = .init(.{ .vanilla = {} }),
+        .attention_metadata = .init(.fromBackend(backend, @intCast(args.seqlen))),
+        .attention_parameters = .init(.fromBackend(backend)),
     };
 
     var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
     errdefer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
-    }
-
-    var platform: zml.Platform = try .auto(io, .{});
-    defer platform.deinit();
-    var it = platform.devicesIterator();
-    log.info("Devices:", .{});
-    while (it.next()) |device| {
-        log.info("\t- {f}", .{device});
     }
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters });

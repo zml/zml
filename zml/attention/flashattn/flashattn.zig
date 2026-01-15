@@ -7,63 +7,6 @@ const bindings = @import("bindings.zig");
 pub const load = bindings.load;
 pub const register = bindings.register;
 
-const Flashattn = @This();
-
-pub const FlashattnBackend = enum {
-    fa2,
-    fa3,
-};
-
-pub const Parameters = union(FlashattnBackend) {
-    fa2: fa2.Parameters,
-    fa3: fa3.Parameters,
-
-    pub const InitOptions = union(FlashattnBackend) {
-        fa2: fa2.Parameters.InitOptions,
-        fa3: fa3.Parameters.InitOptions,
-    };
-
-    pub fn init(opts: InitOptions) Parameters {
-        return switch (opts) {
-            inline else => |v, tag| @unionInit(Parameters, @tagName(tag), @field(Flashattn, @tagName(tag)).Parameters.init(v)),
-        };
-    }
-};
-
-pub const Metadata = union(FlashattnBackend) {
-    fa2: fa2.Metadata,
-    fa3: fa3.Metadata,
-
-    pub const InitOptions = union(FlashattnBackend) {
-        fa2: fa2.Metadata.InitOptions,
-        fa3: fa3.Metadata.InitOptions,
-    };
-
-    pub fn init(opts: InitOptions) Metadata {
-        return switch (opts) {
-            inline else => |v, tag| @unionInit(Metadata, @tagName(tag), @field(Flashattn, @tagName(tag)).Metadata.init(v)),
-        };
-    }
-
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
-        return switch (self) {
-            inline else => |v, tag| @unionInit(zml.Bufferized(Metadata), @tagName(tag), try v.initBuffer(io, platform)),
-        };
-    }
-
-    pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-        switch (self.*) {
-            inline else => |*v, tag| @field(Flashattn, @tagName(tag)).Metadata.deinitBuffer(v),
-        }
-    }
-};
-
-pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    return switch (parameters) {
-        inline else => |_, tag| @field(Flashattn, @tagName(tag)).attention(q, k, v, token_index, @field(metadata, @tagName(tag)), @field(parameters, @tagName(tag))),
-    };
-}
-
 pub const fa2 = struct {
     pub const Parameters = struct {
         pub const InitOptions = struct {};
