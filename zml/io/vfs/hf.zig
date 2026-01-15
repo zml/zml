@@ -18,10 +18,7 @@ pub const API = struct {
     };
 };
 
-const ReadState = struct {
-    children: []const TreeNode,
-    index: usize,
-};
+const ReadState = struct { children: []const TreeNode, index: usize };
 
 pub const TreeNode = struct {
     name: []const u8,
@@ -53,75 +50,6 @@ const RepoKey = struct {
 };
 
 pub const HF = struct {
-    pub const Auth = union(enum) {
-        none,
-        hf_token: []const u8,
-
-        pub const AuthError = error{
-            MissingHFToken,
-            InvalidHFToken,
-            MissingHomePath,
-            MissingConfigFile,
-            Unexpected,
-        };
-
-        pub fn deinit(self: *Auth, allocator: std.mem.Allocator) void {
-            switch (self.*) {
-                .none => {},
-                .hf_token => |token| {
-                    allocator.free(token);
-                },
-            }
-        }
-
-        pub fn auto(allocator: std.mem.Allocator, io_: std.Io) AuthError!Auth {
-            return fromHomeConfig(allocator, io_) catch |err| switch (err) {
-                AuthError.MissingHomePath, AuthError.MissingConfigFile => return fromEnv(allocator) catch |e| switch (e) {
-                    AuthError.MissingHFToken => {
-                        log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
-                        return .none;
-                    },
-                    else => return AuthError.Unexpected,
-                },
-                else => return AuthError.Unexpected,
-            };
-        }
-
-        pub fn fromEnv(allocator: std.mem.Allocator) AuthError!Auth {
-            const token = std.process.getEnvVarOwned(allocator, "HF_TOKEN") catch |err| switch (err) {
-                error.EnvironmentVariableNotFound => return AuthError.MissingHFToken,
-                else => return AuthError.Unexpected,
-            };
-            defer allocator.free(token);
-
-            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{token}) catch return AuthError.Unexpected };
-        }
-
-        pub fn fromHomeConfig(allocator: std.mem.Allocator, base_io: std.Io) AuthError!Auth {
-            const home_path = std.process.getEnvVarOwned(allocator, "HOME") catch |err| switch (err) {
-                error.EnvironmentVariableNotFound => return AuthError.MissingHomePath,
-                else => return AuthError.Unexpected,
-            };
-            defer allocator.free(home_path);
-
-            const token_path = std.fmt.allocPrint(allocator, "{s}/.cache/huggingface/token", .{home_path}) catch return AuthError.Unexpected;
-            defer allocator.free(token_path);
-
-            const file = std.Io.Dir.openFileAbsolute(base_io, token_path, .{ .mode = .read_only }) catch |err| switch (err) {
-                error.FileNotFound => return AuthError.MissingConfigFile,
-                else => return AuthError.Unexpected,
-            };
-
-            var reader = file.reader(base_io, &.{});
-            const size = reader.getSize() catch return AuthError.Unexpected;
-
-            const token = reader.interface.readAlloc(allocator, size) catch return AuthError.Unexpected;
-            defer allocator.free(token);
-
-            return .{ .hf_token = std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, "\n")}) catch return AuthError.Unexpected };
-        }
-    };
-
     pub const Repo = struct {
         repo: []const u8,
         model: []const u8,
@@ -149,10 +77,7 @@ pub const HF = struct {
     };
 
     const Handle = struct {
-        pub const Type = enum {
-            file,
-            directory,
-        };
+        pub const Type = enum { file, directory };
 
         type: Type,
         uri: []const u8,
@@ -173,47 +98,55 @@ pub const HF = struct {
         }
     };
 
-    const Config = struct {
-        http_client: *std.http.Client,
-        auth: Auth = .none,
-    };
-
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
-    authorization: std.http.Client.Request.Headers.Value = .default,
-    handles: stdx.SegmentedList(Handle, 0),
+    authorization: std.http.Client.Request.Headers.Value,
+    handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .{},
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
 
-    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, config: Config) !HF {
-        var handles: stdx.SegmentedList(Handle, 0) = .{};
-        // cwd
-        const handle = try handles.addOne(allocator);
-        handle.* = .{
-            .type = .directory,
-            .uri = "",
-            .pos = 0,
-            .size = 0,
-        };
-
-        var hf: HF = .{
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, hf_token: ?[]const u8) !HF {
+        return .{
             .allocator = allocator,
-            .handles = handles,
-            .base = .init(base_io),
-            .client = config.http_client,
-        };
-
-        switch (config.auth) {
-            .hf_token => |token| {
-                hf.authorization = .{ .override = token };
+            .base = .init(inner),
+            .client = http_client,
+            .authorization = if (hf_token) |token| blk: {
+                break :blk .{
+                    .override = try std.fmt.allocPrint(allocator, "Bearer {s}", .{std.mem.trim(u8, token, " \t\n\r")}),
+                };
+            } else blk: {
+                break :blk .default;
             },
-            .none => {},
-        }
+        };
+    }
 
-        return hf;
+    pub fn auto(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client) !HF {
+        const hf_token = if (std.process.getEnvVarOwned(allocator, "HF_TOKEN")) |token| blk: {
+            break :blk token;
+        } else |_| blk: {
+            const home_path = std.process.getEnvVarOwned(allocator, "HOME") catch break :blk null;
+            defer allocator.free(home_path);
+
+            var path_buf: [256]u8 = undefined;
+            const token_path = std.fmt.bufPrint(&path_buf, "{s}/.cache/huggingface/token", .{home_path}) catch break :blk null;
+
+            var file = std.Io.Dir.openFileAbsolute(inner, token_path, .{ .mode = .read_only }) catch break :blk null;
+            defer file.close(inner);
+
+            const size = file.stat(inner) catch break :blk null;
+            var reader = file.reader(inner, &.{});
+            const token = reader.interface.readAlloc(allocator, size.size) catch break :blk null;
+
+            break :blk token;
+        };
+        defer if (hf_token) |token| allocator.free(token);
+
+        if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
+
+        return init(allocator, inner, http_client, hf_token);
     }
 
     pub fn deinit(self: *HF) void {
@@ -240,6 +173,11 @@ pub const HF = struct {
         }
         self.trees.deinit(self.allocator);
         self.dir_read_states.deinit(self.allocator);
+
+        switch (self.authorization) {
+            .default, .omit => {},
+            .override => |t| self.allocator.free(t),
+        }
     }
 
     pub fn io(self: *HF) std.Io {

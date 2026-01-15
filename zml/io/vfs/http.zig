@@ -35,41 +35,22 @@ pub const HTTP = struct {
         }
     };
 
-    const Protocol = union(enum) {
-        http,
-        https,
-    };
-
-    const Config = struct {
-        http_client: *std.http.Client,
-        protocol: Protocol,
-    };
+    const Protocol = enum { http, https };
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     client: *std.http.Client,
     protocol: Protocol,
-    handles: stdx.SegmentedList(Handle, 0),
+    handles: stdx.SegmentedList(Handle, 0) = .{},
     closed_handles: std.ArrayList(u32) = .{},
     base: VFSBase,
 
-    pub fn init(allocator: std.mem.Allocator, base_io: std.Io, config: Config) !HTTP {
-        var handles: stdx.SegmentedList(Handle, 0) = .{};
-        // cwd
-        const handle = try handles.addOne(allocator);
-        handle.* = .{
-            .type = .directory,
-            .uri = "",
-            .pos = 0,
-            .size = 0,
-        };
-
+    pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
         return .{
             .allocator = allocator,
-            .base = .init(base_io),
-            .handles = handles,
-            .client = config.http_client,
-            .protocol = config.protocol,
+            .base = .init(inner),
+            .client = http_client,
+            .protocol = protocol,
         };
     }
 
@@ -175,7 +156,7 @@ pub const HTTP = struct {
         const handle = self.getDirHandle(dir);
 
         return .{
-            .inode = @intCast(dir.handle),
+            .inode = @intCast(0),
             .nlink = 0,
             .size = handle.size,
             .permissions = .fromMode(0o444),
@@ -191,7 +172,7 @@ pub const HTTP = struct {
         const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
 
         return .{
-            .inode = @intCast(dir.handle),
+            .inode = @intCast(0),
             .nlink = 0,
             .size = size,
             .permissions = .fromMode(0o444),
