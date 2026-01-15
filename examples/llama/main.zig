@@ -26,6 +26,7 @@ const CliArgs = struct {
     reader_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     writer_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     async_limit: ?u32 = null,
+    backend: ?zml.attention.Backend = null,
 
     pub const help =
         \\Usage: llama --model=<path> [options]
@@ -36,6 +37,7 @@ const CliArgs = struct {
         \\  --model=<path>              Path to model (local path or HuggingFace repo)
         \\  --prompt=<text>             Input prompt (reads from stdin if not provided)
         \\  --seqlen=<n>                Maximum sequence length (default: 512)
+        \\  --backend=<text>            Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
         \\  --reader-buffer-size=<size> Reader buffer size (default: 32MiB)
         \\  --writer-buffer-size=<size> Writer buffer size (default: 32MiB)
         \\  --async-limit=<n>           Async I/O concurrency limit
@@ -133,8 +135,11 @@ pub fn main() !void {
     const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
     defer llama_model.deinit(allocator);
 
-    const backend: zml.attention.Backend = .auto(platform);
-    log.info("Selected backend: {}", .{backend});
+    const backend = args.backend orelse b: {
+        const selected = zml.attention.Backend.auto(platform);
+        log.info("Selected backend: {}", .{selected});
+        break :b selected;
+    };
 
     // Specify shapes of input arguments
     const dtype = llama_model.model.embed_tokens.weight.dtype();
