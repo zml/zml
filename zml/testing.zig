@@ -49,7 +49,7 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
         if (should_free_left) left.free(allocator);
         if (should_free_right) right.free(allocator);
     }
-    errdefer log.err("\n--> Left: {0f}{0d:24.3}\n--> Right: {1f}{1d:24.3}", .{ left, right });
+    errdefer log.err("\n--> Left: {0d:24.3}\n--> Right: {1d:24.3}", .{ left, right });
     if (!std.mem.eql(i64, left.shape.dims(), right.shape.dims())) {
         log.err("left.shape() {f} != right.shape() {f}", .{ left.shape, right.shape });
         return error.TestUnexpectedResult;
