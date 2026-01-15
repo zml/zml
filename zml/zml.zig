@@ -25,6 +25,7 @@ pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
 pub const module = @import("module.zig");
 pub const nn = @import("nn.zig");
+pub const ops = @import("ops.zig");
 pub const platform = @import("platform.zig");
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
