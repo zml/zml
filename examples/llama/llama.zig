@@ -106,10 +106,12 @@ pub const LlamaLM = struct {
         token_index: Tensor,
         kv_cache: KvCache,
         rng: Tensor.Rng,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache);
+        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache, attention_metadata, attention_parameters);
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -207,13 +209,20 @@ pub const Llama = struct {
 
     /// Forward one token, using KV cache for previous tokens.
     /// Returns result and updated KV cache.
-    pub fn forward(self: Llama, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+    pub fn forward(
+        self: Llama,
+        tokens: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
+    ) struct { Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i), attention_metadata, attention_parameters);
         }
         const output = self.norm.forward(hidden);
 
@@ -252,13 +261,15 @@ pub const TransformerLayer = struct {
         x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
 
         const x0_normalized = self.input_layernorm.forward(x0);
-        const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache);
+        const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache, attention_metadata, attention_parameters);
         const x1 = x0.add(delta0);
 
         // Fully Connected
@@ -385,19 +396,13 @@ pub const SelfAttn = struct {
         x: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
         var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-
-        // Generate the attention mask.
-        const seq_len = kv_cache.k.dim(.k);
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, x.dtype(), null);
-
-        // Note: in Pytorch it would be very inefficient to generate the full attn_mask,
-        // then slice into it, but XLA is able to optimize this correctly.
-        attn_mask = attn_mask.gatherSlices(zml.Shape.init(.{ .q = x.dim(.s) }, attn_mask.dtype()), token_index.reshape(.{ .coord = 1 }), .{});
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
@@ -418,8 +423,8 @@ pub const SelfAttn = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
-        // const attn_output = zml.nn.sdpaMemEfficient(q, k, v, .{ .attn_mask = attn_mask }, .{ .q_chunk_size = 4096, .k_chunk_size = 1024 });
+        const attn_output = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };
     }
