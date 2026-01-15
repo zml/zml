@@ -170,12 +170,12 @@ pub fn main() !void {
         allocator,
         platform,
         .{
-            .size = args.reader_buffer_size.bytes() * 1024 * 1024,
+            .size = args.reader_buffer_size.bytes(),
             .concurrency = load_model_buffers.limit,
             .dma = true,
         },
         .{
-            .size = args.writer_buffer_size.bytes() * 1024 * 1024,
+            .size = args.writer_buffer_size.bytes(),
             .concurrency = load_model_buffers.limit,
             .dma = true,
         },
