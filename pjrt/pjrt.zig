@@ -11,7 +11,7 @@ test {
     std.testing.refAllDecls(@This());
 }
 
-const meta = struct {
+pub const meta = struct {
     // We could calculate it like PJRT does, but it turns out that some of those
     // were wrong in PJRT itself [1], which gets propagated to binary plugins. In
     // order to mirror that, we just the value as computed by PJRT itself, through
@@ -252,8 +252,8 @@ pub const Api = struct {
     }
 
     pub fn ffi(api: *const Api) ?Ffi {
-        if (api.extension(c.PJRT_FFI_Extension, c.PJRT_Extension_Type_FFI)) |ext| {
-            return .{ .inner = ext };
+        if (api.extension(.ffi)) |ext| {
+            return .{ .inner = ext.ffi };
         }
         return null;
     }
@@ -1441,7 +1441,7 @@ pub const Ffi = extern struct {
             .platform_name_size = platform_name.len,
             .traits = @bitCast(traits),
         };
-        const result = self.inner.register_handler.?(&ret);
+        const result = self.inner.register_handler.?(@ptrCast(&ret));
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("registerFfi error: {s}", .{pjrt_error.getMessage(api)});
