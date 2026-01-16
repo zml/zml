@@ -360,7 +360,9 @@ pub const ShapeSpec = extern struct {
     pub fn init(dims_: []const i64, bt: BufferType) ShapeSpec {
         return .{
             .inner = .{
+<<<<<<< HEAD
                 .dims = @ptrCast(@constCast(dims_)),
+
                 .num_dims = dims_.len,
                 .element_type = @intFromEnum(bt),
             },
@@ -466,13 +468,17 @@ pub const Client = opaque {
             .client = self.inner(),
             .data = @constCast(args.data),
             .type = @intFromEnum(args.buffer_type),
+<<<<<<< HEAD
             .dims = @ptrCast(@constCast(args.dims)),
             .num_dims = args.dims.len,
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
+
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
+<<<<<<< HEAD
+
         });
 
         return .{
@@ -554,9 +560,11 @@ pub const Client = opaque {
     pub fn createBuffersForAsyncHostToDevice(self: *const Client, api: *const Api, args: CreateBuffersForAsyncHostToDeviceArgs) ApiError!*AsyncHostToDeviceTransferManager {
         const ret = try api.call(.PJRT_Client_CreateBuffersForAsyncHostToDevice, .{
             .client = self.inner(),
+<<<<<<< HEAD
             .shape_specs = @ptrCast(@constCast(args.shape_specs)),
             .num_shape_specs = args.shape_specs.len,
             .device_layouts = if (args.device_layouts) |layouts| @ptrCast(@constCast(layouts)) else null,
+
             .num_device_layouts = if (args.device_layouts) |layouts| layouts.len else 0,
             .memory = @ptrCast(@constCast(args.memory)),
         });
@@ -877,11 +885,13 @@ pub const LoadedExecutable = opaque {
         _ = try api.call(.PJRT_LoadedExecutable_Execute, .{
             .executable = self.inner(),
             .options = @ptrCast(&options),
+<<<<<<< HEAD
             .argument_lists = @ptrCast(args.arguments),
             .num_devices = args.arguments.len,
             .num_args = args.num_args,
             .output_lists = @ptrCast(args.results),
             .device_complete_events = if (args.events) |ev| @ptrCast(ev) else null,
+
         });
     }
 
@@ -1333,7 +1343,9 @@ pub const AsyncHostToDeviceTransferManager = opaque {
     pub fn addMetadata(self: *AsyncHostToDeviceTransferManager, api: *const Api, transfer_metadata: []const NamedValue) ApiError!void {
         _ = try api.call(.PJRT_AsyncHostToDeviceTransferManager_AddMetadata, .{
             .transfer_manager = self.inner(),
+<<<<<<< HEAD
             .transfer_metadata = @ptrCast(transfer_metadata),
+
             .num_metadata = transfer_metadata.len,
         });
     }
@@ -1463,7 +1475,9 @@ pub const Ffi = extern struct {
             .platform_name_size = platform_name.len,
             .traits = @bitCast(traits),
         };
+<<<<<<< HEAD
         const result = self.inner.register_handler.?(@ptrCast(&ret));
+
 
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
