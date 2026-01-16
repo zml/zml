@@ -1,0 +1,11 @@
+filegroup(
+    name = "libflashattn",
+    visibility = ["//visibility:public"],
+    srcs = ["flashattn/lib/libflashattn.so"],
+)
+
+cc_library(
+    name = "c",
+    hdrs = ["flashattn/include/capi.h"],
+    visibility = ["//visibility:public"],
+)

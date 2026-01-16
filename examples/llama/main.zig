@@ -26,6 +26,7 @@ const CliArgs = struct {
     reader_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     writer_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     async_limit: ?u32 = null,
+    backend: ?zml.attention.Backend = null,
 
     pub const help =
         \\Usage: llama --model=<path> [options]
@@ -36,6 +37,7 @@ const CliArgs = struct {
         \\  --model=<path>              Path to model (local path or HuggingFace repo)
         \\  --prompt=<text>             Input prompt (reads from stdin if not provided)
         \\  --seqlen=<n>                Maximum sequence length (default: 512)
+        \\  --backend=<text>            Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
         \\  --reader-buffer-size=<size> Reader buffer size (default: 32MiB)
         \\  --writer-buffer-size=<size> Writer buffer size (default: 32MiB)
         \\  --async-limit=<n>           Async I/O concurrency limit
@@ -121,9 +123,23 @@ pub fn main() !void {
         },
     };
 
+    var platform: zml.Platform = try .auto(io, .{});
+    defer platform.deinit();
+    var it = platform.devicesIterator();
+    log.info("Devices:", .{});
+    while (it.next()) |device| {
+        log.info("\t- {f}", .{device});
+    }
+
     // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
     const llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
     defer llama_model.deinit(allocator);
+
+    const backend = args.backend orelse b: {
+        const selected = zml.attention.Backend.auto(platform);
+        log.info("Selected backend: {}", .{selected});
+        break :b selected;
+    };
 
     // Specify shapes of input arguments
     const dtype = llama_model.model.embed_tokens.weight.dtype();
@@ -138,20 +154,14 @@ pub fn main() !void {
             .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
         }, dtype)),
         .rng = .init(),
+        .attention_metadata = .init(.fromBackend(backend, @intCast(args.seqlen))),
+        .attention_parameters = .init(.fromBackend(backend)),
     };
 
     var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
     errdefer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
-    }
-
-    var platform: zml.Platform = try .auto(io, .{});
-    defer platform.deinit();
-    var it = platform.devicesIterator();
-    log.info("Devices:", .{});
-    while (it.next()) |device| {
-        log.info("\t- {f}", .{device});
     }
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters });
@@ -210,6 +220,9 @@ pub fn main() !void {
     var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
     defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
 
+    var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform);
+    defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+
     var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
 
@@ -230,6 +243,7 @@ pub fn main() !void {
         compiled_model_result.prefill_exe,
         compiled_model_result.decode_exe,
         &kv_cache_buffers,
+        &attention_metadata_buffers,
         tokenizer,
         config,
         llama_options,
@@ -281,6 +295,8 @@ const LlamaParameters = struct {
     token_index: zml.Tensor,
     kv_cache: llama.KvCache,
     rng: zml.Tensor.Rng,
+    attention_metadata: zml.attention.Metadata,
+    attention_parameters: zml.attention.Parameters,
 };
 
 const CompileModelResult = struct {
@@ -299,7 +315,14 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, llama_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{
+                parameters_.prefill_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                parameters_.attention_metadata,
+                parameters_.attention_parameters,
+            });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -309,7 +332,14 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, llama_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{
+                parameters_.decode_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                parameters_.attention_metadata,
+                parameters_.attention_parameters,
+            });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -427,6 +457,7 @@ pub fn generateText(
     prefill_exe: zml.exe.Exe,
     decode_exe: zml.exe.Exe,
     kv_cache_buffers: *zml.Bufferized(llama.KvCache),
+    attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     tokenizer: zml.tokenizer.Tokenizer,
     config: LlamaLM.Config,
     options: LlamaLM.Options,
@@ -467,7 +498,7 @@ pub fn generateText(
         var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
         defer prefill_token_pos_buffer.deinit();
 
-        prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
+        prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
 
         prefill_exe.call(prefill_args, &prefill_results);
 
@@ -520,7 +551,7 @@ pub fn generateText(
         defer token_pos_buffer.deinit();
 
         // call to generate the next token
-        decode_args.set(.{ llama_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{ llama_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
 
         decode_exe.call(decode_args, &decode_results);
 

@@ -4,6 +4,7 @@ load("//third_party/mnist:repo.bzl", mnist = "repo")
 load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
+load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 
 def _non_module_deps_impl(mctx):
     com_google_sentencepiece()
@@ -12,6 +13,7 @@ def _non_module_deps_impl(mctx):
     xla()
     arocc()
     translate_c()
+    flashattn()
 
     return mctx.extension_metadata(
         reproducible = True,

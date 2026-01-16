@@ -583,6 +583,27 @@ pub fn integerAttribute(ctx: *Context, it: IntegerTypes, value_: anytype) *const
     return @ptrCast(IntegerAttribute.init(ctx, it, value_));
 }
 
+pub const FloatAttribute = opaque {
+    const M = Methods(FloatAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAFloat;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(ctx: *Context, comptime ft: FloatTypes, value_: f64) *const FloatAttribute {
+        return @ptrCast(c.mlirFloatAttrDoubleGet(
+            ctx.ptr(),
+            FloatType(ft).get(ctx).ptr(),
+            value_,
+        ).ptr);
+    }
+};
+
+pub fn floatAttribute(ctx: *Context, comptime ft: FloatTypes, value_: anytype) *const Attribute {
+    return @ptrCast(FloatAttribute.init(ctx, ft, value_));
+}
+
 pub const BoolAttribute = opaque {
     const M = Methods(BoolAttribute, c.MlirAttribute);
 

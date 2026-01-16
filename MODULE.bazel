@@ -113,7 +113,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "mnist", "org_swig_swig", "translate-c", "xla")
+use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "mnist", "org_swig_swig", "translate-c", "xla", "flashattn")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(

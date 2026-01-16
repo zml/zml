@@ -109,12 +109,28 @@ pub const Platform = struct {
         if (true_num_devices > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
         }
-        return .{
+
+        const platform: Platform = .{
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
             .compilation_options = .{},
         };
+
+        switch (target) {
+            .cuda => {
+                // TODO(Corentin): provide a better allocator
+                zml.attention.flashattn.load(std.heap.c_allocator, io) catch {
+                    log.warn("Failed to load flashattn", .{});
+                };
+                zml.attention.flashattn.register(platform) catch {
+                    log.warn("Failed to register flashattn custom call", .{});
+                };
+            },
+            else => {},
+        }
+
+        return platform;
     }
 
     pub fn auto(io: std.Io, options: CreateOptions) !Platform {
@@ -338,5 +354,20 @@ pub const CreateOptions = struct {
             },
         }
         return values.items;
+    }
+};
+
+// TODO(Corendos): Consider moving that in its own file if its size increase too much.
+pub const cuda = struct {
+    pub fn tryGetComputeCapabilities(platform: zml.Platform, device: *const pjrt.Device) ?[]const u8 {
+        stdx.debug.assert(platform.target == .cuda, "tryGetComputeCapabilities expects .cuda platform, got {}", .{platform.target});
+        const description = device.getDescription(platform.pjrt_api);
+
+        const attributes = description.attributes(platform.pjrt_api);
+        return for (attributes) |attr| {
+            if (std.mem.eql(u8, attr.name(), "compute_capability")) {
+                break attr.value().string;
+            }
+        } else null;
     }
 };

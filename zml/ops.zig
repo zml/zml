@@ -962,7 +962,30 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     var metadata_attributes: [metadata_type_info.@"struct".fields.len]mlir.NamedAttribute = undefined;
     inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
         const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
-            .int, .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@field(metadata, field.name)))),
+            .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
+            .int => |int_field| switch (int_field.signedness) {
+                .signed => switch (int_field.bits) {
+                    8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(metadata, field.name)),
+                    16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @field(metadata, field.name)),
+                    32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @field(metadata, field.name)),
+                    64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @field(metadata, field.name)),
+                    else => @panic("Unsupported DataType"),
+                },
+                .unsigned => switch (int_field.bits) {
+                    8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @field(metadata, field.name)),
+                    16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @field(metadata, field.name)),
+                    32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @field(metadata, field.name)),
+                    64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @field(metadata, field.name)),
+                    else => @panic("Unsupported DataType"),
+                },
+            },
+            .float => |float_field| switch (float_field.bits) {
+                16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
+                32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
+                64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
+                else => @panic("Unsupported DataType"),
+            },
+            .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(metadata, field.name)),
             else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
         };
         metadata_attributes[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
@@ -996,7 +1019,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
             .output_operand_aliases = opts.output_operand_aliases orelse &.{},
         },
         .unknown(ctx.mlir_ctx),
-    );
+    ).appendTo(CompilationContext.current().currentScope().block);
 
     const outputs_ = ctx.arena.allocator().alloc(Tensor, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
