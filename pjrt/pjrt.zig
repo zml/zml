@@ -1155,6 +1155,8 @@ pub const Event = opaque {
             io: std.Io,
         }{ .io = io };
 
+        std.log.info("[{}] state: {} {*} {}", .{ std.Thread.getCurrentId(), self, &ctx, self.isReady(api) });
+
         try self.onReady(api, struct {
             fn call(err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void {
                 const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
@@ -1162,6 +1164,7 @@ pub const Event = opaque {
                 ctx_.event.set(ctx_.io);
             }
         }.call, &ctx);
+
         ctx.event.waitUncancelable(io);
 
         if (ctx.err) |e| {
