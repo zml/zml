@@ -406,7 +406,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     };
 
     fa2_mha_varlen_fwd = @ptrCast(@alignCast(std.c.dlsym(handle, "fa2_mha_varlen_fwd") orelse return error.NotFound));
-    fa2_mha_fwd = @ptrCast(std.c.dlsym(handle, "fa2_mha_fwd") orelse return error.NotFound);
+    fa2_mha_fwd = @ptrCast(@alignCast(std.c.dlsym(handle, "fa2_mha_fwd") orelse return error.NotFound));
     fa3_mha_fwd = @ptrCast(@alignCast(std.c.dlsym(handle, "fa3_mha_fwd") orelse return error.NotFound));
 }
 
