@@ -70,6 +70,9 @@ pub fn main() !void {
 
     log.info("Running with threaded io async limit set to {?d}", .{threaded.async_limit.toInt()});
 
+    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
+    defer vfs.deinit();
+
     var http_client: std.http.Client = .{
         .allocator = allocator,
         .io = threaded.io(),
@@ -81,18 +84,14 @@ pub fn main() !void {
 
     var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
     defer vfs_file.deinit();
+    try vfs.register("file", vfs_file.io());
 
     var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
     defer vfs_https.deinit();
+    try vfs.register("https", vfs_https.io());
 
     var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
     defer hf_vfs.deinit();
-
-    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
-    defer vfs.deinit();
-
-    try vfs.register("file", vfs_file.io());
-    try vfs.register("https", vfs_https.io());
     try vfs.register("hf", hf_vfs.io());
 
     const io = vfs.io();
@@ -154,34 +153,29 @@ pub fn main() !void {
         .attention_parameters = .init(.fromBackend(backend)),
     };
 
-    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
+    var progress = std.Progress.start(io, .{ .root_name = args.model, .estimated_total_items = store.view().count() });
+
+    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo, &progress });
     errdefer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
     }
 
-    var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters });
+    var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, &progress });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
         defer v.prefill_exe.deinit();
         defer v.decode_exe.deinit();
     } else |_| {};
 
-    var load_model_buffers_group: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 16);
+    var load_model_buffers_group: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 32);
     defer {
         load_model_buffers_group.cancel(io);
         load_model_buffers_group.deinit();
     }
 
-    var model_name_it = std.mem.splitScalar(u8, args.model, '/');
-    var model_name = model_name_it.next() orelse args.model;
-    while (model_name_it.next()) |part| {
-        if (!std.mem.eql(u8, part, "")) model_name = part;
-    }
-
     const read_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = args.reader_buffer_size.bytes(), .concurrency = load_model_buffers_group.limit, .dma = true };
     const write_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = args.writer_buffer_size.bytes(), .concurrency = load_model_buffers_group.limit, .dma = true };
 
-    var progress = std.Progress.start(io, .{ .root_name = model_name, .estimated_total_items = store.view().count() });
     var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers_group, read_pool_config, write_pool_config, platform, &store, llama_model });
     errdefer b: {
         var v = llama_buffers_future.cancel(io) catch break :b;
@@ -254,8 +248,10 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
     return parsed_config;
 }
 
-fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
-    log.info("Loading tokenizer", .{});
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
+    // log.info("Loading tokenizer", .{});
+    var node = progress.start("Loading tokenizer...", 1);
+    defer node.end();
     var timer = try std.time.Timer.start();
     defer log.info("Loaded tokenizer [{D}]", .{timer.read()});
     const bytes = b: {
@@ -284,16 +280,19 @@ const CompileModelResult = struct {
     decode_exe: zml.Exe,
 };
 
-fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, llama_model: llama.LlamaLM, parameters: LlamaParameters) !CompileModelResult {
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, llama_model: llama.LlamaLM, parameters: LlamaParameters, progress: *std.Progress.Node) !CompileModelResult {
+    var node = progress.start("Compiling...", 2);
+    defer node.end();
+
     var timer = try std.time.Timer.start();
-    log.info("Compiling model", .{});
     defer log.info("Compiled model [{D}]", .{timer.read()});
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = io.async(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, progress_: *std.Progress.Node) !zml.Exe {
+            var node_ = progress_.start("Compiling prefill...", 1);
+            defer node_.end();
             var timer_ = try std.time.Timer.start();
-            log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.prefill_tokens,
@@ -304,13 +303,14 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
                 parameters_.attention_parameters,
             });
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters });
+    }.call, .{ allocator, io, platform, llama_model, parameters, &node });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_future = io.async(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, progress_: *std.Progress.Node) !zml.Exe {
+            var node_ = progress_.start("Compiling decode...", 1);
+            defer node_.end();
             var timer_ = try std.time.Timer.start();
-            log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.decode_tokens,
@@ -321,7 +321,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
                 parameters_.attention_parameters,
             });
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters });
+    }.call, .{ allocator, io, platform, llama_model, parameters, &node });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
     const prefill_exe = try prefill_future.await(io);
@@ -343,7 +343,6 @@ fn loadModelBuffers(
 ) !zml.Bufferized(llama.LlamaLM) {
     var transferred_bytes: usize = 0;
     var timer = try stdx.time.Timer.start();
-    log.info("Loading model", .{});
     defer {
         const duration = timer.read();
         const seconds = @as(f64, @floatFromInt(duration.ns)) / 1e9;
