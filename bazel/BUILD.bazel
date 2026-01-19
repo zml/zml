@@ -1,10 +1,6 @@
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
-zig_binary(
+zig_library(
     name = "bazel",
     main = "bazel.zig",
     visibility = ["//visibility:public"],

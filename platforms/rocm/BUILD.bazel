@@ -43,6 +43,7 @@ zig_library(
     ] + select({
         "//platforms:rocm.enabled": [
             ":libpjrt_rocm",
+            "//bazel",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

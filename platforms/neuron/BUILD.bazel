@@ -117,6 +117,7 @@ zig_library(
             ":libnrt_headers",
             ":libpython",
             ":zmlxneuron",
+            "//bazel",
             "//stdx",
             "@libpjrt_neuron",
             "@rules_zig//zig/runfiles",

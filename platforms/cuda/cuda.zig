@@ -1,10 +1,10 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
-const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
 const nvidiaLibsPath = "/cuda/";
@@ -49,12 +49,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
-        stdx.debug.panic("Unable to find runfiles", .{});
-    };
-
-    const source_repo = bazel_builtin.current_repository;
-    const r = r_.withSourceRepo(source_repo);
+    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {

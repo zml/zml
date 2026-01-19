@@ -40,6 +40,7 @@ zig_library(
     ] + select({
         "//platforms:cuda.enabled": [
             ":libpjrt_cuda",
+            "//bazel",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

@@ -50,6 +50,7 @@ zig_library(
     ] + select({
         "//platforms:cpu.enabled": [
             ":libpjrt_cpu",
+            "//bazel",
             "//stdx",
             "@rules_zig//zig/runfiles",
         ],

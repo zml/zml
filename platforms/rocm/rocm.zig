@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const c = @import("c");
 const pjrt = @import("pjrt");
@@ -26,6 +27,7 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
+    _ = allocator; // autofix
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
@@ -36,15 +38,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
-        stdx.debug.panic("Unable to find runfiles", .{});
-    };
-
-    const source_repo = bazel_builtin.current_repository;
-    const r = r_.withSourceRepo(source_repo);
+    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
