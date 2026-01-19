@@ -76,10 +76,8 @@ pub const LlamaLM = struct {
         cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
     ) !zml.Bufferized(LlamaLM) {
         var lm_head_bufferized: ?zml.Bufferized(zml.nn.Linear) = null;
-        if (self.lm_head) |lm_head| {
-            lm_head_bufferized = undefined;
-
-            const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &lm_head, &lm_head_bufferized.?, store.withPrefix("lm_head"));
+        if (self.lm_head) |_| {
+            const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.lm_head, &lm_head_bufferized, store.withPrefix("lm_head"));
             for (transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
         }
 

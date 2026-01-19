@@ -1,5 +1,4 @@
 const std = @import("std");
-const builtin = @import("builtin");
 
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
@@ -277,7 +276,6 @@ pub fn bufferize(
         fn cb(ctx: *FillBuffersCtx, tensor: *const Tensor) void {
             const ptr = ctx.store.store.getPtrFromId(tensor.id) orelse return;
             const buffer = ctx.buffers[ctx.idx];
-            buffer.* = .fromIoBufferize(ctx.bufferize_ctx.platform, tensor.shape());
 
             ctx.transfers[ctx.idx] = .{
                 .io = ctx.bufferize_ctx.io,
@@ -388,13 +386,13 @@ pub const DeviceWriter = struct {
     io: std.Io,
     progress: ?*std.Progress.Node,
     platform: Platform,
+    shape: Shape,
     buffer: *Buffer,
     transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
     offset: usize = 0,
     interface: std.Io.Writer,
 
-    pub fn init(io: std.Io, progress: ?*std.Progress.Node, platform: Platform, buffer: *Buffer, memory: Buffer.Memory, buf: []u8) !DeviceWriter {
-        const shape = buffer.shape();
+    pub fn init(io: std.Io, progress: ?*std.Progress.Node, platform: Platform, shape: Shape, buffer: *Buffer, memory: Buffer.Memory, buf: []u8) !DeviceWriter {
         const memories = platform.getDevices()[0].addressableMemories(platform.pjrt_api);
 
         const mem = blk: {
@@ -411,12 +409,15 @@ pub const DeviceWriter = struct {
             .shape_specs = &.{shape_spec},
             .memory = mem,
         });
-        try buffer._shards.append(transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable);
+
+        const pjrt_buffer = transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable;
+        buffer.* = Buffer.fromPjrtBuffers(platform, shape, &.{pjrt_buffer});
 
         return .{
             .io = io,
             .progress = progress,
             .platform = platform,
+            .shape = shape,
             .buffer = buffer,
             .transfer_manager = transfer_manager,
             .interface = .{
@@ -438,9 +439,9 @@ pub const DeviceWriter = struct {
         _ = splat;
         const self: *DeviceWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        stdx.debug.assert(self.offset + w.end <= self.buffer.shape().byteSize(), "Can't write more data than required", .{});
+        stdx.debug.assert(self.offset + w.end <= self.shape.byteSize(), "Can't write more data than required", .{});
 
-        const is_last_transfer = self.offset + w.end >= self.buffer.shape().byteSize();
+        const is_last_transfer = self.offset + w.end >= self.shape.byteSize();
         const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, w.buffer[0..w.end], @intCast(self.offset), is_last_transfer) catch return error.WriteFailed;
         event.await(self.platform.pjrt_api, self.io) catch return error.WriteFailed;
 
@@ -513,11 +514,11 @@ fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model))) 
                 },
             }
         },
-        .optional => {
+        .optional => |optional_type_info| {
             if (model == null) {
                 bufferized_.* = null;
             } else {
-                bufferized_.* = undefined;
+                bufferized_.* = @as(optional_type_info.child, undefined);
                 initBufferizedFrom(model.?, &bufferized_.*.?);
             }
         },

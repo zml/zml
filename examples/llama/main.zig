@@ -166,29 +166,10 @@ pub fn main() !void {
         defer v.decode_exe.deinit();
     } else |_| {};
 
-    var load_model_buffers: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 16);
+    var load_model_buffers_group: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 16);
     defer {
-        load_model_buffers.cancel(io);
-        load_model_buffers.deinit();
-    }
-
-    var read_pool, var write_pool = try zml.io.ConcurrentBufferPool.initRW(
-        allocator,
-        platform,
-        .{
-            .size = args.reader_buffer_size.bytes(),
-            .concurrency = load_model_buffers.limit,
-            .dma = true,
-        },
-        .{
-            .size = args.writer_buffer_size.bytes(),
-            .concurrency = load_model_buffers.limit,
-            .dma = true,
-        },
-    );
-    defer {
-        read_pool.deinit();
-        write_pool.deinit();
+        load_model_buffers_group.cancel(io);
+        load_model_buffers_group.deinit();
     }
 
     var model_name_it = std.mem.splitScalar(u8, args.model, '/');
@@ -197,8 +178,11 @@ pub fn main() !void {
         if (!std.mem.eql(u8, part, "")) model_name = part;
     }
 
+    const read_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = args.reader_buffer_size.bytes(), .concurrency = load_model_buffers_group.limit, .dma = true };
+    const write_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = args.writer_buffer_size.bytes(), .concurrency = load_model_buffers_group.limit, .dma = true };
+
     var progress = std.Progress.start(io, .{ .root_name = model_name, .estimated_total_items = store.view().count() });
-    var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers, &read_pool, &write_pool, platform, &store, llama_model });
+    var llama_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers_group, read_pool_config, write_pool_config, platform, &store, llama_model });
     errdefer b: {
         var v = llama_buffers_future.cancel(io) catch break :b;
         LlamaLM.unloadBuffers(&v, allocator);
@@ -351,8 +335,8 @@ fn loadModelBuffers(
     io: std.Io,
     progress: *std.Progress.Node,
     group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
-    read_pool: *zml.io.ConcurrentBufferPool,
-    write_pool: *zml.io.ConcurrentBufferPool,
+    read_pool_config: zml.io.ConcurrentBufferPool.Config,
+    write_pool_config: zml.io.ConcurrentBufferPool.Config,
     platform: zml.Platform,
     store: *zml.io.TensorStore,
     llama_model: llama.LlamaLM,
@@ -371,12 +355,18 @@ fn loadModelBuffers(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
+    var read_pool = try zml.io.ConcurrentBufferPool.init(allocator, platform, read_pool_config);
+    defer read_pool.deinit();
+
+    var write_pool = try zml.io.ConcurrentBufferPool.init(allocator, platform, write_pool_config);
+    defer write_pool.deinit();
+
     const bufferize_ctx: zml.io.BufferizeContext(llama.TransferCtx) = .{
         .allocator = allocator,
         .arena = &arena,
         .io = io,
         .platform = platform,
-        .cb_ctx = .{ .read_pool = read_pool, .write_pool = write_pool, .transferred_bytes = &transferred_bytes, .progress = progress },
+        .cb_ctx = .{ .read_pool = &read_pool, .write_pool = &write_pool, .transferred_bytes = &transferred_bytes, .progress = progress },
     };
 
     const bufferized = llama_model.loadBuffers(
@@ -407,7 +397,7 @@ fn transferBuffer(ctx: zml.io.TensorBufferTransfer(llama.TransferCtx)) !void {
     var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, read_buffer) catch unreachable;
     defer reader.deinit();
 
-    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.buffer, .device, write_buffer) catch unreachable;
+    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.tensor.shape, ctx.buffer, .device, write_buffer) catch unreachable;
     defer {
         writer.interface.flush() catch unreachable;
         writer.deinit();
