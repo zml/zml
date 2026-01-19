@@ -5,5 +5,5 @@ def repo():
         name = "arocc",
         remote = "https://github.com/zml/arocc.git",
         commit = "7e60c78a9660016e46d8be8907591b143ba2e700",
-        build_file = "//third_party/arocc:arocc.bazel",
+        build_file = "@zml//third_party/arocc:arocc.bazel",
     )

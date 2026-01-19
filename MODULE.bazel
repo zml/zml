@@ -227,7 +227,7 @@ use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
 
 git_override(
     module_name = "rules_zig",
-    commit = "b4ae496abfd61f880927dd01ea59823df7b42c29",
+    commit = "0570426cce634b110febba028bd692e0c4633b27",
     remote = "https://github.com/zml/rules_zig.git",
 )
 
