@@ -13,12 +13,12 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CPU");
 }
 
-pub fn load(io: std.Io) !*const pjrt.Api {
+pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {

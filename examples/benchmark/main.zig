@@ -25,7 +25,7 @@ pub fn main() !void {
     const io = threaded.io();
 
     // Auto-select platform
-    const platform: zml.Platform = try .auto(io, .{});
+    const platform: zml.Platform = try .auto(allocator, io, .{});
 
     const cli_args: CliArgs = blk: {
         var ret: CliArgs = .{};

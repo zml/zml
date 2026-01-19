@@ -15,13 +15,13 @@ pub const Platform = enum {
     neuron,
 };
 
-pub fn load(tag: Platform, io: std.Io) !*const pjrt.Api {
+pub fn load(allocator: std.mem.Allocator, io: std.Io, tag: Platform) !*const pjrt.Api {
     return switch (tag) {
-        .cpu => try cpu.load(io),
-        .cuda => try cuda.load(io),
-        .rocm => try rocm.load(io),
-        .tpu => try tpu.load(io),
-        .neuron => try neuron.load(io),
+        .cpu => try cpu.load(allocator, io),
+        .cuda => try cuda.load(allocator, io),
+        .rocm => try rocm.load(allocator, io),
+        .tpu => try tpu.load(allocator, io),
+        .neuron => try neuron.load(allocator, io),
     };
 }
 

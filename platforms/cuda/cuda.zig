@@ -32,7 +32,7 @@ fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !vo
     _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
 }
 
-pub fn load(io: std.Io) !*const pjrt.Api {
+pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
@@ -46,7 +46,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
         log.warn("Detected {s} in LD_LIBRARY_PATH. This can lead to undefined behaviors and crashes", .{nvidiaLibsPath});
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.c_allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {

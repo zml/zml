@@ -49,11 +49,11 @@ fn disableXlaLogs() void {
     );
 }
 
-fn loadOrGetApi(target: Target, io: std.Io) !*const pjrt.Api {
+fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
         inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
             disableXlaLogs();
-            const api = try platforms.load(tag, io);
+            const api = try platforms.load(allocator, io, tag);
             @field(api_map, @tagName(tag)) = api;
             break :b api;
         },
@@ -100,8 +100,8 @@ pub const Platform = struct {
         }
     };
 
-    pub fn init(target: Target, io: std.Io, options: CreateOptions) !Platform {
-        const api = try loadOrGetApi(target, io);
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !Platform {
+        const api = try loadOrGetApi(allocator, io, target);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
@@ -133,7 +133,7 @@ pub const Platform = struct {
         return platform;
     }
 
-    pub fn auto(io: std.Io, options: CreateOptions) !Platform {
+    pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !Platform {
         const ordered_targets: []const Target = &.{
             .tpu,
             .neuron,
@@ -142,7 +142,7 @@ pub const Platform = struct {
             .cpu,
         };
         return for (ordered_targets) |target| {
-            break init(target, io, options) catch continue;
+            break init(allocator, io, target, options) catch continue;
         } else error.Unavailable;
     }
 

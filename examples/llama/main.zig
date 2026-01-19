@@ -119,7 +119,7 @@ pub fn main() !void {
         },
     };
 
-    var platform: zml.Platform = try .auto(io, .{});
+    var platform: zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit();
     var it = platform.devicesIterator();
     log.info("Devices:", .{});

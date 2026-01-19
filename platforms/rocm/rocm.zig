@@ -25,7 +25,7 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
     _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
 }
 
-pub fn load(io: std.Io) !*const pjrt.Api {
+pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
@@ -36,7 +36,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
+    var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
     var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {

@@ -98,7 +98,7 @@ pub fn main() !void {
     const mnist_model: Mnist = .init(store.view());
 
     // Auto-select platform
-    const platform: zml.Platform = try .auto(io, .{});
+    const platform: zml.Platform = try .auto(allocator, io, .{});
 
     // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
