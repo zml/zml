@@ -44,8 +44,8 @@ copy_to_directory(
         "@libgomp1",
     ],
     replace_prefixes = {
-        "runtimes/neuron/neuronx-cc": "bin/neuronx-cc",
-        "runtimes/neuron/libneuronxla.so": "site-packages/libneuronxla.so",
+        "platforms/neuron/neuronx-cc": "bin/neuronx-cc",
+        "platforms/neuron/libneuronxla.so": "site-packages/libneuronxla.so",
         "libneuronpjrt_so": "lib",
         "libpjrt_neuron_so": "lib",
         "libnrt.patchelf": "lib",
@@ -61,7 +61,7 @@ copy_to_directory(
         "**/_solib_*/**",
     ],
     include_srcs_patterns = [
-        "runtimes/neuron/neuronx-cc",
+        "platforms/neuron/neuronx-cc",
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",

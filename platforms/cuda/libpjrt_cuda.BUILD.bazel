@@ -39,7 +39,7 @@ copy_to_directory(
         "nvvm/lib64": "lib",
         "libpjrt_cuda_so": "lib",
         "lib/x86_64-linux-gnu": "lib",
-        "runtimes/cuda": "lib",
+        "platforms/cuda": "lib",
     },
     add_directory_to_runfiles = False,
     include_external_repositories = ["**"],

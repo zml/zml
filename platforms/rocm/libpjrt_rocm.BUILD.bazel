@@ -84,7 +84,7 @@ copy_to_directory(
         "opt/amdgpu/share": "share",
         "rocblas": "lib",
         "rocroller": "lib",
-        "runtimes/rocm": "lib",
+        "platforms/rocm": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
     },
     add_directory_to_runfiles = True,
