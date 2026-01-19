@@ -3,8 +3,8 @@ const std = @import("std");
 const c = @import("c");
 const pjrt = @import("pjrt");
 const pjrtx = @import("pjrt");
-const runtimes = @import("runtimes");
-pub const Target = runtimes.Platform;
+const platforms = @import("platforms");
+pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const Exe = @import("exe.zig").Exe;
@@ -53,7 +53,7 @@ fn loadOrGetApi(target: Target, io: std.Io) !*const pjrt.Api {
     return switch (target) {
         inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
             disableXlaLogs();
-            const api = try runtimes.load(tag, io);
+            const api = try platforms.load(tag, io);
             @field(api_map, @tagName(tag)) = api;
             break :b api;
         },
@@ -71,7 +71,7 @@ pub const Platform = struct {
     // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
     compilation_options: CompilationOptions = .{},
 
-    pub const MAX_NUM_DEVICES: u8 = if (runtimes.isEnabled(.tpu)) 32 else 8;
+    pub const MAX_NUM_DEVICES: u8 = if (platforms.isEnabled(.tpu)) 32 else 8;
 
     pub const Device = struct {
         pub const Iterator = struct {

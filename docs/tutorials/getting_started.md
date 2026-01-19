@@ -105,11 +105,11 @@ bazel test //zml:test
 You can compile models for accelerator runtimes by appending one or more of the
 following arguments to the command line when compiling or running a model:
 
-- NVIDIA CUDA: `--@zml//runtimes:cuda=true`
-- AMD RoCM: `--@zml//runtimes:rocm=true`
-- Google TPU: `--@zml//runtimes:tpu=true`
-- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
-- **AVOID CPU:** `--@zml//runtimes:cpu=false`
+- NVIDIA CUDA: `--@zml//platforms:cuda=true`
+- AMD RoCM: `--@zml//platforms:rocm=true`
+- Google TPU: `--@zml//platforms:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
+- **AVOID CPU:** `--@zml//platforms:cpu=false`
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
 
@@ -119,7 +119,7 @@ run the following:
 
 ```
 bazel run --config=release //examples/llama:Llama-3.2-1B-Instruct \
-          --@zml//runtimes:cuda=true                              \
+          --@zml//platforms:cuda=true                              \
           -- --prompt="What is the capital of France?"
 ```
 

@@ -1,11 +1,11 @@
 const std = @import("std");
 
+const cpu = @import("platforms/cpu");
+const cuda = @import("platforms/cuda");
+const neuron = @import("platforms/neuron");
 const pjrt = @import("pjrt");
-const cpu = @import("runtimes/cpu");
-const cuda = @import("runtimes/cuda");
-const rocm = @import("runtimes/rocm");
-const tpu = @import("runtimes/tpu");
-const neuron = @import("runtimes/neuron");
+const rocm = @import("platforms/rocm");
+const tpu = @import("platforms/tpu");
 
 pub const Platform = enum {
     cpu,

@@ -107,13 +107,13 @@ uv_lock(
 
 zig_library(
     name = "neuron",
-    import_name = "runtimes/neuron",
+    import_name = "platforms/neuron",
     main = "neuron.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
-        "//runtimes:neuron.enabled": [
+        "//platforms:neuron.enabled": [
             ":libnrt_headers",
             ":libpython",
             ":zmlxneuron",

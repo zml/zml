@@ -17,5 +17,5 @@ copy_to_directory(
 cc_library(
     name = "libpjrt_tpu",
     data = [":sandbox"],
-    visibility = ["@zml//runtimes/tpu:__subpackages__"],
+    visibility = ["@zml//platforms/tpu:__subpackages__"],
 )

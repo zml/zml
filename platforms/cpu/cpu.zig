@@ -7,7 +7,7 @@ const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
-const log = std.log.scoped(.@"zml/runtime/cpu");
+const log = std.log.scoped(.@"zml/platforms/cpu");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CPU");
@@ -29,7 +29,7 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     const r = r_.withSourceRepo(source_repo);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("zml/runtimes/cpu/sandbox/lib", &path_buf) orelse {
+    const sandbox_path = try r.rlocation("zml/platforms/cpu/sandbox/lib", &path_buf) orelse {
         log.err("Failed to find sandbox path for CPU runtime", .{});
         return error.FileNotFound;
     };

@@ -14,17 +14,17 @@ information on how to compile a model.
 You can compile models for accelerator runtimes by appending one or more of the
 following arguments to the command line when compiling / running a model:
 
-- NVIDIA CUDA: `--@zml//runtimes:cuda=true`
-- AMD RoCM: `--@zml//runtimes:rocm=true`
-- Google TPU: `--@zml//runtimes:tpu=true`
-- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
-- **AVOID CPU:** `--@zml//runtimes:cpu=false`
+- NVIDIA CUDA: `--@zml//platforms:cuda=true`
+- AMD RoCM: `--@zml//platforms:rocm=true`
+- Google TPU: `--@zml//platforms:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
+- **AVOID CPU:** `--@zml//platforms:cpu=false`
 
 So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
-bazel run --config=release //examples/llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama --@zml//platforms:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 ```
 
 
@@ -41,8 +41,8 @@ As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
 bazel build --config=release //examples/llama          \
-    --@zml//runtimes:cuda=true                \
-    --@zml//runtimes:cpu=false                \
+    --@zml//platforms:cuda=true                \
+    --@zml//platforms:cpu=false                \
     --platforms=@zml//platforms:linux_amd64
 ```
 
@@ -82,8 +82,8 @@ tar(
 
 ```
 bazel build --config=release //mnist:archive                    \
-            --@zml//runtimes:cuda=true                \
-            --@zml//runtimes:cpu=false                \
+            --@zml//platforms:cuda=true                \
+            --@zml//platforms:cpu=false                \
             --platforms=@zml//platforms:linux_amd64
 ```
 

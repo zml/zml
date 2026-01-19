@@ -7,7 +7,7 @@ const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
-const log = std.log.scoped(.@"zml/runtime/rocm");
+const log = std.log.scoped(.@"zml/platforms/rocm");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_ROCM");

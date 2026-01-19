@@ -222,16 +222,16 @@ it out.
 **Note: Please add one more of the following parameters to specify all the
 platforms your containerized model should support.**
 
-- NVIDIA CUDA: `--@zml//runtimes:cuda=true`
-- AMD RoCM: `--@zml//runtimes:rocm=true`
-- Google TPU: `--@zml//runtimes:tpu=true`
-- AWS Trainium/Inferentia 2: `--@zml//runtimes:neuron=true`
-- **AVOID CPU:** `--@zml//runtimes:cpu=false`
+- NVIDIA CUDA: `--@zml//platforms:cuda=true`
+- AMD RoCM: `--@zml//platforms:rocm=true`
+- Google TPU: `--@zml//platforms:tpu=true`
+- AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
+- **AVOID CPU:** `--@zml//platforms:cpu=false`
 
 **Example:**
 
 ```
-bazel run //mnist:push --config=release --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //mnist:push --config=release --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
 
 
@@ -372,5 +372,5 @@ And that's it! With one simple bazel command, you can push a neatly packaged
 MNIST model, including weights and dataset, to the docker registry:
 
 ```
-bazel run //mnist:push --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //mnist:push --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```

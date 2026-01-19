@@ -17,17 +17,17 @@ jobs:
       matrix:
         runtimes:
           - target: cuda
-            bazel_opts: "--@zml//runtimes:cuda=true --@zml//runtimes:cpu=false"
+            bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             enable_cache: false
             user: actions
             runs-on: ["self-hosted", "platform=cuda"]
           - target: rocm
-            bazel_opts: "--@zml//runtimes:rocm=true --@zml//runtimes:cpu=false"
+            bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
             enable_cache: false
             user: actions
             runs-on: ["self-hosted", "platform=rocm"]
           - target: cpu
-            bazel_opts: "--@zml//runtimes:cpu=true"
+            bazel_opts: "--@zml//platforms:cpu=true"
             enable_cache: true
             user: runner
             runs-on:

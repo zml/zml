@@ -9,7 +9,7 @@ const stdx = @import("stdx");
 
 const nvidiaLibsPath = "/cuda/";
 
-const log = std.log.scoped(.@"zml/runtime/cuda");
+const log = std.log.scoped(.@"zml/platforms/cuda");
 
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CUDA");

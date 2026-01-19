@@ -5,7 +5,7 @@ const c = @import("c");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
-const log = std.log.scoped(.@"zml/runtimes/neuron");
+const log = std.log.scoped(.@"zml/platforms/neuron");
 
 fn findFreeTcpPort(io: std.Io) !u16 {
     var server = try std.Io.net.IpAddress.listen(

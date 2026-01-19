@@ -1,6 +1,6 @@
 load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -20,6 +20,9 @@ cc_library(
 zig_library(
     name = "zml",
     srcs = [
+        "attention/attention.zig",
+        "attention/flashattn/bindings.zig",
+        "attention/flashattn/flashattn.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
@@ -39,9 +42,6 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "zml.zig",
-        "attention/attention.zig",
-        "attention/flashattn/flashattn.zig",
-        "attention/flashattn/bindings.zig",
     ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
@@ -56,13 +56,13 @@ zig_library(
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
-        "//runtimes",
+        "//platforms",
         "//stdx",
         "//upb",
-        "//zml/tokenizer",
         "//zml/io",
-        "@rules_zig//zig/runfiles",
+        "//zml/tokenizer",
         "@flashattn//:c",
+        "@rules_zig//zig/runfiles",
     ],
 )
 

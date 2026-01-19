@@ -32,7 +32,7 @@ copy_to_directory(
         "@libnvjitlink",
         "@nccl",
         "@zlib1g",
-        "@zml//runtimes/cuda:zmlxcuda",
+        "@zml//platforms/cuda:zmlxcuda",
     ],
     replace_prefixes = {
         "nvidia/nccl/lib": "lib",
@@ -61,5 +61,5 @@ cc_library(
         # is the default in most bazel CC toolchains as well as in certain linkers.
         "-Wl,-z,lazy",
     ],
-    visibility = ["@zml//runtimes/cuda:__subpackages__"],
+    visibility = ["@zml//platforms/cuda:__subpackages__"],
 )

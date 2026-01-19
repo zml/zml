@@ -79,7 +79,7 @@ pip.parse(
     ],
     hub_name = "neuron_py_deps",
     python_version = "3.12",
-    requirements_lock = "//runtimes/neuron:requirements.lock.txt",
+    requirements_lock = "//platforms/neuron:requirements.lock.txt",
 )
 use_repo(pip, "neuron_py_deps")
 
@@ -92,19 +92,19 @@ pip.parse(
 )
 use_repo(pip, "huggingface_hub")
 
-cpu = use_extension("//runtimes/cpu:cpu.bzl", "cpu_pjrt_plugin")
+cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
-cuda = use_extension("//runtimes/cuda:cuda.bzl", "cuda_packages")
+cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
-rocm = use_extension("//runtimes/rocm:rocm.bzl", "rocm_packages")
+rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 
-tpu = use_extension("//runtimes/tpu:tpu.bzl", "tpu_packages")
+tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
-neuron = use_extension("//runtimes/neuron:neuron.bzl", "neuron_packages")
+neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
 
 zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
@@ -113,7 +113,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "mnist", "org_swig_swig", "translate-c", "xla", "flashattn")
+use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "mnist", "org_swig_swig", "translate-c", "xla")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -170,22 +170,22 @@ use_repo(crate, "crates")
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
     name = "apt_cuda",
-    lock = "//runtimes/cuda:packages.lock.json",
-    manifest = "//runtimes/cuda:packages.yaml",
+    lock = "//platforms/cuda:packages.lock.json",
+    manifest = "//platforms/cuda:packages.yaml",
 )
 use_repo(apt, "apt_cuda")
 
 apt.install(
     name = "apt_rocm",
-    lock = "//runtimes/rocm:packages.lock.json",
-    manifest = "//runtimes/rocm:packages.yaml",
+    lock = "//platforms/rocm:packages.lock.json",
+    manifest = "//platforms/rocm:packages.yaml",
 )
 use_repo(apt, "apt_rocm")
 
 apt.install(
     name = "apt_neuron",
-    lock = "//runtimes/neuron:packages.lock.json",
-    manifest = "//runtimes/neuron:packages.yaml",
+    lock = "//platforms/neuron:packages.lock.json",
+    manifest = "//platforms/neuron:packages.yaml",
 )
 use_repo(apt, "apt_neuron")
 

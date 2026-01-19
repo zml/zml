@@ -1,3 +1,43 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+PLATFORMS = {
+    "cpu": True,
+    "cuda": False,
+    "rocm": False,
+    "tpu": False,
+    "neuron": False,
+}
+
+[
+    bool_flag(
+        name = runtime,
+        build_setting_default = default,
+    )
+    for runtime, default in PLATFORMS.items()
+]
+
+[
+    config_setting(
+        name = "{}.enabled".format(runtime),
+        flag_values = {":{}".format(runtime): "True"},
+        visibility = ["//platforms:__subpackages__"],
+    )
+    for runtime in PLATFORMS.keys()
+]
+
+zig_library(
+    name = "platforms",
+    main = "platforms.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + [
+        "//platforms/{}".format(runtime)
+        for runtime in PLATFORMS.keys()
+    ],
+)
+
 platform(
     name = "linux_amd64",
     constraint_values = [

@@ -1,5 +1,5 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-load("//runtimes/common:packages.bzl", "packages")
+load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
@@ -9,14 +9,14 @@ _BUILD_LINUX = "\n".join([
     packages.filegroup(
         name = "libpjrt_cpu",
         srcs = ["libpjrt_cpu.so"],
-        visibility = ["@zml//runtimes/cpu:__subpackages__"],
+        visibility = ["@zml//platforms/cpu:__subpackages__"],
     ),
 ])
 
 _BUILD_DARWIN = packages.filegroup(
     name = "libpjrt_cpu",
     srcs = ["libpjrt_cpu.dylib"],
-    visibility = ["@zml//runtimes/cpu:__subpackages__"],
+    visibility = ["@zml//platforms/cpu:__subpackages__"],
 )
 
 def _cpu_pjrt_plugin_impl(mctx):

@@ -4,7 +4,7 @@ const c = @import("c");
 const stdx = @import("stdx");
 const upb = @import("upb");
 
-const log = std.log.scoped(.@"zml/runtimes/neuron/libneuronxla");
+const log = std.log.scoped(.@"zml/platforms/neuron/libneuronxla");
 
 pub fn makeTempDir(io: std.Io, buf: []u8, prefix: []const u8) ![]const u8 {
     const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";

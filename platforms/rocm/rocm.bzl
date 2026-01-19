@@ -1,6 +1,6 @@
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
-load("//runtimes/common:packages.bzl", "packages")
+load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
@@ -61,7 +61,7 @@ _ROCM_PACKAGES = {
     "hip-dev": """filegroup(name = "runfiles", srcs = glob(["share/**"]))""",
     "rocblas": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
+        packages.load_("@zml//platforms/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "rocblas",
             src = "lib/librocblas.so.5",
@@ -92,7 +92,7 @@ _ROCM_PACKAGES = {
     ]),
     "hipblaslt": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.load_("@zml//runtimes/rocm:gfx.bzl", "bytecode_select"),
+        packages.load_("@zml//platforms/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "hipblaslt",
             src = "lib/libhipblaslt.so.1",
@@ -145,7 +145,7 @@ _ROCM_PACKAGES = {
 
 def _rocm_impl(mctx):
     loaded_packages = packages.read(mctx, [
-        "@zml//runtimes/rocm:packages.lock.json",
+        "@zml//platforms/rocm:packages.lock.json",
     ])
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():

@@ -68,7 +68,7 @@ copy_to_directory(
         "@roctracer",
         "@roctracer//:roctx",
         "@zlib1g",
-        "@zml//runtimes/rocm:zmlxrocm",
+        "@zml//platforms/rocm:zmlxrocm",
     ] + select({
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
@@ -100,5 +100,5 @@ tar(
 cc_library(
     name = "libpjrt_rocm",
     data = [":sandbox"],
-    visibility = ["@zml//runtimes/rocm:__subpackages__"],
+    visibility = ["@zml//platforms/rocm:__subpackages__"],
 )

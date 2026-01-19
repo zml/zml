@@ -7,27 +7,26 @@ const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
-const log = std.log.scoped(.@"zml/runtime/neuron");
+const log = std.log.scoped(.@"zml/platforms/tpu");
 
 pub fn isEnabled() bool {
-    return @hasDecl(c, "ZML_RUNTIME_NEURON");
+    return @hasDecl(c, "ZML_RUNTIME_TPU");
 }
 
-fn hasNeuronDevice(io: std.Io) bool {
-    std.Io.Dir.accessAbsolute(io, "/dev/neuron0", .{ .read = true }) catch return false;
-    return true;
-}
-
-fn isRunningOnEC2(io: std.Io) !bool {
-    const AmazonEC2 = "Amazon EC2";
-    var buffer: [AmazonEC2.len]u8 = undefined;
+/// Check if running on Google Compute Engine, because TPUs will poll the
+/// metadata server, hanging the process. So only do it on GCP.
+/// Do it using the official method at:
+/// https://cloud.google.com/compute/docs/instances/detect-compute-engine?hl=en#use_operating_system_tools_to_detect_if_a_vm_is_running_in
+fn isOnGCP(io: std.Io) !bool {
+    const GoogleComputeEngine = "Google Compute Engine";
+    var buffer: [GoogleComputeEngine.len]u8 = undefined;
     return std.mem.eql(
         u8,
-        AmazonEC2,
+        GoogleComputeEngine,
         try std.Io.Dir.readFile(
             .cwd(),
             io,
-            "/sys/devices/virtual/dmi/id/sys_vendor",
+            "/sys/devices/virtual/dmi/id/product_name",
             &buffer,
         ),
     );
@@ -40,32 +39,29 @@ pub fn load(io: std.Io) !*const pjrt.Api {
     if (comptime builtin.os.tag != .linux) {
         return error.Unavailable;
     }
-    if (!(isRunningOnEC2(io) catch false)) {
-        return error.Unavailable;
-    }
-    if (!hasNeuronDevice(io)) {
+    if (!(isOnGCP(io) catch false)) {
         return error.Unavailable;
     }
 
     var arena = std.heap.ArenaAllocator.init(std.heap.smp_allocator);
     defer arena.deinit();
 
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io }) orelse {
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator() }) orelse {
         stdx.debug.panic("Unable to find runfiles", .{});
     };
 
     const source_repo = bazel_builtin.current_repository;
     const r = r_.withSourceRepo(source_repo);
 
-    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &sandbox_path_buf) orelse {
-        log.err("Failed to find sandbox path for NEURON runtime", .{});
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("libpjrt_tpu/sandbox", &path_buf) orelse {
+        log.err("Failed to find sandbox path for TPU runtime", .{});
         return error.FileNotFound;
     };
 
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_neuron.so" });
+        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_tpu.so" });
         var future = io.async(struct {
             fn call(path_: [:0]const u8) !*const pjrt.Api {
                 return pjrt.Api.loadFrom(path_);

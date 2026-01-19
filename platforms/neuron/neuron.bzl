@@ -3,7 +3,7 @@ load("@rules_python//python:defs.bzl", "PyInfo")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 load("//bazel:simple_repository.bzl", "simple_repository")
-load("//runtimes/common:packages.bzl", "packages")
+load("//platforms:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
 STRIP_PREFIX = "opt/aws/neuron"
@@ -61,7 +61,7 @@ _NEURON_PACKAGES = {
 
 def _neuron_impl(mctx):
     loaded_packages = packages.read(mctx, [
-        "@zml//runtimes/neuron:packages.lock.json",
+        "@zml//platforms/neuron:packages.lock.json",
     ])
 
     simple_repository(

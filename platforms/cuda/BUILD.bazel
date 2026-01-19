@@ -27,18 +27,18 @@ cc_library(
 zig_library(
     name = "cuda",
     data = select({
-        "//runtimes:cuda.enabled": [
+        "//platforms:cuda.enabled": [
             "@flashattn//:libflashattn",
         ],
         "//conditions:default": [":empty"],
     }),
-    import_name = "runtimes/cuda",
+    import_name = "platforms/cuda",
     main = "cuda.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
-        "//runtimes:cuda.enabled": [
+        "//platforms:cuda.enabled": [
             ":libpjrt_cuda",
             "//stdx",
             "@rules_zig//zig/runfiles",

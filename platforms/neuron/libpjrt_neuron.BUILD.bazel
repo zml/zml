@@ -1,10 +1,7 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@zml//bazel:patchelf.bzl", "patchelf")
-load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
 load("@bazel_skylib//rules:select_file.bzl", "select_file")
-load("@rules_cc//cc:cc_shared_library.bzl", "cc_shared_library")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
-load("@rules_python//python:py_binary.bzl", "py_binary")
 
 runfiles_to_default(
     name = "libneuronxla_files",
@@ -19,15 +16,15 @@ select_file(
 
 patchelf(
     name = "libneuronpjrt_so",
-    set_rpath = '$ORIGIN',
+    set_rpath = "$ORIGIN",
     src = ":libneuronpjrt_so_orig",
     soname = "libneuronpjrt.so",
 )
 
 patchelf(
     name = "libpjrt_neuron_so",
-    set_rpath = '$ORIGIN',
-    src = "@zml//runtimes/neuron:libpjrt_neuron",
+    set_rpath = "$ORIGIN",
+    src = "@zml//platforms/neuron:libpjrt_neuron",
     soname = "libpjrt_neuron.so",
 )
 
@@ -36,8 +33,8 @@ copy_to_directory(
     srcs = [
         ":libneuronpjrt_so",
         ":libpjrt_neuron_so",
-        "@zml//runtimes/neuron:neuronx-cc_files",
-        "@zml//runtimes/neuron:libneuronxla",
+        "@zml//platforms/neuron:neuronx-cc_files",
+        "@zml//platforms/neuron:libneuronxla",
         "@rules_python//python:current_py_toolchain",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
@@ -90,11 +87,11 @@ cc_library(
         # is the default in most bazel CC toolchains as well as in certain linkers.
         "-Wl,-z,lazy",
     ],
-    visibility = ["@zml//runtimes/neuron:__subpackages__"],
+    visibility = ["@zml//platforms/neuron:__subpackages__"],
 )
 
 cc_library(
     name = "libpjrt_neuron",
     data = [":sandbox"],
-    visibility = ["@zml//runtimes/neuron:__subpackages__"],
+    visibility = ["@zml//platforms/neuron:__subpackages__"],
 )

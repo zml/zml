@@ -35,13 +35,13 @@ cc_library(
 
 zig_library(
     name = "rocm",
-    import_name = "runtimes/rocm",
+    import_name = "platforms/rocm",
     main = "rocm.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
-        "//runtimes:rocm.enabled": [
+        "//platforms:rocm.enabled": [
             ":libpjrt_rocm",
             "//stdx",
             "@rules_zig//zig/runfiles",

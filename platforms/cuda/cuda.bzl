@@ -1,7 +1,7 @@
 load("@bazel_skylib//lib:paths.bzl", "paths")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
-load("//runtimes/common:packages.bzl", "packages")
+load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
@@ -151,7 +151,7 @@ def _read_redist_json(mctx, url, sha256):
 
 def _cuda_impl(mctx):
     loaded_packages = packages.read(mctx, [
-        "@zml//runtimes/cuda:packages.lock.json",
+        "@zml//platforms/cuda:packages.lock.json",
     ])
     CUDA_REDIST = _read_redist_json(
         mctx,

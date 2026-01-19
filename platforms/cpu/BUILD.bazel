@@ -42,13 +42,13 @@ cc_library(
 
 zig_library(
     name = "cpu",
-    import_name = "runtimes/cpu",
+    import_name = "platforms/cpu",
     main = "cpu.zig",
     visibility = ["//visibility:public"],
     deps = [
         "//pjrt",
     ] + select({
-        "//runtimes:cpu.enabled": [
+        "//platforms:cpu.enabled": [
             ":libpjrt_cpu",
             "//stdx",
             "@rules_zig//zig/runfiles",
