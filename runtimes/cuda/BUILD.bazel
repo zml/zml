@@ -3,12 +3,12 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
 zig_shared_library(
     name = "zmlxcuda",
-    # Use Clang's compiler-rt, but disable stack checking
-    # to avoid requiring on the _zig_probe_stack symbol.
-    zigopts = ["-fno-stack-check"],
     main = "zmlxcuda.zig",
     shared_lib_name = "libzmlxcuda.so.0",
     visibility = ["@libpjrt_cuda//:__subpackages__"],
+    # Use Clang's compiler-rt, but disable stack checking
+    # to avoid requiring on the _zig_probe_stack symbol.
+    zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
 )
 
@@ -26,6 +26,12 @@ cc_library(
 
 zig_library(
     name = "cuda",
+    data = select({
+        "//runtimes:cuda.enabled": [
+            "@flashattn//:libflashattn",
+        ],
+        "//conditions:default": [":empty"],
+    }),
     import_name = "runtimes/cuda",
     main = "cuda.zig",
     visibility = ["//visibility:public"],
@@ -39,16 +45,4 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
-    data = select({
-        "//runtimes:cuda.enabled": [
-            "@flashattn//:libflashattn"
-        ],
-        "//conditions:default": [":empty"],
-    }),
-)
-
-filegroup(
-    name = "layers",
-    srcs = [],
-    visibility = ["//visibility:public"],
 )

@@ -28,9 +28,3 @@ zig_library(
         "//conditions:default": [":empty"],
     }),
 )
-
-filegroup(
-    name = "layers",
-    srcs = [],
-    visibility = ["//visibility:public"],
-)

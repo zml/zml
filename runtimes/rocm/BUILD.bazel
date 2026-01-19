@@ -3,12 +3,12 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
 zig_shared_library(
     name = "zmlxrocm",
-    # Use Clang's compiler-rt, but disable stack checking
-    # to avoid requiring on the _zig_probe_stack symbol.
-    zigopts = ["-fno-stack-check"],
     main = "zmlxrocm.zig",
     shared_lib_name = "libzmlxrocm.so.0",
     visibility = ["@libpjrt_rocm//:__subpackages__"],
+    # Use Clang's compiler-rt, but disable stack checking
+    # to avoid requiring on the _zig_probe_stack symbol.
+    zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
 )
 
@@ -48,10 +48,4 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
-)
-
-filegroup(
-    name = "layers",
-    srcs = [],
-    visibility = ["//visibility:public"],
 )
