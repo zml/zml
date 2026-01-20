@@ -21,7 +21,7 @@ PLATFORMS = {
     config_setting(
         name = "{}.enabled".format(runtime),
         flag_values = {":{}".format(runtime): "True"},
-        visibility = ["//platforms:__subpackages__"],
+        visibility = ["//visibility:public"],
     )
     for runtime in PLATFORMS.keys()
 ]

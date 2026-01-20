@@ -1,11 +1,24 @@
 const std = @import("std");
 
 const flashattn = @import("platforms/cuda/flashattn");
-pub const load = flashattn.load;
+const platforms = @import("platforms");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
+
+pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
+    if (comptime platforms.isEnabled(.cuda)) {
+        try flashattn.load(allocator, io);
+    }
+}
+
+pub fn register(platform: zml.Platform) !void {
+    if (comptime platforms.isEnabled(.cuda)) {
+        try fa2.register(platform);
+        try fa3.register(platform);
+    }
+}
 
 fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
     return switch (dtype) {
@@ -456,8 +469,3 @@ pub const fa3 = struct {
         return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
     }
 };
-
-pub fn register(platform: zml.Platform) !void {
-    try fa2.register(platform);
-    try fa3.register(platform);
-}

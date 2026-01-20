@@ -60,9 +60,13 @@ zig_library(
         "//upb",
         "//zml/io",
         "//zml/tokenizer",
-        "//platforms/cuda/flashattn",
         "@rules_zig//zig/runfiles",
-    ],
+    ] + select({
+        "//platforms:cuda.enabled": [
+            "//platforms/cuda/flashattn",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 # All ZML Tests
