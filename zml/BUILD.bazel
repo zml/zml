@@ -21,8 +21,7 @@ zig_library(
     name = "zml",
     srcs = [
         "attention/attention.zig",
-        "attention/flashattn/bindings.zig",
-        "attention/flashattn/flashattn.zig",
+        "attention/flashattn.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
@@ -61,7 +60,7 @@ zig_library(
         "//upb",
         "//zml/io",
         "//zml/tokenizer",
-        "@flashattn//:c",
+        "//platforms/cuda/flashattn",
         "@rules_zig//zig/runfiles",
     ],
 )

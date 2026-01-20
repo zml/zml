@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "flashattn",
+    import_name = "platforms/cuda/flashattn",
+    main = "flashattn.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "@flashattn//:c",
+        "@rules_zig//zig/runfiles",
+    ],
+)
