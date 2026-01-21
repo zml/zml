@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
+const stdx = @import("stdx");
 const zml = @import("zml");
 const ops = zml.ops;
 const cublas_gg = zml.cublas_grouped_gemm;
@@ -12,24 +13,24 @@ const Demo = struct {
         // group_count=1 demo
         const group_count: c_int = @intCast(tokens_per_exp.dim(0));
         const transa = [_]cublas_gg.cublasOperation_t{cublas_gg.CUBLAS_OP_N};
+        _ = transa; // autofix
         const transb = [_]cublas_gg.cublasOperation_t{cublas_gg.CUBLAS_OP_N};
+        _ = transb; // autofix
         const m = [_]c_int{@intCast(A.dim(0))}; // nbre tok
+        _ = m; // autofix
         const k = [_]c_int{@intCast(A.dim(1))}; // dim
+        _ = k; // autofix
         const n = [_]c_int{@intCast(B.dim(1))}; // dim out
+        _ = n; // autofix
         const group_size = [_]c_int{ 1, 1, 1 };
+        _ = group_size; // autofix
 
         const out_shape = zml.Shape.init(.{ @divExact(A.dim(0), group_count), B.dim(1) }, A.dtype());
 
         return zml.Tensor.gemmGroupedBatched(A, B, tokens_per_exp, .{
-            .transa_array = &transa,
-            .transb_array = &transb,
-            .m_array = &m,
-            .n_array = &n,
-            .k_array = &k,
             .alpha = 1.0,
             .beta = 1.0,
             .group_count = group_count,
-            .group_size = &group_size,
             .computeType = cublas_gg.CUBLAS_COMPUTE_32F,
             .output_shape = out_shape,
         });
@@ -60,9 +61,9 @@ pub fn main() !void {
     // Shapes: A[M,K], B[K,N]
     const num_exp = 4;
 
-    const M: usize = 12;
-    const K: usize = 4;
-    const N: usize = 6;
+    const M: usize = 24;
+    const K: usize = 12;
+    const N: usize = 10;
 
     const A_t: zml.Tensor = .init(.{ num_exp * M, K }, .f32);
     const B_t: zml.Tensor = .init(.{ K, N }, .f32);
@@ -92,20 +93,19 @@ pub fn main() !void {
     // Fill with something deterministic (all ones)
     {
         const a = A_host.items(f32);
-        for (0..a.len) |i| {
-            // Vary across the whole buffer with a mix of integer + fractional parts.
-            a[i] = @as(f32, @floatFromInt(i));
+        for (0..num_exp) |i| {
+            a[i] = @as(f32, @floatFromInt(i)) * -1.2;
         }
     }
     {
         const b = B_host.items(f32);
         for (0..b.len) |i| {
             // Alternate signs and vary magnitude to make mistakes obvious.
-            b[i] = @floatFromInt(i);
+            b[i] = @as(f32, @floatFromInt(i));
         }
     }
 
-    const data_u32: [num_exp]u32 = .{ 1, 2, 0, 3 };
+    const data_u32: [num_exp]u32 = .{ 5, 2, 0, 3 };
     @memcpy(tokens_per_exp_host.items(u32)[0..num_exp], &data_u32);
 
     var A_buf: zml.Buffer = try .fromSlice(io, platform, A_host);
@@ -158,6 +158,11 @@ pub fn main() !void {
         }
         try w.print("\n", .{});
     }
+
+    for (0..M * N) |idx| {
+        stdx.debug.assert(C_host.items(f32)[idx] == output.items(f32)[idx], "missmatch at id : {d}, in kernel output : {d}, in cpu output : {d}", .{ idx, C_host.items(f32)[idx], output.items(f32)[idx] });
+    }
+    log.info("All good", .{});
 }
 
 fn gemmRowMajor(

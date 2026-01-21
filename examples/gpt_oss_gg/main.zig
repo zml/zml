@@ -5,8 +5,10 @@ const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
+const cublas_gg = zml.cublas_grouped_gemm;
+const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 
-const gpt_oss = @import("gpt_oss.zig");
+const gpt_oss = @import("gpt_oss_gg.zig");
 const GptOss = gpt_oss.GptOss;
 const KvCache = gpt_oss.KvCache;
 
@@ -96,6 +98,7 @@ pub fn main() !void {
             .hd = config.head_dim,
         }, dtype)),
         .rng = .init(),
+        .tokens_mask = .init(.{ .s = gpt_options.max_seq_len }, .bool),
     };
 
     var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
@@ -105,12 +108,21 @@ pub fn main() !void {
     }
 
     var platform: zml.Platform = try .auto(io, .{});
+    platform = platform.withCompilationOptions(.{ .xla_dump_to = "/tmp/zml/gpt_oss/" });
     defer platform.deinit();
     var it = platform.devicesIterator();
     log.info("Devices:", .{});
     while (it.next()) |device| {
         log.info("\t- {f}", .{device});
     }
+
+    if (platform.target != .cuda) {
+        log.warn("Platform is not CUDA, skipping execution. This example requires CUDA.", .{});
+        return;
+    }
+
+    try GemmGroupedBatched.register(platform);
+    try cublas_gg.load(allocator);
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
@@ -239,6 +251,7 @@ const GptOssParameters = struct {
     token_index: zml.Tensor,
     kv_cache: gpt_oss.KvCache,
     rng: zml.Tensor.Rng,
+    tokens_mask: zml.Tensor,
 };
 
 const CompileModelResult = struct {
@@ -257,7 +270,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng, parameters_.tokens_mask });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -267,7 +280,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng });
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng, null });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -434,7 +447,15 @@ pub fn generateText(
         var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
         defer prefill_token_pos_buffer.deinit();
 
-        prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
+        const tokens_mask: zml.Slice = try .alloc(allocator, .init(.{max_seq_len}, .bool));
+        defer tokens_mask.free(allocator);
+        @memset(tokens_mask.items(bool)[0..prompt_tok.len], true);
+        @memset(tokens_mask.items(bool)[prompt_tok.len..max_seq_len], false);
+
+        var tokens_mask_buffer: zml.Buffer = try .fromSlice(io, platform, tokens_mask);
+        defer tokens_mask_buffer.deinit();
+
+        prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, tokens_mask_buffer });
 
         prefill_exe.call(prefill_args, &prefill_results);
 
