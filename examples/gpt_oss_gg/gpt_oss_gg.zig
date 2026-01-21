@@ -5,6 +5,7 @@ const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
+const cublas_gg = zml.cublas_grouped_gemm;
 
 const log = std.log.scoped(.gpt_oss);
 
@@ -22,6 +23,7 @@ pub const GptOss = struct {
             int: u32,
             ints: []const u32,
         }),
+        hidden_size: u32,
         head_dim: u32,
         num_hidden_layers: u32,
         num_attention_heads: u32,
@@ -107,9 +109,10 @@ pub const GptOss = struct {
         token_index: Tensor,
         kv_cache: KvCache,
         rng: Tensor.Rng,
+        token_mask: ?Tensor,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache);
+        const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache, token_mask);
         var new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.options.sampling_strategy);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -216,13 +219,13 @@ pub const Model = struct {
         allocator.free(self.layers);
     }
 
-    pub fn forward(self: Model, tokens: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+    pub fn forward(self: Model, tokens: Tensor, token_index: Tensor, kv_cache: KvCache, tokens_mask: ?Tensor) struct { Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i));
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i), tokens_mask);
         }
         const output = self.norm.forward(hidden);
 
@@ -261,6 +264,7 @@ pub const TransformerLayer = struct {
         x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
+        tokens_mask: ?Tensor,
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
@@ -272,7 +276,7 @@ pub const TransformerLayer = struct {
 
         // Fully Connected
         const x1_normalized = self.post_attention_layernorm.forward(x1);
-        const x2 = self.mlp.forward(x1_normalized).add(x1);
+        const x2 = self.mlp.forward(x1_normalized, tokens_mask).add(x1);
         //const x2 = self.moe.forward(x1_normalized).add(x1).rename(.{ .dout = .d });
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -443,9 +447,208 @@ const MoE = struct {
         //to be filled
     }
 
-    pub fn forward(self: MoE, input: Tensor) Tensor {
+    pub fn forward(self: MoE, input: Tensor, tokens_mask: ?Tensor) Tensor {
+        // log.info("input : {f}", .{input.shape()});
+        //log.info("tokens_mask : {f}", .{tokens_mask.shape()});
+        const dt = input.dtype();
+
         const gating = self.router.forward(input);
-        return mixtureOfExperts(Mlp, self.experts, input, gating, self.moe_opts);
+        //const probs = gating.softmax(.expert);
+        // log.info("gating {f}", .{gating.shape()});
+        // return mixtureOfExperts(Mlp, self.experts, input, gating, self.moe_opts);
+        const num_tokens: u32 = @intCast(input.dim(.s));
+        _ = num_tokens; // autofix
+        const num_experts = gating.dim(.expert);
+        const routing = gating.topK(.{ .top_expert = .expert }, self.moe_opts.experts_per_token, .{});
+        const expert_indices = routing.indices;
+        var expert_scores = routing.values.softmax(.top_expert);
+        // log.info("indices {f}", .{indices.shape()});
+        var general_output = Tensor.zeroes(input.shape()); //intialized like that because same size
+
+        // Apply the mask on expert scores
+        if (tokens_mask) |mask| {
+            // mask: [S], scores: [S, K] -> Broadcast
+            const mask_b = mask.broad(expert_scores.shape()).convert(expert_scores.dtype());
+            expert_scores = expert_scores.mul(mask_b);
+        }
+
+        if (tokens_mask) |mask| {
+            // const mask_indices = mask.slice1d(.d, .{ .start = 0, .end = self.moe_opts.experts_per_token });
+            var max_inf = Tensor.constant(expert_indices.dtype().maxValue());
+            max_inf = max_inf.broad(expert_indices.shape());
+            // log.info("max_inf {f}", .{max_inf.shape()});
+            const expert_indices_with_max = Tensor.select(mask.broad(expert_indices.shape()), expert_indices, max_inf);
+            // log.info("masked indices {f}", .{masked_indices.shape()});
+            const weights_gate_up = self.experts.gate_up_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            log.info("weights gate up {f}", .{weights_gate_up.shape()});
+            const weights_down = self.experts.down_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            log.info("weights down {f}", .{weights_down.shape()});
+
+            //topk experts per token loop
+            for (0..self.moe_opts.experts_per_token) |i| {
+                // const indices_sliced_max = indices_with_max.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
+
+                // counts0: [expert]
+                const counts0 = zml.Tensor.zeroes(.init(.{ .expert = num_experts }, .i32));
+
+                // updates: [seq] rempli de 1
+                const ones = zml.Tensor.constant(.{ .i32 = 1 }).broad(zml.Shape.init(.{ .s = input.dim(.s) }, .i32));
+                _ = ones; // autofix
+                const expert_indices_1d = expert_indices.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert); // indices: [seq] => offsets dans l'axe .expert
+                const expert_scores_1d = expert_scores.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert); // indices: [seq] => offsets dans l'axe .expert
+
+                // scatter: counts[ indices[seq] ] += 1
+                const counts_tokens_per_exp = counts0.scatterSlices(
+                    .{ .expert = expert_indices_1d }, // indices: [seq]
+                    mask.convert(.i32), // updates: [seq]
+                    .{
+                        .update_fn = zml.Tensor.ScatterOpts.increment,
+                        .indices_are_unique = false, // plusieurs tokens peuvent aller au même expert
+                    },
+                );
+
+                //recup only les tokens consideres
+                const indices_sorted = expert_indices_with_max.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert).argsort(.s, .{ .descending = false });
+                const idx = indices_sorted.rename(.{ .s = .seq });
+                const input_sorted = input.gather(.{ .s = idx }, .{});
+
+                //const expert_ids_sorted = expert_indices_1d.gather(.{ .s = idx }, .{});
+
+                log.info("Weights gate up : {f}", .{weights_gate_up.shape()});
+                log.info("input sorted : {f}", .{input_sorted.shape()});
+
+                var out_gate_up = Tensor.gemmGroupedBatched(
+                    weights_gate_up,
+                    input_sorted,
+                    counts_tokens_per_exp,
+                    .{
+                        .group_count = @intCast(num_experts),
+                        .computeType = cublas_gg.CUBLAS_COMPUTE_32F, //a verifier
+                        .alpha = 1.0,
+                        .beta = 0.0,
+                        .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) * 2 }, .bf16),
+                    },
+                );
+
+                const expert_per_token = expert_indices_1d.gather(.{ .s = idx }, .{});
+
+                // out_gate_up = out_gate_up.transpose(.{ .s, .d });
+                if (self.experts.gate_up_proj.bias) |bias| {
+                    const bias_per_token = bias.gather(.{ .expert = expert_per_token }, .{});
+                    out_gate_up = out_gate_up.add(bias_per_token);
+                }
+                log.info("out_gate_up {f}", .{out_gate_up});
+                var gate, var up = zml.nn.splitRealImg(out_gate_up, .interleaved);
+                log.info("gate {f}", .{gate.shape()});
+                log.info("up {f}", .{up.shape()});
+
+                gate = .minimum(gate, .scalar(7, dt));
+                up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
+
+                const out = gate.quickGelu().mul(up.addConstant(1));
+                var moe_out = Tensor.gemmGroupedBatched(
+                    weights_down,
+                    out,
+                    counts_tokens_per_exp,
+                    .{
+                        .group_count = @intCast(num_experts),
+                        .computeType = cublas_gg.CUBLAS_COMPUTE_32F, //a verifier
+                        .alpha = 1.0,
+                        .beta = 0.0,
+                        .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) }, .bf16),
+                    },
+                );
+
+                // moe_out = moe_out.transpose(.{ .s, .d });
+                if (self.experts.down_proj.bias) |bias| {
+                    const bias_per_token = bias.gather(.{ .expert = expert_per_token }, .{});
+                    moe_out = moe_out.add(bias_per_token);
+                }
+
+                const expert_scores_sorted = expert_scores_1d.gather(.{ .s = idx }, .{}).rename(.{ .seq = .s });
+
+                moe_out = moe_out.mul(expert_scores_sorted.convert(moe_out.dtype()).broad(moe_out.shape()));
+                // input in MoE
+
+                const restore_indices = indices_sorted.argsort(.s, .{ .descending = false }).rename(.{ .s = .n });
+
+                const top_output = moe_out.gather(.{ .s = restore_indices }, .{});
+                general_output = general_output.add(top_output);
+                // reorganize MoEoutput and sum in
+
+            }
+        } else { //Decode
+            const weights_gate_up = self.experts.gate_up_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            log.info("weights gate up {f}", .{weights_gate_up.shape()});
+            const weights_down = self.experts.down_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            log.info("weights down {f}", .{weights_down.shape()});
+            for (0..self.moe_opts.experts_per_token) |i| {
+                const indices_1d = expert_indices.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
+                const scores_1d = expert_scores.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
+                const counts0 = zml.Tensor.zeroes(.init(.{ .expert = num_experts }, .i32));
+                const ones = zml.Tensor.constant(.{ .i32 = 1 }).broad(zml.Shape.init(.{ .s = input.dim(.s) }, .i32));
+
+                const counts_tokens_per_exp = counts0.scatterSlices(
+                    .{ .expert = indices_1d }, // indices: [seq] => offsets dans l'axe .expert
+                    ones, // updates: [seq]
+                    .{
+                        .update_fn = zml.Tensor.ScatterOpts.increment,
+                        .indices_are_unique = false, // plusieurs tokens peuvent aller au même expert
+                    },
+                );
+                var out_gate_up = Tensor.gemmGroupedBatched(
+                    weights_gate_up,
+                    input,
+                    counts_tokens_per_exp,
+                    .{
+                        .group_count = @intCast(num_experts),
+                        .computeType = cublas_gg.CUBLAS_COMPUTE_32F, //a verifier
+                        .alpha = 1.0,
+                        .beta = 0.0,
+                        .output_shape = .init(.{
+                            .s = input.dim(.s),
+                            .d = input.dim(.d) * 2,
+                        }, .bf16),
+                    },
+                );
+                // out_gate_up = out_gate_up.transpose(.{ .s, .d });
+                if (self.experts.gate_up_proj.bias) |bias| {
+                    const bias_per_token = bias.gather(.{ .expert = indices_1d }, .{});
+                    out_gate_up = out_gate_up.add(bias_per_token);
+                }
+                var gate, var up = zml.nn.splitRealImg(out_gate_up, .interleaved);
+                log.info("gate {f}", .{gate.shape()});
+                log.info("up {f}", .{up.shape()});
+
+                gate = .minimum(gate, .scalar(7, dt));
+                up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
+
+                const out = gate.quickGelu().mul(up.addConstant(1));
+                var moe_out = Tensor.gemmGroupedBatched(
+                    weights_down,
+                    out,
+                    counts_tokens_per_exp,
+                    .{
+                        .group_count = @intCast(num_experts),
+                        .computeType = cublas_gg.CUBLAS_COMPUTE_32F, //a verifier
+                        .alpha = 1.0,
+                        .beta = 0.0,
+                        .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) }, .bf16),
+                    },
+                );
+
+                if (self.experts.down_proj.bias) |bias| {
+                    const bias_per_token = bias.gather(.{ .expert = indices_1d }, .{});
+                    moe_out = moe_out.add(bias_per_token);
+                }
+                moe_out = moe_out.mul(scores_1d.convert(moe_out.dtype()).broad(moe_out.shape()));
+                // input in MoE
+                //
+
+                general_output = general_output.add(moe_out);
+            }
+        }
+        return general_output;
     }
 
     pub const OnDisk = struct {
@@ -497,19 +700,11 @@ pub const Mlp = struct {
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const dt = x.dtype();
-        log.info("x {f}", .{x.shape()});
-
         var gate, var up = zml.nn.splitRealImg(self.gate_up_proj.forward(x), .interleaved);
-        log.info("gate {f}", .{gate.shape()});
-        log.info("up {f}", .{up.shape()});
-
         gate = .minimum(gate, .scalar(7, dt));
         up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
 
         const out = gate.quickGelu().mul(up.addConstant(1));
-        log.info("out {f}", .{out.shape()});
-        log.info("self.down_proj.weight {f}", .{self.down_proj.blocks.shape()});
-
         return self.down_proj.forward(out);
     }
 
@@ -523,6 +718,22 @@ pub const BlockScaledLinear = struct {
     scale: zml.Tensor,
     bias: ?zml.Tensor = null,
     blocks_dtype: zml.DataType,
+
+    pub fn dequantize(self: BlockScaledLinear, dtype: zml.DataType) zml.Tensor {
+        const blocks_0 = self.blocks.bitCast(self.blocks_dtype);
+        const blocks = blocks_0.merge(.{ .d_block = .{ .d_block, .bitcast } });
+
+        const scale = self.scale.bitCast(.f8e8m0);
+
+        var dequantized_weight: zml.Tensor = .mul(
+            blocks.convert(dtype),
+            scale.convert(dtype).appendAxes(.{.d_block}),
+        );
+
+        dequantized_weight = dequantized_weight.merge(.{ .d = .{ .d, .d_block } });
+
+        return dequantized_weight;
+    }
 
     pub fn forward(self: BlockScaledLinear, x: zml.Tensor) zml.Tensor {
         const res_shape = x.shape().setDim(-1, self.blocks.dim(-3));
@@ -539,13 +750,13 @@ pub const BlockScaledLinear = struct {
                 blocks.convert(x.dtype()),
                 scale.convert(x.dtype()).appendAxes(.{.d_block}),
             );
+            // log.info("dequantized weights {f}", .{dequantized_weight.shape()});
             var y = x.dot(dequantized_weight.merge(.{ .d = .{ .d, .d_block } }), .d);
             // std.log.warn("output shape: {f}", .{y});
             std.debug.assert(y.shape().eql(res_shape));
             y._shape = res_shape;
             break :y y;
         };
-        log.info("Y shape {f}", .{y.shape()});
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 
@@ -604,6 +815,9 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
             .experts_per_token = opts.experts_per_token,
             .normalization = opts.normalization,
         });
+        log.info("routing prefill {f}", .{routing.shape()});
+        log.info("tokens_per_exp prefill {f}", .{tokens_ids_per_expert.shape()});
+
         const scores_per_expert = routing.transpose(.{ .expert, .s }).gather(.{ .s = tokens_ids_per_expert }, .{});
         const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
         var output_per_expert = experts.forward(input_per_expert);
@@ -634,6 +848,7 @@ pub fn moePerTokenRouting(Expert: type, experts: Expert, input: zml.Tensor, gati
     const per_token_outputs = zml.module.CompilationContext.current().allocator.alloc(Tensor, num_tokens) catch @panic("OOM");
 
     const routing = gating.topK(.{ .top_expert = .expert }, opts.experts_per_token, .{});
+    log.info("routing shape : {f}", .{routing.indices.shape()});
     const per_token_score = switch (opts.normalization) {
         .linear => routing.values.div(routing.values.sum(.top_expert)),
         .softmax => routing.values.softmax(.top_expert),

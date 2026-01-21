@@ -90,7 +90,6 @@ pub const CUBLAS_STATUS_INTERNAL_ERROR: cublasStatus_t = 14;
 pub const CUBLAS_STATUS_NOT_SUPPORTED: cublasStatus_t = 15;
 pub const CUBLAS_STATUS_LICENSE_ERROR: cublasStatus_t = 16;
 
-//
 fn dataTypeFromFfiDataType(ffi_dt: ffi.DataType) zml.DataType {
     return switch (ffi_dt) {
         .pred => .bool,
@@ -176,9 +175,6 @@ fn getPlatform(call_frame: *ffi.CallFrame) zml.Platform {
     return .{ .target = .cuda, .pjrt_api = pjrt_api.?, .pjrt_client = pjrt_client.? };
 }
 
-// try cublas_grouped_gemm.GemmGroupedBatched.register(platform);
-// try cublas_grouped_gemm.load(allocator);
-
 pub const GemmGroupedBatched = struct {
     pub const custom_call_name: [:0]const u8 = "cublas_gemm_grouped_batched";
 
@@ -194,7 +190,6 @@ pub const GemmGroupedBatched = struct {
     }
 
     fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
-        defer std.log.info("PUTAIN TA MERE", .{});
         if (call_frame.registeringHook()) return null;
 
         if (cublas_gemm_grouped_batched_ex == null) {
@@ -205,11 +200,9 @@ pub const GemmGroupedBatched = struct {
             return error.CublasHandleNotInitialized;
         }
 
-        // Get input buffers
         const num_inputs = call_frame.args.buffers().len;
         stdx.debug.assert(num_inputs >= 2, "Expected at least 2 input buffers (A and B)", .{});
 
-        // Parse attributes
         const group_count: c_int = @intCast(getScalarAttributeAs(i32, call_frame, "group_count") orelse return error.MissingAttribute);
         const alpha: f32 = getScalarAttributeAs(f32, call_frame, "alpha") orelse 1.0;
         const beta: f32 = getScalarAttributeAs(f32, call_frame, "beta") orelse 0.0;
@@ -249,14 +242,12 @@ pub const GemmGroupedBatched = struct {
         const stream_ptr = call_frame.stream();
         const cu_stream: c.CUstream = @ptrCast(@constCast(stream_ptr));
 
-        // 1) Déterminer le nombre d’éléments
         const td = tokens_per_exp_buffer.shape.dims();
         stdx.debug.assert(td.len == 1, "tokens_per_exp expected rank-1, got rank={d}", .{td.len});
         const count: usize = @intCast(td[0]);
 
         const host_tokens = arena.allocator().alloc(c_int, @intCast(group_count)) catch unreachable;
 
-        // 3) Copier device -> host
         stdx.debug.assert(tokens_per_exp_buffer.ptr != null, "tokens_per_exp device ptr is null", .{});
         const src_dev: c.CUdeviceptr = @intCast(@intFromPtr(tokens_per_exp_buffer.ptr.?));
 
@@ -264,14 +255,11 @@ pub const GemmGroupedBatched = struct {
 
         try cuda.check(cuda.memcpyToHostAsync(host_tokens.ptr, src_dev, bytes, cu_stream));
 
-        try cuda.check(cuda.streamSynchronize(cu_stream));
-
         const Ad = A_buffer.shape.dims();
         const Bd = B_buffer.shape.dims();
 
         stdx.debug.assert(Ad.len == 2, "Expected A to be rank-2 [m,k], got rank={d}", .{Ad.len});
         stdx.debug.assert(Bd.len == 2, "Expected B to be rank-2 [k,n], got rank={d}", .{Bd.len});
-        stdx.debug.assert(Ad[1] == Bd[0], "GEMM shape mismatch: A is {d}x{d}, B is {d}x{d}", .{ Ad[0], Ad[1], Bd[0], Bd[1] });
 
         const elem_size: usize = switch (A_buffer.shape.dtype()) {
             .f16, .bf16, .f32, .f64 => |v| v.sizeOf(),
@@ -298,17 +286,14 @@ pub const GemmGroupedBatched = struct {
 
         // We hard-code: 1 GEMM per group
         for (0..@intCast(group_count)) |gi| {
-            transa_array[gi] = CUBLAS_OP_N;
+            transa_array[gi] = CUBLAS_OP_T;
             transb_array[gi] = CUBLAS_OP_N;
 
             n_array[gi] = host_tokens[gi];
             m_array[gi] = @divExact(m, group_count);
             k_array[gi] = k;
 
-            // NOTE: cuBLAS assumes column-major.
-            // This choice matches column-major packed matrices:
-            // A: lda x k with lda>=m, B: ldb x n with ldb>=k, C: ldc x n with ldc>=m
-            lda_array[gi] = @divExact(m, group_count);
+            lda_array[gi] = k;
             ldb_array[gi] = k;
             ldc_array[gi] = @divExact(m, group_count);
 
@@ -317,10 +302,11 @@ pub const GemmGroupedBatched = struct {
             const lda: usize = @intCast(lda_array[gi]);
             const ldb: usize = @intCast(ldb_array[gi]);
             const ldc: usize = @intCast(ldc_array[gi]);
-            const k_g: usize = @intCast(k_array[gi]);
-            const n_g: usize = @intCast(n_array[gi]);
 
-            const A_elems: usize = lda * k_g;
+            const n_g: usize = @intCast(n_array[gi]);
+            const m_g: usize = @intCast(m_array[gi]);
+
+            const A_elems: usize = lda * m_g;
             const B_elems: usize = ldb * n_g;
             const C_elems: usize = ldc * n_g;
 
@@ -331,49 +317,16 @@ pub const GemmGroupedBatched = struct {
             a_off_bytes += A_elems * elem_size;
             b_off_bytes += B_elems * elem_size;
             c_off_bytes += C_elems * elem_size;
-
-            log.info(
-                "group[{d}]:  m={d} n={d} k={d} lda={d} ldb={d} ldc={d} ",
-                .{ gi, m_array[gi], n_g, k_g, lda, ldb, ldc },
-            );
-
-            log.info(
-                "group[{d}]: per-problem elems A={d} B={d} C={d} | offsets start (elems) A={d} B={d} C={d}",
-                .{ gi, A_elems, B_elems, C_elems, a_off_bytes, b_off_bytes, c_off_bytes },
-            );
         }
 
-        // m_array[0] = 20;
-        // m_array[1] = 100;
-        // m_array[2] = 8;
-        // group_size[0] = 1;
-        // group_size[1] = 1;
-        // group_size[2] = 1;
-        // n_array[0] = 128;
-        // n_array[1] = 128;
-        // n_array[2] = 128;
-        // k_array[0] = 256;
-        // k_array[1] = 256;
-        // k_array[2] = 256;
-        // lda_array[0] = 20;
-        // lda_array[1] = 100;
-        // lda_array[2] = 8;
-        // ldb_array[0] = 256;
-        // ldb_array[1] = 256;
-        // ldb_array[2] = 256;
-        // ldc_array[0] = 20;
-        // ldc_array[1] = 100;
-        // ldc_array[2] = 8;
-
         // You'll need to populate m_array, n_array, k_array, etc. from your actual data
-        //
         const ptr_bytes: usize = @as(usize, @intCast(group_count)) * @sizeOf(?*anyopaque);
 
         var d_A_array: c.CUdeviceptr = 0;
         var d_B_array: c.CUdeviceptr = 0;
-
         var d_C_array: c.CUdeviceptr = 0;
 
+        //faire a l'init
         try cuda.check(cuda.memAlloc(&d_A_array, ptr_bytes));
         defer _ = cuda.memFree(d_A_array);
 
@@ -392,10 +345,6 @@ pub const GemmGroupedBatched = struct {
         try cuda.check(cuda.memcpyToDeviceAsync(d_B_array, B_src, ptr_bytes, cu_stream));
         try cuda.check(cuda.memcpyToDeviceAsync(d_C_array, C_src, ptr_bytes, cu_stream));
 
-        // Optional but good for debugging (ensures the arrays are visible before GEMM)
-        try cuda.check(cuda.streamSynchronize(cu_stream));
-
-        // Determine data types
         const Atype: cudaDataType_t = switch (A_buffer.shape.dtype()) {
             .f32 => CUDA_R_32F, // CUDA_R_32F
             .f16 => CUDA_R_16F, // CUDA_R_16F
@@ -405,12 +354,6 @@ pub const GemmGroupedBatched = struct {
         };
         const Btype: cudaDataType_t = Atype;
         const Ctype: cudaDataType_t = Atype;
-
-        // Prepare arrays of pointers
-
-        std.log.info("A>> {any}", .{Aarray});
-        std.log.info("B>> {any}", .{Barray});
-        std.log.info("C>> {any}", .{Carray});
 
         // Call cuBLAS function
         const status = cublas_gemm_grouped_batched_ex.?(
@@ -435,13 +378,6 @@ pub const GemmGroupedBatched = struct {
             group_size.ptr,
             computeType,
         );
-        defer std.log.info("C>> {any}", .{Carray});
-
-        {
-            std.log.info("BEFORE", .{});
-            defer std.log.info("AFTER", .{});
-            try cuda.check(cuda.streamSynchronize(cu_stream));
-        }
 
         if (status != CUBLAS_STATUS_SUCCESS) {
             return error.CublasError;
@@ -492,15 +428,15 @@ pub fn gemmGroupedBatched(
     B: Tensor,
     tokens_per_exp: Tensor,
     opts: struct {
-        transa_array: []const cublasOperation_t,
-        transb_array: []const cublasOperation_t,
-        m_array: []const c_int,
-        n_array: []const c_int,
-        k_array: []const c_int,
+        // transa_array: []const cublasOperation_t,
+        // transb_array: []const cublasOperation_t,
+        // m_array: []const c_int,
+        // n_array: []const c_int,
+        // k_array: []const c_int,
         alpha: f32 = 1.0,
         beta: f32 = 0.0,
         group_count: c_int,
-        group_size: []const c_int,
+        // group_size: []const c_int,
         computeType: cublasComputeType_t,
         output_shape: zml.Shape,
     },
