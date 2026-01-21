@@ -197,6 +197,7 @@ pub fn TensorBufferTransfer(comptime UserData: type) type {
         tensor: safetensors.Tensor,
         buffer: *Buffer,
         cb_ctx: UserData,
+        shape: Shape,
     };
 }
 
@@ -283,6 +284,7 @@ pub fn bufferize(
                 .tensor = ptr.*,
                 .buffer = buffer,
                 .cb_ctx = ctx.cb_ctx,
+                .shape = tensor.shape(),
             };
             ctx.idx += 1;
         }
@@ -354,7 +356,7 @@ pub fn loadBuffersFromId(
                 var writer: Writer = if (ctx.platform.target == .neuron) blk: {
                     break :blk .{ .buffered_device = BufferedDeviceWriter.init(allocator_, ctx.io, null, ctx.platform, ctx.buffer.shape(), ctx.buffer) catch unreachable };
                 } else blk: {
-                    break :blk .{ .device = DeviceWriter.init(ctx.io, null, ctx.platform, ctx.buffer, .device, write_buffer) catch unreachable };
+                    break :blk .{ .device = DeviceWriter.init(ctx.io, null, ctx.platform, ctx.shape, ctx.buffer, .device, write_buffer) catch unreachable };
                 };
 
                 switch (writer) {
@@ -496,7 +498,7 @@ pub const BufferedDeviceWriter = struct {
     }
 };
 
-fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model))) void {
+pub fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model))) void {
     const Model = @TypeOf(model);
     const type_info = @typeInfo(Bufferized(Model));
     switch (type_info) {
