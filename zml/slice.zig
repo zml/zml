@@ -6,12 +6,30 @@ const floats = @import("floats.zig");
 const DataType = @import("dtype.zig").DataType;
 const Shape = @import("shape.zig").Shape;
 
+pub fn isBytes(comptime T: type) bool {
+    const type_info = @typeInfo(T);
+    if (type_info != .pointer) return false;
+    if (type_info.pointer.child == u8) return true;
+    const child_type_info = @typeInfo(type_info.pointer.child);
+    if (child_type_info != .array) return false;
+    if (child_type_info.array.child != u8) return false;
+    return true;
+}
+
 pub const Slice = struct {
-    data: []u8,
+    inner_data: union(enum) {
+        mutable: []u8,
+        immutable: []const u8,
+    },
     shape: Shape,
 
-    pub fn init(shape: Shape, data: []u8) Slice {
-        return .{ .data = data, .shape = shape };
+    pub fn init(shape: Shape, bytes: anytype) Slice {
+        stdx.debug.assertComptime(isBytes(@TypeOf(bytes)), "Expected \"bytes\" to be a []u8 or []const u8, got {s}", .{@typeName(@TypeOf(bytes))});
+        const type_info = @typeInfo(@TypeOf(bytes));
+        return if (type_info.pointer.is_const)
+            .{ .inner_data = .{ .immutable = bytes }, .shape = shape }
+        else
+            .{ .inner_data = .{ .mutable = bytes }, .shape = shape };
     }
 
     pub fn alloc(allocator: std.mem.Allocator, shape_: Shape) !Slice {
@@ -27,87 +45,70 @@ pub const Slice = struct {
             else => |v| stdx.debug.panic("Unsupported alignment: {}", .{v}),
         };
 
-        return .{ .data = bytes, .shape = shape_ };
+        return .{ .inner_data = .{ .mutable = bytes }, .shape = shape_ };
     }
 
     pub fn free(slice: Slice, allocator: std.mem.Allocator) void {
-        slice.constSlice().free(allocator);
-    }
+        const d = slice.constData();
 
-    pub fn constSlice(self: Slice) ConstSlice {
-        return .{ .data = self.data, .shape = self.shape };
-    }
-
-    pub fn dtype(self: Slice) DataType {
-        return self.shape.dtype();
-    }
-
-    pub fn items(self: Slice, comptime T: type) []T {
-        return @alignCast(std.mem.bytesAsSlice(T, self.data));
-    }
-
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{self});
-    }
-
-    pub fn formatNumber(self: @This(), writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
-        return self.constSlice().formatNumber(writer, n);
-    }
-};
-
-pub const ConstSlice = struct {
-    data: []const u8,
-    shape: Shape,
-
-    pub fn init(shape: Shape, data: []const u8) ConstSlice {
-        return .{ .data = data, .shape = shape };
-    }
-
-    pub fn free(slice: ConstSlice, allocator: std.mem.Allocator) void {
         switch (slice.shape.dtype().alignOf()) {
-            1 => allocator.free(@as([]align(1) const u8, @alignCast(slice.data))),
-            2 => allocator.free(@as([]align(2) const u8, @alignCast(slice.data))),
-            4 => allocator.free(@as([]align(4) const u8, @alignCast(slice.data))),
-            8 => allocator.free(@as([]align(8) const u8, @alignCast(slice.data))),
-            16 => allocator.free(@as([]align(16) const u8, @alignCast(slice.data))),
-            32 => allocator.free(@as([]align(32) const u8, @alignCast(slice.data))),
-            64 => allocator.free(@as([]align(64) const u8, @alignCast(slice.data))),
+            1 => allocator.free(@as([]align(1) const u8, @alignCast(d))),
+            2 => allocator.free(@as([]align(2) const u8, @alignCast(d))),
+            4 => allocator.free(@as([]align(4) const u8, @alignCast(d))),
+            8 => allocator.free(@as([]align(8) const u8, @alignCast(d))),
+            16 => allocator.free(@as([]align(16) const u8, @alignCast(d))),
+            32 => allocator.free(@as([]align(32) const u8, @alignCast(d))),
+            64 => allocator.free(@as([]align(64) const u8, @alignCast(d))),
             else => |v| stdx.debug.panic("Unsupported alignment: {}", .{v}),
         }
     }
 
-    pub fn dtype(self: ConstSlice) DataType {
-        return self.shape.dtype();
+    pub fn dtype(slice: Slice) DataType {
+        return slice.shape.dtype();
     }
 
-    pub fn items(self: ConstSlice, comptime T: type) []const T {
-        return @alignCast(std.mem.bytesAsSlice(T, self.data));
+    pub fn data(slice: Slice) []u8 {
+        return switch (slice.inner_data) {
+            .mutable => |d| d,
+            else => stdx.debug.panic("Expected slice to be mutable but it's immutable", .{}),
+        };
+    }
+
+    pub fn constData(slice: Slice) []const u8 {
+        return switch (slice.inner_data) {
+            inline else => |d| d,
+        };
+    }
+
+    pub fn items(slice: Slice, comptime T: type) []T {
+        return @alignCast(std.mem.bytesAsSlice(T, slice.data()));
+    }
+
+    pub fn constItems(slice: Slice, comptime T: type) []const T {
+        return @alignCast(std.mem.bytesAsSlice(T, slice.constData()));
     }
 
     pub fn format(
-        self: @This(),
+        slice: @This(),
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        return writer.print("{any}", .{self});
+        return writer.print("{any}", .{slice});
     }
 
-    pub fn formatNumber(self: @This(), writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
-        return self.prettyPrintIndented(writer, 4, 0, n);
+    pub fn formatNumber(slice: Slice, writer: *std.Io.Writer, n: std.fmt.Number) std.Io.Writer.Error!void {
+        return slice.prettyPrintIndented(writer, 4, 0, n);
     }
 
-    pub fn prettyPrint(self: ConstSlice, writer: *std.Io.Writer, options: std.fmt.Number) !void {
-        return self.prettyPrintIndented(writer, 4, 0, options);
+    pub fn prettyPrint(slice: Slice, writer: *std.Io.Writer, options: std.fmt.Number) !void {
+        return slice.prettyPrintIndented(writer, 4, 0, options);
     }
 
-    fn prettyPrintIndented(self: ConstSlice, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: std.fmt.Number) !void {
-        if (self.shape.rank() == 0) {
+    fn prettyPrintIndented(slice: Slice, writer: *std.Io.Writer, num_rows: u8, indent_level: u8, options: std.fmt.Number) !void {
+        if (slice.shape.rank() == 0) {
             // Special case input tensor is a scalar
-            return switch (self.dtype()) {
+            return switch (slice.dtype()) {
                 inline else => |dt| {
-                    const val: dt.toZigType() = self.items(dt.toZigType())[0];
+                    const val: dt.toZigType() = slice.constItems(dt.toZigType())[0];
                     return switch (comptime dt.class()) {
                         // Since we have custom floats, we need to explicitly convert to float32 ourselves.
                         .float => stdx.fmt.formatFloat(floats.floatCast(f32, val), options, writer),
@@ -119,16 +120,16 @@ pub const ConstSlice = struct {
             };
         }
 
-        if (self.shape.rank() == 1) {
+        if (slice.shape.rank() == 1) {
             // Print a contiguous slice of items from the buffer in one line.
             // The number of items printed is controlled by the user through format syntax.
             try writer.splatByteAll(' ', indent_level);
-            switch (self.dtype()) {
+            switch (slice.dtype()) {
                 inline else => |dt| {
                     const T = dt.toZigType();
                     // TODO: handle negative strides
-                    const elem_strides: i64 = self.shape.computeElementStrides().get(0);
-                    const values = self.items(T);
+                    const elem_strides: i64 = slice.shape.computeElementStrides().get(0);
+                    const values = slice.constItems(T);
                     switch (comptime dt.class()) {
                         .float => try stdx.fmt.formatFloatSlice(values, options, elem_strides, writer),
                         .integer => try stdx.fmt.formatIntSlice(values, options, elem_strides, writer),
@@ -144,12 +145,12 @@ pub const ConstSlice = struct {
         _ = try writer.write("{\n");
 
         // Write first rows
-        const n: u64 = @intCast(self.shape.dim(0));
+        const n: u64 = @intCast(slice.shape.dim(0));
         for (0..@min(num_rows, n)) |d| {
-            const byte_stride: usize = @intCast(self.shape.computeByteStrides().get(0));
-            const sub_slice: ConstSlice = .init(self.shape.drop(0), self.data[d * byte_stride ..][0..byte_stride]);
+            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
+            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
             try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-            if (self.shape.rank() > 1) {
+            if (slice.shape.rank() > 1) {
                 try writer.writeAll(",\n");
             }
         }
@@ -162,10 +163,10 @@ pub const ConstSlice = struct {
         }
         // Write last rows
         for (@max(n - num_rows, num_rows)..n) |d| {
-            const byte_stride: usize = @intCast(self.shape.computeByteStrides().get(0));
-            const sub_slice: ConstSlice = .init(self.shape.drop(0), self.data[d * byte_stride ..][0..byte_stride]);
+            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
+            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
             try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-            if (self.shape.rank() > 1) {
+            if (slice.shape.rank() > 1) {
                 try writer.writeAll(",\n");
             }
         }
@@ -202,7 +203,7 @@ test "slice pretty print rank 3" {
             .{ 60, 61, 62, 63 },
         },
     };
-    const slice = ConstSlice.init(.init(.{ 4, 4, 4 }, .i32), std.mem.asBytes(&data));
+    const slice = Slice.init(.init(.{ 4, 4, 4 }, .i32), std.mem.asBytes(&data));
     const expected =
         \\{
         \\  {
@@ -237,21 +238,21 @@ test "slice pretty print rank 3" {
 
 test "slice pretty print rank 1" {
     const data: [4]i32 = .{ 0, 1, 2, 3 };
-    const slice = ConstSlice.init(.init(.{4}, .i32), std.mem.asBytes(&data));
+    const slice = Slice.init(.init(.{4}, .i32), std.mem.asBytes(&data));
     const expected = "{0,1,2,3}";
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
 
 test "slice pretty print rank 0" {
-    const data: [1]i32 = .{ 0 };
-    const slice = ConstSlice.init(.init(.{}, .i32), std.mem.asBytes(&data));
+    const data: [1]i32 = .{0};
+    const slice = Slice.init(.init(.{}, .i32), std.mem.asBytes(&data));
     const expected = "0";
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
 
 test "slice pretty print ellipsis" {
     const data: [9][1]i32 = .{ .{0}, .{1}, .{2}, .{3}, .{4}, .{5}, .{6}, .{7}, .{8} };
-    const slice = ConstSlice.init(.init(.{ 9, 1 }, .i32), std.mem.asBytes(&data));
+    const slice = Slice.init(.init(.{ 9, 1 }, .i32), std.mem.asBytes(&data));
     const expected =
         \\{
         \\  {0},

@@ -3,7 +3,7 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const ConstSlice = @import("slice.zig").ConstSlice;
+const Slice = @import("slice.zig").Slice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
@@ -136,7 +136,7 @@ test normalizeL2 {
     var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
     defer res.deinit();
 
-    const expectation: ConstSlice = .init(input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 }));
+    const expectation: Slice = .init(input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 }));
     try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
 }
 
@@ -606,7 +606,7 @@ test nearest {
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.shape().dims());
-        const expected: ConstSlice = .init(Shape.init(.{ 1, 1, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6]i32{.{.{ 1, 1, 1, 2, 2, 2 }}}));
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6]i32{.{.{ 1, 1, 1, 2, 2, 2 }}}));
         try zml.testing.expectClose(std.testing.io, expected, result, 0);
     }
 
@@ -626,7 +626,7 @@ test nearest {
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 2, 3, 8 }, result.shape().dims());
-        const expected: ConstSlice = .init(Shape.init(.{ 2, 3, 8 }, .i32), std.mem.sliceAsBytes(&[2][3][8]i32{
+        const expected: Slice = .init(Shape.init(.{ 2, 3, 8 }, .i32), std.mem.sliceAsBytes(&[2][3][8]i32{
             .{
                 .{ 1, 1, 2, 2, 3, 3, 4, 4 },
                 .{ 5, 5, 6, 6, 7, 7, 8, 8 },
@@ -654,7 +654,7 @@ test nearest {
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6, 6 }, result.shape().dims());
-        const expected: ConstSlice = .init(Shape.init(.{ 1, 1, 6, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6][6]i32{.{.{
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 6, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6][6]i32{.{.{
             .{ 1, 1, 1, 2, 2, 2 },
             .{ 1, 1, 1, 2, 2, 2 },
             .{ 1, 1, 1, 2, 2, 2 },
@@ -683,7 +683,7 @@ test nearest {
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 2, 2, 4, 4 }, result.shape().dims());
-        const expected: ConstSlice = .init(Shape.init(.{ 2, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[2][2][4][4]i32{
+        const expected: Slice = .init(Shape.init(.{ 2, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[2][2][4][4]i32{
             .{
                 .{
                     .{ 1, 1, 2, 2 },
@@ -728,7 +728,7 @@ test nearest {
         defer result.deinit();
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 2, 4, 4 }, result.shape().dims());
-        const expected: ConstSlice = .init(Shape.init(.{ 1, 1, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[1][1][2][4][4]i32{
+        const expected: Slice = .init(Shape.init(.{ 1, 1, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[1][1][2][4][4]i32{
             .{
                 .{
                     .{

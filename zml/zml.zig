@@ -36,7 +36,6 @@ pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
 pub const slice = @import("slice.zig");
 pub const Slice = slice.Slice;
-pub const ConstSlice = slice.ConstSlice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");

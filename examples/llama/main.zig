@@ -531,7 +531,7 @@ pub fn generateText(
         }
 
         // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
+        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
         const token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
         defer token_pos_buffer.deinit();
 

@@ -4,7 +4,6 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
-const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -116,16 +115,14 @@ pub const Buffer = struct {
         return from(io, platform, sh, data, .{});
     }
 
-    /// Copies the given zml.Slice or zml.ConstSlice to the accelerator memory and
+    /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: Platform, slice: anytype) !Buffer {
+    pub fn fromSlice(io: std.Io, platform: Platform, slice: Slice) !Buffer {
         return fromSliceOpts(io, platform, slice, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: Platform, slice: anytype, opts: FromOptions) !Buffer {
-        if (@TypeOf(slice) != Slice and @TypeOf(slice) != ConstSlice) @compileError("Buffer.fromSlice expects a Slice or ConstSlice, got " ++ @typeName(@TypeOf(slice)));
-        const real_slice: ConstSlice = if (@TypeOf(slice) == Slice) slice.constSlice() else slice;
-        return from(io, platform, real_slice.shape, std.mem.sliceAsBytes(real_slice.data), opts);
+    pub fn fromSliceOpts(io: std.Io, platform: Platform, slice: Slice, opts: FromOptions) !Buffer {
+        return from(io, platform, slice.shape, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
     /// Creates a Buffer with a single element.
@@ -236,7 +233,7 @@ pub const Buffer = struct {
     /// Copies the content of the Buffer to the provided slice.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, slice.data);
+        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, slice.data());
         if (maybe_event) |event| {
             try event.await(self._api, io);
         }

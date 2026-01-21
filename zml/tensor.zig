@@ -9,7 +9,6 @@ const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
-const ConstSlice = @import("slice.zig").ConstSlice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -321,7 +320,7 @@ pub const Tensor = struct {
 
             const output = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.fmod, .{input_buffer});
 
-            try zml.testing.expectClose(std.testing.io, ConstSlice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
+            try zml.testing.expectClose(std.testing.io, zml.Slice.init(zml.Shape.init(.{6}, .f32), std.mem.sliceAsBytes(&e)), output, 1e-4);
         }
     }
 
@@ -1239,7 +1238,7 @@ pub const Tensor = struct {
         const res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Tensor.leakyReLU, .{input_buffer});
         defer res.deinit();
 
-        const expectation: ConstSlice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
+        const expectation: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[2]f32{ -0.0688, 1.6795 }));
         try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
     }
 
@@ -2443,7 +2442,7 @@ pub const Tensor = struct {
         const result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local._gatherSlices, .{ operand_buffer, indices_buffer });
         defer result.deinit();
 
-        const expected: ConstSlice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
+        const expected: zml.Slice = .init(Shape.init(.{ 2, 2, 2, 3 }, .u16), std.mem.sliceAsBytes(&[2][2][2][3]u16{
             .{
                 .{ .{ 13, 14, 15 }, .{ 19, 20, 21 } },
                 .{ .{ 37, 38, 39 }, .{ 43, 44, 45 } },

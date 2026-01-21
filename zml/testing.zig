@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const ConstSlice = @import("slice.zig").ConstSlice;
+const Slice = @import("slice.zig").Slice;
 const Platform = @import("platform.zig").Platform;
 const zml = @import("zml.zig");
 
@@ -14,9 +14,7 @@ var _platform: ?Platform = null;
 pub fn env() Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
-        zml.init();
-
-        _platform = Platform.auto(std.testing.io, .{}) catch unreachable;
+        _platform = Platform.auto(std.testing.allocator, std.testing.io, .{}) catch unreachable;
     }
 
     return _platform.?;
@@ -35,14 +33,14 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
 /// host for comparison !
 pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
-    var left: ConstSlice, const should_free_left = if (@TypeOf(left_) == zml.Buffer) b: {
+    var left: Slice, const should_free_left = if (@TypeOf(left_) == zml.Buffer) b: {
         const slice = try left_.toSliceAlloc(allocator, io);
-        break :b .{ slice.constSlice(), true };
+        break :b .{ slice, true };
     } else .{ left_, false };
 
-    var right: ConstSlice, const should_free_right = if (@TypeOf(right_) == zml.Buffer) b: {
+    var right: Slice, const should_free_right = if (@TypeOf(right_) == zml.Buffer) b: {
         const slice = try right_.toSliceAlloc(allocator, io);
-        break :b .{ slice.constSlice(), true };
+        break :b .{ slice, true };
     } else .{ right_, false };
 
     defer {
@@ -75,7 +73,7 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
         .f8e8m0,
         => |t| {
             const L = t.toZigType();
-            const left_data = left.items(L);
+            const left_data = left.constItems(L);
             switch (right.dtype()) {
                 inline .bf16,
                 .f16,
@@ -88,7 +86,7 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
                 .f8e5m2fnuz,
                 => |rt| {
                     const R = rt.toZigType();
-                    const right_data = right.items(R);
+                    const right_data = right.constItems(R);
                     for (left_data, right_data, 0..) |l, r, i| {
                         if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
                             log.err("left.data != right_data.\n < {d:40.3} \n > {d:40.3}\n error at idx {d}: {d:.3} != {d:.3}", .{ stdx.fmt.slice(center(left_data, i)), stdx.fmt.slice(center(right_data, i)), i, left_data[i], right_data[i] });
@@ -101,7 +99,7 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
         },
         inline .bool, .u2, .u4, .u8, .u16, .u32, .u64, .i2, .i4, .i8, .i16, .i32, .i64 => |t| {
             const T = t.toZigType();
-            return std.testing.expectEqualSlices(T, left.items(T), right.items(T));
+            return std.testing.expectEqualSlices(T, left.constItems(T), right.constItems(T));
         },
         .c64, .c128 => @panic("TODO: support comparison of complex"),
     }
