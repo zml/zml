@@ -83,6 +83,11 @@ pub fn main_016() !void {
     defer threaded.deinit();
     const io = threaded.io();
 
+    const path = try std.Io.Dir.realPathFileAlloc(.cwd(), io, ".", arena.allocator());
+
+    const execrootidx = std.mem.find(u8, path, "execroot/_main").?;
+    const workspace_dir = path[0 .. execrootidx + "execroot/_main".len];
+
     const args = try std.process.argsAlloc(arena.allocator());
     defer std.process.argsFree(arena.allocator(), args);
 
@@ -93,11 +98,10 @@ pub fn main_016() !void {
     var read_buffer: [8192]u8 = undefined;
     var reader = file.reader(io, &read_buffer);
 
-    const build_workspace_directory = try std.process.getEnvVarOwned(arena.allocator(), "BUILD_WORKSPACE_DIRECTORY");
     var replacer: StringReplaceReader = .{
         .in = &reader.interface,
         .pattern = "@@__BUILD_WORKSPACE_DIRECTORY__@@",
-        .replace_by = build_workspace_directory,
+        .replace_by = workspace_dir,
     };
 
     var write_buffer: [8192]u8 = undefined;
