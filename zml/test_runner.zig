@@ -22,11 +22,12 @@ pub fn main() !void {
     var ok_count: usize = 0;
     var skip_count: usize = 0;
     var fail_count: usize = 0;
-    const root_node = std.Progress.start(.{
+    const root_node = std.Progress.start(std.testing.io, .{
         .root_name = "Test",
         .estimated_total_items = test_fn_list.len,
     });
-    const have_tty = std.fs.File.stderr().isTty();
+
+    const have_tty = try std.Io.File.stderr().isTty(std.testing.io);
 
     var args = std.process.args();
     // Skip executable path
@@ -53,7 +54,7 @@ pub fn main() !void {
             }
         }
 
-        testing.io_instance = .init(testing.allocator_instance.allocator());
+        testing.io_instance = .init(testing.allocator_instance.allocator(), .{});
         defer testing.io_instance.deinit();
 
         const test_node = root_node.start(test_fn.name, 0);
