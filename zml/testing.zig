@@ -135,6 +135,130 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
     return output;
 }
 
+fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
+    var count: usize = 0;
+    var it = store.store.registry.iterator();
+    while (it.next()) |entry| {
+        if (std.mem.startsWith(u8, entry.key_ptr.*, prefix)) {
+            count += 1;
+        }
+    }
+
+    return count;
+}
+
+/// Test a layer implementation against reference activations stored in a TensorStore.
+/// The layer is expected to have a method with the name given by `func`.
+/// The reference activations are expected to be stored under the keys:
+/// - `{name}.in.0`, `{name}.in.1`, ... for inputs
+/// - `{name}.out.0`, `{name}.out.1`, ... for outputs
+///
+/// The layer weights are expected to be provided in `layer_weights`.
+/// The comparison tolerance can be adjusted with `tolerance`.
+///
+/// The function arguments need to be valid when initialized to undefined, meaning no slices,
+/// no unions, no pointers.
+pub fn testlayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: zml.Platform,
+    layer: anytype,
+    comptime func: std.meta.DeclEnum(@TypeOf(layer)),
+    activation_store: zml.io.TensorStore.View,
+    comptime name: []const u8,
+    layer_weights: zml.Bufferized(@TypeOf(layer)),
+    tolerance: f32,
+) !void {
+    const forward = @field(@TypeOf(layer), @tagName(func));
+    const ArgsT = stdx.meta.Tail(stdx.meta.FnArgs(forward));
+
+    var args: ArgsT = undefined;
+
+    const LocalContext = struct {
+        activation_store: zml.io.TensorStore.View,
+        index: usize = 0,
+    };
+
+    const input_count = zml.meta.count(zml.Tensor, &args);
+    const expected_input_count = countWithPrefix(activation_store, name ++ ".in");
+    if (input_count != expected_input_count) {
+        log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
+    }
+
+    const store_input = activation_store.withPrefix(name ++ ".in");
+    var ctx = LocalContext{ .activation_store = store_input };
+    try zml.meta.visit(struct {
+        fn cb(ctx_: *const LocalContext, tensor: *zml.Tensor) !void {
+            var buffer: [256]u8 = undefined;
+            const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
+
+            tensor.* = ctx_.activation_store.createTensor(subkey);
+        }
+    }.cb, &ctx, &args);
+
+    const exe = try platform.compile(allocator, io, layer, func, args);
+    defer exe.deinit();
+
+    const output_count = exe.output_shapes.len;
+    const store_output = activation_store.withPrefix(name ++ ".out");
+    const expected_output_count = countWithPrefix(store_output, name ++ ".out");
+    if (output_count != expected_output_count) {
+        log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
+    }
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    var args_buffers = try zml.io.loadBuffersFromId(allocator, io, platform, args, activation_store, .{ .size = 4096, .concurrency = 1 }, .{ .size = 4096, .concurrency = 1 });
+    defer zml.meta.visit(struct {
+        fn cb(_: void, b: *zml.Buffer) void {
+            b.deinit();
+        }
+    }.cb, {}, &args_buffers);
+
+    exe_args.set(.{ layer_weights, args_buffers });
+
+    exe.callOpts(io, exe_args, &exe_results, .{ .wait = true });
+
+    var results = try allocator.alloc(zml.Buffer, output_count);
+    defer allocator.free(results);
+
+    exe_results.fill(.{results});
+
+    var failed: bool = false;
+    var reader_buffer: [4096]u8 = undefined;
+    for (0..output_count) |i| {
+        const expected_slice = b: {
+            var buffer: [256]u8 = undefined;
+            const subkey = try std.fmt.bufPrint(&buffer, "{d}", .{i});
+            var reader = try store_output.getReader(subkey, io, &reader_buffer);
+            defer reader.deinit();
+            const shape = store_output.getShape(subkey).?;
+            const expected_bytes = try reader.interface.readAlloc(allocator, shape.byteSize());
+            break :b zml.Slice.init(shape, expected_bytes);
+        };
+        defer expected_slice.free(allocator);
+
+        const output_slice = try results[i].toSliceAlloc(allocator, io);
+        defer output_slice.free(allocator);
+
+        zml.testing.expectClose(io, expected_slice, output_slice, tolerance) catch |err| switch (err) {
+            error.TestUnexpectedResult => {
+                log.err("{s}.{d} doesn't match !", .{ name ++ ".out", i });
+                failed = true;
+                continue;
+            },
+            else => return err,
+        };
+    }
+
+    if (failed) return error.TestUnexpectedResult;
+    log.info("all good for {s} !", .{name});
+}
+
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
     const c = 20;
     const start = if (i < c) 0 else i - c;
