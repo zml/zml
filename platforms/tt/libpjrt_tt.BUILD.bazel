@@ -1,0 +1,65 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@aspect_bazel_lib//lib:tar.bzl", "tar")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@zml//bazel:patchelf.bzl", "patchelf")
+
+patchelf(
+    name = "libpjrt_tt_so",
+    soname = "libpjrt_tt.so",
+    src = "pjrt_plugin_tt.so",
+    set_rpath = "$ORIGIN",
+)
+
+patchelf(
+    name = "libdevice_so",
+    soname = "libdevice.so",
+    src = "lib/libdevice.so",
+    set_rpath = "$ORIGIN",
+)
+
+filegroup(
+    name = "tt-mlir",
+    srcs = glob(
+        include = ["lib/**"],
+        exclude = ["lib/libdevice.so"],
+    ),
+)
+
+filegroup(
+    name = "tt-metal",
+    srcs = glob(["tt-metal/**"]),
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":libpjrt_tt_so",
+        ":tt-mlir",
+        ":tt-metal",
+        ":libdevice_so",
+        "@libhwloc15",
+        # "@libopenmpi3",
+        "@libprotobuf23",
+        "@libnsl2",
+        "@zlib1g",
+        "@libevent-pthreads-2.1-7",
+        "@rules_python//python:current_py_toolchain",
+    ],
+    replace_prefixes = {
+        "libpjrt_tt_so": "lib",
+        "libdevice_so": "lib",
+        # # "pjrt_plugin_tt/": "lib",
+        "lib/x86_64-linux-gnu": "lib",
+        "usr/lib/x86_64-linux-gnu": "lib",
+        # "lib": "lib",
+        # "tt-metal": "tt-metal",
+    },
+    add_directory_to_runfiles = True,
+    include_external_repositories = ["**"],
+)
+
+cc_library(
+    name = "libpjrt_tt",
+    data = [":sandbox"],
+    visibility = ["@zml//platforms/tt:__subpackages__"],
+)

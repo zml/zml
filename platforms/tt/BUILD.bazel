@@ -1,0 +1,31 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_TT_DISABLED"],
+)
+
+cc_library(
+    name = "libpjrt_tt",
+    defines = ["ZML_RUNTIME_TT"],
+    deps = ["@libpjrt_tt"],
+)
+
+zig_library(
+    name = "tt",
+    import_name = "platforms/tt",
+    main = "tt.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:tt.enabled": [
+            ":libpjrt_tt",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)

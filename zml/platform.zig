@@ -135,6 +135,7 @@ pub const Platform = struct {
 
     pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !Platform {
         const ordered_targets: []const Target = &.{
+            .tt,
             .tpu,
             .neuron,
             .rocm,
@@ -285,6 +286,7 @@ pub const CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    tt: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,

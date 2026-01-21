@@ -1,0 +1,25 @@
+#
+#     bazel run @apt_rocm//:lock
+#
+version: 1
+
+sources:
+    - channel: jammy main
+      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+    - channel: jammy universe
+      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+    - channel: jammy-security main
+      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+    - channel: jammy-updates main
+      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+
+archs:
+    - "amd64"
+
+packages:
+    - "libhwloc15"
+    - "libhwloc-plugins"
+    - "libprotobuf23"
+    - "libopenmpi3"
+    - "libnsl2"
+    - "zlib1g"

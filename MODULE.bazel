@@ -61,7 +61,7 @@ uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = Tru
 uv.configure(version = "0.6.5")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
-python.toolchain(python_version = "3.12")
+python.toolchain(python_version = "3.11")
 use_repo(python, "python_versions")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
@@ -106,6 +106,9 @@ use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
+
+tt = use_extension("//platforms/tt:tt.bzl", "tt_packages")
+use_repo(tt, "libpjrt_tt")
 
 zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
 use_repo(zls, "zls_toolchains")
