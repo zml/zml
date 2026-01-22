@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const zml = @import("../zml.zig");
-pub const flashattn = @import("flashattn.zig");
+const flashattn = @import("flashattn.zig");
 
 const Attention = @This();
 

@@ -20,8 +20,10 @@ cc_library(
 zig_library(
     name = "zml",
     srcs = [
+        "attention.zig",
         "attention/attention.zig",
         "attention/flashattn.zig",
+        "attention/paged_attention.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
