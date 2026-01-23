@@ -25,7 +25,7 @@ const CliArgs = struct {
     reader_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     writer_buffer_size: stdx.flags.ByteSize = .{ .value = 32, .unit = .mib },
     async_limit: ?u32 = null,
-    backend: ?zml.attention.Backend = null,
+    backend: ?zml.attention.attention.Backend = null,
 
     pub const help =
         \\Usage: llama --model=<path> [options]
@@ -108,7 +108,7 @@ pub fn main() !void {
     const llama_options: llama.LlamaLM.Options = .{
         .max_seq_len = args.seqlen,
         .sampling_strategy = .{
-            .topk = 2,
+            .topk = 1,
             .temperature = 1.0,
         },
     };
@@ -126,7 +126,7 @@ pub fn main() !void {
     defer llama_model.deinit(allocator);
 
     const backend = args.backend orelse b: {
-        const selected = zml.attention.Backend.auto(platform);
+        const selected = zml.attention.attention.Backend.auto(platform);
         log.info("Selected backend: {}", .{selected});
         break :b selected;
     };
@@ -192,8 +192,8 @@ pub fn main() !void {
     var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
     defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
 
-    var attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform);
-    defer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+    var attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform);
+    defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
     var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
@@ -270,8 +270,8 @@ const LlamaParameters = struct {
     token_index: zml.Tensor,
     kv_cache: llama.KvCache,
     rng: zml.Tensor.Rng,
-    attention_metadata: zml.attention.Metadata,
-    attention_parameters: zml.attention.Parameters,
+    attention_metadata: zml.attention.attention.Metadata,
+    attention_parameters: zml.attention.attention.Parameters,
 };
 
 const CompileModelResult = struct {
@@ -436,7 +436,7 @@ pub fn generateText(
     prefill_exe: zml.exe.Exe,
     decode_exe: zml.exe.Exe,
     kv_cache_buffers: *zml.Bufferized(llama.KvCache),
-    attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
+    attention_metadata_buffers: *zml.Bufferized(zml.attention.attention.Metadata),
     tokenizer: zml.tokenizer.Tokenizer,
     config: LlamaLM.Config,
     options: LlamaLM.Options,
@@ -484,6 +484,10 @@ pub fn generateText(
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
         try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
         generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
+
+        std.log.info("\n\ngenerated tokens: {any}\n\n", .{prefill_tokens_slice.constItems(u32)[0..prompt_tok.len]});
+        const out = try tokenizer_decoder.decode(prefill_tokens_slice.constItems(u32)[0..prompt_tok.len]);
+        std.log.info("\n\ngenerated: {s}\n\n", .{out});
     }
 
     // Prepare for token-by-token generation,

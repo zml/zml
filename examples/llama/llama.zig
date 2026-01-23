@@ -113,8 +113,8 @@ pub const LlamaLM = struct {
         token_index: Tensor,
         kv_cache: KvCache,
         rng: Tensor.Rng,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
@@ -227,8 +227,8 @@ pub const Llama = struct {
         tokens: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { Tensor, KvCache } {
         const embeds = embed(self.embed_tokens, tokens);
         var hidden = embeds;
@@ -274,8 +274,8 @@ pub const TransformerLayer = struct {
         x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
@@ -409,8 +409,8 @@ pub const SelfAttn = struct {
         x: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.Metadata,
-        attention_parameters: zml.attention.Parameters,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
@@ -436,7 +436,7 @@ pub const SelfAttn = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+        const attn_output = zml.attention.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };
