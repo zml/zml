@@ -54,6 +54,13 @@ const Buffer = struct {
             flashattnDataTypeFromZmlDataType(buffer.shape.dtype()),
         );
     }
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{f}@{*}", .{ self.shape, self.ptr });
+    }
 };
 
 fn getPlatform(call_frame: *ffi.CallFrame) zml.Platform {
@@ -124,7 +131,7 @@ fn fixupKvCacheBuffer(buffer: Buffer, layer_index: i64) Buffer {
 pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
         pub fn register(platform: zml.Platform) !void {
-            try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "host", T.run, .{ .command_buffer_compatible = true });
+            try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "cuda", T.run, .{ .command_buffer_compatible = false });
         }
 
         pub fn run(call_frame: *ffi.CallFrame) callconv(.c) ?*ffi.Error {
@@ -561,6 +568,16 @@ pub const paged_fa2 = struct {
             };
         }
 
+        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(DecodeMetadata) {
+            return .{
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+            };
+        }
+
+        pub fn deinitBuffers(self: *const zml.Bufferized(DecodeMetadata)) void {
+            self.out_accum.deinit();
+        }
+
         pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
             const shapes_ = DecodeMetadata.shapes(max_token_count, num_heads, head_dim);
             var allocation_size: usize = 0;
@@ -574,7 +591,6 @@ pub const paged_fa2 = struct {
         batch_size_decode: usize,
         max_num_pages: usize,
         max_seqlen_k: usize,
-        max_seqlen_q: usize,
         max_token_count: usize,
         num_heads: usize,
         head_dim: usize,
@@ -632,6 +648,17 @@ pub const paged_fa2 = struct {
             };
         }
 
+        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(MixedMetadata) {
+            return .{
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+                .host_metadata = undefined,
+            };
+        }
+
+        pub fn deinitBuffers(self: *const zml.Bufferized(MixedMetadata)) void {
+            self.out_accum.deinit();
+        }
+
         pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
             const shapes_ = MixedMetadata.shapes(max_token_count, num_heads, head_dim);
             var allocation_size: usize = 0;
@@ -643,7 +670,6 @@ pub const paged_fa2 = struct {
 
     pub const Context = struct {
         max_seqlen_k: usize,
-        max_seqlen_q: usize,
         decode_offset: ?zml.Tensor = null,
 
         //pub fn init(options: Options) zml.ShapeOf(Context) {
@@ -668,15 +694,11 @@ pub const paged_fa2 = struct {
             const max_seqlen_k = switch (parameters) {
                 inline else => |v| v.options.max_seqlen_k,
             };
-            const max_seqlen_q = switch (parameters) {
-                .mixed => |mixed_parameters| mixed_parameters.options.max_seqlen_q,
-                else => 1,
-            };
             const decode_offset = switch (parameters) {
                 .mixed => |mixed_parameters| mixed_parameters.metadata.host_metadata.slice1d(0, .{ .end = 1 }).squeeze(0),
                 .decode => null,
             };
-            return .{ .max_seqlen_k = max_seqlen_k, .max_seqlen_q = max_seqlen_q, .decode_offset = decode_offset };
+            return .{ .max_seqlen_k = max_seqlen_k, .decode_offset = decode_offset };
         }
     };
 
@@ -687,23 +709,26 @@ pub const paged_fa2 = struct {
         const register = Wrapped.register;
         const run = Wrapped.run;
 
-        fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
+        pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[9]);
+            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[11]);
             const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
 
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
             const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
             const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
-            const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
-            const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
-            const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
-            const softmax_lse = bufferFromFfiBuffer(call_frame.args.buffers()[6]);
-            const softmax_lse_accum = bufferFromFfiBuffer(call_frame.args.buffers()[7]);
-            const out_accum = bufferFromFfiBuffer(call_frame.args.buffers()[8]);
+            const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
+            const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
+            const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
+            const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[6]);
+            const softmax_lse = bufferFromFfiBuffer(call_frame.args.buffers()[7]);
+            const softmax_lse_accum = bufferFromFfiBuffer(call_frame.args.buffers()[8]);
+            const out_accum = bufferFromFfiBuffer(call_frame.args.buffers()[9]);
+            const host_metadata = bufferFromFfiBuffer(call_frame.args.buffers()[10]);
             const o = bufferFromFfiBuffer(call_frame.results.buffers()[0]);
 
+            const max_seqlen_q = @as([*]i32, @ptrCast(@alignCast(host_metadata.ptr)))[1];
             const softmax_scale: f32 = getScalarAttributeAs(f32, call_frame, "softmax_scale") orelse b: {
                 const head_dim = q.shape.dim(2);
                 break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
@@ -711,7 +736,6 @@ pub const paged_fa2 = struct {
             const is_causal: bool = getScalarAttributeAs(bool, call_frame, "is_causal").?;
             const window_size_left: i32 = getScalarAttributeAs(i32, call_frame, "window_size_left") orelse -1;
             const window_size_right: i32 = getScalarAttributeAs(i32, call_frame, "window_size_right") orelse -1;
-            const max_seqlen_q: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_q").?;
             const max_seqlen_k: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_k").?;
             const num_heads: i32 = getScalarAttributeAs(i32, call_frame, "num_heads").?;
 
@@ -735,7 +759,7 @@ pub const paged_fa2 = struct {
                 &paged_v.toFlashattnTensor(),
                 &o.toFlashattnTensor(),
                 &cu_seqlens_q.toFlashattnTensor(),
-                null,
+                &cu_seqlens_k.toFlashattnTensor(),
                 &seqused_k.toFlashattnTensor(),
                 &block_table.toFlashattnTensor(),
                 &softmax_lse.toFlashattnTensor(),
@@ -757,21 +781,22 @@ pub const paged_fa2 = struct {
         const register = Wrapped.register;
         const run = Wrapped.run;
 
-        fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
+        pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[9]);
+            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[10]);
             const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
 
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
             const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
             const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
-            const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
-            const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
-            const softmax_lse = bufferFromFfiBuffer(call_frame.args.buffers()[6]);
-            const softmax_lse_accum = bufferFromFfiBuffer(call_frame.args.buffers()[7]);
-            const out_accum = bufferFromFfiBuffer(call_frame.args.buffers()[8]);
+            const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
+            const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
+            const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[6]);
+            const softmax_lse = bufferFromFfiBuffer(call_frame.args.buffers()[7]);
+            const softmax_lse_accum = bufferFromFfiBuffer(call_frame.args.buffers()[8]);
+            const out_accum = bufferFromFfiBuffer(call_frame.args.buffers()[9]);
             const o = bufferFromFfiBuffer(call_frame.results.buffers()[0]);
 
             const softmax_scale: f32 = getScalarAttributeAs(f32, call_frame, "softmax_scale") orelse b: {
@@ -781,7 +806,6 @@ pub const paged_fa2 = struct {
             const is_causal: bool = getScalarAttributeAs(bool, call_frame, "is_causal").?;
             const window_size_left: i32 = getScalarAttributeAs(i32, call_frame, "window_size_left") orelse -1;
             const window_size_right: i32 = getScalarAttributeAs(i32, call_frame, "window_size_right") orelse -1;
-            const max_seqlen_q: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_q").?;
             const max_seqlen_k: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_k").?;
             const num_heads: i32 = getScalarAttributeAs(i32, call_frame, "num_heads").?;
 
@@ -789,7 +813,7 @@ pub const paged_fa2 = struct {
             const stream = call_frame.api.stream(ctx);
 
             const params: flashattn.FA2MhaVarlenFwdParams = .{
-                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_q = 1,
                 .max_seqlen_k = max_seqlen_k,
                 .is_causal = is_causal,
                 .softmax_scale = softmax_scale,
@@ -805,7 +829,7 @@ pub const paged_fa2 = struct {
                 &paged_v.toFlashattnTensor(),
                 &o.toFlashattnTensor(),
                 &cu_seqlens_q.toFlashattnTensor(),
-                null,
+                &cu_seqlens_k.toFlashattnTensor(),
                 &seqused_k.toFlashattnTensor(),
                 &block_table.toFlashattnTensor(),
                 &softmax_lse.toFlashattnTensor(),
@@ -829,13 +853,14 @@ pub const paged_fa2 = struct {
             .decode => |decode_parameters| b: {
                 const softmax_lse = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.dim(.h), .q = q.dim(.b) }, .f32));
                 const softmax_lse_accum = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{32 * decode_parameters.block_table.dim(0) * q.dim(.h) * 4}, .i8));
+                const dummy_cu_seqlens_k = zml.Tensor.constant(zml.DataType.i32.zero()).broad(decode_parameters.cu_seqlens_q.shape());
 
                 const original_tot = q.dim(.b);
                 const num_heads = q.dim(.h);
                 const num_heads_k = k_cache.dim(.h);
                 const head_size = q.dim(.hd);
                 const ngroups = @divExact(num_heads, num_heads_k);
-                const seqlenq_ngroups_swapped = context.max_seqlen_q == 1 and num_heads > num_heads_k and @mod(head_size, 8) == 0;
+                const seqlenq_ngroups_swapped = num_heads > num_heads_k and @mod(head_size, 8) == 0;
                 var q2 = q;
                 if (seqlenq_ngroups_swapped) {
                     q2 = q2.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .b, .ngroups, .h, .hd }).merge(.{ .b = .{ .b, .ngroups } });
@@ -847,9 +872,10 @@ pub const paged_fa2 = struct {
                         q2,
                         k_cache,
                         v_cache,
-                        decode_parameters.block_table,
                         decode_parameters.cu_seqlens_q,
+                        dummy_cu_seqlens_k,
                         decode_parameters.seqused_k,
+                        decode_parameters.block_table,
                         softmax_lse,
                         softmax_lse_accum,
                         decode_parameters.metadata.out_accum,
@@ -859,7 +885,6 @@ pub const paged_fa2 = struct {
                     .{
                         .is_causal = true,
                         .max_seqlen_k = context.max_seqlen_k,
-                        .max_seqlen_q = context.max_seqlen_q,
                         .num_heads = num_heads,
                     },
                     .{ .has_side_effect = false },
@@ -874,25 +899,27 @@ pub const paged_fa2 = struct {
             .mixed => |mixed_parameters| b: {
                 const softmax_lse_prefill = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = q.dim(.b) }, .f32));
                 const softmax_lse_accum_prefill = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{32 * q.dim(.b) * q.dim(.h) * 4}, .i8));
+                const dummy_cu_seqlens_k_prefill = zml.Tensor.constant(zml.DataType.i32.zero()).broad(mixed_parameters.cu_seqlens_q_prefill.shape());
                 var o = zml.ops.customCall(
                     Prefill.custom_call_name,
                     .{
                         q,
                         k_cache,
                         v_cache,
-                        mixed_parameters.block_table_prefill,
                         mixed_parameters.cu_seqlens_q_prefill,
+                        dummy_cu_seqlens_k_prefill,
                         mixed_parameters.seqused_k_prefill,
+                        mixed_parameters.block_table_prefill,
                         softmax_lse_prefill,
                         softmax_lse_accum_prefill,
                         mixed_parameters.metadata.out_accum,
+                        mixed_parameters.metadata.host_metadata,
                         layer_index,
                     },
                     .{q.shape()},
                     .{
-                        .is_causal = true,
+                        .is_causal = false,
                         .max_seqlen_k = context.max_seqlen_k,
-                        .max_seqlen_q = context.max_seqlen_q,
                         .num_heads = q.dim(.h),
                     },
                     .{ .has_side_effect = false },
@@ -901,6 +928,7 @@ pub const paged_fa2 = struct {
                 const batch_size_decode = mixed_parameters.block_table_prefill.dim(0);
                 const softmax_lse_decode = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = batch_size_decode }, .f32));
                 const softmax_lse_accum_decode = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{32 * mixed_parameters.block_table_decode.dim(0) * q.dim(.h) * 4}, .i8));
+                const dummy_cu_seqlens_k_decode = zml.Tensor.constant(zml.DataType.i32.zero()).broad(mixed_parameters.cu_seqlens_q_decode.shape());
                 var q_decode = q.dynamicSlice1d(0, .{ .start = context.decode_offset.?, .len = batch_size_decode });
 
                 const original_tot = q_decode.dim(.b);
@@ -919,9 +947,10 @@ pub const paged_fa2 = struct {
                         q_decode,
                         k_cache,
                         v_cache,
-                        mixed_parameters.block_table_decode,
                         mixed_parameters.cu_seqlens_q_decode,
+                        dummy_cu_seqlens_k_decode,
                         mixed_parameters.seqused_k_decode,
+                        mixed_parameters.block_table_decode,
                         softmax_lse_decode,
                         softmax_lse_accum_decode,
                         mixed_parameters.metadata.out_accum,
@@ -931,7 +960,6 @@ pub const paged_fa2 = struct {
                     .{
                         .is_causal = true,
                         .max_seqlen_k = context.max_seqlen_k,
-                        .max_seqlen_q = 1,
                         .num_heads = q.dim(.h),
                     },
                     .{ .has_side_effect = false },
