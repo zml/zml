@@ -1,9 +1,9 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const floats = @import("floats.zig");
 
 const DataType = @import("dtype.zig").DataType;
+const floats = @import("floats.zig");
 const Shape = @import("shape.zig").Shape;
 
 pub fn isBytes(comptime T: type) bool {
@@ -25,6 +25,7 @@ pub const Slice = struct {
 
     pub fn init(shape: Shape, bytes: anytype) Slice {
         stdx.debug.assertComptime(isBytes(@TypeOf(bytes)), "Expected \"bytes\" to be a []u8 or []const u8, got {s}", .{@typeName(@TypeOf(bytes))});
+        stdx.debug.assert(bytes.len == shape.byteSize(), "Expected \"bytes\" to have the same length as shape.byteSize() ({}), got {}", .{ shape.byteSize(), bytes.len });
         const type_info = @typeInfo(@TypeOf(bytes));
         return if (type_info.pointer.is_const)
             .{ .inner_data = .{ .immutable = bytes }, .shape = shape }
