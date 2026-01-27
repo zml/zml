@@ -1139,15 +1139,14 @@ pub const Event = opaque {
             return;
         }
 
-        var ctx = struct {
+        const Ctx = struct {
             err: ?*Error = null,
             event: std.Io.Event = .unset,
             io: std.Io,
-        }{ .io = io };
-
-        try self.onReady(api, struct {
-            fn call(err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void {
-                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+        };
+        var ctx: Ctx = .{ .io = io };
+        try self.onReady(api, Ctx, struct {
+            fn call(err: ?*Error, ctx_: *Ctx) void {
                 ctx_.err = err;
                 ctx_.event.set(ctx_.io);
             }
@@ -1168,10 +1167,14 @@ pub const Event = opaque {
         });
     }
 
-    pub fn onReady(self: *Event, api: *const Api, func: *const fn (err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void, user_arg: ?*anyopaque) ApiError!void {
+    pub fn onReady(self: *Event, api: *const Api, comptime T: type, func: fn (err: ?*Error, user_arg: *T) void, user_arg: *T) ApiError!void {
         _ = try api.call(.PJRT_Event_OnReady, .{
             .event = self.inner(),
-            .callback = @ptrCast(func),
+            .callback = @ptrCast(&struct {
+                fn call(err: ?*Error, user_arg_: ?*anyopaque) callconv(.c) void {
+                    func(err, @ptrCast(@alignCast(user_arg_.?)));
+                }
+            }.call),
             .user_arg = user_arg,
         });
     }
