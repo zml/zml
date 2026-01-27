@@ -90,6 +90,7 @@ pub const Exe = struct {
     pub const Arguments = struct {
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
+        baked_count: usize = 0,
 
         pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize) !Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
@@ -118,7 +119,7 @@ pub const Exe = struct {
                 self: *Arguments,
                 current_index: usize = 0,
             };
-            var context: LocalContext = .{ .self = self, .current_index = offset };
+            var context: LocalContext = .{ .self = self, .current_index = offset + self.baked_count };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *const Buffer) void {
                     stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected argument {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
@@ -129,6 +130,30 @@ pub const Exe = struct {
                     context_.current_index += 1;
                 }
             }.cb, &context, &v);
+        }
+
+        pub fn bake(self: *Arguments, v: anytype) void {
+            const LocalContext = struct {
+                self: *Arguments,
+
+                current_index: usize = 0,
+            };
+
+            var context: LocalContext = .{ .self = self, .current_index = self.baked_count };
+
+            meta.visit(struct {
+                fn cb(context_: *LocalContext, buffer: *const Buffer) void {
+                    stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected argument {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
+
+                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
+                        context_.self.flat_buffers.buffers[device_index][context_.current_index] = buffer._shards.get(device_index);
+                    }
+
+                    context_.current_index += 1;
+                }
+            }.cb, &context, &v);
+
+            self.baked_count = context.current_index;
         }
     };
 
