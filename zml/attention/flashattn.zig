@@ -1051,7 +1051,7 @@ pub const paged_fa3 = struct {
 
         pub fn init(max_token_count: usize, num_heads: usize, head_dim: usize) DecodeMetadata {
             return .{
-                .out_accum = .init(.{16 * max_token_count * num_heads * head_dim * 4}, .i8),
+                .out_accum = .init(.{32 * max_token_count * num_heads * head_dim * 4}, .i8),
             };
         }
 
@@ -1416,8 +1416,8 @@ pub const paged_fa3 = struct {
                         mixed_parameters.block_table_decode,
                         softmax_lse_decode,
                         softmax_lse_accum_decode,
-                        scheduler_metadata_decode,
                         mixed_parameters.metadata.out_accum,
+                        scheduler_metadata_decode,
                         layer_index,
                     },
                     .{q_decode.shape()},
