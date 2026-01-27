@@ -41,6 +41,7 @@ zig_library(
         "slice.zig",
         "tensor.zig",
         "testing.zig",
+        "tracer.zig",
         "zml.zig",
     ],
     main = "zml.zig",
