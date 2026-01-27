@@ -108,6 +108,7 @@ pub const CublasGemmGroupedBatchedExFunc = *const fn (
 pub var cublas_gemm_grouped_batched_ex: ?CublasGemmGroupedBatchedExFunc = null;
 pub var cublas_handle: ?cublasHandle_t = null;
 pub var cublasSetStream: ?*const fn (cublasHandle_t, ?*anyopaque) callconv(.c) cublasStatus_t = null;
+pub var cublasCreate: ?*const fn (*cublasHandle_t) callconv(.c) cublasStatus_t = null;
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     _ = io; // autofix
@@ -140,7 +141,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
         lib.lookup(CublasGemmGroupedBatchedExFunc, "cublasGemmGroupedBatchedEx") orelse
         return error.NotFound;
 
-    const cublasCreate =
+    cublasCreate =
         lib.lookup(*const fn (*cublasHandle_t) callconv(.c) cublasStatus_t, "cublasCreate_v2") orelse
         return error.NotFound;
 
@@ -149,8 +150,9 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
         return error.NotFound;
 
     var handle_ptr: cublasHandle_t = undefined;
-    const status = cublasCreate(&handle_ptr);
+    const status = cublasCreate.?(&handle_ptr);
     if (status != CUBLAS_STATUS_SUCCESS) return error.CublasError;
+
     cublas_handle = handle_ptr;
 }
 

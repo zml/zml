@@ -22,6 +22,7 @@ pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
+pub const grouped_gemm = @import("grouped_gemm/cublas.zig");
 pub const io = @import("io.zig");
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
@@ -41,6 +42,7 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
+//pub const cublas_grouped_gemm = @import("cublas_grouped_gemm.zig");
 /// Return a clone of a type with Tensors replaced by Buffer.
 /// Non-Tensor metadata is stripped out of the resulting struct.
 /// Recursively descends into the type.
