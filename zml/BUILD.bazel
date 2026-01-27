@@ -29,6 +29,7 @@ zig_library(
         "floats.zig",
         "io.zig",
         "meta.zig",
+        "mem.zig",
         "mlirx.zig",
         "module.zig",
         "nn.zig",
