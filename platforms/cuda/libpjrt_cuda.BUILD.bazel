@@ -1,5 +1,6 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@zml//bazel:patchelf.bzl", "patchelf")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
 
 patchelf(
     name = "libpjrt_cuda_so",

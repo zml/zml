@@ -5,6 +5,9 @@ load("//platforms:packages.bzl", "packages")
 
 _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
+
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_import.bzl", "cc_import")
 """
 
 ARCH = "linux-x86_64"

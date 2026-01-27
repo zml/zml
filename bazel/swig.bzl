@@ -1,4 +1,6 @@
 load("@rules_cc//cc:action_names.bzl", "C_COMPILE_ACTION_NAME")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:defs.bzl", "CcInfo", "cc_common")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "find_cc_toolchain", "use_cc_toolchain")
 
 def _swig_cc_library_impl(ctx):
@@ -141,7 +143,7 @@ def swig_cc_library(name, deps = [], **kwargs):
         srcs = [":{}.swig".format(name)],
         output_group = "srcs",
     )
-    native.cc_library(
+    cc_library(
         name = name,
         hdrs = [":{}.hdrs".format(name)],
         srcs = [":{}.srcs".format(name)],

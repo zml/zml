@@ -5,6 +5,6 @@ zls_completion(
     visibility = ["//visibility:public"],
     deps = [
         "//stdx",
-        "//zml:zml",
+        "//zml",
     ],
 )

@@ -1,6 +1,7 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
 load("//bazel:swig.bzl", "swig_cc_library")
 load("//bazel:zig_srcs.bzl", "zig_srcs")
+load("@rules_cc//cc:cc_static_library.bzl", "cc_static_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 swig_cc_library(
     name = "sentencepiece_swig",
