@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+
+zig_binary(
+    name = "gpt_oss_gg_2",
+    srcs = ["gpt_oss_gg_2.zig"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "//platforms/cuda/grouped_gemm:grouped_gemm"
+    ],
+)
