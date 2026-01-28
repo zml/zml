@@ -17,9 +17,8 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice() bool {
-    // Check for native Linux NVIDIA device
     async.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch {
-        // Check for WSL2 GPU device
+        // check wsl2 location
         async.File.access("/dev/dxg", .{ .mode = .read_only }) catch return false;
     };
     return true;
