@@ -6,6 +6,7 @@ pub const VFS = @import("io").VFS;
 
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
+const mem = @import("mem.zig");
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -190,293 +191,123 @@ pub const TensorStore = struct {
     };
 };
 
-pub fn TensorBufferTransfer(comptime UserData: type) type {
-    return struct {
-        io: std.Io,
-        platform: Platform,
-        tensor: safetensors.Tensor,
-        buffer: *Buffer,
-        cb_ctx: UserData,
-        shape: Shape,
-    };
-}
-
-pub fn CallbackTensorBufferTransfer(comptime UserData: type) type {
-    return fn (t: TensorBufferTransfer(UserData)) std.Io.Cancelable!void;
-}
-
-pub fn BufferizeContext(comptime UserData: type) type {
-    return struct {
-        allocator: std.mem.Allocator,
-        arena: *std.heap.ArenaAllocator,
-        io: std.Io,
-        platform: Platform,
-        cb_ctx: UserData,
-    };
-}
-
-pub fn bufferize(
-    comptime UserData: type,
-    bufferize_ctx: BufferizeContext(UserData),
-    model: anytype,
-    bufferized: *Bufferized(@TypeOf(model.*)),
-    store: TensorStore.View,
-) ![]TensorBufferTransfer(UserData) {
-    comptime {
-        switch (@typeInfo(@TypeOf(model))) {
-            .pointer => {},
-            else => @compileError("zml.io.bufferize expects a pointer to the model (pass &model or &self.field)"),
-        }
-    }
-
-    var tensor_count: usize = 0;
-    meta.visit(struct {
-        fn cb(ctx: *usize, _: *const Tensor) void {
-            ctx.* += 1;
-        }
-    }.cb, &tensor_count, model);
-
-    initBufferizedFrom(model.*, bufferized);
-
-    const arena_allocator = bufferize_ctx.arena.allocator();
-
-    const transfers = try arena_allocator.alloc(TensorBufferTransfer(UserData), tensor_count);
-    const buffers = try bufferize_ctx.allocator.alloc(*Buffer, tensor_count);
-    defer bufferize_ctx.allocator.free(buffers);
-
-    const VisitBuffersCtx = struct {
-        index: usize = 0,
-        buffers: []*Buffer,
-    };
-
-    var visit_buffers_ctx: VisitBuffersCtx = .{ .buffers = buffers };
-    meta.visit(struct {
-        fn cb(ctx: *VisitBuffersCtx, buffer: *Buffer) void {
-            ctx.buffers[ctx.index] = buffer;
-            ctx.index += 1;
-        }
-    }.cb, &visit_buffers_ctx, bufferized);
-
-    const FillBuffersCtx = struct {
-        bufferize_ctx: BufferizeContext(UserData),
-        store: TensorStore.View,
-        buffers: []*Buffer,
-        cb_ctx: UserData,
-        transfers: []TensorBufferTransfer(UserData),
-        idx: usize = 0,
-    };
-    var fill_buffers_ctx: FillBuffersCtx = .{
-        .bufferize_ctx = bufferize_ctx,
-        .store = store,
-        .buffers = buffers,
-        .cb_ctx = bufferize_ctx.cb_ctx,
-        .transfers = transfers,
-    };
-
-    meta.visit(struct {
-        fn cb(ctx: *FillBuffersCtx, tensor: *const Tensor) void {
-            const ptr = ctx.store.store.getPtrFromId(tensor.id) orelse return;
-            const buffer = ctx.buffers[ctx.idx];
-
-            ctx.transfers[ctx.idx] = .{
-                .io = ctx.bufferize_ctx.io,
-                .platform = ctx.bufferize_ctx.platform,
-                .tensor = ptr.*,
-                .buffer = buffer,
-                .cb_ctx = ctx.cb_ctx,
-                .shape = tensor.shape(),
-            };
-            ctx.idx += 1;
-        }
-    }.cb, &fill_buffers_ctx, model);
-
-    return transfers;
-}
-
-pub const Writer = union(enum) { device: DeviceWriter, buffered_device: BufferedDeviceWriter };
-
-pub fn loadBuffersFromId(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: Platform,
-    model: anytype,
-    store: TensorStore.View,
-    read_pool_config: ConcurrentBufferPool.Config,
-    write_pool_config: ConcurrentBufferPool.Config,
-) !Bufferized(@TypeOf(model)) {
-    var bufferized: Bufferized(@TypeOf(model)) = undefined;
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var read_pool, var write_pool = try ConcurrentBufferPool.initRW(
-        allocator,
-        platform,
-        read_pool_config,
-        write_pool_config,
-    );
-    defer {
-        read_pool.deinit();
-        write_pool.deinit();
-    }
-
-    const LoadCtx = struct { allocator: std.mem.Allocator, read_pool: *ConcurrentBufferPool, write_pool: *ConcurrentBufferPool };
-
-    const bufferize_ctx: BufferizeContext(LoadCtx) = .{
-        .allocator = allocator,
-        .arena = &arena,
-        .io = io,
-        .platform = platform,
-        .cb_ctx = .{ .allocator = allocator, .read_pool = &read_pool, .write_pool = &write_pool },
-    };
-
-    const transfers = try bufferize(LoadCtx, bufferize_ctx, &model, &bufferized, store);
-
-    var group = try stdx.Io.AllocatingLimitedConcurrentGroup.init(allocator, read_pool.config.concurrency);
-    defer {
-        group.cancel(io);
-        group.deinit();
-    }
-
-    for (transfers) |t| {
-        try group.concurrent(io, struct {
-            fn run(ctx: TensorBufferTransfer(LoadCtx)) !void {
-                const allocator_ = ctx.cb_ctx.allocator;
-                const read_pool_ = ctx.cb_ctx.read_pool;
-                const write_pool_ = ctx.cb_ctx.write_pool;
-
-                const read_buffer = read_pool_.acquire(ctx.io) catch unreachable;
-                defer read_pool_.release(ctx.io, read_buffer) catch {};
-
-                const write_buffer = write_pool_.acquire(ctx.io) catch unreachable;
-                defer write_pool_.release(ctx.io, write_buffer) catch {};
-
-                var reader = safetensors.TensorReader.init(ctx.io, ctx.tensor, read_buffer) catch unreachable;
-                defer reader.deinit();
-
-                var writer: Writer = if (ctx.platform.target == .neuron) blk: {
-                    break :blk .{ .buffered_device = BufferedDeviceWriter.init(allocator_, ctx.io, null, ctx.platform, ctx.buffer.shape(), ctx.buffer) catch unreachable };
-                } else blk: {
-                    break :blk .{ .device = DeviceWriter.init(ctx.io, null, ctx.platform, ctx.shape, ctx.buffer, .device, write_buffer) catch unreachable };
-                };
-
-                switch (writer) {
-                    .device => |*d| {
-                        defer {
-                            d.interface.flush() catch unreachable;
-                            d.deinit();
-                        }
-                        _ = reader.interface.streamRemaining(&d.interface) catch unreachable;
-                    },
-                    .buffered_device => |*d| {
-                        defer {
-                            d.interface.flush() catch unreachable;
-                            d.deinit();
-                        }
-                        _ = reader.interface.streamRemaining(&d.interface) catch unreachable;
-                    },
-                }
-            }
-        }.run, .{t});
-    }
-
-    try group.await(io);
-
-    return bufferized;
-}
-
-pub const DeviceWriter = struct {
-    io: std.Io,
-    progress: ?*std.Progress.Node,
-    platform: Platform,
-    shape: Shape,
-    buffer: *Buffer,
-    transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
-    offset: usize = 0,
+pub const ProgressWriter = struct {
+    inner: *std.Io.Writer,
+    progress: *std.Progress.Node,
     interface: std.Io.Writer,
+    total: usize = 0,
+    scale: usize,
 
-    pub fn init(io: std.Io, progress: ?*std.Progress.Node, platform: Platform, shape: Shape, buffer: *Buffer, memory: Buffer.Memory, buf: []u8) !DeviceWriter {
-        const memories = platform.getDevices()[0].addressableMemories(platform.pjrt_api);
+    pub const InitOpts = struct {
+        scale: usize = 1,
+    };
 
-        const mem = blk: {
-            for (memories) |mem_| {
-                if (mem_.kind(platform.pjrt_api) == memory) {
-                    break :blk mem_;
-                }
-            }
-            return error.MemoryNotFound;
-        };
-
-        const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
-            .shape_specs = &.{shape_spec},
-            .memory = mem,
-        });
-
-        const pjrt_buffer = transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable;
-        buffer.* = Buffer.fromPjrtBuffers(platform, shape, &.{pjrt_buffer});
-
+    pub fn init(inner_: *std.Io.Writer, progress_: *std.Progress.Node, opts: InitOpts) ProgressWriter {
         return .{
-            .io = io,
-            .progress = progress,
-            .platform = platform,
-            .shape = shape,
-            .buffer = buffer,
-            .transfer_manager = transfer_manager,
+            .inner = inner_,
+            .progress = progress_,
+            .scale = opts.scale,
             .interface = .{
-                .buffer = buf,
-                .end = 0,
+                .buffer = inner_.buffer,
+                .end = inner_.end,
                 .vtable = &.{
                     .drain = drain,
+                    .flush = flush,
+                    .rebase = rebase,
+                    .sendFile = sendFile,
                 },
             },
         };
     }
 
-    pub fn deinit(self: *const DeviceWriter) void {
-        self.transfer_manager.deinit(self.platform.pjrt_api);
+    pub fn pre(self: *ProgressWriter) usize {
+        self.inner.buffer = self.interface.buffer;
+        self.inner.end = self.interface.end;
+        return self.inner.end;
+    }
+
+    pub fn post(self: *ProgressWriter, len_pre: usize, total: usize) void {
+        self.interface.buffer = self.inner.buffer;
+        self.interface.end = self.inner.end;
+        self.total += (len_pre - self.interface.end) + total;
+        self.progress.setCompletedItems(self.total / self.scale);
     }
 
     pub fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        _ = data;
-        _ = splat;
-        const self: *DeviceWriter = @alignCast(@fieldParentPtr("interface", w));
+        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
+        const len_pre = self.pre();
+        errdefer self.post(len_pre, 0);
+        const total = try self.inner.vtable.drain(self.inner, data, splat);
+        self.post(len_pre, total);
+        return total;
+    }
 
-        stdx.debug.assert(self.offset + w.end <= self.shape.byteSize(), "Can't write more data than required", .{});
+    pub fn sendFile(w: *std.Io.Writer, file_reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.Writer.FileError!usize {
+        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
+        const len_pre = self.pre();
+        errdefer self.post(len_pre, 0);
+        const total = try self.inner.vtable.sendFile(self.inner, file_reader, limit);
+        self.post(len_pre, total);
+        return total;
+    }
 
-        const is_last_transfer = self.offset + w.end >= self.shape.byteSize();
-        const event = self.transfer_manager.transferData(self.platform.pjrt_api, 0, w.buffer[0..w.end], @intCast(self.offset), is_last_transfer) catch return error.WriteFailed;
-        event.await(self.platform.pjrt_api, self.io) catch return error.WriteFailed;
+    pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
+        const len_pre = self.pre();
+        defer self.post(len_pre, 0);
+        try self.inner.vtable.flush(self.inner);
+    }
 
-        self.offset += w.end;
-        if (self.progress) |p| p.setCompletedItems(self.offset);
-        w.end = 0;
+    pub fn rebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
+        const self: *ProgressWriter = @alignCast(@fieldParentPtr("interface", w));
+        const len_pre = self.pre();
+        defer self.post(len_pre, 0);
+        try self.inner.vtable.rebase(self.inner, preserve, capacity);
+    }
+};
 
-        return 0;
+pub const DeviceWriter = union(enum) {
+    direct: DirectDeviceWriter,
+    buffered: BufferedDeviceWriter,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer, memory_kind: Buffer.Memory) !DeviceWriter {
+        return switch (platform.target) {
+            .cuda, .rocm => .{ .direct = try .init(allocator, io, platform, pool, shape, buffer, memory_kind) },
+            .tpu, .neuron => .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
+            else => unreachable,
+        };
+    }
+
+    pub fn interface(self: *DeviceWriter) *std.Io.Writer {
+        return switch (self.*) {
+            .direct => &self.direct.interface,
+            .buffered => &self.buffered.interface,
+        };
+    }
+
+    pub fn deinit(self: *DeviceWriter, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .direct => self.direct.deinit(),
+            .buffered => self.buffered.deinit(allocator),
+        }
     }
 };
 
 pub const BufferedDeviceWriter = struct {
-    allocator: std.mem.Allocator,
     io: std.Io,
-    progress: ?*std.Progress.Node,
-    transfer_buffer: []u8,
-    platform: Platform,
+    platform: *const Platform,
     shape: Shape,
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, progress: ?*std.Progress.Node, platform: Platform, shape: Shape, buffer: *Buffer) !BufferedDeviceWriter {
-        const transfer_buffer = try allocator.alloc(u8, shape.byteSize());
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedDeviceWriter {
         return .{
-            .allocator = allocator,
             .io = io,
-            .progress = progress,
-            .transfer_buffer = transfer_buffer,
             .shape = shape,
             .platform = platform,
             .buffer = buffer,
             .interface = .{
-                .buffer = transfer_buffer,
+                .buffer = try allocator.alloc(u8, shape.byteSize()),
                 .vtable = &.{
                     .drain = std.Io.Writer.fixedDrain,
                     .flush = flush,
@@ -486,136 +317,148 @@ pub const BufferedDeviceWriter = struct {
         };
     }
 
-    pub fn deinit(self: *BufferedDeviceWriter) void {
-        self.allocator.free(self.transfer_buffer);
+    pub fn deinit(self: *BufferedDeviceWriter, allocator: std.mem.Allocator) void {
+        if (self.interface.buffer.len > 0) {
+            allocator.free(self.interface.buffer);
+        }
     }
 
     pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *BufferedDeviceWriter = @alignCast(@fieldParentPtr("interface", w));
-        self.buffer.* = Buffer.fromBytes(self.io, self.platform, self.shape, self.transfer_buffer) catch return std.Io.Writer.Error.WriteFailed;
-        if (self.progress) |p| p.setCompletedItems(self.shape.byteSize());
+        self.buffer.* = Buffer.fromBytes(self.io, self.platform, self.shape, self.interface.buffer) catch return std.Io.Writer.Error.WriteFailed;
         _ = self.buffer.await(self.io) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
 
-pub fn initBufferizedFrom(model: anytype, bufferized_: *Bufferized(@TypeOf(model))) void {
-    const Model = @TypeOf(model);
-    const type_info = @typeInfo(Bufferized(Model));
-    switch (type_info) {
-        .@"struct" => |struct_type_info| {
-            if (Bufferized(Model) == Buffer) return;
-            inline for (struct_type_info.fields) |field| {
-                initBufferizedFrom(@field(model, field.name), &@field(bufferized_, field.name));
-            }
-        },
-        .@"union" => {
-            switch (model) {
-                inline else => |v, tag| {
-                    bufferized_.* = @unionInit(Bufferized(Model), @tagName(tag), undefined);
-                    initBufferizedFrom(v, @field(bufferized_, @tagName(tag)));
-                },
-            }
-        },
-        .optional => |optional_type_info| {
-            if (model == null) {
-                bufferized_.* = null;
-            } else {
-                bufferized_.* = @as(optional_type_info.child, undefined);
-                initBufferizedFrom(model.?, &bufferized_.*.?);
-            }
-        },
-        .void, .int, .@"enum", .bool, .enum_literal, .float, .pointer, .vector => {},
-        else => unreachable,
-    }
-}
-
-pub const ConcurrentBufferPool = struct {
-    pub const Error = error{ OutOfMemory, Notfound, NotAcquired };
-
-    const alignment: std.mem.Alignment = .fromByteUnits(4 * 1024);
-
-    allocator: std.mem.Allocator,
-    mutex: std.Io.Mutex = .init,
-
-    platform: Platform,
-    locked: []bool,
-    buffers: []u8,
-    config: Config,
-
-    pub const Config = struct {
-        size: usize,
-        concurrency: usize,
-        dma: bool = true,
+pub const DirectDeviceWriter = struct {
+    const EventContext = struct {
+        self: *DirectDeviceWriter,
+        err: ?*pjrt.Error = null,
+        pjrt_event: *pjrt.Event,
+        event: std.Io.Event = .unset,
+        buffer: []u8,
     };
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        platform: Platform,
-        config: Config,
-    ) !ConcurrentBufferPool {
-        const buffers = try allocator.alignedAlloc(u8, alignment, config.concurrency * config.size);
-        errdefer allocator.free(buffers);
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    pool: *mem.DynamicBufferPool,
+    total: usize,
+    buffer: *Buffer,
 
-        if (config.dma and platform.target != .cpu) {
-            try platform.pjrt_client.dmaMap(platform.pjrt_api, buffers);
-        }
+    transfer_manager: *pjrt.AsyncHostToDeviceTransferManager,
+    offset: usize = 0,
 
-        const locked = try allocator.alloc(bool, config.concurrency);
-        @memset(locked, false);
+    interface: std.Io.Writer,
+    flip_flop: u1 = 0,
+    events_contexts: [2]?EventContext = @splat(null),
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer, memory_kind: Buffer.Memory) !DirectDeviceWriter {
+        const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
+        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
+            .shape_specs = &.{shape_spec},
+            .memory = blk: {
+                const devices = platform.getDevices();
+                for (devices[0].addressableMemories(platform.pjrt_api)) |m| {
+                    if (m.kind(platform.pjrt_api) == memory_kind) break :blk m;
+                }
+                return error.MemoryNotFound;
+            },
+        });
+
+        const pjrt_buffer = transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable;
+        buffer.* = Buffer.fromPjrtBuffers(platform, shape, &.{pjrt_buffer});
 
         return .{
             .allocator = allocator,
-            .mutex = .init,
+            .io = io,
             .platform = platform,
-            .locked = locked,
-            .buffers = buffers,
-            .config = config,
+            .pool = pool,
+            .total = shape.byteSize(),
+            .buffer = buffer,
+            .transfer_manager = transfer_manager,
+            .interface = .{
+                .buffer = try pool.get(allocator, io),
+                .end = 0,
+                .vtable = &.{
+                    .drain = drain,
+                },
+            },
         };
     }
 
-    pub fn initRW(allocator: std.mem.Allocator, platform: Platform, read_config: Config, write_config: Config) !struct { ConcurrentBufferPool, ConcurrentBufferPool } {
-        return .{ try .init(allocator, platform, read_config), try .init(allocator, platform, write_config) };
+    pub fn deinit(self: *DirectDeviceWriter) void {
+        self.transfer_manager.deinit(self.platform.pjrt_api);
     }
 
-    pub fn deinit(self: *ConcurrentBufferPool) void {
-        if (self.config.dma and self.platform.target != .cpu) {
-            self.platform.pjrt_client.dmaUnmap(self.platform.pjrt_api, self.buffers) catch {};
+    fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+        _ = data; // autofix
+        _ = splat; // autofix
+        const self: *DirectDeviceWriter = @alignCast(@fieldParentPtr("interface", w));
+        if (self.offset >= self.total) {
+            return std.Io.Writer.Error.WriteFailed;
         }
 
-        self.allocator.free(self.buffers);
-        self.allocator.free(self.locked);
-    }
+        const current_buffer = self.interface.buffer;
+        const buffered = self.interface.buffered();
+        const sliced_buffer = self.interface.buffered()[0..@min(buffered.len, self.total - self.offset)];
+        const written = sliced_buffer.len;
+        const is_last = (self.offset + sliced_buffer.len) >= self.total;
 
-    pub fn acquire(self: *ConcurrentBufferPool, io: std.Io) Error![]u8 {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
+        const transfer_event = self.transfer_manager.transferData(
+            self.platform.pjrt_api,
+            0,
+            sliced_buffer,
+            @intCast(self.offset),
+            is_last,
+        ) catch |err| {
+            log.err("error when transferring data to device: {any}", .{err});
+            return std.Io.Writer.Error.WriteFailed;
+        };
+        const ctx = &self.events_contexts[@intCast(self.flip_flop)];
+        ctx.* = .{
+            .self = self,
+            .buffer = current_buffer,
+            .pjrt_event = transfer_event,
+        };
+        transfer_event.onReady(self.platform.pjrt_api, EventContext, struct {
+            fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
+                ctx_.self.pool.put(ctx_.self.io, ctx_.buffer);
+                ctx_.err = err;
+                ctx_.event.set(ctx_.self.io);
+            }
+        }.call, &(ctx.*.?)) catch |err| {
+            log.err("error when setting up transfer completion callback: {any}", .{err});
+            return std.Io.Writer.Error.WriteFailed;
+        };
 
-        for (self.locked, 0..) |locked, i| {
-            if (!locked) {
-                self.locked[i] = true;
-                return self.buffers[i * self.config.size .. (i + 1) * self.config.size];
+        if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
+            defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
+            // std.log.info("[{*} WAITING", .{self});
+            ctx_previous.event.waitUncancelable(self.io);
+            // std.log.info("[{*} WAITED", .{self});
+            defer ctx_previous.pjrt_event.deinit(self.platform.pjrt_api);
+            if (ctx_previous.err) |e| {
+                defer e.deinit(self.platform.pjrt_api);
+                log.err("error while awaiting: {s}: {s}", .{
+                    @tagName(e.getCode(self.platform.pjrt_api)),
+                    e.getMessage(self.platform.pjrt_api),
+                });
+                return std.Io.Writer.Error.WriteFailed;
             }
         }
 
-        return Error.OutOfMemory;
-    }
-
-    pub fn release(self: *ConcurrentBufferPool, io: std.Io, buffer: []u8) Error!void {
-        self.mutex.lockUncancelable(io);
-        defer self.mutex.unlock(io);
-
-        for (self.locked, 0..) |locked, i| {
-            const slice = self.buffers[i * self.config.size .. (i + 1) * self.config.size];
-            if (slice.ptr == buffer.ptr) {
-                if (locked) {
-                    self.locked[i] = false;
-                    return;
-                } else {
-                    return Error.NotAcquired;
-                }
-            }
+        self.flip_flop ^= 1;
+        self.offset += written;
+        if (is_last) {
+            self.interface = .failing;
+        } else {
+            self.interface.end = 0;
+            self.interface.buffer = self.pool.get(self.allocator, self.io) catch |err| {
+                log.err("unable to get a new buffer from the pool: {any}", .{err});
+                return std.Io.Writer.Error.WriteFailed;
+            };
         }
-
-        return Error.Notfound;
+        return 0;
     }
 };
