@@ -52,7 +52,7 @@ pub const CompilationContext = struct {
     mlir_pass_manager: *mlir.PassManager,
     //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
-    platform: Platform,
+    platform: *const Platform,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
 
@@ -64,7 +64,7 @@ pub const CompilationContext = struct {
         }
     }.call);
 
-    pub fn init(allocator: std.mem.Allocator, platform: Platform) CompilationContext {
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform) CompilationContext {
         mlir_once.call();
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
@@ -175,7 +175,7 @@ pub const CompilationContext = struct {
     //}
 };
 
-pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: Platform) !Exe {
+pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform);
     defer compilation_context.deinit();
 
@@ -425,7 +425,7 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
     //const tracer = Tracer.init("ai.zml.compilation");
     //const compile_frame = tracer.frameStart("pjrt compilation");
     //defer tracer.frameEnd(compile_frame, "pjrt compilation");

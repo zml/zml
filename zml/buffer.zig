@@ -34,7 +34,7 @@ pub const Buffer = struct {
     /// Frees the accelerator memory.
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
-    pub fn deinit(self: *const Buffer) void {
+    pub fn deinit(self: *Buffer) void {
         // log.warn("Unloading {f} {d} bytes", .{ self._shape, self._shape.byteSize() });
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._api);
@@ -51,7 +51,7 @@ pub const Buffer = struct {
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
-    pub fn from(io: std.Io, platform: Platform, shape_: Shape, data_: []const u8, opts: FromOptions) !Buffer {
+    pub fn from(io: std.Io, platform: *const Platform, shape_: Shape, data_: []const u8, opts: FromOptions) !Buffer {
         var res: Buffer = .{
             ._api = platform.pjrt_api,
             ._target = platform.target,
@@ -111,22 +111,22 @@ pub const Buffer = struct {
 
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(io: std.Io, platform: Platform, sh: Shape, data: []const u8) !Buffer {
+    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, data: []const u8) !Buffer {
         return from(io, platform, sh, data, .{});
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: Platform, slice: Slice) !Buffer {
+    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice) !Buffer {
         return fromSliceOpts(io, platform, slice, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: Platform, slice: Slice, opts: FromOptions) !Buffer {
+    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, opts: FromOptions) !Buffer {
         return from(io, platform, slice.shape, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(io: std.Io, platform: Platform, val: anytype, dtype_: DataType) !Buffer {
+    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
         return fromBytes(io, platform, Shape.init(.{}, dtype_), x.asBytes());
     }
@@ -143,7 +143,7 @@ pub const Buffer = struct {
 
     pub const UnitializedOptions = struct { memory: Memory = .device };
 
-    pub fn uninitialized(io: std.Io, platform: Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
+    pub fn uninitialized(io: std.Io, platform: *const Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
         if (opts.memory != .device) {
             // XLA uninitialized doesn't respect memory see https://github.com/openxla/xla/pull/31292
             // TODO: use uninitialized when it works again.
@@ -202,7 +202,7 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: *const Platform, shape_: Shape, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
         var shards: Shards = .{};

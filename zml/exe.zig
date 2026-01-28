@@ -9,7 +9,7 @@ const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
 pub const Exe = struct {
-    platform: Platform,
+    platform: *const Platform,
     exe: *pjrt.LoadedExecutable,
 
     context: ?*pjrt.ExecuteContext = null,
@@ -23,7 +23,7 @@ pub const Exe = struct {
 
     pub fn init(
         allocator: std.mem.Allocator,
-        platform: Platform,
+        platform: *const Platform,
         exe: *pjrt.LoadedExecutable,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
@@ -133,12 +133,12 @@ pub const Exe = struct {
     };
 
     pub const Results = struct {
-        platform: Platform,
+        platform: *const Platform,
         flat_buffers: FlatBuffers,
 
         expected_shapes: []const Shape,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize, platform: Platform) !Results {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize, platform: *const Platform) !Results {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 

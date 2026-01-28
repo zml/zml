@@ -60,10 +60,56 @@ fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*cons
     };
 }
 
+pub const Device = struct {
+    platform: *const Platform,
+    device: *const pjrt.Device,
+    desc: *const pjrt.DeviceDescription,
+
+    fn init(device_: *const pjrt.Device, platform: *const Platform) Device {
+        return .{
+            .platform = platform,
+            .device = device_,
+            .desc = device_.getDescription(platform.pjrt_api),
+        };
+    }
+
+    pub fn id(self: Device) i32 {
+        return self.desc.id(self.platform.pjrt_api);
+    }
+
+    pub fn processIndex(self: Device) i32 {
+        return self.desc.processIndex(self.platform.pjrt_api);
+    }
+
+    pub fn localHardwareId(self: Device) i32 {
+        return self.device.localHardwareId(self.platform.pjrt_api);
+    }
+
+    pub fn kind(self: Device) []const u8 {
+        return self.desc.kind(self.platform.pjrt_api);
+    }
+
+    pub fn debugString(self: Device) []const u8 {
+        return self.desc.debugString(self.platform.pjrt_api);
+    }
+
+    pub fn toString(self: Device) []const u8 {
+        return self.desc.toString(self.platform.pjrt_api);
+    }
+
+    pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.print("{s} ({s})", .{
+            self.desc.kind(self.platform.pjrt_api),
+            self.desc.debugString(self.platform.pjrt_api),
+        });
+    }
+};
+
 pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    _devices: []Device,
 
     // This make the pjrt struct quite fat, but is only used during compilation.
     // TODO: Reconsider having it here, and maybe pass explicitly to compile,
@@ -73,54 +119,33 @@ pub const Platform = struct {
 
     pub const MAX_NUM_DEVICES: u8 = if (platforms.isEnabled(.tpu)) 32 else 8;
 
-    pub const Device = struct {
-        pub const Iterator = struct {
-            api: *const pjrt.Api,
-            devices: []const *const pjrt.Device,
-            current: usize = 0,
-
-            pub fn next(self: *Iterator) ?Device {
-                if (self.current >= self.devices.len) {
-                    return null;
-                }
-                defer self.current += 1;
-                return .{
-                    .api = self.api,
-                    .device = self.devices[self.current],
-                };
-            }
-        };
-
-        api: *const pjrt.Api,
-        device: *const pjrt.Device,
-
-        pub fn format(self: Device, writer: *std.Io.Writer) std.Io.Writer.Error!void {
-            const description = self.device.getDescription(self.api);
-            try writer.print("{s} ({s})", .{ description.kind(self.api), description.debugString(self.api) });
-        }
-    };
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !Platform {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
 
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
-        const true_num_devices = pjrt_client.addressableDevices(api).len;
-        if (true_num_devices > MAX_NUM_DEVICES) {
-            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, true_num_devices, MAX_NUM_DEVICES });
+        const pjrt_devices = pjrt_client.addressableDevices(api);
+        if (pjrt_devices.len > MAX_NUM_DEVICES) {
+            log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
-        const platform: Platform = .{
+        var platform = try allocator.create(Platform);
+        platform.* = .{
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
             .compilation_options = .{},
+            ._devices = try allocator.alloc(Device, pjrt_devices.len),
         };
+
+        for (pjrt_devices, platform._devices) |pjrt_device, *platform_device| {
+            platform_device.* = .init(pjrt_device, platform);
+        }
 
         switch (target) {
             .cuda => {
                 // TODO(Corentin): provide a better allocator
-                zml.attention.flashattn.load(std.heap.c_allocator, io) catch {
+                zml.attention.flashattn.load(allocator, io) catch {
                     log.warn("Failed to load flashattn", .{});
                 };
                 zml.attention.flashattn.register(platform) catch {
@@ -133,7 +158,7 @@ pub const Platform = struct {
         return platform;
     }
 
-    pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !Platform {
+    pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !*Platform {
         const ordered_targets: []const Target = &.{
             .tpu,
             .neuron,
@@ -146,28 +171,23 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
-    pub fn devicesIterator(self: Platform) Device.Iterator {
-        return .{
-            .api = self.pjrt_api,
-            .devices = self.getDevices(),
-        };
+    pub fn devices(self: *const Platform) []const Device {
+        return self._devices;
     }
 
-    pub fn formatWithDevices(self: Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn formatWithDevices(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("Platform: {s}\n", .{@tagName(self.target)});
-        const devices = self.getDevices();
-        try writer.print("Devices total={d}\n", .{devices.len});
-        for (devices, 0..) |device, i| {
-            const description = device.getDescription(self.pjrt_api);
-            try writer.print("\t#{d}: {s}\n", .{ i, description.kind(self.pjrt_api) });
+        try writer.print("Devices total={d}\n", .{devices().len});
+        for (devices(), 0..) |device, i| {
+            try writer.print("\t#{d}: {s}\n", .{ i, device.kind() });
         }
     }
 
-    pub fn fmtVerbose(self: Platform) std.fmt.Alt(Platform, formatWithDevices) {
+    pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithDevices) {
         return .{ .data = self };
     }
 
-    pub fn getDevices(self: Platform) []const *const pjrt.Device {
+    pub fn getDevices(self: *const Platform) []const *const pjrt.Device {
         const all_devices = self.pjrt_client.addressableDevices(self.pjrt_api);
         if (all_devices.len > MAX_NUM_DEVICES) {
             return all_devices[0..MAX_NUM_DEVICES];
@@ -177,7 +197,7 @@ pub const Platform = struct {
 
     pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
 
-    pub fn sharding(self: Platform) Sharding {
+    pub fn sharding(self: *const Platform) Sharding {
         // replicas run the same function but with different inputs,
         // while partitions contribute to one evaluation over a shared input.
         // Inside an inference process, we generally don't want replicas,
@@ -190,17 +210,12 @@ pub const Platform = struct {
             .{ .num_replicas = 1, .num_partitions = 1 };
     }
 
-    pub fn withCompilationOptions(self: Platform, opts: CompilationOptions) Platform {
-        var res = self;
-        res.compilation_options = opts;
-        return res;
-    }
-
-    pub fn deinit(self: *Platform) void {
+    pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
+        allocator.free(self._devices);
         self.pjrt_client.deinit(self.pjrt_api);
     }
 
-    pub fn memoryForDevice(platform: Platform, memory: pjrt.Memory.Kind, device: *const pjrt.Device) *const pjrt.Memory {
+    pub fn memoryForDevice(platform: *const Platform, memory: pjrt.Memory.Kind, device: *const pjrt.Device) *const pjrt.Memory {
         const memory_target: pjrt.Memory.Kind = switch (memory) {
             .host_unpinned => switch (platform.target) {
                 // Cuda doesn't have host_unpinned.
@@ -232,7 +247,7 @@ pub const Platform = struct {
         }
     }
 
-    pub fn memoryStats(platform: Platform, device_id: usize) pjrt.MemoryStats {
+    pub fn memoryStats(platform: *const Platform, device_id: usize) pjrt.MemoryStats {
         if (platform.target == .cpu) return .zeroes;
 
         const device = platform.getDevices()[device_id];
@@ -240,7 +255,7 @@ pub const Platform = struct {
     }
 
     pub fn compile(
-        self: Platform,
+        self: *const Platform,
         allocator: std.mem.Allocator,
         io: std.Io,
         model_: anytype,
@@ -255,21 +270,19 @@ pub const Platform = struct {
         );
     }
 
-    pub fn compileModel(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
+    pub fn compileModel(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args);
     }
 
-    pub fn compileFn(self: Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
+    pub fn compileFn(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
         return zml.module.compile(allocator, io, func, args, self);
     }
 
-    pub fn format(self: @This(), writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {{ ", .{@tagName(self.target)});
-        const devices = self.getDevices();
-        for (0..devices.len) |i| {
-            const description = devices[i].getDescription(self.pjrt_api);
-            try writer.print("{s}(\"{s}\")", .{ description.toString(self.pjrt_api), description.kind(self.pjrt_api) });
-            if (i < devices.len - 1) try writer.writeAll(", ");
+        for (self.devices(), 0..) |device, i| {
+            try writer.print("{s}(\"{s}\")", .{ device.toString(), device.kind() });
+            if (i < devices().len - 1) try writer.writeAll(", ");
         }
         try writer.writeAll(" }");
     }
