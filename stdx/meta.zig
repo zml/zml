@@ -123,33 +123,19 @@ pub fn asSlice(comptime T: type) type {
 }
 
 pub fn TupleRange(comptime T: type, comptime start: ?usize, comptime end: ?usize) type {
-    return TupleRangeX(T, start orelse 0, end orelse std.meta.fields(T).len);
-}
-
-pub fn TupleRangeX(comptime T: type, comptime start: usize, comptime end: usize) type {
     const fields = std.meta.fields(T);
+    const start_ = start orelse 0;
+    const end_ = end orelse fields.len;
 
-    var field_names: [end - start][]const u8 = undefined;
-    var field_types: [end - start]type = undefined;
-    var field_attrs: [end - start]std.builtin.Type.StructField.Attributes = undefined;
-
-    inline for (start..end, 0..) |i, j| {
-        var new_field = fields[i];
-        var num_buf: [32]u8 = undefined;
-        new_field.name = blk: {
-            const s = std.fmt.formatIntBuf(&num_buf, j, 10, .lower, .{});
-            num_buf[s] = 0;
-            break :blk num_buf[0..s :0];
-        };
-        field_names[j] = new_field.name;
-        field_types[j] = new_field.type;
-        field_attrs[j] = .{
-            .@"comptime" = new_field.is_comptime,
-            .@"align" = new_field.alignment,
-            .default_value_ptr = new_field.default_value_ptr,
-        };
+    if (start_ == end_) {
+        return @Tuple(&.{});
     }
-    return @Struct(.auto, null, &field_names, &field_types, &field_attrs);
+
+    var field_types: [end_ - start_]type = undefined;
+    inline for (start_..end_, 0..) |i, j| {
+        field_types[j] = fields[i].type;
+    }
+    return @Tuple(&field_types);
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
