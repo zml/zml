@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "grouped_gemm_LT",
+    import_name = "platforms/cuda/grouped_gemm_LT",
+    main = "grouped_gemm_LT.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "@rules_zig//zig/runfiles",
+        "//stdx",
+    ],
+)
