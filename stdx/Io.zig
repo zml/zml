@@ -22,50 +22,63 @@ pub const Dir = struct {
     }
 };
 
-pub fn LimitedConcurrentGroup(comptime limit: usize) type {
-    return struct {
-        const Self = @This();
+pub const LimitedGroup = struct {
+    limit: usize,
+    in_flight: std.atomic.Value(usize) = .init(0),
+    group: std.Io.Group = .init,
+    cond: std.Io.Condition = .init,
+    mutex: std.Io.Mutex = .init,
 
-        queue_buffer: [limit]bool = undefined,
+    fn Wrapper(comptime function: anytype) type {
+        return struct {
+            fn wrapper(self: *LimitedGroup, io: std.Io, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.Cancelable!void {
+                while (true) {
+                    var in_flight = self.in_flight.load(.acquire);
+                    while (in_flight < self.limit) {
+                        if (self.in_flight.cmpxchgWeak(in_flight, in_flight + 1, .release, .acquire)) |actual| {
+                            in_flight = actual;
+                            continue;
+                        }
 
-        group: std.Io.Group = .init,
-        queue: std.Io.Queue(bool) = undefined,
+                        defer {
+                            self.mutex.lockUncancelable(io);
+                            defer self.mutex.unlock(io);
+                            _ = self.in_flight.fetchSub(1, .release);
+                            self.cond.signal(io);
+                        }
+                        return @call(.auto, function, args);
+                    }
 
-        pub fn init() Self {
-            var s: Self = .{};
-            s.queue = std.Io.Queue(bool).init(&s.queue_buffer);
-            return s;
-        }
-
-        pub fn concurrent(
-            self: *Self,
-            io: std.Io,
-            comptime function: anytype,
-            args: std.meta.ArgsTuple(@TypeOf(function)),
-        ) !void {
-            self.queue.putOneUncancelable(io, true) catch unreachable;
-
-            try self.group.concurrent(io, struct {
-                fn wrapper(
-                    io_: std.Io,
-                    queue: *std.Io.Queue(bool),
-                    inner_args: std.meta.ArgsTuple(@TypeOf(function)),
-                ) !void {
-                    defer _ = queue.getOneUncancelable(io_) catch unreachable;
-                    return @call(.auto, function, inner_args);
+                    try self.mutex.lock(io);
+                    defer self.mutex.unlock(io);
+                    while (self.in_flight.load(.acquire) >= self.limit) {
+                        try self.cond.wait(io, &self.mutex);
+                    }
                 }
-            }.wrapper, .{ io, &self.queue, args });
-        }
+            }
+        };
+    }
 
-        pub fn await(self: *AllocatingLimitedConcurrentGroup, io: std.Io) std.Io.Cancelable!void {
-            try self.group.await(io);
-        }
+    pub fn init(limit: usize) LimitedGroup {
+        return .{ .limit = limit };
+    }
 
-        pub fn cancel(self: *Self, io: std.Io) void {
-            self.group.cancel(io);
-        }
-    };
-}
+    pub fn async(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) void {
+        self.group.async(io, Wrapper(function).wrapper, .{ self, io, args });
+    }
+
+    pub fn concurrent(self: *LimitedGroup, io: std.Io, comptime function: anytype, args: std.meta.ArgsTuple(@TypeOf(function))) std.Io.ConcurrentError!void {
+        try self.group.concurrent(io, Wrapper(function).wrapper, .{ self, io, args });
+    }
+
+    pub fn await(self: *LimitedGroup, io: std.Io) std.Io.Cancelable!void {
+        try self.group.await(io);
+    }
+
+    pub fn cancel(self: *LimitedGroup, io: std.Io) void {
+        self.group.cancel(io);
+    }
+};
 
 pub const AllocatingLimitedConcurrentGroup = struct {
     allocator: std.mem.Allocator,
