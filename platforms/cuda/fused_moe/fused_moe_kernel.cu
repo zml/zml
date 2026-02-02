@@ -1,7 +1,6 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
-// #include <cuda_atomic.h>
 
 // Helper to convert mxfp4 to bf16
 // MXFP4 format: TODO - Please specify the exact format (bit layout, exponent/mantissa bits)
@@ -182,10 +181,6 @@ __global__ void fused_moe_expert_kernel(
     const int out_feature = blockIdx.y * blockDim.y + threadIdx.y;
 
     if (token_local_idx >= num_tokens || out_feature >= hidden_dim) return;
-
-    const int original_token_idx = sorted_token_indices[start_token + token_local_idx];
-    const int restore_idx = restore_indices[original_token_idx];
-    const float score = routing_scores[original_token_idx];
 
     const int original_token_idx = sorted_token_indices[start_token + token_local_idx];
     const int restore_idx = restore_indices[original_token_idx];
