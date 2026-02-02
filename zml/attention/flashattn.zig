@@ -263,9 +263,13 @@ pub const fa2 = struct {
         };
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
-        var q = q_.insertAxes(.q, .{.b}).merge(.{ .tot = .{ .b, .q } });
-        const k = k_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
-        const v = v_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
+        var q, const k, const v = if (q_.shape().hasTag(.b) != null) b: {
+            break :b [_]zml.Tensor{
+                q_.merge(.{ .tot = .{ .b, .q } }), k_.merge(.{ .tot = .{ .b, .k } }), v_.merge(.{ .tot = .{ .b, .k } }),
+            };
+        } else b: {
+            break :b [_]zml.Tensor{ q_.rename(.{ .q = .tot }), k_.rename(.{ .k = .tot }), v_.rename(.{ .k = .tot }) };
+        };
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }));
 
