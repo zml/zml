@@ -3,23 +3,38 @@
 #include <cuda_bf16.h>
 #include <cuda_atomic.h>
 
-// Helper to convert f4e2m1 (nvfp4) to bf16
-// f4e2m1 format: 1 sign bit, 2 exponent bits, 1 mantissa bit
-// Values: 0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, and negatives
-__device__ __forceinline__ __nv_bfloat16 dequantize_f4e2m1_to_bf16(uint8_t quantized, uint8_t scale_f8e8m0) {
-    // Lookup table for f4e2m1 values (16 possible values)
-    constexpr float f4e2m1_values[16] = {
-        0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-        -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f
-    };
-    
+// Helper to convert mxfp4 to bf16
+// MXFP4 format: TODO - Please specify the exact format (bit layout, exponent/mantissa bits)
+// For now, using a placeholder that needs to be updated with the correct mxfp4 dequantization
+__device__ __forceinline__ __nv_bfloat16 dequantize_mxfp4_to_bf16(uint8_t quantized, uint8_t scale_f8e8m0) {
     // Convert f8e8m0 scale to float
     // f8e8m0: 8 exponent bits, 0 mantissa bits (just exponent)
     float scale = __exp2f((float)((int)scale_f8e8m0 - 127));
     
-    // Extract f4e2m1 value (low 4 bits)
+    // TODO: Replace this with the correct mxfp4 dequantization
+    // MXFP4 dequantization formula needs to be provided
+    // Example placeholder (this is WRONG and needs to be replaced):
+    // Extract 4-bit value
     uint8_t f4_val = quantized & 0x0F;
-    float dequantized = f4e2m1_values[f4_val] * scale;
+    
+    // TODO: Implement proper mxfp4 decoding
+    // MXFP4 typically has a different bit layout than f4e2m1
+    // Common formats:
+    // - f4e3m0: 1 sign, 3 exponent, 0 mantissa
+    // - Or another 4-bit format
+    
+    // Placeholder: assuming similar to f4e2m1 but needs correction
+    // This is a TEMPORARY implementation - MUST be replaced with correct mxfp4 formula
+    float dequantized = 0.0f;
+    
+    // Extract sign bit (assuming MSB)
+    int sign = (f4_val >> 3) & 1;
+    int exp = (f4_val >> 0) & 7;  // Placeholder - adjust based on actual mxfp4 format
+    int mantissa = 0;  // Placeholder - adjust based on actual mxfp4 format
+    
+    // TODO: Implement correct mxfp4 reconstruction
+    // For now, using a simple placeholder that needs the actual formula
+    dequantized = (sign ? -1.0f : 1.0f) * __exp2f((float)(exp - 3)) * scale;
     
     return __float2bfloat16(dequantized);
 }
@@ -195,7 +210,7 @@ __global__ void fused_moe_expert_kernel(
             const int gate_scale_idx = gate_idx;
             uint8_t gate_quantized = gate_up_blocks[gate_weight_block];
             uint8_t gate_scale = gate_up_scales[gate_scale_idx];
-            __nv_bfloat16 gate_weight = dequantize_f4e2m1_to_bf16(gate_quantized, gate_scale);
+            __nv_bfloat16 gate_weight = dequantize_mxfp4_to_bf16(gate_quantized, gate_scale);
             
             // Up weight at position 2*feat+1
             const int up_idx = expert_id * ffn_dim * 2 * hidden_dim + (feat * 2 + 1) * hidden_dim + in_feat;
@@ -203,7 +218,7 @@ __global__ void fused_moe_expert_kernel(
             const int up_scale_idx = up_idx;
             uint8_t up_quantized = gate_up_blocks[up_weight_block];
             uint8_t up_scale = gate_up_scales[up_scale_idx];
-            __nv_bfloat16 up_weight = dequantize_f4e2m1_to_bf16(up_quantized, up_scale);
+            __nv_bfloat16 up_weight = dequantize_mxfp4_to_bf16(up_quantized, up_scale);
             
             float input_val = __bfloat162float(input[original_token_idx * hidden_dim + in_feat]);
             gate_acc += input_val * __bfloat162float(gate_weight);
@@ -250,7 +265,7 @@ __global__ void fused_moe_expert_kernel(
             const int down_scale_idx = expert_id * hidden_dim * ffn_dim + out_feature * ffn_dim + in_feat;
             uint8_t down_quantized = down_blocks[down_weight_block];
             uint8_t down_scale = down_scales[down_scale_idx];
-            __nv_bfloat16 down_weight = dequantize_f4e2m1_to_bf16(down_quantized, down_scale);
+            __nv_bfloat16 down_weight = dequantize_mxfp4_to_bf16(down_quantized, down_scale);
             
             down_acc += __bfloat162float(gate_up_results[in_feat]) * __bfloat162float(down_weight);
         }
@@ -292,10 +307,10 @@ extern "C" int fused_moe_kernel_launch(
     void* stream,
     // Inputs (all on device)
     const void* input,                    // [seq_len, hidden_dim] bf16
-    const void* gate_up_blocks,           // [num_experts, ffn_dim*2, hidden_dim] quantized f4e2m1
+    const void* gate_up_blocks,           // [num_experts, ffn_dim*2, hidden_dim] quantized mxfp4
     const void* gate_up_scales,           // [num_experts, ffn_dim*2, hidden_dim] f8e8m0
     const void* gate_up_bias,            // [num_experts, ffn_dim*2] bf16 or nullptr
-    const void* down_blocks,              // [num_experts, hidden_dim, ffn_dim] quantized f4e2m1
+    const void* down_blocks,              // [num_experts, hidden_dim, ffn_dim] quantized mxfp4
     const void* down_scales,              // [num_experts, hidden_dim, ffn_dim] f8e8m0
     const void* down_bias,                // [num_experts, hidden_dim] bf16 or nullptr
     const int* expert_indices,            // [seq_len, top_k] - expert IDs
