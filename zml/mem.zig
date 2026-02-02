@@ -345,7 +345,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
             switch (model) {
                 inline else => |v, tag| {
                     bufferized_.* = @unionInit(ModelBufferized, @tagName(tag), undefined);
-                    try bufferizeInner(allocator, v, @field(bufferized_, @tagName(tag)));
+                    try bufferizeInner(allocator, v, &@field(bufferized_, @tagName(tag)));
                 },
             }
         },
