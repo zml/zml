@@ -1,7 +1,7 @@
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>
 #include <cuda_bf16.h>
-#include <cuda_atomic.h>
+// #include <cuda_atomic.h>
 
 // Helper to convert mxfp4 to bf16
 // MXFP4 format: TODO - Please specify the exact format (bit layout, exponent/mantissa bits)
@@ -10,32 +10,32 @@ __device__ __forceinline__ __nv_bfloat16 dequantize_mxfp4_to_bf16(uint8_t quanti
     // Convert f8e8m0 scale to float
     // f8e8m0: 8 exponent bits, 0 mantissa bits (just exponent)
     float scale = __exp2f((float)((int)scale_f8e8m0 - 127));
-    
+
     // TODO: Replace this with the correct mxfp4 dequantization
     // MXFP4 dequantization formula needs to be provided
     // Example placeholder (this is WRONG and needs to be replaced):
     // Extract 4-bit value
     uint8_t f4_val = quantized & 0x0F;
-    
+
     // TODO: Implement proper mxfp4 decoding
     // MXFP4 typically has a different bit layout than f4e2m1
     // Common formats:
     // - f4e3m0: 1 sign, 3 exponent, 0 mantissa
     // - Or another 4-bit format
-    
+
     // Placeholder: assuming similar to f4e2m1 but needs correction
     // This is a TEMPORARY implementation - MUST be replaced with correct mxfp4 formula
     float dequantized = 0.0f;
-    
+
     // Extract sign bit (assuming MSB)
     int sign = (f4_val >> 3) & 1;
     int exp = (f4_val >> 0) & 7;  // Placeholder - adjust based on actual mxfp4 format
     int mantissa = 0;  // Placeholder - adjust based on actual mxfp4 format
-    
+
     // TODO: Implement correct mxfp4 reconstruction
     // For now, using a simple placeholder that needs the actual formula
     dequantized = (sign ? -1.0f : 1.0f) * __exp2f((float)(exp - 3)) * scale;
-    
+
     return __float2bfloat16(dequantized);
 }
 
@@ -60,13 +60,13 @@ __global__ void extract_topk_and_compute_restore_kernel(
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= seq_len) return;
-    
+
     if (token_mask && token_mask[idx] == 0) {
         expert_indices_1d[idx] = -1;  // Invalid token
         routing_scores_1d[idx] = 0.0f;
         return;
     }
-    
+
     expert_indices_1d[idx] = expert_indices_2d[idx * top_k + k_rank];
     routing_scores_1d[idx] = routing_scores_2d[idx * top_k + k_rank];
     restore_indices[idx] = idx;  // Will be updated by sort kernel
@@ -85,16 +85,16 @@ __global__ void sort_tokens_by_expert_kernel(
     // Use shared memory for counting
     extern __shared__ int shared_counts[];
     int* expert_counts = shared_counts;
-    
+
     const int tid = threadIdx.x;
     const int num_threads = blockDim.x;
-    
+
     // Initialize counts
     if (tid < num_experts) {
         expert_counts[tid] = 0;
     }
     __syncthreads();
-    
+
     // Count tokens per expert (only valid tokens)
     for (int i = tid; i < seq_len; i += num_threads) {
         if (token_mask && token_mask[i] == 0) continue;
@@ -104,7 +104,7 @@ __global__ void sort_tokens_by_expert_kernel(
         }
     }
     __syncthreads();
-    
+
     // Compute cumulative offsets
     if (tid == 0) {
         expert_offsets[0] = 0;
@@ -113,13 +113,13 @@ __global__ void sort_tokens_by_expert_kernel(
         }
     }
     __syncthreads();
-    
+
     // Reset counts for second pass
     if (tid < num_experts) {
         expert_counts[tid] = 0;
     }
     __syncthreads();
-    
+
     // Scatter tokens to sorted positions
     for (int i = tid; i < seq_len; i += num_threads) {
         if (token_mask && token_mask[i] == 0) continue;
@@ -139,7 +139,7 @@ __global__ void compute_restore_indices_kernel(
 ) {
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= seq_len) return;
-    
+
     int original_token = sorted_token_indices[idx];
     restore_indices[original_token] = idx;
 }
@@ -159,10 +159,10 @@ __global__ void fused_moe_expert_kernel(
     const int* __restrict__ expert_offsets,               // [num_experts + 1] - cumulative offsets
     const int* __restrict__ restore_indices,             // [seq_len] - restore original order
     const float* __restrict__ routing_scores,              // [seq_len] - routing scores for original tokens
-    
+
     // Outputs (accumulated)
     __nv_bfloat16* __restrict__ output,                   // [seq_len, hidden_dim]
-    
+
     // Parameters
     int seq_len,
     int num_experts,
@@ -174,35 +174,35 @@ __global__ void fused_moe_expert_kernel(
     const int start_token = expert_offsets[expert_id];
     const int end_token = expert_offsets[expert_id + 1];
     const int num_tokens = end_token - start_token;
-    
+
     if (num_tokens == 0) return;
-    
+
     // Each thread block processes one token
     const int token_local_idx = blockIdx.x * blockDim.x + threadIdx.x;
     const int out_feature = blockIdx.y * blockDim.y + threadIdx.y;
-    
+
     if (token_local_idx >= num_tokens || out_feature >= hidden_dim) return;
-    
+
     const int original_token_idx = sorted_token_indices[start_token + token_local_idx];
     const int restore_idx = restore_indices[original_token_idx];
     const float score = routing_scores[original_token_idx];
-    
+
     const int original_token_idx = sorted_token_indices[start_token + token_local_idx];
     const int restore_idx = restore_indices[original_token_idx];
     const float score = routing_scores[original_token_idx];
-    
+
     // Use shared memory to store gate-up results for this token
     extern __shared__ __nv_bfloat16 shared_gate_up[];
     __nv_bfloat16* gate_up_results = shared_gate_up;  // [ffn_dim] per token
-    
+
     // Step 1: Gate-Up projection for this token
     // Each thread processes one ffn_dim feature (with gate and up interleaved)
     const int feat = threadIdx.y;
-    
+
     if (feat < ffn_dim) {
         float gate_acc = 0.0f;
         float up_acc = 0.0f;
-        
+
         for (int in_feat = threadIdx.x; in_feat < hidden_dim; in_feat += blockDim.x) {
             // Gate weight at position 2*feat (interleaved format)
             const int gate_idx = expert_id * ffn_dim * 2 * hidden_dim + (feat * 2) * hidden_dim + in_feat;
@@ -211,7 +211,7 @@ __global__ void fused_moe_expert_kernel(
             uint8_t gate_quantized = gate_up_blocks[gate_weight_block];
             uint8_t gate_scale = gate_up_scales[gate_scale_idx];
             __nv_bfloat16 gate_weight = dequantize_mxfp4_to_bf16(gate_quantized, gate_scale);
-            
+
             // Up weight at position 2*feat+1
             const int up_idx = expert_id * ffn_dim * 2 * hidden_dim + (feat * 2 + 1) * hidden_dim + in_feat;
             const int up_weight_block = up_idx / block_size;
@@ -219,77 +219,77 @@ __global__ void fused_moe_expert_kernel(
             uint8_t up_quantized = gate_up_blocks[up_weight_block];
             uint8_t up_scale = gate_up_scales[up_scale_idx];
             __nv_bfloat16 up_weight = dequantize_mxfp4_to_bf16(up_quantized, up_scale);
-            
+
             float input_val = __bfloat162float(input[original_token_idx * hidden_dim + in_feat]);
             gate_acc += input_val * __bfloat162float(gate_weight);
             up_acc += input_val * __bfloat162float(up_weight);
         }
-        
+
         // Reduce across threads in x dimension
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             gate_acc += __shfl_down_sync(0xFFFFFFFF, gate_acc, offset);
             up_acc += __shfl_down_sync(0xFFFFFFFF, up_acc, offset);
         }
-        
+
         if (threadIdx.x == 0) {
             // Add bias (also interleaved)
             if (gate_up_bias) {
                 gate_acc += __bfloat162float(gate_up_bias[expert_id * ffn_dim * 2 + feat * 2]);
                 up_acc += __bfloat162float(gate_up_bias[expert_id * ffn_dim * 2 + feat * 2 + 1]);
             }
-            
+
             // Clamp
             gate_acc = fminf(gate_acc, 7.0f);
             up_acc = fmaxf(fminf(up_acc, 7.0f), -7.0f);
-            
+
             // Apply QuickGELU and multiply
             __nv_bfloat16 gate = __float2bfloat16(gate_acc);
             __nv_bfloat16 up = __float2bfloat16(up_acc);
             __nv_bfloat16 activated = quick_gelu(gate);
             activated = __float2bfloat16(__bfloat162float(activated) * (__bfloat162float(up) + 1.0f));
-            
+
             // Store in shared memory
             gate_up_results[feat] = activated;
         }
     }
     __syncthreads();
-    
+
     // Step 2: Down projection
     // Each thread processes one output feature
     if (out_feature < hidden_dim) {
         float down_acc = 0.0f;
-        
+
         for (int in_feat = threadIdx.x; in_feat < ffn_dim; in_feat += blockDim.x) {
             const int down_weight_block = (expert_id * hidden_dim * ffn_dim + out_feature * ffn_dim + in_feat) / block_size;
             const int down_scale_idx = expert_id * hidden_dim * ffn_dim + out_feature * ffn_dim + in_feat;
             uint8_t down_quantized = down_blocks[down_weight_block];
             uint8_t down_scale = down_scales[down_scale_idx];
             __nv_bfloat16 down_weight = dequantize_mxfp4_to_bf16(down_quantized, down_scale);
-            
+
             down_acc += __bfloat162float(gate_up_results[in_feat]) * __bfloat162float(down_weight);
         }
-        
+
         // Reduce across threads
         #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2) {
             down_acc += __shfl_down_sync(0xFFFFFFFF, down_acc, offset);
         }
-        
+
         if (threadIdx.x == 0) {
             if (down_bias) {
                 down_acc += __bfloat162float(down_bias[expert_id * hidden_dim + out_feature]);
             }
-            
+
             // Multiply by routing score and accumulate to output
             down_acc *= score;
             __nv_bfloat16 result = __float2bfloat16(down_acc);
-            
+
             // Atomic add to output (multiple experts can contribute to same token)
             // Use atomicAdd on unsigned short (bf16 is 16 bits)
             unsigned short* output_ushort = (unsigned short*)&output[restore_idx * hidden_dim + out_feature];
             unsigned short result_ushort = __bfloat162ushort(result);
-            
+
             // Atomic add using compare-and-swap loop for bf16
             unsigned short old_val, new_val;
             do {
@@ -327,26 +327,26 @@ extern "C" int fused_moe_kernel_launch(
 ) {
     cudaStream_t cuda_stream = (cudaStream_t)stream;
     cudaError_t err;
-    
+
     // Workspace layout (all on device):
     // - sorted_token_indices: [seq_len] * top_k
     // - expert_offsets: [num_experts + 1] * top_k
     // - restore_indices: [seq_len] * top_k
     // - expert_indices_1d: [seq_len]
     // - routing_scores_1d: [seq_len]
-    
+
     int* sorted_token_indices_base = (int*)workspace;
     int* expert_offsets_base = sorted_token_indices_base + seq_len * top_k;
     int* restore_indices_base = expert_offsets_base + (num_experts + 1) * top_k;
     int* expert_indices_1d = restore_indices_base + seq_len * top_k;
     float* routing_scores_1d = (float*)(expert_indices_1d + seq_len);
-    
+
     // Process each top-k rank
     for (int k = 0; k < top_k; k++) {
         int* sorted_token_indices = sorted_token_indices_base + k * seq_len;
         int* expert_offsets = expert_offsets_base + k * (num_experts + 1);
         int* restore_indices = restore_indices_base + k * seq_len;
-        
+
         // Step 1: Extract k-th column from expert_indices and routing_scores
         dim3 extract_grid((seq_len + 255) / 256);
         dim3 extract_block(256);
@@ -361,7 +361,7 @@ extern "C" int fused_moe_kernel_launch(
             top_k,
             k
         );
-        
+
         // Step 2: Sort tokens by expert
         dim3 sort_grid(1);
         dim3 sort_block(256);
@@ -374,7 +374,7 @@ extern "C" int fused_moe_kernel_launch(
             seq_len,
             num_experts
         );
-        
+
         // Step 3: Compute restore indices (inverse permutation)
         dim3 restore_grid((seq_len + 255) / 256);
         dim3 restore_block(256);
@@ -383,19 +383,19 @@ extern "C" int fused_moe_kernel_launch(
             restore_indices,
             seq_len
         );
-        
+
         // Step 4: Process each expert
         // Grid: (max_tokens_per_expert, hidden_dim/32)
         // Block: (32, 32) - 32 threads for input features, 32 for output features
         dim3 moe_block(32, 32);
         size_t moe_shared = ffn_dim * sizeof(__nv_bfloat16);  // For gate_up results per token
-        
+
         for (int expert_id = 0; expert_id < num_experts; expert_id++) {
             int num_tokens_expert = expert_offsets[expert_id + 1] - expert_offsets[expert_id];
             if (num_tokens_expert == 0) continue;
-            
+
             dim3 moe_grid((num_tokens_expert + 31) / 32, (hidden_dim + 31) / 32);
-            
+
             fused_moe_expert_kernel<<<moe_grid, moe_block, moe_shared, cuda_stream>>>(
                 (const __nv_bfloat16*)input,
                 (const uint8_t*)gate_up_blocks,
@@ -418,7 +418,7 @@ extern "C" int fused_moe_kernel_launch(
             );
         }
     }
-    
+
     err = cudaGetLastError();
     return (err == cudaSuccess) ? 0 : (int)err;
 }
