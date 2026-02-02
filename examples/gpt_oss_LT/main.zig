@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 const cublas_lt = zml.grouped_gemm_LT;
+const fused_moe = zml.fused_moe;
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
@@ -119,6 +120,8 @@ pub fn main() !void {
 
     try GemmGroupedBatched.register(platform);
     try cublas_lt.load(allocator, io);
+    try fused_moe.load(allocator, io);
+    try fused_moe.register(platform);
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
