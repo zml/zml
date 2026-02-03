@@ -86,7 +86,7 @@ pub const Buffer = struct {
                 .buffer_type = buffer_type,
                 .dims = shape_.dims(),
                 .byte_strides = byte_strides.slice(),
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = .ImmutableOnlyDuringCall,
                 .dst = .{ .memory = devices[i].memory(opts.memory).pjrt_memory },
             };
 
@@ -96,9 +96,10 @@ pub const Buffer = struct {
             res._shards.appendAssumeCapacity(pjrt_buffer);
         }
 
-        if (opts.wait) {
-            try res.await(io);
-        }
+        _ = io;
+        // if (opts.wait) {
+        //     try res.await(io);
+        // }
 
         return res;
     }
@@ -136,7 +137,12 @@ pub const Buffer = struct {
     pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
 
     pub fn uninitialized(io: std.Io, platform: *const Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
-        _ = io; // autofix
+        if (platform.target == .metal) {
+        const slice: Slice = try .alloc(std.heap.c_allocator, shape_);
+        defer slice.free(std.heap.c_allocator);
+
+        return .fromSliceOpts(io, platform, slice, .{});
+        }
         var res: Buffer = .{
             .platform = platform,
             ._shape = shape_,
@@ -212,8 +218,12 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self.platform.pjrt_api, slice.data());
+        _ = io;
         if (maybe_event) |event| {
-            try event.await(self.platform.pjrt_api, io);
+            event.deinit(self.platform.pjrt_api);
+            // std.log.info("Waiting for toSlice event", .{}); 
+            // try event.await(self.platform.pjrt_api, io);
+            // std.log.info("Waited for toSlice event", .{}); 
         }
     }
 

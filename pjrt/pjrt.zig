@@ -234,23 +234,24 @@ pub const Api = struct {
         };
     }
 
-    pub fn stablehloCurrentVersion(self: *const Api) ?[]const u8 {
-        const state = struct {
-            var buf: [32]u8 = undefined;
-            var str: ?[:0]const u8 = null;
-        };
-        if (state.str) |str| {
-            return str;
-        }
-        if (self.getPluginAttribute("stablehlo_current_version")) |nv| {
-            switch (nv.value()) {
-                .int64list => |v| {
-                    state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
-                },
-                else => unreachable,
-            }
-        }
-        return state.str;
+    pub fn stablehloCurrentVersion(_: *const Api) ?[]const u8 {
+        return "1.13.0";
+        // const state = struct {
+        //     var buf: [32]u8 = undefined;
+        //     var str: ?[:0]const u8 = null;
+        // };
+        // if (state.str) |str| {
+        //     return str;
+        // }
+        // if (self.getPluginAttribute("stablehlo_current_version")) |nv| {
+        //     switch (nv.value()) {
+        //         .int64list => |v| {
+        //             state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
+        //         },
+        //         else => unreachable,
+        //     }
+        // }
+        // return state.str;
     }
 
     pub fn createExecuteContext(api: *const Api) ApiError!*ExecuteContext {
@@ -1149,6 +1150,9 @@ pub const Event = opaque {
     }
 
     pub fn await(self: *Event, api: *const Api, io: std.Io) ApiError!void {
+        if (true) {
+            return;
+        }
         if (self.isReady(api)) {
             return;
         }

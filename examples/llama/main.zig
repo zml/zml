@@ -460,6 +460,8 @@ pub fn generateText(
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
 
+std.log.info("prompt tok len: {}", .{prompt_tok.len});
+std.log.info("prompt len: {}", .{prompt.len});
     {
         var prefill_args = try prefill_exe.args(allocator);
         defer prefill_args.deinit(allocator);
@@ -479,13 +481,16 @@ pub fn generateText(
 
         prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
 
+std.log.info("Before", .{});
         prefill_exe.call(prefill_args, &prefill_results);
+std.log.info("After", .{});
 
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
         try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
+std.log.info("After event", .{});
         generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
     }
-
+    std.log.info("Prefill generated: {d}", .{generated_token_slice.items(u32)[0]});
     // Prepare for token-by-token generation,
 
     var decode_args = try decode_exe.args(allocator);
@@ -508,6 +513,7 @@ pub fn generateText(
         // collect and print generated sequence
         num_tokens_generated += 1;
         const generated_token = generated_token_slice.items(u32)[0];
+        std.log.info("Decode generated: {d}", .{generated_token_slice.items(u32)[0]});
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try writer.writeAll(chunk);
             try writer.flush();
