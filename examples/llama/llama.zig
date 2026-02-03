@@ -10,8 +10,8 @@ const stdx = zml.stdx;
 const log = std.log.scoped(.llama);
 
 pub const TransferCtx = struct {
-    read_pool: *zml.io.ConcurrentBufferPool,
-    write_pool: *zml.io.ConcurrentBufferPool,
+    allocator: std.mem.Allocator,
+    pool: *zml.mem.DynamicBufferPool,
     transferred_bytes: *usize,
     progress: *std.Progress.Node,
 };
@@ -68,24 +68,33 @@ pub const LlamaLM = struct {
         self.model.deinit(allocator);
     }
 
-    pub fn loadBuffers(
+    pub fn load(
         self: *const LlamaLM,
-        bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
-        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
-        store: zml.io.TensorStore.View,
-        cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
     ) !zml.Bufferized(LlamaLM) {
-        var lm_head_bufferized: ?zml.Bufferized(zml.nn.Linear) = null;
-        if (self.lm_head) |_| {
-            const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.lm_head, &lm_head_bufferized, store.withPrefix("lm_head"));
-            for (transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+        progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
         }
-
-        const model_bufferized = try self.model.loadBuffers(bufferize_ctx, group, store.withPrefix("model"), cb);
-        return .{
-            .lm_head = lm_head_bufferized,
-            .model = model_bufferized,
-        };
+        return zml.io.load(LlamaLM, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(LlamaLM), allocator: std.mem.Allocator) void {
@@ -174,7 +183,7 @@ pub const Llama = struct {
     pub fn loadBuffers(
         self: *const Llama,
         bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
-        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+        group: *stdx.Io.LimitedGroup,
         store: zml.io.TensorStore.View,
         cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
     ) !zml.Bufferized(Llama) {
@@ -183,14 +192,20 @@ pub const Llama = struct {
         var bufferized: zml.Bufferized(Llama) = .{ .embed_tokens = undefined, .norm = undefined, .layers = bufferized_layers };
 
         const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.embed_tokens, &bufferized.embed_tokens, store.withPrefix("embed_tokens"));
-        for (transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+        for (transfers) |t| {
+            try group.concurrent(bufferize_ctx.io, cb, .{t});
+        }
 
         const norm_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.norm, &bufferized.norm, store.withPrefix("norm"));
-        for (norm_transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+        for (norm_transfers) |t| {
+            try group.concurrent(bufferize_ctx.io, cb, .{t});
+        }
 
         for (self.layers, bufferized_layers, 0..) |layer, *buf_layer, i| {
             const layer_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &layer, buf_layer, store.withPrefix("layers").withLayer(i));
-            for (layer_transfers) |t| try group.concurrent(bufferize_ctx.io, cb, .{t});
+            for (layer_transfers) |t| {
+                try group.concurrent(bufferize_ctx.io, cb, .{t});
+            }
         }
 
         return bufferized;
@@ -449,7 +464,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
             .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),

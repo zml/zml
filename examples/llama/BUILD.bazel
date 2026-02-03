@@ -12,6 +12,15 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "loader",
+    srcs = ["llama.zig"],
+    main = "main2.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+
 mtree_spec(
     name = "mtree",
     srcs = [":llama"],

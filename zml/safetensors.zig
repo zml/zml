@@ -69,6 +69,7 @@ pub const TensorReader = struct {
     remaining: u64,
     io: std.Io,
     interface: std.Io.Reader,
+    tensor: Tensor,
 
     pub const Error = error{TensorNotFound} || std.Io.File.OpenError || std.Io.File.Reader.SeekError || std.mem.Allocator.Error;
 
@@ -87,6 +88,7 @@ pub const TensorReader = struct {
             .file = file,
             .file_reader = file_reader,
             .remaining = tensor.byteSize(),
+            .tensor = tensor,
             .io = io,
             .interface = .{
                 .vtable = &.{
@@ -106,7 +108,9 @@ pub const TensorReader = struct {
 
     fn stream(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
         const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) return error.EndOfStream;
+        if (self.remaining == 0) {
+            return error.EndOfStream;
+        }
 
         const combined_limit = limit.min(.limited64(self.remaining));
         const n = try self.file_reader.interface.stream(w, combined_limit);
@@ -116,7 +120,10 @@ pub const TensorReader = struct {
 
     fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const self: *TensorReader = @fieldParentPtr("interface", r);
-        if (self.remaining == 0) return error.EndOfStream;
+        if (self.remaining == 0) {
+            std.log.info("EOS2 !", .{});
+            return error.EndOfStream;
+        }
 
         const combined_limit = limit.min(.limited64(self.remaining));
         const n = try self.file_reader.interface.discard(combined_limit);

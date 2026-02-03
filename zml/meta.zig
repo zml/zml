@@ -791,3 +791,20 @@ pub fn Contains(Haystack: type, T: type) bool {
         else => false,
     };
 }
+
+pub fn forEachVisit(v: anytype, comptime T: type, f: anytype, args: stdx.meta.TupleRange(std.meta.ArgsTuple(@TypeOf(f)), 2, null)) void {
+    const Ctx = struct {
+        i: usize,
+        args_: @TypeOf(args),
+    };
+    var ctx: Ctx = .{
+        .i = 0,
+        .args_ = args,
+    };
+    visit(struct {
+        fn cb(ctx_: *Ctx, elem: T) void {
+            @call(.auto, f, .{ ctx_.i, elem } ++ ctx_.args_);
+            ctx_.i += 1;
+        }
+    }.cb, &ctx, v);
+}

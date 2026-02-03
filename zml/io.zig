@@ -7,6 +7,7 @@ pub const VFS = @import("io").VFS;
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const mem = @import("mem.zig");
+const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -266,26 +267,25 @@ pub const ProgressWriter = struct {
     }
 };
 
-pub const DeviceWriter = union(enum) {
-    direct: DirectDeviceWriter,
-    buffered: BufferedDeviceWriter,
+pub const MemoryWriter = union(enum) {
+    direct: DirectMemoryWriter,
+    buffered: BufferedMemoryWriter,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer, memory_kind: Buffer.Memory) !DeviceWriter {
-        return switch (platform.target) {
-            .cuda, .rocm => .{ .direct = try .init(allocator, io, platform, pool, shape, buffer, memory_kind) },
-            .tpu, .neuron => .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
-            else => unreachable,
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !MemoryWriter {
+        return switch (memory.platform.target) {
+            .cuda, .rocm => .{ .direct = try .init(allocator, io, memory, pool, shape, buffer) },
+            .tpu, .neuron, .cpu => .{ .buffered = try .init(allocator, io, memory, shape, buffer) },
         };
     }
 
-    pub fn interface(self: *DeviceWriter) *std.Io.Writer {
+    pub fn interface(self: *MemoryWriter) *std.Io.Writer {
         return switch (self.*) {
             .direct => &self.direct.interface,
             .buffered => &self.buffered.interface,
         };
     }
 
-    pub fn deinit(self: *DeviceWriter, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .direct => self.direct.deinit(),
             .buffered => self.buffered.deinit(allocator),
@@ -293,18 +293,18 @@ pub const DeviceWriter = union(enum) {
     }
 };
 
-pub const BufferedDeviceWriter = struct {
+pub const BufferedMemoryWriter = struct {
     io: std.Io,
-    platform: *const Platform,
+    memory: *const Memory,
     shape: Shape,
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, buffer: *Buffer) !BufferedDeviceWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
             .shape = shape,
-            .platform = platform,
+            .memory = memory,
             .buffer = buffer,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
@@ -317,22 +317,42 @@ pub const BufferedDeviceWriter = struct {
         };
     }
 
-    pub fn deinit(self: *BufferedDeviceWriter, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *BufferedMemoryWriter, allocator: std.mem.Allocator) void {
         if (self.interface.buffer.len > 0) {
             allocator.free(self.interface.buffer);
         }
     }
 
+    fn flush_(w: *std.Io.Writer) !void {
+        const self: *BufferedMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+        const pjrt_api = self.memory.platform.pjrt_api;
+
+        const args: pjrt.Client.BufferFromHostBufferArgs = .{
+            .data = @ptrCast(self.interface.buffer),
+            .buffer_type = pjrtx.bufferTypeFromDtype(self.shape.dtype()),
+            .dims = self.shape.dims(),
+            .byte_strides = self.shape.computeByteStrides().constSlice(),
+            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+            .dst = .{ .memory = self.memory.pjrt_memory },
+        };
+        const pjrt_buffer, const event = try self.memory.platform.pjrt_client.bufferFromHostBuffer(pjrt_api, args);
+        self.buffer.* = Buffer.fromPjrtBuffers(self.memory.platform, self.shape, &.{pjrt_buffer});
+        if (event) |ev| {
+            defer ev.deinit(pjrt_api);
+            try ev.await(pjrt_api, self.io);
+        } else {
+            try self.buffer.await(self.io);
+        }
+    }
+
     pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *BufferedDeviceWriter = @alignCast(@fieldParentPtr("interface", w));
-        self.buffer.* = Buffer.fromBytes(self.io, self.platform, self.shape, self.interface.buffer) catch return std.Io.Writer.Error.WriteFailed;
-        _ = self.buffer.await(self.io) catch return std.Io.Writer.Error.WriteFailed;
+        flush_(w) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
 
-pub const DirectDeviceWriter = struct {
+pub const DirectMemoryWriter = struct {
     const EventContext = struct {
-        self: *DirectDeviceWriter,
+        self: *DirectMemoryWriter,
         err: ?*pjrt.Error = null,
         pjrt_event: *pjrt.Event,
         event: std.Io.Event = .unset,
@@ -341,7 +361,7 @@ pub const DirectDeviceWriter = struct {
 
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *const Platform,
+    memory: *const Memory,
     pool: *mem.DynamicBufferPool,
     total: usize,
     buffer: *Buffer,
@@ -353,26 +373,23 @@ pub const DirectDeviceWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer, memory_kind: Buffer.Memory) !DirectDeviceWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !DirectMemoryWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
-        const transfer_manager = try platform.pjrt_client.createBuffersForAsyncHostToDevice(platform.pjrt_api, .{
-            .shape_specs = &.{shape_spec},
-            .memory = blk: {
-                const devices = platform.getDevices();
-                for (devices[0].addressableMemories(platform.pjrt_api)) |m| {
-                    if (m.kind(platform.pjrt_api) == memory_kind) break :blk m;
-                }
-                return error.MemoryNotFound;
+        const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
+            memory.platform.pjrt_api,
+            .{
+                .shape_specs = &.{shape_spec},
+                .memory = memory.pjrt_memory,
             },
-        });
+        );
 
-        const pjrt_buffer = transfer_manager.retrieveBuffer(platform.pjrt_api, 0) catch unreachable;
-        buffer.* = Buffer.fromPjrtBuffers(platform, shape, &.{pjrt_buffer});
+        const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
+        buffer.* = Buffer.fromPjrtBuffers(memory.platform, shape, &.{pjrt_buffer});
 
         return .{
             .allocator = allocator,
             .io = io,
-            .platform = platform,
+            .memory = memory,
             .pool = pool,
             .total = shape.byteSize(),
             .buffer = buffer,
@@ -387,17 +404,19 @@ pub const DirectDeviceWriter = struct {
         };
     }
 
-    pub fn deinit(self: *DirectDeviceWriter) void {
-        self.transfer_manager.deinit(self.platform.pjrt_api);
+    pub fn deinit(self: *DirectMemoryWriter) void {
+        self.transfer_manager.deinit(self.memory.platform.pjrt_api);
     }
 
     fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
         _ = data; // autofix
         _ = splat; // autofix
-        const self: *DirectDeviceWriter = @alignCast(@fieldParentPtr("interface", w));
+        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
         if (self.offset >= self.total) {
             return std.Io.Writer.Error.WriteFailed;
         }
+
+        const pjrt_api = self.memory.platform.pjrt_api;
 
         const current_buffer = self.interface.buffer;
         const buffered = self.interface.buffered();
@@ -406,7 +425,7 @@ pub const DirectDeviceWriter = struct {
         const is_last = (self.offset + sliced_buffer.len) >= self.total;
 
         const transfer_event = self.transfer_manager.transferData(
-            self.platform.pjrt_api,
+            pjrt_api,
             0,
             sliced_buffer,
             @intCast(self.offset),
@@ -421,7 +440,7 @@ pub const DirectDeviceWriter = struct {
             .buffer = current_buffer,
             .pjrt_event = transfer_event,
         };
-        transfer_event.onReady(self.platform.pjrt_api, EventContext, struct {
+        transfer_event.onReady(pjrt_api, EventContext, struct {
             fn call(err: ?*pjrt.Error, ctx_: *EventContext) void {
                 ctx_.self.pool.put(ctx_.self.io, ctx_.buffer);
                 ctx_.err = err;
@@ -434,15 +453,13 @@ pub const DirectDeviceWriter = struct {
 
         if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
             defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
-            // std.log.info("[{*} WAITING", .{self});
             ctx_previous.event.waitUncancelable(self.io);
-            // std.log.info("[{*} WAITED", .{self});
-            defer ctx_previous.pjrt_event.deinit(self.platform.pjrt_api);
+            defer ctx_previous.pjrt_event.deinit(pjrt_api);
             if (ctx_previous.err) |e| {
-                defer e.deinit(self.platform.pjrt_api);
+                defer e.deinit(pjrt_api);
                 log.err("error while awaiting: {s}: {s}", .{
-                    @tagName(e.getCode(self.platform.pjrt_api)),
-                    e.getMessage(self.platform.pjrt_api),
+                    @tagName(e.getCode(pjrt_api)),
+                    e.getMessage(pjrt_api),
                 });
                 return std.Io.Writer.Error.WriteFailed;
             }
@@ -462,3 +479,101 @@ pub const DirectDeviceWriter = struct {
         return 0;
     }
 };
+
+pub const LoadOpts = struct {
+    parallelism: usize,
+    store: *const TensorStore,
+    progress: ?*std.Progress.Node = null,
+    dma_chunks: usize,
+    dma_chunk_size: usize,
+    total_bytes: ?*usize = null,
+};
+
+pub fn load(
+    comptime ModelType: type,
+    model: *const ModelType,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    opts: LoadOpts,
+) !Bufferized(ModelType) {
+    var bufferized = try mem.bufferize(allocator, ModelType, model);
+
+    const first_device = platform.devices[0]; // Temporary until sharding is re-exposed
+    const dma_alloc: mem.DmaAllocator = .init(allocator, &first_device);
+    var buffer_pool: mem.DynamicBufferPool = .init(opts.dma_chunks, opts.dma_chunk_size);
+    defer buffer_pool.deinit(dma_alloc.allocator());
+
+    const Ctx = struct {
+        allocator: std.mem.Allocator,
+        dma_allocator: std.mem.Allocator,
+        pinned_buffer_pool: *mem.DynamicBufferPool,
+        io: std.Io,
+        buffers: []*Buffer,
+        store: *const TensorStore,
+        memory: *const Memory,
+        group: stdx.Io.LimitedGroup,
+        total: std.atomic.Value(usize) = .init(0),
+        progress: ?*std.Progress.Node,
+    };
+    var walk_ctx: Ctx = .{
+        .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
+        .store = opts.store,
+        .allocator = allocator,
+        .dma_allocator = dma_alloc.allocator(),
+        .pinned_buffer_pool = &buffer_pool,
+        .io = io,
+        .memory = first_device.memory(.default),
+        .progress = opts.progress,
+        .group = .init(opts.parallelism),
+    };
+
+    defer if (opts.total_bytes) |total_bytes_ptr| {
+        total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
+    };
+
+    meta.forEachVisit(&bufferized, *Buffer, struct {
+        fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
+            ctx.buffers[i] = buffer;
+        }
+    }.call, .{&walk_ctx});
+
+    meta.forEachVisit(model, *const Tensor, struct {
+        fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
+            ctx.group.concurrent(ctx.io, struct {
+                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
+                    defer reader.deinit();
+
+                    var memory_writer = MemoryWriter.init(
+                        ctx_.dma_allocator,
+                        ctx_.io,
+                        ctx_.memory,
+                        ctx_.pinned_buffer_pool,
+                        reader.tensor.shape,
+                        ctx_.buffers[i_],
+                    ) catch unreachable;
+                    defer memory_writer.deinit(ctx_.dma_allocator);
+
+                    const scale = 1024;
+
+                    if (ctx_.progress) |progress| {
+                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+                        defer node.end();
+                        var progress_writer: ProgressWriter = .init(memory_writer.interface(), &node, .{ .scale = scale });
+                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+                        progress_writer.interface.flush() catch unreachable;
+                        _ = ctx_.total.fetchAdd(total, .monotonic);
+                    } else {
+                        const total = reader.interface.streamRemaining(memory_writer.interface()) catch unreachable;
+                        memory_writer.interface().flush() catch unreachable;
+                        _ = ctx_.total.fetchAdd(total, .monotonic);
+                    }
+                }
+            }.call, .{ i, tensor, ctx }) catch unreachable;
+        }
+    }.call, .{&walk_ctx});
+    walk_ctx.group.await(io) catch unreachable;
+
+    return bufferized;
+}

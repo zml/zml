@@ -86,6 +86,10 @@ pub const Api = struct {
     pub const Version = struct {
         major: i64,
         minor: i64,
+
+        pub fn format(self: Version, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+            try writer.print("{d}.{d}", .{ self.major, self.minor });
+        }
     };
 
     const Funcs = std.meta.FieldEnum(c.PJRT_Api);
@@ -93,7 +97,11 @@ pub const Api = struct {
     inner: c.PJRT_Api,
 
     pub fn loadFrom(library: [:0]const u8) !*const Api {
-        log.info("Loading library {s}...", .{library});
+        const basename = std.Io.Dir.path.basename(library);
+        log.info("Loading: {s}...", .{basename});
+        var timer: std.time.Timer = try .start();
+        defer log.info("Loaded: {s} [{D}]", .{ basename, timer.read() });
+
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux => blk: {
                 // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
@@ -113,7 +121,6 @@ pub const Api = struct {
         };
 
         const api = DynGetPjrtApi();
-        log.info("Loaded library: {s}", .{library});
         _ = api.call(.PJRT_Plugin_Initialize, .{}) catch unreachable;
 
         return api;
@@ -622,6 +629,13 @@ pub const Device = opaque {
         return null;
     }
 
+    pub fn defaultMemory(self: *const Device, api: *const Api) *const Memory {
+        const ret = api.call(.PJRT_Device_DefaultMemory, .{
+            .device = self.inner(),
+        }) catch unreachable;
+        return @ptrCast(ret.memory);
+    }
+
     pub const MemoryStats = struct {
         /// Number of bytes in use.
         bytes_in_use: u64,
@@ -669,7 +683,7 @@ pub const Device = opaque {
         const ret = try api.call(.PJRT_Device_MemoryStats, .{
             .device = self.inner(),
         });
-        return .fromCStruct(ret);
+        return .fromCStruct(@bitCast(ret));
     }
 };
 
@@ -1210,6 +1224,11 @@ pub const Memory = opaque {
             "unpinned_host".len => .host_unpinned,
             else => @panic("Memory kind not supported"),
         };
+    }
+
+    pub fn kind_(self: *const Memory, api: *const Api) []const u8 {
+        const ret = api.call(.PJRT_Memory_Kind, .{ .memory = self.inner() }) catch unreachable;
+        return ret.kind[0..ret.kind_size];
     }
 
     pub fn kindId(self: *const Memory, api: *const Api) u32 {

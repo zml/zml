@@ -1,9 +1,8 @@
 const std = @import("std");
+const log = std.log;
 
 const zml = @import("zml");
 const stdx = zml.stdx;
-
-const log = std.log.scoped(.mnist);
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -37,16 +36,19 @@ const Mnist = struct {
         };
     }
 
-    pub fn loadBuffers(
-        self: Mnist,
+    pub fn load(
+        self: *const Mnist,
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: zml.Platform,
-        store: zml.io.TensorStore.View,
-        read_pool_config: zml.io.ConcurrentBufferPool.Config,
-        write_pool_config: zml.io.ConcurrentBufferPool.Config,
+        platform: *const zml.Platform,
+        store: *const zml.io.TensorStore,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.loadBuffersFromId(allocator, io, platform, self, store, read_pool_config, write_pool_config);
+        return zml.io.load(Mnist, self, allocator, io, platform, .{
+            .store = store,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        });
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
@@ -68,19 +70,12 @@ const Mnist = struct {
 };
 
 pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+    const allocator = std.heap.smp_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-
-    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
-    defer vfs.deinit();
-
-    try vfs.register("file", vfs_file.io());
-
-    const io = vfs.io();
+    const io = threaded.io();
 
     // Parse program args
     const process_args = try std.process.argsAlloc(allocator);
@@ -98,14 +93,14 @@ pub fn main() !void {
     const mnist_model: Mnist = .init(store.view());
 
     // Auto-select platform
-    const platform: zml.Platform = try .auto(allocator, io, .{});
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
 
     // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
     var exe = blk: {
         log.info("Compiling model....", .{});
         var timer = try std.time.Timer.start();
-        defer log.info("✅ Compiled model in {D}", .{timer.read()});
+        defer log.info("✅ Compiled model [{D}]", .{timer.read()});
         break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input});
     };
     defer exe.deinit();
@@ -114,12 +109,8 @@ pub fn main() !void {
     var mnist_buffers = blk: {
         log.info("Transfering weights....", .{});
         var timer = try std.time.Timer.start();
-        defer log.info("✅ Transferred weights in {D}", .{timer.read()});
-
-        const read_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = 64 * 1024 * 1024, .concurrency = 10, .dma = true };
-        const write_pool_config: zml.io.ConcurrentBufferPool.Config = .{ .size = 32 * 1024 * 1024, .concurrency = 10, .dma = true };
-
-        break :blk try mnist_model.loadBuffers(allocator, io, platform, store.view(), read_pool_config, write_pool_config);
+        defer log.info("✅ Transferred weights [{D}]", .{timer.read()});
+        break :blk try mnist_model.load(allocator, io, platform, &store);
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 
@@ -139,29 +130,27 @@ pub fn main() !void {
     };
 
     // inference - can be looped
-    while (true) {
-        const idx = rng.random().uintLessThan(u64, 10000);
-        var sample: [28 * 28]u8 align(16) = undefined;
-        _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
+    const idx = rng.random().uintLessThan(u64, 10000);
+    var sample: [28 * 28]u8 align(16) = undefined;
+    _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
-        var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample));
-        defer input_buffer.deinit();
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample));
+    defer input_buffer.deinit();
 
-        printDigit(sample);
+    printDigit(sample);
 
-        args.set(.{ mnist_buffers, input_buffer });
-        exe.call(args, &results);
-        var result: zml.Buffer = results.get(zml.Buffer);
-        defer result.deinit();
+    args.set(.{ mnist_buffers, input_buffer });
+    exe.call(args, &results);
+    var result: zml.Buffer = results.get(zml.Buffer);
+    defer result.deinit();
 
-        log.info(
-            \\✅ RECOGNIZED DIGIT:
-            \\                       +-------------+
-            \\{s}
-            \\                       +-------------+
-            \\
-        , .{digits[try result.getValue(u8, io)]});
-    }
+    log.info(
+        \\✅ RECOGNIZED DIGIT:
+        \\                       +-------------+
+        \\{s}
+        \\                       +-------------+
+        \\
+    , .{digits[try result.getValue(u8, io)]});
 }
 
 fn printDigit(digit: [28 * 28]u8) void {

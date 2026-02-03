@@ -10,7 +10,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
 
-    pub fn auto(platform: zml.Platform) Backend {
+    pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => b: {
                 const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
@@ -84,7 +84,7 @@ pub const Metadata = union(Backend) {
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform) },

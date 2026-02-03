@@ -9,6 +9,7 @@ const upb = @import("upb");
 
 const Buffer = @import("buffer.zig").Buffer;
 const Exe = @import("exe.zig").Exe;
+const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const pjrtx = @import("pjrtx.zig");
@@ -25,7 +26,7 @@ pub const CompilationContext = struct {
         block: *mlir.Block,
         id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
-        id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Buffer.Memory),
+        id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
         arena: std.heap.ArenaAllocator,
 
         pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
@@ -223,7 +224,7 @@ pub const OutputInfo = struct {
     shapes: []Shape,
     values: []*const mlir.Value,
     donations: []?usize,
-    output_memory_kinds: []Buffer.Memory,
+    output_memory_kinds: []Memory.Kind,
 
     pub fn deinit(self: OutputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
@@ -238,7 +239,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
         shape_list: *std.array_list.Managed(Shape),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
-        output_memory_kind_list: *std.array_list.Managed(Buffer.Memory),
+        output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
@@ -247,7 +248,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
     errdefer value_list.deinit();
     var donation_list = std.array_list.Managed(?usize).init(allocator);
     errdefer donation_list.deinit();
-    var output_memory_kind_list = std.array_list.Managed(Buffer.Memory).init(allocator);
+    var output_memory_kind_list = std.array_list.Managed(Memory.Kind).init(allocator);
     errdefer output_memory_kind_list.deinit();
 
     var context: LocalContext = .{
@@ -376,7 +377,14 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     };
     for (output_info.output_memory_kinds, 0..) |output_memory_kind, index| {
         if (output_memory_kind == .device) continue;
-        output_attributes[index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "mhlo.memory_kind", mlir.stringAttribute(compilation_context.mlir_ctx, output_memory_kind.pjrtName())));
+        output_attributes[index].appendAssumeCapacity(.named(
+            compilation_context.mlir_ctx,
+            "mhlo.memory_kind",
+            mlir.stringAttribute(
+                compilation_context.mlir_ctx,
+                compilation_context.platform.memoryKind(output_memory_kind),
+            ),
+        ));
     }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 

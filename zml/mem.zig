@@ -6,25 +6,28 @@ const assert = std.debug.assert;
 const pjrt = @import("pjrt");
 
 const Buffer = @import("buffer.zig").Buffer;
+const Device = @import("platform.zig").Device;
+const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/mem");
 
-pub const HostPinnedAllocator = union(enum) {
+pub const DmaAllocator = union(enum) {
     passthrough: std.mem.Allocator,
-    uib: UnitializedBufferHostPinnedAllocator,
+    uib: UninitializedBufferAllocator,
     dmam: DmaMapAllocator,
 
-    pub fn init(parent: std.mem.Allocator, platform: *const Platform) HostPinnedAllocator {
-        return switch (platform.target) {
-            .cuda, .rocm => .{ .dmam = .init(parent, platform) },
-            else => .{ .passthrough = parent },
+    pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
+        return switch (device.platform.target) {
+            .cuda, .rocm => .{ .dmam = .init(parent, device.platform) },
+            .tpu, .neuron => .{ .uib = .init(device.memory(.host_pinned)) },
+            .cpu => .{ .passthrough = parent },
         };
     }
 
-    pub fn allocator(self: *const HostPinnedAllocator) std.mem.Allocator {
+    pub fn allocator(self: *const DmaAllocator) std.mem.Allocator {
         return switch (self.*) {
             .passthrough => |a| a,
             inline else => |*a| a.allocator(),
@@ -32,25 +35,20 @@ pub const HostPinnedAllocator = union(enum) {
     }
 };
 
-pub const UnitializedBufferHostPinnedAllocator = struct {
-    platform: *const Platform,
-    host_pinned_memory: *const pjrt.Memory,
+pub const UninitializedBufferAllocator = struct {
+    memory: *const Memory,
 
     const Header = struct {
         buffer: *pjrt.Buffer,
     };
 
-    pub fn init(platform: *const Platform) UnitializedBufferHostPinnedAllocator {
-        const devices = platform.getDevices();
-        const mem = platform.memoryForDevice(.host_pinned, devices[0]);
-
+    pub fn init(memory: *const Memory) UninitializedBufferAllocator {
         return .{
-            .platform = platform,
-            .host_pinned_memory = mem,
+            .memory = memory,
         };
     }
 
-    pub fn allocator(self: *const UnitializedBufferHostPinnedAllocator) std.mem.Allocator {
+    pub fn allocator(self: *const UninitializedBufferAllocator) std.mem.Allocator {
         return .{
             .ptr = @constCast(self),
             .vtable = &.{
@@ -63,11 +61,13 @@ pub const UnitializedBufferHostPinnedAllocator = struct {
     }
 
     fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, _: usize) ?[*]u8 {
-        const self: *UnitializedBufferHostPinnedAllocator = @ptrCast(@alignCast(ctx));
+        const self: *UninitializedBufferAllocator = @ptrCast(@alignCast(ctx));
+        const pjrt_api = self.memory.platform.pjrt_api;
+        const pjrt_client = self.memory.platform.pjrt_client;
 
         const total_len = std.mem.alignForward(usize, @sizeOf(Header) + len, alignment.toByteUnits());
 
-        const pjrt_buffer = self.platform.pjrt_client.createUninitializedBuffer(self.platform.pjrt_api, .{
+        const pjrt_buffer = pjrt_client.createUninitializedBuffer(pjrt_api, .{
             .dims = &.{@intCast(total_len)},
             .element_type = .u8,
             .layout = .{
@@ -77,10 +77,10 @@ pub const UnitializedBufferHostPinnedAllocator = struct {
                     .tile_dims_sizes = &.{},
                 },
             },
-            .dst = .{ .memory = self.host_pinned_memory },
+            .dst = .{ .memory = self.memory.pjrt_memory },
         }) catch return null;
 
-        const opaque_ptr: [*]u8 = @ptrCast(pjrt_buffer.opaqueDeviceMemoryDataPointer(self.platform.pjrt_api) catch unreachable);
+        const opaque_ptr: [*]u8 = @ptrCast(pjrt_buffer.opaqueDeviceMemoryDataPointer(pjrt_api) catch unreachable);
         const data_with_header: []u8 = opaque_ptr[0..total_len];
 
         const header = std.mem.bytesAsValue(Header, opaque_ptr);
@@ -93,9 +93,10 @@ pub const UnitializedBufferHostPinnedAllocator = struct {
 
     fn free(ctx: *anyopaque, buf: []u8, alignment: Alignment, ret_addr: usize) void {
         _ = ret_addr;
-        const self: *UnitializedBufferHostPinnedAllocator = @ptrCast(@alignCast(ctx));
+        const self: *UninitializedBufferAllocator = @ptrCast(@alignCast(ctx));
+        const pjrt_api = self.memory.platform.pjrt_api;
         const header: *Header = @ptrFromInt(std.mem.alignBackward(usize, @intFromPtr(buf.ptr) - @sizeOf(Header), alignment.toByteUnits()));
-        header.buffer.deinit(self.platform.pjrt_api);
+        header.buffer.deinit(pjrt_api);
     }
 
     fn resize(ctx: *anyopaque, buf: []u8, alignment: Alignment, new_len: usize, ret_addr: usize) bool {
@@ -333,7 +334,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         return;
     }
 
-    const type_info = @typeInfo(Bufferized);
+    const type_info = @typeInfo(ModelBufferized);
     switch (type_info) {
         .@"struct" => |struct_type_info| {
             inline for (struct_type_info.fields) |field| {
@@ -372,8 +373,10 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
     }
 }
 
-pub inline fn bufferize(allocator: std.mem.Allocator, model: anytype) !Bufferized(@TypeOf(model)) {
-    var bufferized: Bufferized(@TypeOf(model)) = undefined;
-    try bufferizeInner(allocator, model, &bufferized);
+/// Convert a model to its bufferized form by replacing Tensor fields with Buffer
+/// and allocating any required slices using the provided allocator.
+pub inline fn bufferize(allocator: std.mem.Allocator, comptime ModelType: type, model: *const ModelType) !Bufferized(ModelType) {
+    var bufferized: Bufferized(ModelType) = undefined;
+    try bufferizeInner(allocator, model.*, &bufferized);
     return bufferized;
 }

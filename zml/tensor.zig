@@ -10,12 +10,12 @@ const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Memory = Buffer.Memory;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -154,7 +154,10 @@ pub const Tensor = struct {
         if (ctx.platform.target == .cpu) return self;
 
         const frontend_attributes = mlir.dictionaryAttribute(ctx.mlir_ctx, &.{
-            .named(ctx.mlir_ctx, "_xla_buffer_placement", mlir.stringAttribute(ctx.mlir_ctx, kind.pjrtName())),
+            .named(ctx.mlir_ctx, "_xla_buffer_placement", mlir.stringAttribute(
+                ctx.mlir_ctx,
+                ctx.platform.memoryKind(kind),
+            )),
         });
 
         const op = dialects.stablehlo.custom_call(
@@ -474,7 +477,7 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(platform: Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
+        pub fn initBuffer(platform: *const Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), std.mem.asBytes(&seed)),
             };
@@ -3988,7 +3991,7 @@ pub const Tensor = struct {
     }
 
     /// Returns the output memory kind of the tensor.
-    pub fn outputMemoryKind(self: Tensor) Buffer.Memory {
+    pub fn outputMemoryKind(self: Tensor) Memory.Kind {
         return CompilationContext.current().currentScope().id_to_output_memory_kind.get(self.id) orelse .device;
     }
 };

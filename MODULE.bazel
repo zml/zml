@@ -15,7 +15,7 @@ bazel_dep(name = "protobuf", version = "33.1", repo_name = "com_google_protobuf"
 
 # Needs to be added before rules_cc so that the cc toolchain declared by
 # apple_support wins over the one in rules_cc.
-bazel_dep(name = "rules_cc", version = "0.2.12")
+bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_distroless", version = "0.5.1")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.6")
@@ -233,7 +233,7 @@ git_override(
 
 git_override(
     module_name = "toolchains_llvm_bootstrapped",
-    commit = "4902b6cadc4ca840645c97d52f985c6f67967b6f",
+    commit = "023f62a94eb38d2991432a766a1d4c05e90414d7",
     remote = "https://github.com/cerisier/toolchains_llvm_bootstrapped.git",
 )
 
