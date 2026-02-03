@@ -76,7 +76,11 @@ pub const Memory = struct {
         const pjrt_addressable_by_devices = pjrt_memory.addressableByDevices(platform.pjrt_api);
         const addressable_by_devices = try allocator.alloc(*const Device, pjrt_addressable_by_devices.len);
         for (pjrt_addressable_by_devices, addressable_by_devices) |pjrt_device, *addressable_by_device| {
-            addressable_by_device.* = &all_devices[pjrt_device.localHardwareId(platform.pjrt_api)];
+            const pjrt_device_ordinal = switch (platform.target) {
+                .cuda, .rocm, .tpu, .neuron, .cpu => pjrt_device.localHardwareId(platform.pjrt_api),
+                .metal => 0,
+            };
+            addressable_by_device.* = &all_devices[pjrt_device_ordinal];
         }
 
         return .{
@@ -101,7 +105,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .tpu, .neuron => return true,
+            .cpu, .tpu, .neuron, .metal => return true,
         }
     }
 
@@ -120,7 +124,11 @@ pub const Device = struct {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
         const addressable_memories = try allocator.alloc(*const Memory, pjrt_addressable_memories.len);
         for (pjrt_addressable_memories, addressable_memories) |pjrt_memory, *addressable_memory| {
-            addressable_memory.* = &all_addressable_memories[pjrt_memory.id(platform.pjrt_api)];
+            const pjrt_memory_ordinal = switch (platform.target) {
+                .cuda, .rocm, .tpu, .neuron, .cpu => pjrt_memory.id(platform.pjrt_api),
+                .metal => 0,
+            };
+            addressable_memory.* = &all_addressable_memories[pjrt_memory_ordinal];
         }
 
         return .{
@@ -144,7 +152,10 @@ pub const Device = struct {
     }
 
     pub fn localHardwareId(self: Device) i32 {
-        return self.device.localHardwareId(self.platform.pjrt_api);
+        return switch (self.platform.target) {
+            .cuda, .rocm, .tpu, .neuron, .cpu => self.device.localHardwareId(self.platform.pjrt_api),
+            .metal => 0,
+        };
     }
 
     pub fn kind(self: Device) []const u8 {
@@ -173,7 +184,11 @@ pub const Device = struct {
     pub fn memory(self: Device, memory_kind: Memory.Kind) *const Memory {
         if (memory_kind == .default) {
             const mem = self.pjrt_device.defaultMemory(self.platform.pjrt_api);
-            return &self.platform.memories[mem.id(self.platform.pjrt_api)];
+            const pjrt_memory_ordinal = switch (self.platform.target) {
+                .cuda, .rocm, .tpu, .neuron, .cpu => mem.id(self.platform.pjrt_api),
+                .metal => 0,
+            };
+            return &self.platform.memories[pjrt_memory_ordinal];
         }
 
         for (self.addressable_memories) |mem| {
@@ -261,6 +276,7 @@ pub const Platform = struct {
             .neuron,
             .rocm,
             .cuda,
+            .metal,
             .cpu,
         };
         return for (ordered_targets) |target| {
@@ -375,6 +391,7 @@ pub const CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    metal: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,

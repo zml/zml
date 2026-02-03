@@ -274,7 +274,7 @@ pub const MemoryWriter = union(enum) {
     pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !MemoryWriter {
         return switch (memory.platform.target) {
             .cuda, .rocm => .{ .direct = try .init(allocator, io, memory, pool, shape, buffer) },
-            .tpu, .neuron, .cpu => .{ .buffered = try .init(allocator, io, memory, shape, buffer) },
+            .tpu, .neuron, .cpu, .metal => .{ .buffered = try .init(allocator, io, memory, shape, buffer) },
         };
     }
 

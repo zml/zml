@@ -94,6 +94,8 @@ pub fn main() !void {
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator);
+    log.info("\n{f}", .{platform.fmtVerbose()});
 
     // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);

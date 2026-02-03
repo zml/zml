@@ -1,0 +1,47 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "empty",
+    defines = ["ZML_RUNTIME_METAL_DISABLED"],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        "libIREECompiler.so",
+        "pjrt_plugin_iree_metal.dylib",
+        "@toolchains_llvm_bootstrapped//tools:lld",
+    ],
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "pjrt_plugin_iree_metal.dylib": "lib/pjrt_plugin_iree_metal.dylib",
+        "libIREECompiler.so": "lib/libIREECompiler.so",
+    },
+)
+
+cc_library(
+    name = "libpjrt_metal",
+    data = [":sandbox"],
+    defines = ["ZML_RUNTIME_METAL"],
+)
+
+zig_library(
+    name = "metal",
+    import_name = "platforms/metal",
+    main = "metal.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//pjrt",
+    ] + select({
+        "//platforms:metal.enabled": [
+            ":libpjrt_metal",
+            "//bazel",
+            "//stdx",
+            "@rules_zig//zig/runfiles",
+        ],
+        "//conditions:default": [":empty"],
+    }),
+)
