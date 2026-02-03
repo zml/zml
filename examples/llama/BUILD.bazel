@@ -20,6 +20,18 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "llama_layers",
+    main = "main_layers.zig",
+    srcs = [
+        "llama.zig"
+    ],
+    deps = [
+        "@zml//zml",
+        "@zml//stdx",
+    ],
+)
+
 
 mtree_spec(
     name = "mtree",
