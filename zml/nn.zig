@@ -3,11 +3,11 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
 const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 const zml = @import("zml.zig");
 
@@ -1115,7 +1115,7 @@ pub const DynamicSamplingStrategy = struct {
 
     pub fn makeBuffers(
         io: std.Io,
-        platform: zml.Platform,
+        platform: *const zml.Platform,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {

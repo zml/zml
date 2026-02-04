@@ -16,8 +16,6 @@ pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
-    sharding_enabled: bool = false,
-    sharding_axes: stdx.BoundedArray([*:0]const u8, 8) = .{},
     device_memory_size: u64 = 0,
 };
 
@@ -199,7 +197,7 @@ pub const Platform = struct {
     // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
     compilation_options: CompilationOptions = .{},
 
-    pub const MAX_NUM_DEVICES: u8 = if (platforms.isEnabled(.tpu)) 32 else 8;
+    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 512 else 256;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -329,21 +327,38 @@ pub const Platform = struct {
         model_: anytype,
         comptime func: std.meta.DeclEnum(@TypeOf(model_)),
         args: stdx.meta.Tail(stdx.meta.FnArgs(@field(@TypeOf(model_), @tagName(func)))),
+        opts: zml.module.CompilationOpts,
     ) !Exe {
         return self.compileFn(
             allocator,
             io,
             @field(@TypeOf(model_), @tagName(func)),
             .{model_} ++ args,
+            opts,
         );
     }
 
-    pub fn compileModel(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
-        return self.compileFn(allocator, io, func, .{model} ++ args);
+    pub fn compileModel(
+        self: *const Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        comptime func: anytype,
+        model: stdx.meta.Head(stdx.meta.FnArgs(func)),
+        args: stdx.meta.Tail(stdx.meta.FnArgs(func)),
+        opts: zml.module.CompilationOpts,
+    ) !Exe {
+        return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
 
-    pub fn compileFn(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
-        return zml.module.compile(allocator, io, func, args, self);
+    pub fn compileFn(
+        self: *const Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        comptime func: anytype,
+        args: stdx.meta.FnArgs(func),
+        opts: zml.module.CompilationOpts,
+    ) !Exe {
+        return zml.module.compile(allocator, io, func, args, self, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {

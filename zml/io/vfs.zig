@@ -68,6 +68,7 @@ pub const VFS = struct {
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
                 .dirAccess = dirAccess,
+                .dirCreateFile = dirCreateFile,
                 .dirOpenFile = dirOpenFile,
                 .dirClose = dirClose,
                 .dirRead = dirRead,
@@ -198,6 +199,22 @@ pub const VFS = struct {
             return std.Io.Dir.AccessError.Unexpected;
         };
         return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
+    }
+
+    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+        const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+            log.err("Failed to lookup backend for dir create fuke '{s}' : {any}", .{ sub_path, err });
+            return std.Io.Dir.AccessError.Unexpected;
+        };
+
+        const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = .{
+            .handle = @intCast(file.handle),
+            .backend_idx = backend_idx,
+        };
+        return .{ .handle = @intCast(idx) };
     }
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {

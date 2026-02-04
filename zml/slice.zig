@@ -1,9 +1,10 @@
 const std = @import("std");
 
 const stdx = @import("stdx");
-const floats = @import("floats.zig");
 
+const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const floats = @import("floats.zig");
 const Shape = @import("shape.zig").Shape;
 
 pub fn isBytes(comptime T: type) bool {
@@ -173,6 +174,17 @@ pub const Slice = struct {
 
         try writer.splatByteAll(' ', indent_level);
         _ = try writer.write("}");
+    }
+};
+
+pub const SliceView = struct {
+    data: []const u8,
+    offset_bytes: usize,
+    shape: Shape,
+    byte_strides: stdx.BoundedArray(i64, constants.MAX_RANK),
+
+    pub fn constData(self: SliceView) []const u8 {
+        return self.data[self.offset_bytes..];
     }
 };
 

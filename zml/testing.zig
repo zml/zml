@@ -3,8 +3,8 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const Platform = @import("platform.zig").Platform;
+const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/testing");
@@ -161,7 +161,7 @@ fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
 pub fn testlayer(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     layer: anytype,
     comptime func: std.meta.DeclEnum(@TypeOf(layer)),
     activation_store: zml.io.TensorStore.View,

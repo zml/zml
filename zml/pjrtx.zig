@@ -12,16 +12,6 @@ pub const Client = opaque {
     pub const CompileError = std.mem.Allocator.Error || error{InvalidMlirBytecodeVersion} || pjrt.ApiError;
 
     pub fn compile(client: *const pjrt.Client, api: *const pjrt.Api, allocator: std.mem.Allocator, io: std.Io, module: *const mlir.Module, compile_options_pb: []const u8) CompileError!*pjrt.LoadedExecutable {
-        var bytecode: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
-        defer bytecode.deinit();
-        module.operation().writeBytecode(.{ .desired_emit_version = 1 }, &bytecode.writer) catch |err| {
-            log.err("failed to write module bytecode: {}", .{err});
-            return switch (err) {
-                error.WriteFailed => error.OutOfMemory,
-                else => |e| e,
-            };
-        };
-
         const stablehlo_version = blk: {
             if (api.stablehloCurrentVersion()) |requested_version| {
                 break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
@@ -29,9 +19,14 @@ pub const Client = opaque {
             break :blk dialects.stablehlo.minimumVersion();
         };
 
+        const cloned_op = module.operation().clone();
+        var cloned_module = mlir.Module.fromOperation(cloned_op);
+        defer cloned_module.deinit();
+
         var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer serialized_buffer.deinit();
-        dialects.stablehlo.serializePortableArtifact(bytecode.written(), stablehlo_version, &serialized_buffer.writer) catch |err| {
+
+        dialects.stablehlo.serializePortableArtifact2(cloned_module, stablehlo_version, &serialized_buffer.writer) catch |err| {
             log.err("failed to serialize to portable artifact: {}", .{err});
             return switch (err) {
                 std.Io.Writer.Error.WriteFailed => error.OutOfMemory,

@@ -89,6 +89,10 @@ pub fn main() !void {
     defer hf_vfs.deinit();
     try vfs.register("hf", hf_vfs.io());
 
+    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, threaded.io(), &http_client);
+    defer s3_vfs.deinit();
+    try vfs.register("s3", s3_vfs.io());
+
     const io = vfs.io();
 
     log.info("Resolving model repo", .{});
@@ -385,7 +389,7 @@ fn loadModelBuffers(
 fn transferBuffer(ctx: zml.io.TensorBufferTransfer(llama.TransferCtx)) !void {
     var transfer_progress = ctx.cb_ctx.progress.start(ctx.tensor.name, ctx.tensor.byteSize());
 
-    var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, &.{}) catch unreachable;
+    var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, &.{}, .{}) catch unreachable;
     defer reader.deinit();
 
     var writer = zml.io.DeviceWriter2.init(ctx.cb_ctx.allocator, ctx.io, ctx.platform, ctx.cb_ctx.pool, ctx.tensor.shape, ctx.buffer, .device) catch unreachable;

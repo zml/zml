@@ -15,9 +15,16 @@ const mlirx = @import("mlirx.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("sharding.zig").Sharding;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");
+
+pub const CompilationOpts = struct {
+    input_sharding: Sharding,
+    output_sharding: Sharding,
+    program_sharding: []const Sharding,
+};
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
@@ -54,6 +61,7 @@ pub const CompilationContext = struct {
     //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
     platform: *const Platform,
+    opts: CompilationOpts,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
 
@@ -65,14 +73,15 @@ pub const CompilationContext = struct {
         }
     }.call);
 
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform) CompilationContext {
+    pub fn init(allocator: std.mem.Allocator, platform: *const Platform, opts: CompilationOpts) CompilationContext {
         mlir_once.call();
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo" }) |d| {
+        inline for (.{ "func", "stablehlo", "sdy" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
+        mlir_ctx.allowUnregisteredDialects(true);
 
         //const loc = mlir.Location.fromSrc(mlir_ctx, @src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(.unknown(mlir_ctx));
@@ -99,6 +108,7 @@ pub const CompilationContext = struct {
             .mlir_pass_manager = pass_manager,
             .module = module,
             .platform = platform,
+            .opts = opts,
         };
     }
 
@@ -139,68 +149,103 @@ pub const CompilationContext = struct {
             popped.deinit();
         }
     }
-
-    //pub fn addShardingAttributes(
-    //    self: *const CompilationContext,
-    //    mesh: Mesh,
-    //    arg_attrs: []AttributeList,
-    //    res_attrs: []AttributeList,
-    //    input_shapes: []const Shape,
-    //    input_meshes: []const ?Mesh,
-    //    output_info: OutputInfo,
-    //) void {
-    //    if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
-
-    //    const default_layout = mlir.NamedAttribute.named(self.mlir_ctx, "mhlo.layout_mode", mlir.stringAttribute(self.mlir_ctx, "default"));
-    //    for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
-    //        attr.appendAssumeCapacity(default_layout);
-    //        if (input_mesh) |m| {
-    //            // log.warn("addShardingAttributes for {} with input mesh: {}", .{ shape, m });
-    //            attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(m, shape))));
-    //        } else {
-    //            // log.warn("addShardingAttributes for {} with progran mesh: {}", .{ shape, mesh });
-    //            attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
-    //        }
-    //    }
-
-    //    for (res_attrs, output_info.shapes) |*attr, shape| {
-    //        attr.appendAssumeCapacity(default_layout);
-    //        attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
-    //    }
-    //}
-
-    //pub fn getShardingAttr(self: *const CompilationContext, sharding: Sharding) *const mlir.Attribute {
-    //    var sharding_str: stdx.BoundedArray(u8, 128) = .{};
-    //    sharding.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
-    //    return mlir.stringAttribute(self.mlir_ctx, sharding_str.constSlice());
-    //}
 };
 
-pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, platform);
+pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
+    var compilation_context: CompilationContext = .init(allocator, platform, opts);
     defer compilation_context.deinit();
 
-    const result = emitMlir(&compilation_context, func, args) catch unreachable;
+    const result = emitMlir(&compilation_context, func, args, opts) catch unreachable;
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
+    const MeshCtx = struct {
+        ctx: *CompilationContext,
+        seen: *std.StringHashMap(void),
+
+        fn add(self: *@This(), sharding: Sharding) !void {
+            const name = sharding.meshName();
+            if (self.seen.contains(name)) return;
+            try self.seen.put(name, {});
+
+            const mesh_attr_str = try sharding.meshAttrString(self.ctx.arena.allocator());
+            const mesh_attr = try mlir.Attribute.parse(self.ctx.mlir_ctx, mesh_attr_str);
+
+            const mesh_op = mlir.Operation.make(self.ctx.mlir_ctx, "sdy.mesh", .{
+                .attributes = &.{
+                    .named(self.ctx.mlir_ctx, "sym_name", mlir.stringAttribute(self.ctx.mlir_ctx, name)),
+                    .named(self.ctx.mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+                },
+                .location = .unknown(self.ctx.mlir_ctx),
+                .verify = false,
+            });
+
+            _ = mesh_op.appendTo(self.ctx.module.body());
+        }
+    };
+
+    var seen = std.StringHashMap(void).init(compilation_context.arena.allocator());
+    var mesh_ctx: MeshCtx = .{
+        .ctx = &compilation_context,
+        .seen = &seen,
+    };
+
+    try mesh_ctx.add(opts.input_sharding);
+    try mesh_ctx.add(opts.output_sharding);
+    for (opts.program_sharding) |s| {
+        try mesh_ctx.add(s);
+    }
+
     _ = result.func.appendTo(compilation_context.module.body());
-    const sharding = platform.sharding();
-    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, sharding.num_replicas));
-    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, sharding.num_partitions));
+
+    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.input_sharding.numPartitions()));
+    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.input_sharding.numReplicas()));
+
+    compilation_context.mlir_pass_manager.runOnOp(compilation_context.module.operation()) catch |err| switch (err) {
+        error.MlirUnexpected => {
+            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compilation_context.module.operation()});
+            @panic("ZML generated invalid mlir. Please open a bug report");
+        },
+    };
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, opts) catch unreachable;
 
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    log.info("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    const num_devices = sharding.num_partitions * sharding.num_replicas;
-    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, num_devices);
+    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, opts.input_sharding, opts.output_sharding);
     errdefer exe.deinit();
 
     return exe;
+}
+
+fn shapeHasAxisTags(shape: Shape) bool {
+    for (0..shape.rank()) |ax| {
+        if (shape.partition(ax) == .axis) return true;
+    }
+    return false;
+}
+
+fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
+    for (0..shape.rank()) |ax| {
+        switch (shape.partition(ax)) {
+            .axis => |tag| if (sharding.binding(tag) == null) return false,
+            else => {},
+        }
+    }
+    return true;
+}
+
+fn selectShardingForShape(shape: Shape, primary: Sharding, alternates: []const Sharding) ?Sharding {
+    if (!shapeHasAxisTags(shape)) return primary;
+    if (shardingCoversShape(primary, shape)) return primary;
+
+    for (alternates) |s| {
+        if (shardingCoversShape(s, shape)) return s;
+    }
+    return null;
 }
 
 fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
@@ -318,7 +363,7 @@ fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context,
     return res;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
+fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func), opts: CompilationOpts) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 
@@ -388,21 +433,42 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
+    for (input_info.shapes, 0..) |shape, i| {
+        const selected = selectShardingForShape(shape, opts.input_sharding, opts.program_sharding);
+        if (selected) |sharding| {
+            if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
+                const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+                input_attributes[i].appendAssumeCapacity(.named(
+                    compilation_context.mlir_ctx,
+                    "sdy.sharding",
+                    @ptrCast(parsed),
+                ));
+            }
+        }
+    }
+
+    for (output_info.shapes, 0..) |shape, i| {
+        const selected = selectShardingForShape(shape, opts.output_sharding, opts.program_sharding);
+        if (selected) |sharding| {
+            if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
+                const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+                output_attributes[i].appendAssumeCapacity(.named(
+                    compilation_context.mlir_ctx,
+                    "sdy.sharding",
+                    @ptrCast(parsed),
+                ));
+            }
+        }
+    }
+
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
         .block = compilation_context.currentScope().block,
         .location = .unknown(compilation_context.mlir_ctx),
         .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
         .results_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, output_attributes),
+        .verify = false,
     });
-
-    compilation_context.mlir_pass_manager.runOnOp(mlir_func) catch |err| switch (err) {
-        error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: {f}", .{mlir_func});
-            // user errors should have triggered a panic before we reach this.
-            @panic("ZML generated invalid mlir. Please open a bug report");
-        },
-    };
 
     return .{
         .func = mlir_func,
@@ -433,16 +499,13 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
-    //const tracer = Tracer.init("ai.zml.compilation");
-    //const compile_frame = tracer.frameStart("pjrt compilation");
-    //defer tracer.frameEnd(compile_frame, "pjrt compilation");
-
-    const sharding = platform.sharding();
-
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, opts: CompilationOpts) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
+
+    const sharding = opts.input_sharding;
+    const device_assignment = try sharding.deviceAssignment(arena);
 
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
@@ -450,22 +513,32 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
 
             c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
-            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
-            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
-            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.numReplicas());
+            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.numPartitions());
+            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.numDevices() > 1);
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
-                const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
+                const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
-                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, sharding.num_replicas);
-                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, sharding.num_partitions);
+                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment_proto, sharding.numReplicas());
+                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment_proto, sharding.numPartitions());
 
-                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, sharding.num_partitions, upb_arena);
-                for (computation_devices[0..sharding.num_partitions], 0..) |*computation_device, i| {
+                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(
+                    device_assignment_proto,
+                    @intCast(sharding.numPartitions()),
+                    upb_arena,
+                );
+
+                for (computation_devices[0..@intCast(sharding.numPartitions())], 0..) |*computation_device, i| {
                     computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
-                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(i), upb_arena);
+                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(
+                        computation_device.*,
+                        @intCast(device_assignment[@intCast(i)]),
+                        upb_arena,
+                    );
                 }
-                break :device_assignment_blk device_assignment;
+
+                break :device_assignment_blk device_assignment_proto;
             });
 
             break :executable_build_options_blk exec_build_options;
@@ -509,7 +582,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             else => {},
         }
 
-        if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
             try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
             try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
             if (platform.compilation_options.xla_dump_fusion_visualization) {

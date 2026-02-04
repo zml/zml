@@ -33,6 +33,7 @@ zig_library(
         "mlirx.zig",
         "module.zig",
         "nn.zig",
+        "sharding.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",

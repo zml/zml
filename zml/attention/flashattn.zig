@@ -31,7 +31,7 @@ fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
     };
 }
 
-fn tensorFromBuffer(buffer: zml.Buffer, platform: zml.Platform) !flashattn.Tensor {
+fn tensorFromBuffer(buffer: zml.Buffer, platform: *const zml.Platform) !flashattn.Tensor {
     return .init(
         try buffer._shards.get(0).getOpaqueDeviceMemoryDataPointer(platform.pjrt_api),
         buffer.shape().dims(),

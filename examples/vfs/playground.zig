@@ -51,7 +51,7 @@ pub fn main() !void {
     var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
     defer hf_vfs.deinit();
 
-    var s3_vfs: zml.io.VFS.S3 = try .fromEnv(allocator, threaded.io(), &http_client);
+    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, threaded.io(), &http_client);
     defer s3_vfs.deinit();
 
     var vfs: zml.io.VFS = try .init(allocator, threaded.io());
@@ -64,7 +64,7 @@ pub fn main() !void {
 
     const io = vfs.io();
 
-    const buffer = try allocator.alloc(u8, 16 * 1024 * 1024);
+    const buffer = try allocator.alignedAlloc(u8, .fromByteUnits(4 * 1024), 16 * 1024 * 1024);
     defer allocator.free(buffer);
 
     var stdout_writer = std.Io.File.stdout().writer(io, buffer);

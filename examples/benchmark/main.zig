@@ -25,7 +25,7 @@ pub fn main() !void {
     const io = threaded.io();
 
     // Auto-select platform
-    const platform: zml.Platform = try .auto(allocator, io, .{});
+    const platform: *zml.Platform = try .auto(allocator, io, .{});
 
     const cli_args: CliArgs = blk: {
         var ret: CliArgs = .{};
@@ -99,7 +99,7 @@ pub fn main() !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 

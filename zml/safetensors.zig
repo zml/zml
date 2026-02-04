@@ -64,36 +64,56 @@ pub fn fetchRegistry(
 }
 
 pub const TensorReader = struct {
+    tensor: Tensor,
     file: std.Io.File,
     file_reader: std.Io.File.Reader,
+    alignment: ?std.mem.Alignment,
     remaining: u64,
+    padding_remaining: u64,
+
     io: std.Io,
     interface: std.Io.Reader,
-    tensor: Tensor,
-
-    pub const Error = error{TensorNotFound} || std.Io.File.OpenError || std.Io.File.Reader.SeekError || std.mem.Allocator.Error;
 
     pub fn init(
         io: std.Io,
         tensor: Tensor,
         buffer: []u8,
-    ) Error!TensorReader {
+        opts: struct {
+            alignment: ?std.mem.Alignment = null,
+        },
+    ) !TensorReader {
         const file = try std.Io.Dir.openFile(.cwd(), io, tensor.file_uri, .{ .mode = .read_only });
         errdefer file.close(io);
 
+        const offset, const padding_remaining = if (opts.alignment) |alignment| blk: {
+            const aligned_offset = std.mem.alignBackward(u64, tensor.offset, alignment.toByteUnits());
+            break :blk .{ aligned_offset, tensor.offset - aligned_offset };
+        } else blk: {
+            break :blk .{ tensor.offset, 0 };
+        };
+
         var file_reader = file.reader(io, buffer);
-        try file_reader.seekTo(tensor.offset);
+        try file_reader.seekTo(offset);
 
         return .{
+            .tensor = tensor,
             .file = file,
             .file_reader = file_reader,
+            .alignment = opts.alignment,
             .remaining = tensor.byteSize(),
-            .tensor = tensor,
+            .padding_remaining = padding_remaining,
             .io = io,
             .interface = .{
-                .vtable = &.{
-                    .stream = stream,
-                    .discard = discard,
+                .vtable = if (opts.alignment) |_| blk: {
+                    break :blk &.{
+                        .stream = streamAligned,
+                        .discard = discardAligned,
+                    };
+                } else blk: {
+                    break :blk &.{
+                        .stream = stream,
+                        .discard = discard,
+                    };
                 },
                 .buffer = &.{},
                 .seek = 0,
@@ -121,8 +141,71 @@ pub const TensorReader = struct {
     fn discard(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
         const self: *TensorReader = @fieldParentPtr("interface", r);
         if (self.remaining == 0) {
-            std.log.info("EOS2 !", .{});
             return error.EndOfStream;
+        }
+
+        const combined_limit = limit.min(.limited64(self.remaining));
+        const n = try self.file_reader.interface.discard(combined_limit);
+        self.remaining -= n;
+        return n;
+    }
+
+    fn streamAligned(r: *std.Io.Reader, w: *std.Io.Writer, limit: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        const self: *TensorReader = @fieldParentPtr("interface", r);
+        if (self.remaining == 0) return error.EndOfStream;
+
+        const requested_bytes = limit.minInt64(self.remaining);
+
+        if (self.padding_remaining > 0) {
+            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
+            self.padding_remaining = 0;
+        }
+
+        const align_bytes = self.alignment.?.toByteUnits();
+        const file_offset = self.file_reader.pos - std.mem.alignBackward(u64, self.file_reader.pos, align_bytes);
+        const writer_addr = @intFromPtr(w.buffer.ptr) + w.end;
+        const writer_offset = writer_addr - std.mem.alignBackward(usize, writer_addr, align_bytes);
+
+        if (file_offset != writer_offset) {
+            const skip = if (file_offset >= writer_offset) blk: {
+                break :blk file_offset - writer_offset;
+            } else blk: {
+                break :blk align_bytes - writer_offset + file_offset;
+            };
+
+            w.advance(skip);
+        }
+
+        if (w.writableSliceGreedy(align_bytes)) |dest| {
+            const phys_buf = dest.ptr - file_offset;
+            const phys_pos = self.file_reader.pos - file_offset;
+            const phys_size = std.mem.alignBackward(usize, @min(dest.len, requested_bytes) + file_offset, align_bytes);
+
+            if (phys_size > file_offset) {
+                const phys_read = self.file.readPositional(self.io, &.{phys_buf[0..phys_size]}, phys_pos) catch unreachable;
+                if (phys_read > file_offset) {
+                    const bytes_read = phys_read - file_offset;
+                    w.advance(bytes_read);
+                    self.file_reader.pos += bytes_read;
+                    self.remaining -= bytes_read;
+                    return bytes_read;
+                }
+            }
+        } else |_| {}
+
+        const bytes_read = try self.file_reader.interface.stream(w, .limited64(requested_bytes));
+        self.remaining -= bytes_read;
+
+        return bytes_read;
+    }
+
+    fn discardAligned(r: *std.Io.Reader, limit: std.Io.Limit) std.Io.Reader.Error!usize {
+        const self: *TensorReader = @fieldParentPtr("interface", r);
+        if (self.remaining == 0) return 0;
+
+        if (self.padding_remaining > 0) {
+            _ = try self.file_reader.interface.discard(.limited64(self.padding_remaining));
+            self.padding_remaining = 0;
         }
 
         const combined_limit = limit.min(.limited64(self.remaining));

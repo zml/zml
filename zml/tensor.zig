@@ -142,11 +142,13 @@ pub const Tensor = struct {
         return res;
     }
 
-    // TODO(Corentin)
-    pub fn withSharding(self: Tensor, axes_: anytype) Tensor {
-        _ = self;
-        _ = axes_;
-        @panic("Unimplemented");
+    pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
+        // todo: custom call
+
+        const partitioned_shape = self._shape.withPartitioning(axes_);
+        var res = self;
+        res._shape = partitioned_shape;
+        return res;
     }
 
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {

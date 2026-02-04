@@ -729,6 +729,9 @@ pub const DeviceDescription = opaque {
         const ret = api.call(.PJRT_DeviceDescription_Attributes, .{
             .device_description = self.inner(),
         }) catch unreachable;
+
+        if (ret.attributes == null) return &.{};
+
         return @ptrCast(ret.attributes[0..ret.num_attributes]);
     }
 

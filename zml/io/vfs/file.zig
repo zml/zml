@@ -148,21 +148,25 @@ pub const File = struct {
         const alignment_bytes: usize = self.config.direct_io_alignment.toByteUnits();
 
         if (!std.mem.isAligned(@as(usize, position), alignment_bytes)) {
+            log.warn("<<< use inner position postion={d} alignment_bytes={d}", .{ @as(usize, position), alignment_bytes });
             return .{ .handle = handle.inner_handle };
         }
 
         var total_size: usize = 0;
         for (data) |buf| {
             if (!std.mem.isAligned(@intFromPtr(buf.ptr), alignment_bytes)) {
+                log.warn("<<< use inner buf buf={*} alignment_bytes={d}", .{ buf, alignment_bytes });
                 return .{ .handle = handle.inner_handle };
             }
             total_size += buf.len;
         }
 
         if (!std.mem.isAligned(total_size, alignment_bytes)) {
+            log.warn("<<< use inner total total_size={d} alignment_bytes={d}", .{ total_size, alignment_bytes });
             return .{ .handle = handle.inner_handle };
         }
 
+        // log.warn(">>> use direct io", .{});
         return .{ .handle = direct_io_handle };
     }
 
