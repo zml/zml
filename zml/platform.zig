@@ -232,17 +232,16 @@ pub const Platform = struct {
 
         {
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(allocator, pjrt_device, platform, memories);
+                platform_device.* = try .init(arena.allocator(), pjrt_device, platform, memories);
             }
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
-                platform_memory.* = try .init(allocator, pjrt_memory, platform, devices);
+                platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
             }
         }
 
         switch (target) {
             .cuda => {
-                // TODO(Corentin): provide a better allocator
-                zml.attention.flashattn.load(allocator, io) catch {
+                zml.attention.flashattn.load(arena.allocator(), io) catch {
                     log.warn("Failed to load flashattn", .{});
                 };
                 zml.attention.flashattn.register(platform) catch {
