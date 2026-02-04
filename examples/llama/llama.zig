@@ -119,9 +119,8 @@ pub const LlamaLM = struct {
         stdx.debug.assert(tokens_.dtype() == .u32 and tokens_.rank() >= 1 and token_index.dtype() == .u32 and token_index.rank() <= 1, "Can't run Llama ! Expected >=1d tokens and 0d token_index, got: {f} and {f}", .{ tokens_, token_index });
         const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = self.model.forward(tokens, token_index, kv_cache, attention_metadata, attention_parameters);
-        return .{ out, updated_kv_cache, rng };
-        // const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
-        // return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
+         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
@@ -410,8 +409,8 @@ pub const SelfAttn = struct {
         x: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
-        _: zml.attention.Metadata,
-        _: zml.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
@@ -437,7 +436,7 @@ pub const SelfAttn = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = q; //zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+        const attn_output = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };

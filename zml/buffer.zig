@@ -218,12 +218,9 @@ pub const Buffer = struct {
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self.platform.pjrt_api, slice.data());
-        _ = io;
         if (maybe_event) |event| {
+             try event.await(self.platform.pjrt_api, io);
             event.deinit(self.platform.pjrt_api);
-            // std.log.info("Waiting for toSlice event", .{}); 
-            // try event.await(self.platform.pjrt_api, io);
-            // std.log.info("Waited for toSlice event", .{}); 
         }
     }
 
