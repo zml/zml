@@ -60,19 +60,21 @@ const Model = struct {
 };
 
 pub fn main() !void {
-    // var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    // defer std.debug.assert(debug_allocator.deinit() == .ok);
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
 
-    // const allocator = debug_allocator.allocator();
-    const allocator = std.heap.smp_allocator;
+    const allocator = debug_allocator.allocator();
+    // const allocator = std.heap.smp_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
     const io = threaded.io();
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = 64 } });
+    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = 8 } });
     defer platform.deinit(allocator);
+
+    log.info("{f}\n\n", .{platform.fmtVerbose()});
 
     const dtype: zml.DataType = .bf16;
 

@@ -230,17 +230,16 @@ pub const Platform = struct {
 
         {
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(allocator, pjrt_device, platform, memories);
+                platform_device.* = try .init(arena.allocator(), pjrt_device, platform, memories);
             }
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
-                platform_memory.* = try .init(allocator, pjrt_memory, platform, devices);
+                platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
             }
         }
 
         switch (target) {
             .cuda => {
-                // TODO(Corentin): provide a better allocator
-                zml.attention.flashattn.load(allocator, io) catch {
+                zml.attention.flashattn.load(arena.allocator(), io) catch {
                     log.warn("Failed to load flashattn", .{});
                 };
                 zml.attention.flashattn.register(platform) catch {
@@ -266,14 +265,14 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
-    pub fn formatWithDevices(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const tee = "├─ ";
         const line = "│  ";
         const langle = "└─ ";
 
         try writer.print("platform: {s}\n", .{@tagName(self.target)});
         try writer.print("version: {f}\n", .{self.pjrt_api.version()});
-        try writer.print("stablehlo_version: {?s}\n", .{self.pjrt_api.stablehloCurrentVersion()});
+
         try writer.print("extensions:\n", .{});
         {
             var it = self.pjrt_api.extensions();
@@ -282,37 +281,104 @@ pub const Platform = struct {
             }
         }
 
+        try writer.print("plugin attributes:\n", .{});
+        {
+            const attributes = self.pjrt_api.pluginAttributes();
+            if (attributes.len == 0) {
+                try writer.print("{s}(none)\n", .{langle});
+            } else {
+                for (attributes, 0..) |attr, i| {
+                    const is_last_attr = i == attributes.len - 1;
+                    try writer.print("{s}{s}", .{ if (is_last_attr) langle else tee, attr.name() });
+                    switch (attr.value()) {
+                        .string => |v| try writer.print(": \"{s}\"", .{v}),
+                        .int64 => |v| try writer.print(": {d}", .{v}),
+                        .int64list => |v| {
+                            for (v, 0..) |item, j| {
+                                if (j == 0) {
+                                    try writer.print(": {d}", .{item});
+                                } else {
+                                    try writer.print(".{d}", .{item});
+                                }
+                            }
+                        },
+                        .float => |v| try writer.print(": {d}", .{v}),
+                        .bool => |v| try writer.print(": {}", .{v}),
+                    }
+                    try writer.writeAll("\n");
+                }
+            }
+        }
+
         try writer.print("devices:\n", .{});
         for (self.devices, 0..) |device, i| {
-            const is_last_device = i < self.devices.len - 1;
-            try writer.print("{s}{f}\n", .{ if (is_last_device) tee else langle, device });
-            for (device.addressable_memories, 0..) |mem, j| {
-                try writer.print("{s}{s}memory: {s}\n", .{
-                    if (is_last_device) line else "   ",
-                    if (j < device.addressable_memories.len - 1) tee else langle,
-                    mem.kind(),
-                });
+            const is_last_device = i == self.devices.len - 1;
+            const child_indent = if (is_last_device) "   " else line;
+
+            try writer.print("{s}{f}\n", .{ if (is_last_device) langle else tee, device });
+
+            {
+                const device_attrs = device.pjrt_desc.attributes(self.pjrt_api);
+                if (device_attrs.len > 0) {
+                    var last_name: ?[]const u8 = null;
+                    var remaining: usize = device_attrs.len;
+
+                    while (remaining > 0) : (remaining -= 1) {
+                        var next_index: ?usize = null;
+                        for (device_attrs, 0..) |attr, j| {
+                            const name = attr.name();
+                            if (last_name) |last| {
+                                if (std.mem.order(u8, name, last) != .gt) continue;
+                            }
+                            if (next_index) |ni| {
+                                if (std.mem.order(u8, name, device_attrs[ni].name()) == .lt) {
+                                    next_index = j;
+                                }
+                            } else {
+                                next_index = j;
+                            }
+                        }
+
+                        if (next_index == null) break;
+                        const attr = device_attrs[next_index.?];
+
+                        try writer.print("{s}{s}{s}", .{ child_indent, tee, attr.name() });
+                        switch (attr.value()) {
+                            .string => |v| try writer.print(": \"{s}\"", .{v}),
+                            .int64 => |v| try writer.print(": {d}", .{v}),
+                            .int64list => |v| try writer.print(": {any}", .{v}),
+                            .float => |v| try writer.print(": {d}", .{v}),
+                            .bool => |v| try writer.print(": {}", .{v}),
+                        }
+                        try writer.writeAll("\n");
+
+                        last_name = attr.name();
+                    }
+                }
+            }
+
+            try writer.print("{s}{s}memories:\n", .{ child_indent, langle });
+            {
+                const memory_indent = "   ";
+                if (device.addressable_memories.len == 0) {
+                    try writer.print("{s}{s}{s}(none)\n", .{ child_indent, memory_indent, langle });
+                } else {
+                    for (device.addressable_memories, 0..) |mem, j| {
+                        const is_last_mem = j == device.addressable_memories.len - 1;
+                        try writer.print("{s}{s}{s}memory: {s}\n", .{
+                            child_indent,
+                            memory_indent,
+                            if (is_last_mem) langle else tee,
+                            mem.pjrt_memory.debugString(self.pjrt_api),
+                        });
+                    }
+                }
             }
         }
     }
 
-    pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithDevices) {
+    pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithAttributes) {
         return .{ .data = self };
-    }
-
-    pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
-
-    pub fn sharding(self: *const Platform) Sharding {
-        // replicas run the same function but with different inputs,
-        // while partitions contribute to one evaluation over a shared input.
-        // Inside an inference process, we generally don't want replicas,
-        // as it's best to fully isolate replicas on different processes.
-        // For now we hardcode num_replicas = 1.
-        const num_devices: u8 = @intCast(self.devices.len);
-        return if (self.compilation_options.sharding_enabled)
-            .{ .num_replicas = 1, .num_partitions = num_devices }
-        else
-            .{ .num_replicas = 1, .num_partitions = 1 };
     }
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {

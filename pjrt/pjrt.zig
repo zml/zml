@@ -242,7 +242,7 @@ pub const Api = struct {
         if (state.str) |str| {
             return str;
         }
-        if (self.getPluginAttribute("stablehlo_current_version")) |nv| {
+        if (self.pluginAttribute("stablehlo_current_version")) |nv| {
             switch (nv.value()) {
                 .int64list => |v| {
                     state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
@@ -265,8 +265,8 @@ pub const Api = struct {
         return null;
     }
 
-    fn getPluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
-        const attributes = api.getPluginAttributes();
+    pub fn pluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
+        const attributes = api.pluginAttributes();
         for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), key)) {
                 return attr;
@@ -275,7 +275,7 @@ pub const Api = struct {
         return null;
     }
 
-    fn getPluginAttributes(api: *const Api) []const NamedValue {
+    pub fn pluginAttributes(api: *const Api) []const NamedValue {
         const ret = api.call(.PJRT_Plugin_Attributes, .{
             .extension_start = null,
         }) catch unreachable;
