@@ -4,25 +4,23 @@ const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
 const Platform = @import("platform.zig").Platform;
+const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
 const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/sharding");
 
-// mock
-fn getDevices(nb: usize) []Device {
-    var devices: [54]Device = undefined;
+pub const Partitioner = union(enum) {
+    shardy,
+    gspmd,
 
-    for (devices[0..nb], 0..) |*d, i| {
-        d.* = .{
-            .id = i,
-            .compute_units = 16,
-            .pjrt_device = null,
+    pub fn fromTarget(target: Target) Partitioner {
+        return switch (target) {
+            .cpu, .cuda, .rocm, .tpu => .shardy,
+            .neuron => .gspmd,
         };
     }
-
-    return devices[0..nb];
-}
+};
 
 pub const Device = struct {
     /// Unique device identifier in the mesh
@@ -35,7 +33,7 @@ pub const Device = struct {
     compute_units: usize,
 
     /// Placeholder
-    pjrt_device: ?*anyopaque = null,
+    pjrt_device: ?*const pjrt.Device = null,
 
     pub fn format(self: Device, writer: *std.Io.Writer) !void {
         try writer.print(
@@ -88,9 +86,32 @@ pub const PhysicalNode = union(enum) {
         tag: PhysicalAxisTag,
         geometry: AxisGeometry,
         children: []PhysicalNode,
+        owned_children: bool,
     },
     /// A leaf represents the actual hardware device
     leaf: Device,
+
+    pub fn axis(tag: PhysicalAxisTag, geometry_: AxisGeometry, children: []const PhysicalNode) PhysicalNode {
+        return .{
+            .branch = .{
+                .tag = tag,
+                .geometry = geometry_,
+                .children = @constCast(children),
+                .owned_children = false,
+            },
+        };
+    }
+
+    pub fn device(device_: PlatformDevice) PhysicalNode {
+        return .{
+            .leaf = .{
+                .id = @intCast(device_.id()),
+                .compute_units = 1,
+                .coords = null,
+                .pjrt_device = device_.pjrt_device,
+            },
+        };
+    }
 
     pub fn deinit(self: PhysicalNode, allocator: std.mem.Allocator) void {
         switch (self) {
@@ -131,6 +152,9 @@ pub const PhysicalNode = union(enum) {
 /// - Assumes a single uniform topology (no heterogeneity).
 /// - Only the axes that appear in the tree are available for sharding.
 pub const PhysicalMesh = struct {
+    /// Explicit topology tree API (canonical form)
+    pub const Tree = PhysicalNode;
+
     pub const AxisInfo = struct {
         tag: PhysicalAxisTag,
         size: i64,
@@ -141,74 +165,102 @@ pub const PhysicalMesh = struct {
     target: Target,
     root: PhysicalNode,
 
-    /// Usage: PhysicalMesh.init(alloc, .tpu, .{ .link_x = 4, .link_y = 8, .link_z = 8 }, .{ .mesh = .torus })
-    pub fn init(
-        allocator: std.mem.Allocator,
-        target: Target,
-        topology: anytype,
-        geometry_: AxisGeometry,
-    ) !PhysicalMesh {
-        const T = @TypeOf(topology);
-        const info = @typeInfo(T).@"struct";
+    pub fn fromTree(allocator: std.mem.Allocator, target: Target, root: PhysicalNode) !PhysicalMesh {
+        var cloned = try cloneNode(allocator, root);
+        errdefer cloned.deinit(allocator);
 
-        var total_devices: usize = 1;
-        inline for (info.fields) |field| {
-            total_devices *= @field(topology, field.name);
-        }
-
-        const devices = try allocator.alloc(Device, total_devices);
-        defer allocator.free(devices);
-
-        // mock
-        for (devices, 0..) |*d, i| d.* = .{ .id = i, .compute_units = 2 };
+        try validateGeometry(cloned);
 
         var path = [_]usize{0} ** 16;
-        const root = try buildFromFields(allocator, topology, info.fields, devices, geometry_, &path, 0);
+        try assignCoords(&cloned, allocator, &path, 0);
 
         return .{
-            .target = target,
-            .root = root,
             .allocator = allocator,
+            .target = target,
+            .root = cloned,
         };
     }
 
-    fn buildFromFields(
-        allocator: std.mem.Allocator,
-        topology: anytype,
-        comptime fields: []const std.builtin.Type.StructField,
-        devices: []const Device,
-        geometry_: AxisGeometry,
-        path: *[16]usize,
-        depth: usize,
-    ) !PhysicalNode {
-        const current_field = fields[0];
-        const count = @field(topology, current_field.name);
-        const stride = devices.len / count;
-
-        const children = try allocator.alloc(PhysicalNode, count);
-        errdefer allocator.free(children);
-
-        for (children, 0..) |*child, i| {
-            const slice = devices[i * stride .. (i + 1) * stride];
-
-            path[depth] = i;
-
-            if (fields.len > 1) {
-                child.* = try buildFromFields(allocator, topology, fields[1..], slice, geometry_, path, depth + 1);
-            } else {
-                var dev = slice[0];
-                dev.coords = try allocator.dupe(usize, path[0 .. depth + 1]);
-                child.* = .{ .leaf = dev };
-            }
-        }
-
-        return .{
-            .branch = .{
-                .tag = std.meta.stringToEnum(PhysicalAxisTag, current_field.name).?,
-                .geometry = geometry_,
-                .children = children,
+    fn cloneNode(allocator: std.mem.Allocator, node: PhysicalNode) !PhysicalNode {
+        return switch (node) {
+            .leaf => |d| .{
+                .leaf = .{
+                    .id = d.id,
+                    .compute_units = d.compute_units,
+                    .coords = null,
+                    .pjrt_device = d.pjrt_device,
+                },
+            },
+            .branch => |b| blk: {
+                const children = try allocator.alloc(PhysicalNode, b.children.len);
+                errdefer allocator.free(children);
+                for (b.children, 0..) |child, i| {
+                    children[i] = try cloneNode(allocator, child);
+                }
+                break :blk .{
+                    .branch = .{
+                        .tag = b.tag,
+                        .geometry = b.geometry,
+                        .children = children,
+                        .owned_children = true,
+                    },
+                };
             },
         };
+    }
+
+    fn validateGeometry(node: PhysicalNode) !void {
+        switch (node) {
+            .leaf => return,
+            .branch => |b| {
+                if (b.children.len == 0) return error.InvalidPhysicalMesh;
+
+                switch (b.geometry) {
+                    .mesh => {
+                        var has_leaf = false;
+                        var has_branch = false;
+                        var expected_tag: ?PhysicalAxisTag = null;
+
+                        for (b.children) |child| {
+                            switch (child) {
+                                .leaf => has_leaf = true,
+                                .branch => |cb| {
+                                    has_branch = true;
+                                    if (expected_tag == null) {
+                                        expected_tag = cb.tag;
+                                    } else if (cb.tag != expected_tag.?) {
+                                        return error.IncompatibleGeometry;
+                                    }
+                                },
+                            }
+                        }
+
+                        if (has_leaf and has_branch) return error.IncompatibleGeometry;
+                    },
+                    .ring => {
+                        if (b.children.len < 2) return error.IncompatibleGeometry;
+                    },
+                    .point_to_point, .tree, .isolated => {},
+                }
+
+                for (b.children) |child| try validateGeometry(child);
+            },
+        }
+    }
+
+    fn assignCoords(node: *PhysicalNode, allocator: std.mem.Allocator, path: *[16]usize, depth: usize) !void {
+        switch (node.*) {
+            .leaf => |*d| {
+                if (d.coords) |coords| allocator.free(coords);
+                d.coords = try allocator.dupe(usize, path[0..depth]);
+            },
+            .branch => |*b| {
+                for (b.children, 0..) |*child, i| {
+                    path[depth] = i;
+                    try assignCoords(child, allocator, path, depth + 1);
+                }
+            },
+        }
     }
 
     pub fn deinit(self: *PhysicalMesh) void {
@@ -302,94 +354,125 @@ pub const PhysicalMesh = struct {
             .neuron => neuron(allocator, platform),
         };
 
-        return .{
-            .allocator = allocator,
-            .target = platform.target,
-            .root = root,
-        };
+        return try fromTree(allocator, platform.target, root);
     }
 
-    fn cpu(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
+    pub fn cpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
         const devices = platform.devices;
         const nodes = try allocator.alloc(PhysicalNode, devices.len);
 
-        for (nodes, devices) |*n, d| n.* = .{ .leaf = d };
+        for (nodes, devices) |*n, d| n.* = .device(d);
 
         return .{
             .branch = .{
                 .tag = .bus,
                 .geometry = .tree,
                 .children = nodes,
+                .owned_children = true,
             },
         };
     }
 
-    fn gpu(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
+    pub fn gpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
         const devices = platform.devices;
+
         // todo: this is simplified I treat all GPUs as one P2P group for this example
         const nodes = try allocator.alloc(PhysicalNode, devices.len);
 
-        for (nodes, devices) |*n, d| n.* = .{ .leaf = d };
+        for (nodes, devices) |*n, d| n.* = .device(d);
 
         return .{
             .branch = .{
                 .tag = .link,
                 .geometry = .point_to_point,
                 .children = nodes,
+                .owned_children = true,
             },
         };
     }
 
-    fn tpu(allocator: std.mem.Allocator, _: *const Platform) !PhysicalNode {
-        const devices = getDevices()[0..8];
-        // Example: TPU v3-8 is 2x2x2
+    pub fn tpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
+        const devices = platform.devices;
 
+        // Example: TPU v3-8 is 2x2x2 (8 devices)
         var z_branches = try allocator.alloc(PhysicalNode, 4);
 
-        for (z_branches, 0..) |*zb, i| {
+        for (z_branches, 0..) |*z_branch, i| {
             const z_leaves = try allocator.alloc(PhysicalNode, 2);
-            z_leaves[0] = .{ .leaf = devices[i * 2] };
-            z_leaves[1] = .{ .leaf = devices[i * 2 + 1] };
-            zb.* = .{ .branch = .{ .tag = .link_z, .geometry = .{ .mesh = .torus }, .children = z_leaves } };
+
+            z_leaves[0] = .device(devices[i * 2]);
+            z_leaves[1] = .device(devices[i * 2 + 1]);
+
+            z_branch.* = .{
+                .branch = .{
+                    .tag = .link_z,
+                    .geometry = .{ .mesh = .torus },
+                    .children = z_leaves,
+                    .owned_children = true,
+                },
+            };
         }
 
         var y_branches = try allocator.alloc(PhysicalNode, 2);
 
-        y_branches[0] = .{ .branch = .{ .tag = .link_y, .geometry = .{ .mesh = .torus }, .children = z_branches[0..2] } };
-        y_branches[1] = .{ .branch = .{ .tag = .link_y, .geometry = .{ .mesh = .torus }, .children = z_branches[2..4] } };
+        y_branches[0] = .{
+            .branch = .{
+                .tag = .link_y,
+                .geometry = .{ .mesh = .torus },
+                .children = z_branches[0..2],
+                .owned_children = true,
+            },
+        };
+
+        y_branches[1] = .{
+            .branch = .{
+                .tag = .link_y,
+                .geometry = .{ .mesh = .torus },
+                .children = z_branches[2..4],
+                .owned_children = true,
+            },
+        };
 
         return .{
             .branch = .{
                 .tag = .link_x,
                 .geometry = .{ .mesh = .torus },
                 .children = y_branches,
+                .owned_children = true,
             },
         };
     }
 
-    fn neuron(allocator: std.mem.Allocator, _: *const Platform) !PhysicalNode {
-        const devices = getDevices()[0..24];
+    pub fn neuron(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
+        const devices = platform.devices;
 
-        if (devices.len == 24) { // AWS Inf2.48xlarge: 2 islands of 12 chips
-            const islands = try allocator.alloc(PhysicalNode, 2);
+        // AWS Inf2.48xlarge: 2 islands of 12 chips (24 devices)
+        const islands = try allocator.alloc(PhysicalNode, 2);
 
-            for (islands, 0..) |*island, i| {
-                const start = i * 12;
-                const ring_nodes = try allocator.alloc(PhysicalNode, 12);
-                for (ring_nodes, 0..) |*rn, j| rn.* = .{ .leaf = devices[start + j] };
+        for (islands, 0..) |*island, i| {
+            const start = i * 12;
+            const ring_nodes = try allocator.alloc(PhysicalNode, 12);
 
-                island.* = .{ .branch = .{ .tag = .link, .geometry = .{ .ring = .closed_ring }, .children = ring_nodes } };
-            }
+            for (ring_nodes, 0..) |*rn, j| rn.* = .device(devices[start + j]);
 
-            return .{ .branch = .{ .tag = .bus, .geometry = .isolated, .children = islands } };
+            island.* = .{
+                .branch = .{
+                    .tag = .link,
+                    .geometry = .{ .ring = .closed_ring },
+                    .children = ring_nodes,
+                    .owned_children = true,
+                },
+            };
         }
 
-        // Default NeuronLink
-        const nodes = try allocator.alloc(PhysicalNode, devices.len);
-        defer allocator.free(nodes);
-        for (nodes, devices) |*n, d| n.* = .{ .leaf = d };
-
-        return .{ .branch = .{ .tag = .link, .geometry = .{ .ring = .closed_ring }, .children = try allocator.dupe(PhysicalNode, nodes) } };
+        return .{
+            .branch = .{
+                .tag = .bus,
+                .geometry = .isolated,
+                .children = islands,
+                .owned_children = true,
+            },
+        };
     }
 
     pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
@@ -454,32 +537,32 @@ pub const LogicalAxisIntent = enum {
 /// Limitations:
 /// - No sizes here; no divisibility checks here.
 pub const LogicalMesh = struct {
+    pub const Axes = stdx.BoundedArray(Shape.Tag, Shape.MAX_RANK);
+    pub const Intents = stdx.BoundedArray(LogicalAxisIntent, Shape.MAX_RANK);
+
     name: []const u8,
-    axes: stdx.BoundedArray(Shape.Tag, Shape.MAX_RANK),
-    intents: stdx.BoundedArray(LogicalAxisIntent, Shape.MAX_RANK),
+    axes: Axes,
+    intents: Intents,
 
-    pub fn init(name: []const u8, axes_: anytype) LogicalMesh {
+    pub fn init(name: []const u8, axes_: anytype) !LogicalMesh {
         const T = @TypeOf(axes_);
-        // if (!stdx.meta.isStruct(T)) {
-        //     stdx.debug.compileError("LogicalMesh.init expects a struct of axis intents, got {}", .{T});
-        // }
 
-        var tags = stdx.BoundedArray(Shape.Tag, Shape.MAX_RANK).init(0) catch unreachable;
-        var intents = stdx.BoundedArray(LogicalAxisIntent, Shape.MAX_RANK).init(0) catch unreachable;
+        var axes: Axes = try .init(0);
+        var intents: Intents = try .init(0);
 
         inline for (std.meta.fields(T)) |field| {
             const value = @field(axes_, field.name);
-            tags.appendAssumeCapacity(Shape.toTag(field));
+            axes.appendAssumeCapacity(Shape.toTag(field));
             intents.appendAssumeCapacity(intentFromValue(value));
         }
 
-        if (tags.len == 0) {
+        if (axes.len == 0) {
             stdx.debug.panic("LogicalMesh must have at least one axis defined", .{});
         }
 
         return .{
             .name = name,
-            .axes = tags,
+            .axes = axes,
             .intents = intents,
         };
     }
@@ -499,6 +582,7 @@ pub const LogicalMesh = struct {
         for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
             if (std.mem.eql(u8, std.mem.span(t), std.mem.span(tag))) return i;
         }
+
         return null;
     }
 
@@ -523,6 +607,9 @@ pub const LogicalMesh = struct {
 /// This is the "rules of the road" for placement.
 /// Per‑tensor assignment happens later.
 pub const Sharding = struct {
+    pub const Bindings = std.AutoArrayHashMapUnmanaged(Shape.Tag, []const PhysicalAxisTag);
+    pub const Tiles = std.ArrayList(Sharding.Tile);
+
     pub const PhysicalSlice = struct {
         tag: PhysicalAxisTag,
         start: i64,
@@ -542,10 +629,10 @@ pub const Sharding = struct {
     logical: LogicalMesh,
     physical: PhysicalMesh,
 
-    tiles: std.ArrayList(Tile),
+    tiles: Tiles,
 
     /// Compact binding table: logical axis -> physical axes
-    bindings: std.AutoArrayHashMapUnmanaged(Shape.Tag, []const PhysicalAxisTag),
+    bindings: Bindings,
 
     /// Folded axis mapping: kept axis -> ordered source axes
     folds: std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, []const PhysicalAxisTag),
@@ -856,7 +943,7 @@ pub fn resolveStrategyConstraints(
     physical: PhysicalMesh,
     strategy: Strategy,
 ) !Sharding {
-    var tiles: std.ArrayList(Sharding.Tile) = .{};
+    var tiles: Sharding.Tiles = .{};
     errdefer {
         for (tiles.items) |*t| {
             t.physical.deinit(allocator);
@@ -865,7 +952,7 @@ pub fn resolveStrategyConstraints(
         tiles.deinit(allocator);
     }
 
-    var bindings: std.AutoArrayHashMapUnmanaged(Shape.Tag, []const PhysicalAxisTag) = .{};
+    var bindings: Sharding.Bindings = .{};
     errdefer {
         var it = bindings.iterator();
         while (it.next()) |entry| allocator.free(entry.value_ptr.*);
@@ -916,7 +1003,8 @@ pub fn resolveStrategyConstraints(
         fold_lists.deinit(allocator);
     }
 
-    const order = physical.shardableAxes();
+    const axis_order = physical.axisOrder().constSlice();
+    if (axis_order.len == 0) return error.InvalidPhysicalMesh;
 
     if (strategy.folding.count() > 0) {
         var used = std.EnumSet(PhysicalAxisTag).initEmpty();
@@ -932,8 +1020,7 @@ pub fn resolveStrategyConstraints(
                 used.insert(src);
             }
         }
-        for (order) |p| {
-            if (!physical.hasAxis(p)) continue;
+        for (axis_order) |p| {
             if (!used.contains(p)) {
                 var res = try fold_lists.getOrPut(allocator, p);
                 if (!res.found_existing) res.value_ptr.* = .{};
@@ -941,8 +1028,7 @@ pub fn resolveStrategyConstraints(
             }
         }
     } else {
-        for (order) |p| {
-            if (!physical.hasAxis(p)) continue;
+        for (axis_order) |p| {
             if (axis_used.contains(p)) {
                 var res = try fold_lists.getOrPut(allocator, p);
                 if (!res.found_existing) res.value_ptr.* = .{};
@@ -950,28 +1036,22 @@ pub fn resolveStrategyConstraints(
             }
         }
 
-        var fallback: ?PhysicalAxisTag = null;
-        for (order) |p| {
-            if (physical.hasAxis(p)) {
-                fallback = p;
-                break;
-            }
-        }
-        if (fold_lists.count() == 0 and fallback != null) {
-            var res = try fold_lists.getOrPut(allocator, fallback.?);
+        const fallback = axis_order[0];
+
+        if (fold_lists.count() == 0) {
+            var res = try fold_lists.getOrPut(allocator, fallback);
             if (!res.found_existing) res.value_ptr.* = .{};
-            try res.value_ptr.append(allocator, fallback.?);
+            try res.value_ptr.append(allocator, fallback);
         }
 
-        const fold_target = selectFoldTarget(logical, bindings, physical) orelse fallback.?;
+        const fold_target = selectFoldTarget(logical, bindings, physical) orelse fallback;
         var target_entry = try fold_lists.getOrPut(allocator, fold_target);
         if (!target_entry.found_existing) target_entry.value_ptr.* = .{};
         if (target_entry.value_ptr.items.len == 0) {
             try target_entry.value_ptr.append(allocator, fold_target);
         }
 
-        for (order) |p| {
-            if (!physical.hasAxis(p)) continue;
+        for (axis_order) |p| {
             if (!axis_used.contains(p)) {
                 try target_entry.value_ptr.append(allocator, p);
             }
@@ -992,7 +1072,7 @@ pub fn resolveStrategyConstraints(
     }
 
     // Build tile axes from folded groups
-    for (order) |p_tag| {
+    for (axis_order) |p_tag| {
         const sources = folds.get(p_tag) orelse continue;
 
         var size: i64 = 1;
@@ -1022,21 +1102,13 @@ pub fn resolveStrategyConstraints(
     };
 }
 
-fn intentPriority(intent: LogicalAxisIntent) i32 {
-    return switch (intent) {
-        .high_bandwidth => 0,
-        .balanced => 1,
-        .low_bandwidth => 2,
-    };
-}
-
 fn selectFoldTarget(
     logical: LogicalMesh,
-    bindings: std.AutoArrayHashMapUnmanaged(Shape.Tag, []const PhysicalAxisTag),
+    bindings: Sharding.Bindings,
     physical: PhysicalMesh,
 ) ?PhysicalAxisTag {
     var best_tag: ?PhysicalAxisTag = null;
-    var best_pri: i32 = 999;
+    var best_priority: i32 = 999;
     var best_size: i64 = -1;
 
     for (logical.axes.constSlice(), logical.intents.constSlice()) |l_tag, l_intent| {
@@ -1045,11 +1117,11 @@ fn selectFoldTarget(
         const p_tag = binding[0];
         if (!physical.hasAxis(p_tag)) continue;
 
-        const pri = intentPriority(l_intent);
+        const priority = @intFromEnum(l_intent);
         const size = physical.axis(p_tag);
 
-        if (pri < best_pri or (pri == best_pri and size > best_size)) {
-            best_pri = pri;
+        if (priority < best_priority or (priority == best_priority and size > best_size)) {
+            best_priority = priority;
             best_size = size;
             best_tag = p_tag;
         }
@@ -1151,7 +1223,7 @@ pub fn resolveStrategy(
     physical: PhysicalMesh,
     strategy: Strategy,
 ) !Sharding {
-    var tiles: std.ArrayList(Sharding.Tile) = .{};
+    var tiles: Sharding.Tiles = .{};
     errdefer {
         for (tiles.items) |*t| {
             t.physical.deinit(allocator);
@@ -1233,15 +1305,17 @@ pub fn resolveStrategy(
 /// Think of it as: "if you shard logical axis X,
 /// use physical axes in this order."
 pub const Strategy = struct {
+    pub const Bindings = std.AutoArrayHashMapUnmanaged(Shape.Tag, Binding);
+    pub const Folding = std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, []const PhysicalAxisTag);
+
     pub const Binding = struct {
         logical: Shape.Tag,
         physical: std.ArrayList(PhysicalAxisTag),
     };
 
-    bindings: std.AutoArrayHashMapUnmanaged(Shape.Tag, Binding),
-
+    bindings: Bindings,
     /// Optional explicit folding: target axis -> ordered source axes.
-    folding: std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, []const PhysicalAxisTag),
+    folding: Folding,
 
     pub const init: Strategy = .{
         .bindings = .{},
@@ -1351,6 +1425,19 @@ fn shardableAxesByIntent(
 ) []const PhysicalAxisTag {
     out.* = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
     const base = physical.shardableAxes();
+
+    var any = false;
+    for (base) |t| {
+        if (physical.hasAxis(t)) {
+            any = true;
+            break;
+        }
+    }
+    if (!any) {
+        const order = physical.axisOrder();
+        out.* = order;
+        return out.constSlice();
+    }
 
     switch (intent) {
         .high_bandwidth => {
@@ -1799,31 +1886,4 @@ pub fn assignTensor(
         .axes = axes,
         .shards = shards,
     };
-}
-
-test "tile sharding virtualization uses tensor shape sizes" {
-    const allocator = std.testing.allocator;
-
-    var physical: PhysicalMesh = try .init(allocator, .cuda, .{ .link = 8 }, .point_to_point);
-    defer physical.deinit();
-
-    const logical = LogicalMesh.init("dp_virtualized", .{ .batch = .high_bandwidth });
-
-    const tensor_shape = Shape.init(.{ .my_tensor_dim = 16 }, .u8).withPartitioning(.{ .my_tensor_dim = .batch });
-
-    var strategy = try suggestStrategy(allocator, logical, physical);
-    defer strategy.deinit(allocator);
-
-    var sharding = try resolveStrategy(allocator, logical, tensor_shape, physical, strategy);
-    defer sharding.deinit();
-
-    try std.testing.expectEqual(1, sharding.tiles.items.len);
-
-    const tile = sharding.tiles.items[0];
-    try std.testing.expectEqual(16, tile.logical_demand);
-    try std.testing.expectEqual(8, tile.physical_capacity);
-    try std.testing.expectEqual(2, tile.virtual_factor);
-
-    try std.testing.expectEqual(1, tile.physical.items.len);
-    try std.testing.expectEqual(8, tile.physical.items[0].size);
 }

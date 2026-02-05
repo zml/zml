@@ -133,7 +133,7 @@ pub const Device = struct {
         allocator.free(self.addressable_memories);
     }
 
-    pub fn id(self: Device) i32 {
+    pub fn id(self: Device) usize {
         return self.pjrt_desc.id(self.platform.pjrt_api);
     }
 

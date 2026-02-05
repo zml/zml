@@ -78,28 +78,48 @@ pub fn main() !void {
 
     const dtype: zml.DataType = .bf16;
 
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .cpu, .{ .bus = 4 }, .tree);
+    // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
     // defer physical_mesh.deinit();
 
     // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .cuda, .{ .link = 8 }, .tree);
     // defer physical_mesh.deinit();
 
-    var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .tpu, .{ .link_x = 2, .link_y = 2, .link_z = 2 }, .{ .mesh = .torus });
-    defer physical_mesh.deinit();
-
     // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .neuron, .{ .bus = 2, .link = 12 }, .{ .ring = .closed_ring });
     // defer physical_mesh.deinit();
+
+    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[0]), .device(platform.devices[1]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[2]), .device(platform.devices[3]),
+            }),
+        }),
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[4]), .device(platform.devices[5]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[6]), .device(platform.devices[7]),
+            }),
+        }),
+    });
+
+    var physical_mesh: zml.sharding.PhysicalMesh = try .fromTree(allocator, platform.target, topology);
+    defer physical_mesh.deinit();
+
     log.info("{f}", .{physical_mesh});
 
     // 2D logical mesh (data)
-    const mesh_data: zml.sharding.LogicalMesh = .init("data_mesh", .{
+    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{
         .batch = .low_bandwidth,
         .context = .balanced,
     });
     log.info("{f}", .{mesh_data});
 
     // 3D logical mesh (model)
-    const mesh_model: zml.sharding.LogicalMesh = .init("model_mesh_3d", .{
+    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{
         .model = .high_bandwidth,
         .head = .balanced,
         .expert = .low_bandwidth,
