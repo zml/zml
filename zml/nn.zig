@@ -29,7 +29,6 @@ pub const Linear = struct {
     pub fn forward(self: Linear, x: Tensor) Tensor {
         var y = x.dot(self.weight.convert(x.dtype()), self.tag);
 
-        // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
