@@ -188,11 +188,12 @@ pub fn testlayer(
     const store_input = activation_store.withPrefix(name ++ ".in");
     var ctx = LocalContext{ .activation_store = store_input };
     try zml.meta.visit(struct {
-        fn cb(ctx_: *const LocalContext, tensor: *zml.Tensor) !void {
+        fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
             tensor.* = ctx_.activation_store.createTensor(subkey);
+            ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
