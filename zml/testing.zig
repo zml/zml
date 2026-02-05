@@ -238,10 +238,12 @@ pub fn testlayer(
             var reader = try store_output.getReader(subkey, io, &reader_buffer);
             defer reader.deinit();
             const shape = store_output.getShape(subkey).?;
-            const expected_bytes = try reader.interface.readAlloc(allocator, shape.byteSize());
-            break :b zml.Slice.init(shape, expected_bytes);
+            const expected_slice: zml.Slice = try .alloc(allocator, shape);
+            errdefer expected_slice.free(allocator);
+            try reader.interface.readSliceAll(expected_slice.data());
+            break :b expected_slice;
         };
-        defer expected_slice.free(allocator);
+        defer allocator.free(expected_slice.data());
 
         const output_slice = try results[i].toSliceAlloc(allocator, io);
         defer output_slice.free(allocator);
@@ -257,7 +259,7 @@ pub fn testlayer(
     }
 
     if (failed) return error.TestUnexpectedResult;
-    log.info("all good for {s} !", .{name});
+    log.info("all good for {s} ! (tolerance: {e})", .{ name, tolerance });
 }
 
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
