@@ -169,35 +169,64 @@ pub const RopeOpts = struct {
         pub const Yarn = struct {
             beta_fast: f32 = 32.0,
             beta_slow: f32 = 1.0,
-            factor: f32,
+            factor: ?f32 = null,
+            mscale: ?f32 = null,
+            mscale_all_dim: ?f32 = null,
             truncate: bool = true,
             original_max_position_embeddings: u32,
+            rope_theta: f32,
+            llama_4_scaling_beta: ?f32 = null,
+            attention_factor: ?f32 = null,
         };
 
         /// Read a Rope scaling config from HF config.json format.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
-            const content = try std.json.Value.jsonParse(allocator, source, options);
-            if (content == .null) return .default;
+            return jsonParseFromValue(
+                allocator,
+                try std.json.innerParse(std.json.Value, allocator, source, options),
+                options,
+            );
+        }
 
-            if (content != .object) return error.InvalidEnumTag;
+        pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
+            _ = allocator; // autofix
+            _ = options; // autofix
+            if (source == .null) return .default;
 
-            const obj = content.object;
+            if (source != .object) return error.InvalidEnumTag;
+
+            const obj = source.object;
             const impl = obj.get("rope_type") orelse return error.MissingField;
             if (impl != .string) return error.InvalidEnumTag;
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
-                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, content, .{ .ignore_unknown_fields = true }) };
+                return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else if (std.mem.eql(u8, impl.string, "yarn")) {
-                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, content, .{ .ignore_unknown_fields = true }) };
+                return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else {
                 log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = {} };
             }
         }
 
+        fn getMScale(factor: f32, mscale: f32) f32 {
+            if (mscale < 1.0) {
+                return 1.0;
+            }
+            return 0.1 * mscale * @log(factor) + 1.0;
+        }
+
         pub fn attentionScaling(scaling: Scaling) f32 {
             return switch (scaling) {
-                .yarn => |yarn| 0.1 * @log(yarn.factor) + 1.0,
+                .yarn => |yarn| yarn_scaling: {
+                    const attention_factor = if (yarn.attention_factor) |af| af else b: {
+                        break :b if (yarn.mscale != null and yarn.mscale_all_dim != null)
+                            getMScale(yarn.factor.?, yarn.mscale.?) / getMScale(yarn.factor.?, yarn.mscale_all_dim.?)
+                        else
+                            getMScale(yarn.factor.?, 1.0);
+                    };
+                    break :yarn_scaling attention_factor;
+                },
                 else => 1.0,
             };
         }
@@ -317,7 +346,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
             const M: f64 = @floatFromInt(s.original_max_position_embeddings);
             const f_high = s.beta_fast * (2 * std.math.pi) / M;
             const f_low = s.beta_slow * (2 * std.math.pi) / M;
-            const downscaling = 1.0 / s.factor;
+            const downscaling = 1.0 / s.factor.?;
 
             // This isn't a typo: low n have a high frequency, high n have a low frequency.
             var n_low: f64 = -@log(f_high) / @log(opts.freq_base) * N_f;
