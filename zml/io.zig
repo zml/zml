@@ -120,6 +120,14 @@ pub const TensorStore = struct {
             return if (self.prefix_length == 0) null else self.prefix_buffer[0..self.prefix_length];
         }
 
+        pub fn hasKey(self: *const View, subkey: []const u8) bool {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+            return for (self.store.registry.tensors.keys()) |k| {
+                if (std.mem.startsWith(u8, k, key)) break true;
+            } else false;
+        }
+
         pub fn maybeCreateTensor(self: View, subkey: []const u8) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
