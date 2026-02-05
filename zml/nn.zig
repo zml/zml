@@ -90,12 +90,13 @@ pub const LayerNorm = struct {
     }
 };
 
-pub fn rmsNorm(x: Tensor, axis: anytype, eps: f32) Tensor {
-    const ax = x.axis(axis);
+pub fn rmsNorm(x_: Tensor, axis: anytype, eps: f32) Tensor {
+    const ax = x_.axis(axis);
     // upcast to improve precision
-    const variance = x.convert(.f32).powByConst(2).mean(ax);
-    const rsqrt = Tensor.rsqrt(variance.addConstant(eps)).convert(x.dtype());
-    return x.mul(rsqrt.broad(x.shape()));
+    var x = x_.convert(.f32);
+    const variance = x.powByConst(2).mean(ax);
+    const rsqrt = Tensor.rsqrt(variance.addConstant(eps));
+    return x.mul(rsqrt.broad(x.shape())).convert(x_.dtype());
 }
 
 /// Center and scale by the variance.
