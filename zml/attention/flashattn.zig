@@ -507,10 +507,10 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn allocationSize(options_: Options) usize {
-            return switch (options_) {
-                .decode => |decode_options| DecodeParameters.allocationSize(decode_options),
-                .mixed => |mixed_options| MixedParameters.allocationSize(mixed_options),
+        pub fn allocationSize(self: Parameters) usize {
+            return switch (self) {
+                .decode => |decode| decode.allocationSize(),
+                .mixed => |mixed| mixed.allocationSize(),
             };
         }
 
@@ -549,13 +549,13 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn allocationSize(options: DecodeOptions) usize {
-            const shapes_ = DecodeParameters.shapes(options);
+        pub fn allocationSize(self: DecodeParameters) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.block_table.byteSize();
-            allocation_size += shapes_.cu_seqlens_q.byteSize();
-            allocation_size += shapes_.seqused_k.byteSize();
-            allocation_size += DecodeMetadata.allocationSize(options.max_token_count, options.num_heads, options.head_dim);
+
+            allocation_size += self.block_table.byteSize();
+            allocation_size += self.cu_seqlens_q.byteSize();
+            allocation_size += self.seqused_k.byteSize();
+            allocation_size += self.metadata.allocationSize();
 
             return allocation_size;
         }
@@ -580,10 +580,9 @@ pub const paged_fa2 = struct {
             self.out_accum.deinit();
         }
 
-        pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
-            const shapes_ = DecodeMetadata.shapes(max_token_count, num_heads, head_dim);
+        pub fn allocationSize(self: DecodeMetadata) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.out_accum.byteSize();
+            allocation_size += self.out_accum.byteSize();
             return allocation_size;
         }
     };
@@ -623,17 +622,16 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn allocationSize(options: MixedOptions) usize {
-            const shapes_ = MixedParameters.shapes(options);
+        pub fn allocationSize(self: MixedParameters) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.block_table_decode.byteSize();
-            allocation_size += shapes_.cu_seqlens_q_prefill.byteSize();
-            allocation_size += shapes_.seqused_k_prefill.byteSize();
+            allocation_size += self.block_table_decode.byteSize();
+            allocation_size += self.cu_seqlens_q_prefill.byteSize();
+            allocation_size += self.seqused_k_prefill.byteSize();
 
-            allocation_size += shapes_.block_table_decode.byteSize();
-            allocation_size += shapes_.cu_seqlens_q_decode.byteSize();
-            allocation_size += shapes_.seqused_k_decode.byteSize();
-            allocation_size += MixedMetadata.allocationSize(options.max_token_count, options.num_heads, options.head_dim);
+            allocation_size += self.block_table_decode.byteSize();
+            allocation_size += self.cu_seqlens_q_decode.byteSize();
+            allocation_size += self.seqused_k_decode.byteSize();
+            allocation_size += self.metadata.allocationSize();
 
             return allocation_size;
         }
@@ -661,11 +659,10 @@ pub const paged_fa2 = struct {
             self.out_accum.deinit();
         }
 
-        pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
-            const shapes_ = MixedMetadata.shapes(max_token_count, num_heads, head_dim);
+        pub fn allocationSize(self: MixedMetadata) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.out_accum.byteSize();
-            allocation_size += shapes_.host_metadata.byteSize();
+            allocation_size += self.out_accum.byteSize();
+            allocation_size += self.host_metadata.byteSize();
             return allocation_size;
         }
     };
@@ -992,10 +989,10 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn allocationSize(options_: Options) usize {
-            return switch (options_) {
-                .decode => |decode_options| DecodeParameters.allocationSize(decode_options),
-                .mixed => |mixed_options| MixedParameters.allocationSize(mixed_options),
+        pub fn allocationSize(self: Parameters) usize {
+            return switch (self) {
+                .decode => |decode| decode.allocationSize(),
+                .mixed => |mixed| mixed.allocationSize(),
             };
         }
 
@@ -1034,13 +1031,13 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn allocationSize(options: DecodeOptions) usize {
-            const shapes_ = DecodeParameters.shapes(options);
+        pub fn allocationSize(self: DecodeParameters) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.block_table.byteSize();
-            allocation_size += shapes_.cu_seqlens_q.byteSize();
-            allocation_size += shapes_.seqused_k.byteSize();
-            allocation_size += DecodeMetadata.allocationSize(options.max_token_count, options.num_heads, options.head_dim);
+
+            allocation_size += self.block_table.byteSize();
+            allocation_size += self.cu_seqlens_q.byteSize();
+            allocation_size += self.seqused_k.byteSize();
+            allocation_size += self.metadata.allocationSize();
 
             return allocation_size;
         }
@@ -1065,10 +1062,9 @@ pub const paged_fa3 = struct {
             self.out_accum.deinit();
         }
 
-        pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
-            const shapes_ = DecodeMetadata.shapes(max_token_count, num_heads, head_dim);
+        pub fn allocationSize(self: DecodeMetadata) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.out_accum.byteSize();
+            allocation_size += self.out_accum.byteSize();
             return allocation_size;
         }
     };
@@ -1108,17 +1104,16 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn allocationSize(options: MixedOptions) usize {
-            const shapes_ = MixedParameters.shapes(options);
+        pub fn allocationSize(self: MixedParameters) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.block_table_decode.byteSize();
-            allocation_size += shapes_.cu_seqlens_q_prefill.byteSize();
-            allocation_size += shapes_.seqused_k_prefill.byteSize();
+            allocation_size += self.block_table_decode.byteSize();
+            allocation_size += self.cu_seqlens_q_prefill.byteSize();
+            allocation_size += self.seqused_k_prefill.byteSize();
 
-            allocation_size += shapes_.block_table_decode.byteSize();
-            allocation_size += shapes_.cu_seqlens_q_decode.byteSize();
-            allocation_size += shapes_.seqused_k_decode.byteSize();
-            allocation_size += MixedMetadata.allocationSize(options.max_token_count, options.num_heads, options.head_dim);
+            allocation_size += self.block_table_decode.byteSize();
+            allocation_size += self.cu_seqlens_q_decode.byteSize();
+            allocation_size += self.seqused_k_decode.byteSize();
+            allocation_size += self.metadata.allocationSize();
 
             return allocation_size;
         }
@@ -1146,11 +1141,10 @@ pub const paged_fa3 = struct {
             self.out_accum.deinit();
         }
 
-        pub fn allocationSize(max_token_count: usize, num_heads: usize, head_dim: usize) usize {
-            const shapes_ = MixedMetadata.shapes(max_token_count, num_heads, head_dim);
+        pub fn allocationSize(self: MixedMetadata) usize {
             var allocation_size: usize = 0;
-            allocation_size += shapes_.out_accum.byteSize();
-            allocation_size += shapes_.host_metadata.byteSize();
+            allocation_size += self.out_accum.byteSize();
+            allocation_size += self.host_metadata.byteSize();
             return allocation_size;
         }
     };
