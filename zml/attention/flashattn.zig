@@ -906,7 +906,7 @@ pub const paged_fa2 = struct {
                     },
                     .{q.shape()},
                     .{
-                        .is_causal = false,
+                        .is_causal = true,
                         .max_seqlen_k = context.max_seqlen_k,
                         .num_heads = q.dim(.h),
                     },
