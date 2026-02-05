@@ -38,6 +38,12 @@ pub const Parameters = union(Backend) {
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
         };
     }
+
+    pub fn allocationSize(self: Parameters) usize {
+        return switch (self) {
+            inline else => |v| v.allocationSize(),
+        };
+    }
 };
 
 /// Internal state that can be used inside the model code. It's derived from Parameters and Option.
