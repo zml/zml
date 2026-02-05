@@ -12,9 +12,7 @@ const Shape = @import("shape.zig").Shape;
 const sharding_ = @import("sharding.zig");
 const Sharding = sharding_.Sharding;
 const ShardAssignment = sharding_.ShardAssignment;
-const slice_ = @import("slice.zig");
-const Slice = slice_.Slice;
-const SliceView = slice_.SliceView;
+const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
 
@@ -26,10 +24,10 @@ const log = std.log.scoped(.zml);
 /// * loading weights from disk directly to the `device zml.aio.loadBuffers`
 /// * can be created by calling `HostBuffer.toDevice(platform)`.
 pub const Buffer = struct {
+    _platform: *const Platform,
     _shape: Shape,
-    platform: *const Platform,
-    _shards: Shards,
     _sharding: Sharding,
+    _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
@@ -42,7 +40,7 @@ pub const Buffer = struct {
     pub fn deinit(self: *Buffer) void {
         // log.warn("Unloading {f} {d} bytes", .{ self._shape, self._shape.byteSize() });
         for (self._shards.constSlice()) |buffer| {
-            buffer.deinit(self.platform.pjrt_api);
+            buffer.deinit(self._platform.pjrt_api);
         }
     }
 
@@ -51,8 +49,9 @@ pub const Buffer = struct {
         return self._shape;
     }
 
+    // todo: rework with sharding in mind
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("Buffer({f})@{x}", .{ self._shape, @intFromPtr(self.devicePtr()) });
+        try writer.print("Buffer({f})@{x}", .{ self._shape, @intFromPtr(self.shardDevicePtr(0)) });
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -65,10 +64,10 @@ pub const Buffer = struct {
         opts: FromOptions,
     ) !Buffer {
         var res: Buffer = .{
-            .platform = platform,
+            ._platform = platform,
             ._shape = shape_,
-            ._shards = .{},
             ._sharding = sharding,
+            ._shards = .{},
         };
 
         const devices = platform.devices;
@@ -82,7 +81,7 @@ pub const Buffer = struct {
         while (it.next()) |shard| {
             if (shard.device_id >= devices.len) return error.InvalidDeviceId;
 
-            const view = sliceViewFromShard(slice, shard);
+            const view = shardSlice(slice, shard);
 
             const args = pjrt.Client.BufferFromHostBufferArgs{
                 .data = view.constData().ptr,
@@ -130,9 +129,9 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !void {
         for (self._shards.constSlice()) |buffer| {
-            const ev = buffer.readyEvent(self.platform.pjrt_api);
-            defer ev.deinit(self.platform.pjrt_api);
-            try ev.await(self.platform.pjrt_api, io);
+            const ev = buffer.readyEvent(self._platform.pjrt_api);
+            defer ev.deinit(self._platform.pjrt_api);
+            try ev.await(self._platform.pjrt_api, io);
         }
     }
 
@@ -141,27 +140,26 @@ pub const Buffer = struct {
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
-        shape_: Shape,
+        sh: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
         var res: Buffer = .{
-            .platform = platform,
-            ._shape = shape_,
-            ._shards = .{},
-            ._target = platform.target,
+            ._platform = platform,
+            ._shape = sh,
             ._sharding = sharding,
+            ._shards = .{},
         };
         errdefer for (res._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
         };
 
         var args = pjrt.Client.CreateUninitializedBufferArgs{
-            .dims = shape_.dims(),
-            .element_type = pjrtx.bufferTypeFromDtype(shape_.dtype()),
+            .dims = sh.dims(),
+            .element_type = pjrtx.bufferTypeFromDtype(sh.dtype()),
             .layout = .{
                 .tiled = .{
-                    .minor_to_major = constants.minorToMajor(shape_.rank()),
+                    .minor_to_major = constants.minorToMajor(sh.rank()),
                     .tile_dims = &.{},
                     .tile_dims_sizes = &.{},
                 },
@@ -171,7 +169,7 @@ pub const Buffer = struct {
 
         const devices = platform.devices;
 
-        const assignment = try sharding.deviceAssignment(sharding.allocator); // todo
+        const assignment = try sharding.deviceAssignment(sharding.allocator); // todo: sharding
         defer sharding.allocator.free(assignment);
 
         for (assignment) |device_id| {
@@ -194,15 +192,15 @@ pub const Buffer = struct {
         var shards: Shards = .{};
         shards.appendSliceAssumeCapacity(pjrt_buffers);
         return .{
-            .platform = platform,
+            ._platform = platform,
             ._shape = shape_,
-            ._shards = shards,
             ._sharding = sharding,
+            ._shards = shards,
         };
     }
 
-    pub fn devicePtr(self: Buffer) *anyopaque {
-        return self._shards.get(0).opaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+    pub fn shardDevicePtr(self: Buffer, shard_index: usize) *anyopaque {
+        return self._shards.get(shard_index).opaqueDeviceMemoryDataPointer(self._api) catch unreachable;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
@@ -216,57 +214,69 @@ pub const Buffer = struct {
     }
 
     /// Copies the content of the Buffer to the provided slice.
+    /// No allocations; only supports contiguous shard views.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
-        const maybe_event = try self._shards.get(0).toHostBuffer(self._api, slice.data());
-        if (maybe_event) |event| {
-            try event.await(self.platform.pjrt_api, io);
+        stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
+
+        var it = try sharding_.transferIterator(self._sharding, self._shape);
+        defer it.deinit();
+
+        var shard_index: usize = 0;
+        while (it.next()) |shard| : (shard_index += 1) {
+            if (shard_index >= self._shards.len) return error.ShardCountMismatch;
+
+            const view = shardSlice(slice, shard);
+            if (!view.isContiguous()) return error.NonContiguousShardRead;
+
+            const size_bytes: usize = @intCast(view.shape.byteSize());
+            const start: usize = view.offset_bytes;
+            const end: usize = start + size_bytes;
+            stdx.debug.assert(end <= slice.constData().len, "Shard view exceeds destination slice", .{});
+
+            const dst = slice.data()[start..end];
+            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, dst);
+
+            if (maybe_event) |event| {
+                try event.await(self._platform.pjrt_api, io);
+            }
         }
     }
 
     /// Copies the content of the Buffer to the provided slice.
     /// The returned slice owns the memory.
+    /// (This path supports non-contiguous shard views.)
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
 
-        try self.toSlice(io, slice);
+        var it = try sharding_.transferIterator(self._sharding, self._shape);
+        defer it.deinit();
+
+        var shard_index: usize = 0;
+        while (it.next()) |shard| : (shard_index += 1) {
+            if (shard_index >= self._shards.len) return error.ShardCountMismatch;
+
+            const view = shardSlice(slice, shard);
+            var shard_slice = try Slice.alloc(allocator, view.shape);
+            defer shard_slice.free(allocator);
+
+            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, shard_slice.data());
+            if (maybe_event) |event| {
+                try event.await(self._platform.pjrt_api, io);
+            }
+
+            view.copyFromContiguous(shard_slice.constData());
+        }
 
         return slice;
     }
 
-    fn sliceViewFromShard(
-        src: Slice,
-        shard: ShardAssignment.Shard,
-    ) SliceView {
-        const rank = src.shape.rank();
-        var starts = [_]i64{0} ** constants.MAX_RANK;
-        var sizes = [_]i64{0} ** constants.MAX_RANK;
-
-        for (0..rank) |ax| {
-            starts[ax] = 0;
-            sizes[ax] = src.shape.dim(ax);
-        }
+    /// Returns a Slice representing the sub-region of `total` defined by the shard assignment.
+    fn shardSlice(total: Slice, shard: ShardAssignment.Shard) Slice {
+        var res = total;
         for (shard.slices.items) |s| {
-            starts[s.axis] = s.start;
-            sizes[s.axis] = s.size;
+            res = res.subSlice(s.axis, s.start, s.size);
         }
-
-        var out_shape = src.shape;
-        for (0..rank) |ax| {
-            out_shape = out_shape.set(ax, sizes[ax]);
-        }
-
-        const byte_strides = src.shape.computeByteStrides();
-        var offset: i64 = 0;
-        for (0..rank) |ax| {
-            offset += starts[ax] * byte_strides.get(ax);
-        }
-
-        return .{
-            .data = src.constData(),
-            .offset_bytes = @intCast(offset),
-            .shape = out_shape,
-            .byte_strides = byte_strides,
-        };
+        return res;
     }
 };

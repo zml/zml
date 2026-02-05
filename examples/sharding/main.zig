@@ -59,96 +59,26 @@ const Model = struct {
     }
 };
 
-pub fn main() !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
+const AddModel = struct {
+    pub fn init() AddModel {
+        return .{};
+    }
 
-    const allocator = debug_allocator.allocator();
-    // const allocator = std.heap.smp_allocator;
+    pub fn forward(_: AddModel, a: zml.Tensor, b: zml.Tensor, c: zml.Tensor, d: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+        const sum_ac = a.add(c);
+        const sum_bd = b.add(d);
+        return .{ sum_ac, sum_bd };
+    }
+};
 
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
-
-    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = 8 } });
-    defer platform.deinit(allocator);
-
-    log.info("{f}\n\n", .{platform.fmtVerbose()});
-
+fn runComplexModel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    sharding_data: zml.sharding.Sharding,
+    sharding_model: zml.sharding.Sharding,
+) !void {
     const dtype: zml.DataType = .bf16;
-
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-    // defer physical_mesh.deinit();
-
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .cuda, .{ .link = 8 }, .tree);
-    // defer physical_mesh.deinit();
-
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .neuron, .{ .bus = 2, .link = 12 }, .{ .ring = .closed_ring });
-    // defer physical_mesh.deinit();
-
-    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[0]), .device(platform.devices[1]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[2]), .device(platform.devices[3]),
-            }),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[4]), .device(platform.devices[5]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[6]), .device(platform.devices[7]),
-            }),
-        }),
-    });
-
-    var physical_mesh: zml.sharding.PhysicalMesh = try .fromTree(allocator, platform.target, topology);
-    defer physical_mesh.deinit();
-
-    log.info("{f}", .{physical_mesh});
-
-    // 2D logical mesh (data)
-    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{
-        .batch = .low_bandwidth,
-        .context = .balanced,
-    });
-    log.info("{f}", .{mesh_data});
-
-    // 3D logical mesh (model)
-    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{
-        .model = .high_bandwidth,
-        .head = .balanced,
-        .expert = .low_bandwidth,
-    });
-    log.info("{f}", .{mesh_model});
-
-    var strategy_data = try zml.sharding.suggestStrategy(allocator, mesh_data, physical_mesh);
-    defer strategy_data.deinit(allocator);
-
-    var strategy_model = try zml.sharding.suggestStrategy(allocator, mesh_model, physical_mesh);
-    defer strategy_model.deinit(allocator);
-
-    var sharding_data = try zml.sharding.resolveStrategyConstraints(
-        allocator,
-        mesh_data,
-        physical_mesh,
-        strategy_data,
-    );
-    defer sharding_data.deinit();
-    log.info("{f}", .{sharding_data});
-
-    var sharding_model = try zml.sharding.resolveStrategyConstraints(
-        allocator,
-        mesh_model,
-        physical_mesh,
-        strategy_model,
-    );
-    defer sharding_model.deinit();
-    log.info("{f}", .{sharding_model});
 
     const input_shape = zml.Shape.init(.{ .b = 8, .s = 512, .d = 4096 }, dtype)
         .withPartitioning(.{ .b = .batch, .s = .context, .d = .replicated });
@@ -233,6 +163,167 @@ pub fn main() !void {
     log.info("Exiting", .{});
 }
 
+fn runAdditionExample(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    sharding_data: zml.sharding.Sharding,
+    sharding_model: zml.sharding.Sharding,
+) !void {
+    _ = sharding_data; // autofix
+    const add_shape_data = zml.Shape.init(.{ .x = 16, .y = 24 }, .f32)
+        .withPartitioning(.{ .x = .batch, .y = .context });
+    _ = add_shape_data; // autofix
+
+    const add_shape_model = zml.Shape.init(.{ .x = 8, .y = 16, .z = 8 }, .f32)
+        .withPartitioning(.{ .x = .model, .y = .head, .z = .expert });
+
+    const a: zml.Tensor = .fromShape(add_shape_model);
+    const b: zml.Tensor = .fromShape(add_shape_model);
+    const c: zml.Tensor = .fromShape(add_shape_model);
+    const d: zml.Tensor = .fromShape(add_shape_model);
+
+    const model: AddModel = .init();
+
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{
+        .input_sharding = sharding_model,
+        .output_sharding = sharding_model,
+        .program_sharding = &.{sharding_model},
+    });
+    defer exe.deinit();
+
+    var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_model, 0.0);
+    defer a_buf.deinit();
+    var b_buf = try createSequenceBuffer(allocator, io, platform, b.shape(), sharding_model, 1.0);
+    defer b_buf.deinit();
+
+    var c_buf = try createSequenceBuffer(allocator, io, platform, c.shape(), sharding_model, 2.0);
+    defer c_buf.deinit();
+    var d_buf = try createSequenceBuffer(allocator, io, platform, d.shape(), sharding_model, 3.0);
+    defer d_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    exe_args.set(.{ a_buf, b_buf, c_buf, d_buf });
+
+    log.info("Running add example (a+c, b+d)...", .{});
+    exe.call(exe_args, &exe_results);
+
+    const Out = struct { sum_ac: zml.Buffer, sum_bd: zml.Buffer };
+    var out = exe_results.get(Out);
+    defer out.sum_ac.deinit();
+    defer out.sum_bd.deinit();
+
+    const sum_ac_slice = try out.sum_ac.toSliceAlloc(allocator, io);
+    defer sum_ac_slice.free(allocator);
+    const sum_bd_slice = try out.sum_bd.toSliceAlloc(allocator, io);
+    defer sum_bd_slice.free(allocator);
+
+    const sum_ac = sum_ac_slice.items(f32);
+    const sum_bd = sum_bd_slice.items(f32);
+
+    log.info(" sum_ac[0]={d:.3} sum_bd[0]={d:.3}", .{ sum_ac[0], sum_bd[0] });
+
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    try sum_bd_slice.prettyPrint(&stdout.interface, .{});
+}
+
+pub fn main() !void {
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    defer std.debug.assert(debug_allocator.deinit() == .ok);
+
+    const allocator = debug_allocator.allocator();
+    // const allocator = std.heap.smp_allocator;
+
+    var threaded: std.Io.Threaded = .init(allocator, .{});
+    defer threaded.deinit();
+
+    const io = threaded.io();
+
+    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = 8 } });
+    defer platform.deinit(allocator);
+
+    log.info("{f}\n\n", .{platform.fmtVerbose()});
+
+    // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
+    // defer physical_mesh.deinit();
+
+    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .cuda, .{ .link = 8 }, .tree);
+    // defer physical_mesh.deinit();
+
+    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .neuron, .{ .bus = 2, .link = 12 }, .{ .ring = .closed_ring });
+    // defer physical_mesh.deinit();
+
+    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[0]), .device(platform.devices[1]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[2]), .device(platform.devices[3]),
+            }),
+        }),
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[4]), .device(platform.devices[5]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(platform.devices[6]), .device(platform.devices[7]),
+            }),
+        }),
+    });
+
+    var physical_mesh: zml.sharding.PhysicalMesh = try .fromTree(allocator, platform.target, topology);
+    defer physical_mesh.deinit();
+
+    log.info("{f}", .{physical_mesh});
+
+    // 2D logical mesh (data)
+    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{
+        .batch = .low_bandwidth,
+        .context = .balanced,
+    });
+    log.info("{f}", .{mesh_data});
+
+    // 3D logical mesh (model)
+    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{
+        .model = .high_bandwidth,
+        .head = .balanced,
+        .expert = .low_bandwidth,
+    });
+    log.info("{f}", .{mesh_model});
+
+    var strategy_data = try zml.sharding.suggestStrategy(allocator, mesh_data, physical_mesh);
+    defer strategy_data.deinit(allocator);
+
+    var strategy_model = try zml.sharding.suggestStrategy(allocator, mesh_model, physical_mesh);
+    defer strategy_model.deinit(allocator);
+
+    var sharding_data = try zml.sharding.resolveStrategyConstraints(
+        allocator,
+        mesh_data,
+        physical_mesh,
+        strategy_data,
+    );
+    defer sharding_data.deinit();
+    log.info("{f}", .{sharding_data});
+
+    var sharding_model = try zml.sharding.resolveStrategyConstraints(
+        allocator,
+        mesh_model,
+        physical_mesh,
+        strategy_model,
+    );
+    defer sharding_model.deinit();
+    log.info("{f}", .{sharding_model});
+
+    try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
+}
+
 fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.sharding.Sharding, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
@@ -259,4 +350,40 @@ fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const
     }
 
     return .fromSlice(io, platform, slice, sharding);
+}
+
+fn createSequenceBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    shape: zml.Shape,
+    sharding: zml.sharding.Sharding,
+    start: f32,
+) !zml.Buffer {
+    const slice = try zml.Slice.alloc(allocator, shape);
+    defer slice.free(allocator);
+
+    for (slice.items(f32), 0..) |*e, i| {
+        e.* = start + @as(f32, @floatFromInt(i));
+    }
+
+    return zml.Buffer.fromSlice(io, platform, slice, sharding);
+}
+
+fn createConstantBuffer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    shape: zml.Shape,
+    sharding: zml.sharding.Sharding,
+    value: f32,
+) !zml.Buffer {
+    const slice = try zml.Slice.alloc(allocator, shape);
+    defer slice.free(allocator);
+
+    for (slice.items(f32)) |*e| {
+        e.* = value;
+    }
+
+    return zml.Buffer.fromSlice(io, platform, slice, sharding);
 }

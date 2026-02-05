@@ -511,7 +511,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
         c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
             const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
-
+            c.xla_ExecutableBuildOptionsProto_set_use_shardy_partitioner(exec_build_options, true); // todo: check partitioner
             c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
             c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.numReplicas());
             c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.numPartitions());

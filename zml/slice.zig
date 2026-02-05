@@ -23,14 +23,17 @@ pub const Slice = struct {
         immutable: []const u8,
     },
     shape: Shape,
+    offset_bytes: usize = 0,
+    byte_strides: stdx.BoundedArray(i64, constants.MAX_RANK),
 
     pub fn init(shape: Shape, bytes: anytype) Slice {
         stdx.debug.assertComptime(isBytes(@TypeOf(bytes)), "Expected \"bytes\" to be a []u8 or []const u8, got {s}", .{@typeName(@TypeOf(bytes))});
         const type_info = @typeInfo(@TypeOf(bytes));
+        const byte_strides = shape.computeByteStrides();
         return if (type_info.pointer.is_const)
-            .{ .inner_data = .{ .immutable = bytes }, .shape = shape }
+            .{ .inner_data = .{ .immutable = bytes }, .shape = shape, .offset_bytes = 0, .byte_strides = byte_strides }
         else
-            .{ .inner_data = .{ .mutable = bytes }, .shape = shape };
+            .{ .inner_data = .{ .mutable = bytes }, .shape = shape, .offset_bytes = 0, .byte_strides = byte_strides };
     }
 
     pub fn alloc(allocator: std.mem.Allocator, shape_: Shape) !Slice {
@@ -46,11 +49,16 @@ pub const Slice = struct {
             else => |v| stdx.debug.panic("Unsupported alignment: {}", .{v}),
         };
 
-        return .{ .inner_data = .{ .mutable = bytes }, .shape = shape_ };
+        return .{
+            .inner_data = .{ .mutable = bytes },
+            .shape = shape_,
+            .offset_bytes = 0,
+            .byte_strides = shape_.computeByteStrides(),
+        };
     }
 
     pub fn free(slice: Slice, allocator: std.mem.Allocator) void {
-        const d = slice.constData();
+        const d = slice.constData_();
 
         switch (slice.shape.dtype().alignOf()) {
             1 => allocator.free(@as([]align(1) const u8, @alignCast(d))),
@@ -68,7 +76,57 @@ pub const Slice = struct {
         return slice.shape.dtype();
     }
 
+    pub fn isContiguous(slice: Slice) bool {
+        const expected = slice.shape.computeByteStrides();
+        const rank = slice.shape.rank();
+        for (0..rank) |ax| {
+            if (slice.byte_strides.get(ax) != expected.get(ax)) return false;
+        }
+        return true;
+    }
+
+    /// Returns the actual element-wise strides for this specific slice.
+    /// This respects transpositions and non-contiguous views.
+    pub fn elementStrides(self: Slice) stdx.BoundedArray(i64, constants.MAX_RANK) {
+        const element_size = @as(i64, @intCast(self.dtype().sizeOf()));
+        var res = self.byte_strides;
+        for (res.slice()) |*stride| {
+            // We divide the actual byte strides by the size of the data type
+            stride.* = @divExact(stride.*, element_size);
+        }
+        return res;
+    }
+
+    pub fn subSlice(slice: Slice, axis: anytype, start: i64, size: i64) Slice {
+        const dim = slice.shape.dim(axis);
+
+        stdx.debug.assert(start >= 0 and size >= 0 and start + size <= dim, "subSlice out of bounds: axis {d} start {d} size {d} dim {d}", .{ axis, start, size, dim });
+
+        const stride_bytes = slice.byte_strides.get(axis);
+        const new_offset = @as(i64, @intCast(slice.offset_bytes)) + start * stride_bytes;
+        stdx.debug.assert(new_offset >= 0, "subSlice produced negative offset: {d}", .{new_offset});
+
+        var res = slice;
+        res.offset_bytes = @intCast(new_offset);
+        res.shape = slice.shape.set(axis, size);
+        return res;
+    }
+
+    fn dropAxis(slice: Slice, axis_: anytype) Slice {
+        const axis = slice.shape.axis(axis_);
+        var res = slice;
+        res.shape = slice.shape.drop(axis);
+        _ = res.byte_strides.orderedRemove(@intCast(axis));
+        return res;
+    }
+
     pub fn data(slice: Slice) []u8 {
+        const base = slice.data_();
+        stdx.debug.assert(slice.offset_bytes <= base.len, "Slice offset exceeds data length", .{});
+        return base[slice.offset_bytes..];
+    }
+
+    fn data_(slice: Slice) []u8 {
         return switch (slice.inner_data) {
             .mutable => |d| d,
             else => stdx.debug.panic("Expected slice to be mutable but it's immutable", .{}),
@@ -76,6 +134,12 @@ pub const Slice = struct {
     }
 
     pub fn constData(slice: Slice) []const u8 {
+        const base = slice.constData_();
+        stdx.debug.assert(slice.offset_bytes <= base.len, "Slice offset exceeds data length", .{});
+        return base[slice.offset_bytes..];
+    }
+
+    fn constData_(slice: Slice) []const u8 {
         return switch (slice.inner_data) {
             inline else => |d| d,
         };
@@ -128,14 +192,18 @@ pub const Slice = struct {
             switch (slice.dtype()) {
                 inline else => |dt| {
                     const T = dt.toZigType();
-                    // TODO: handle negative strides
-                    const elem_strides: i64 = slice.shape.computeElementStrides().get(0);
-                    const values = slice.constItems(T);
+                    const n = slice.shape.dim(0);
+
+                    const stride = @divExact(slice.byte_strides.get(0), @as(i64, @intCast(@sizeOf(T))));
+
+                    const needed_len: usize = if (n == 0) 0 else @intCast(@abs((n - 1) * stride) + 1);
+                    const values = slice.constItems(T)[0..needed_len];
+
                     switch (comptime dt.class()) {
-                        .float => try stdx.fmt.formatFloatSlice(values, options, elem_strides, writer),
-                        .integer => try stdx.fmt.formatIntSlice(values, options, elem_strides, writer),
-                        .complex => try stdx.fmt.formatComplexSlice(values, options, elem_strides, writer),
-                        .bool => try stdx.fmt.formatBoolSlice(values, options, elem_strides, writer),
+                        .float => try stdx.fmt.formatFloatSlice(values, options, stride, writer),
+                        .integer => try stdx.fmt.formatIntSlice(values, options, stride, writer),
+                        .complex => try stdx.fmt.formatComplexSlice(values, options, stride, writer),
+                        .bool => try stdx.fmt.formatBoolSlice(values, options, stride, writer),
                     }
                 },
             }
@@ -148,8 +216,7 @@ pub const Slice = struct {
         // Write first rows
         const n: u64 = @intCast(slice.shape.dim(0));
         for (0..@min(num_rows, n)) |d| {
-            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
-            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
+            const sub_slice = slice.subSlice(0, @intCast(d), 1).dropAxis(0);
             try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
             if (slice.shape.rank() > 1) {
                 try writer.writeAll(",\n");
@@ -164,8 +231,7 @@ pub const Slice = struct {
         }
         // Write last rows
         for (@max(n - num_rows, num_rows)..n) |d| {
-            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
-            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
+            const sub_slice = slice.subSlice(0, @intCast(d), 1).dropAxis(0);
             try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
             if (slice.shape.rank() > 1) {
                 try writer.writeAll(",\n");
@@ -175,16 +241,33 @@ pub const Slice = struct {
         try writer.splatByteAll(' ', indent_level);
         _ = try writer.write("}");
     }
-};
 
-pub const SliceView = struct {
-    data: []const u8,
-    offset_bytes: usize,
-    shape: Shape,
-    byte_strides: stdx.BoundedArray(i64, constants.MAX_RANK),
+    pub fn copyFromContiguous(destination: Slice, source: []const u8) void {
+        const total_bytes = destination.shape.byteSize();
+        stdx.debug.assert(source.len >= total_bytes, "Source buffer size ({}) smaller than destination shape ({})", .{ source.len, total_bytes });
 
-    pub fn constData(self: SliceView) []const u8 {
-        return self.data[self.offset_bytes..];
+        if (total_bytes == 0) return;
+
+        if (destination.isContiguous()) {
+            @memcpy(destination.data()[0..total_bytes], source[0..total_bytes]);
+            return;
+        }
+
+        const rank = destination.shape.rank();
+        stdx.debug.assert(rank > 0, "Non-contiguous slice with rank 0 is unexpected", .{});
+
+        const outer_len: usize = @intCast(destination.shape.dim(0));
+        stdx.debug.assert(outer_len > 0, "Invalid dimension size: {d}", .{outer_len});
+
+        stdx.debug.assert(total_bytes % outer_len == 0, "Non-even split for contiguous source", .{});
+        const outer_span_bytes = total_bytes / outer_len;
+
+        for (0..outer_len) |i| {
+            const destination_outer = destination.subSlice(0, @intCast(i), 1).dropAxis(0);
+            const source_outer_start = i * outer_span_bytes;
+            const source_outer_end = source_outer_start + outer_span_bytes;
+            destination_outer.copyFromContiguous(source[source_outer_start..source_outer_end]);
+        }
     }
 };
 
