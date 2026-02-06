@@ -6,13 +6,14 @@ import torch
 import numpy as np
 from PIL import Image
 
-from transformers.models.qwen2 import Qwen2TokenizerFast
-from transformers.models.qwen3 import Qwen3ForCausalLM
-
+# from transformers.models.qwen2 import Qwen2TokenizerFast
+# from transformers.models.qwen3 import Qwen3ForCausalLM
 # from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
 # from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
 # from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
+from tokenization_qwen2_fast import Qwen2TokenizerFast
+from modeling_qwen3 import Qwen3ForCausalLM
 from transformer_flux2 import Flux2Transformer2DModel
 from autoencoder_kl_flux2 import AutoencoderKLFlux2
 from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
@@ -20,53 +21,40 @@ from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 import flux2_tools
 import utils
 
-def get_tokens_from_prompt(repo_id: str, prompt: str, max_length=20) -> Dict[str, torch.Tensor]:
-    hand_tokenizer = Qwen2TokenizerFast.from_pretrained(
-        repo_id,
-        subfolder="tokenizer"
-    )
-    text = hand_tokenizer.apply_chat_template(
+def get_tokens_from_prompt(tokenizer: Qwen2TokenizerFast, prompt: str, max_length=20) -> Tuple[str, Dict[str, torch.Tensor]]:
+    text = tokenizer.apply_chat_template(
         [{"role": "user", "content": prompt}],
         tokenize=False,
         add_generation_prompt=True,
         enable_thinking=False, # Specific to Qwen2-based flows
     )
-    print(f"text_templated: from {prompt} to {text}")
-
-    token = hand_tokenizer(
+    token = tokenizer(
         text,
         padding="max_length",
         max_length=max_length,
         truncation=True,
         return_tensors="pt",
     )
-    return token
+    return text, token
 
 
-def get_encoding_embeded_from_tokens(repo_id: str, 
+def get_encoding_embeded_from_tokens(token_encoder: Qwen3ForCausalLM, 
                                      tokens: Dict[str, torch.Tensor],
-                                     hidden_states_layers: list[int] = [9, 18, 27],
-                                     device = "cpu") -> Tuple[torch.Tensor, torch.Tensor]:
-    
-    token_encoder = Qwen3ForCausalLM.from_pretrained(
-        repo_id,
-        subfolder="text_encoder",
-        dtype=torch.float32,
-    )
-    token_encoder.to(device)
+                                     hidden_states_layers: list[int] = [9, 18, 27]) -> Tuple[torch.Tensor, torch.Tensor]:
+
     text_outputs = token_encoder(
-        input_ids=tokens["input_ids"].to(device),
-        attention_mask=tokens["attention_mask"].to(device),
+        input_ids=tokens["input_ids"].to(token_encoder.device),
+        attention_mask=tokens["attention_mask"].to(token_encoder.device),
         output_hidden_states=True,
         use_cache=False,
     )
     out = torch.stack([text_outputs.hidden_states[k] for k in hidden_states_layers], dim=1)
-    out = out.to(dtype=torch.float32, device=device)
+    out = out.to(dtype=token_encoder.dtype, device=token_encoder.device)
     batch_size, num_channels, seq_len, hidden_dim = out.shape
     assert batch_size == 1, "Only batch size 1 is supported currently."
     prompt_embeds = out.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_channels * hidden_dim)
     text_ids = flux2_tools.prepare_text_ids(prompt_embeds)
-    text_ids = text_ids.to(device)
+    text_ids = text_ids.to(token_encoder.device)
     return prompt_embeds, text_ids
 
 
@@ -215,61 +203,82 @@ def run_pipline():
     prompt = "A flying surperman style cat"
     img_dim: int = 128
 
-    if os.path.exists("/Users/kevin/zml/flux_klein_notebook_embeds.npy") and os.path.exists("/Users/kevin/zml/flux_klein_notebook_text_ids.npy"):
-        print("\n>>> Loading Embeds...")
-        token_encoded_embeds = torch.from_numpy(np.load("/Users/kevin/zml/flux_klein_notebook_embeds.npy"))
-        text_ids = torch.from_numpy(np.load("/Users/kevin/zml/flux_klein_notebook_text_ids.npy"))
-    else:
-        print("\n>>> Tokenizing Prompt...")
-        token: dict[str, torch.Tensor] = get_tokens_from_prompt(repo_id=repo_id, prompt=prompt, max_length=20)
-        print(f"input_ids: {token['input_ids'].flatten()[:20]}")
-        print(f"attention_mask: {token['attention_mask'].flatten()[:20]}")
-        print("\n>>> Encoding Prompt...")
-        token_encoded_embeds, text_ids = get_encoding_embeded_from_tokens(repo_id=repo_id, tokens=token)
-        save_encoding_embeded_from_tokens(token_encoded_embeds, text_ids, "flux_klein_notebook")
+    print("\n>>> Tokenizing Prompt...")
 
+    tokenizer = Qwen2TokenizerFast.from_pretrained(
+        repo_id,
+        subfolder="tokenizer"
+    )
+    text, token = get_tokens_from_prompt(tokenizer=tokenizer, prompt=prompt, max_length=20)
+    print(f"text_templated: from {prompt} to {text}")
+    print(f"input_ids: {token['input_ids'].flatten()[:20]}")
+    print(f"attention_mask: {token['attention_mask'].flatten()[:20]}")
+
+    token_encoder = Qwen3ForCausalLM.from_pretrained(
+        repo_id,
+        subfolder="text_encoder",
+        dtype=torch.float32,
+    )
+    token_encoder.to("cpu")
+
+    token_encoded_embeds, text_ids = get_encoding_embeded_from_tokens(token_encoder=token_encoder, tokens=token)
     print(f"    text_ids (first 20). {text_ids.shape} : {text_ids.flatten()[:20]}")
     print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
+    sys.exit(0)
 
-    print("\n>>>Preparing Latents...")
-    transformer = Flux2Transformer2DModel.from_pretrained(
-        repo_id,
-        subfolder="transformer"
-    )
-    latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim)
-    print(f"    Latents (first 20). {latents.shape} : {latents.flatten()[:20]}")
-    print(f"    Latent_ids (first 20). {latent_ids.shape} : {latent_ids.flatten()[:20]}")
+    # if os.path.exists("/Users/kevin/zml/flux_klein_notebook_embeds.npy") and os.path.exists("/Users/kevin/zml/flux_klein_notebook_text_ids.npy"):
+    #     print("\n>>> Loading Embeds...")
+    #     token_encoded_embeds = torch.from_numpy(np.load("/Users/kevin/zml/flux_klein_notebook_embeds.npy"))
+    #     text_ids = torch.from_numpy(np.load("/Users/kevin/zml/flux_klein_notebook_text_ids.npy"))
+    # else:
+    #     print("\n>>> Tokenizing Prompt...")
+    #     token: dict[str, torch.Tensor] = get_tokens_from_prompt(repo_id=repo_id, prompt=prompt, max_length=20)
+    #     print(f"input_ids: {token['input_ids'].flatten()[:20]}")
+    #     print(f"attention_mask: {token['attention_mask'].flatten()[:20]}")
+    #     print("\n>>> Encoding Prompt...")
+    #     token_encoded_embeds, text_ids = get_encoding_embeded_from_tokens(repo_id=repo_id, tokens=token)
+    #     save_encoding_embeded_from_tokens(token_encoded_embeds, text_ids, "flux_klein_notebook")
+
+    # print(f"    text_ids (first 20). {text_ids.shape} : {text_ids.flatten()[:20]}")
+    # print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
+
+    # print("\n>>>Preparing Latents...")
+    # transformer = Flux2Transformer2DModel.from_pretrained(
+    #     repo_id,
+    #     subfolder="transformer"
+    # )
+    # latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim)
+    # print(f"    Latents (first 20). {latents.shape} : {latents.flatten()[:20]}")
+    # print(f"    Latent_ids (first 20). {latent_ids.shape} : {latent_ids.flatten()[:20]}")
     
-    print("\n>>> Preparing Timesteps...")
-    scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
-        repo_id,
-        subfolder="scheduler"
-    )
-    print(f"    Scheduler Sigmas (first 20): {scheduler.sigmas.flatten()[:20]}")
-    latents_out: torch.Tensor = schedule(
-        transformer=transformer,
-        scheduler=scheduler,
-        latents=latents,
-        latent_ids=latent_ids,
-        prompt_embeds=token_encoded_embeds,
-        text_ids=text_ids,
-        num_inference_steps=1)
+    # print("\n>>> Preparing Timesteps...")
+    # scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
+    #     repo_id,
+    #     subfolder="scheduler"
+    # )
+    # print(f"    Scheduler Sigmas (first 20): {scheduler.sigmas.flatten()[:20]}")
+    # latents_out: torch.Tensor = schedule(
+    #     transformer=transformer,
+    #     scheduler=scheduler,
+    #     latents=latents,
+    #     latent_ids=latent_ids,
+    #     prompt_embeds=token_encoded_embeds,
+    #     text_ids=text_ids,
+    #     num_inference_steps=1)
 
-    print(f"    Latents Out (first 20). {latents_out.shape} : {latents_out.flatten().tolist()[:20]}")
+    # print(f"    Latents Out (first 20). {latents_out.shape} : {latents_out.flatten().tolist()[:20]}")
 
-    # Stopping before VAE decoding for now
+    # print("\n>>> Decoding Latents...")
+    # variational_auto_encoder = AutoencoderKLFlux2.from_pretrained(
+    #     repo_id,
+    #     subfolder="vae"
+    # )
+    # image_decoded: torch.Tensor = variational_auto_encode(variational_auto_encoder=variational_auto_encoder,latents=latents_out)
 
-    print("\n>>> Decoding Latents...")
-    variational_auto_encoder = AutoencoderKLFlux2.from_pretrained(
-        repo_id,
-        subfolder="vae"
-    )
-    image_decoded: torch.Tensor = variational_auto_encode(variational_auto_encoder=variational_auto_encoder,latents=latents_out)
+    # print(f"    Image Decoded (first 20). {image_decoded.shape} : {image_decoded.flatten().tolist()[:20]}")
 
-    print(f"    Image Decoded (first 20). {image_decoded.shape} : {image_decoded.flatten().tolist()[:20]}")
-
-    convert_image_to_pil_png(image_decoded, "flux_klein_notebook_result")
-    print("\n>>> Pipeline Complete.")
+    # convert_image_to_pil_png(image_decoded, "flux_klein_notebook_result")
+    # print("\n>>> Pipeline Complete.")
 
 # %%
 
