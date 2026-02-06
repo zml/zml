@@ -95,7 +95,7 @@ pub const NpyData = struct {
         return loadNpy(allocator, path);
     }
 
-    pub fn toBuffer(self: NpyData, io: std.Io, platform: zml.Platform) !zml.Buffer {
+    pub fn toBuffer(self: NpyData, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
         return zml.Buffer.fromBytes(io, platform, self.toTensor().shape(), self.data);
     }
 };
@@ -446,7 +446,7 @@ const CFileReader = struct {
 
 // }
 
-pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, buf: zml.Buffer, path: []const u8) !void {
+pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, buf: zml.Buffer, path: []const u8) !void {
     _ = platform;
     const shape = buf.shape();
     const slice = try zml.Slice.alloc(allocator, shape);

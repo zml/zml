@@ -477,7 +477,7 @@ pub const AutoencoderKLFlux2 = struct {
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, model_path: []const u8) !ModelContext {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8) !ModelContext {
         log.info("Loading VAE from: {s}/vae", .{model_path});
 
         // 1. Resolve Repo/Dir
@@ -501,14 +501,13 @@ pub const AutoencoderKLFlux2 = struct {
 
         // 5. Hydrate Weights
         log.info("Hydrating VAE Weights...", .{});
-        const weights = try zml.io.loadBuffersFromId(
+        const weights = try zml.io.load(
+            AutoencoderKLFlux2,
+            &model,
             allocator,
             io,
             platform,
-            model,
-            tr_store.view(),
-            .{ .size = 128 * 1024 * 1024, .concurrency = 4 },
-            .{ .size = 128 * 1024 * 1024, .concurrency = 4 },
+            .{ .parallelism = 1, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024 },
         );
 
         return .{

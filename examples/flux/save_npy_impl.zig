@@ -1,4 +1,4 @@
-pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, buf: zml.Buffer, path: []const u8) !void {
+pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, buf: zml.Buffer, path: []const u8) !void {
     _ = platform;
     const shape = buf.shape();
     const slice = try zml.Slice.alloc(allocator, shape);

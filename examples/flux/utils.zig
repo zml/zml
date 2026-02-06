@@ -15,7 +15,7 @@ pub const LatentPacker = struct {
 pub fn pack_latents(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     latents_in: zml.Buffer,
 ) !struct { zml.Buffer, zml.Buffer } {
     const latents_tensor = zml.Tensor.fromShape(latents_in.shape());
@@ -55,7 +55,7 @@ pub fn compute_empirical_mu(image_seq_len: f64, num_steps: f64) f32 {
 pub fn get_latents(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     config: flux_model.Config,
     img_dim: usize,
 ) !struct { zml.Buffer, zml.Buffer } {
@@ -81,7 +81,7 @@ pub fn get_latents(
     // Upload to Device
     const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
 
-    const latents_raw_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(latents_raw_data));
+    var latents_raw_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(latents_raw_data));
     defer latents_raw_buffer.deinit();
 
     // Compile and Execute Packing

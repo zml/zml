@@ -1362,8 +1362,7 @@ pub const ModelContext = struct {
     }
 };
 
-
-pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, model_path: []const u8) !ModelContext {
+pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8) !ModelContext {
     @setEvalBranchQuota(10000);
     log.info("Loading Transformer from: {s}/transformer", .{model_path});
 
@@ -1397,14 +1396,13 @@ pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: zml.Plat
 
     // 5. Hydrate Weights
     log.info("Hydrating Weights...", .{});
-    const weights = try zml.io.loadBuffersFromId(
+    const weights = try zml.io.load(
+        Flux2Transformer2DModel,
+        &model,
         allocator,
         io,
         platform,
-        model,
-        tr_store.view(),
-        .{ .size = 128 * 1024 * 1024, .concurrency = 4 }, // 128MB Read Pool
-        .{ .size = 128 * 1024 * 1024, .concurrency = 4 }, // 128MB Write Pool
+        .{.parallelism = 1, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024},
     );
 
     return .{

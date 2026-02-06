@@ -38,7 +38,7 @@ pub fn main() !void {
     const io = vfs.io();
 
     var platform_auto = try zml.Platform.init(allocator, io, .cpu, .{});
-    defer platform_auto.deinit();
+    defer platform_auto.deinit(allocator);
 
     const CliArgs = struct {
         model: []const u8 = "/Users/kevin/FLUX.2-klein-4B",
@@ -70,7 +70,7 @@ pub fn main() !void {
     log.info(">>Preparing Latents...", .{});
     const img_dim = 128;
 
-    const latent_buf, const latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, img_dim);
+    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, img_dim);
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
 
@@ -95,7 +95,7 @@ pub fn main() !void {
         return;
     }
 
-    const latents_out = try schedule(
+    var latents_out = try schedule(
         transformer2d_model_ctx.model,
         transformer2d_model_ctx.weights,
         scheduler,
@@ -127,7 +127,7 @@ pub fn main() !void {
     std.process.exit(0);
 }
 
-fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
+fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
     const VAEDecodeStep = struct {
         pub fn forward(self: @This(), model: autoencoder_kl.AutoencoderKLFlux2, latents_tensor: zml.Tensor) zml.Tensor {
             _ = self;
@@ -154,7 +154,7 @@ fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: z
     return vae_res.get(zml.Buffer);
 }
 
-fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
+fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
     const npy = tools.NpyData.load(allocator, path) catch {
         log.warn("Input not found at {s}, using zeros", .{path});
         const shape = zml.Shape.init(fallback_shape, .f32);
@@ -180,7 +180,7 @@ pub fn schedule(
     num_inference_steps: usize,
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
 ) !zml.Buffer {
     @setEvalBranchQuota(10_000);
     const image_seq_len: f64 = @floatFromInt(latents.shape().dim(1));
@@ -303,7 +303,7 @@ pub fn schedule(
             t_proj_slice[j] = @cos(arg);
             t_proj_slice[j + 128] = @sin(arg);
         }
-        const t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(t_proj_slice));
+        var t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(t_proj_slice));
         // defer t_proj_buf.deinit();
 
         // Guidance Projection
@@ -317,8 +317,8 @@ pub fn schedule(
             g_proj_slice[j] = @cos(arg);
             g_proj_slice[j + 128] = @sin(arg);
         }
-        const g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_slice));
-        // defer g_proj_buf.deinit();
+        var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_slice));
+        defer g_proj_buf.deinit();
 
         // Debug: Print Timestep Projection
         if (idx == 0) {
@@ -394,7 +394,7 @@ fn debugForwardStage(
     text_ids: zml.Buffer,
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     stage: flux_model_transformer2d.Flux2Transformer2DModel.DebugStage,
 ) !void {
     const freq_vals_arr = flux_model_transformer2d.computeTimestepFrequencies(transformer.config.timestep_guidance_channels);
@@ -515,7 +515,7 @@ fn debugForwardStage(
 fn unpackLatentsWithIds(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     latents: zml.Buffer,
     latent_ids: zml.Buffer,
 ) !zml.Buffer {
