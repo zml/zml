@@ -31,3 +31,6 @@ venv
 # Editor specific
 ## Neovim
 .nvim.local.lua
+
+*.tmp*
+__pycache__/
