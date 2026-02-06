@@ -38,7 +38,6 @@ pub const Buffer = struct {
     /// Depending on the platform, the memory is typically not released to the OS
     /// but just marked as available in the memory pool.
     pub fn deinit(self: *Buffer) void {
-        // log.warn("Unloading {f} {d} bytes", .{ self._shape, self._shape.byteSize() });
         for (self._shards.constSlice()) |buffer| {
             buffer.deinit(self._platform.pjrt_api);
         }
@@ -49,9 +48,86 @@ pub const Buffer = struct {
         return self._shape;
     }
 
-    // todo: rework with sharding in mind
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.print("Buffer({f})@{x}", .{ self._shape, @intFromPtr(self.shardDevicePtr(0)) });
+        try writer.writeAll("Buffer\n");
+        try writer.print("Shape: {f}\n", .{self._shape});
+        try writer.print("Shards: {d}\n", .{self._shards.len});
+
+        const rank = self._shape.rank();
+
+        var axis_sliced = [_]bool{false} ** constants.MAX_RANK;
+        {
+            var it = sharding_.transferIterator(self._sharding, self._shape) catch unreachable;
+            defer it.deinit();
+
+            if (it.next()) |first| {
+                for (first.slices.items) |s| {
+                    axis_sliced[s.axis] = true;
+                }
+            }
+        }
+
+        try writer.writeAll("Tensor axes:\n");
+        for (0..rank) |ax| {
+            const tag = self._shape.tag(ax);
+            const dim = self._shape.dim(ax);
+            const part = self._shape.partition(ax);
+
+            try writer.print("  - axis {d} tag {s} dim {d} partition ", .{ ax, tag, dim });
+            switch (part) {
+                .axis => |t| try writer.print("{s}", .{t}),
+                .open => try writer.writeAll("open"),
+                .replicated => try writer.writeAll("replicated"),
+                .unknown => try writer.writeAll("unknown"),
+            }
+
+            if (tag == Shape.TagUnknown) {
+                try writer.writeAll(" -> unbound");
+            } else if (self._sharding.binding(tag)) |axes| {
+                if (axes.len == 0) {
+                    try writer.writeAll(" -> replicated");
+                } else {
+                    try writer.writeAll(" -> ");
+                    for (axes, 0..) |p, i| {
+                        if (i > 0) try writer.writeAll(", ");
+                        try writer.writeAll(@tagName(p));
+                    }
+                }
+            } else {
+                try writer.writeAll(" -> unbound");
+            }
+
+            if (axis_sliced[ax]) {
+                try writer.writeAll(" | assignment: sliced\n");
+            } else {
+                try writer.writeAll(" | assignment: replicated\n");
+            }
+        }
+
+        try writer.writeAll("Sharding:\n");
+        try self._sharding.format(writer);
+
+        var it = sharding_.transferIterator(self._sharding, self._shape) catch unreachable;
+        defer it.deinit();
+
+        try writer.writeAll("Shard mapping:\n");
+
+        var shard_index: usize = 0;
+        while (it.next()) |shard| : (shard_index += 1) {
+            try writer.print("  - shard[{d}] -> device {d}", .{ shard_index, shard.device_id });
+
+            if (shard.slices.items.len == 0) {
+                try writer.writeAll(" (replicated)\n");
+                continue;
+            }
+
+            try writer.writeAll(" slices: ");
+            for (shard.slices.items, 0..) |s, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.print("axis {d}=[{d}..{d})", .{ s.axis, s.start, s.start + s.size });
+            }
+            try writer.writeAll("\n");
+        }
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -154,32 +230,36 @@ pub const Buffer = struct {
             shard.deinit(platform.pjrt_api);
         };
 
-        var args = pjrt.Client.CreateUninitializedBufferArgs{
-            .dims = sh.dims(),
-            .element_type = pjrtx.bufferTypeFromDtype(sh.dtype()),
-            .layout = .{
-                .tiled = .{
-                    .minor_to_major = constants.minorToMajor(sh.rank()),
-                    .tile_dims = &.{},
-                    .tile_dims_sizes = &.{},
-                },
-            },
-            .dst = undefined,
-        };
-
         const devices = platform.devices;
 
-        const assignment = try sharding.deviceAssignment(sharding.allocator); // todo: sharding
-        defer sharding.allocator.free(assignment);
+        var it = try sharding_.transferIterator(sharding, sh);
+        defer it.deinit();
 
-        for (assignment) |device_id| {
+        while (it.next()) |shard| {
+            if (shard.device_id >= devices.len) return error.InvalidDeviceId;
+
+            const shard_shape = shardShape(sh, shard);
+
+            var args = pjrt.Client.CreateUninitializedBufferArgs{
+                .dims = shard_shape.dims(),
+                .element_type = pjrtx.bufferTypeFromDtype(shard_shape.dtype()),
+                .layout = .{
+                    .tiled = .{
+                        .minor_to_major = constants.minorToMajor(shard_shape.rank()),
+                        .tile_dims = &.{},
+                        .tile_dims_sizes = &.{},
+                    },
+                },
+                .dst = undefined,
+            };
+
             args.dst = if (platform.target == .cpu or opts.memory == .device)
-                .{ .device = devices[device_id] }
+                .{ .device = devices[shard.device_id] }
             else
-                .{ .memory = platform.memoryForDevice(opts.memory, devices[device_id]) };
+                .{ .memory = platform.memoryForDevice(opts.memory, devices[shard.device_id]) };
 
-            const shard = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
-            res._shards.appendAssumeCapacity(shard);
+            const shard_buffer = try platform.pjrt_client.createUninitializedBuffer(platform.pjrt_api, args);
+            res._shards.appendAssumeCapacity(shard_buffer);
         }
 
         return res;
@@ -228,13 +308,13 @@ pub const Buffer = struct {
             const view = shardSlice(slice, shard);
             if (!view.isContiguous()) return error.NonContiguousShardRead;
 
-            const size_bytes: usize = @intCast(view.shape.byteSize());
-            const start: usize = view.offset_bytes;
-            const end: usize = start + size_bytes;
+            const size_bytes = view.shape.byteSize();
+            const start = view.offset_bytes;
+            const end = start + size_bytes;
             stdx.debug.assert(end <= slice.constData().len, "Shard view exceeds destination slice", .{});
 
-            const dst = slice.data()[start..end];
-            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, dst);
+            const destination = slice.data()[start..end];
+            const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
             if (maybe_event) |event| {
                 try event.await(self._platform.pjrt_api, io);
@@ -257,6 +337,7 @@ pub const Buffer = struct {
             if (shard_index >= self._shards.len) return error.ShardCountMismatch;
 
             const view = shardSlice(slice, shard);
+
             var shard_slice = try Slice.alloc(allocator, view.shape);
             defer shard_slice.free(allocator);
 
@@ -276,6 +357,15 @@ pub const Buffer = struct {
         var res = total;
         for (shard.slices.items) |s| {
             res = res.subSlice(s.axis, s.start, s.size);
+        }
+        return res;
+    }
+
+    // todo: move
+    fn shardShape(total: Shape, shard: ShardAssignment.Shard) Shape {
+        var res = total;
+        for (shard.slices.items) |s| {
+            res = res.set(s.axis, s.size);
         }
         return res;
     }

@@ -506,6 +506,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
 
     const sharding = opts.input_sharding;
     const device_assignment = try sharding.deviceAssignment(arena);
+    log.info("Device assignment: {any}", .{device_assignment});
 
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);

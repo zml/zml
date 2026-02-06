@@ -155,6 +155,69 @@ pub const PhysicalMesh = struct {
     /// Explicit topology tree API (canonical form)
     pub const Tree = PhysicalNode;
 
+    pub const AxisTraversal = struct {
+        pub const Order = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
+        pub const DepthByTag = std.EnumArray(PhysicalAxisTag, ?u8);
+
+        order: Order,
+        depth_by_tag: DepthByTag,
+
+        pub fn init(root: PhysicalNode) !AxisTraversal {
+            var order: Order = try .init(0);
+            axisOrderNode(root, &order);
+
+            var depth_by_tag: DepthByTag = .initFill(null);
+            for (order.constSlice(), 0..) |t, i| {
+                depth_by_tag.set(t, @intCast(i));
+            }
+
+            return .{
+                .order = order,
+                .depth_by_tag = depth_by_tag,
+            };
+        }
+
+        pub fn depth(self: AxisTraversal, tag: PhysicalAxisTag) ?u8 {
+            return self.depth_by_tag.get(tag);
+        }
+
+        pub fn format(self: AxisTraversal, writer: *std.Io.Writer) !void {
+            try writer.writeAll("AxisTraversal(order=[");
+
+            for (self.order.constSlice(), 0..) |tag, i| {
+                if (i > 0) try writer.writeAll(", ");
+                try writer.writeAll(@tagName(tag));
+            }
+
+            try writer.writeAll("], depth_by_tag={");
+
+            const fields = std.meta.fields(PhysicalAxisTag);
+            inline for (fields, 0..) |field, i| {
+                if (i > 0) try writer.writeAll(", ");
+                const tag = @field(PhysicalAxisTag, field.name);
+                try writer.writeAll(field.name);
+                try writer.writeAll("=");
+                if (self.depth_by_tag.get(tag)) |d| {
+                    try writer.print("{d}", .{d});
+                } else {
+                    try writer.writeAll("null");
+                }
+            }
+
+            try writer.writeAll("})");
+        }
+
+        fn axisOrderNode(node: PhysicalNode, out: *Order) void {
+            switch (node) {
+                .leaf => {},
+                .branch => |b| {
+                    out.appendAssumeCapacity(b.tag);
+                    if (b.children.len > 0) axisOrderNode(b.children[0], out);
+                },
+            }
+        }
+    };
+
     pub const AxisInfo = struct {
         tag: PhysicalAxisTag,
         size: i64,
@@ -164,7 +227,7 @@ pub const PhysicalMesh = struct {
     allocator: std.mem.Allocator,
     target: Target,
     root: PhysicalNode,
-    tag_to_depth: std.EnumArray(PhysicalAxisTag, i8),
+    axis_traversal: AxisTraversal,
 
     pub fn fromTree(allocator: std.mem.Allocator, target: Target, root: PhysicalNode) !PhysicalMesh {
         var cloned = try cloneNode(allocator, root);
@@ -179,7 +242,7 @@ pub const PhysicalMesh = struct {
             .allocator = allocator,
             .target = target,
             .root = cloned,
-            .tag_to_depth = tagToDepth(cloned),
+            .axis_traversal = try .init(cloned),
         };
     }
 
@@ -248,17 +311,6 @@ pub const PhysicalMesh = struct {
                 for (b.children) |child| try validateGeometry(child);
             },
         }
-    }
-
-    fn tagToDepth(root: PhysicalNode) std.EnumArray(PhysicalAxisTag, i8) {
-        var order = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
-        axisOrderNode(root, &order);
-
-        var tag_to_depth = std.EnumArray(PhysicalAxisTag, i8).initFill(-1);
-        for (order.constSlice(), 0..) |t, i| {
-            tag_to_depth.set(t, @intCast(i));
-        }
-        return tag_to_depth;
     }
 
     fn assignCoords(node: *PhysicalNode, allocator: std.mem.Allocator, path: *[16]usize, depth: usize) !void {
@@ -338,20 +390,8 @@ pub const PhysicalMesh = struct {
         return 1;
     }
 
-    pub fn axisOrder(self: PhysicalMesh) stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) {
-        var out = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
-        axisOrderNode(self.root, &out);
-        return out;
-    }
-
-    fn axisOrderNode(node: PhysicalNode, out: *stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK)) void {
-        switch (node) {
-            .leaf => {},
-            .branch => |b| {
-                out.appendAssumeCapacity(b.tag);
-                if (b.children.len > 0) axisOrderNode(b.children[0], out);
-            },
-        }
+    pub fn axisOrder(self: PhysicalMesh) AxisTraversal.Order {
+        return self.axis_traversal.order;
     }
 
     pub fn geometry(self: PhysicalMesh, tag: PhysicalAxisTag) ?AxisGeometry {
@@ -376,6 +416,35 @@ pub const PhysicalMesh = struct {
         }
 
         return false;
+    }
+
+    pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
+        try writer.print("\nPhysicalMesh(platform={s} num_devices={d})\n", .{ @tagName(self.target), self.countDevices() });
+        try writer.print("├── {f}\n", .{self.axis_traversal});
+        // try writer.print("└── Total Devices: {d}\n", .{self.countDevices()});
+
+        try formatNode(self.root, writer, "", true);
+    }
+
+    fn formatNode(node: PhysicalNode, writer: *std.Io.Writer, prefix: []const u8, is_last: bool) !void {
+        try writer.print("{s}{s}", .{ prefix, if (is_last) "└── " else "├── " });
+
+        switch (node) {
+            .leaf => |d| {
+                try writer.print("{f}\n", .{d});
+            },
+            .branch => |b| {
+                try writer.print("[{s}] x{d} ({s})\n", .{ @tagName(b.tag), b.children.len, @tagName(b.geometry) });
+
+                var buf: [256]u8 = undefined;
+                const new_prefix = std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, if (is_last) "    " else "│   " }) catch unreachable;
+
+                for (b.children, 0..) |child, i| {
+                    const child_is_last = (i == b.children.len - 1);
+                    try formatNode(child, writer, new_prefix, child_is_last);
+                }
+            },
+        }
     }
 
     pub fn auto(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalMesh {
@@ -507,36 +576,6 @@ pub const PhysicalMesh = struct {
             },
         };
     }
-
-    pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("PhysicalMesh({s})\n", .{@tagName(self.target)});
-        // try writer.print("├── Total Devices: {d}\n", .{self.countDevices()});
-        try writer.print("└── Total Devices: {d}\n", .{self.countDevices()});
-        try writer.writeAll("│\n");
-
-        try formatNode(self.root, writer, "", true);
-    }
-
-    fn formatNode(node: PhysicalNode, writer: *std.Io.Writer, prefix: []const u8, is_last: bool) !void {
-        try writer.print("{s}{s}", .{ prefix, if (is_last) "└── " else "├── " });
-
-        switch (node) {
-            .leaf => |d| {
-                try writer.print("{f}\n", .{d});
-            },
-            .branch => |b| {
-                try writer.print("[{s}] x{d} ({s})\n", .{ @tagName(b.tag), b.children.len, @tagName(b.geometry) });
-
-                var buf: [256]u8 = undefined;
-                const new_prefix = std.fmt.bufPrint(&buf, "{s}{s}", .{ prefix, if (is_last) "    " else "│   " }) catch unreachable;
-
-                for (b.children, 0..) |child, i| {
-                    const child_is_last = (i == b.children.len - 1);
-                    try formatNode(child, writer, new_prefix, child_is_last);
-                }
-            },
-        }
-    }
 };
 
 pub const LogicalAxisIntent = enum {
@@ -600,6 +639,14 @@ pub const LogicalMesh = struct {
         };
     }
 
+    pub fn intent(self: LogicalMesh, tag: Shape.Tag) ?LogicalAxisIntent {
+        for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
+            if (std.mem.eql(u8, std.mem.span(t), std.mem.span(tag))) return i;
+        }
+
+        return null;
+    }
+
     fn intentFromValue(v: anytype) LogicalAxisIntent {
         const V = @TypeOf(v);
         if (V == LogicalAxisIntent) return v;
@@ -609,14 +656,6 @@ pub const LogicalMesh = struct {
         }
 
         stdx.debug.compileError("LogicalMesh intent must be LogicalAxisIntent, got {}", .{V});
-    }
-
-    pub fn intent(self: LogicalMesh, tag: Shape.Tag) ?LogicalAxisIntent {
-        for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
-            if (std.mem.eql(u8, std.mem.span(t), std.mem.span(tag))) return i;
-        }
-
-        return null;
     }
 
     pub fn format(self: LogicalMesh, writer: *std.Io.Writer) !void {
@@ -744,7 +783,7 @@ pub const Sharding = struct {
 
         var idx: usize = 0;
         for (sources) |src| {
-            const depth = self.physical.tag_to_depth.get(src);
+            const depth = self.physical.axis_traversal.depth(src) orelse unreachable;
             const coord = coords[@intCast(depth)];
             const size = self.physical.axis(src);
             idx = idx * @as(usize, @intCast(size)) + coord;
@@ -756,23 +795,14 @@ pub const Sharding = struct {
         const order = self.physical.axisOrder();
         var idx: usize = 0;
         for (order.constSlice()) |tag| {
-            const depth = self.physical.tag_to_depth.get(tag);
-            if (depth < 0) continue;
-            const coord = coords[@intCast(depth)];
-            const size = self.physical.axis(tag);
-            idx = idx * @as(usize, @intCast(size)) + coord;
+            const depth = self.physical.axis_traversal.depth(tag);
+            if (depth) |d| {
+                const coord = coords[@intCast(d)];
+                const size = self.physical.axis(tag);
+                idx = idx * @as(usize, @intCast(size)) + coord;
+            }
         }
         return idx;
-    }
-
-    fn axisCoordFromLinear(view: Sharding.AxisView, axis_index: usize, linear_idx: usize) usize {
-        var stride: usize = 1;
-        var j: usize = axis_index + 1;
-        while (j < view.axes.len) : (j += 1) {
-            stride *= @intCast(view.axes.constSlice()[j].size);
-        }
-        const axis_size: usize = @intCast(view.axes.constSlice()[axis_index].size);
-        return (linear_idx / stride) % axis_size;
     }
 
     fn deviceOrder(self: Sharding, allocator: std.mem.Allocator) ![]Device {
@@ -1626,7 +1656,7 @@ fn selectPhysicalAxesForDim(
             if (Sharding.axisContains(axis, p_tag) and !used_axes.contains(axis.tag)) {
                 const next_product = product * axis.size;
                 if (@rem(dim, next_product) == 0) {
-                    const coord = Sharding.axisCoordFromLinear(view, i, shard_idx);
+                    const coord = axisCoordFromLinear(view, i, shard_idx);
                     try counts.append(allocator, axis.size);
                     try indices.append(allocator, @intCast(coord));
                     product = next_product;
@@ -1638,6 +1668,16 @@ fn selectPhysicalAxesForDim(
     }
 
     return product;
+}
+
+fn axisCoordFromLinear(view: Sharding.AxisView, axis_index: usize, linear_idx: usize) usize {
+    var stride: usize = 1;
+    var j: usize = axis_index + 1;
+    while (j < view.axes.len) : (j += 1) {
+        stride *= @intCast(view.axes.constSlice()[j].size);
+    }
+    const axis_size: usize = @intCast(view.axes.constSlice()[axis_index].size);
+    return (linear_idx / stride) % axis_size;
 }
 
 pub const TransferIterator = struct {

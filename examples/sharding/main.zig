@@ -230,6 +230,8 @@ fn runAdditionExample(
 
     var stdout = std.Io.File.stdout().writer(io, &.{});
     try sum_bd_slice.prettyPrint(&stdout.interface, .{});
+
+    log.info("\n\n{f}", .{out.sum_bd});
 }
 
 pub fn main() !void {
@@ -261,10 +263,10 @@ pub fn main() !void {
     const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[0]), .device(platform.devices[1]),
+                .device(platform.devices[3]), .device(platform.devices[1]),
             }),
             .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[2]), .device(platform.devices[3]),
+                .device(platform.devices[2]), .device(platform.devices[0]),
             }),
         }),
         .axis(.link_y, .{ .mesh = .torus }, &.{
