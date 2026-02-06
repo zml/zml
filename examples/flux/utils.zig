@@ -169,19 +169,18 @@ pub const BoxMullerGenerator = struct {
 pub fn prepare_text_ids(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize) !zml.Buffer {
     const batch_size = 1;
     const count = batch_size * seq_len * 4;
-    const data = try allocator.alloc(f32, count);
+    const data = try allocator.alloc(i64, count);
     defer allocator.free(data);
 
     // For Python default t_coord=None -> t=0
     for (0..seq_len) |s| {
-        data[s * 4 + 0] = 0.0; // t
-        data[s * 4 + 1] = 0.0; // h
-        data[s * 4 + 2] = 0.0; // w
-        data[s * 4 + 3] = @floatFromInt(s); // l
+        data[s * 4 + 0] = 0; // t
+        data[s * 4 + 1] = 0; // h
+        data[s * 4 + 2] = 0; // w
+        data[s * 4 + 3] = @as(i64, @intCast(s)); // l
     }
 
-    const shape = zml.Shape.init(.{ @as(i64, @intCast(batch_size)), @as(i64, @intCast(seq_len)), 4 }, .f32);
-    // Note: Python uses same dtype as input? Usually float32 for embeddings.
+    const shape = zml.Shape.init(.{ @as(i64, @intCast(batch_size)), @as(i64, @intCast(seq_len)), 4 }, .i64);
 
     return try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(data));
 }

@@ -217,8 +217,8 @@ def run_pipline():
     token_encoder = Qwen3ForCausalLM.from_pretrained(
         repo_id,
         subfolder="text_encoder",
-        dtype=torch.bfloat16,
-        # dtype=torch.float32,
+        # dtype=torch.bfloat16,
+        dtype=torch.float32,
     )
     token_encoder.to("cpu")
 
@@ -227,8 +227,9 @@ def run_pipline():
     print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
     
     # Save embeddings to npy files (convert bf16 to f32 for numpy compatibility)
-    np.save("/Users/kevin/zml/flux_klein_notebook_embeds.npy", token_encoded_embeds.detach().float().numpy())
-    np.save("/Users/kevin/zml/flux_klein_notebook_text_ids.npy", text_ids.detach().numpy())
+    save_encoding_embeded_from_tokens(token_encoded_embeds, text_ids, "flux_klein_notebook")
+    # np.save("/Users/kevin/zml/flux_klein_notebook_embeds.npy", token_encoded_embeds.detach().float().numpy())
+    # np.save("/Users/kevin/zml/flux_klein_notebook_text_ids.npy", text_ids.detach().numpy())
     print(f"Saved embeddings to /Users/kevin/zml/flux_klein_notebook_embeds.npy")
     sys.exit(0)
 

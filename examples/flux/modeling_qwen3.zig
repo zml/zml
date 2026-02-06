@@ -63,16 +63,28 @@ pub const Linear = struct {
 
     pub fn init(weight: zml.Tensor, bias: ?zml.Tensor) Linear {
         // Tag weight as [out, d].
-        // zml.nn.Linear contracts on the dimension matching the tag passed to init (here .d).
         const w = weight.withTags(.{ .out, .d });
         return .{
-            .inner = zml.nn.Linear.init(w, bias, .d),
+            .inner = zml.nn.Linear.init(w, bias, .out),
         };
     }
 
     pub fn forward(self: Linear, x: zml.Tensor) zml.Tensor {
-        // Apply .d tag to the last dimension of x, invoke inner linear, then rename .out -> .d
-        return self.inner.forward(x.withPartialTags(.{.d})).rename(.{ .out = .d });
+        const input_dtype = x.dtype();
+        // Match Python: perform dot product in f32 for precision
+        // Manually implement Linear.forward to ensure correct tag handling and avoid panics
+        const x_f32 = x.convert(.f32).withPartialTags(.{.d});
+        const weight_f32 = self.inner.weight.convert(.f32);
+
+        // Contract on '.d' dimension. Result will have tag '.out'
+        var y = x_f32.dot(weight_f32, .d);
+        if (self.inner.bias) |bias| {
+            y = y.add(bias.convert(.f32).broad(y.shape()));
+        }
+
+        // Rename '.out' to '.d' for the next layer's input
+        const out = y.rename(.{ .out = .d });
+        return out.convert(input_dtype);
     }
 };
 
@@ -88,9 +100,12 @@ pub const Qwen3RMSNorm = struct {
     }
 
     pub fn forward(self: Qwen3RMSNorm, hidden_states: zml.Tensor) zml.Tensor {
-        const out = zml.nn.rmsNorm(hidden_states, -1, self.eps);
-        const weight_broad = self.weight.convert(hidden_states.dtype()).broadcastLeft(out.shape());
-        return out.mul(weight_broad);
+        // Match Python: internal computation in f32
+        // Assumes hidden_states is already f32 for efficiency, but convert() is safe anyway
+        const hs_f32 = hidden_states.convert(.f32);
+        const out_f32 = zml.nn.rmsNorm(hs_f32, -1, self.eps);
+        const weight_f32 = self.weight.convert(.f32).broadcastLeft(out_f32.shape());
+        return out_f32.mul(weight_f32);
     }
 };
 
@@ -108,6 +123,7 @@ pub const Qwen3MLP = struct {
     }
 
     pub fn forward(self: Qwen3MLP, x: zml.Tensor) zml.Tensor {
+        // Input and Output maintained in f32 for high precision chain
         const gate = self.gate_proj.forward(x);
         const up = self.up_proj.forward(x);
         const act = gate.silu();
@@ -198,8 +214,8 @@ pub const Qwen3Attention = struct {
         const scale = 1.0 / @sqrt(@as(f64, @floatFromInt(head_dim)));
 
         var attn_weights = zml.Tensor.dotGeneral(
-            query_states,
-            key_states,
+            query_states.convert(.f32),
+            key_states.convert(.f32),
             &.{.{ 3, 3 }},
             &.{ .{ 0, 0 }, .{ 1, 1 } },
         );
@@ -216,7 +232,8 @@ pub const Qwen3Attention = struct {
         // Expand to [1, 1, s, s] for broadcasting with [b, h, s, s]
         const causal_4d = causal_mask.reshape(zml.Shape.init(.{ 1, 1, s, s }, .bool));
         const causal_broad = causal_4d.broadcastLeft(attn_weights.shape().withDtype(.bool));
-        const neg_inf = zml.Tensor.scalar(-1e4, attn_weights.dtype());
+        // Use very large negative value matching Python's torch.finfo(dtype).min behavior
+        const neg_inf = zml.Tensor.scalar(-3.4e38, .f32);
         attn_weights = causal_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
 
         if (attention_mask) |mask| {
@@ -233,11 +250,13 @@ pub const Qwen3Attention = struct {
             attn_weights = pad_mask_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
         }
 
+        // Match Python: compute softmax in f32
+        const input_dtype = hidden_states.dtype();
         attn_weights = attn_weights.softmax(-1);
 
         var attn_output = zml.Tensor.dotGeneral(
             attn_weights,
-            value_states,
+            value_states.convert(.f32),
             &.{.{ 3, 2 }},
             &.{ .{ 0, 0 }, .{ 1, 1 } },
         );
@@ -245,9 +264,10 @@ pub const Qwen3Attention = struct {
         attn_output = attn_output.transpose(.{ 0, 2, 1, 3 });
 
         const concat_dim = self.config.num_attention_heads * self.head_dim;
-        attn_output = attn_output.reshape(zml.Shape.init(.{ b, s, concat_dim }, hidden_states.dtype()));
+        attn_output = attn_output.reshape(zml.Shape.init(.{ b, s, concat_dim }, .f32));
 
-        return self.o_proj.forward(attn_output);
+        const out = self.o_proj.forward(attn_output);
+        return out.convert(input_dtype);
     }
 };
 
@@ -268,21 +288,18 @@ pub const Qwen3DecoderLayer = struct {
 
     pub fn forward(
         self: Qwen3DecoderLayer,
-        hidden_states: zml.Tensor,
+        hidden_states: zml.Tensor, // input is f32
         rope: RoPE,
         attention_mask: ?zml.Tensor,
-    ) zml.Tensor {
-        var residual = hidden_states;
+    ) zml.Tensor { // returns f32
         var h = self.input_layernorm.forward(hidden_states);
         h = self.self_attn.forward(h, rope, attention_mask);
-        h = residual.add(h);
+        h = hidden_states.add(h);
 
-        residual = h;
+        const res2 = h;
         h = self.post_attention_layernorm.forward(h);
         h = self.mlp.forward(h);
-        h = residual.add(h);
-
-        return h;
+        return res2.add(h);
     }
 };
 
@@ -317,7 +334,10 @@ pub const Qwen3Model = struct {
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { last_hidden_state: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
-        var hidden_states = self.embed_tokens.forward(input_ids);
+        const input_dtype = input_ids.dtype(); // usually i32
+        _ = input_dtype; // autofix
+        // Initial conversion to f32. All activations stay f32 until the very end.
+        var hidden_states = self.embed_tokens.forward(input_ids).convert(.f32);
 
         var all_hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) = null;
         if (output_hidden_states) {
@@ -325,19 +345,19 @@ pub const Qwen3Model = struct {
         }
 
         if (output_hidden_states) {
-            all_hidden_states.?.append(hidden_states) catch {};
+            all_hidden_states.?.append(hidden_states) catch {}; // Index 0: embeddings (f32)
         }
 
         for (self.layers) |layer| {
             hidden_states = layer.forward(hidden_states, rope, attention_mask);
             if (output_hidden_states) {
-                all_hidden_states.?.append(hidden_states) catch {};
+                all_hidden_states.?.append(hidden_states) catch {}; // Index 1..36 (f32)
             }
         }
 
         hidden_states = self.norm.forward(hidden_states);
         if (output_hidden_states) {
-            all_hidden_states.?.append(hidden_states) catch {};
+            all_hidden_states.?.append(hidden_states) catch {}; // Index 37: final norm (f32)
         }
 
         return .{ .last_hidden_state = hidden_states, .hidden_states = all_hidden_states };
