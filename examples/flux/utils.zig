@@ -168,24 +168,6 @@ pub const BoxMullerGenerator = struct {
 
 pub fn prepare_text_ids(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize) !zml.Buffer {
     const batch_size = 1;
-    // Python code:
-    // t = torch.arange(1) if t_coord is None else ...
-    // h = torch.arange(1)
-    // w = torch.arange(1)
-    // l = torch.arange(L)
-    // coords = torch.cartesian_prod(t, h, w, l)
-    // out_ids.append(coords)
-    // return torch.stack(out_ids)
-
-    // Effectively for B=1, coords = [1, 1, 1, seq_len] Cartesian Product -> [seq_len, 4]
-    // [0, 0, 0, 0]
-    // [0, 0, 0, 1]
-    // ...
-    // [0, 0, 0, seq_len-1]
-
-    // Since t, h, w are 0 (arange(1) -> [0]), only l changes.
-    // Result shape: [B, seq_len, 4]
-
     const count = batch_size * seq_len * 4;
     const data = try allocator.alloc(f32, count);
     defer allocator.free(data);
@@ -235,7 +217,7 @@ test "BoxMullerGenerator matches Python reference" {
     // std.debug.print("Max difference: {d}\n", .{max_err});
 }
 
-fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
+pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
     const VAEDecodeStep = struct {
         pub fn forward(self: @This(), model: autoencoder_kl.AutoencoderKLFlux2, latents_tensor: zml.Tensor) zml.Tensor {
             _ = self;
@@ -262,7 +244,7 @@ fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *
     return vae_res.get(zml.Buffer);
 }
 
-fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
+pub fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
     const npy = tools.NpyData.load(allocator, path) catch {
         log.warn("Input not found at {s}, using zeros", .{path});
         const shape = zml.Shape.init(fallback_shape, .f32);

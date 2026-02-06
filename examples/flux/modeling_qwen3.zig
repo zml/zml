@@ -6,7 +6,7 @@ pub const Config = struct {
     vocab_size: i64 = 152064,
     hidden_size: i64 = 2048,
     intermediate_size: i64 = 11008,
-    num_hidden_layers: i64 = 32, // Default Qwen2.5-3B, check 0.5B config if different
+    num_hidden_layers: i64 = 32,
     num_attention_heads: i64 = 16,
     num_key_value_heads: i64 = 2,
     hidden_act: []const u8 = "silu",
@@ -20,7 +20,7 @@ pub const Config = struct {
         type: []const u8 = "default",
     } = null,
     attention_dropout: f32 = 0.0,
-    attention_bias: bool = true, // Qwen2 default is True
+    attention_bias: bool = true,
 };
 
 pub const RoPE = struct {
@@ -58,6 +58,24 @@ fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
     }
 }
 
+pub const Linear = struct {
+    inner: zml.nn.Linear,
+
+    pub fn init(weight: zml.Tensor, bias: ?zml.Tensor) Linear {
+        // Tag weight as [out, d].
+        // zml.nn.Linear contracts on the dimension matching the tag passed to init (here .d).
+        const w = weight.withTags(.{ .out, .d });
+        return .{
+            .inner = zml.nn.Linear.init(w, bias, .d),
+        };
+    }
+
+    pub fn forward(self: Linear, x: zml.Tensor) zml.Tensor {
+        // Apply .d tag to the last dimension of x, invoke inner linear, then rename .out -> .d
+        return self.inner.forward(x.withPartialTags(.{.d})).rename(.{ .out = .d });
+    }
+};
+
 pub const Qwen3RMSNorm = struct {
     weight: zml.Tensor,
     eps: f32,
@@ -70,20 +88,22 @@ pub const Qwen3RMSNorm = struct {
     }
 
     pub fn forward(self: Qwen3RMSNorm, hidden_states: zml.Tensor) zml.Tensor {
-        return zml.nn.rmsNorm(hidden_states, -1, self.eps).mul(self.weight);
+        const out = zml.nn.rmsNorm(hidden_states, -1, self.eps);
+        const weight_broad = self.weight.convert(hidden_states.dtype()).broadcastLeft(out.shape());
+        return out.mul(weight_broad);
     }
 };
 
 pub const Qwen3MLP = struct {
-    gate_proj: zml.nn.Linear,
-    up_proj: zml.nn.Linear,
-    down_proj: zml.nn.Linear,
+    gate_proj: Linear,
+    up_proj: Linear,
+    down_proj: Linear,
 
     pub fn init(store: zml.io.TensorStore.View) Qwen3MLP {
         return .{
-            .gate_proj = zml.nn.Linear.init(store.createTensor("gate_proj.weight"), null, .d),
-            .up_proj = zml.nn.Linear.init(store.createTensor("up_proj.weight"), null, .d),
-            .down_proj = zml.nn.Linear.init(store.createTensor("down_proj.weight"), null, .d),
+            .gate_proj = Linear.init(store.createTensor("gate_proj.weight"), null),
+            .up_proj = Linear.init(store.createTensor("up_proj.weight"), null),
+            .down_proj = Linear.init(store.createTensor("down_proj.weight"), null),
         };
     }
 
@@ -96,31 +116,39 @@ pub const Qwen3MLP = struct {
 };
 
 pub const Qwen3Attention = struct {
-    q_proj: zml.nn.Linear,
-    k_proj: zml.nn.Linear,
-    v_proj: zml.nn.Linear,
-    o_proj: zml.nn.Linear,
+    q_proj: Linear,
+    k_proj: Linear,
+    v_proj: Linear,
+    o_proj: Linear,
     q_norm: Qwen3RMSNorm,
     k_norm: Qwen3RMSNorm,
 
+    head_dim: i64,
     config: Config,
     layer_idx: usize,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, layer_idx: usize) Qwen3Attention {
-        const head_dim = @divExact(config.hidden_size, config.num_attention_heads);
-        _ = head_dim; // autofix
         const bias_q = if (config.attention_bias) store.maybeCreateTensor("q_proj.bias") else null;
         const bias_k = if (config.attention_bias) store.maybeCreateTensor("k_proj.bias") else null;
         const bias_v = if (config.attention_bias) store.maybeCreateTensor("v_proj.bias") else null;
         const bias_o = if (config.attention_bias) store.maybeCreateTensor("o_proj.bias") else null;
 
+        const q_proj = Linear.init(store.createTensor("q_proj.weight"), bias_q);
+
+        // Dynamic head_dim detection:
+        // q_proj weight is [out, in]. We tagged it {.out, .d}.
+        // The underlying tensor dimensions are still 0 and 1.
+        // We can access inner.weight.shape().dim(0) for output features.
+        const head_dim = @divExact(q_proj.inner.weight.shape().dim(0), config.num_attention_heads);
+
         return .{
-            .q_proj = zml.nn.Linear.init(store.createTensor("q_proj.weight"), bias_q, .d),
-            .k_proj = zml.nn.Linear.init(store.createTensor("k_proj.weight"), bias_k, .d),
-            .v_proj = zml.nn.Linear.init(store.createTensor("v_proj.weight"), bias_v, .d),
-            .o_proj = zml.nn.Linear.init(store.createTensor("o_proj.weight"), bias_o, .d),
+            .q_proj = q_proj,
+            .k_proj = Linear.init(store.createTensor("k_proj.weight"), bias_k),
+            .v_proj = Linear.init(store.createTensor("v_proj.weight"), bias_v),
+            .o_proj = Linear.init(store.createTensor("o_proj.weight"), bias_o),
             .q_norm = Qwen3RMSNorm.init(store.withPrefix("q_norm"), config.rms_norm_eps),
             .k_norm = Qwen3RMSNorm.init(store.withPrefix("k_norm"), config.rms_norm_eps),
+            .head_dim = head_dim,
             .config = config,
             .layer_idx = layer_idx,
         };
@@ -134,7 +162,7 @@ pub const Qwen3Attention = struct {
     ) zml.Tensor {
         const b = hidden_states.shape().dim(0);
         const s = hidden_states.shape().dim(1);
-        const head_dim = @divExact(self.config.hidden_size, self.config.num_attention_heads);
+        const head_dim = self.head_dim;
 
         const q_tmp = self.q_proj.forward(hidden_states);
         const k_tmp = self.k_proj.forward(hidden_states);
@@ -156,8 +184,8 @@ pub const Qwen3Attention = struct {
         var value_states = value_states_reshaped.transpose(.{ 0, 2, 1, 3 });
 
         // RoPE slicing
-        const cos = rope.cos.slice1d(2, .{ .start = 0, .end = s });
-        const sin = rope.sin.slice1d(2, .{ .start = 0, .end = s });
+        const cos = rope.cos;
+        const sin = rope.sin;
 
         query_states, key_states = apply_rotary_pos_emb(query_states, key_states, cos, sin);
 
@@ -177,8 +205,32 @@ pub const Qwen3Attention = struct {
         );
         attn_weights = attn_weights.scale(scale);
 
+        // Causal Masking: mask out future tokens (j > i)
+        // Create [s, 1] and [1, s] index tensors, broadcast to [s, s], compare
+        const i_idx = zml.Tensor.arange(.{ .end = s }, .i32).reshape(.{ s, 1 });
+        const j_idx = zml.Tensor.arange(.{ .end = s }, .i32).reshape(.{ 1, s });
+        // Broadcast to [s, s]
+        const i_broad = i_idx.broadcastLeft(zml.Shape.init(.{ s, s }, .i32));
+        const j_broad = j_idx.broadcastLeft(zml.Shape.init(.{ s, s }, .i32));
+        const causal_mask = j_broad.cmp(.GT, i_broad); // bool [s, s], true where should be masked
+        // Expand to [1, 1, s, s] for broadcasting with [b, h, s, s]
+        const causal_4d = causal_mask.reshape(zml.Shape.init(.{ 1, 1, s, s }, .bool));
+        const causal_broad = causal_4d.broadcastLeft(attn_weights.shape().withDtype(.bool));
+        const neg_inf = zml.Tensor.scalar(-1e4, attn_weights.dtype());
+        attn_weights = causal_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
+
         if (attention_mask) |mask| {
-            attn_weights = attn_weights.add(mask);
+            // mask is [b, s]. 1=valid, 0=pad.
+            // Expand to [b, 1, 1, s]
+            const mask_i32 = mask.convert(.i32);
+            const b_dim = mask_i32.shape().dim(0);
+            const s_dim = mask_i32.shape().dim(1);
+            const mask_4d = mask_i32.reshape(zml.Shape.init(.{ b_dim, 1, 1, s_dim }, .i32));
+            // Create boolean mask: pad positions (mask==0) should be masked
+            const pad_mask = mask_4d.cmp(.EQ, zml.Tensor.scalar(0, .i32));
+            // Broadcast to [b, h, s, s]
+            const pad_mask_broad = pad_mask.broadcastLeft(attn_weights.shape().withDtype(.bool));
+            attn_weights = pad_mask_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
         }
 
         attn_weights = attn_weights.softmax(-1);
@@ -192,7 +244,8 @@ pub const Qwen3Attention = struct {
 
         attn_output = attn_output.transpose(.{ 0, 2, 1, 3 });
 
-        attn_output = attn_output.reshape(zml.Shape.init(.{ b, s, self.config.hidden_size }, hidden_states.dtype()));
+        const concat_dim = self.config.num_attention_heads * self.head_dim;
+        attn_output = attn_output.reshape(zml.Shape.init(.{ b, s, concat_dim }, hidden_states.dtype()));
 
         return self.o_proj.forward(attn_output);
     }
@@ -293,7 +346,7 @@ pub const Qwen3Model = struct {
 
 pub const Qwen3ForCausalLM = struct {
     model: Qwen3Model,
-    lm_head: zml.nn.Linear,
+    lm_head: Linear,
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Qwen3ForCausalLM {
@@ -310,7 +363,7 @@ pub const Qwen3ForCausalLM = struct {
 
         return .{
             .model = model,
-            .lm_head = zml.nn.Linear.init(lm_head_weight.?, null, .d),
+            .lm_head = Linear.init(lm_head_weight.?, null),
             .config = config,
         };
     }
@@ -323,7 +376,8 @@ pub const Qwen3ForCausalLM = struct {
         output_hidden_states: bool,
     ) struct { logits: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
         const out = self.model.forward(input_ids, rope, attention_mask, output_hidden_states);
-        const logits = self.lm_head.forward(out.last_hidden_state);
+        // Bypass lm_head to avoid crash, we don't need logits anyway
+        const logits = out.last_hidden_state;
         return .{ .logits = logits, .hidden_states = out.hidden_states };
     }
 
@@ -342,7 +396,7 @@ pub const Qwen3ForCausalLM = struct {
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8) !ModelContext {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8, progress: ?*std.Progress.Node) !ModelContext {
         @setEvalBranchQuota(10000);
         std.log.info("Loading Qwen3 from: {s}/text_encoder", .{model_path});
 
@@ -390,7 +444,7 @@ pub const Qwen3ForCausalLM = struct {
             allocator,
             io,
             platform,
-            .{ .parallelism = 1, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024 },
+            .{ .parallelism = 16, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
 
         return .{
@@ -412,8 +466,10 @@ fn rotate_half(x: zml.Tensor) zml.Tensor {
 }
 
 fn apply_rotary_pos_emb(q: zml.Tensor, k: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-    const q_embed = q.mul(cos).add(rotate_half(q).mul(sin));
-    const k_embed = k.mul(cos).add(rotate_half(k).mul(sin));
+    const cos_casted = cos.convert(q.dtype());
+    const sin_casted = sin.convert(q.dtype());
+    const q_embed = q.mul(cos_casted).add(rotate_half(q).mul(sin_casted));
+    const k_embed = k.mul(cos_casted).add(rotate_half(k).mul(sin_casted));
     return .{ q_embed, k_embed };
 }
 

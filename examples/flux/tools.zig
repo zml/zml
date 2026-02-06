@@ -532,3 +532,66 @@ pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 
     log.info("Saved buffer to {s}", .{path});
 }
+
+/// Asserts that two buffers have the same shape and values (within tolerance).
+pub fn assertBuffersEqual(allocator: std.mem.Allocator, io: std.Io, a: zml.Buffer, b: zml.Buffer, tolerance: f32) !void {
+    // Check shapes match (ignoring dtype)
+    const a_shape = a.shape();
+    const b_shape = b.shape();
+    if (!a_shape.eqlDims(b_shape)) {
+        log.err("Buffer shapes don't match: {any} vs {any}", .{ a_shape.dims(), b_shape.dims() });
+        return error.ShapeMismatch;
+    }
+
+    // Get data from both buffers
+    const a_slice = try a.toSliceAlloc(allocator, io);
+    defer a_slice.free(allocator);
+    const b_slice = try b.toSliceAlloc(allocator, io);
+    defer b_slice.free(allocator);
+
+    // Get element count from shape
+    const count = a_shape.count();
+
+    var max_diff: f32 = 0.0;
+    var diff_count: usize = 0;
+
+    for (0..count) |i| {
+        // Get values as f32 based on each buffer's dtype
+        const va: f32 = getElementAsF32(a_slice, a_shape.dtype(), i);
+        const vb: f32 = getElementAsF32(b_slice, b_shape.dtype(), i);
+
+        const diff = @abs(va - vb);
+        if (diff > tolerance) {
+            diff_count += 1;
+            if (diff_count <= 5) {
+                log.warn("Mismatch at index {}: {} vs {} (diff: {})", .{ i, va, vb, diff });
+            }
+        }
+        max_diff = @max(max_diff, diff);
+    }
+
+    if (diff_count > 0) {
+        // log.err("Buffers differ: {} mismatches out of {} elements, max diff: {}", .{ diff_count, count, max_diff });
+        // message format
+        const message = try std.fmt.allocPrint(allocator, "Buffers differ: {} mismatches out of {} elements, max diff: {}", .{ diff_count, count, max_diff });
+        defer allocator.free(message);
+        @panic(message);
+    }
+
+    log.info("Buffers match! Max diff: {}", .{max_diff});
+}
+
+fn getElementAsF32(slice: zml.Slice, dtype: zml.DataType, idx: usize) f32 {
+    return switch (dtype) {
+        .f32 => slice.items(f32)[idx],
+        .i32 => @floatFromInt(slice.items(i32)[idx]),
+        .i64 => @floatFromInt(slice.items(i64)[idx]),
+        .f16 => @floatCast(slice.items(f16)[idx]),
+        .bf16 => blk: {
+            const raw = slice.items(u16)[idx];
+            const u32_val = @as(u32, raw) << 16;
+            break :blk @bitCast(u32_val);
+        },
+        else => 0.0,
+    };
+}
