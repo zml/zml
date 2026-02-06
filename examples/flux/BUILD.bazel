@@ -18,14 +18,16 @@ zig_binary(
         "main.zig",
         "scheduling_flow_match_euler_discrete.zig",
         "modeling_qwen3.zig",
-        "tokenization_qwen2.zig",
         "tokenization_qwen2_fast.zig",
         "tools.zig",
         "utils.zig",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = [
+        "//zml",
+        "@stb//:stb_image_write",
+    ],
 )
 
 mtree_spec(

@@ -6,11 +6,13 @@ from diffusers import Flux2KleinPipeline
 import safetensors.torch as safetensors_torch
 import numpy as np
 
-dtype = torch.bfloat16
+# dtype = torch.bfloat16
+dtype = torch.float32
 # device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
 device = "cpu"
 
-prompt = "A flying surperman style cat"
+# prompt = "A flying surperman style cat"
+prompt = "A photo of a cat"
 
 if len(sys.argv) > 1:
     model_path = sys.argv[1]

@@ -6,5 +6,6 @@ zls_completion(
     deps = [
         "//stdx",
         "//zml",
+        "//examples/flux",
     ],
 )

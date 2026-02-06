@@ -9,8 +9,8 @@ dtype = torch.float32
 device = "cpu"
 # device = "mps"
 
-prompt = "A flying surperman style cat"
-
+# prompt = "A flying surperman style cat"
+prompt = "A photo of a cat"
 
 model_path = "black-forest-labs/FLUX.2-klein-4B"
 pipeline = Flux2KleinPipeline.from_pretrained(

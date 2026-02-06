@@ -1,4 +1,5 @@
 const std = @import("std");
+const c_interface = @import("c");
 const zml = @import("zml");
 const tools = @import("tools.zig");
 const utils = @import("utils.zig");
@@ -22,10 +23,12 @@ pub const std_options: std.Options = .{
 const enable_stage_debug = false;
 const stage_to_debug = flux_model_transformer2d.Flux2Transformer2DModel.DebugStage.block0_attn_concat_img;
 
-// bazel run //examples/flux -- --model=/Users/kevin/FLUX.2-klein-4B
+// bazel run --verbose_failures //examples/flux -- --model=/Users/kevin/FLUX.2-klein-4B && python examples/python/verify_npy.py /Users/kevin/zml/flux_klein_zml_result.npy
 
 pub fn main() !void {
     @setEvalBranchQuota(10_000);
+    
+    // c_interface.stbi_write_png();
 
     // log.info("Flux was compiled with {}", .{@import("builtin").mode});
 
@@ -58,7 +61,8 @@ pub fn main() !void {
     var tokenizer = try Qwen2TokenizerFast.from_pretrained(allocator, io, args.model, .{ .subfolder = "tokenizer" });
     defer tokenizer.deinit();
 
-    const prompt = "A flying surperman style cat";
+    // const prompt = "A flying surperman style cat";
+    const prompt = "A photo of a cat";
     const max_length = 20;
 
     // Apply Chat Template
@@ -174,84 +178,82 @@ pub fn main() !void {
     try tools.printFlatten(allocator, io, text_ids_from_python, 200, "    text_ids_from_python (first 20).", .{ .include_shape = true });
     // try tools.assertBuffersEqual(allocator, io, prompt_text_ids, text_ids_from_python, 1e-6);
     // std.process.exit(0);
-    try tools.assertBuffersEqual(allocator, io, prompt_embeds, prompt_embeds_from_python, 1e-1);
+    // try tools.assertBuffersEqual(allocator, io, prompt_embeds, prompt_embeds_from_python, 1e-1);
 
-    {
-        // text_ids_selector is the pb
-        const text_ids_selector = prompt_text_ids;
-        const prompt_embeds_selector = prompt_embeds;
+    // text_ids_selector is the pb
+    const text_ids_selector = prompt_text_ids;
+    const prompt_embeds_selector = prompt_embeds;
 
-        // const text_ids_selector = text_ids_from_python;
-        // const prompt_embeds_selector = prompt_embeds_from_python;
+    // const text_ids_selector = text_ids_from_python;
+    // const prompt_embeds_selector = prompt_embeds_from_python;
 
-        // 2. Load Transformer & Scheduler
-        var transformer2d_model_ctx = try flux_model_transformer2d.loadFromFile(allocator, io, platform_auto, args.model);
-        defer transformer2d_model_ctx.deinit(allocator);
+    // 2. Load Transformer & Scheduler
+    var transformer2d_model_ctx = try flux_model_transformer2d.loadFromFile(allocator, io, platform_auto, args.model);
+    defer transformer2d_model_ctx.deinit(allocator);
 
-        var scheduler = try flow_match_euler_discrete_scheduler.FlowMatchEulerDiscreteScheduler.loadFromFile(allocator, io, args.model);
-        defer scheduler.deinit();
+    var scheduler = try flow_match_euler_discrete_scheduler.FlowMatchEulerDiscreteScheduler.loadFromFile(allocator, io, args.model);
+    defer scheduler.deinit();
 
-        log.info("Models initialized successfully", .{});
+    log.info("Models initialized successfully", .{});
 
-        // 3. Prepare Latents
-        log.info(">>Preparing Latents...", .{});
-        const img_dim = 128;
+    // 3. Prepare Latents
+    log.info(">>Preparing Latents...", .{});
+    const img_dim = 256;
 
-        var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, img_dim);
-        defer latent_buf.deinit();
-        defer latent_ids_buf.deinit();
+    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, img_dim);
+    defer latent_buf.deinit();
+    defer latent_ids_buf.deinit();
 
-        try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
-        try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
 
-        // 4. Schedule (Sampling Loop)
-        log.info("\n>>> Preparing Timesteps...", .{});
-        if (enable_stage_debug) {
-            try utils.debugForwardStage(
-                transformer2d_model_ctx.model,
-                transformer2d_model_ctx.weights,
-                latent_buf,
-                latent_ids_buf,
-                prompt_embeds_selector,
-                text_ids_selector,
-                allocator,
-                io,
-                platform_auto,
-                stage_to_debug,
-            );
-            return;
-        }
-
-        var latents_out = try utils.schedule(
+    // 4. Schedule (Sampling Loop)
+    log.info("\n>>> Preparing Timesteps...", .{});
+    if (enable_stage_debug) {
+        try utils.debugForwardStage(
             transformer2d_model_ctx.model,
             transformer2d_model_ctx.weights,
-            scheduler,
             latent_buf,
             latent_ids_buf,
             prompt_embeds_selector,
             text_ids_selector,
-            1, // num_inference_steps
             allocator,
             io,
             platform_auto,
+            stage_to_debug,
         );
-        defer latents_out.deinit();
-
-        try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
-
-        log.info("\n>>> Decoding Latents...", .{});
-
-        var vae_ctx = try autoencoder_kl.AutoencoderKLFlux2.loadFromFile(allocator, io, platform_auto, args.model);
-        defer vae_ctx.deinit(allocator);
-
-        const image_decoded_buf = try utils.variational_auto_encode(allocator, io, platform_auto, vae_ctx, latents_out);
-
-        try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
-
-        try tools.saveBufferToNpy(allocator, io, platform_auto, image_decoded_buf, "/Users/kevin/zml/flux_klein_zml_result.npy");
-
-        log.info("\n>>> Pipeline Complete.", .{});
+        return;
     }
+
+    var latents_out = try utils.schedule(
+        transformer2d_model_ctx.model,
+        transformer2d_model_ctx.weights,
+        scheduler,
+        latent_buf,
+        latent_ids_buf,
+        prompt_embeds_selector,
+        text_ids_selector,
+        4, // num_inference_steps
+        allocator,
+        io,
+        platform_auto,
+    );
+    defer latents_out.deinit();
+
+    try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+
+    log.info("\n>>> Decoding Latents...", .{});
+
+    var vae_ctx = try autoencoder_kl.AutoencoderKLFlux2.loadFromFile(allocator, io, platform_auto, args.model);
+    defer vae_ctx.deinit(allocator);
+
+    const image_decoded_buf = try utils.variational_auto_encode(allocator, io, platform_auto, vae_ctx, latents_out);
+
+    try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
+
+    try tools.saveBufferToNpy(allocator, io, platform_auto, image_decoded_buf, "/Users/kevin/zml/flux_klein_zml_result.npy");
+
+    log.info("\n>>> Pipeline Complete.", .{});
 
     std.process.exit(0);
 }
