@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+
+zig_binary(
+    name = "gpt_oss_triton",
+    srcs = ["gpt_oss_triton.zig"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
