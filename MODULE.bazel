@@ -95,8 +95,11 @@ use_repo(pip, "huggingface_hub")
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
+
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda", "cuda_cudart")
+
+
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
@@ -114,6 +117,8 @@ register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
 use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "linenoise", "mnist", "org_swig_swig", "translate-c", "xla")
+
+
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(

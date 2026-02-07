@@ -22,7 +22,7 @@ zig_library(
     srcs = [
         "attention/attention.zig",
         "attention/flashattn.zig",
-        "fused_moe/fused_moe.zig",
+        "moe_triton/moe_triton.zig",
         "grouped_gemm/cublas.zig",
         "grouped_gemm_LT/cublas.zig",
         "buffer.zig",
@@ -72,6 +72,7 @@ zig_library(
             "//platforms/cuda/fused_moe",
             "//platforms/cuda/grouped_gemm",
             "//platforms/cuda/grouped_gemm_LT",
+            "//platforms/cuda/moe_triton",
         ],
         "//conditions:default": [],
     }),

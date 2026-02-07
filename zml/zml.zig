@@ -31,6 +31,7 @@ pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
 pub const mlir = @import("mlirx.zig");
 pub const module = @import("module.zig");
+pub const moe_triton = @import("moe_triton/moe_triton.zig");
 pub const nn = @import("nn.zig");
 pub const ops = @import("ops.zig");
 pub const platform = @import("platform.zig");
