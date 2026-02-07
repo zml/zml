@@ -278,6 +278,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 
     var values: [inputs.len]*const mlir.Value = undefined;
     inline for (0..inputs.len) |i| {
+        std.log.debug("Input tensor {d}: {f}", .{ i, inputs[i].shape() });
         values[i] = inputs[i].value();
     }
 
