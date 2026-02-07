@@ -18,6 +18,8 @@ const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 
+const _log = std.log.scoped(.gpt_oss);
+
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
 
@@ -67,6 +69,248 @@ pub const Tensor = struct {
                 .output_shape = opts.output_shape,
             },
         );
+    }
+
+    /// Helper to create scalar i32 constants for kernel arguments.
+    fn int32Const(val: anytype) Tensor {
+        return Tensor.scalar(@as(i32, @intCast(val)), .i32);
+    }
+
+    /// Helper to create scalar i64 constants for kernel arguments.
+    fn int64Const(val: anytype) Tensor {
+        return Tensor.scalar(@as(i64, @intCast(val)), .i64);
+    }
+
+    /// Helper to create a dummy null tensor for unused pointer arguments.
+    /// We pass a 1-element zero tensor so the kernel receives a valid pointer.
+    fn nullTensor() Tensor {
+        return Tensor.scalar(0, .u8).broad(Shape.init(.{1}, .u8));
+    }
+
+    /// Triton MoE MXFP4 kernel wrapper (TTIR signature-aligned).
+    pub fn moeTritonOp(
+        input_sorted: Tensor, // [M_tokens, K] (bf16)
+        weights: Tensor, // [Experts, K, N_exp] (mxfp4/u8) - layout may be adapted later
+        weights_scales: Tensor, // [Experts, K_mx, N_exp] (scales) - layout may be adapted later
+        bias: Tensor, // [Experts, N_exp] (bf16)
+        counts: Tensor, // [Experts] i32 (tokens per expert)
+        output_dim: i32, // N (per exp)
+    ) Tensor {
+        _log.info("moeTritonOp input_sorted shape={f}", .{input_sorted.shape()});
+        _log.info("moeTritonOp weights shape={f}", .{weights.shape()});
+        _log.info("moeTritonOp weights_scales shape={f}", .{weights_scales.shape()});
+        _log.info("moeTritonOp bias shape={f}", .{bias.shape()});
+        _log.info("moeTritonOp counts shape={f}", .{counts.shape()});
+        const M: i64 = input_sorted.dim(0);
+        const K: i64 = input_sorted.dim(1);
+        const N: i64 = @as(i64, output_dim);
+
+        const num_experts = weights.dim(0);
+
+        const N_TOTAL = N * num_experts;
+
+        const N_exp: i64 = weights.dim(2);
+        const K_w: i64 = @divFloor(K, 2);
+        const K_mx: i64 = @divFloor(K, 32);
+
+        const BLOCK_M: i64 = 32;
+        const BLOCK_N: i64 = 128;
+
+        const num_slices = input_sorted.dim(.seq);
+        _ = num_slices; // autofix
+
+        const grid_m: i64 = if (M <= num_experts)
+            M
+        else
+            num_experts - 1 - @divFloor(num_experts - M - 1, BLOCK_M);
+        _log.info("grid_m={d}", .{grid_m});
+        _log.info("N = {d}", .{N});
+        _log.info("M = {d}", .{M});
+        _log.info("BLOCK_M = {d}", .{BLOCK_M});
+        _log.info("BLOCK_N = {d}", .{BLOCK_N});
+
+        const grid_n: i64 = @divFloor(N_TOTAL + BLOCK_N - 1, BLOCK_N);
+        _log.info("grid_n={d}", .{grid_n});
+
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        var buf: [1024 * 1024]u8 = undefined;
+        const cwd = std.Io.Dir.cwd();
+        var file = cwd.openFile(io, "/home/louislechevalier/zml/moe_mxfp4_tensorized.ttir", .{}) catch |err| {
+            std.debug.panic("failed to open PTX file: {s}", .{@errorName(err)});
+        };
+        var reader = file.reader(io, &buf);
+        const len = file.length(io) catch |err| {
+            std.debug.panic("failed to get PTX file length: {s}", .{@errorName(err)});
+        };
+        const ir_buf = reader.interface.readAlloc(CompilationContext.current().allocator, len) catch |err| {
+            std.debug.panic("failed to read PTX file: {s}", .{@errorName(err)});
+        };
+        const ir_z: [:0]const u8 = CompilationContext.current().allocator.dupeZ(u8, ir_buf) catch |err| {
+            std.debug.panic("failed to null-terminate PTX: {s}", .{@errorName(err)});
+        };
+
+        const ops_ = ops.TritonOps{
+            .name = "_matmul__tensorized_wrapper",
+            .ir = ir_z,
+            .grid = .{ 1, @intCast(grid_m), @intCast(grid_n) },
+            .num_warps = 4,
+            .num_stages = 3,
+            .debug = true,
+            .output_operand_aliases = &.{},
+        };
+
+        // Device-side ragged metadata (prefix sum for XSliceOffs).
+        const slice_sizes = counts.convert(.i32);
+        // const slice_offs_shape: Shape = .init(.{ .d = slice_sizes.dim(0) + 1 }, .i32);
+        // _ = slice_offs_shape; // autofix
+        const slice_offs_inclusive = slice_sizes.cumulativeSum(0);
+        const first_off = Tensor.zeroes(.init(.{ .d = 1 }, .i32));
+        const slice_offs = Tensor.concatenate(&.{ first_off, slice_offs_inclusive }, 0);
+
+        const block_m_i32: i32 = @intCast(BLOCK_M);
+        const n_blocks = slice_sizes.addConstant(block_m_i32 - 1).divByConst(block_m_i32);
+        const xblocks_off_values = n_blocks.cumulativeSum(0);
+        const xblocks_off = Tensor.concatenate(&.{ first_off, xblocks_off_values }, 0);
+
+        const total_blocks = n_blocks.sum(0);
+
+        // // Minimal XBlockOffs/XBlockSchedule on device.
+        // const xblock_prefix = Tensor.zeroes(Shape.init(.{ .d = 32 }, .i32));
+        // _ = xblock_prefix; // autofix
+        // const grid_m_tensor = Tensor.constant(.{ .i32 = @as(i32, @intCast(grid_m)) }).reshape(.{ .d = 1 });
+        // _ = grid_m_tensor; // autofix
+        // const xblock_offs = Tensor.concatenate(&.{ xblock_prefix, grid_m_tensor }, 0);
+        // const xblock_schedule = Tensor.zeroes(Shape.init(.{ .d = grid_m }, .i32));
+        const seq = input_sorted.dim(.seq);
+        _log.info("seq {d}", .{seq});
+        const max_n_blocks = num_experts - 1 - (@divFloor(num_experts - seq - 1, 16)); //verifier le divFloor
+        _log.info("seq {d}", .{max_n_blocks});
+
+        var slices_idx = Tensor.iota(.init(.{ .d = max_n_blocks }, .i32), 0);
+
+        const slices_idx_2d = slices_idx.broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
+
+        // B. Batch ID via comparaison à tous les offsets, shape [max_n_blocks, num_experts+1]
+        const offsets_2d = xblocks_off.reshape(.{ 1, num_experts + 1 }).broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
+        const mask = slices_idx_2d.cmp(.GE, offsets_2d);
+
+        const batch_ids = mask.convert(.i32).sum(1).sub(Tensor.scalar(1, .i32));
+        const xblocks_off_1d = xblocks_off.reshape(.{ .d = num_experts + 1 });
+
+        const batch_ids_1d = batch_ids.reshape(.{max_n_blocks});
+
+        // C. Block ID interne = global_idx - start_offset(batch)
+        const start_offsets = xblocks_off_1d.gather(.{ .d = batch_ids_1d }, .{});
+        const internal_block_ids = slices_idx.reshape(.{max_n_blocks}).sub(start_offsets);
+
+        const shift_16 = Tensor.scalar(16, .i32);
+        const pack = internal_block_ids.shiftLeft(shift_16).add(batch_ids_1d);
+
+        const total_blocks_broad = total_blocks.reshape(Shape.init(.{1}, .i32)).broad(Shape.init(.{max_n_blocks}, .i32));
+        const valid_mask = slices_idx.cmp(.LT, total_blocks_broad);
+
+        // Remplir les invalides avec -1
+        const minus_one = Tensor.scalar(-1, .i32).broad(Shape.init(.{max_n_blocks}, .i32));
+        const xblock_schedule = valid_mask.select(pack, minus_one);
+
+        const bias_f32 = bias.convert(.f32);
+
+        const output_shape: Shape = .init(.{ .seq = M, .d = N }, .bf16);
+        const output = Tensor.zeroes(output_shape);
+
+        _log.info("moeTritonOp: M={d} K={d} N={d} N_exp={d} K_w={d} K_mx={d} num_experts={d}", .{ M, K, N, N_exp, K_w, K_mx, num_experts });
+        _log.info("block sizes: BLOCK_M={d} BLOCK_N={d} grid_m={d} grid_n={d}", .{ BLOCK_M, BLOCK_N, grid_m, grid_n });
+        _log.info("input_sorted shape={f}", .{input_sorted.shape()});
+        _log.info("weights shape={f}", .{weights.shape()});
+        _log.info("weights_scales shape={f} ", .{weights_scales.shape()});
+        _log.info("bias shape={f} ", .{bias.shape()});
+        _log.info("counts shape={f} ", .{counts.shape()});
+        _log.info("slice_sizes shape={f} slice_offs shape={f}", .{ slice_sizes.shape(), slice_offs.shape() });
+        _log.info("xblock_offs shape={f} xblock_schedule shape={f}", .{ xblocks_off.shape(), xblock_schedule.shape() });
+        _log.info("output_shape={f}", .{output_shape});
+
+        const K_packed = weights.dim(2) * weights.dim(3); // 90 * 16 = 1440
+
+        // Y [M, N]
+        const stride_y_m: i64 = N;
+
+        // X [M, K]
+        const stride_x_z: i64 = M * K;
+        const stride_x_m: i64 = K;
+
+        // W [Experts, K, N]
+        const stride_w_e: i64 = K_packed * N_exp;
+        const stride_w_k: i64 = 1;
+        const stride_w_n: i64 = K_packed;
+
+        // Scales [Experts, K_mx, N]
+        const stride_w_mx_e: i64 = N_exp * K_mx;
+        const stride_w_mx_k: i64 = 1; // Sauter N pour K_mx suivant
+        const stride_w_mx_n: i64 = K_mx;
+
+        const stride_b_e: i64 = N_exp;
+
+        _log.info(
+            "strides: stride_y_m={d} stride_x_z={d} stride_x_m={d} stride_w_e={d} stride_w_n={d} stride_w_mx_e={d} stride_w_mx_k={d} stride_b_e={d}",
+            .{ stride_y_m, stride_x_z, stride_x_m, stride_w_e, stride_w_n, stride_w_mx_e, stride_w_mx_k, stride_b_e },
+        );
+
+        // --- Liste des Arguments (32 items, Match Exact Signature) ---
+        const kernel_args = .{
+            // 1. Y & Strides
+            output, // %Y
+            int32Const(0), // %stride_y_k
+            int32Const(0), // %stride_y_z
+            int32Const(stride_y_m), // %stride_y_m
+            int32Const(1), // %stride_y_n
+
+            // 2. X & Strides
+            input_sorted, // %X
+            int32Const(stride_x_z), // %stride_x_z
+            int32Const(stride_x_m), // %stride_x_m
+            int32Const(1), // %stride_x_k
+
+            // 3. W & Strides
+            weights, // %W
+            int32Const(stride_w_e), // %stride_w_e
+            int32Const(stride_w_k), // %stride_w_k
+            int32Const(stride_w_n), // %stride_w_n
+
+            // 4. Scales & Strides
+            weights_scales, // %WMxScale
+            int32Const(stride_w_mx_e), // %stride_w_mx_e
+            int32Const(stride_w_mx_k), // %stride_w_mx_k
+            int32Const(stride_w_mx_n), // %stride_w_mx_n
+
+            // 5. Bias
+            bias_f32, // %B
+            int32Const(stride_b_e), // %stride_b_e
+
+            // 6. Dimensions
+            int32Const(M), // %M
+            int32Const(N), // %N
+            int32Const(K), // %K
+            int32Const(K_w), // %K_W
+
+            // 7. Metadata
+            slice_sizes, // %XSliceSizes
+            slice_offs, // %XSliceOffs
+            xblocks_off, // %XBlockOffs
+            xblock_schedule, // %XBlockSchedule
+
+            // 8. Grid & Config
+            int32Const(1), // %batch_size
+            int32Const(grid_m), // %grid_m
+            int32Const(grid_n), // %grid_n
+            Tensor.scalar(1.0, .f32), // %out_alpha
+            int32Const(0), // %reduce_rank
+        };
+
+        const res = ops.triton(kernel_args, .{output_shape}, ops_);
+        return res[0];
     }
 
     pub fn init(shape_like: anytype, dt: DataType) Tensor {
