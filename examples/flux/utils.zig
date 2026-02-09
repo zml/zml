@@ -244,7 +244,7 @@ pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platfor
 }
 
 pub fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
-    const npy = tools.NpyData.load(allocator, path) catch {
+    const npy = tools.NumpyData.load(allocator, path) catch {
         log.warn("Input not found at {s}, using zeros", .{path});
         const shape = zml.Shape.init(fallback_shape, .f32);
         const data = try allocator.alloc(f32, shape.count());
@@ -472,131 +472,6 @@ pub fn schedule(
     if (!is_first) current_latents.deinit();
 
     return unpacked;
-}
-
-fn debugForwardStage(
-    transformer: flux_model_transformer2d.Flux2Transformer2DModel,
-    weights: zml.Bufferized(flux_model_transformer2d.Flux2Transformer2DModel),
-    latents: zml.Buffer,
-    latent_ids: zml.Buffer,
-    prompt_embeds: zml.Buffer,
-    text_ids: zml.Buffer,
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    stage: flux_model_transformer2d.Flux2Transformer2DModel.DebugStage,
-) !void {
-    const freq_vals_arr = flux_model_transformer2d.computeTimestepFrequencies(transformer.config.timestep_guidance_channels);
-
-    const txt_shape = text_ids.shape();
-    const img_shape = latent_ids.shape();
-    const txt_len = txt_shape.dim(1);
-    const img_len = img_shape.dim(1);
-    const total_len = txt_len + img_len;
-
-    var txt_ids_slice = try zml.Slice.alloc(allocator, txt_shape);
-    defer txt_ids_slice.free(allocator);
-    try text_ids.toSlice(io, txt_ids_slice);
-
-    var img_ids_slice = try zml.Slice.alloc(allocator, img_shape);
-    defer img_ids_slice.free(allocator);
-    try latent_ids.toSlice(io, img_ids_slice);
-
-    const comb_shape = zml.Shape.init(.{ .b = 1, .s = total_len, .coord = 4 }, .f32);
-    var comb_slice = try zml.Slice.alloc(allocator, comb_shape);
-    defer comb_slice.free(allocator);
-    const comb_bytes = comb_slice.items(u8);
-    const comb_f32 = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(comb_bytes)));
-
-    const txt_i64 = std.mem.bytesAsSlice(i64, @as([]align(8) u8, @alignCast(txt_ids_slice.items(u8))));
-    for (txt_i64, 0..) |v, i| {
-        comb_f32[i] = @floatFromInt(v);
-    }
-
-    const img_i32 = std.mem.bytesAsSlice(i32, @as([]align(4) u8, @alignCast(img_ids_slice.items(u8))));
-    const offset = txt_i64.len;
-    for (img_i32, 0..) |v, i| {
-        comb_f32[offset + i] = @floatFromInt(v);
-    }
-
-    const rope_slices = try flux_model_transformer2d.computeRotaryEmbedding(allocator, comb_f32, comb_shape, transformer.config.axes_dims_rope, transformer.config.rope_theta);
-    defer rope_slices[0].free(allocator);
-    defer rope_slices[1].free(allocator);
-
-    var rotary_cos_dev = try zml.Buffer.fromSlice(io, platform, rope_slices[0]);
-    defer rotary_cos_dev.deinit();
-    var rotary_sin_dev = try zml.Buffer.fromSlice(io, platform, rope_slices[1]);
-    defer rotary_sin_dev.deinit();
-
-    const FluxDebugStep = struct {
-        stage: flux_model_transformer2d.Flux2Transformer2DModel.DebugStage,
-
-        pub fn forward(
-            self: @This(),
-            model: flux_model_transformer2d.Flux2Transformer2DModel,
-            hidden_states: zml.Tensor,
-            encoder_hidden_states: zml.Tensor,
-            timesteps_proj: zml.Tensor,
-            guidance_proj: ?zml.Tensor,
-            rotary_cos: zml.Tensor,
-            rotary_sin: zml.Tensor,
-        ) zml.Tensor {
-            return model.forwardStage(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin, self.stage);
-        }
-    };
-
-    const latents_shape = latents.shape();
-    const pixel_latents_shape = zml.Shape.init(.{ .b = 1, .s = latents_shape.dim(1), .d = latents_shape.dim(2) }, .f32);
-    const t_proj_shape = zml.Shape.init(.{ .b = 1, .d = 256 }, .f32);
-    const rotary_shape = rotary_cos_dev.shape();
-
-    const sym_latents = zml.Tensor.fromShape(pixel_latents_shape);
-    const sym_prompt = zml.Tensor.fromShape(prompt_embeds.shape());
-    const sym_t_proj = zml.Tensor.fromShape(t_proj_shape);
-    const sym_g_proj = zml.Tensor.fromShape(t_proj_shape);
-    const sym_rotary_cos = zml.Tensor.fromShape(rotary_shape);
-    const sym_rotary_sin = zml.Tensor.fromShape(rotary_shape);
-
-    var step_exe = try platform.compile(allocator, io, FluxDebugStep{ .stage = stage }, .forward, .{ transformer, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
-    defer step_exe.deinit();
-
-    // Create Projection Buffers
-    var t_proj_arr: [256]f32 = undefined;
-    const t_val: f32 = 1000.0;
-    for (0..128) |j| {
-        const arg = t_val * freq_vals_arr[j];
-        t_proj_arr[j] = @cos(arg);
-        t_proj_arr[j + 128] = @sin(arg);
-    }
-    var t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.asBytes(&t_proj_arr));
-    defer t_proj_buf.deinit();
-
-    // Guidance Projection
-    const guidance_scale: f32 = 3.5;
-    const g_val: f32 = guidance_scale * 1000.0;
-    var g_proj_arr: [256]f32 = undefined;
-    for (0..128) |j| {
-        const arg = g_val * freq_vals_arr[j];
-        g_proj_arr[j] = @cos(arg);
-        g_proj_arr[j + 128] = @sin(arg);
-    }
-    var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.asBytes(&g_proj_arr));
-    defer g_proj_buf.deinit();
-
-    var args_step = try step_exe.args(allocator);
-    defer args_step.deinit(allocator);
-    args_step.set(.{ weights, latents, prompt_embeds, t_proj_buf, g_proj_buf, rotary_cos_dev, rotary_sin_dev });
-
-    var res_step = try step_exe.results(allocator);
-    defer res_step.deinit(allocator);
-    step_exe.call(args_step, &res_step);
-
-    const output_buf = res_step.get(zml.Buffer);
-
-    // Print logic inside helper
-    var label_buf: [256]u8 = undefined;
-    const label = try std.fmt.bufPrint(&label_buf, "      [Block0] {s}", .{@tagName(stage)});
-    try tools.printFlatten(allocator, io, output_buf, 20, label, .{});
 }
 
 /// Implements unpack_latents_with_ids from Python

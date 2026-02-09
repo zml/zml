@@ -7,25 +7,25 @@ const truncated_shape_msg = "torch.Size([...])";
 const truncated_values_msg = "[...]";
 const unsupported_dtype_msg = "[unsupported dtype]";
 
-pub const NpyData = struct {
+pub const NumpyData = struct {
     shape: []usize,
     data: []align(8) u8,
     allocated_mem: []align(8) u8,
     dtype: []const u8,
     allocator: std.mem.Allocator,
 
-    pub fn deinit(self: *NpyData) void {
+    pub fn deinit(self: *NumpyData) void {
         self.allocator.free(self.shape);
         self.allocator.free(self.allocated_mem);
         self.allocator.free(self.dtype);
     }
 
-    pub fn items(self: NpyData, comptime T: type) []T {
+    pub fn items(self: NumpyData, comptime T: type) []T {
         const aligned_data = @as([]align(8) u8, @alignCast(self.data));
         return std.mem.bytesAsSlice(T, aligned_data);
     }
 
-    pub fn toTensor(self: NpyData) zml.Tensor {
+    pub fn toTensor(self: NumpyData) zml.Tensor {
         // Map Dtype
         // Supported: <f4 (f32), <i8 (i64), <i4 (i32)
         var dtype: zml.DataType = .f32;
@@ -52,7 +52,7 @@ pub const NpyData = struct {
         }
     }
 
-    pub fn print(self: NpyData, n: usize, label: []const u8) void {
+    pub fn print(self: NumpyData, n: usize, label: []const u8) void {
         log.info("{s} shape: {any}, dtype: {s}", .{ label, self.shape, self.dtype });
 
         var buf: [4096]u8 = undefined;
@@ -91,22 +91,14 @@ pub const NpyData = struct {
         log.info("{s} (first {d}): {s}", .{ label, n, buf[0..pos] });
     }
 
-    pub fn load(allocator: std.mem.Allocator, path: []const u8) !NpyData {
+    pub fn load(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
         return loadNpy(allocator, path);
     }
 
-    pub fn toBuffer(self: NpyData, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
+    pub fn toBuffer(self: NumpyData, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
         return zml.Buffer.fromBytes(io, platform, self.toTensor().shape(), self.data);
     }
 };
-
-pub fn printTensor(t: zml.Tensor, n: usize) void {
-    log.info("Tensor Shape: {}, Dtype: {}", .{ t.shape(), t.dtype() });
-    // zml.Tensor is symbolic and does not hold host data.
-    // We cannot print elements unless we have a zml.Buffer or the original data.
-    log.warn("Cannot print elements of symbolic zml.Tensor. Use zml.Buffer for runtime data.", .{});
-    _ = n;
-}
 
 pub fn printBuffer(allocator: std.mem.Allocator, io: std.Io, buf: zml.Buffer, n: usize, label: []const u8) !void {
     log.info("{s} Shape: {}", .{ label, buf.shape() });
@@ -122,24 +114,24 @@ pub fn printBuffer(allocator: std.mem.Allocator, io: std.Io, buf: zml.Buffer, n:
     switch (buf.shape().dtype()) {
         .f32 => {
             const data = std.mem.bytesAsSlice(f32, slice.items(u8));
-            for (0..@min(n, data.len)) |i| {
-                if (std.fmt.bufPrint(buffer[pos..], "{d:.4}, ", .{data[i]})) |s| {
+            for (0..@min(n, data.len)) |idx| {
+                if (std.fmt.bufPrint(buffer[pos..], "{d:.4}, ", .{data[idx]})) |s| {
                     pos += s.len;
                 } else |_| break;
             }
         },
         .i64 => {
             const data = std.mem.bytesAsSlice(i64, slice.items(u8));
-            for (0..@min(n, data.len)) |i| {
-                if (std.fmt.bufPrint(buffer[pos..], "{d}, ", .{data[i]})) |s| {
+            for (0..@min(n, data.len)) |idx| {
+                if (std.fmt.bufPrint(buffer[pos..], "{d}, ", .{data[idx]})) |s| {
                     pos += s.len;
                 } else |_| break;
             }
         },
         .i32 => {
             const data = std.mem.bytesAsSlice(i32, slice.items(u8));
-            for (0..@min(n, data.len)) |i| {
-                if (std.fmt.bufPrint(buffer[pos..], "{d}, ", .{data[i]})) |s| {
+            for (0..@min(n, data.len)) |idx| {
+                if (std.fmt.bufPrint(buffer[pos..], "{d}, ", .{data[idx]})) |s| {
                     pos += s.len;
                 } else |_| break;
             }
@@ -277,7 +269,7 @@ fn appendValues(
     return true;
 }
 
-pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NpyData {
+pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -376,7 +368,7 @@ pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NpyData {
 
     _ = try reader.readFull(data);
 
-    return NpyData{
+    return NumpyData{
         .shape = try shape_list.toOwnedSlice(allocator),
         .data = data,
         .allocated_mem = @as([]align(8) u8, @alignCast(u8_full_slice)),
@@ -582,7 +574,7 @@ pub fn assertBuffersEqual(allocator: std.mem.Allocator, io: std.Io, a: zml.Buffe
     log.info("Buffers match! Max diff: {d}", .{max_diff});
 }
 
-fn getElementAsF64(slice: zml.Slice, dtype: zml.DataType, idx: usize) f64 {
+pub fn getElementAsF64(slice: zml.Slice, dtype: zml.DataType, idx: usize) f64 {
     return switch (dtype) {
         .f32 => @floatCast(slice.items(f32)[idx]),
         .f64 => slice.items(f64)[idx],

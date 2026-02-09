@@ -1,6 +1,8 @@
 const std = @import("std");
 const zml = @import("zml");
 
+const log = std.log.scoped(.tokenization_qwen2_fast);
+
 pub const Qwen2TokenizerFast = struct {
     tokenizer: zml.tokenizer.Tokenizer,
     allocator: std.mem.Allocator,
@@ -10,18 +12,22 @@ pub const Qwen2TokenizerFast = struct {
         content: []const u8,
     };
 
-    pub fn from_pretrained(allocator: std.mem.Allocator, io: std.Io, repo_id: []const u8, options: struct { subfolder: ?[]const u8 = null }) !Qwen2TokenizerFast {
-        var buffer: [1024]u8 = undefined;
+    pub fn from_pretrained(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = null }) !Qwen2TokenizerFast {
         const subfolder = options.subfolder orelse "";
 
-        // Try tokenizer.json first (Fast tokenizer)
-        const path = try std.fmt.bufPrint(&buffer, "{s}/{s}/tokenizer.json", .{ repo_id, subfolder });
+        const tokenizer_path = try std.fmt.allocPrint(allocator, "{s}/tokenizer.json", .{subfolder});
+        defer allocator.free(tokenizer_path);
 
-        // We use zml.tokenizer.Tokenizer.fromFile which detects json/pb
-        const tokenizer = try zml.tokenizer.Tokenizer.fromFile(allocator, io, path);
+        const bytes = label_block_bytes: {
+            const file = try repo_dir.openFile(io, tokenizer_path, .{});
+            defer file.close(io);
+            var reader = file.reader(io, &.{});
+            break :label_block_bytes try reader.interface.readAlloc(allocator, try file.length(io));
+        };
+        defer allocator.free(bytes);
 
         return Qwen2TokenizerFast{
-            .tokenizer = tokenizer,
+            .tokenizer = try zml.tokenizer.Tokenizer.fromBytes(allocator, io, bytes),
             .allocator = allocator,
         };
     }
@@ -31,61 +37,78 @@ pub const Qwen2TokenizerFast = struct {
     }
 
     pub fn apply_chat_template(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
-        tokenize: bool = false,
         add_generation_prompt: bool = true,
-        enable_thinking: bool = false,
     }) ![]const u8 {
-        var result = try std.ArrayList(u8).initCapacity(self.allocator, 1024);
+        const im_start = "<|im_start|>";
+        const im_sep = "\n";
+        const im_end = "<|im_end|>\n";
+        const gen_header = "<|im_start|>assistant\n";
+        const gen_think = "<think>\n\n</think>\n\n";
 
-        // Simple Qwen2 chat template implementation
-        // <|im_start|>role\ncontent<|im_end|>\n
+        var total_size: usize = 0;
 
         for (messages) |msg| {
-            try result.appendSlice(self.allocator, "<|im_start|>");
-            try result.appendSlice(self.allocator, msg.role);
-            try result.appendSlice(self.allocator, "\n");
-            try result.appendSlice(self.allocator, msg.content);
-            try result.appendSlice(self.allocator, "<|im_end|>\n");
+            total_size += im_start.len;
+            total_size += msg.role.len;
+            total_size += im_sep.len;
+            total_size += msg.content.len;
+            total_size += im_end.len;
         }
 
         if (options.add_generation_prompt) {
-            try result.appendSlice(self.allocator, "<|im_start|>assistant\n");
-            // To match Python output observed:
-            try result.appendSlice(self.allocator, "<think>\n\n</think>\n\n");
+            total_size += gen_header.len + gen_think.len;
+        }
+
+        var result: std.ArrayList(u8) = try std.ArrayList(u8).initCapacity(self.allocator, total_size);
+        errdefer result.deinit(self.allocator);
+
+        for (messages) |msg| {
+            try result.appendSlice(self.allocator, im_start);
+            try result.appendSlice(self.allocator, msg.role);
+            try result.appendSlice(self.allocator, im_sep);
+            try result.appendSlice(self.allocator, msg.content);
+            try result.appendSlice(self.allocator, im_end);
+        }
+
+        if (options.add_generation_prompt) {
+            try result.appendSlice(self.allocator, gen_header);
+            try result.appendSlice(self.allocator, gen_think);
         }
 
         return result.toOwnedSlice(self.allocator);
     }
 
-    pub const TokenizeOutput = struct {
+    const TokenizeOutput = struct {
         input_ids: zml.Buffer,
         attention_mask: zml.Buffer,
+        pub fn deinit(self: *@This()) void {
+            self.input_ids.deinit();
+            self.attention_mask.deinit();
+        }
     };
 
     pub fn tokenize(self: *Qwen2TokenizerFast, io: std.Io, platform: *const zml.Platform, text: []const u8, options: struct {
-        padding: []const u8 = "max_length",
-        max_length: usize = 20,
+        max_length: usize = 512,
         truncation: bool = true,
-        return_tensors: []const u8 = "pt",
     }) !TokenizeOutput {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
-        const ids = try encoder.encode(text);
+        const ids: []const u32 = try encoder.encode(text);
 
-        const pad_id = self.tokenizer.tokenToId("<|endoftext|>") orelse 151643; // Default or internal
+        const pad_id: u32 = self.tokenizer.tokenToId("<|endoftext|>") orelse 151643;
 
-        var final_ids = try std.ArrayList(i64).initCapacity(self.allocator, options.max_length);
+        var final_ids: std.ArrayList(i64) = try std.ArrayList(i64).initCapacity(self.allocator, options.max_length);
         defer final_ids.deinit(self.allocator);
 
-        var final_mask = try std.ArrayList(i64).initCapacity(self.allocator, options.max_length);
+        var final_mask: std.ArrayList(i64) = try std.ArrayList(i64).initCapacity(self.allocator, options.max_length);
         defer final_mask.deinit(self.allocator);
 
-        const len = ids.len;
-        const take = if (options.truncation and len > options.max_length) options.max_length else len;
+        const len: usize = ids.len;
+        const take: usize = if (options.truncation and len > options.max_length) options.max_length else len;
 
-        for (0..take) |i| {
-            final_ids.appendAssumeCapacity(@intCast(ids[i]));
+        for (0..take) |idx| {
+            final_ids.appendAssumeCapacity(@intCast(ids[idx]));
             final_mask.appendAssumeCapacity(1);
         }
 
@@ -97,15 +120,32 @@ pub const Qwen2TokenizerFast = struct {
             }
         }
 
-        // Convert to zml.Buffer
-        const shape = zml.Shape.init(.{ 1, @as(i64, @intCast(options.max_length)) }, .i64);
-
-        const ids_buf = try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(final_ids.items));
-        const mask_buf = try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(final_mask.items));
+        const shape: zml.Shape = zml.Shape.init(.{ 1, @as(i64, @intCast(options.max_length)) }, .i64);
 
         return TokenizeOutput{
-            .input_ids = ids_buf,
-            .attention_mask = mask_buf,
+            .input_ids = try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(final_ids.items)),
+            .attention_mask = try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(final_mask.items)),
         };
+    }
+
+    pub fn pipeline_tokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
+
+        // Tokenizer Setup
+        var tokenizer = try Qwen2TokenizerFast.from_pretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
+        defer tokenizer.deinit();
+        const messages = [_]Qwen2TokenizerFast.ChatMessage{
+            .{ .role = "user", .content = options.prompt },
+        };
+        const text_templated = try tokenizer.apply_chat_template(&messages, .{
+            .add_generation_prompt = true,
+        });
+        defer allocator.free(text_templated);
+        log.info("text_templated: from {s} to {s}", .{ options.prompt, text_templated });
+
+        // Tokenize
+        return try tokenizer.tokenize(io, platform, text_templated, .{
+            .max_length = options.max_length,
+            .truncation = true,
+        });
     }
 };

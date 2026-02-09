@@ -334,8 +334,6 @@ pub const Qwen3Model = struct {
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { last_hidden_state: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
-        const input_dtype = input_ids.dtype(); // usually i32
-        _ = input_dtype; // autofix
         // Initial conversion to f32. All activations stay f32 until the very end.
         var hidden_states = self.embed_tokens.forward(input_ids).convert(.f32);
 

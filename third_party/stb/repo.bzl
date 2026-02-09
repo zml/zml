@@ -1,10 +1,9 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "git_repository")
 
 def repo():
-    http_archive(
+    git_repository(
         name = "stb",
+        remote = "https://github.com/nothings/stb.git",
         build_file = "//third_party/stb:stb.BUILD",
-        urls = ["https://github.com/nothings/stb/archive/master.tar.gz"],
-        strip_prefix = "stb-master",
-        sha256 = "aa1cd65973cf814b11e5823889cb10650cf25c1badf11a80bbbc23e0c32622ee",
+       commit = "f1c79c02822848a9bed4315b12c8c8f3761e1296",
     )

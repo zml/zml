@@ -2,7 +2,33 @@ load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
-load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+bool_flag(
+    name = "enable_stage_debug",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "stage_debug_enabled",
+    flag_values = {":enable_stage_debug": "True"},
+)
+
+cc_library(
+    name = "config_defines",
+    defines = ["ZML_CONFIG_DEFINED"] + select({
+        ":stage_debug_enabled": ["ZML_ENABLE_STAGE_DEBUG"],
+        "//conditions:default": [],
+    }),
+)
+
+zig_library(
+    name = "config",
+    srcs = ["config.zig"],
+    main = "config.zig",
+    deps = [":config_defines"],
+)
 
 zig_test(
     name = "utils_test",
@@ -21,12 +47,14 @@ zig_binary(
         "tokenization_qwen2_fast.zig",
         "tools.zig",
         "utils.zig",
+        "config.zig",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
     deps = [
+        ":config",
         "//zml",
-        "@stb//:stb_image_write",
+        "@stb//:stb",
     ],
 )
 
