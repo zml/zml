@@ -762,8 +762,9 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
     if (opts.output_operand_aliases) |output_operand_aliases| {
         var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
         for (output_operand_aliases, 0..) |alias, output_index| {
+            const output_tuple_indices = if (result_types.len > 1) &[1]i64{@intCast(output_index)} else &.{};
             buffer.appendAssumeCapacity(
-                outputOperandAliasAttribute(ctx, .{ .operand_index = alias, .output_tuple_indices = &[1]i64{@intCast(output_index)} }),
+                outputOperandAliasAttribute(ctx, .{ .operand_index = alias, .output_tuple_indices = output_tuple_indices }),
             );
         }
         attrs.appendAssumeCapacity(
