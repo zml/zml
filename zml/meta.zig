@@ -305,6 +305,7 @@ test mapAlloc {
 /// The returned type will contains only `To` making it easy for the compiler to produce compact layout.
 /// Used by `zml.Bufferized` to strip compile time arguments from a model struct.
 pub fn MapRestrict(From: type, To: type) type {
+    @setEvalBranchQuota(100000);
     return struct {
         pub fn map(T: type) type {
             switch (T) {

@@ -662,7 +662,7 @@ pub const Device = opaque {
 
         pub const zeroes = std.mem.zeroes(MemoryStats);
 
-        fn fromCStruct(v: c.PJRT_Device_MemoryStats_Args) MemoryStats {
+        fn fromCStruct(v: meta.Struct(c.PJRT_Device_MemoryStats_Args)) MemoryStats {
             return .{
                 .bytes_in_use = @intCast(v.bytes_in_use),
                 .peak_bytes_in_use = if (v.peak_bytes_in_use_is_set) @intCast(v.peak_bytes_in_use) else null,
