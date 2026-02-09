@@ -495,7 +495,7 @@ pub const Client = opaque {
         dims: []const i64,
         element_type: BufferType,
         layout: MemoryLayout,
-        device: *const Device,
+        device: ?*const Device = null,
         on_delete_callback: *const fn (device_buffer_ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void = &struct {
             fn call(_: ?*anyopaque, _: ?*anyopaque) callconv(.c) void {}
         }.call,
