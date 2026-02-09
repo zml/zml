@@ -144,29 +144,33 @@ pub const Slice = struct {
         try writer.splatByteAll(' ', indent_level);
         _ = try writer.write("{\n");
 
-        // Write first rows
         const n: u64 = @intCast(slice.shape.dim(0));
-        for (0..@min(num_rows, n)) |d| {
-            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
-            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
-            try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-            if (slice.shape.rank() > 1) {
+        if (n >= num_rows) {
+            // Write first rows
+            for (0..@min(num_rows, n)) |d| {
+                const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
+                const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
+                try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
                 try writer.writeAll(",\n");
             }
-        }
 
-        if (n < num_rows) return;
-        // Skip middle rows
-        if (n > 2 * num_rows) {
-            try writer.splatByteAll(' ', indent_level + 2);
-            _ = try writer.write("...\n");
-        }
-        // Write last rows
-        for (@max(n - num_rows, num_rows)..n) |d| {
-            const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
-            const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
-            try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
-            if (slice.shape.rank() > 1) {
+            // Skip middle rows
+            if (n > 2 * num_rows) {
+                try writer.splatByteAll(' ', indent_level + 2);
+                _ = try writer.write("...\n");
+            }
+            // Write last rows
+            for (@max(n - num_rows, num_rows)..n) |d| {
+                const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
+                const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
+                try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
+                try writer.writeAll(",\n");
+            }
+        } else {
+            for (0..n) |d| {
+                const byte_stride: usize = @intCast(slice.shape.computeByteStrides().get(0));
+                const sub_slice: Slice = .init(slice.shape.drop(0), slice.constData()[d * byte_stride ..][0..byte_stride]);
+                try sub_slice.prettyPrintIndented(writer, num_rows, indent_level + 2, options);
                 try writer.writeAll(",\n");
             }
         }
@@ -233,6 +237,17 @@ test "slice pretty print rank 3" {
         \\}
     ;
 
+    try std.testing.expectFmt(expected, "{d}", .{slice});
+}
+
+test "slice pretty print rank 2" {
+    const data: [4]i32 = .{ 0, 1, 2, 3 };
+    const slice = Slice.init(.init(.{ 1, 4 }, .i32), std.mem.asBytes(&data));
+    const expected =
+        \\{
+        \\  {0,1,2,3},
+        \\}
+    ;
     try std.testing.expectFmt(expected, "{d}", .{slice});
 }
 
