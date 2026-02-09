@@ -986,6 +986,13 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
                 else => @panic("Unsupported DataType"),
             },
             .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(metadata, field.name)),
+            .pointer => |pointer_info| switch (pointer_info.size) {
+                .slice => if (pointer_info.child == u8)
+                    mlir.stringAttribute(ctx.mlir_ctx, @field(metadata, field.name))
+                else
+                    @panic("Unsupported pointer type in metadata"),
+                else => @panic("Unsupported pointer type in metadata"),
+            },
             else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
         };
         metadata_attributes[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
