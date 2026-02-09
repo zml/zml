@@ -21,12 +21,17 @@ pub const Exe = struct {
     input_shardings: []const Sharding,
     output_shardings: []const Sharding,
 
+    num_devices: usize,
+    num_partitions: i32,
+
     arena: std.heap.ArenaAllocator,
 
     pub fn init(
         allocator: std.mem.Allocator,
         platform: *const Platform,
         exe: *pjrt.LoadedExecutable,
+        num_devices: usize,
+        num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
         input_shardings: []const Sharding,
@@ -48,6 +53,8 @@ pub const Exe = struct {
             .output_shapes = output_shapes_copy,
             .input_shardings = input_shardings_copy,
             .output_shardings = output_shardings_copy,
+            .num_devices = num_devices,
+            .num_partitions = num_partitions,
             .arena = arena,
         };
     }
@@ -57,11 +64,11 @@ pub const Exe = struct {
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
-        return Arguments.init(allocator, self.input_shapes, self.input_shardings);
+        return Arguments.init(allocator, self.input_shapes, self.input_shardings, self.num_devices);
     }
 
     pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
-        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform);
+        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform, self.num_devices);
     }
 
     pub const FlatBuffers = struct {
@@ -99,10 +106,8 @@ pub const Exe = struct {
         expected_shapes: []const Shape,
         shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding) !Arguments {
-            const num_devices = shardings[0].numDevices();
-
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, @intCast(num_devices));
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) !Arguments {
+            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
@@ -165,10 +170,8 @@ pub const Exe = struct {
         expected_shapes: []const Shape,
         shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform) !Results {
-            const num_devices = shardings[0].numDevices();
-
-            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, @intCast(num_devices));
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform, num_devices: usize) !Results {
+            const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
             const expected_shapes = try allocator.dupe(Shape, shapes);
@@ -231,10 +234,7 @@ pub const Exe = struct {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
 
-        // todo: do sharding
-        const num_partitions: i32 = 1;
-
-        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..num_partitions] else null;
+        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_partitions)] else null;
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,

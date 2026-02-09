@@ -183,9 +183,7 @@ fn runAdditionExample(
 
     const model: AddModel = .init();
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{
-        .shardings = &.{ sharding_data, sharding_model },
-    });
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, try .init(.shardy, &.{ sharding_data, sharding_model }));
     defer exe.deinit();
 
     var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_data, 0.0);
@@ -318,13 +316,13 @@ pub fn main() !void {
     });
     log.info("{f}", .{mesh_model});
 
-    var strategy_data = try zml.sharding.suggestStrategy(allocator, mesh_data, physical_mesh);
+    var strategy_data: zml.sharding.Strategy = try .suggest(allocator, mesh_data, physical_mesh);
     defer strategy_data.deinit(allocator);
 
-    var strategy_model = try zml.sharding.suggestStrategy(allocator, mesh_model, physical_mesh);
+    var strategy_model: zml.sharding.Strategy = try .suggest(allocator, mesh_model, physical_mesh);
     defer strategy_model.deinit(allocator);
 
-    var sharding_data = try zml.sharding.resolveStrategyConstraints(
+    var sharding_data: zml.sharding.Sharding = try .initFromStrategy(
         allocator,
         mesh_data,
         physical_mesh,
@@ -333,7 +331,7 @@ pub fn main() !void {
     defer sharding_data.deinit();
     log.info("{f}", .{sharding_data});
 
-    var sharding_model = try zml.sharding.resolveStrategyConstraints(
+    var sharding_model: zml.sharding.Sharding = try .initFromStrategy(
         allocator,
         mesh_model,
         physical_mesh,
