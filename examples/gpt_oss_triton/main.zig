@@ -1,12 +1,11 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const moe_triton = zml.moe_triton;
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
-const MoeTriton = moe_triton.MoeTriton;
+const cublas_gg = zml.grouped_gemm.GemmGroupedBatched;
 
 const gpt_oss = @import("gpt_oss_triton.zig");
 const GptOss = gpt_oss.GptOss;
@@ -117,8 +116,8 @@ pub fn main() !void {
         return;
     }
 
-    try MoeTriton.register(platform);
-    try moe_triton.load(allocator, io);
+    // try MoeTriton.register(platform);
+    // try moe_triton.load(allocator, io);
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
@@ -188,6 +187,7 @@ pub fn main() !void {
         var reader = std.Io.File.stdin().reader(io, &.{});
         break :blk try reader.interface.allocRemaining(allocator, .unlimited);
     };
+    // const prompt = "Present shortly the city of paris";
     defer allocator.free(prompt);
 
     // const prompt = cli.args.prompt orelse "What is the capital of France?";
@@ -260,7 +260,7 @@ const GptOssParameters = struct {
     kv_cache: gpt_oss.KvCache,
     rng: zml.Tensor.Rng,
     tokens_mask: zml.Tensor,
-    metadata: moe_triton.MoeTriton.Metadata,
+    metadata: cublas_gg.Metadata,
 };
 
 const CompileModelResult = struct {

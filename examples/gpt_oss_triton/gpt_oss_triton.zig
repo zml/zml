@@ -7,8 +7,6 @@ const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
 const ops = zml.ops;
 
-// const moe_triton = zml.moe_triton;
-
 const log = std.log.scoped(.gpt_oss);
 
 pub const TransferCtx = struct {
@@ -523,7 +521,6 @@ const MoE = struct {
 
         // const weights_down = self.experts.down_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
         const weights_down = self.experts.down_proj.blocks;
-        _ = weights_down; // autofix
 
         const host_buffer = host_buffer_input;
         const device_buffer = device_buffer_input;
@@ -573,15 +570,9 @@ const MoE = struct {
                 const input_sorted = input.gather(.{ .s = idx }, .{});
 
                 //const expert_ids_sorted = expert_indices_1d.gather(.{ .s = idx }, .{});
-                log.info("weight shape: {f}", .{weights_gate_up.shape()});
-                log.info("input shape: {f}", .{input_sorted.shape()});
-                log.info("counts_tokens_per_exp shape: {f}", .{counts_tokens_per_exp.shape()});
 
                 const weights_gate_up_scales = self.experts.gate_up_proj.scale;
-                log.info("gate up proj scale shape: {f}", .{weights_gate_up_scales.shape()});
                 const bias_gate_up = self.experts.gate_up_proj.bias.?;
-                log.info("gate up proj bias shape: {f}", .{bias_gate_up.shape()});
-                log.info("weights_gate_up: {f}", .{weights_gate_up.shape()});
 
                 const out_gate_up = Tensor.moeTritonOp(
                     input_sorted,
@@ -589,7 +580,9 @@ const MoE = struct {
                     weights_gate_up_scales,
                     bias_gate_up,
                     counts_tokens_per_exp,
+
                     @intCast(input.dim(.d) * 2),
+                    "/home/louislechevalier/zml/moe_mxfp4_tensorized_prefill_gate_up.ttir",
                 );
                 // moe_triton.moeTriton(
                 //     weights_gate_up,
@@ -605,7 +598,6 @@ const MoE = struct {
                 //         .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) * 2 }, .bf16),
                 //     },
                 // );
-                log.info("out_gate_up shape: {f}", .{out_gate_up.shape()});
 
                 const expert_per_token = expert_indices_1d.gather(.{ .s = idx }, .{});
                 _ = expert_per_token; // autofix
@@ -618,17 +610,18 @@ const MoE = struct {
 
                 const out = gate.quickGelu().mul(up.addConstant(1));
 
-                // const weights_down_scales = self.experts.down_proj.scale;
-                // const bias_down = self.experts.down_proj.bias.?;
+                const weights_down_scales = self.experts.down_proj.scale;
+                const bias_down = self.experts.down_proj.bias.?;
 
-                // var moe_out = Tensor.moeTritonOp(
-                //     out,
-                //     weights_down,
-                //     weights_down_scales,
-                //     bias_down,
-                //     counts_tokens_per_exp,
-                //     @intCast(input.dim(.d)),
-                // );
+                var moe_out = Tensor.moeTritonOp(
+                    out,
+                    weights_down,
+                    weights_down_scales,
+                    bias_down,
+                    counts_tokens_per_exp,
+                    @intCast(input.dim(.d)),
+                    "/home/louislechevalier/zml/moe_mxfp4_tensorized_prefill_down.ttir",
+                );
                 // log.info("moe_out shape: {f}", .{moe_out.shape()});
                 // moe_triton.moeTriton(
                 //     weights_down,
@@ -648,108 +641,109 @@ const MoE = struct {
                 // Bias is applied inside moeTritonOp.
 
                 const expert_scores_sorted = expert_scores_1d.gather(.{ .s = idx }, .{});
-                _ = expert_scores_sorted; // autofix
+                // _ = expert_scores_sorted; // autofix
 
-                // moe_out = moe_out.mul(expert_scores_sorted.convert(moe_out.dtype()).broad(moe_out.shape()));
-                // // input in MoE
+                moe_out = moe_out.mul(expert_scores_sorted.convert(moe_out.dtype()).broad(moe_out.shape()));
+                // // // input in MoE
 
                 const restore_indices = indices_sorted.argsort(.s, .{ .descending = false }).rename(.{ .s = .n });
-                _ = restore_indices; // autofix
 
-                // const top_output = moe_out.gather(.{ .seq = restore_indices }, .{});
-                general_output = general_output.add(out);
+                const top_output = moe_out.gather(.{ .seq = restore_indices }, .{});
+                general_output = general_output.add(top_output);
                 // reorganize MoEoutput and sum in
 
             }
         } else { //Decode
-            // // const weights_gate_up = self.experts.gate_up_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
-            // // log.info("weights gate up {f}", .{weights_gate_up.shape()});
-            // // const weights_down = self.experts.down_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
-            // // log.info("weights down {f}", .{weights_down.shape()});
-            // for (0..self.moe_opts.experts_per_token) |i| {
-            //     const indices_1d = expert_indices.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
-            //     const scores_1d = expert_scores.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
-            //     const counts0 = zml.Tensor.zeroes(.init(.{ .expert = num_experts }, .i32));
-            //     const ones = zml.Tensor.constant(.{ .i32 = 1 }).broad(zml.Shape.init(.{ .s = input.dim(.s) }, .i32));
+            // const weights_gate_up = self.experts.gate_up_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            // log.info("weights gate up {f}", .{weights_gate_up.shape()});
+            // const weights_down = self.experts.down_proj.dequantize(dt).merge(.{ .expert = .{ .expert, .out } });
+            // log.info("weights down {f}", .{weights_down.shape()});
+            for (0..self.moe_opts.experts_per_token) |i| {
+                const indices_1d = expert_indices.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert);
+                const scores_1d = expert_scores.slice1d(.top_expert, .{ .start = @intCast(i), .end = @intCast(i + 1) }).squeeze(.top_expert).rename(.{ .s = .seq });
+                const counts0 = zml.Tensor.zeroes(.init(.{ .expert = num_experts }, .i32));
+                const ones = zml.Tensor.constant(.{ .i32 = 1 }).broad(zml.Shape.init(.{ .s = input.dim(.s) }, .i32));
 
-            //     const counts_tokens_per_exp = counts0.scatterSlices(
-            //         .{ .expert = indices_1d }, // indices: [seq] => offsets dans l'axe .expert
-            //         ones, // updates: [seq]
-            //         .{
-            //             .update_fn = zml.Tensor.ScatterOpts.increment,
-            //             .indices_are_unique = false, // plusieurs tokens peuvent aller au même expert
-            //         },
-            //     );
+                const counts_tokens_per_exp = counts0.scatterSlices(
+                    .{ .expert = indices_1d }, // indices: [seq] => offsets dans l'axe .expert
+                    ones, // updates: [seq]
+                    .{
+                        .update_fn = zml.Tensor.ScatterOpts.increment,
+                        .indices_are_unique = false, // plusieurs tokens peuvent aller au même expert
+                    },
+                );
 
-            //     const weights_gate_up_scales = self.experts.gate_up_proj.scale;
-            //     const bias_gate_up = self.experts.gate_up_proj.bias.?;
+                const weights_gate_up_scales = self.experts.gate_up_proj.scale;
+                const bias_gate_up = self.experts.gate_up_proj.bias.?;
 
-            //     const out_gate_up = Tensor.moeTritonOp(
-            //         input,
-            //         weights_gate_up,
-            //         weights_gate_up_scales,
-            //         bias_gate_up,
-            //         counts_tokens_per_exp,
-            //         @intCast(input.dim(.d) * 2),
-            //     );
-            //     // moe_triton.moeTriton(
-            //     //     weights_gate_up,
-            //     //     input,
-            //     //     counts_tokens_per_exp,
-            //     //     host_buffer,
-            //     //     device_buffer,
-            //     //     .{
-            //     //         .group_count = @intCast(num_experts),
-            //     //         // .computeType = cublas_lt.CUBLAS_COMPUTE_32F, //a verifier
-            //     //         .alpha = 1.0,
-            //     //         .beta = 0.0,
-            //     //         .output_shape = .init(.{
-            //     //             .s = input.dim(.s),
-            //     //             .d = input.dim(.d) * 2,
-            //     //         }, .bf16),
-            //     //     },
-            //     // );
-            //     // Bias is applied inside moeTritonOp.
-            //     var gate, var up = zml.nn.splitRealImg(out_gate_up, .interleaved);
+                const out_gate_up = Tensor.moeTritonOp(
+                    input.rename(.{ .s = .seq }),
+                    weights_gate_up,
+                    weights_gate_up_scales,
+                    bias_gate_up,
+                    counts_tokens_per_exp,
+                    @intCast(input.dim(.d) * 2),
+                    "/home/louislechevalier/zml/moe_mxfp4_tensorized_decode_gate_up.ttir",
+                );
+                // moe_triton.moeTriton(
+                //     weights_gate_up,
+                //     input,
+                //     counts_tokens_per_exp,
+                //     host_buffer,
+                //     device_buffer,
+                //     .{
+                //         .group_count = @intCast(num_experts),
+                //         // .computeType = cublas_lt.CUBLAS_COMPUTE_32F, //a verifier
+                //         .alpha = 1.0,
+                //         .beta = 0.0,
+                //         .output_shape = .init(.{
+                //             .s = input.dim(.s),
+                //             .d = input.dim(.d) * 2,
+                //         }, .bf16),
+                //     },
+                // );
+                // Bias is applied inside moeTritonOp.
+                var gate, var up = zml.nn.splitRealImg(out_gate_up, .interleaved);
 
-            //     gate = .minimum(gate, .scalar(7, dt));
-            //     up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
+                gate = .minimum(gate, .scalar(7, dt));
+                up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
 
-            //     const out = gate.quickGelu().mul(up.addConstant(1));
+                const out = gate.quickGelu().mul(up.addConstant(1));
 
-            //     const weights_down_scales = self.experts.down_proj.scale;
-            //     const bias_down = self.experts.down_proj.bias.?;
+                const weights_down_scales = self.experts.down_proj.scale;
+                const bias_down = self.experts.down_proj.bias.?;
 
-            //     var moe_out = Tensor.moeTritonOp(
-            //         out,
-            //         weights_down,
-            //         weights_down_scales,
-            //         bias_down,
-            //         counts_tokens_per_exp,
-            //         @intCast(input.dim(.d)),
-            //     );
-            //     // moe_triton.moeTriton(
-            //     //     weights_down,
-            //     //     out,
-            //     //     counts_tokens_per_exp,
-            //     //     host_buffer,
-            //     //     device_buffer,
-            //     //     .{
-            //     //         .group_count = @intCast(num_experts),
-            //     //         // .computeType = cublas_lt.CUBLAS_COMPUTE_32F, //a verifier
-            //     //         .alpha = 1.0,
-            //     //         .beta = 0.0,
-            //     //         .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) }, .bf16),
-            //     //     },
-            //     // );
+                var moe_out = Tensor.moeTritonOp(
+                    out,
+                    weights_down,
+                    weights_down_scales,
+                    bias_down,
+                    counts_tokens_per_exp,
+                    @intCast(input.dim(.d)),
+                    "/home/louislechevalier/zml/moe_mxfp4_tensorized_decode_down.ttir",
+                );
+                // moe_triton.moeTriton(
+                //     weights_down,
+                //     out,
+                //     counts_tokens_per_exp,
+                //     host_buffer,
+                //     device_buffer,
+                //     .{
+                //         .group_count = @intCast(num_experts),
+                //         // .computeType = cublas_lt.CUBLAS_COMPUTE_32F, //a verifier
+                //         .alpha = 1.0,
+                //         .beta = 0.0,
+                //         .output_shape = .init(.{ .s = input.dim(.s), .d = input.dim(.d) }, .bf16),
+                //     },
+                // );
 
-            //     // Bias is applied inside moeTritonOp.
-            //     moe_out = moe_out.mul(scores_1d.convert(moe_out.dtype()).broad(moe_out.shape()));
-            //     // input in MoE
-            //     //
+                // Bias is applied inside moeTritonOp.
+                moe_out = moe_out.mul(scores_1d.convert(moe_out.dtype()).broad(moe_out.shape()));
+                // input in MoE
+                //
 
-            //     general_output = general_output.add(moe_out);
-            // }
+                general_output = general_output.add(moe_out);
+            }
         }
         return .{ general_output, host_buffer, device_buffer };
     }
@@ -918,8 +912,6 @@ pub fn mixtureOfExperts(Expert: type, experts: Expert, input: zml.Tensor, gating
             .experts_per_token = opts.experts_per_token,
             .normalization = opts.normalization,
         });
-        log.info("routing prefill {f}", .{routing.shape()});
-        log.info("tokens_per_exp prefill {f}", .{tokens_ids_per_expert.shape()});
 
         const scores_per_expert = routing.transpose(.{ .expert, .s }).gather(.{ .s = tokens_ids_per_expert }, .{});
         const input_per_expert = input.gather(.{ .s = tokens_ids_per_expert }, .{});
