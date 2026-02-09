@@ -1,4 +1,5 @@
 const std = @import("std");
+const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
@@ -8,11 +9,81 @@ const PagedAttention = @This();
 pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
+
+    pub fn auto(platform: zml.Platform) Backend {
+        return switch (platform.target) {
+            .cuda => b: {
+                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+
+                if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
+                    if (std.mem.eql(u8, cc, "9.0")) {
+                        break :b .cuda_fa3;
+                    }
+                }
+
+                break :b .cuda_fa2;
+            },
+            else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
+        };
+    }
 };
 
 pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
+
+    pub fn fromBackend(backend: Backend, is_prefill: bool, batch_size: u32, seq_len: u32, page_chunk_size: u32, max_token_count: u32, num_attention_heads: u32, head_dim: u32) Options {
+        return switch (backend) {
+            .cuda_fa2 => if (is_prefill) .{
+                .cuda_fa2 = .{
+                    .mixed = .{
+                        .batch_size_decode = batch_size,
+                        .batch_size_prefill = batch_size,
+                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_seqlen_k = seq_len,
+                        .max_token_count = max_token_count,
+                        .num_heads = num_attention_heads,
+                        .head_dim = head_dim,
+                    },
+                },
+            } else .{
+                .cuda_fa2 = .{
+                    .decode = .{
+                        .batch_size = batch_size,
+                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_seqlen_k = seq_len,
+                        .max_token_count = max_token_count,
+                        .num_heads = num_attention_heads,
+                        .head_dim = head_dim,
+                    },
+                },
+            },
+            .cuda_fa3 => if (is_prefill) .{
+                .cuda_fa3 = .{
+                    .mixed = .{
+                        .batch_size_decode = batch_size,
+                        .batch_size_prefill = batch_size,
+                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_seqlen_k = seq_len,
+                        .max_token_count = max_token_count,
+                        .num_heads = num_attention_heads,
+                        .head_dim = head_dim,
+                    },
+                },
+            } else .{
+                .cuda_fa3 = .{
+                    .decode = .{
+                        .batch_size = batch_size,
+                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_seqlen_k = seq_len,
+                        .max_token_count = max_token_count,
+                        .num_heads = num_attention_heads,
+                        .head_dim = head_dim,
+                    },
+                },
+            },
+        };
+    }
 
     pub fn isPrefill(self: Options) bool {
         return switch (self) {
