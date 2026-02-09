@@ -287,10 +287,13 @@ pub fn testLayer(
     layer: anytype,
     comptime func: std.meta.DeclEnum(@TypeOf(layer)),
     activation_store: zml.io.TensorStore.View,
-    comptime name: []const u8,
+    name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
     opts: CompareOpts,
 ) !void {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
     const forward = @field(@TypeOf(layer), @tagName(func));
     const ArgsT = stdx.meta.Tail(stdx.meta.FnArgs(forward));
 
@@ -301,13 +304,14 @@ pub fn testLayer(
         index: usize = 0,
     };
 
+    const input_name = try std.fmt.allocPrint(arena.allocator(), "{s}.in", .{name});
     const input_count = zml.meta.count(zml.Tensor, &args);
-    const expected_input_count = countWithPrefix(activation_store, name ++ ".in");
+    const expected_input_count = countWithPrefix(activation_store, input_name);
     if (input_count != expected_input_count) {
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
     }
 
-    const store_input = activation_store.withPrefix(name ++ ".in");
+    const store_input = activation_store.withPrefix(input_name);
     var ctx = LocalContext{ .activation_store = store_input };
     try zml.meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
@@ -322,9 +326,10 @@ pub fn testLayer(
     const exe = try platform.compile(allocator, io, layer, func, args);
     defer exe.deinit();
 
+    const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
     const output_count = exe.output_shapes.len;
-    const store_output = activation_store.withPrefix(name ++ ".out");
-    const expected_output_count = countWithPrefix(store_output, name ++ ".out");
+    const store_output = activation_store.withPrefix(output_name);
+    const expected_output_count = countWithPrefix(store_output, output_name);
     if (output_count != expected_output_count) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
     }
@@ -365,7 +370,7 @@ pub fn testLayer(
             try reader.interface.readSliceAll(expected_slice.data());
             break :b expected_slice;
         };
-        defer allocator.free(expected_slice.data());
+        defer expected_slice.free(allocator);
 
         const output_slice = try results[i].toSliceAlloc(allocator, io);
         defer output_slice.free(allocator);
@@ -375,7 +380,7 @@ pub fn testLayer(
                 const stderr = std.debug.lockStderr(&.{});
                 defer std.debug.unlockStderr();
                 const w = &stderr.file_writer.interface;
-                try w.print("{s}.{d} doesn't match !", .{ name ++ ".out", i });
+                try w.print("{s}.{d} doesn't match !", .{ output_name, i });
                 failed = true;
                 continue;
             },
