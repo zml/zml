@@ -1063,3 +1063,10 @@ fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
     for (values) |val| res.appendAssumeCapacity(@intCast(val));
     return res;
 }
+
+pub fn scaled_dot(lhs: Tensor, rhs: Tensor, lhs_scale: Tensor, rhs_scale: Tensor, args: anytype) Tensor {
+    const real_lhs = lhs.convert(.bf16).mul(lhs_scale.convert(.bf16));
+    const real_rhs = rhs.convert(.bf16).mul(rhs_scale.convert(.bf16));
+
+    return real_lhs.dot(real_rhs, args).convert(.bf16);
+}
