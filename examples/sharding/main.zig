@@ -174,7 +174,7 @@ fn runAdditionExample(
         .withPartitioning(.{ .x = .batch, .y = .context });
 
     const add_shape_model = zml.Shape.init(.{ .x = 8, .y = 16, .z = 8 }, .f32)
-        .withPartitioning(.{ .x = .replicated, .y = .head, .z = .expert });
+        .withPartitioning(.{ .x = .model, .y = .replicated, .z = .expert });
 
     const a: zml.Tensor = .fromShape(add_shape_data);
     const b: zml.Tensor = .fromShape(add_shape_model);
@@ -205,6 +205,11 @@ fn runAdditionExample(
     defer exe_results.deinit(allocator);
 
     exe_args.set(.{ a_buf, b_buf, c_buf, d_buf });
+
+    // log.info("Buffer a: {f}", .{a_buf.placement()});
+    log.info("Buffer b: {f}", .{b_buf.placement()});
+    // log.info("Buffer c: {f}", .{c_buf.placement()});
+    // log.info("Buffer d: {f}", .{d_buf.placement()});
 
     log.info("Running add example (a+c, b+d)...", .{});
     exe.call(exe_args, &exe_results);

@@ -49,85 +49,7 @@ pub const Buffer = struct {
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
-        try writer.writeAll("Buffer\n");
-        try writer.print("Shape: {f}\n", .{self._shape});
-        try writer.print("Shards: {d}\n", .{self._shards.len});
-
-        // const rank = self._shape.rank();
-
-        // var axis_sliced = [_]bool{false} ** constants.MAX_RANK;
-        // {
-        //     var it = sharding_.transferIterator(self._sharding, self._shape) catch unreachable;
-        //     defer it.deinit();
-
-        //     if (it.next()) |first| {
-        //         for (first.slices.constSlice()) |s| {
-        //             axis_sliced[s.axis] = true;
-        //         }
-        //     }
-        // }
-
-        // try writer.writeAll("Tensor axes:\n");
-        // for (0..rank) |ax| {
-        //     const tag = self._shape.tag(ax);
-        //     const dim = self._shape.dim(ax);
-        //     const part = self._shape.partition(ax);
-
-        //     try writer.print("  - axis {d} tag {s} dim {d} partition ", .{ ax, tag, dim });
-        //     switch (part) {
-        //         .axis => |t| try writer.print("{s}", .{t}),
-        //         .open => try writer.writeAll("open"),
-        //         .replicated => try writer.writeAll("replicated"),
-        //         .unknown => try writer.writeAll("unknown"),
-        //     }
-
-        //     if (tag == Shape.TagUnknown) {
-        //         try writer.writeAll(" -> unbound");
-        //     } else if (self._sharding.binding(tag)) |axes| {
-        //         if (axes.len == 0) {
-        //             try writer.writeAll(" -> replicated");
-        //         } else {
-        //             try writer.writeAll(" -> ");
-        //             for (axes, 0..) |p, i| {
-        //                 if (i > 0) try writer.writeAll(", ");
-        //                 try writer.writeAll(@tagName(p));
-        //             }
-        //         }
-        //     } else {
-        //         try writer.writeAll(" -> unbound");
-        //     }
-
-        //     if (axis_sliced[ax]) {
-        //         try writer.writeAll(" | assignment: sliced\n");
-        //     } else {
-        //         try writer.writeAll(" | assignment: replicated\n");
-        //     }
-        // }
-
-        // try writer.writeAll("Sharding:\n");
-        // try self._sharding.format(writer);
-
-        // var it = sharding_.transferIterator(self._sharding, self._shape) catch unreachable;
-        // defer it.deinit();
-
-        // try writer.writeAll("Shard mapping:\n");
-
-        // var shard_index: usize = 0;
-        // while (it.next()) |shard| : (shard_index += 1) {
-        //     try writer.print("  - shard[{d}] -> device {d}", .{ shard_index, shard.device_id });
-
-        //     if (shard.slices.items.len == 0) {
-        //         try writer.writeAll(" (replicated)\n");
-        //         continue;
-        //     }
-
-        //     try writer.writeAll(" slices: ");
-        //     for (shard.slices.items, 0..) |s, i| {
-        //         if (i > 0) try writer.writeAll(", ");
-        //         try writer.print("axis {d}=[{d}..{d})", .{ s.axis, s.start, s.start + s.size });
-        //     }
-        //     try writer.writeAll("\n");
-        // }
+        try writer.print("{f}", .{self.placement()});
     }
 
     /// Copies the content of the given buffer from host memory to the accelerator memory.
@@ -318,7 +240,7 @@ pub const Buffer = struct {
         return slice;
     }
 
-    fn placement(self: Buffer) Placement {
+    pub fn placement(self: Buffer) Placement {
         return Placement.init(self._sharding, self._shape) catch unreachable;
     }
 };

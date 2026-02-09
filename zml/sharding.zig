@@ -668,10 +668,11 @@ pub const LogicalMesh = struct {
     }
 
     pub fn format(self: LogicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("LogicalMesh(name='{s}'):\n", .{self.name});
-        for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
-            try writer.print("  - {s}: {s}\n", .{ t, @tagName(i) });
+        try writer.print("LogicalMesh(name={s}", .{self.name});
+        for (self.axes.constSlice(), self.intents.constSlice()) |axis, int| {
+            try writer.print(" {s}={s}", .{ axis, @tagName(int) });
         }
+        try writer.print(")", .{});
     }
 };
 
@@ -695,6 +696,12 @@ pub const Sharding = struct {
         size: i64,
         geometry: ?AxisGeometry,
         folded: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK),
+
+        pub fn contains(self: *const Axis, tag: PhysicalAxisTag) bool {
+            if (self.tag == tag) return true;
+            for (self.folded.constSlice()) |t| if (t == tag) return true;
+            return false;
+        }
     };
 
     pub const AxisView = struct {
@@ -790,12 +797,6 @@ pub const Sharding = struct {
         }
 
         return view;
-    }
-
-    fn axisContains(axis: Axis, tag: PhysicalAxisTag) bool {
-        if (axis.tag == tag) return true;
-        for (axis.folded.constSlice()) |t| if (t == tag) return true;
-        return false;
     }
 
     fn foldedCoord(self: Sharding, tag: PhysicalAxisTag, coords: []const usize) usize {
@@ -947,7 +948,7 @@ pub const Sharding = struct {
 
                     for (binding_) |p_tag| {
                         for (view.axes.constSlice()) |axis| {
-                            if (axisContains(axis, p_tag) and !used_axes.contains(axis.tag)) {
+                            if (axis.contains(p_tag) and !used_axes.contains(axis.tag)) {
                                 if (!wrote_any) {
                                     try out.writer.writeAll("{");
                                     wrote_any = true;
@@ -1317,92 +1318,6 @@ fn selectFoldTarget(
     return best_tag;
 }
 
-fn largestFactorLE(n: i64, limit: i64) i64 {
-    var f = if (limit < n) limit else n;
-
-    while (f > 1) : (f -= 1) {
-        if (@rem(n, f) == 0) return f;
-    }
-
-    return 1;
-}
-
-/// Split a logical axis size across multiple physical axes.
-/// Logic:
-/// - walk physical axes in binding order
-/// - greedily take a factor that divides remaining size
-/// - leftover becomes virtualization
-/// Limitation: errors if a physical axis does not divide remaining size.
-fn factorizeLogicalAxis(
-    logical_size: i64,
-    physical: PhysicalMesh,
-    bindings: []const PhysicalAxisTag,
-    axis_extents: *std.EnumArray(PhysicalAxisTag, i64),
-    virtual_factor: *i64,
-) !void {
-    var remaining = logical_size;
-
-    for (bindings) |p_tag| {
-        const p_cap = physical.axis(p_tag);
-        if (p_cap <= 0) return error.InvalidPhysicalAxis;
-
-        if (remaining <= p_cap) {
-            const extent = remaining;
-            axis_extents.getPtr(p_tag).* *= extent;
-            remaining = 1;
-            break;
-        }
-
-        const extent = largestFactorLE(remaining, p_cap);
-        if (extent == 1) {
-            if (@rem(remaining, p_cap) != 0) return error.NonFactorableAxis;
-            axis_extents.getPtr(p_tag).* *= p_cap;
-            remaining = @divExact(remaining, p_cap);
-        } else {
-            axis_extents.getPtr(p_tag).* *= extent;
-            remaining = @divExact(remaining, extent);
-        }
-    }
-
-    if (remaining > 1) {
-        virtual_factor.* *= remaining;
-    }
-}
-
-fn tagsEqual(a: Shape.Tag, b: Shape.Tag) bool {
-    return std.mem.eql(u8, std.mem.span(a), std.mem.span(b));
-}
-
-fn logicalDimFromShape(shape: Shape, logical_tag: Shape.Tag) ?i64 {
-    var total: i64 = 1;
-    var found = false;
-    const rk = shape.rank();
-
-    var ax: usize = 0;
-    while (ax < rk) : (ax += 1) {
-        const dim = shape.dim(ax);
-        const tag = shape.tag(ax);
-
-        if (tag != Shape.TagUnknown and tagsEqual(tag, logical_tag)) {
-            total *= dim;
-            found = true;
-            continue;
-        }
-
-        switch (shape.partition(ax)) {
-            .axis => |t| {
-                if (tagsEqual(t, logical_tag)) {
-                    total *= dim;
-                    found = true;
-                }
-            },
-            else => {},
-        }
-    }
-
-    return if (found) total else null;
-}
-
 /// Strategy is a compiled mapping plan:
 /// logical axis → ordered physical axes.
 /// It is built from logical intents + physical mesh hints.
@@ -1601,6 +1516,23 @@ pub const Placement = struct {
             }
             return res;
         }
+
+        pub fn format(self: Shard, writer: *std.Io.Writer) !void {
+            try writer.print("device_id={d} coords={any}", .{ self.device_id, self.device_coords });
+
+            if (self.slices.len == 0) {
+                try writer.writeAll(" slices=replicated");
+                return;
+            }
+
+            try writer.writeAll(" slices=[");
+            for (self.slices.constSlice(), 0..) |s, i| {
+                if (i > 0) try writer.writeAll(", ");
+                const axis_label = self.global_shape.debugTag(s.axis);
+                try writer.print("{s}:[{d}:{d}]", .{ axis_label, s.start, s.start + s.size });
+            }
+            try writer.writeAll("]");
+        }
     };
 
     const AxisSplit = struct {
@@ -1731,7 +1663,7 @@ pub const Placement = struct {
 
         for (binding) |p_tag| {
             for (view.axes.constSlice(), 0..) |axis, i| {
-                if (Sharding.axisContains(axis, p_tag) and !used_axes.contains(axis.tag)) {
+                if (axis.contains(p_tag) and !used_axes.contains(axis.tag)) {
                     const next_product = plan.product * axis.size;
                     if (@rem(dim, next_product) == 0) {
                         const coord = view.axisCoordFromLinearIndex(i, shard_idx);
@@ -1751,7 +1683,7 @@ pub const Placement = struct {
     pub fn format(self: Placement, writer: *std.Io.Writer) !void {
         try writer.print("Placement(shape={f} shards={d})\n", .{ self.shape, self.shards.len });
 
-        try writer.writeAll("Tensor axis summary:\n");
+        try writer.writeAll("Axis partitioning summary:\n");
         for (0..self.shape.rank()) |ax| {
             const dim = self.shape.dim(ax);
             const spec = self.shape.partition(ax);
@@ -1759,7 +1691,7 @@ pub const Placement = struct {
 
             var shard_size: i64 = dim;
             if (self.shards.len > 0) {
-                for (self.shards[0].slices.constSlice()) |s| {
+                for (self.shards.constSlice()[0].slices.constSlice()) |s| {
                     if (s.axis == ax) {
                         shard_size = s.size;
                         break;
@@ -1767,32 +1699,20 @@ pub const Placement = struct {
                 }
             }
 
-            var shard_count: ?i64 = null;
-            if (shard_size > 0 and @rem(dim, shard_size) == 0) {
-                shard_count = @divExact(dim, shard_size);
-            }
+            const shards_count: i64 = if (shard_size > 0 and @rem(dim, shard_size) == 0)
+                @divExact(dim, shard_size)
+            else
+                0;
 
-            try writer.print("  - {s}: dim={d}, shard={d}, shards=", .{ axis_label, dim, shard_size });
-            if (shard_count) |c| {
-                try writer.print("{d}", .{c});
-            } else {
-                try writer.writeAll("?");
-            }
-            try writer.print(", spec={s}\n", .{@tagName(spec)});
+            try writer.print(
+                "└─ {s}: dim={d}, spec={s}, shard_size={d}, shards={d}\n",
+                .{ axis_label, dim, @tagName(spec), shard_size, shards_count },
+            );
         }
 
         try writer.writeAll("Per-shard placement:\n");
-        for (self.shards, 0..) |shard, i| {
-            try writer.print("└─ Shard[{d}]\n", .{i});
-            try writer.print("   ├─ device_id: {d}\n", .{shard.device_id});
-            try writer.print("   ├─ device_coords: {any}\n", .{shard.device_coords});
-            try writer.print("   ├─ shape: {f}\n", .{shard.shape});
-            try writer.writeAll("   └─ slices:\n");
-
-            for (shard.slices.constSlice()) |s| {
-                const axis_label = self.shape.debugTag(s.axis);
-                try writer.print("       - {s}: [{d}:{d}] (size={d})\n", .{ axis_label, s.start, s.start + s.size, s.size });
-            }
+        for (self.shards.constSlice(), 0..) |shard, i| {
+            try writer.print("└─ Shard[{d}] {f}\n", .{ i, shard });
         }
     }
 };
