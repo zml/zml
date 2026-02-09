@@ -170,34 +170,30 @@ fn runAdditionExample(
     sharding_data: zml.sharding.Sharding,
     sharding_model: zml.sharding.Sharding,
 ) !void {
-    _ = sharding_data; // autofix
     const add_shape_data = zml.Shape.init(.{ .x = 16, .y = 24 }, .f32)
         .withPartitioning(.{ .x = .batch, .y = .context });
-    _ = add_shape_data; // autofix
 
     const add_shape_model = zml.Shape.init(.{ .x = 8, .y = 16, .z = 8 }, .f32)
-        .withPartitioning(.{ .x = .model, .y = .head, .z = .expert });
+        .withPartitioning(.{ .x = .replicated, .y = .head, .z = .expert });
 
-    const a: zml.Tensor = .fromShape(add_shape_model);
+    const a: zml.Tensor = .fromShape(add_shape_data);
     const b: zml.Tensor = .fromShape(add_shape_model);
-    const c: zml.Tensor = .fromShape(add_shape_model);
+    const c: zml.Tensor = .fromShape(add_shape_data);
     const d: zml.Tensor = .fromShape(add_shape_model);
 
     const model: AddModel = .init();
 
     var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{
-        .input_sharding = sharding_model,
-        .output_sharding = sharding_model,
-        .program_sharding = &.{sharding_model},
+        .shardings = &.{ sharding_data, sharding_model },
     });
     defer exe.deinit();
 
-    var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_model, 0.0);
+    var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_data, 0.0);
     defer a_buf.deinit();
     var b_buf = try createSequenceBuffer(allocator, io, platform, b.shape(), sharding_model, 1.0);
     defer b_buf.deinit();
 
-    var c_buf = try createSequenceBuffer(allocator, io, platform, c.shape(), sharding_model, 2.0);
+    var c_buf = try createSequenceBuffer(allocator, io, platform, c.shape(), sharding_data, 2.0);
     defer c_buf.deinit();
     var d_buf = try createSequenceBuffer(allocator, io, platform, d.shape(), sharding_model, 3.0);
     defer d_buf.deinit();
@@ -220,16 +216,17 @@ fn runAdditionExample(
 
     const sum_ac_slice = try out.sum_ac.toSliceAlloc(allocator, io);
     defer sum_ac_slice.free(allocator);
+
     const sum_bd_slice = try out.sum_bd.toSliceAlloc(allocator, io);
     defer sum_bd_slice.free(allocator);
 
     const sum_ac = sum_ac_slice.items(f32);
     const sum_bd = sum_bd_slice.items(f32);
 
-    log.info(" sum_ac[0]={d:.3} sum_bd[0]={d:.3}", .{ sum_ac[0], sum_bd[0] });
+    log.info(" sum_ac[0]={any} sum_bd[0]={any}", .{ sum_ac[0..32], sum_bd[0..32] });
 
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    try sum_bd_slice.prettyPrint(&stdout.interface, .{});
+    // var stdout = std.Io.File.stdout().writer(io, &.{});
+    // try sum_bd_slice.prettyPrint(&stdout.interface, .{});
 
     log.info("\n\n{f}", .{out.sum_bd});
 }
@@ -246,7 +243,18 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = 8 } });
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    const device_count = blk: {
+        if (env_map.get("DEVICE_COUNT")) |v| {
+            break :blk std.fmt.parseInt(usize, v, 10) catch unreachable;
+        }
+
+        break :blk 8;
+    };
+
+    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = @intCast(device_count) } });
     defer platform.deinit(allocator);
 
     log.info("{f}\n\n", .{platform.fmtVerbose()});
@@ -260,26 +268,32 @@ pub fn main() !void {
     // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .neuron, .{ .bus = 2, .link = 12 }, .{ .ring = .closed_ring });
     // defer physical_mesh.deinit();
 
-    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[3]), .device(platform.devices[1]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[2]), .device(platform.devices[0]),
-            }),
-        }),
-        .axis(.link_y, .{ .mesh = .torus }, &.{
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[4]), .device(platform.devices[5]),
-            }),
-            .axis(.link_z, .{ .mesh = .torus }, &.{
-                .device(platform.devices[6]), .device(platform.devices[7]),
-            }),
-        }),
-    });
+    var physical_mesh: zml.sharding.PhysicalMesh = blk: {
+        if (device_count == 9) {
+            const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+                .axis(.link_y, .{ .mesh = .torus }, &.{
+                    .axis(.link_z, .{ .mesh = .torus }, &.{
+                        .device(platform.devices[3]), .device(platform.devices[1]),
+                    }),
+                    .axis(.link_z, .{ .mesh = .torus }, &.{
+                        .device(platform.devices[2]), .device(platform.devices[0]),
+                    }),
+                }),
+                .axis(.link_y, .{ .mesh = .torus }, &.{
+                    .axis(.link_z, .{ .mesh = .torus }, &.{
+                        .device(platform.devices[4]), .device(platform.devices[5]),
+                    }),
+                    .axis(.link_z, .{ .mesh = .torus }, &.{
+                        .device(platform.devices[6]), .device(platform.devices[7]),
+                    }),
+                }),
+            });
 
-    var physical_mesh: zml.sharding.PhysicalMesh = try .fromTree(allocator, platform.target, topology);
+            break :blk try .fromTree(allocator, platform.target, topology);
+        } else {
+            break :blk try .auto(allocator, platform);
+        }
+    };
     defer physical_mesh.deinit();
 
     log.info("{f}", .{physical_mesh});

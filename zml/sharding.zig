@@ -3,9 +3,11 @@ const std = @import("std");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
+const Memory = @import("platform.zig").Memory;
 const Platform = @import("platform.zig").Platform;
 const PlatformDevice = @import("platform.zig").Device;
 const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/sharding");
@@ -18,6 +20,13 @@ pub const Partitioner = union(enum) {
         return switch (target) {
             .cpu, .cuda, .rocm, .tpu => .shardy,
             .neuron => .gspmd,
+        };
+    }
+
+    pub fn inputAttribute(self: Partitioner) ![]const u8 {
+        return switch (self) {
+            .shardy => "#shardy.partition",
+            .gspmd => error.UnsupportedPartitioner,
         };
     }
 };
@@ -421,7 +430,7 @@ pub const PhysicalMesh = struct {
     pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
         try writer.print("\nPhysicalMesh(platform={s} num_devices={d})\n", .{ @tagName(self.target), self.countDevices() });
         try writer.print("├── {f}\n", .{self.axis_traversal});
-        // try writer.print("└── Total Devices: {d}\n", .{self.countDevices()});
+        try writer.print("│  \n", .{});
 
         try formatNode(self.root, writer, "", true);
     }
@@ -691,6 +700,21 @@ pub const Sharding = struct {
     pub const AxisView = struct {
         axes: stdx.BoundedArray(Axis, Shape.MAX_RANK),
         total_devices: i64,
+
+        pub fn axisCoordFromLinearIndex(self: *const AxisView, axis_index: usize, linear_idx: usize) usize {
+            const stride = self.axisStride(axis_index);
+            const axis_size: usize = @intCast(self.axes.constSlice()[axis_index].size);
+            return (linear_idx / stride) % axis_size;
+        }
+
+        pub fn axisStride(self: *const AxisView, axis_index: usize) usize {
+            var stride: usize = 1;
+            var j = axis_index + 1;
+            while (j < self.axes.len) : (j += 1) {
+                stride *= @intCast(self.axes.constSlice()[j].size);
+            }
+            return stride;
+        }
     };
 
     allocator: std.mem.Allocator,
@@ -1537,17 +1561,7 @@ pub fn suggestStrategy(
     return strategy;
 }
 
-//
-
-/// ShardAssignment is the *per‑tensor* concrete plan.
-///
-/// It answers:
-/// - which devices get data
-/// - which slice of the tensor goes to each device
-///
-/// This is derived from:
-/// Sharding (global plan) + tensor partition specs.
-pub const ShardAssignment = struct {
+pub const Placement = struct {
     pub const Slice1d = struct {
         axis: u8,
         start: i64,
@@ -1557,31 +1571,195 @@ pub const ShardAssignment = struct {
     pub const Shard = struct {
         device_id: usize,
         device_coords: []const usize,
-        slices: std.ArrayListUnmanaged(Slice1d),
+        shape: Shape,
+        global_shape: Shape,
+        slices: stdx.BoundedArray(Slice1d, Shape.MAX_RANK),
+
+        pub fn device(self: *const Shard, platform: *const Platform) PlatformDevice {
+            return blk: {
+                for (platform.devices) |d| {
+                    if (d.id() == self.device_id) break :blk d;
+                }
+                unreachable;
+            };
+        }
+
+        pub fn memory(self: *const Shard, platform: *const Platform, kind: Memory.Kind) *const Memory {
+            return self.device(platform).memory(kind);
+        }
+
+        pub fn shardSlice(self: *const Shard, slice: Slice) Slice {
+            stdx.debug.assert(
+                self.global_shape.eql(slice.shape),
+                "Placement global shape {f} doesn't match slice shape {f}",
+                .{ self.global_shape, slice.shape },
+            );
+
+            var res = slice;
+            for (self.slices.constSlice()) |s| {
+                res = res.subSlice(s.axis, s.start, s.size);
+            }
+            return res;
+        }
     };
 
-    allocator: std.mem.Allocator,
-    shards: []Shard,
+    const AxisSplit = struct {
+        product: i64,
+        counts: stdx.BoundedArray(i64, Shape.MAX_RANK),
+        indices: stdx.BoundedArray(i64, Shape.MAX_RANK),
 
-    pub fn deinit(self: *ShardAssignment) void {
-        for (self.shards) |*s| {
-            s.slices.deinit(self.allocator);
+        pub fn init() !AxisSplit {
+            return .{
+                .product = 1,
+                .counts = try .init(0),
+                .indices = try .init(0),
+            };
         }
-        self.allocator.free(self.shards);
+
+        pub fn linearIndex(self: AxisSplit) i64 {
+            var linear: i64 = 0;
+            for (self.counts.constSlice(), self.indices.constSlice()) |c, iidx| {
+                linear = linear * c + iidx;
+            }
+            return linear;
+        }
+    };
+
+    sharding: Sharding,
+    shape: Shape,
+    shards: stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES),
+
+    pub fn init(
+        sharding: Sharding,
+        shape: Shape,
+    ) !Placement {
+        const view = sharding.axisView();
+        const shards_len: usize = @intCast(view.total_devices);
+
+        var shards = stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES).init(0) catch unreachable;
+        stdx.debug.assert(shards_len <= shards.capacity(), "Too many shards: {d} > {d}", .{ shards_len, shards.capacity() });
+
+        // Pre-fill shards so we can index by device order later.
+        for (0..shards_len) |_| {
+            shards.appendAssumeCapacity(.{
+                .device_id = 0,
+                .device_coords = &.{},
+                .shape = undefined,
+                .global_shape = shape,
+                .slices = stdx.BoundedArray(Slice1d, Shape.MAX_RANK).init(0) catch unreachable,
+            });
+        }
+
+        const ordered_devices = try sharding.deviceOrder(sharding.allocator);
+        defer sharding.allocator.free(ordered_devices);
+
+        for (ordered_devices) |d| {
+            const coords = d.coords orelse return error.MissingDeviceCoords;
+            const idx = sharding.globalIndexFromCoords(coords);
+            shards.slice()[idx].device_id = d.id;
+            shards.slice()[idx].device_coords = coords;
+        }
+
+        var self: Placement = .{
+            .sharding = sharding,
+            .shape = shape,
+            .shards = shards,
+        };
+
+        for (self.shards.slice(), 0..) |*s, shard_idx| {
+            var slices = try stdx.BoundedArray(Slice1d, Shape.MAX_RANK).init(0);
+            var used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
+
+            for (0..shape.rank()) |ax| {
+                const axis_index: u8 = @intCast(ax);
+                const slice = try self.sliceForAxis(view, shard_idx, &used_axes, axis_index);
+                slices.appendAssumeCapacity(slice);
+            }
+
+            s.slices = slices;
+            s.shape = blk: {
+                var sh = shape;
+                for (slices.constSlice()) |slice| {
+                    sh = sh.set(slice.axis, slice.size);
+                }
+                break :blk sh;
+            };
+        }
+
+        return self;
     }
 
-    pub fn format(self: ShardAssignment, shape: Shape, writer: *std.Io.Writer) !void {
-        try writer.print("ShardAssignment(shards={d})\n", .{self.shards.len});
+    fn sliceForAxis(
+        self: *Placement,
+        view: Sharding.AxisView,
+        shard_idx: usize,
+        used_axes: *std.EnumSet(PhysicalAxisTag),
+        axis_index: u8,
+    ) !Slice1d {
+        const dim = self.shape.dim(axis_index);
+        const spec = self.shape.partition(axis_index);
+
+        switch (spec) {
+            .axis => |logical_tag| {
+                const binding = self.sharding.binding(logical_tag) orelse return error.MissingLogicalBinding;
+
+                const plan = try selectPhysicalAxesForDim(dim, binding, view, shard_idx, used_axes);
+
+                const size = @divExact(dim, plan.product);
+                const start = plan.linearIndex() * size;
+
+                return .{
+                    .axis = axis_index,
+                    .start = start,
+                    .size = size,
+                };
+            },
+            .replicated => return .{ .axis = axis_index, .start = 0, .size = dim },
+            .open => return .{ .axis = axis_index, .start = 0, .size = dim },
+            .unknown => return .{ .axis = axis_index, .start = 0, .size = dim },
+        }
+    }
+
+    fn selectPhysicalAxesForDim(
+        dim: i64,
+        binding: []const PhysicalAxisTag,
+        view: Sharding.AxisView,
+        shard_idx: usize,
+        used_axes: *std.EnumSet(PhysicalAxisTag),
+    ) !AxisSplit {
+        var plan: AxisSplit = try .init();
+
+        for (binding) |p_tag| {
+            for (view.axes.constSlice(), 0..) |axis, i| {
+                if (Sharding.axisContains(axis, p_tag) and !used_axes.contains(axis.tag)) {
+                    const next_product = plan.product * axis.size;
+                    if (@rem(dim, next_product) == 0) {
+                        const coord = view.axisCoordFromLinearIndex(i, shard_idx);
+                        plan.counts.appendAssumeCapacity(axis.size);
+                        plan.indices.appendAssumeCapacity(@intCast(coord));
+                        plan.product = next_product;
+                        used_axes.insert(axis.tag);
+                    }
+                    break;
+                }
+            }
+        }
+
+        return plan;
+    }
+
+    pub fn format(self: Placement, writer: *std.Io.Writer) !void {
+        try writer.print("Placement(shape={f} shards={d})\n", .{ self.shape, self.shards.len });
 
         try writer.writeAll("Tensor axis summary:\n");
-        for (0..shape.rank()) |ax| {
-            const dim = shape.dim(ax);
-            const tag = shape.tag(ax);
-            const spec = shape.partition(ax);
+        for (0..self.shape.rank()) |ax| {
+            const dim = self.shape.dim(ax);
+            const spec = self.shape.partition(ax);
+            const axis_label = self.shape.debugTag(ax);
 
             var shard_size: i64 = dim;
             if (self.shards.len > 0) {
-                for (self.shards[0].slices.items) |s| {
+                for (self.shards[0].slices.constSlice()) |s| {
                     if (s.axis == ax) {
                         shard_size = s.size;
                         break;
@@ -1589,29 +1767,18 @@ pub const ShardAssignment = struct {
                 }
             }
 
-            const replicated = (shard_size == dim);
-
             var shard_count: ?i64 = null;
             if (shard_size > 0 and @rem(dim, shard_size) == 0) {
                 shard_count = @divExact(dim, shard_size);
             }
 
-            if (tag != Shape.TagUnknown) {
-                try writer.print("  - {s}: dim={d}, shard={d}, shards=", .{ tag, dim, shard_size });
-            } else {
-                try writer.print("  - axis {d}: dim={d}, shard={d}, shards=", .{ ax, dim, shard_size });
-            }
-
+            try writer.print("  - {s}: dim={d}, shard={d}, shards=", .{ axis_label, dim, shard_size });
             if (shard_count) |c| {
                 try writer.print("{d}", .{c});
             } else {
                 try writer.writeAll("?");
             }
-
-            try writer.print(", {s}, spec={s}\n", .{
-                if (replicated) "replicated" else "sharded",
-                @tagName(spec),
-            });
+            try writer.print(", spec={s}\n", .{@tagName(spec)});
         }
 
         try writer.writeAll("Per-shard placement:\n");
@@ -1619,195 +1786,13 @@ pub const ShardAssignment = struct {
             try writer.print("└─ Shard[{d}]\n", .{i});
             try writer.print("   ├─ device_id: {d}\n", .{shard.device_id});
             try writer.print("   ├─ device_coords: {any}\n", .{shard.device_coords});
+            try writer.print("   ├─ shape: {f}\n", .{shard.shape});
             try writer.writeAll("   └─ slices:\n");
 
-            for (shard.slices.items) |s| {
-                const tag = shape.tag(s.axis);
-                if (tag != Shape.TagUnknown) {
-                    try writer.print("       - {s}: [{d}:{d}] (size={d})\n", .{ tag, s.start, s.start + s.size, s.size });
-                } else {
-                    try writer.print("       - axis {d}: [{d}:{d}] (size={d})\n", .{ s.axis, s.start, s.start + s.size, s.size });
-                }
+            for (shard.slices.constSlice()) |s| {
+                const axis_label = self.shape.debugTag(s.axis);
+                try writer.print("       - {s}: [{d}:{d}] (size={d})\n", .{ axis_label, s.start, s.start + s.size, s.size });
             }
         }
     }
 };
-
-/// Select physical axes for one tensor axis.
-/// Logic:
-/// - walk binding order
-/// - include an axis only if it keeps divisibility
-/// - returns product of used axes
-/// This allows partial usage when full usage is not divisible.
-fn selectPhysicalAxesForDim(
-    allocator: std.mem.Allocator,
-    dim: i64,
-    binding: []const PhysicalAxisTag,
-    view: Sharding.AxisView,
-    shard_idx: usize,
-    used_axes: *std.EnumSet(PhysicalAxisTag),
-    counts: *std.ArrayListUnmanaged(i64),
-    indices: *std.ArrayListUnmanaged(i64),
-) !i64 {
-    var product: i64 = 1;
-
-    for (binding) |p_tag| {
-        for (view.axes.constSlice(), 0..) |axis, i| {
-            if (Sharding.axisContains(axis, p_tag) and !used_axes.contains(axis.tag)) {
-                const next_product = product * axis.size;
-                if (@rem(dim, next_product) == 0) {
-                    const coord = axisCoordFromLinear(view, i, shard_idx);
-                    try counts.append(allocator, axis.size);
-                    try indices.append(allocator, @intCast(coord));
-                    product = next_product;
-                    used_axes.insert(axis.tag);
-                }
-                break;
-            }
-        }
-    }
-
-    return product;
-}
-
-fn axisCoordFromLinear(view: Sharding.AxisView, axis_index: usize, linear_idx: usize) usize {
-    var stride: usize = 1;
-    var j: usize = axis_index + 1;
-    while (j < view.axes.len) : (j += 1) {
-        stride *= @intCast(view.axes.constSlice()[j].size);
-    }
-    const axis_size: usize = @intCast(view.axes.constSlice()[axis_index].size);
-    return (linear_idx / stride) % axis_size;
-}
-
-pub const TransferIterator = struct {
-    assignment: ShardAssignment,
-    index: usize = 0,
-
-    pub fn next(self: *TransferIterator) ?ShardAssignment.Shard {
-        defer self.index += 1;
-
-        if (self.index >= self.assignment.shards.len) return null;
-
-        return self.assignment.shards[self.index];
-    }
-
-    pub fn deinit(self: *TransferIterator) void {
-        self.assignment.deinit();
-    }
-};
-
-/// transferIterator is a small wrapper for data transfer.
-///
-/// It yields shard entries (device + slices) for a shape.
-/// This is what Buffer uses to know where to send data.
-pub fn transferIterator(sharding: Sharding, shape: Shape) !TransferIterator {
-    const assignment = try assignTensor(sharding, shape);
-    return .{ .assignment = assignment };
-}
-
-/// assignTensor builds a ShardAssignment for one tensor.
-///
-/// Logic (high level):
-/// 1) Build the list of devices in tile order.
-/// 2) For each device, compute its tile coords.
-/// 3) For each tensor axis:
-///    - if partitioned on logical axis:
-///      follow logical→physical binding order,
-///      take only physical axes that keep divisibility,
-///      compute slice start/size.
-///    - if replicated: slice = full axis.
-///
-/// Limitations:
-/// - If a logical axis is unbound, this errors.
-/// - If an axis cannot be divided by the chosen physical axes,
-///   it will skip non‑divisible axes (partial usage).
-pub fn assignTensor(
-    sharding: Sharding,
-    shape: Shape,
-) !ShardAssignment {
-    const allocator = sharding.allocator;
-
-    const view = sharding.axisView();
-    const shards_len: usize = @intCast(view.total_devices);
-
-    var shards = try allocator.alloc(ShardAssignment.Shard, shards_len);
-    errdefer {
-        for (shards) |*s| s.slices.deinit(allocator);
-        allocator.free(shards);
-    }
-
-    @memset(shards, .{
-        .device_id = 0,
-        .device_coords = &.{},
-        .slices = .{},
-    });
-
-    const ordered_devices = try sharding.deviceOrder(allocator);
-    defer allocator.free(ordered_devices);
-
-    for (ordered_devices) |d| {
-        const coords = d.coords orelse return error.MissingDeviceCoords;
-        const idx = sharding.globalIndexFromCoords(coords);
-        shards[idx].device_id = d.id;
-        shards[idx].device_coords = coords;
-    }
-
-    for (shards, 0..) |*s, shard_idx| {
-        var slices = std.ArrayListUnmanaged(ShardAssignment.Slice1d){};
-        var used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
-
-        for (0..shape.rank()) |ax| {
-            const dim = shape.dim(ax);
-            const spec = shape.partition(ax);
-
-            var start: i64 = 0;
-            var size: i64 = dim;
-
-            switch (spec) {
-                .axis => |logical_tag| {
-                    const binding = sharding.binding(logical_tag) orelse return error.MissingLogicalBinding;
-
-                    var counts = std.ArrayListUnmanaged(i64){};
-                    defer counts.deinit(allocator);
-
-                    var indices = std.ArrayListUnmanaged(i64){};
-                    defer indices.deinit(allocator);
-
-                    const product = try selectPhysicalAxesForDim(
-                        allocator,
-                        dim,
-                        binding,
-                        view,
-                        shard_idx,
-                        &used_axes,
-                        &counts,
-                        &indices,
-                    );
-
-                    size = @divExact(dim, product);
-
-                    var linear: i64 = 0;
-                    for (counts.items, indices.items) |c, iidx| {
-                        linear = linear * c + iidx;
-                    }
-
-                    start = linear * size;
-                },
-                else => {},
-            }
-
-            try slices.append(allocator, .{
-                .axis = @intCast(ax),
-                .start = start,
-                .size = size,
-            });
-        }
-
-        s.slices = slices;
-    }
-    return .{
-        .allocator = allocator,
-        .shards = shards,
-    };
-}

@@ -21,9 +21,7 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/module");
 
 pub const CompilationOpts = struct {
-    input_sharding: Sharding,
-    output_sharding: Sharding,
-    program_sharding: []const Sharding,
+    shardings: []const Sharding,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -58,7 +56,6 @@ pub const CompilationContext = struct {
     mlir_registry: *mlir.DialectRegistry,
     mlir_ctx: *mlir.Context,
     mlir_pass_manager: *mlir.PassManager,
-    //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
     platform: *const Platform,
     opts: CompilationOpts,
@@ -151,6 +148,32 @@ pub const CompilationContext = struct {
     }
 };
 
+// todo: move
+fn addShardyMeshes(compilation_context: *CompilationContext, shardings: []const Sharding) !void {
+    var seen: std.StringHashMap(void) = .init(compilation_context.allocator);
+    defer seen.deinit();
+
+    for (shardings) |sharding| {
+        const name = sharding.meshName();
+        if (seen.contains(name)) continue;
+        try seen.put(name, {});
+
+        const mesh_attr_str = try sharding.meshAttrString(compilation_context.arena.allocator());
+        const mesh_attr = try mlir.Attribute.parse(compilation_context.mlir_ctx, mesh_attr_str);
+
+        const mesh_op = mlir.Operation.make(compilation_context.mlir_ctx, "sdy.mesh", .{
+            .attributes = &.{
+                .named(compilation_context.mlir_ctx, "sym_name", mlir.stringAttribute(compilation_context.mlir_ctx, name)),
+                .named(compilation_context.mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+            },
+            .location = .unknown(compilation_context.mlir_ctx),
+            .verify = false,
+        });
+
+        _ = mesh_op.appendTo(compilation_context.module.body());
+    }
+}
+
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform, opts);
     defer compilation_context.deinit();
@@ -159,47 +182,12 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
-    const MeshCtx = struct {
-        ctx: *CompilationContext,
-        seen: *std.StringHashMap(void),
-
-        fn add(self: *@This(), sharding: Sharding) !void {
-            const name = sharding.meshName();
-            if (self.seen.contains(name)) return;
-            try self.seen.put(name, {});
-
-            const mesh_attr_str = try sharding.meshAttrString(self.ctx.arena.allocator());
-            const mesh_attr = try mlir.Attribute.parse(self.ctx.mlir_ctx, mesh_attr_str);
-
-            const mesh_op = mlir.Operation.make(self.ctx.mlir_ctx, "sdy.mesh", .{
-                .attributes = &.{
-                    .named(self.ctx.mlir_ctx, "sym_name", mlir.stringAttribute(self.ctx.mlir_ctx, name)),
-                    .named(self.ctx.mlir_ctx, "mesh", @ptrCast(mesh_attr)),
-                },
-                .location = .unknown(self.ctx.mlir_ctx),
-                .verify = false,
-            });
-
-            _ = mesh_op.appendTo(self.ctx.module.body());
-        }
-    };
-
-    var seen = std.StringHashMap(void).init(compilation_context.arena.allocator());
-    var mesh_ctx: MeshCtx = .{
-        .ctx = &compilation_context,
-        .seen = &seen,
-    };
-
-    try mesh_ctx.add(opts.input_sharding);
-    try mesh_ctx.add(opts.output_sharding);
-    for (opts.program_sharding) |s| {
-        try mesh_ctx.add(s);
-    }
+    try addShardyMeshes(&compilation_context, opts.shardings);
 
     _ = result.func.appendTo(compilation_context.module.body());
 
-    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.input_sharding.numPartitions()));
-    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.input_sharding.numReplicas()));
+    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.shardings[0].numPartitions()));
+    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, opts.shardings[0].numReplicas()));
 
     compilation_context.mlir_pass_manager.runOnOp(compilation_context.module.operation()) catch |err| switch (err) {
         error.MlirUnexpected => {
@@ -215,17 +203,10 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
 
     log.info("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, opts.input_sharding, opts.output_sharding);
+    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, result.input_info.shardings, result.output_info.shardings);
     errdefer exe.deinit();
 
     return exe;
-}
-
-fn shapeHasAxisTags(shape: Shape) bool {
-    for (0..shape.rank()) |ax| {
-        if (shape.partition(ax) == .axis) return true;
-    }
-    return false;
 }
 
 fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
@@ -238,57 +219,44 @@ fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
     return true;
 }
 
-fn selectShardingForShape(shape: Shape, primary: Sharding, alternates: []const Sharding) ?Sharding {
-    if (!shapeHasAxisTags(shape)) return primary;
-    if (shardingCoversShape(primary, shape)) return primary;
-
-    for (alternates) |s| {
+fn selectSharding(shape: Shape, shardings: []const Sharding) !Sharding {
+    for (shardings) |s| {
         if (shardingCoversShape(s, shape)) return s;
     }
-    return null;
-}
 
-fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
-    const LocalContext = struct {
-        list: *std.array_list.Managed(Shape),
-    };
-    var list = std.array_list.Managed(Shape).init(allocator);
-    errdefer list.deinit();
-
-    var context: LocalContext = .{ .list = &list };
-    try meta.visit(struct {
-        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
-            try ctx_.list.append(tensor.shape());
-        }
-    }.cb, &context, v);
-
-    return try list.toOwnedSlice();
+    return error.NoSuitableSharding;
 }
 
 pub const OutputInfo = struct {
     shapes: []Shape,
+    shardings: []Sharding,
     values: []*const mlir.Value,
     donations: []?usize,
     output_memory_kinds: []Memory.Kind,
 
     pub fn deinit(self: OutputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
+        allocator.free(self.shardings);
         allocator.free(self.values);
         allocator.free(self.donations);
         allocator.free(self.output_memory_kinds);
     }
 };
 
-fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
+fn collectOutputInfo(allocator: std.mem.Allocator, shardings: []const Sharding, v: anytype) !OutputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
+        sharding_list: *std.array_list.Managed(Sharding),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
         output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
+        shardings: []const Sharding,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    errdefer sharding_list.deinit();
     var value_list = std.array_list.Managed(*const mlir.Value).init(allocator);
     errdefer value_list.deinit();
     var donation_list = std.array_list.Managed(?usize).init(allocator);
@@ -298,14 +266,17 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
     var context: LocalContext = .{
         .shape_list = &shape_list,
+        .sharding_list = &sharding_list,
         .value_list = &value_list,
         .donation_list = &donation_list,
         .output_memory_kind_list = &output_memory_kind_list,
+        .shardings = shardings,
     };
 
     try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
+            try ctx_.sharding_list.append(try selectSharding(tensor.shape(), ctx_.shardings));
             try ctx_.value_list.append(tensor.value());
             try ctx_.donation_list.append(tensor.donation());
             try ctx_.output_memory_kind_list.append(tensor.outputMemoryKind());
@@ -314,6 +285,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
     return .{
         .shapes = try shape_list.toOwnedSlice(),
+        .shardings = try sharding_list.toOwnedSlice(),
         .values = try value_list.toOwnedSlice(),
         .donations = try donation_list.toOwnedSlice(),
         .output_memory_kinds = try output_memory_kind_list.toOwnedSlice(),
@@ -322,30 +294,43 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
 pub const InputInfo = struct {
     shapes: []Shape,
+    shardings: []Sharding,
 
     pub fn deinit(self: InputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
+        allocator.free(self.shardings);
     }
 };
 
-fn collectInputInfo(allocator: std.mem.Allocator, v: anytype) !InputInfo {
+fn collectInputInfo(allocator: std.mem.Allocator, shardings: []const Sharding, v: anytype) !InputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
+        sharding_list: *std.array_list.Managed(Sharding),
+        shardings: []const Sharding,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
 
-    var context: LocalContext = .{ .shape_list = &shape_list };
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    errdefer sharding_list.deinit();
+
+    var context: LocalContext = .{
+        .shape_list = &shape_list,
+        .sharding_list = &sharding_list,
+        .shardings = shardings,
+    };
 
     try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
+            try ctx_.sharding_list.append(try selectSharding(tensor.shape(), ctx_.shardings));
         }
     }.cb, &context, v);
 
     return .{
         .shapes = try shape_list.toOwnedSlice(),
+        .shardings = try sharding_list.toOwnedSlice(),
     };
 }
 
@@ -395,7 +380,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    const input_info = try collectInputInfo(compilation_context.allocator, &args);
+    const input_info = try collectInputInfo(compilation_context.allocator, opts.shardings, &args);
     errdefer input_info.deinit(compilation_context.allocator);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
@@ -407,7 +392,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
         const result = @call(.auto, func, args);
 
-        const output_info = try collectOutputInfo(compilation_context.allocator, &result);
+        const output_info = try collectOutputInfo(compilation_context.allocator, opts.shardings, &result);
         errdefer output_info.deinit(compilation_context.allocator);
 
         break :b output_info;
@@ -433,31 +418,25 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
-    for (input_info.shapes, 0..) |shape, i| {
-        const selected = selectShardingForShape(shape, opts.input_sharding, opts.program_sharding);
-        if (selected) |sharding| {
-            if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
-                const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
-                input_attributes[i].appendAssumeCapacity(.named(
-                    compilation_context.mlir_ctx,
-                    "sdy.sharding",
-                    @ptrCast(parsed),
-                ));
-            }
+    for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
+        if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
+            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+            input_attributes[i].appendAssumeCapacity(.named(
+                compilation_context.mlir_ctx,
+                "sdy.sharding",
+                @ptrCast(parsed),
+            ));
         }
     }
 
-    for (output_info.shapes, 0..) |shape, i| {
-        const selected = selectShardingForShape(shape, opts.output_sharding, opts.program_sharding);
-        if (selected) |sharding| {
-            if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
-                const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
-                output_attributes[i].appendAssumeCapacity(.named(
-                    compilation_context.mlir_ctx,
-                    "sdy.sharding",
-                    @ptrCast(parsed),
-                ));
-            }
+    for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
+        if (try sharding.shardingAttrForShape(compilation_context.arena.allocator(), shape)) |attr_str| {
+            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+            output_attributes[i].appendAssumeCapacity(.named(
+                compilation_context.mlir_ctx,
+                "sdy.sharding",
+                @ptrCast(parsed),
+            ));
         }
     }
 
@@ -504,7 +483,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
 
-    const sharding = opts.input_sharding;
+    const sharding = opts.shardings[0]; // todo: refactor
     const device_assignment = try sharding.deviceAssignment(arena);
     log.info("Device assignment: {any}", .{device_assignment});
 

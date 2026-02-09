@@ -18,8 +18,8 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-    input_sharding: Sharding,
-    output_sharding: Sharding,
+    input_shardings: []const Sharding,
+    output_shardings: []const Sharding,
 
     arena: std.heap.ArenaAllocator,
 
@@ -29,8 +29,8 @@ pub const Exe = struct {
         exe: *pjrt.LoadedExecutable,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
-        input_sharding: Sharding,
-        output_sharding: Sharding,
+        input_shardings: []const Sharding,
+        output_shardings: []const Sharding,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -38,13 +38,16 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
+        const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
+        const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
+
         return .{
             .platform = platform,
             .exe = exe,
             .input_shapes = input_shapes_copy,
             .output_shapes = output_shapes_copy,
-            .input_sharding = input_sharding,
-            .output_sharding = output_sharding,
+            .input_shardings = input_shardings_copy,
+            .output_shardings = output_shardings_copy,
             .arena = arena,
         };
     }
@@ -54,11 +57,11 @@ pub const Exe = struct {
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
-        return Arguments.init(allocator, self.input_shapes, self.input_sharding);
+        return Arguments.init(allocator, self.input_shapes, self.input_shardings);
     }
 
     pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
-        return Results.init(allocator, self.output_shapes, self.output_sharding, self.platform);
+        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform);
     }
 
     pub const FlatBuffers = struct {
@@ -94,10 +97,10 @@ pub const Exe = struct {
     pub const Arguments = struct {
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
-        sharding: Sharding,
+        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, sharding: Sharding) !Arguments {
-            const num_devices = sharding.numDevices();
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding) !Arguments {
+            const num_devices = shardings[0].numDevices();
 
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, @intCast(num_devices));
             errdefer flat_buffers.deinit(allocator);
@@ -108,7 +111,7 @@ pub const Exe = struct {
             return .{
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
-                .sharding = sharding,
+                .shardings = shardings,
             };
         }
 
@@ -160,10 +163,10 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
 
         expected_shapes: []const Shape,
-        sharding: Sharding,
+        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, sharding: Sharding, platform: *const Platform) !Results {
-            const num_devices = sharding.numDevices();
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform) !Results {
+            const num_devices = shardings[0].numDevices();
 
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, @intCast(num_devices));
             errdefer flat_buffers.deinit(allocator);
@@ -175,7 +178,7 @@ pub const Exe = struct {
                 .platform = platform,
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
-                .sharding = sharding,
+                .shardings = shardings,
             };
         }
 
@@ -197,7 +200,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.sharding, shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &result);
