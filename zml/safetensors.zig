@@ -195,6 +195,52 @@ pub const TensorRegistry = struct {
         return try fetchRegistry(allocator, io, repo, entrypoint);
     }
 
+    /// Load a safetensors file from a repository directory.
+    ///
+    /// # Arguments
+    ///
+    /// * `allocator` - The allocator to use for allocating memory.
+    /// * `io` - The I/O interface.
+    /// * `repo` - The repository directory.
+    /// * `file_name` - The name of the safetensors file.
+    ///
+    /// # Returns
+    ///
+    /// A `TensorRegistry` containing the tensors from the safetensors file.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the safetensors file cannot be opened or parsed.
+    ///
+    /// # Example
+    ///
+    /// ```zig
+    /// const allocator = std.testing.allocator;
+    /// const io = std.testing.io;
+    /// const repo = try std.Io.Dir.openFile(.cwd(), io, "test_model.safetensors", .{ .mode = .read_only });
+    /// defer repo.close(io);
+    /// var registry = try TensorRegistry.fromFile(allocator, io, repo, "test_model.safetensors");
+    /// defer registry.deinit();
+    /// ```
+    ///
+    /// # Example
+    ///
+    /// ```zig
+    // const repo_dir: std.Io.Dir = try zml.safetensors.resolveModelRepo(io, args.model);
+    // const transformer_dir = try repo_dir.openDir(io, "transformer2d", .{});
+    // defer transformer_dir.close(io);
+    // var registry = try TensorRegistry.fromFile(allocator, io, transformer_dir, "diffusion_pytorch_model.safetensors");
+    // defer registry.deinit();
+    /// ```
+    pub fn fromFile(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        file_name: []const u8,
+    ) !TensorRegistry {
+        return try fetchRegistry(allocator, io, repo, try repo.openFile(io, file_name, .{ .mode = .read_only }));
+    }
+
     pub fn fromPath(
         allocator: std.mem.Allocator,
         io: std.Io,
