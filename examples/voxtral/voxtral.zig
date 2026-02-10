@@ -48,7 +48,6 @@ pub const LogMelSpectrogram = struct {
         } else if (num_frames < force_num_frames) {
 	    const tagged = wav.withTags(.{ .t, ._ });
 	    wav = tagged.pad(0.0, .{ .t = Tensor.Pad{ .high = force_num_samples - tagged.dim(.t) } });
-            // wav = wav.pad(0.0, .{ .samples = .{ .high = force_num_samples - wav.dim(rank - 1) } });
         }
 	
         num_frames = @intCast(@divFloor(wav.dim(0), self.hop_len));
@@ -143,6 +142,7 @@ pub fn main() !void {
     var reader = file.reader(io, &wav_buffer);
     
     const wav_file = try loadWav(allocator, &reader.interface);
+    std.debug.print("LEN: {d}\n", .{wav_file.len});
     defer allocator.free(wav_file);
     std.debug.print("{any}\n", .{wav_file[0..100]});
 
@@ -160,6 +160,35 @@ pub fn main() !void {
     defer compiled_mel_spectrum.deinit();
     var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
     defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
+
+    // Execute
+    var args = try compiled_mel_spectrum.args(allocator);
+    defer args.deinit(allocator); 
+    var results = try compiled_mel_spectrum.results(allocator);
+    defer results.deinit(allocator);
+    
+    const first: zml.Slice = try zml.Slice.alloc(allocator, .init(.{ .freq = wav_file.len }, .f32));
+    defer first.free(allocator);
+    var first_buffer: zml.Buffer = try .fromSlice(io, platform, first);
+    defer first_buffer.deinit();
+
+    args.set(.{mel_spectrum_buffers, first_buffer});
+    compiled_mel_spectrum.call(args, &results);
+    results.fill(.{&first_buffer});
+
+    
+    try first_buffer.toSlice(io, first);
+    
+    const outfile = try std.Io.Dir.createFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/out.bin", .{});
+    defer outfile.close(io);
+    
+    var outbuff: [4096]u8 = undefined;
+    var writer = outfile.writer(io, &outbuff);
+    const writer_interface = &writer.interface;
+
+    try writer_interface.writeAll(first.data());
+    
+    // std.debug.print("Here is the results: {f}\n", .{first});
 }
 
 fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
@@ -192,7 +221,8 @@ fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
 }
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram) !zml.Exe {
-    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{model.force_num_frames * model.hop_len}, .f32).withTags(.{.freq})});
+    // return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{model.force_num_frames * model.hop_len}, .f32).withTags(.{.freq})});
+    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{809508}, .f32).withTags(.{.freq})});
 }
 
 pub const AudioWindow = enum {
