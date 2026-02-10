@@ -6,7 +6,10 @@ zig_binary(
     args = [],
     data = [],
     main = "voxtral.zig",
-    srcs = ["wav.zig"],
+    srcs = [
+        "wav.zig",
+        "config.zig",
+    ],
     deps = ["//zml"],
 )
 
