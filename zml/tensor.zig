@@ -105,6 +105,8 @@ pub const Tensor = struct {
         const M: i64 = input_sorted.dim(0);
         const K: i64 = input_sorted.dim(1);
         const N: i64 = @as(i64, output_dim);
+        // _log.info("moeTritonOp M={d}", .{M});
+        // _log.info("moeTritonOp K={d}", .{K});
         // _log.info("moeTritonOp N={d}", .{N});
 
         const num_experts = weights.dim(0);
@@ -127,14 +129,14 @@ pub const Tensor = struct {
             M
         else
             num_experts - 1 - @divFloor(num_experts - M - 1, BLOCK_M);
-        _log.info("grid_m={d}", .{grid_m});
+        // _log.info("grid_m={d}", .{grid_m});
         // _log.info("N = {d}", .{N});
         // _log.info("M = {d}", .{M});
         // _log.info("BLOCK_M = {d}", .{BLOCK_M});
         // _log.info("BLOCK_N = {d}", .{BLOCK_N});
 
         const grid_n: i64 = @divFloor(N + BLOCK_N - 1, BLOCK_N);
-        _log.info("grid_n={d}", .{grid_n});
+        // _log.info("grid_n={d}", .{grid_n});
 
         var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
         defer threaded.deinit();
@@ -154,15 +156,6 @@ pub const Tensor = struct {
         };
         const ir_z: [:0]const u8 = CompilationContext.current().allocator.dupeZ(u8, ir_buf) catch |err| {
             std.debug.panic("failed to null-terminate PTX: {s}", .{@errorName(err)});
-        };
-
-        const ops_ = ops.TritonOps{
-            .name = "_matmul__tensorized_wrapper",
-            .ir = ir_z,
-            .grid = .{ @intCast(grid_m * grid_n), 1, 1 },
-            .num_warps = 4,
-            .num_stages = 3,
-            .debug = true,
         };
 
         // Device-side ragged metadata (prefix sum for XSliceOffs).
@@ -309,6 +302,17 @@ pub const Tensor = struct {
             int32Const(grid_n), // %grid_n
             Tensor.scalar(1.0, .f32), // %out_alpha
             int32Const(0), // %reduce_rank
+            Tensor.zeroes(output_shape), // %Yout
+        };
+
+        const ops_ = ops.TritonOps{
+            .name = "_matmul__tensorized_wrapper",
+            .ir = ir_z,
+            .grid = .{ @intCast(grid_m * grid_n), 1, 1 },
+            .num_warps = 4,
+            .num_stages = 2,
+            .debug = true,
+            .output_operand_aliases = &.{kernel_args.len - 1},
         };
 
         const res = ops.triton(kernel_args, .{output_shape}, ops_);

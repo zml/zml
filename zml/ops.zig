@@ -267,7 +267,7 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
-    output_operand_aliases: []const i64 = &.{},
+    output_operand_aliases: []const i64 = &.{0},
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
