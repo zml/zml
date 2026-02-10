@@ -1403,9 +1403,6 @@ pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const z
     const transformer_dir = try repo_dir.openDir(io, subfolder, .{});
     defer transformer_dir.close(io);
 
-    const transformer_file = try transformer_dir.openFile(io, "diffusion_pytorch_model.safetensors", .{});
-    defer transformer_file.close(io);
-
     // var path_buffer: [4096]u8 = undefined;
     // const path_len = try transformer_file.realPath(io, &path_buffer);
     // try std.fs.path.join(&path_buffer, &.{ transformer_dir.path(), "diffusion_pytorch_model.safetensors" });
