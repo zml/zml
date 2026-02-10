@@ -16,7 +16,6 @@ pub const LogMelSpectrogram = struct {
     
     hop_len: u63 = 160,
     global_log_mel_max: f32 = 1.5,
-    
     mel_floor: f32 = 1e-10,
     force_num_frames: u32 = 3000,
     
@@ -46,7 +45,7 @@ pub const LogMelSpectrogram = struct {
             wav = wav.slice1d(-1, .{ .end = force_num_samples });
             num_frames = force_num_frames;
         } else if (num_frames < force_num_frames) {
-	    const tagged = wav.withTags(.{ .t, ._ });
+	    const tagged = wav.withTags(.{.t});
 	    wav = tagged.pad(0.0, .{ .t = Tensor.Pad{ .high = force_num_samples - tagged.dim(.t) } });
         }
 	
@@ -61,21 +60,21 @@ pub const LogMelSpectrogram = struct {
         };
 
         // Use Short Time Fourier Transform to compute features.
-        var spectrogram = stft(padded_wav, window_weight, num_frames, self.hop_len, self.precision);
+        // Generate num_frames+1 (matching torch.stft center=True frame count),
+        // then drop the last frame to match Whisper convention (stft[..., :-1]).
+        var spectrogram = stft(padded_wav, window_weight, num_frames + 1, self.hop_len, self.precision);
+        spectrogram = spectrogram.slice1d(0, .{ .end = -1 });
         spectrogram = spectrogram.convert(dtype);
         // Re-weight frequencies for speech
         spectrogram = spectrogram.dot(self.mel_filters, .freq);
 
-        // Convert to log scale
+        spectrogram = spectrogram.maximum(Tensor.constant(dtype.constant(self.mel_floor)));
         var log_spec = spectrogram.log().scale(1.0 / @log(10.0));
 
-        // Cut out noise below self.mel_floor or below max(log_spec) - 8
-        var log_spec_min = Tensor.constant(dtype.constant(@log10(self.mel_floor)));
-        const log_spec_max = log_spec.flatten().max(0).squeeze(0);
-        log_spec_min = log_spec_min.maximum(log_spec_max.addConstant(-8));
-
+        const log_spec_min = Tensor.constant(dtype.constant(self.global_log_mel_max - 8.0));
         log_spec = log_spec.maximum(log_spec_min);
         const log_spec_rank = log_spec.shape().rank();
+	
         // "center" the distribution
         return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ log_spec_rank - 1, log_spec_rank - 2 });
     }
@@ -109,7 +108,7 @@ pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, pr
     var fft = windows.convert(precision).fft(.{ .kind = .RFFT, .length = &.{fft_len} });
     const spectrogram = fft.abs();
     
-    const ret = spectrogram.mul(spectrogram).convert(waveform.dtype()).renameAxis(0, .temp);
+    const ret = spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.temp, .freq});
     log.info("{f}", .{ret.shape()});
     
     return ret;
@@ -135,7 +134,7 @@ pub fn main() !void {
     const arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
 
-    const file = try std.Io.Dir.openFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/inputs/harvard.wav", .{});
+    const file = try std.Io.Dir.openFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/inputs/harvard_16k.wav", .{});
     defer file.close(io);
 
     var wav_buffer: [4096]u8 = undefined;
@@ -167,17 +166,22 @@ pub fn main() !void {
     var results = try compiled_mel_spectrum.results(allocator);
     defer results.deinit(allocator);
     
-    const first: zml.Slice = try zml.Slice.alloc(allocator, .init(.{ .freq = wav_file.len }, .f32));
-    defer first.free(allocator);
-    var first_buffer: zml.Buffer = try .fromSlice(io, platform, first);
-    defer first_buffer.deinit();
+    const input_slice = zml.Slice.init(.init(.{ .freq = wav_file.len }, .f32), std.mem.sliceAsBytes(wav_file));
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
+    defer input_buffer.deinit();
 
-    args.set(.{mel_spectrum_buffers, first_buffer});
+    const output_shape = zml.Shape.init(.{ 128, melspectro_model.force_num_frames }, .f32);
+    const output_slice: zml.Slice = try zml.Slice.alloc(allocator, output_shape);
+    defer output_slice.free(allocator);
+    var output_buffer: zml.Buffer = try .fromSlice(io, platform, output_slice);
+    defer output_buffer.deinit();
+
+    args.set(.{mel_spectrum_buffers, input_buffer});
     compiled_mel_spectrum.call(args, &results);
-    results.fill(.{&first_buffer});
+    results.fill(.{&output_buffer});
 
-    
-    try first_buffer.toSlice(io, first);
+
+    try output_buffer.toSlice(io, output_slice);
     
     const outfile = try std.Io.Dir.createFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/out.bin", .{});
     defer outfile.close(io);
@@ -186,7 +190,7 @@ pub fn main() !void {
     var writer = outfile.writer(io, &outbuff);
     const writer_interface = &writer.interface;
 
-    try writer_interface.writeAll(first.data());
+    try writer_interface.writeAll(output_slice.data());
     
     // std.debug.print("Here is the results: {f}\n", .{first});
 }
@@ -222,7 +226,7 @@ fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram) !zml.Exe {
     // return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{model.force_num_frames * model.hop_len}, .f32).withTags(.{.freq})});
-    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{809508}, .f32).withTags(.{.freq})});
+    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{293699}, .f32).withTags(.{.freq})});
 }
 
 pub const AudioWindow = enum {
