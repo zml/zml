@@ -2,6 +2,10 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
+const tools = @import("tools.zig");
+
+const log = std.log.scoped(.modeling_qwen3);
+
 pub const Config = struct {
     vocab_size: i64 = 152064,
     hidden_size: i64 = 2048,
@@ -9,16 +13,12 @@ pub const Config = struct {
     num_hidden_layers: i64 = 32,
     num_attention_heads: i64 = 16,
     num_key_value_heads: i64 = 2,
-    hidden_act: []const u8 = "silu",
     max_position_embeddings: i64 = 32768,
     initializer_range: f32 = 0.02,
     rms_norm_eps: f32 = 1e-6,
     use_cache: bool = true,
     tie_word_embeddings: bool = false,
     rope_theta: f32 = 1000000.0,
-    rope_scaling: ?struct {
-        type: []const u8 = "default",
-    } = null,
     attention_dropout: f32 = 0.0,
     attention_bias: bool = true,
 };
@@ -62,7 +62,6 @@ pub const Linear = struct {
     inner: zml.nn.Linear,
 
     pub fn init(weight: zml.Tensor, bias: ?zml.Tensor) Linear {
-        // Tag weight as [out, d].
         const w = weight.withTags(.{ .out, .d });
         return .{
             .inner = zml.nn.Linear.init(w, bias, .out),
@@ -71,18 +70,14 @@ pub const Linear = struct {
 
     pub fn forward(self: Linear, x: zml.Tensor) zml.Tensor {
         const input_dtype = x.dtype();
-        // Match Python: perform dot product in f32 for precision
-        // Manually implement Linear.forward to ensure correct tag handling and avoid panics
         const x_f32 = x.convert(.f32).withPartialTags(.{.d});
         const weight_f32 = self.inner.weight.convert(.f32);
 
-        // Contract on '.d' dimension. Result will have tag '.out'
         var y = x_f32.dot(weight_f32, .d);
         if (self.inner.bias) |bias| {
             y = y.add(bias.convert(.f32).broad(y.shape()));
         }
 
-        // Rename '.out' to '.d' for the next layer's input
         const out = y.rename(.{ .out = .d });
         return out.convert(input_dtype);
     }
@@ -327,6 +322,10 @@ pub const Qwen3Model = struct {
         };
     }
 
+    pub fn deinit(self: *Qwen3Model, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+    }
+
     pub fn forward(
         self: Qwen3Model,
         input_ids: zml.Tensor,
@@ -386,15 +385,18 @@ pub const Qwen3ForCausalLM = struct {
         };
     }
 
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.model.deinit(allocator);
+    }
+
     pub fn forward(
-        self: Qwen3ForCausalLM,
+        self: @This(),
         input_ids: zml.Tensor,
         rope: RoPE,
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { logits: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
         const out = self.model.forward(input_ids, rope, attention_mask, output_hidden_states);
-        // Bypass lm_head to avoid crash, we don't need logits anyway
         const logits = out.last_hidden_state;
         return .{ .logits = logits, .hidden_states = out.hidden_states };
     }
@@ -406,69 +408,47 @@ pub const Qwen3ForCausalLM = struct {
         config: Config,
         weights: zml.Bufferized(Qwen3ForCausalLM),
 
-        pub fn deinit(self: *ModelContext, allocator: std.mem.Allocator) void {
+        pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
             unloadWeights(allocator, &self.weights);
-            allocator.free(self.model.model.layers);
+            self.model.deinit(allocator);
             self.store.deinit();
             self.registry.deinit();
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8, progress: ?*std.Progress.Node) !ModelContext {
-        @setEvalBranchQuota(10000);
-        std.log.info("Loading Qwen3 from: {s}/text_encoder", .{model_path});
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node) !ModelContext {
+        @setEvalBranchQuota(10_000);
+        const subfolder = "text_encoder";
 
-        const tr_dir = try std.fs.path.join(allocator, &.{ model_path, "text_encoder" });
-        defer allocator.free(tr_dir);
+        const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });
+        log.info("Loaded config type: {s} from {s} with values {any}", .{ @typeName(Config), subfolder, config_json });
+        errdefer config_json.deinit();
+        const config = config_json.value;
 
-        const tr_repo = try zml.safetensors.resolveModelRepo(io, tr_dir);
+        std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});
 
-        var config = Config{};
-        if (tr_repo.readFileAlloc(io, "config.json", allocator, .limited(1024 * 1024))) |bytes| {
-            defer allocator.free(bytes);
-            var config_parsed = try std.json.parseFromSlice(Config, allocator, bytes, .{ .ignore_unknown_fields = true });
-            defer config_parsed.deinit();
-            config = config_parsed.value;
-            std.log.info("Loaded Qwen3 Config: {any}", .{config});
-        } else |err| {
-            std.log.warn("Failed to load config.json (err={}), using default Qwen3 Config", .{err});
-        }
+        var tensor_registry = try zml.safetensors.TensorRegistry.fromRepo(allocator, io, try repo_dir.openDir(io, subfolder, .{}));
+        defer tensor_registry.deinit();
 
-        var tr_registry = blk: {
-            const index_path = try std.fs.path.join(allocator, &.{ tr_dir, "model.safetensors.index.json" });
-            defer allocator.free(index_path);
+        var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
+        errdefer tensor_store.deinit();
+        var model = try Qwen3ForCausalLM.init(allocator, tensor_store.view(), config);
+        errdefer model.deinit(allocator);
 
-            // Try to load index
-            if (zml.safetensors.TensorRegistry.fromPath(allocator, io, index_path)) |reg| {
-                std.log.info("Loaded Qwen3 Weights from Index: {s}", .{index_path});
-                break :blk reg;
-            } else |_| {
-                // Fallback to single file
-                const model_path_sf = try std.fs.path.join(allocator, &.{ tr_dir, "model.safetensors" });
-                defer allocator.free(model_path_sf);
-                std.log.info("Loading Qwen3 Weights from: {s}", .{model_path_sf});
-                break :blk try zml.safetensors.TensorRegistry.fromPath(allocator, io, model_path_sf);
-            }
-        };
-
-        var tr_store = zml.io.TensorStore.fromRegistry(allocator, &tr_registry);
-
-        const model = try Qwen3ForCausalLM.init(allocator, tr_store.view(), config);
-
-        std.log.info("Hydrating Qwen3 Weights...", .{});
-        const weights = try zml.io.load(
+        log.info("Hydrating Qwen3 Weights...", .{});
+        var weights = try zml.io.load(
             Qwen3ForCausalLM,
             &model,
             allocator,
             io,
             platform,
-            .{ .parallelism = 16, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
+            .{ .parallelism = 16, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
-
+        errdefer unloadWeights(allocator, &weights);
         return .{
             .model = model,
-            .store = tr_store,
-            .registry = tr_registry,
+            .store = tensor_store,
+            .registry = tensor_registry,
             .config = config,
             .weights = weights,
         };

@@ -36,7 +36,7 @@ pub const NumpyData = struct {
         } else if (std.mem.indexOf(u8, self.dtype, "i4")) |_| {
             dtype = .i32;
         } else {
-            log.warn("NpyData.toTensor: Unknown dtype {s}, defaulting to f32", .{self.dtype});
+            log.warn("NumpyData.toTensor: Unknown dtype {s}, defaulting to f32", .{self.dtype});
         }
 
         switch (self.shape.len) {
@@ -46,7 +46,7 @@ pub const NumpyData = struct {
             4 => return zml.Tensor.fromShape(zml.Shape.init(.{ @as(i64, @intCast(self.shape[0])), @as(i64, @intCast(self.shape[1])), @as(i64, @intCast(self.shape[2])), @as(i64, @intCast(self.shape[3])) }, dtype)),
             5 => return zml.Tensor.fromShape(zml.Shape.init(.{ @as(i64, @intCast(self.shape[0])), @as(i64, @intCast(self.shape[1])), @as(i64, @intCast(self.shape[2])), @as(i64, @intCast(self.shape[3])), @as(i64, @intCast(self.shape[4])) }, dtype)),
             else => {
-                log.err("NpyData.toTensor: Unsupported rank {d}", .{self.shape.len});
+                log.err("NumpyData.toTensor: Unsupported rank {d}", .{self.shape.len});
                 return zml.Tensor.fromShape(zml.Shape.init(.{}, dtype));
             },
         }
@@ -92,7 +92,7 @@ pub const NumpyData = struct {
     }
 
     pub fn load(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
-        return loadNpy(allocator, path);
+        return loadNumpy(allocator, path);
     }
 
     pub fn toBuffer(self: NumpyData, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
@@ -269,7 +269,7 @@ fn appendValues(
     return true;
 }
 
-pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
+pub fn loadNumpy(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
     const path_z = try allocator.dupeZ(u8, path);
     defer allocator.free(path_z);
 
@@ -285,8 +285,8 @@ pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
     var magic: [6]u8 = undefined;
     _ = try reader.readFull(&magic);
     if (!std.mem.eql(u8, &magic, "\x93NUMPY")) {
-        log.err("Invalid NPY magic: {s}", .{magic});
-        return error.InvalidNpyFile;
+        log.err("Invalid Numpy magic: {s}", .{magic});
+        return error.InvalidNumpyFile;
     }
 
     // 2. Version
@@ -294,7 +294,7 @@ pub fn loadNpy(allocator: std.mem.Allocator, path: []const u8) !NumpyData {
     const minor = try reader.readByte();
 
     if (major != 1) {
-        log.warn("NPY version {d}.{d} not fully tested, attempting parse...", .{ major, minor });
+        log.warn("Numpy version {d}.{d} not fully tested, attempting parse...", .{ major, minor });
     }
 
     // 3. Header Length (little endian 2 bytes)
@@ -403,19 +403,19 @@ const CFileReader = struct {
     }
 };
 
-// How to use NpyData
+// How to use NumpyData
 // // Load Embeds
 // {
-//     const filename = "/Users/kevin/zml/flux_klein_notebook_embeds.npy";
+//     const filename = "/Users/kevin/zml/flux_klein_notebook_embeds.Numpy";
 
-//     var npy = try tools.NpyData.load(allocator, filename);
-//     defer npy.deinit();
+//     var Numpy = try tools.NumpyData.load(allocator, filename);
+//     defer Numpy.deinit();
 
-//     // Print using NpyData.print (Host)
-//     npy.print(20, "Embeds (NpyData)");
+//     // Print using NumpyData.print (Host)
+//     Numpy.print(20, "Embeds (NumpyData)");
 
 //     // Print using zml.Buffer (Device/Platform)
-//     const buffer = try npy.toBuffer(io, platform_auto);
+//     const buffer = try Numpy.toBuffer(io, platform_auto);
 //     defer buffer.deinit();
 //     try tools.printBuffer(allocator, io, buffer, 20, "Embeds (Buffer)");
 
@@ -423,22 +423,22 @@ const CFileReader = struct {
 
 // // Load Text IDs
 // {
-//     const filename = "/Users/kevin/zml/flux_klein_notebook_text_ids.npy";
+//     const filename = "/Users/kevin/zml/flux_klein_notebook_text_ids.Numpy";
 
-//     var npy = try tools.NpyData.load(allocator, filename);
-//     defer npy.deinit();
+//     var Numpy = try tools.NumpyData.load(allocator, filename);
+//     defer Numpy.deinit();
 
-//     // Print using NpyData.print (Host)
-//     npy.print(20, "TextIDs (NpyData)");
+//     // Print using NumpyData.print (Host)
+//     Numpy.print(20, "TextIDs (NumpyData)");
 
 //     // Print using zml.Buffer (Device/Platform)
-//     const buffer = try npy.toBuffer(io, platform_auto);
+//     const buffer = try Numpy.toBuffer(io, platform_auto);
 //     defer buffer.deinit();
 //     try tools.printBuffer(allocator, io, buffer, 20, "TextIDs (Buffer)");
 
 // }
 
-pub fn saveBufferToNpy(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, buf: zml.Buffer, path: []const u8) !void {
+pub fn saveBufferToNumpy(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, buf: zml.Buffer, path: []const u8) !void {
     _ = platform;
     const shape = buf.shape();
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -589,4 +589,35 @@ pub fn getElementAsF64(slice: zml.Slice, dtype: zml.DataType, idx: usize) f64 {
         },
         else => 0.0,
     };
+}
+
+pub fn parseConfig(comptime TemplateConfig: type, allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = null, json_name: ?[]const u8 = null }) !std.json.Parsed(TemplateConfig) {
+    var timer = try std.time.Timer.start();
+    const subfolder = options.subfolder orelse "";
+    const json_name = options.json_name orelse "config.json";
+
+    const config_sub_path = if (subfolder.len > 0)
+        try std.fmt.allocPrint(allocator, "{s}/{s}", .{ subfolder, json_name })
+    else
+        try allocator.dupe(u8, json_name);
+    defer allocator.free(config_sub_path);
+
+    log.info("Loading config type: {s} from {s}", .{ @typeName(TemplateConfig), config_sub_path });
+    defer log.info("Loaded config [{D}]", .{timer.read()});
+
+    const parsed_config: std.json.Parsed(TemplateConfig) = label_parsing_block: {
+        const config_json_file = try repo_dir.openFile(io, config_sub_path, .{});
+        defer config_json_file.close(io);
+        const stat = try config_json_file.stat(io);
+        const file_size = stat.size;
+        const config_json_buffer = try allocator.alloc(u8, @intCast(file_size));
+        defer allocator.free(config_json_buffer);
+        var config_reader = config_json_file.reader(io, config_json_buffer);
+        var reader: std.json.Reader = .init(allocator, &config_reader.interface);
+        defer reader.deinit();
+
+        break :label_parsing_block try std.json.parseFromTokenSource(TemplateConfig, allocator, &reader, .{ .ignore_unknown_fields = true });
+    };
+    errdefer parsed_config.deinit();
+    return parsed_config;
 }

@@ -12,7 +12,7 @@ pub const Qwen2TokenizerFast = struct {
         content: []const u8,
     };
 
-    pub fn from_pretrained(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = null }) !Qwen2TokenizerFast {
+    pub fn fromPretrained(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = "tokenizer" }) !Qwen2TokenizerFast {
         const subfolder = options.subfolder orelse "";
 
         const tokenizer_path = try std.fmt.allocPrint(allocator, "{s}/tokenizer.json", .{subfolder});
@@ -36,7 +36,7 @@ pub const Qwen2TokenizerFast = struct {
         self.tokenizer.deinit();
     }
 
-    pub fn apply_chat_template(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
+    fn applyChatTemplate(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
         add_generation_prompt: bool = true,
     }) ![]const u8 {
         const im_start = "<|im_start|>";
@@ -128,15 +128,15 @@ pub const Qwen2TokenizerFast = struct {
         };
     }
 
-    pub fn pipeline_tokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
+    pub fn pipelineTokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
 
         // Tokenizer Setup
-        var tokenizer = try Qwen2TokenizerFast.from_pretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
+        var tokenizer = try Qwen2TokenizerFast.fromPretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
         defer tokenizer.deinit();
         const messages = [_]Qwen2TokenizerFast.ChatMessage{
             .{ .role = "user", .content = options.prompt },
         };
-        const text_templated = try tokenizer.apply_chat_template(&messages, .{
+        const text_templated = try tokenizer.applyChatTemplate(&messages, .{
             .add_generation_prompt = true,
         });
         defer allocator.free(text_templated);

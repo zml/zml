@@ -3,6 +3,8 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
+const tools = @import("tools.zig");
+
 const log = std.log.scoped(.flux2_model);
 
 pub const Config = struct {
@@ -35,6 +37,10 @@ const Linear = struct {
         return .{
             .inner = zml.nn.Linear.init(w, bias, .d),
         };
+    }
+
+    pub fn deinit(self: *@This()) void {
+        _ = self; // autofix
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
@@ -380,6 +386,10 @@ const Flux2Modulation = struct {
             .linear = Linear.init(store.withPrefix("linear")),
             .mod_param_sets = mod_param_sets,
         };
+    }
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        self.linear.deinit(allocator);
     }
 
     pub fn forward(self: Flux2Modulation, temb: Tensor) stdx.BoundedArray(Tensor, 32) {
@@ -812,6 +822,10 @@ const Flux2SingleTransformerBlock = struct {
         };
     }
 
+    pub fn deinit(self: *@This()) void {
+        _ = self; // autofix
+    }
+
     fn geglu(input: Tensor) Tensor {
         const last_dim = input.rank() - 1;
         const d = input.shape().dim(last_dim);
@@ -1004,10 +1018,8 @@ pub const Flux2Transformer2DModel = struct {
 
     const debug_double_block_limit: ?usize = null;
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !Flux2Transformer2DModel {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Flux2Transformer2DModel {
         var c = config;
-
-        const allocator = std.heap.page_allocator;
 
         const blocks = try allocator.alloc(Flux2TransformerBlock, @intCast(c.num_layers));
         for (blocks, 0..) |*b, i| {
@@ -1042,6 +1054,24 @@ pub const Flux2Transformer2DModel = struct {
             .proj_out = Linear.init(store.withPrefix("proj_out")),
         };
         return model;
+    }
+
+    pub fn deinit(self: *Flux2Transformer2DModel, allocator: std.mem.Allocator) void {
+        _ = self; // autofix
+        _ = allocator; // autofix
+
+        // self.time_guidance_embed.deinit(allocator);
+        // self.double_stream_modulation_img.deinit(allocator);
+        // self.double_stream_modulation_txt.deinit(allocator);
+        // self.single_stream_modulation.deinit(allocator);
+        // self.x_embedder.deinit(allocator);
+        // self.context_embedder.deinit(allocator);
+        // for (self.transformer_blocks) |*b| b.deinit(allocator);
+        // allocator.free(self.transformer_blocks);
+        // for (self.single_transformer_blocks) |*b| b.deinit(allocator);
+        // allocator.free(self.single_transformer_blocks);
+        // self.norm_out.deinit(allocator);
+        // self.proj_out.deinit(allocator);
     }
 
     pub fn prepare_text_ids(self: Flux2Transformer2DModel, prompt_embeds: Tensor) Tensor {
@@ -1362,53 +1392,74 @@ pub const ModelContext = struct {
     }
 };
 
-pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8) !ModelContext {
-    @setEvalBranchQuota(10000);
-    log.info("Loading Transformer from: {s}/transformer", .{model_path});
+pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node) !ModelContext {
+    @setEvalBranchQuota(10_000);
+    const subfolder = "transformer";
 
+    const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });
+    errdefer config_json.deinit();
+    const config = config_json.value;
+
+    const transformer_dir = try repo_dir.openDir(io, subfolder, .{});
+    defer transformer_dir.close(io);
+
+    const transformer_file = try transformer_dir.openFile(io, "diffusion_pytorch_model.safetensors", .{});
+    defer transformer_file.close(io);
+
+    // var path_buffer: [4096]u8 = undefined;
+    // const path_len = try transformer_file.realPath(io, &path_buffer);
+    // try std.fs.path.join(&path_buffer, &.{ transformer_dir.path(), "diffusion_pytorch_model.safetensors" });
+
+    var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, transformer_dir, "diffusion_pytorch_model.safetensors");
+
+    // var tensor_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, path_buffer[0..path_len]);
+    defer tensor_registry.deinit();
+
+    // log.info("Tensor Registry: {s}", .{path_buffer[0..path_len]});
+
+    var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
+    errdefer tensor_store.deinit();
     // 1. Resolve Repo/Dir
-    const tr_dir = try std.fs.path.join(allocator, &.{ model_path, "transformer" });
-    defer allocator.free(tr_dir);
-    const tr_repo = try zml.safetensors.resolveModelRepo(io, tr_dir);
+    // const tr_dir = try std.fs.path.join(allocator, &.{ model_path, subfolder });
+    // defer allocator.free(tr_dir);
+    // const tr_repo = try zml.safetensors.resolveModelRepo(io, tr_dir);
 
     // 2. Parse Config
-    const tr_config_bytes = try tr_repo.readFileAlloc(io, "config.json", allocator, .limited(1024 * 1024));
-    defer allocator.free(tr_config_bytes);
+    // const tr_config_bytes = try tr_repo.readFileAlloc(io, "config.json", allocator, .limited(1024 * 1024));
+    // defer allocator.free(tr_config_bytes);
 
-    var tr_config_w = try std.json.parseFromSlice(Config, allocator, tr_config_bytes, .{ .ignore_unknown_fields = true });
-    defer tr_config_w.deinit();
-    const config = tr_config_w.value;
-    log.info("Flux2 Config: {any}", .{config});
+    // var tr_config_w = try std.json.parseFromSlice(Config, allocator, tr_config_bytes, .{ .ignore_unknown_fields = true });
+    // defer tr_config_w.deinit();
+    // const config = tr_config_w.value;
+    // log.info("Flux2 Config: {any}", .{config});
 
     // 3. Load Safetensors
-    const transformer_file = try std.fs.path.join(allocator, &.{ model_path, "transformer", "diffusion_pytorch_model.safetensors" });
-    defer allocator.free(transformer_file);
-    log.info("Loading Transformer Checkpoint: {s}", .{transformer_file});
+    // const transformer_file = try std.fs.path.join(allocator, &.{ model_path, "transformer", "diffusion_pytorch_model.safetensors" });
+    // defer allocator.free(transformer_file);
+    // log.info("Loading Transformer Checkpoint: {s}", .{transformer_file});
 
-    var tr_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, transformer_file);
-    // Don't deinit registry yet, wait for Context.deinit
+    // var tr_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, transformer_file);
+    // // Don't deinit registry yet, wait for Context.deinit
 
-    var tr_store = zml.io.TensorStore.fromRegistry(allocator, &tr_registry);
-    // Don't deinit store yet.
+    // var tr_store = zml.io.TensorStore.fromRegistry(allocator, &tr_registry);
+    // // Don't deinit store yet.
 
-    // 4. Init Model
-    const model = try Flux2Transformer2DModel.init(tr_store.view(), config);
-
-    // 5. Hydrate Weights
-    log.info("Hydrating Weights...", .{});
-    const weights = try zml.io.load(
+    // // 4. Init Model
+    var model = try Flux2Transformer2DModel.init(allocator, tensor_store.view(), config);
+    errdefer model.deinit(allocator);
+    var weights = try zml.io.load(
         Flux2Transformer2DModel,
         &model,
         allocator,
         io,
         platform,
-        .{.parallelism = 1, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024},
+        .{ .parallelism = 16, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
     );
-
+    errdefer unloadWeights(allocator, &weights);
     return .{
         .model = model,
-        .store = tr_store,
-        .registry = tr_registry,
+        .store = tensor_store,
+        .registry = tensor_registry,
         .config = config,
         .weights = weights,
     };
