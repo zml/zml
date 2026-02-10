@@ -3969,12 +3969,11 @@ pub const Tensor = struct {
     }
 
     /// Insert code that will print the content of the given buffer at runtime.
+    /// Use the name parameter to differentiate different print calls in the output.
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
-    pub fn print(input: Tensor) Tensor {
-        // TODO(Corentin)
-        _ = input;
-        @panic("Unimplemented");
+    pub fn print(input: Tensor, name: []const u8) void {
+        _ = ops.customCall("zml$print", .{input}, .{}, .{ .name = name }, .{ .has_side_effect = true });
     }
 
     fn mlirCtx() *mlir.Context {

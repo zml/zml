@@ -321,6 +321,7 @@ pub const Attrs = extern struct {
     const Attr = extern union {
         scalar: Scalar,
         array: Array,
+        string: ByteSpan,
     };
 
     pub const Scalar = extern struct {

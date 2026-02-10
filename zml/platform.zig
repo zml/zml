@@ -2,7 +2,7 @@ const std = @import("std");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-const pjrtx = @import("pjrt");
+const pjrtx = @import("pjrtx.zig");
 const platforms = @import("platforms");
 pub const Target = platforms.Platform;
 const stdx = @import("stdx");
@@ -251,6 +251,18 @@ pub const Platform = struct {
             else => {},
         }
 
+        if (platform.pjrt_api.ffi()) |ffi| b: {
+            const platform_name = switch (target) {
+                .cuda => "cuda",
+                .rocm => "rocm",
+                .cpu => "host",
+                else => break :b,
+            };
+            ffi.register(platform.pjrt_api, "zml$print", platform_name, printCallback, .{ .command_buffer_compatible = false }) catch |e| {
+                log.warn("Failed to register \"print\" callback, error: {}", .{e});
+            };
+        }
+
         return platform;
     }
 
@@ -460,3 +472,91 @@ pub const cuda = struct {
         } else null;
     }
 };
+
+fn dataTypeFromFfiDataType(ffi_dt: pjrt.ffi.DataType) zml.DataType {
+    return switch (ffi_dt) {
+        .bool => .bool,
+        .i8 => .i8,
+        .i16 => .i16,
+        .i32 => .i32,
+        .i64 => .i64,
+        .u8 => .u8,
+        .u16 => .u16,
+        .u32 => .u32,
+        .u64 => .u64,
+        .f16 => .f16,
+        .f32 => .f32,
+        .f64 => .f64,
+        .bf16 => .bf16,
+        .c64 => .c64,
+        .c128 => .c128,
+        .f8e5m2 => .f8e5m2,
+        .f8e4m3fn => .f8e4m3fn,
+        .f8e4m3b11fnuz => .f8e4m3b11fnuz,
+        .f8e5m2fnuz => .f8e5m2fnuz,
+        .f8e4m3fnuz => .f8e4m3fnuz,
+        else => unreachable,
+    };
+}
+
+fn shapeFromFfiBuffer(buffer: *const pjrt.ffi.Buffer) zml.Shape {
+    return .init(buffer.dims(), dataTypeFromFfiDataType(buffer.dtype));
+}
+
+fn getScalarAttributeAs(comptime T: type, call_frame: *pjrt.ffi.CallFrame, attribute_name: []const u8) ?T {
+    const attribute = call_frame.attrs.getByName(.scalar, attribute_name) orelse return null;
+    return attribute.get(T);
+}
+
+fn printCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
+    return printCallbackInner(call_frame) catch |e| b: {
+        log.err("Error in print callback: {}", .{e});
+        break :b pjrt.ffi.Error.create(call_frame.api, .unknown, "Unknown");
+    };
+}
+
+fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
+    if (call_frame.registeringHook()) return null;
+
+    const pjrt_api: *pjrt.Api = @ptrFromInt(getScalarAttributeAs(u64, call_frame, "pjrt_api").?);
+    const pjrt_client: *pjrt.Client = @ptrFromInt(getScalarAttributeAs(u64, call_frame, "pjrt_client").?);
+
+    const device_ordinal: usize = @intCast(try call_frame.ctx.getDeviceOrdinal(call_frame.api));
+
+    const buffer = call_frame.args.buffers()[0];
+    const shape = shapeFromFfiBuffer(buffer);
+
+    // NOTE(Corentin): This is a hack. We take the first non device memory, hoping that it's host visible,
+    // and copy the buffer there to read it on the CPU and print it.
+    const device = pjrt_client.devices(pjrt_api)[device_ordinal];
+    const addressable_memories = device.addressableMemories(pjrt_api);
+    const first_non_device_memory = for (addressable_memories) |memory| {
+        if (!std.mem.eql(u8, memory.kind_(pjrt_api), "device")) break memory;
+    } else return error.MemoryNotFound;
+
+    var pjrt_buffer = try pjrt_client.createViewOfDeviceBuffer(pjrt_api, .{
+        .data = buffer.data,
+        .dims = shape.dims(),
+        .element_type = pjrtx.bufferTypeFromDtype(shape.dtype()),
+        .device = device,
+        .layout = .{
+            .tiled = .{
+                .minor_to_major = zml.constants.minorToMajor(shape.rank()),
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        },
+    });
+
+    pjrt_buffer = try pjrt_buffer.copyToMemory(pjrt_api, first_non_device_memory);
+    try pjrt_buffer.readyEvent(pjrt_api).awaitRaw(pjrt_api);
+
+    const host_visible_data: [*]u8 = @ptrCast(@alignCast(try pjrt_buffer.opaqueDeviceMemoryDataPointer(pjrt_api)));
+
+    const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
+    const name = call_frame.attrs.getByName(.string, "name").?.slice();
+
+    log.info("{s}: {d}", .{ name, slice });
+
+    return null;
+}
