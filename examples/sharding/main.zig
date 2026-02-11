@@ -318,28 +318,13 @@ pub fn main() !void {
     });
     log.info("{f}", .{mesh_model});
 
-    var strategy_data: zml.sharding.Strategy = try .suggest(allocator, mesh_data, physical_mesh);
-    defer strategy_data.deinit(allocator);
+    const strategy_data: zml.sharding.Strategy = try .suggest(mesh_data, physical_mesh);
+    const strategy_model: zml.sharding.Strategy = try .suggest(mesh_model, physical_mesh);
 
-    var strategy_model: zml.sharding.Strategy = try .suggest(allocator, mesh_model, physical_mesh);
-    defer strategy_model.deinit(allocator);
-
-    var sharding_data: zml.sharding.Sharding = try .initFromStrategy(
-        allocator,
-        mesh_data,
-        physical_mesh,
-        strategy_data,
-    );
-    defer sharding_data.deinit();
+    const sharding_data: zml.sharding.Sharding = try .initFromStrategy(mesh_data, physical_mesh, strategy_data);
     log.info("{f}", .{sharding_data});
 
-    var sharding_model: zml.sharding.Sharding = try .initFromStrategy(
-        allocator,
-        mesh_model,
-        physical_mesh,
-        strategy_model,
-    );
-    defer sharding_model.deinit();
+    const sharding_model: zml.sharding.Sharding = try .initFromStrategy(mesh_model, physical_mesh, strategy_model);
     log.info("{f}", .{sharding_model});
 
     try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
