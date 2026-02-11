@@ -1066,7 +1066,6 @@ pub const Flux2Transformer2DModel = struct {
     const debug_double_block_limit: ?usize = null;
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !@This() {
-
         const blocks = try allocator.alloc(Flux2TransformerBlock, @intCast(config.num_layers));
         for (blocks, 0..) |*b, i| {
             var buf: [64]u8 = undefined;
@@ -1432,7 +1431,7 @@ pub const ModelContext = struct {
         self.registry.deinit();
     }
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
 
         const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
@@ -1457,7 +1456,7 @@ pub const ModelContext = struct {
             allocator,
             io,
             platform,
-            .{ .parallelism = 16, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
+            .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
         errdefer unloadWeights(allocator, &weights);
         return .{

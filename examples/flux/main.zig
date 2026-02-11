@@ -47,32 +47,39 @@ pub const std_options: std.Options = .{
 // --generator-type=accelerator_box_muller \
 // --async-limit=1
 
+// --prompt="a photo of a cat sleeping on a licorne in magic forest" \
+
 // bazel run //examples/flux -- \
 // --model=/Users/kevin/FLUX.2-klein-4B \
 // --prompt="a photo of a cat sleeping on the sofa" \
 // --output-image-path=/Users/kevin/zml/flux_klein_zml_result.png \
-// --output-image-size=128 \
+// --resolution=HLD \
 // --num-inference-steps=1 \
 // --random-seed=1 \
 // --generator-type=torch \
+// --data-type=f32 \
 // --async-limit=1
+
+const Resolution = enum { HLD, LD, SD, HD, FHD, QHD, UHD };
 
 const CliArgs = struct {
     model: []const u8 = "hf://black-forest-labs/FLUX.2-klein-4B",
     prompt: []const u8 = "A photo of a cat",
-    seqlen: usize = 256,
+    seqlen: usize = 512,
     output_image_path: []const u8 = "output.png",
-    output_image_size: usize = 128,
     random_seed: u64 = 0,
     num_inference_steps: usize = 4,
     async_limit: ?usize = null,
-    generator_type: utils.GeneratorType = .torch,
-    // 3840x2160
-    // 1920x1080
-    // 1024x1024
-    // 1280x720
-    // 512x512
-    const Resolution = enum { HLD, LD, SD, HD, FHD, QHD, UHD };
+    generator_type: utils.GeneratorType = .accelerator_box_muller,
+    data_type: zml.DataType = .f32,
+    // 8K UHD 7680x4320
+    // 4K QHD 3840x2160
+    // FHD 1920x1080
+    // HD 1280x720
+    // SD 512x512
+    // LD 256x256
+    // HLD 128x128
+    resolution: Resolution = .HLD,
 
     pub const help =
         \\ Usage: flux \
@@ -122,12 +129,12 @@ pub fn main() !void {
     defer vfs.deinit();
 
     const io = vfs.io();
-
-    var platform_auto: *zml.Platform = try zml.Platform.init(allocator, io, .cpu, .{});
-    defer platform_auto.deinit(allocator);
-
     const args = stdx.flags.parseProcessArgs(CliArgs);
     log.info("args: {s} : {s} : {d}", .{ args.model, args.prompt, args.seqlen });
+
+    // var platform_auto: *zml.Platform = try zml.Platform.init(allocator, io, .cpu, .{});
+    var platform_auto: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
+    defer platform_auto.deinit(allocator);
 
     var http_client: std.http.Client = .{
         .allocator = allocator,
@@ -158,15 +165,19 @@ pub fn main() !void {
         std.log.info("Stage Debug Disabled", .{});
     }
 
+    const parallelism_level: usize = if (args.async_limit) |limit| limit else try std.Thread.getCpuCount();
+
+    std.log.info("Parallelism Level: {}", .{parallelism_level});
+
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
     // ==================== Tokenizing Prompt ====================
 
-    log.info("\n>>> Tokenizing Prompt...", .{});
-
-    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineTokenizer, .{ allocator, io, repo, platform_auto, null, .{ .prompt = args.prompt, .max_length = args.seqlen } });
+    var qwen2_node = progress.start("Tokenizing Prompt", 0);
+    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineTokenizer, .{ allocator, io, repo, platform_auto, &qwen2_node, .{ .prompt = args.prompt, .max_length = args.seqlen } });
 
     defer _ = qwen2_future.cancel(io) catch unreachable;
+    qwen2_node.end();
 
     var tokens = try qwen2_future.await(io);
     defer tokens.deinit();
@@ -178,10 +189,8 @@ pub fn main() !void {
 
     // ==================== Encoding Prompt ====================
 
-    // Qwen3ForCausalLM
-    log.info("\n>>> Encoding Prompt...", .{});
     var qwen_node = progress.start("Loading Qwen3", 0);
-    var qwen3_model_ctx = try modeling_qwen3.Qwen3ForCausalLM.loadFromFile(allocator, io, platform_auto, repo, &qwen_node);
+    var qwen3_model_ctx = try modeling_qwen3.Qwen3ForCausalLM.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &qwen_node);
     qwen_node.end();
     defer qwen3_model_ctx.deinit(allocator);
 
@@ -269,7 +278,7 @@ pub fn main() !void {
 
     // 2. Load Transformer & Scheduler
     var flux2_transformer2d_node = progress.start("Loading Flux2Transformer2DModel", 0);
-    var transformer2d_model_ctx = try flux_model_transformer2d.ModelContext.loadFromFile(allocator, io, platform_auto, repo, &flux2_transformer2d_node, .{});
+    var transformer2d_model_ctx = try flux_model_transformer2d.ModelContext.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &flux2_transformer2d_node, .{});
     defer transformer2d_model_ctx.deinit(allocator);
     flux2_transformer2d_node.end();
 
@@ -283,7 +292,17 @@ pub fn main() !void {
     // 3. Prepare Latents
     log.info(">>Preparing Latents...", .{});
 
-    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, args.output_image_size, args.generator_type, args.random_seed);
+    const output_image_dim: utils.ResolutionInfo = switch (args.resolution) {
+        .HLD => .{ .width = 128, .height = 128 },
+        .LD => .{ .width = 256, .height = 256 },
+        .SD => .{ .width = 512, .height = 512 },
+        .HD => .{ .width = 1280, .height = 720 },
+        .FHD => .{ .width = 1920, .height = 1080 },
+        .QHD => .{ .width = 2560, .height = 1440 },
+        .UHD => .{ .width = 3840, .height = 2160 },
+    };
+
+    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
 

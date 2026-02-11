@@ -416,7 +416,7 @@ pub const Qwen3ForCausalLM = struct {
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node) !ModelContext {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node) !ModelContext {
         @setEvalBranchQuota(10_000);
         const subfolder = "text_encoder";
 
@@ -442,7 +442,7 @@ pub const Qwen3ForCausalLM = struct {
             allocator,
             io,
             platform,
-            .{ .parallelism = 16, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
+            .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
         errdefer unloadWeights(allocator, &weights);
         return .{

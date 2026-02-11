@@ -140,12 +140,17 @@ pub fn compute_empirical_mu(image_seq_len: f64, num_steps: f64) f32 {
     return @floatCast(a * num_steps + b);
 }
 
+pub const ResolutionInfo = struct {
+    width: usize,
+    height: usize,
+};
+
 pub fn get_latents(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
     config: flux_model.Config,
-    img_dim: usize,
+    img_dim: ResolutionInfo,
     generator_type: GeneratorType,
     seed: u64,
 ) !struct { zml.Buffer, zml.Buffer } {
@@ -154,8 +159,8 @@ pub fn get_latents(
 
     const batch_size = 1;
     const num_channels_latents = @as(usize, @intCast(in_channels));
-    const adjusted_height = (img_dim / (vae_scale_factor * 2));
-    const adjusted_width = (img_dim / (vae_scale_factor * 2));
+    const adjusted_height = (img_dim.height / (vae_scale_factor * 2));
+    const adjusted_width = (img_dim.width / (vae_scale_factor * 2));
 
     const shape_latents = [_]usize{ batch_size, num_channels_latents, adjusted_height, adjusted_width };
     const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
