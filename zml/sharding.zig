@@ -13,144 +13,145 @@ const Target = @import("platform.zig").Target;
 const log = std.log.scoped(.@"zml/sharding");
 
 // todo: check for disagregated prefill (compile on device #1)
+// todo: migrate tests
 
-pub const Partitioner = union(enum) {
-    shardy,
-    gspmd,
+pub const Partitioning = struct {
+    pub const Partitioner = union(enum) {
+        shardy,
+        gspmd,
 
-    pub fn fromTarget(target: Target) Partitioner {
-        return switch (target) {
-            .cpu, .cuda, .rocm, .tpu => .shardy,
-            .neuron => .gspmd,
+        pub fn fromTarget(target: Target) Partitioner {
+            return switch (target) {
+                .cpu, .cuda, .rocm, .tpu => .shardy,
+                .neuron => .gspmd,
+            };
+        }
+    };
+
+    pub const MeshDescriptor = struct {
+        name: []const u8,
+        attr: []const u8,
+    };
+
+    pub const Cardinality = struct {
+        num_partitions: i32,
+        num_replicas: i32,
+    };
+
+    partitioner: Partitioner,
+    shardings: []const Sharding,
+
+    pub fn init(partitioner: Partitioner, shardings: []const Sharding) !Partitioning {
+        stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
+        var plan: Partitioning = .{ .partitioner = partitioner, .shardings = shardings };
+
+        const first = plan.primarySharding();
+        const partitions = first.numPartitions();
+        const replicas = first.numReplicas();
+
+        for (shardings[1..]) |s| {
+            if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
+                // todo deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
+                return error.InconsistentShardingCardinality;
+            }
+        }
+
+        return plan;
+    }
+
+    pub fn kind(self: Partitioning) Partitioner {
+        return self.partitioner;
+    }
+
+    pub fn numPartitions(self: Partitioning) !i32 {
+        return self.cardinality().num_partitions;
+    }
+
+    pub fn numReplicas(self: Partitioning) !i32 {
+        return self.cardinality().num_replicas;
+    }
+
+    pub fn numDevices(self: Partitioning) !i32 {
+        const card = self.cardinality();
+        return card.num_partitions * card.num_replicas;
+    }
+
+    pub fn deviceAssignment(self: Partitioning, allocator: std.mem.Allocator) ![]usize {
+        return switch (self.partitioner) {
+            .shardy => blk: {
+                const sharding = self.primarySharding();
+                break :blk sharding.deviceAssignment(allocator);
+            },
+            .gspmd => error.UnimplementedPartitioner,
         };
     }
 
-    pub const Plan = struct {
-        pub const MeshDescriptor = struct {
-            name: []const u8,
-            attr: []const u8,
+    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?[]const u8 {
+        return switch (self.partitioner) {
+            .shardy => sharding.shardingAttrForShape(allocator, shape),
+            .gspmd => null,
         };
+    }
 
-        pub const Cardinality = struct {
-            num_partitions: i32,
-            num_replicas: i32,
+    pub fn meshDescriptors(self: Partitioning, allocator: std.mem.Allocator) ![]MeshDescriptor {
+        return switch (self.partitioner) {
+            .shardy => blk: {
+                var list = std.array_list.Managed(MeshDescriptor).init(allocator);
+                errdefer list.deinit();
+
+                for (self.shardings) |sharding| {
+                    const name = sharding.meshName();
+                    const attr: []u8 = blk2: {
+                        var out: std.Io.Writer.Allocating = .init(allocator);
+                        errdefer out.deinit();
+
+                        const view = sharding.physicalView();
+                        try out.writer.writeAll("#sdy.mesh<[");
+                        for (view.axes.constSlice(), 0..) |p, i| {
+                            if (i > 0) try out.writer.writeAll(", ");
+                            try out.writer.print("\"{s}\"={d}", .{ @tagName(p.tag), p.size });
+                        }
+                        try out.writer.writeAll("]>");
+
+                        break :blk2 try out.toOwnedSlice();
+                    };
+                    try list.append(.{ .name = name, .attr = attr });
+                }
+
+                break :blk try list.toOwnedSlice();
+            },
+            .gspmd => error.UnimplementedPartitioner,
         };
+    }
 
-        partitioner: Partitioner,
-        shardings: []const Sharding,
+    pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
+        for (self.shardings) |s| {
+            if (self.shardingCoversShape(s, shape)) return s;
+        }
 
-        pub fn init(partitioner: Partitioner, shardings: []const Sharding) !Plan {
-            stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
-            var plan: Plan = .{ .partitioner = partitioner, .shardings = shardings };
+        return error.NoSuitableSharding;
+    }
 
-            const first = plan.primarySharding();
-            const partitions = first.numPartitions();
-            const replicas = first.numReplicas();
+    fn cardinality(self: Partitioning) Cardinality {
+        const first = self.primarySharding();
 
-            for (shardings[1..]) |s| {
-                if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
-                    // todo deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
-                    return error.InconsistentShardingCardinality;
-                }
+        return .{ .num_partitions = first.numPartitions(), .num_replicas = first.numReplicas() };
+    }
+
+    fn primarySharding(self: Partitioning) Sharding {
+        return self.shardings[0];
+    }
+
+    fn shardingCoversShape(self: Partitioning, sharding: Sharding, shape: Shape) bool {
+        _ = self;
+        for (0..shape.rank()) |ax| {
+            switch (shape.partition(ax)) {
+                .axis => |tag| if (sharding.binding(tag) == null) return false,
+                else => {},
             }
-
-            return plan;
         }
-
-        pub fn kind(self: Plan) Partitioner {
-            return self.partitioner;
-        }
-
-        pub fn numPartitions(self: Plan) !i32 {
-            return self.cardinality().num_partitions;
-        }
-
-        pub fn numReplicas(self: Plan) !i32 {
-            return self.cardinality().num_replicas;
-        }
-
-        pub fn numDevices(self: Plan) !i32 {
-            const card = self.cardinality();
-            return card.num_partitions * card.num_replicas;
-        }
-
-        pub fn deviceAssignment(self: Plan, allocator: std.mem.Allocator) ![]usize {
-            return switch (self.partitioner) {
-                .shardy => blk: {
-                    const sharding = self.primarySharding();
-                    break :blk sharding.deviceAssignment(allocator);
-                },
-                .gspmd => error.UnimplementedPartitioner,
-            };
-        }
-
-        pub fn tensorShardingAttr(self: Plan, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?[]const u8 {
-            return switch (self.partitioner) {
-                .shardy => sharding.shardingAttrForShape(allocator, shape),
-                .gspmd => null,
-            };
-        }
-
-        pub fn meshDescriptors(self: Plan, allocator: std.mem.Allocator) ![]MeshDescriptor {
-            return switch (self.partitioner) {
-                .shardy => blk: {
-                    var list = std.array_list.Managed(MeshDescriptor).init(allocator);
-                    errdefer list.deinit();
-
-                    for (self.shardings) |sharding| {
-                        const name = sharding.meshName();
-                        const attr: []u8 = blk2: {
-                            var out: std.Io.Writer.Allocating = .init(allocator);
-                            errdefer out.deinit();
-
-                            const view = sharding.physicalView();
-                            try out.writer.writeAll("#sdy.mesh<[");
-                            for (view.axes.constSlice(), 0..) |p, i| {
-                                if (i > 0) try out.writer.writeAll(", ");
-                                try out.writer.print("\"{s}\"={d}", .{ @tagName(p.tag), p.size });
-                            }
-                            try out.writer.writeAll("]>");
-
-                            break :blk2 try out.toOwnedSlice();
-                        };
-                        try list.append(.{ .name = name, .attr = attr });
-                    }
-
-                    break :blk try list.toOwnedSlice();
-                },
-                .gspmd => error.UnimplementedPartitioner,
-            };
-        }
-
-        pub fn selectSharding(self: Plan, shape: Shape) !Sharding {
-            for (self.shardings) |s| {
-                if (self.shardingCoversShape(s, shape)) return s;
-            }
-
-            return error.NoSuitableSharding;
-        }
-
-        fn cardinality(self: Plan) Cardinality {
-            const first = self.primarySharding();
-
-            return .{ .num_partitions = first.numPartitions(), .num_replicas = first.numReplicas() };
-        }
-
-        fn primarySharding(self: Plan) Sharding {
-            return self.shardings[0];
-        }
-
-        fn shardingCoversShape(self: Plan, sharding: Sharding, shape: Shape) bool {
-            _ = self;
-            for (0..shape.rank()) |ax| {
-                switch (shape.partition(ax)) {
-                    .axis => |tag| if (sharding.binding(tag) == null) return false,
-                    else => {},
-                }
-            }
-            return true;
-        }
-    };
+        return true;
+    }
 };
 
 /// Device is the leaf representation in a PhysicalMesh.

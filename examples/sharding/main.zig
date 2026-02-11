@@ -183,9 +183,9 @@ fn runAdditionExample(
 
     const model: AddModel = .init();
 
-    var shardings = [_]zml.sharding.Sharding{ sharding_data, sharding_model };
+    // var shardings = [_]zml.sharding.Sharding{ sharding_data, sharding_model };
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, try .init(.shardy, shardings[0..]));
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{ .partitioner = .shardy, .shardings = &.{ sharding_data, sharding_model } });
     defer exe.deinit();
 
     var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_data, 0.0);
@@ -267,12 +267,6 @@ pub fn main() !void {
     // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
     // defer physical_mesh.deinit();
 
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .cuda, .{ .link = 8 }, .tree);
-    // defer physical_mesh.deinit();
-
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .init(allocator, .neuron, .{ .bus = 2, .link = 12 }, .{ .ring = .closed_ring });
-    // defer physical_mesh.deinit();
-
     var physical_mesh: zml.sharding.PhysicalMesh = blk: {
         if (device_count == 9) {
             const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
@@ -303,28 +297,18 @@ pub fn main() !void {
 
     log.info("{f}", .{physical_mesh});
 
-    // 2D logical mesh (data)
-    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{
-        .batch = .low_bandwidth,
-        .context = .balanced,
-    });
-    log.info("{f}", .{mesh_data});
-
-    // 3D logical mesh (model)
-    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{
-        .model = .high_bandwidth,
-        .head = .balanced,
-        .expert = .low_bandwidth,
-    });
-    log.info("{f}", .{mesh_model});
+    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{ .batch = .low_bandwidth, .context = .balanced });
+    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{ .model = .high_bandwidth, .head = .balanced, .expert = .low_bandwidth });
 
     const strategy_data: zml.sharding.Strategy = try .suggest(mesh_data, physical_mesh);
     const strategy_model: zml.sharding.Strategy = try .suggest(mesh_model, physical_mesh);
 
     const sharding_data: zml.sharding.Sharding = try .initFromStrategy(mesh_data, physical_mesh, strategy_data);
-    log.info("{f}", .{sharding_data});
-
     const sharding_model: zml.sharding.Sharding = try .initFromStrategy(mesh_model, physical_mesh, strategy_model);
+
+    log.info("{f}", .{mesh_data});
+    log.info("{f}", .{mesh_model});
+    log.info("{f}", .{sharding_data});
     log.info("{f}", .{sharding_model});
 
     try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);

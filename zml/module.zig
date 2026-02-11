@@ -12,7 +12,7 @@ const Exe = @import("exe.zig").Exe;
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
-const Partitioner = @import("sharding.zig").Partitioner;
+const Partitioning = @import("sharding.zig").Partitioning;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
@@ -22,11 +22,9 @@ const Tensor = @import("tensor.zig").Tensor;
 const log = std.log.scoped(.@"zml/module");
 
 pub const CompilationOpts = struct {
-    partitioning: Partitioner.Plan,
-
-    pub fn init(partitioner: Partitioner, shardings: []const Sharding) !CompilationOpts {
-        return .{ .partitioning = try .init(partitioner, shardings) };
-    }
+    shardings: []const Sharding = &.{},
+    // If null, will be initialized from the target
+    partitioner: ?Partitioning.Partitioner = null,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -63,7 +61,7 @@ pub const CompilationContext = struct {
     mlir_pass_manager: *mlir.PassManager,
     module: *mlir.Module,
     platform: *const Platform,
-    opts: CompilationOpts,
+    partitioning: Partitioning,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
 
@@ -110,7 +108,7 @@ pub const CompilationContext = struct {
             .mlir_pass_manager = pass_manager,
             .module = module,
             .platform = platform,
-            .opts = opts,
+            .partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable,
         };
     }
 
@@ -158,7 +156,7 @@ fn addPartitionerMeshes(compilation_context: *CompilationContext) !void {
     const allocator = compilation_context.arena.allocator();
     const mlir_ctx = compilation_context.mlir_ctx;
     const module = compilation_context.module;
-    const partitioning = compilation_context.opts.partitioning;
+    const partitioning = compilation_context.partitioning;
 
     const meshes = try partitioning.meshDescriptors(allocator);
 
@@ -178,12 +176,11 @@ fn addPartitionerMeshes(compilation_context: *CompilationContext) !void {
     }
 }
 
-// todo: migrate tests
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform, opts);
     defer compilation_context.deinit();
 
-    const result = emitMlir(&compilation_context, func, args, opts) catch unreachable;
+    const result = emitMlir(&compilation_context, func, args) catch unreachable;
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
@@ -191,9 +188,9 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
 
     _ = result.func.appendTo(compilation_context.module.body());
 
-    const num_partitions = try opts.partitioning.numPartitions();
-    const num_replicas = try opts.partitioning.numReplicas();
-    const num_devices = try opts.partitioning.numDevices();
+    const num_partitions = try compilation_context.partitioning.numPartitions();
+    const num_replicas = try compilation_context.partitioning.numReplicas();
+    const num_devices = try compilation_context.partitioning.numDevices();
 
     compilation_context.module.operation().setAttributeByName(
         "mhlo.num_partitions",
@@ -214,7 +211,7 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, opts) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning) catch unreachable;
 
     log.info("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
@@ -250,14 +247,14 @@ pub const OutputInfo = struct {
     }
 };
 
-fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioner.Plan, v: anytype) !OutputInfo {
+fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !OutputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
         sharding_list: *std.array_list.Managed(Sharding),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
         output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
-        partitioning: Partitioner.Plan,
+        partitioning: Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
@@ -309,11 +306,11 @@ pub const InputInfo = struct {
     }
 };
 
-fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioner.Plan, v: anytype) !InputInfo {
+fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !InputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
         sharding_list: *std.array_list.Managed(Sharding),
-        partitioning: Partitioner.Plan,
+        partitioning: Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
@@ -355,7 +352,7 @@ fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context,
     return res;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func), opts: CompilationOpts) !EmitMlirResult {
+fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 
@@ -387,7 +384,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    const input_info = try collectInputInfo(compilation_context.allocator, opts.partitioning, &args);
+    const input_info = try collectInputInfo(compilation_context.allocator, compilation_context.partitioning, &args);
     errdefer input_info.deinit(compilation_context.allocator);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
@@ -399,7 +396,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
         const result = @call(.auto, func, args);
 
-        const output_info = try collectOutputInfo(compilation_context.allocator, opts.partitioning, &result);
+        const output_info = try collectOutputInfo(compilation_context.allocator, compilation_context.partitioning, &result);
         errdefer output_info.deinit(compilation_context.allocator);
 
         break :b output_info;
@@ -426,7 +423,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
-        if (try opts.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
+        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
             const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
             input_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
@@ -437,7 +434,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
-        if (try opts.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
+        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
             const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
             output_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
@@ -485,20 +482,20 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, opts: CompilationOpts) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
 
-    const use_shardy_partitioner = switch (opts.partitioning.partitioner) {
+    const use_shardy_partitioner = switch (partitioning.partitioner) {
         .shardy => true,
         .gspmd => false,
     };
 
-    const num_partitions = try opts.partitioning.numPartitions();
-    const num_replicas = try opts.partitioning.numReplicas();
+    const num_partitions = try partitioning.numPartitions();
+    const num_replicas = try partitioning.numReplicas();
 
-    const device_assignment = try opts.partitioning.deviceAssignment(arena);
+    const device_assignment = try partitioning.deviceAssignment(arena);
 
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
