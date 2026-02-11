@@ -14,7 +14,7 @@ const LogMelSpectrogram = mel.LogMelSpectrogram;
 
 const CliArgs = struct {
     input: []const u8,
-    // output: []const u8,
+    model: []const u8,
 };
 
 pub fn main() !void {
