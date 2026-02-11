@@ -183,8 +183,6 @@ fn runAdditionExample(
 
     const model: AddModel = .init();
 
-    // var shardings = [_]zml.sharding.Sharding{ sharding_data, sharding_model };
-
     var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{ .partitioner = .shardy, .shardings = &.{ sharding_data, sharding_model } });
     defer exe.deinit();
 

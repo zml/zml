@@ -13,6 +13,7 @@ const Target = @import("platform.zig").Target;
 const log = std.log.scoped(.@"zml/sharding");
 
 // todo: check for disagregated prefill (compile on device #1)
+// todo: default compilation opts 1 device, no logical mesh, no sharding, etc.
 // todo: migrate tests
 
 pub const Partitioning = struct {
@@ -41,7 +42,7 @@ pub const Partitioning = struct {
 
         for (shardings[1..]) |s| {
             if (s.numPartitions() != partitions or s.numReplicas() != replicas) {
-                // todo deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
+                // todo: deviceAssignments should also be checked for consistency here, but for simplicity we just check the cardinality numbers
                 return error.InconsistentShardingCardinality;
             }
         }
@@ -65,20 +66,14 @@ pub const Partitioning = struct {
 
     pub fn deviceAssignment(self: Partitioning, allocator: std.mem.Allocator) ![]usize {
         return switch (self.partitioner) {
-            .shardy => blk: {
+            .shardy, .gspmd => blk: {
                 const sharding = self.primarySharding();
                 break :blk sharding.deviceAssignment(allocator);
             },
-            .gspmd => error.UnimplementedPartitioner,
         };
     }
 
-    pub const TensorShardingAttr = struct {
-        name: []const u8,
-        attr: []const u8,
-    };
-
-    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?TensorShardingAttr {
+    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?struct { name: []const u8, attr: []const u8 } {
         return switch (self.partitioner) {
             .shardy => if (try sharding.sdyShardingAttrForShape(allocator, shape)) |attr| .{
                 .name = "sdy.sharding",
@@ -1004,6 +999,55 @@ pub const Sharding = struct {
         return try out.toOwnedSlice();
     }
 
+    const DimMapping = struct {
+        /// For each tensor dimension, the indices of physical axes (in PhysicalView) sharding it.
+        axes_per_dim: stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK),
+        /// Indices of physical axes used for replication.
+        replicated_axes: stdx.BoundedArray(usize, Shape.MAX_RANK),
+        /// Reference to the view for sizes.
+        view: PhysicalView,
+    };
+
+    /// Common logic to map tensor dimensions to physical mesh indices.
+    fn getDimMapping(self: *const Sharding, shape: Shape) DimMapping {
+        const view = self.physicalView();
+        var axes_per_dim = stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK).init(0) catch unreachable;
+        var used_mask = [_]bool{false} ** Shape.MAX_RANK;
+        var globally_used = std.EnumSet(PhysicalAxisTag).initEmpty();
+
+        for (0..shape.rank()) |ax| {
+            var dim_axes = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
+            const spec = shape.partition(ax);
+
+            if (spec == .axis) {
+                if (self.binding(spec.axis)) |binding_| {
+                    for (binding_) |p_tag| {
+                        for (view.axes.constSlice(), 0..) |v_ax, i| {
+                            // Only use the axis if it's bound and hasn't been consumed by a previous dimension
+                            if (v_ax.contains(p_tag) and !globally_used.contains(v_ax.tag)) {
+                                dim_axes.appendAssumeCapacity(i);
+                                globally_used.insert(v_ax.tag);
+                                used_mask[i] = true;
+                            }
+                        }
+                    }
+                }
+            }
+            axes_per_dim.appendAssumeCapacity(dim_axes);
+        }
+
+        var replicated_axes = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
+        for (0..view.axes.len) |i| {
+            if (!used_mask[i]) replicated_axes.appendAssumeCapacity(i);
+        }
+
+        return .{
+            .axes_per_dim = axes_per_dim,
+            .replicated_axes = replicated_axes,
+            .view = view,
+        };
+    }
+
     pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
@@ -1014,46 +1058,26 @@ pub const Sharding = struct {
         }
         if (!any_explicit) return null;
 
+        const mapping = self.getDimMapping(shape);
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
         try out.writer.print("#sdy.sharding<@{s}, [", .{self.name()});
-        const view = self.physicalView();
-
-        var used_in_any_dim = std.EnumSet(PhysicalAxisTag).initEmpty();
-        var locally_used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
-
         for (0..shape.rank()) |ax| {
             if (ax > 0) try out.writer.writeAll(", ");
             const spec = shape.partition(ax);
 
             switch (spec) {
                 .axis => |logical_tag| {
-                    const binding_opt = self.binding(logical_tag);
-
-                    if (binding_opt) |binding_| {
-                        var dim_view_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
-                        for (binding_) |p_tag| {
-                            for (view.axes.constSlice()) |v_ax| {
-                                if (v_ax.contains(p_tag) and !locally_used_axes.contains(v_ax.tag)) {
-                                    dim_view_axes.insert(v_ax.tag);
-                                    locally_used_axes.insert(v_ax.tag);
-                                    used_in_any_dim.insert(v_ax.tag);
-                                }
-                            }
-                        }
-
-                        if (dim_view_axes.count() == 0) {
+                    if (self.binding(logical_tag)) |_| {
+                        const dim_phys_indices = mapping.axes_per_dim.get(ax);
+                        if (dim_phys_indices.len == 0) {
                             try out.writer.writeAll("{}");
                         } else {
                             try out.writer.writeAll("{");
-                            var first = true;
-                            for (view.axes.constSlice()) |v_ax| {
-                                if (dim_view_axes.contains(v_ax.tag)) {
-                                    if (!first) try out.writer.writeAll(", ");
-                                    try out.writer.print("\"{s}\"", .{@tagName(v_ax.tag)});
-                                    first = false;
-                                }
+                            for (dim_phys_indices.constSlice(), 0..) |p_idx, i| {
+                                if (i > 0) try out.writer.writeAll(", ");
+                                try out.writer.print("\"{s}\"", .{@tagName(mapping.view.axes.get(p_idx).tag)});
                             }
                             try out.writer.writeAll("}");
                         }
@@ -1067,24 +1091,101 @@ pub const Sharding = struct {
         }
         try out.writer.writeAll("]");
 
-        var first_repl = true;
-        for (view.axes.constSlice()) |v_ax| {
-            if (!used_in_any_dim.contains(v_ax.tag)) {
-                if (first_repl) {
-                    try out.writer.writeAll(", replicated={");
-                    first_repl = false;
-                } else try out.writer.writeAll(", ");
-                try out.writer.print("\"{s}\"", .{@tagName(v_ax.tag)});
+        if (mapping.replicated_axes.len > 0) {
+            try out.writer.writeAll(", replicated={");
+            for (mapping.replicated_axes.constSlice(), 0..) |p_idx, i| {
+                if (i > 0) try out.writer.writeAll(", ");
+                try out.writer.print("\"{s}\"", .{@tagName(mapping.view.axes.get(p_idx).tag)});
             }
+            try out.writer.writeAll("}");
         }
-        if (!first_repl) try out.writer.writeAll("}");
         try out.writer.writeAll(">");
         return try out.toOwnedSlice();
     }
 
-    pub fn gspmdShardingAttrForShape(_: Sharding, _: std.mem.Allocator, _: Shape) !?[]const u8 {
-        // todo: implement
-        return error.NotImplemented;
+    pub fn gspmdShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
+        var has_sharding = false;
+        for (0..shape.rank()) |ax| {
+            if (shape.partition(ax) == .axis) {
+                has_sharding = true;
+                break;
+            }
+        }
+        // If the tensor is fully replicated, GSPMD usually prefers no attribute
+        // or the explicit "{replicated}" string.
+        if (!has_sharding) return null;
+
+        const mapping = self.getDimMapping(shape);
+        var tile_shape = stdx.BoundedArray(i64, Shape.MAX_RANK + 1).init(0) catch unreachable;
+        var permutation = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
+
+        //  Calculate tile sizes per tensor dimension
+        for (mapping.axes_per_dim.constSlice()) |dim_axes| {
+            var combined: i64 = 1;
+            for (dim_axes.constSlice()) |idx| {
+                combined *= mapping.view.axes.get(idx).size;
+                permutation.appendAssumeCapacity(idx);
+            }
+            tile_shape.appendAssumeCapacity(combined);
+        }
+
+        // Add replication dimension if physical axes are left over
+        const has_replication = mapping.replicated_axes.len > 0;
+        if (has_replication) {
+            var repl_size: i64 = 1;
+            for (mapping.replicated_axes.constSlice()) |idx| {
+                repl_size *= mapping.view.axes.get(idx).size;
+                permutation.appendAssumeCapacity(idx);
+            }
+            tile_shape.appendAssumeCapacity(repl_size);
+        }
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        errdefer out.deinit();
+
+        try out.writer.writeByte('"');
+
+        try out.writer.writeAll("{devices=[");
+        for (tile_shape.constSlice(), 0..) |s, i| {
+            if (i > 0) try out.writer.writeAll(",");
+            try out.writer.print("{d}", .{s});
+        }
+        try out.writer.writeAll("]<=[");
+        for (mapping.view.axes.constSlice(), 0..) |ax, i| {
+            if (i > 0) try out.writer.writeAll(",");
+            try out.writer.print("{d}", .{ax.size});
+        }
+        try out.writer.writeAll("]");
+
+        // Permutation T(...)
+        // Only emit T if it's not the identity permutation to keep the string clean.
+        var is_identity = (permutation.len == mapping.view.axes.len);
+        if (is_identity) {
+            for (permutation.constSlice(), 0..) |p, i| {
+                if (p != i) {
+                    is_identity = false;
+                    break;
+                }
+            }
+        }
+
+        if (!is_identity and permutation.len > 0) {
+            try out.writer.writeAll("T(");
+            for (permutation.constSlice(), 0..) |p, i| {
+                if (i > 0) try out.writer.writeAll(",");
+                try out.writer.print("{d}", .{p});
+            }
+            try out.writer.writeAll(")");
+        }
+
+        if (has_replication) {
+            try out.writer.writeAll(" last_tile_dim_replicate");
+        }
+
+        try out.writer.writeAll("}");
+        try out.writer.writeByte('"');
+
+        return try out.toOwnedSlice();
     }
 
     pub fn deviceAssignment(self: Sharding, allocator: std.mem.Allocator) ![]usize {
@@ -1581,7 +1682,7 @@ const ShardingTest = struct {
     pub fn run(self: ShardingTest, s: Scenario) !void {
         const sharding = try Sharding.initFromStrategy(s.logical, s.physical, s.strategy);
 
-        // 1. Verify MLIR String
+        // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
             const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape) orelse return error.ExpectedAnnotationButGotNull;
             defer self.allocator.free(actual_attr);
@@ -1594,13 +1695,13 @@ const ShardingTest = struct {
             }
         }
 
-        // 2. Verify Placement logic / Error
+        // Verify Placement logic / Error
         if (s.expect_error) |err| {
             try std.testing.expectError(err, Placement.init(sharding, s.shape));
             return;
         }
 
-        // 3. Verify Shard Slices (Math)
+        // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
             const placement = try Placement.init(sharding, s.shape);
             try std.testing.expectEqual(s.expected_shards.len, placement.shards.len);
