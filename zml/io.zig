@@ -451,8 +451,29 @@ pub const DirectMemoryWriter = struct {
             return std.Io.Writer.Error.WriteFailed;
         };
 
-        if (self.events_contexts[@intCast(self.flip_flop ^ 1)]) |*ctx_previous| {
-            defer self.events_contexts[@intCast(self.flip_flop ^ 1)] = null;
+        self.offset += written;
+        if (is_last) {
+            // We're the last buffer, so we're waiting on it, otherwise the PJRT callback will point to an invalid context.
+            try self.wait_for_transfer_on_current_flip_flop();
+            self.interface = .failing;
+        } else {
+            // Using the next context slot whenever it'll be available.
+            self.flip_flop ^= 1;
+            try self.wait_for_transfer_on_current_flip_flop();
+            self.interface.end = 0;
+            self.interface.buffer = self.pool.get(self.allocator, self.io) catch |err| {
+                log.err("unable to get a new buffer from the pool: {any}", .{err});
+                return std.Io.Writer.Error.WriteFailed;
+            };
+        }
+        return 0;
+    }
+
+    fn wait_for_transfer_on_current_flip_flop(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+        const ix: usize = @intCast(self.flip_flop);
+        const pjrt_api = self.memory.platform.pjrt_api;
+        if (self.events_contexts[ix]) |*ctx_previous| {
+            defer self.events_contexts[ix] = null;
             ctx_previous.event.waitUncancelable(self.io);
             defer ctx_previous.pjrt_event.deinit(pjrt_api);
             if (ctx_previous.err) |e| {
@@ -464,19 +485,6 @@ pub const DirectMemoryWriter = struct {
                 return std.Io.Writer.Error.WriteFailed;
             }
         }
-
-        self.flip_flop ^= 1;
-        self.offset += written;
-        if (is_last) {
-            self.interface = .failing;
-        } else {
-            self.interface.end = 0;
-            self.interface.buffer = self.pool.get(self.allocator, self.io) catch |err| {
-                log.err("unable to get a new buffer from the pool: {any}", .{err});
-                return std.Io.Writer.Error.WriteFailed;
-            };
-        }
-        return 0;
     }
 };
 
