@@ -829,8 +829,9 @@ pub const LogicalMesh = struct {
     }
 
     pub fn intent(self: LogicalMesh, tag: Shape.Tag) ?LogicalAxisIntent {
+        const target = std.mem.span(tag);
         for (self.axes.constSlice(), self.intents.constSlice()) |t, i| {
-            if (std.mem.eql(u8, std.mem.span(t), std.mem.span(tag))) return i;
+            if (std.mem.eql(u8, std.mem.span(t), target)) return i;
         }
 
         return null;
@@ -858,7 +859,7 @@ pub const LogicalMesh = struct {
 
 pub const Sharding = struct {
     pub const AxisList = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
-    pub const Bindings = std.AutoArrayHashMapUnmanaged(Shape.Tag, AxisList);
+    pub const Bindings = std.StringArrayHashMapUnmanaged(AxisList);
 
     pub const Axis = struct {
         tag: PhysicalAxisTag,
@@ -904,7 +905,7 @@ pub const Sharding = struct {
     folds: std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, AxisList),
 
     pub fn binding(self: Sharding, tag: Shape.Tag) ?[]const PhysicalAxisTag {
-        if (self.bindings.get(tag)) |axes| return axes.constSlice();
+        if (self.bindings.get(std.mem.span(tag))) |axes| return axes.constSlice();
         return null;
     }
 
@@ -1098,40 +1099,18 @@ pub const Sharding = struct {
         axis_used: std.EnumSet(PhysicalAxisTag),
         axis_order: []const PhysicalAxisTag,
     ) !std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, AxisList) {
+        _ = logical; // autofix
+        _ = bindings; // autofix
+        _ = axis_used; // autofix
+
         var folds: std.AutoArrayHashMapUnmanaged(PhysicalAxisTag, AxisList) = .{};
         errdefer folds.deinit(allocator);
 
-        // Start with identity folds for used axes.
         for (axis_order) |tag| {
-            if (axis_used.contains(tag)) {
+            if (physical.hasAxis(tag)) {
                 var one: AxisList = try .init(0);
                 one.appendAssumeCapacity(tag);
                 try folds.put(allocator, tag, one);
-            }
-        }
-
-        const fold_target = Sharding.selectFoldTarget(logical, bindings, physical) orelse axis_order[0];
-
-        // Collect unused axes (excluding fold_target).
-        var unused = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
-        for (axis_order) |tag| {
-            if (!axis_used.contains(tag) and tag != fold_target) {
-                unused.appendAssumeCapacity(tag);
-            }
-        }
-
-        // Ensure target exists.
-        var res = try folds.getOrPut(allocator, fold_target);
-        if (!res.found_existing) {
-            var one: AxisList = try .init(0);
-            one.appendAssumeCapacity(fold_target);
-            res.value_ptr.* = one;
-        }
-
-        // Append unused axes if missing.
-        for (unused.constSlice()) |tag| {
-            if (!Sharding.listContains(res.value_ptr.*, tag)) {
-                res.value_ptr.appendAssumeCapacity(tag);
             }
         }
 
@@ -1153,7 +1132,7 @@ pub const Sharding = struct {
         var best_size: i64 = -1;
 
         for (logical.axes.constSlice(), logical.intents.constSlice()) |l_tag, l_intent| {
-            const binding_ = bindings.get(l_tag) orelse continue;
+            const binding_ = bindings.get(std.mem.span(l_tag)) orelse continue;
             if (binding_.len == 0) continue;
 
             const p_tag = binding_.constSlice()[0];
@@ -1230,18 +1209,9 @@ pub const Sharding = struct {
     pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
-            switch (shape.partition(ax)) {
-                .axis => |logical_tag| {
-                    if (self.binding(logical_tag) != null) {
-                        any_explicit = true;
-                        break;
-                    }
-                },
-                .replicated, .open => {
-                    any_explicit = true;
-                    break;
-                },
-                .unknown => {},
+            if (shape.partition(ax) != .unknown) {
+                any_explicit = true;
+                break;
             }
         }
         if (!any_explicit) return null;
@@ -1250,76 +1220,77 @@ pub const Sharding = struct {
         errdefer out.deinit();
 
         try out.writer.print("#sdy.sharding<@{s}, [", .{self.meshName()});
-
         const view = self.physicalView();
-        var used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
+
+        // Tracks which mesh axes are used across the WHOLE tensor (for the replicated block)
+        var used_in_any_dim = std.EnumSet(PhysicalAxisTag).initEmpty();
+        // Tracks which mesh axes are used in THIS SPECIFIC tensor's dimensions
+        var locally_used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
 
         for (0..shape.rank()) |ax| {
             if (ax > 0) try out.writer.writeAll(", ");
-
             const spec = shape.partition(ax);
+
             switch (spec) {
                 .axis => |logical_tag| {
-                    const binding_opt = self.binding(logical_tag);
-                    if (binding_opt == null) {
-                        try out.writer.writeAll("{?}");
-                        continue;
-                    }
-                    const binding_ = binding_opt.?;
+                    const l_tag_slice = std.mem.span(logical_tag);
+                    var binding_opt: ?[]const PhysicalAxisTag = null;
 
-                    var wrote_any = false;
-                    var first = true;
-
-                    for (binding_) |p_tag| {
-                        for (view.axes.constSlice()) |axis| {
-                            if (axis.contains(p_tag) and !used_axes.contains(axis.tag)) {
-                                if (!wrote_any) {
-                                    try out.writer.writeAll("{");
-                                    wrote_any = true;
-                                }
-                                if (!first) try out.writer.writeAll(", ");
-                                try out.writer.print("\"{s}\"", .{@tagName(axis.tag)});
-                                used_axes.insert(axis.tag);
-                                first = false;
-                                break;
-                            }
+                    var b_it = self.bindings.iterator();
+                    while (b_it.next()) |entry| {
+                        if (std.mem.eql(u8, entry.key_ptr.*, l_tag_slice)) {
+                            binding_opt = entry.value_ptr.constSlice();
+                            break;
                         }
                     }
 
-                    if (!wrote_any) {
-                        try out.writer.writeAll("{?}");
+                    if (binding_opt) |binding_| {
+                        var dim_view_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
+                        for (binding_) |p_tag| {
+                            for (view.axes.constSlice()) |v_ax| {
+                                if (v_ax.contains(p_tag) and !locally_used_axes.contains(v_ax.tag)) {
+                                    dim_view_axes.insert(v_ax.tag);
+                                    locally_used_axes.insert(v_ax.tag);
+                                    used_in_any_dim.insert(v_ax.tag);
+                                }
+                            }
+                        }
+
+                        if (dim_view_axes.count() == 0) {
+                            try out.writer.writeAll("{}");
+                        } else {
+                            try out.writer.writeAll("{");
+                            var first = true;
+                            for (view.axes.constSlice()) |v_ax| {
+                                if (dim_view_axes.contains(v_ax.tag)) {
+                                    if (!first) try out.writer.writeAll(", ");
+                                    try out.writer.print("\"{s}\"", .{@tagName(v_ax.tag)});
+                                    first = false;
+                                }
+                            }
+                            try out.writer.writeAll("}");
+                        }
                     } else {
-                        try out.writer.writeAll("}");
+                        try out.writer.writeAll("{?}");
                     }
                 },
                 .replicated => try out.writer.writeAll("{}"),
-                .open => try out.writer.writeAll("{?}"),
-                .unknown => try out.writer.writeAll("{?}"),
+                .open, .unknown => try out.writer.writeAll("{?}"),
             }
         }
-
         try out.writer.writeAll("]");
 
-        var replicated_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
-        for (view.axes.constSlice()) |axis| {
-            if (!used_axes.contains(axis.tag)) {
-                replicated_axes.insert(axis.tag);
+        var first_repl = true;
+        for (view.axes.constSlice()) |v_ax| {
+            if (!used_in_any_dim.contains(v_ax.tag)) {
+                if (first_repl) {
+                    try out.writer.writeAll(", replicated={");
+                    first_repl = false;
+                } else try out.writer.writeAll(", ");
+                try out.writer.print("\"{s}\"", .{@tagName(v_ax.tag)});
             }
         }
-
-        if (replicated_axes.count() > 0) {
-            try out.writer.writeAll(", replicated={");
-            var first = true;
-            for (view.axes.constSlice()) |axis| {
-                if (replicated_axes.contains(axis.tag)) {
-                    if (!first) try out.writer.writeAll(", ");
-                    try out.writer.print("\"{s}\"", .{@tagName(axis.tag)});
-                    first = false;
-                }
-            }
-            try out.writer.writeAll("}");
-        }
-
+        if (!first_repl) try out.writer.writeAll("}");
         try out.writer.writeAll(">");
         return try out.toOwnedSlice();
     }
@@ -1327,6 +1298,7 @@ pub const Sharding = struct {
     pub fn shardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
         return self.sdyShardingAttrForShape(allocator, shape);
     }
+
     pub fn deviceAssignment(self: Sharding, allocator: std.mem.Allocator) ![]usize {
         const view = self.physicalView();
         const count: usize = @intCast(view.total_devices);
@@ -1355,7 +1327,7 @@ pub const Sharding = struct {
         for (self.logical.axes.constSlice(), self.logical.intents.constSlice()) |l_tag, l_intent| {
             try writer.print("  - {s} ({s}) -> ", .{ l_tag, @tagName(l_intent) });
 
-            if (self.bindings.get(l_tag)) |axes| {
+            if (self.bindings.get(std.mem.span(l_tag))) |axes| {
                 if (axes.len == 0) {
                     try writer.writeAll("replicated\n");
                 } else {
@@ -1403,13 +1375,14 @@ pub const Sharding = struct {
 
 pub const Strategy = struct {
     pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
+    pub const Bindings = std.StringArrayHashMapUnmanaged(Binding);
 
     pub const Binding = struct {
         logical: Shape.Tag,
         physical: PhysicalList,
     };
 
-    bindings: std.AutoArrayHashMapUnmanaged(Shape.Tag, Binding),
+    bindings: Bindings,
 
     /// Explicit folding rules: kept axis -> ordered source axes.
     /// Example: fold link_x + link_z into link_x => { link_x: [link_x, link_z] }
@@ -1426,18 +1399,21 @@ pub const Strategy = struct {
     }
 
     pub fn addBinding(self: *Strategy, allocator: std.mem.Allocator, logical: anytype, physical: PhysicalAxisTag) !void {
-        const logical_ = Shape.toTag(logical);
-        var res = try self.bindings.getOrPut(allocator, logical_);
+        const raw_tag = Shape.toTag(logical);
+        const logical_tag: []const u8 = std.mem.span(raw_tag);
+
+        var res = try self.bindings.getOrPut(allocator, logical_tag);
 
         if (!res.found_existing) {
             var list: PhysicalList = try .init(0);
             list.appendAssumeCapacity(physical);
-            res.value_ptr.* = .{ .logical = logical_, .physical = list };
+            res.value_ptr.* = .{ .logical = raw_tag, .physical = list };
             return;
         }
 
         res.value_ptr.physical.appendAssumeCapacity(physical);
     }
+
     /// Explicitly fold axes: `target` is the kept axis, `sources` define order.
     /// If `target` is missing from `sources`, it is prepended.
     pub fn addFold(self: *Strategy, allocator: std.mem.Allocator, target: PhysicalAxisTag, sources: []const PhysicalAxisTag) !void {
@@ -1465,64 +1441,39 @@ pub const Strategy = struct {
         var strategy: Strategy = .init;
         errdefer strategy.deinit(allocator);
 
-        var used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
         const base_order = physical.shardableAxes();
+        var available = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
+        for (base_order) |tag| {
+            if (physical.hasAxis(tag)) available.appendAssumeCapacity(tag);
+        }
 
-        inline for (.{ .high_bandwidth, .balanced, .low_bandwidth }) |intent| {
-            var preferred_axes: PhysicalList = try .init(0);
+        if (available.len == 0) {
+            for (physical.axisOrder().constSlice()) |tag| available.appendAssumeCapacity(tag);
+        }
 
-            switch (intent) {
-                .high_bandwidth => {
-                    for (base_order) |t| appendIfExists(physical, &preferred_axes, t);
-                },
-                .balanced => {
-                    if (base_order.len > 1) {
-                        for (base_order[1..]) |t| appendIfExists(physical, &preferred_axes, t);
-                        appendIfExists(physical, &preferred_axes, base_order[0]);
-                    } else if (base_order.len == 1) {
-                        appendIfExists(physical, &preferred_axes, base_order[0]);
-                    }
-                },
-                .low_bandwidth => {
-                    var i = base_order.len;
-                    while (i > 0) : (i -= 1) {
-                        appendIfExists(physical, &preferred_axes, base_order[i - 1]);
-                    }
-                },
-                else => unreachable,
-            }
+        const avail = available.constSlice();
+        var counters = std.EnumArray(LogicalAxisIntent, usize).initFill(0);
 
-            if (preferred_axes.len == 0) {
-                for (physical.axisOrder().constSlice()) |t| {
-                    preferred_axes.appendAssumeCapacity(t);
-                }
-            }
+        inline for (std.meta.tags(LogicalAxisIntent)) |target_intent| {
+            for (logical.axes.constSlice(), logical.intents.constSlice()) |l_tag, l_intent| {
+                if (l_intent != target_intent) continue;
 
-            for (logical.axes.constSlice(), logical.intents.constSlice()) |logical_axis, logical_intent| {
-                if (logical_intent != intent) continue;
-                if (preferred_axes.len == 0) continue;
+                const i = counters.get(target_intent);
+                const p_tag = switch (target_intent) {
+                    // High BW: Prefer fastest links (start of list)
+                    .high_bandwidth => avail[i % avail.len],
+                    // Balanced: Prefer middle of list
+                    .balanced => avail[(avail.len / 2 + i) % avail.len],
+                    // Low BW: Prefer slowest links (end of list)
+                    .low_bandwidth => avail[avail.len - 1 - (i % avail.len)],
+                };
 
-                var chosen_axis: ?PhysicalAxisTag = null;
-                for (preferred_axes.constSlice()) |candidate| {
-                    if (!used_axes.contains(candidate)) {
-                        chosen_axis = candidate;
-                        used_axes.insert(candidate);
-                        break;
-                    }
-                }
-                if (chosen_axis == null) {
-                    chosen_axis = preferred_axes.constSlice()[0];
-                }
-
-                try strategy.addBinding(allocator, logical_axis, chosen_axis.?);
+                try strategy.addBinding(allocator, l_tag, p_tag);
+                counters.set(target_intent, i + 1);
             }
         }
 
         return strategy;
-    }
-
-    fn appendIfExists(physical: PhysicalMesh, out: *PhysicalList, tag: PhysicalAxisTag) void {
-        if (physical.hasAxis(tag)) out.appendAssumeCapacity(tag);
     }
 };
 
@@ -1770,7 +1721,6 @@ pub const Placement = struct {
 const ShardingTest = struct {
     pub const ExpectedShard = struct {
         device_id: usize,
-        /// Hardcoded [start, size] per tensor dimension.
         slices: []const [2]i64,
     };
 
@@ -1897,6 +1847,72 @@ test "sharding: unknown partitioning implies replication" {
     try runner.run(scenario);
 }
 
+test "sharding: suggest strategy realization" {
+    const allocator = std.testing.allocator;
+    const runner: ShardingTest = .init(allocator);
+
+    const physical = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
+
+    const logical: LogicalMesh = try .init("suggested_mesh", .{
+        .batch = .low_bandwidth,
+        .model = .high_bandwidth,
+    });
+
+    const strategy: Strategy = try .suggest(allocator, logical, physical);
+
+    var scenario: ShardingTest.Scenario = .{
+        .physical = physical,
+        .logical = logical,
+        .strategy = strategy,
+        .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
+            .withPartitioning(.{ .batch = .batch, .model = .model }),
+        .expected_sdy = "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } }, // x0, y0, z0
+            .{ .device_id = 1, .slices = &.{ .{ 2, 2 }, .{ 0, 2 } } }, // x0, y0, z1 (batch split)
+            .{ .device_id = 2, .slices = &.{ .{ 0, 2 }, .{ 0, 2 } } }, // x0, y1, z0 (replicated y)
+            .{ .device_id = 3, .slices = &.{ .{ 2, 2 }, .{ 0, 2 } } }, // x0, y1, z1
+            .{ .device_id = 4, .slices = &.{ .{ 0, 2 }, .{ 2, 2 } } }, // x1, y0, z0 (model split)
+            .{ .device_id = 5, .slices = &.{ .{ 2, 2 }, .{ 2, 2 } } },
+            .{ .device_id = 6, .slices = &.{ .{ 0, 2 }, .{ 2, 2 } } },
+            .{ .device_id = 7, .slices = &.{ .{ 2, 2 }, .{ 2, 2 } } },
+        },
+    };
+    defer scenario.deinit(allocator);
+    try runner.run(scenario);
+}
+
+test "sharding: suggest folds logical axes with same intent" {
+    const allocator = std.testing.allocator;
+    const runner: ShardingTest = .init(allocator);
+
+    const physical = try runner.physical(.{4}, .point_to_point);
+
+    const logical: LogicalMesh = try .init("fold_mesh", .{
+        .model = .high_bandwidth,
+        .experts = .high_bandwidth,
+    });
+
+    const strategy = try Strategy.suggest(allocator, logical, physical);
+
+    var scenario: ShardingTest.Scenario = .{
+        .physical = physical,
+        .logical = logical,
+        .strategy = strategy,
+        .shape = Shape.init(.{ .model = 4, .experts = 4 }, .f32)
+            .withPartitioning(.{ .model = .model, .experts = .experts }),
+        .expected_sdy = "#sdy.sharding<@fold_mesh, [{\"link_x\"}, {}]>",
+        .expected_shards = &.{
+            .{ .device_id = 0, .slices = &.{ .{ 0, 1 }, .{ 0, 4 } } },
+            .{ .device_id = 1, .slices = &.{ .{ 1, 1 }, .{ 0, 4 } } },
+            .{ .device_id = 2, .slices = &.{ .{ 2, 1 }, .{ 0, 4 } } },
+            .{ .device_id = 3, .slices = &.{ .{ 3, 1 }, .{ 0, 4 } } },
+        },
+    };
+    defer scenario.deinit(allocator);
+    try runner.run(scenario);
+}
+
 test "sharding: multiple physical axes on one logical dimension (folding)" {
     const allocator = std.testing.allocator;
     const runner: ShardingTest = .init(allocator);
@@ -1913,7 +1929,7 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
-        .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\"}], replicated={\"link_y\"}>",
+        .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 4 }} },
             .{ .device_id = 1, .slices = &.{.{ 4, 4 }} },
