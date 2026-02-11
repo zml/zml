@@ -3,7 +3,7 @@ const builtin = @import("builtin");
 const log = std.log;
 const wav_utils = @import("wav.zig");
 const cfg = @import("config.zig");
-const MelSpectrumConfig = cfg.MelSpectrumConfig;
+const Config = cfg.Config;
 
 const zml = @import("zml");
 const stdx = zml.stdx;
@@ -54,13 +54,16 @@ pub fn main() !void {
     const wav_file = try loadWav(allocator, &reader.interface);
     defer allocator.free(wav_file);
 
-    const melspectrum_config = MelSpectrumConfig{};
+    const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
+    var parsed_config = try cfg.parseConfig(allocator, io, model_dir);
+    defer parsed_config.deinit();
+    const config = parsed_config.value;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
-    var melspectro_model: LogMelSpectrogram = .init(melspectrum_config);
+    var melspectro_model: LogMelSpectrogram = .init(config);
     var compiled_mel_spectrum_future = try io.concurrent(compileMelSpectrum, .{allocator, io, platform, melspectro_model});
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
 
@@ -79,7 +82,7 @@ pub fn main() !void {
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
-    const num_frames = wav_file.len / melspectrum_config.hop_length;
+    const num_frames = wav_file.len / config.audio().hop_length;
     const output_shape = zml.Shape.init(.{ 128, num_frames }, .f32);
     const output_slice: zml.Slice = try zml.Slice.alloc(allocator, output_shape);
     defer output_slice.free(allocator);
