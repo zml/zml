@@ -11,72 +11,72 @@ const Tensor = zml.Tensor;
 pub const LogMelSpectrogram = struct {
     window: AudioWindow,
     
-    n_fft: u63 = 400, // Must match window size
+    n_fft: u63, // Must match window size
     mel_filters: Tensor, // Shape must match (201, 128)
-    
-    hop_len: u63 = 160,
-    global_log_mel_max: f32 = 1.5,
     mel_floor: f32 = 1e-10,
-    force_num_frames: u32 = 3000,
+    
+    hop_len: u63,
+    global_log_mel_max: f32,
+    
+    // force_num_frames: u32 = 3000,
     
     precision: zml.DataType = .f32,
     
     pub fn init(config: MelSpectrumConfig) LogMelSpectrogram {
 	return .{
 	    .window = .hann,
-	    .mel_filters = Tensor.init(.{201, 128}, .f32).withTags(.{.freq, ._ }),
+	    .mel_filters = Tensor.init(.{201, 128}, .f32).withTags(.{.freq_bins, .mel}),
 	    .hop_len = config.hop_length,
-	    .n_fft = config.n_fft,
+	    .n_fft = config.window_size,
 	    .global_log_mel_max = 1.5,
 	};
     }
     
     pub fn forward(self: LogMelSpectrogram, waveform: Tensor) Tensor {
 	const dtype = waveform.dtype();
-        const rank: u63 = @intCast(waveform.shape().rank());
-        const window_weight = self.window.getWeights(self.n_fft, dtype);
-        const fft_len = window_weight.dim(rank - 1);
-        var num_frames: u63 = @intCast(@divFloor(waveform.dim(rank - 1), self.hop_len));
-
-        var wav = waveform;
-	const force_num_frames = self.force_num_frames;
-        const force_num_samples = force_num_frames * self.hop_len;
-        if (num_frames > force_num_frames) {
-            wav = wav.slice1d(-1, .{ .end = force_num_samples });
-            num_frames = force_num_frames;
-        } else if (num_frames < force_num_frames) {
-	    const tagged = wav.withTags(.{.t});
-	    wav = tagged.pad(0.0, .{ .t = Tensor.Pad{ .high = force_num_samples - tagged.dim(.t) } });
-        }
 	
-        num_frames = @intCast(@divFloor(wav.dim(0), self.hop_len));
-        std.debug.assert(num_frames == force_num_frames);
+        const window_weight = self.window.getWeights(self.n_fft, dtype);
+        const fft_len = window_weight.dim(.samples);
+        const num_frames: u63 = @intCast(@divFloor(waveform.dim(.samples), self.hop_len));
+
+        // var wav = waveform;
+	// const force_num_frames = self.force_num_frames;
+        // const force_num_samples = force_num_frames * self.hop_len;
+        // if (num_frames > force_num_frames) {
+        //     wav = wav.slice1d(-1, .{ .end = force_num_samples });
+        //     num_frames = force_num_frames;
+        // } else if (num_frames < force_num_frames) {
+	//     const tagged = wav.withTags(.{.t});
+	//     wav = tagged.pad(0.0, .{ .t = Tensor.Pad{ .high = force_num_samples - tagged.dim(.t) } });
+        // }
+	
+        // num_frames = @intCast(@divFloor(wav.dim(0), self.hop_len));
+        // std.debug.assert(num_frames == force_num_frames);
 
         // Reflect padding
         const padded_wav = blk: {
-            const l = wav.slice1d(-1, .{ .start = 1, .end = @divExact(fft_len, 2) + 1 }).reverse(.{-1});
-            const r = wav.slice1d(-1, .{ .start = -@divExact(fft_len, 2) - 1, .end = -1 }).reverse(.{-1});
-            break :blk zml.Tensor.concatenate(&.{ l, wav, r }, -1);
+            const l = waveform.slice1d(.samples, .{ .start = 1, .end = @divExact(fft_len, 2) + 1 }).reverse(.{.samples});
+            const r = waveform.slice1d(.samples, .{ .start = -@divExact(fft_len, 2) - 1, .end = -1 }).reverse(.{.samples});
+            break :blk zml.Tensor.concatenate(&.{ l, waveform, r }, .samples);
         };
 
         // Use Short Time Fourier Transform to compute features.
         // Generate num_frames+1 (matching torch.stft center=True frame count),
         // then drop the last frame to match Whisper convention (stft[..., :-1]).
         var spectrogram = stft(padded_wav, window_weight, num_frames + 1, self.hop_len, self.precision);
-        spectrogram = spectrogram.slice1d(0, .{ .end = -1 });
+        spectrogram = spectrogram.slice1d(.frames, .{ .end = -1 });
         spectrogram = spectrogram.convert(dtype);
         // Re-weight frequencies for speech
-        spectrogram = spectrogram.dot(self.mel_filters, .freq);
+        spectrogram = spectrogram.dot(self.mel_filters, .freq_bins);
 
         spectrogram = spectrogram.maximum(Tensor.constant(dtype.constant(self.mel_floor)));
         var log_spec = spectrogram.log().scale(1.0 / @log(10.0));
 
         const log_spec_min = Tensor.constant(dtype.constant(self.global_log_mel_max - 8.0));
         log_spec = log_spec.maximum(log_spec_min);
-        const log_spec_rank = log_spec.shape().rank();
 	
         // "center" the distribution
-        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ log_spec_rank - 1, log_spec_rank - 2 });
+        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames });
     }
 
     pub fn load(self: *LogMelSpectrogram, io: std.Io, platform: *zml.Platform) !zml.Bufferized(LogMelSpectrogram) {
@@ -108,7 +108,7 @@ pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, pr
     var fft = windows.convert(precision).fft(.{ .kind = .RFFT, .length = &.{fft_len} });
     const spectrogram = fft.abs();
     
-    const ret = spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.temp, .freq});
+    const ret = spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.frames, .freq_bins});
     log.info("{f}", .{ret.shape()});
     
     return ret;
@@ -170,7 +170,9 @@ pub fn main() !void {
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
-    const output_shape = zml.Shape.init(.{ 128, melspectro_model.force_num_frames }, .f32);
+    // const output_shape = zml.Shape.init(.{ 128, melspectro_model.force_num_frames }, .f32);
+    const num_frames = wav_file.len / melspectrum_config.hop_length;
+    const output_shape = zml.Shape.init(.{ 128, num_frames }, .f32);
     const output_slice: zml.Slice = try zml.Slice.alloc(allocator, output_shape);
     defer output_slice.free(allocator);
     var output_buffer: zml.Buffer = try .fromSlice(io, platform, output_slice);
@@ -226,7 +228,7 @@ fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram) !zml.Exe {
     // return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{model.force_num_frames * model.hop_len}, .f32).withTags(.{.freq})});
-    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{293699}, .f32).withTags(.{.freq})});
+    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{293699}, .f32).withTags(.{.samples})});
 }
 
 pub const AudioWindow = enum {
@@ -237,13 +239,13 @@ pub const AudioWindow = enum {
 
     pub fn getWeights(self: AudioWindow, len: i64, dtype: zml.DataType) Tensor {
         return switch (self) {
-            .boxcar => Tensor.constant(dtype.one()),
+            .boxcar => Tensor.constant(dtype.one()).withTags(.{.samples}),
             .hann => {
                 if (len <= 1) return Tensor.constant(dtype.one());
                 const flen: f64 = @floatFromInt(len);
                 const freq = Tensor.constant(dtype.constant(std.math.pi / flen));
                 const steps = Tensor.arange(.{ .start = -len, .end = len, .step = 2 }, dtype);
-                return steps.mul(freq).cos().scale(0.5).addConstant(0.5).convert(dtype);
+                return steps.mul(freq).cos().scale(0.5).addConstant(0.5).convert(dtype).withTags(.{.samples});
             },
         };
     }
