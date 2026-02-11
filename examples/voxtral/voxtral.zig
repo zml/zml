@@ -25,7 +25,14 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
-    const io = threaded.io();
+    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
+    defer vfs.deinit();
+    
+    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
+    defer vfs_file.deinit();
+    try vfs.register("file", vfs_file.io());
+
+    const io = vfs.io();
 
     const arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -91,6 +98,14 @@ pub fn main() !void {
     try writer_interface.writeAll(output_slice.data());
 
     // std.debug.print("Here is the results: {f}\n", .{first});
+
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/voxtral_activations.safetensors");
+    defer registry.deinit();
+
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+
+    // try zml.testing.testlayer(allocator, io, platform.*, melspectro_model, .forward, store.view(), "mel", mel_spectrum_buffers, 1e-3);
 }
 
 fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
