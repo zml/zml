@@ -2,8 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log;
 const cfg = @import("config.zig");
-const MelSpectrumConfig = cfg.MelSpectrumConfig;
-const EncoderConfig = cfg.EncoderConfig;
+const Config = cfg.Config;
 
 const zml = @import("zml");
 const stdx = zml.stdx;
@@ -57,8 +56,12 @@ pub fn main() !void {
     var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
     defer model_store.deinit();
 
-    const melspectrum_config = MelSpectrumConfig{};
-    const encoder_config = EncoderConfig{};
+    // Parse config from model directory
+    const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
+    var parsed_config = try cfg.parseConfig(allocator, io, model_dir);
+    defer parsed_config.deinit();
+    const config = parsed_config.value;
+
     const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
     const load_opts: zml.io.LoadOpts = .{
         .store = &model_store,
@@ -71,9 +74,9 @@ pub fn main() !void {
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
-    // --- Mel spectrogram test ---
+    // -- Mel spectrogram test
     {
-        var melspectro_model: LogMelSpectrogram = .init(melspectrum_config);
+        var melspectro_model: LogMelSpectrogram = .init(config);
         var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
         var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
         defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
@@ -81,7 +84,7 @@ pub fn main() !void {
         try zml.testing.testLayer(allocator, io, platform, MelTestHarness{ .inner = melspectro_model }, .forward, ref_store.view(), "mel", .{ .inner = mel_spectrum_buffers }, 1e-3);
     }
 
-    // --- Conv stem test ---
+    // -- Conv stem test
     {
         const conv_store = model_store.view().withPrefix(encoder_prefix).withPrefix("conv_layers");
         const conv_stem = ConvStemTestHarness{
@@ -94,9 +97,9 @@ pub fn main() !void {
         try zml.testing.testLayer(allocator, io, platform, conv_stem, .forward, ref_store.view(), "conv_stem", conv_buffers, 1e-3);
     }
     
-    // --- Encoder test ---
+    // -- Encoder test
     {
-        const encoder_model = Encoder.init(allocator, model_store.view().withPrefix(encoder_prefix), encoder_config);
+        const encoder_model = Encoder.init(allocator, model_store.view().withPrefix(encoder_prefix), config);
         defer encoder_model.deinit(allocator);
         var encoder_buffers = try zml.io.load(Encoder, &encoder_model, allocator, io, platform, load_opts);
         defer Encoder.unloadBuffers(&encoder_buffers, allocator);
@@ -106,9 +109,9 @@ pub fn main() !void {
     }
 }
 
-// ============================================================================
+// ================================================================
 // Test harnesses
-// ============================================================================
+// ================================================================
 
 const MelTestHarness = struct {
     inner: LogMelSpectrogram,
@@ -138,7 +141,7 @@ const ConvStemTestHarness = struct {
 
 const TransformerLayerTestHarness = struct {
     inner: enc.TransformerLayer,
-    config: EncoderConfig,
+    config: Config,
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayerTestHarness)) void {
         enc.TransformerLayer.unloadBuffers(&self.inner);
