@@ -97,16 +97,22 @@ pub fn main() !void {
 
     try writer_interface.writeAll(output_slice.data());
 
-    // std.debug.print("Here is the results: {f}\n", .{first});
-
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/voxtral_activations.safetensors");
     defer registry.deinit();
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    // try zml.testing.testlayer(allocator, io, platform.*, melspectro_model, .forward, store.view(), "mel", mel_spectrum_buffers, 1e-3);
+    try zml.testing.testLayer(allocator, io, platform, MelTestHarness{ .inner = melspectro_model }, .forward, store.view(), "mel", .{ .inner = mel_spectrum_buffers }, 1e-3);
 }
+
+const MelTestHarness = struct {
+    inner: LogMelSpectrogram,
+
+    pub fn forward(self: MelTestHarness, waveform: Tensor) Tensor {
+        return self.inner.forward(waveform.withTags(.{.samples}));
+    }
+};
 
 fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
