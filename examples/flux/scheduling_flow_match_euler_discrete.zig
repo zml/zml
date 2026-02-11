@@ -1,4 +1,7 @@
 const std = @import("std");
+const zml = @import("zml");
+const tools = @import("tools.zig");
+const log = std.log.scoped(.flux2_scheduler);
 
 fn linspace(allocator: std.mem.Allocator, start: f32, end: f32, n: usize) ![]f32 {
     const res = try allocator.alloc(f32, n);
@@ -8,8 +11,8 @@ fn linspace(allocator: std.mem.Allocator, start: f32, end: f32, n: usize) ![]f32
         return res;
     }
     const step = (end - start) / @as(f32, @floatFromInt(n - 1));
-    for (0..n) |i| {
-        res[i] = start + step * @as(f32, @floatFromInt(i));
+    for (0..n) |idx| {
+        res[idx] = start + step * @as(f32, @floatFromInt(idx));
     }
     return res;
 }
@@ -64,8 +67,8 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         stochastic_sampling: bool = false,
     };
 
-    pub fn init(allocator: std.mem.Allocator, config: Config) !*FlowMatchEulerDiscreteScheduler {
-        const self = try allocator.create(FlowMatchEulerDiscreteScheduler);
+    pub fn init(allocator: std.mem.Allocator, config: Config) !*@This() {
+        const self = try allocator.create(@This());
         self.* = .{
             .num_train_timesteps = config.num_train_timesteps,
             .shift = config.shift,
@@ -100,8 +103,8 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
 
         // sigmas = timesteps / num_train_timesteps
         const sigmas = try allocator.alloc(f32, timesteps_np.len);
-        for (timesteps_np, 0..) |t, i| {
-            sigmas[i] = t / @as(f32, @floatFromInt(self.num_train_timesteps));
+        for (timesteps_np, 0..) |timestep, idx| {
+            sigmas[idx] = timestep / @as(f32, @floatFromInt(self.num_train_timesteps));
         }
         defer allocator.free(sigmas); // We will dupe or use it for final_sigmas
 
@@ -115,8 +118,8 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
 
         self.sigmas = final_sigmas;
         self.timesteps = try allocator.alloc(f32, final_sigmas.len);
-        for (final_sigmas, 0..) |s, i| {
-            self.timesteps[i] = s * @as(f32, @floatFromInt(self.num_train_timesteps));
+        for (final_sigmas, 0..) |sigma, idx| {
+            self.timesteps[idx] = sigma * @as(f32, @floatFromInt(self.num_train_timesteps));
         }
 
         self.sigma_min = self.sigmas[self.sigmas.len - 1];
@@ -125,36 +128,24 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         return self;
     }
 
-    pub fn deinit(self: *FlowMatchEulerDiscreteScheduler) void {
+    pub fn deinit(self: *@This()) void {
         self.allocator.free(self.time_shift_type);
         if (self.timesteps.len > 0) self.allocator.free(self.timesteps);
         if (self.sigmas.len > 0) self.allocator.free(self.sigmas);
         self.allocator.destroy(self);
     }
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, model_path: []const u8) !*FlowMatchEulerDiscreteScheduler {
-        const zml = @import("zml");
-        const repo = try zml.safetensors.resolveModelRepo(io, model_path);
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "scheduler", json_name: []const u8 = "scheduler_config.json" }) !*@This() {
+        if (progress) |p| {
+            p.increaseEstimatedTotalItems(1);
+            var node = p.start("Loading scheduler config...", 1);
+            defer node.end();
+        }
+        const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        errdefer config_json.deinit();
+        log.info("Config: {any}", .{config_json.value});
 
-        // Try to find scheduler_config.json in "scheduler" subfolder or root
-        const config_path = b: {
-            if (repo.openDir(io, "scheduler", .{})) |sub_dir| {
-                defer sub_dir.close(io);
-                if (sub_dir.openFile(io, "scheduler_config.json", .{ .mode = .read_only })) |file| {
-                    file.close(io);
-                    break :b "scheduler/scheduler_config.json";
-                } else |_| {}
-            } else |_| {}
-            break :b "scheduler_config.json";
-        };
-
-        const content = try repo.readFileAlloc(io, config_path, allocator, .limited(16 * 1024));
-        defer allocator.free(content);
-
-        const parsed = try std.json.parseFromSlice(Config, allocator, content, .{ .ignore_unknown_fields = true });
-        defer parsed.deinit();
-
-        return init(allocator, parsed.value);
+        return try init(allocator, config_json.value);
     }
 
     pub fn set_timesteps(self: *FlowMatchEulerDiscreteScheduler, num_inference_steps: ?usize, sigmas_opt: ?[]const f32, mu: ?f32, timesteps_opt: ?[]const f32) !void {

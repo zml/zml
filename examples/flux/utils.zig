@@ -6,6 +6,8 @@ const autoencoder_kl = @import("autoencoder_kl_flux2.zig");
 const flux_model_transformer2d = @import("flux2_transformer2d_model.zig");
 const flow_match_euler_discrete_scheduler = @import("scheduling_flow_match_euler_discrete.zig");
 
+const c_interface = @import("c");
+
 const stdx = zml.stdx;
 const log = std.log.scoped(.utils);
 
@@ -544,4 +546,93 @@ fn unpackLatentsWithIds(
     }
 
     return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bytes));
+}
+
+pub fn computeRoPE_CPU(allocator: std.mem.Allocator, seq_len: usize, head_dim: usize, theta: f32) !struct { cos: []f32, sin: []f32 } {
+    const dim = head_dim;
+    const half = dim / 2;
+
+    const inv_freq = try allocator.alloc(f32, half);
+    defer allocator.free(inv_freq);
+
+    for (0..half) |i| {
+        const x = -@log(theta) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half));
+        inv_freq[i] = @exp(x);
+    }
+
+    const total_elems = seq_len * dim;
+    const cos_data = try allocator.alloc(f32, total_elems);
+    const sin_data = try allocator.alloc(f32, total_elems);
+    errdefer {
+        allocator.free(cos_data);
+        allocator.free(sin_data);
+    }
+
+    for (0..seq_len) |s| { // position
+        for (0..half) |i| { // freq index
+            const freq = @as(f32, @floatFromInt(s)) * inv_freq[i];
+            const cos_val = @cos(freq);
+            const sin_val = @sin(freq);
+
+            const offset = s * dim;
+            cos_data[offset + i] = cos_val;
+            cos_data[offset + i + half] = cos_val;
+
+            sin_data[offset + i] = sin_val;
+            sin_data[offset + i + half] = sin_val;
+        }
+    }
+
+    return .{ .cos = cos_data, .sin = sin_data };
+}
+
+pub fn saveFluxImageToPng(allocator: std.mem.Allocator, io: std.Io, image_decoded_buf: zml.Buffer, filename: []const u8) !void {
+    const shape = image_decoded_buf.shape();
+    const dim_c = shape.dim(1);
+    _ = dim_c;
+    const dim_h = shape.dim(2);
+    const dim_w = shape.dim(3);
+
+    const w: c_int = @intCast(dim_w);
+    const h: c_int = @intCast(dim_h);
+    const comp: c_int = 3;
+    const stride_in_bytes: c_int = w * comp;
+
+    // Fetch data from device
+    const slice = try zml.Slice.alloc(allocator, shape);
+    defer slice.free(allocator);
+    try image_decoded_buf.toSlice(io, slice);
+
+    const png_data = try allocator.alloc(u8, @intCast(dim_h * dim_w * comp));
+    defer allocator.free(png_data);
+
+    // NCHW -> NHWC + Denormalize
+    var idx: usize = 0;
+    for (0..@intCast(dim_h)) |y| {
+        for (0..@intCast(dim_w)) |x| {
+            for (0..@intCast(comp)) |c| {
+                // Input index: 0, c, y, x
+                const in_idx = c * (@as(usize, @intCast(dim_h)) * @as(usize, @intCast(dim_w))) +
+                    y * @as(usize, @intCast(dim_w)) +
+                    x;
+
+                const val_f64 = tools.getElementAsF64(slice, shape.dtype(), in_idx);
+                var val: f64 = (val_f64 / 2.0) + 0.5;
+                if (val < 0.0) val = 0.0;
+                if (val > 1.0) val = 1.0;
+
+                png_data[idx] = @intFromFloat(val * 255.0);
+                idx += 1;
+            }
+        }
+    }
+
+    const filename_z = try allocator.dupeZ(u8, filename);
+    defer allocator.free(filename_z);
+
+    if (c_interface.stbi_write_png(filename_z.ptr, w, h, comp, png_data.ptr, stride_in_bytes) == 0) {
+        log.err("Failed to write PNG to {s}", .{filename});
+    } else {
+        log.info("Saved PNG to {s}", .{filename});
+    }
 }

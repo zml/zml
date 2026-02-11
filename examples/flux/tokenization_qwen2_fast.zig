@@ -128,8 +128,12 @@ pub const Qwen2TokenizerFast = struct {
         };
     }
 
-    pub fn pipelineTokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
-
+    pub fn pipelineTokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
+        if (progress) |p| {
+            p.increaseEstimatedTotalItems(1);
+            var node = p.start("Executing tokenizer...", 1);
+            defer node.end();
+        }
         // Tokenizer Setup
         var tokenizer = try Qwen2TokenizerFast.fromPretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
         defer tokenizer.deinit();
