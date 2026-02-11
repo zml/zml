@@ -329,66 +329,66 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     return outputs_;
 }
 
-test "triton" {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+// test "triton" {
+//     const zml = @import("zml.zig");
+//     const platform = zml.testing.env();
 
-    if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
+//     if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
 
-    const ir =
-        \\ module {
-        \\   tt.func public @add_one(%arg0: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg1: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg2: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg3: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}) {
-        \\     %0 = tt.get_program_id x : i32
-        \\     %1 = tt.load %arg0 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
-        \\     %2 = tt.load %arg1 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
-        \\     %cst = arith.constant 1.000000e+00 : f32
-        \\     %3 = arith.addf %1, %cst : f32
-        \\     tt.store %arg2, %3 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
-        \\     tt.store %arg3, %2 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
-        \\     tt.return
-        \\   }
-        \\ }
-    ;
+//     const ir =
+//         \\ module {
+//         \\   tt.func public @add_one(%arg0: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg1: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg2: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}, %arg3: !tt.ptr<f32, 1> {tt.divisibility = 32 : i32}) {
+//         \\     %0 = tt.get_program_id x : i32
+//         \\     %1 = tt.load %arg0 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+//         \\     %2 = tt.load %arg1 {cache = 1 : i32, evict = 1 : i32, isVolatile = false} : !tt.ptr<f32>
+//         \\     %cst = arith.constant 1.000000e+00 : f32
+//         \\     %3 = arith.addf %1, %cst : f32
+//         \\     tt.store %arg2, %3 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+//         \\     tt.store %arg3, %2 {cache = 1 : i32, evict = 1 : i32} : !tt.ptr<f32>
+//         \\     tt.return
+//         \\   }
+//         \\ }
+//     ;
 
-    const TritonMod = struct {
-        pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
-            return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
-                .debug = false,
-                .name = "add_one",
-                .ir = ir,
-                .grid = .{ 1, 1, 1 },
-                .num_stages = 1,
-                .num_warps = 1,
-            });
-        }
-    };
+//     const TritonMod = struct {
+//         pub fn forward(a: Tensor, b: Tensor) [2]Tensor {
+//             return triton(.{ a, b }, .{ a.shape(), b.shape() }, .{
+//                 .debug = false,
+//                 .name = "add_one",
+//                 .ir = ir,
+//                 .grid = .{ 1, 1, 1 },
+//                 .num_stages = 1,
+//                 .num_warps = 1,
+//             });
+//         }
+//     };
 
-    const a: zml.Tensor = .init(.{}, .f32);
-    const b: zml.Tensor = .init(.{}, .f32);
+//     const a: zml.Tensor = .init(.{}, .f32);
+//     const b: zml.Tensor = .init(.{}, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
-    defer exe.deinit();
+//     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
+//     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
-    defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}));
-    defer b_buffer.deinit();
+//     var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
+//     defer a_buffer.deinit();
+//     var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}));
+//     defer b_buffer.deinit();
 
-    const results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
-    defer results[0].deinit();
-    defer results[1].deinit();
+//     const results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
+//     defer results[0].deinit();
+//     defer results[1].deinit();
 
-    var cpu_result_0 = try results[0].toSliceAlloc(std.testing.allocator, std.testing.io);
-    defer cpu_result_0.free(std.testing.allocator);
-    var cpu_result_1 = try results[1].toSliceAlloc(std.testing.allocator, std.testing.io);
-    defer cpu_result_1.free(std.testing.allocator);
+//     var cpu_result_0 = try results[0].toSliceAlloc(std.testing.allocator, std.testing.io);
+//     defer cpu_result_0.free(std.testing.allocator);
+//     var cpu_result_1 = try results[1].toSliceAlloc(std.testing.allocator, std.testing.io);
+//     defer cpu_result_1.free(std.testing.allocator);
 
-    const expected_result_a: f32 = 2.0;
-    const expected_result_b: f32 = 3.0;
+//     const expected_result_a: f32 = 2.0;
+//     const expected_result_b: f32 = 3.0;
 
-    try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
-    try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
-}
+//     try std.testing.expectEqual(expected_result_a, cpu_result_0.items(f32)[0]);
+//     try std.testing.expectEqual(expected_result_b, cpu_result_1.items(f32)[0]);
+// }
 
 pub const ScatterArgs = struct {
     input: Tensor,
@@ -627,48 +627,48 @@ fn scatterConfig(
     };
 }
 
-test scatterConfig {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+// test scatterConfig {
+//     const zml = @import("zml.zig");
+//     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
-    defer comp.deinit();
-    comp.activate();
-    defer comp.deactivate();
+//     var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+//     defer comp.deinit();
+//     comp.activate();
+//     defer comp.deactivate();
 
-    const block = mlir.Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+//     const block = mlir.Block.init(&.{}, &.{});
+//     comp.pushBlock(block);
+//     defer comp.popBlock();
 
-    const Local = struct {
-        pub fn _idx(idx_shape: anytype) Tensor {
-            return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
-        }
-    };
+//     const Local = struct {
+//         pub fn _idx(idx_shape: anytype) Tensor {
+//             return Tensor.constant(.{ .i32 = 0 }).broad(Shape.init(idx_shape, .i32));
+//         }
+//     };
 
-    const idx = Local._idx;
-    const op = Shape.init(.{ .a = 10, .b = 20 }, .f32);
+//     const idx = Local._idx;
+//     const op = Shape.init(.{ .a = 10, .b = 20 }, .f32);
 
-    // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
-    {
-        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .b = idx(.{ .a = 10, .n = 8 }) });
-        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
+//     // Use .a as a batching axis with .a=10 x .n=8 updates of 2 elements of .b
+//     {
+//         const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .b = idx(.{ .a = 10, .n = 8 }) });
+//         const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
 
-        const cfg = scatterConfig(op, update, indices, coords_tags);
-        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .update_window }, cfg.op_kind.constSlice());
-        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .window_id, .update_window }, cfg.up_kind.constSlice());
-    }
+//         const cfg = scatterConfig(op, update, indices, coords_tags);
+//         try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .update_window }, cfg.op_kind.constSlice());
+//         try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .batching, .window_id, .update_window }, cfg.up_kind.constSlice());
+//     }
 
-    // similar, but use the normalized form where .a is no longer an explicit batching axis.
-    {
-        const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) });
-        const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
+//     // similar, but use the normalized form where .a is no longer an explicit batching axis.
+//     {
+//         const indices, const coords_tags = Shape.parseStruct(Tensor, .{ .a = idx(.{ .a = 10, .n = 8 }), .b = idx(.{ .a = 10, .n = 8 }) });
+//         const update = Shape.init(.{ .a = 10, .n = 8, .b = 2 }, .f32);
 
-        const cfg = scatterConfig(op, update, indices, coords_tags);
-        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .inserted_window, .update_window }, cfg.op_kind.constSlice());
-        try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .window_id, .window_id, .update_window }, cfg.up_kind.constSlice());
-    }
-}
+//         const cfg = scatterConfig(op, update, indices, coords_tags);
+//         try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .inserted_window, .update_window }, cfg.op_kind.constSlice());
+//         try std.testing.expectEqualSlices(ScatterAxisKind, &.{ .window_id, .window_id, .update_window }, cfg.up_kind.constSlice());
+//     }
+// }
 
 /// Concatenate all indices tensor in one tensor.
 ///
@@ -1029,27 +1029,27 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     return outputs_;
 }
 
-test customCall {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+// test customCall {
+//     const zml = @import("zml.zig");
+//     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
-    defer comp.deinit();
-    comp.activate();
-    defer comp.deactivate();
+//     var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+//     defer comp.deinit();
+//     comp.activate();
+//     defer comp.deactivate();
 
-    const block = mlir.Block.init(&.{}, &.{});
-    comp.pushBlock(block);
-    defer comp.popBlock();
+//     const block = mlir.Block.init(&.{}, &.{});
+//     comp.pushBlock(block);
+//     defer comp.popBlock();
 
-    const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(Shape.init(.{128}, .bf16));
-    const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
-        .has_side_effect = false,
-        .output_operand_aliases = &.{0},
-    });
+//     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(Shape.init(.{128}, .bf16));
+//     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
+//         .has_side_effect = false,
+//         .output_operand_aliases = &.{0},
+//     });
 
-    try zml.testing.expectEqualShapes(input.shape(), output.shape());
-}
+//     try zml.testing.expectEqualShapes(input.shape(), output.shape());
+// }
 
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
     var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .{};

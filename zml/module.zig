@@ -155,24 +155,30 @@ pub const CompilationContext = struct {
 
 // todo: move
 fn addPartitionerMeshes(compilation_context: *CompilationContext) !void {
-    const meshes = try compilation_context.opts.partitioning.meshDescriptors(compilation_context.arena.allocator());
+    const allocator = compilation_context.arena.allocator();
+    const mlir_ctx = compilation_context.mlir_ctx;
+    const module = compilation_context.module;
+    const partitioning = compilation_context.opts.partitioning;
+
+    const meshes = try partitioning.meshDescriptors(allocator);
 
     for (meshes) |mesh| {
-        const mesh_attr = try mlir.Attribute.parse(compilation_context.mlir_ctx, mesh.attr);
+        const mesh_attr = try mlir.Attribute.parse(mlir_ctx, mesh.attr);
 
-        const mesh_op = mlir.Operation.make(compilation_context.mlir_ctx, "sdy.mesh", .{
+        const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
             .attributes = &.{
-                .named(compilation_context.mlir_ctx, "sym_name", mlir.stringAttribute(compilation_context.mlir_ctx, mesh.name)),
-                .named(compilation_context.mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+                .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, mesh.name)),
+                .named(mlir_ctx, "mesh", @ptrCast(mesh_attr)),
             },
-            .location = .unknown(compilation_context.mlir_ctx),
+            .location = .unknown(mlir_ctx),
             .verify = false,
         });
 
-        _ = mesh_op.appendTo(compilation_context.module.body());
+        _ = mesh_op.appendTo(module.body());
     }
 }
 
+// todo: migrate tests
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform, opts);
     defer compilation_context.deinit();

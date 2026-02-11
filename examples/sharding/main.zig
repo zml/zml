@@ -183,7 +183,9 @@ fn runAdditionExample(
 
     const model: AddModel = .init();
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, try .init(.shardy, &.{ sharding_data, sharding_model }));
+    var shardings = [_]zml.sharding.Sharding{ sharding_data, sharding_model };
+
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, try .init(.shardy, shardings[0..]));
     defer exe.deinit();
 
     var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_data, 0.0);
@@ -204,10 +206,10 @@ fn runAdditionExample(
 
     exe_args.set(.{ a_buf, b_buf, c_buf, d_buf });
 
-    // log.info("Buffer a: {f}", .{a_buf.placement()});
+    log.info("Buffer a: {f}", .{a_buf.placement()});
     log.info("Buffer b: {f}", .{b_buf.placement()});
-    // log.info("Buffer c: {f}", .{c_buf.placement()});
-    // log.info("Buffer d: {f}", .{d_buf.placement()});
+    log.info("Buffer c: {f}", .{c_buf.placement()});
+    log.info("Buffer d: {f}", .{d_buf.placement()});
 
     log.info("Running add example (a+c, b+d)...", .{});
     exe.call(exe_args, &exe_results);
