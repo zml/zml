@@ -461,7 +461,7 @@ pub const PadOpts = struct {
     interior: []const i64,
 };
 
-pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, location: *const mlir.Location, opts: PadOpts) *mlir.Operation {
+pub fn pad(ctx: *mlir.Context, value: *const mlir.Value, padding_value: *const mlir.Value, opts: PadOpts, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.pad", .{
         .operands = .{ .flat = &.{ value, padding_value } },
         .result_type_inference = true,
