@@ -21,6 +21,85 @@ pub const LatentPacker = struct {
     }
 };
 
+pub const NormalMethod = enum {
+    /// Classic Box-Muller: z = √(-2 ln u₁) · cos(2π u₂)
+    box_muller,
+    /// Marsaglia polar method with branchless fallback for rejected samples.
+    marsaglia_polar,
+};
+
+/// Which random number generator to use for latent generation.
+pub const GeneratorType = enum {
+    /// Accelerator-based RNG with Box-Muller transform (zml.Tensor.Rng).
+    accelerator_box_muller,
+    /// Accelerator-based RNG with Marsaglia polar method (zml.Tensor.Rng).
+    accelerator_marsaglia,
+    /// CPU-based MT19937 + Box-Muller, bit-exact match with PyTorch's torch.Generator.
+    torch,
+};
+
+/// Generates normally-distributed random latents on the accelerator,
+/// then packs them in one compiled graph.
+pub const LatentGenerator = struct {
+    /// Generate standard-normal samples using the chosen method.
+    fn randn(rng: zml.Tensor.Rng, shape: zml.Shape, method: NormalMethod) struct { zml.Tensor.Rng, zml.Tensor } {
+        // Two independent uniform draws used by both methods.
+        const rng1, const uniform1 = rng.uniform(shape, .{ .min = 1e-10, .max = 1.0 });
+        const rng2, const uniform2 = rng1.uniform(shape, .{});
+
+        const latents_raw = switch (method) {
+            .box_muller => blk: {
+                // z = √(-2 ln u₁) · cos(2π u₂)
+                const mag = uniform1.log().scale(-2.0).sqrt();
+                const phase = uniform2.scale(2.0 * std.math.pi);
+                break :blk mag.mul(phase.cos());
+            },
+            .marsaglia_polar => blk: {
+                // Map uniforms to [-1, 1]
+                const v1 = uniform1.scale(2.0).addConstant(-1.0);
+                const v2 = uniform2.scale(2.0).addConstant(-1.0);
+                const s = v1.mul(v1).add(v2.mul(v2));
+
+                // Marsaglia factor: √(-2 ln(s) / s)
+                const factor = s.log().scale(-2.0).div(s).sqrt();
+                const polar = v1.mul(factor);
+
+                // Reject where s ≥ 1 (or s == 0): fall back to Box-Muller.
+                const bm_mag = uniform1.log().scale(-2.0).sqrt();
+                const bm_phase = uniform2.scale(2.0 * std.math.pi);
+                const bm_fallback = bm_mag.mul(bm_phase.cos());
+
+                const one = zml.Tensor.scalar(1.0, shape.dtype());
+                const eps = zml.Tensor.scalar(1e-10, shape.dtype());
+                const valid = s.cmp(.LT, one.broadcast(shape, &.{}))
+                    .logical(.AND, s.cmp(.GT, eps.broadcast(shape, &.{})));
+
+                break :blk valid.select(polar, bm_fallback);
+            },
+        };
+
+        return .{ rng2, latents_raw };
+    }
+
+    pub fn forward(rng: zml.Tensor.Rng, latents_raw_shape: zml.Shape) struct { zml.Tensor.Rng, zml.Tensor, zml.Tensor } {
+        const rng_out, const latents_raw = randn(rng, latents_raw_shape, .box_muller);
+
+        var dummy: flux_model.Flux2Transformer2DModel = undefined;
+        const latents = dummy.pack_latents(latents_raw);
+        const ids = dummy.prepare_latent_ids(latents_raw);
+        return .{ rng_out, latents, ids };
+    }
+
+    pub fn forwardPolar(rng: zml.Tensor.Rng, latents_raw_shape: zml.Shape) struct { zml.Tensor.Rng, zml.Tensor, zml.Tensor } {
+        const rng_out, const latents_raw = randn(rng, latents_raw_shape, .marsaglia_polar);
+
+        var dummy: flux_model.Flux2Transformer2DModel = undefined;
+        const latents = dummy.pack_latents(latents_raw);
+        const ids = dummy.prepare_latent_ids(latents_raw);
+        return .{ rng_out, latents, ids };
+    }
+};
+
 pub fn pack_latents(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -67,47 +146,59 @@ pub fn get_latents(
     platform: *const zml.Platform,
     config: flux_model.Config,
     img_dim: usize,
+    generator_type: GeneratorType,
+    seed: u64,
 ) !struct { zml.Buffer, zml.Buffer } {
     const in_channels = config.in_channels;
     const vae_scale_factor: usize = 8;
 
     const batch_size = 1;
-    const num_channels_latents = @as(usize, @intCast(in_channels)) / 4;
-    const adjusted_height = 2 * (img_dim / (vae_scale_factor * 2));
-    const adjusted_width = 2 * (img_dim / (vae_scale_factor * 2));
+    const num_channels_latents = @as(usize, @intCast(in_channels));
+    const adjusted_height = (img_dim / (vae_scale_factor * 2));
+    const adjusted_width = (img_dim / (vae_scale_factor * 2));
 
-    const shape_latents = [_]usize{ batch_size, num_channels_latents * 4, adjusted_height / 2, adjusted_width / 2 };
-
-    // Generate Raw Latents on Host
-    var rng = BoxMullerGenerator.init(0);
-    const latents_raw_data = try rng.randn(allocator, &shape_latents);
-    defer allocator.free(latents_raw_data);
-
-    // Print raw first 20 for user verification
-    std.log.info("Latents Raw (first 20): {any}", .{latents_raw_data[0..20]});
-
-    // Upload to Device
+    const shape_latents = [_]usize{ batch_size, num_channels_latents, adjusted_height, adjusted_width };
     const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
 
-    var latents_raw_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(latents_raw_data));
-    defer latents_raw_buffer.deinit();
+    switch (generator_type) {
+        .torch => {
+            // CPU-side MT19937 + Box-Muller, matching torch.Generator exactly.
+            var gen = TorchGenerator.init(seed);
+            const data = try gen.randn(allocator, &shape_latents);
+            defer allocator.free(data);
 
-    // Compile and Execute Packing
-    const latents_tensor = zml.Tensor.fromShape(latents_raw_shape);
-    var exe = try zml.module.compile(allocator, io, LatentPacker.forward, .{latents_tensor}, platform);
-    defer exe.deinit();
+            const latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(data));
+            return pack_latents(allocator, io, platform, latents_buffer);
+        },
+        inline .accelerator_box_muller, .accelerator_marsaglia => |gt| {
+            // Accelerator-based RNG compiled graph.
+            const forward_fn = switch (gt) {
+                .accelerator_box_muller => LatentGenerator.forward,
+                .accelerator_marsaglia => LatentGenerator.forwardPolar,
+                else => unreachable,
+            };
 
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-    args.set(.{latents_raw_buffer});
+            var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, seed, io);
+            defer rng_buffer._state.deinit();
 
-    var res = try exe.results(allocator);
-    defer res.deinit(allocator);
+            var exe = try zml.module.compile(allocator, io, forward_fn, .{ zml.Tensor.Rng.init(), latents_raw_shape }, platform);
+            defer exe.deinit();
 
-    exe.call(args, &res);
+            var args = try exe.args(allocator);
+            defer args.deinit(allocator);
+            args.set(.{rng_buffer});
 
-    const out_buffers = res.get(struct { zml.Buffer, zml.Buffer });
-    return out_buffers;
+            var res = try exe.results(allocator);
+            defer res.deinit(allocator);
+
+            exe.call(args, &res);
+
+            const out = res.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer, zml.Buffer });
+            var rng_out_state = out[0]._state;
+            rng_out_state.deinit(); // discard updated Rng state
+            return .{ out[1], out[2] };
+        },
+    }
 }
 
 pub const BoxMullerGenerator = struct {
@@ -168,6 +259,193 @@ pub const BoxMullerGenerator = struct {
     }
 };
 
+/// Bit-exact port of PyTorch's CPU `torch.Generator` (MT19937 + Box-Muller).
+///
+/// Produces the same sequence as:
+///   gen = torch.Generator(device="cpu").manual_seed(seed)
+///   torch.randn(shape, generator=gen, dtype=torch.float32)
+pub const TorchGenerator = struct {
+    const MERSENNE_STATE_N = 624;
+    const MERSENNE_STATE_M = 397;
+    const MATRIX_A: u32 = 0x9908b0df;
+    const UMASK: u32 = 0x80000000;
+    const LMASK: u32 = 0x7fffffff;
+
+    state: [MERSENNE_STATE_N]u32,
+    left: i32,
+    next_idx: u32,
+    // Box-Muller caching: PyTorch produces two normals per pair of uniforms
+    // and caches the second one.
+    has_cached: bool,
+    cached_normal: f32,
+
+    pub fn init(seed: u64) TorchGenerator {
+        var self: TorchGenerator = undefined;
+        self.has_cached = false;
+        self.cached_normal = 0;
+
+        // PyTorch: init_with_uint32(seed)
+        self.state[0] = @as(u32, @truncate(seed));
+        for (1..MERSENNE_STATE_N) |j| {
+            self.state[j] = 1812433253 *% (self.state[j - 1] ^ (self.state[j - 1] >> 30)) +% @as(u32, @intCast(j));
+        }
+        self.left = 1;
+        self.next_idx = 0;
+        return self;
+    }
+
+    fn mixBits(u_val: u32, v_val: u32) u32 {
+        return (u_val & UMASK) | (v_val & LMASK);
+    }
+
+    fn twist(u_val: u32, v_val: u32) u32 {
+        return (mixBits(u_val, v_val) >> 1) ^ (if (v_val & 1 != 0) MATRIX_A else 0);
+    }
+
+    fn nextState(self: *TorchGenerator) void {
+        self.left = MERSENNE_STATE_N;
+        self.next_idx = 0;
+
+        var j: usize = 0;
+        // First loop: MERSENNE_STATE_N - MERSENNE_STATE_M iterations
+        while (j < MERSENNE_STATE_N - MERSENNE_STATE_M) : (j += 1) {
+            self.state[j] = self.state[j + MERSENNE_STATE_M] ^ twist(self.state[j], self.state[j + 1]);
+        }
+        // Second loop: MERSENNE_STATE_M - 1 iterations
+        while (j < MERSENNE_STATE_N - 1) : (j += 1) {
+            self.state[j] = self.state[j + MERSENNE_STATE_M - MERSENNE_STATE_N] ^ twist(self.state[j], self.state[j + 1]);
+        }
+        // Final element wraps around
+        self.state[MERSENNE_STATE_N - 1] = self.state[MERSENNE_STATE_M - 1] ^ twist(self.state[MERSENNE_STATE_N - 1], self.state[0]);
+    }
+
+    /// Generate one u32 (tempered) — equivalent to mt19937_engine::operator()
+    fn random(self: *TorchGenerator) u32 {
+        self.left -= 1;
+        if (self.left == 0) {
+            self.nextState();
+        }
+        var y = self.state[self.next_idx];
+        self.next_idx += 1;
+
+        // Tempering
+        y ^= (y >> 11);
+        y ^= (y << 7) & 0x9d2c5680;
+        y ^= (y << 15) & 0xefc60000;
+        y ^= (y >> 18);
+        return y;
+    }
+
+    /// PyTorch's uniform_real<float>(val, 0.0, 1.0):
+    ///   MASK = (1 << 24) - 1 = 0xFFFFFF
+    ///   result = (val & MASK) * (1.0 / (1 << 24))
+    fn uniformFloat(self: *TorchGenerator) f32 {
+        const val = self.random();
+        const mask: u32 = (1 << 24) - 1;
+        const divisor: f32 = 1.0 / @as(f32, @floatFromInt(@as(u32, 1 << 24)));
+        return @as(f32, @floatFromInt(val & mask)) * divisor;
+    }
+
+    /// Transform 16 uniform values in-place to normal values using Box-Muller.
+    /// Matches PyTorch's `normal_fill_16` exactly:
+    ///   data[0..8] = u1 → radius * cos(theta)
+    ///   data[8..16] = u2 → radius * sin(theta)
+    fn normalFill16(data: *[16]f32) void {
+        for (0..8) |j| {
+            const u1_val = 1.0 - data[j]; // (0, 1] for log safety
+            const u2_val = data[j + 8];
+            const radius = @sqrt(@as(f32, -2.0) * @log(u1_val));
+            const theta = @as(f32, 2.0 * std.math.pi) * u2_val;
+            data[j] = radius * @cos(theta);
+            data[j + 8] = radius * @sin(theta);
+        }
+    }
+
+    /// Generate one u64 (two tempered u32s combined) — equivalent to generator->random64()
+    fn random64(self: *TorchGenerator) u64 {
+        const hi = self.random();
+        const lo = self.random();
+        return (@as(u64, hi) << 32) | @as(u64, lo);
+    }
+
+    /// PyTorch's uniform_real<double>(val, 0.0, 1.0):
+    ///   MASK = (1 << 53) - 1
+    ///   result = (val & MASK) * (1.0 / (1 << 53))
+    fn uniformDouble(self: *TorchGenerator) f64 {
+        const val = self.random64();
+        const mask: u64 = (@as(u64, 1) << 53) - 1;
+        const divisor: f64 = 1.0 / @as(f64, @floatFromInt(@as(u64, 1) << 53));
+        return @as(f64, @floatFromInt(val & mask)) * divisor;
+    }
+
+    /// Generate one standard-normal sample using the sequential cached approach.
+    /// Matches PyTorch's `normal_distribution<double>` path used for tensors < 16 elements.
+    /// Uses f64 accumulators and random64() as PyTorch does.
+    fn normalFloat(self: *TorchGenerator) f32 {
+        if (self.has_cached) {
+            self.has_cached = false;
+            return self.cached_normal;
+        }
+
+        const uf1 = self.uniformDouble();
+        const uf2 = self.uniformDouble();
+
+        // PyTorch: r = sqrt(-2.0 * log1p(-u2)),  theta = 2π * u1
+        const r: f64 = @sqrt(-2.0 * @log(1.0 - uf2));
+        const theta: f64 = 2.0 * std.math.pi * uf1;
+
+        // Cache the sin term (cast to f32) for next call
+        self.cached_normal = @floatCast(r * @sin(theta));
+        self.has_cached = true;
+
+        return @floatCast(r * @cos(theta));
+    }
+
+    /// Fill an f32 slice with standard-normal samples, matching torch.randn(shape, generator=gen).
+    ///
+    /// For size >= 16: uses PyTorch's `normal_fill` algorithm:
+    ///   1. Fill entire buffer with uniform values
+    ///   2. Transform in-place in blocks of 16 via Box-Muller
+    ///   3. If size % 16 != 0, regenerate last 16 uniforms and re-transform
+    /// For size < 16: uses sequential cached Box-Muller (PyTorch's scalar path).
+    pub fn randn(self: *TorchGenerator, allocator: std.mem.Allocator, shape: []const usize) ![]f32 {
+        var count: usize = 1;
+        for (shape) |s| count *= s;
+
+        const result = try allocator.alloc(f32, count);
+        errdefer allocator.free(result);
+
+        if (count >= 16) {
+            // Step 1: Fill entire buffer with uniform values
+            for (result) |*item| {
+                item.* = self.uniformFloat();
+            }
+
+            // Step 2: Transform in blocks of 16
+            var i: usize = 0;
+            while (i + 16 <= count) : (i += 16) {
+                normalFill16(result[i..][0..16]);
+            }
+
+            // Step 3: Handle tail if size % 16 != 0
+            if (count % 16 != 0) {
+                const tail_start = count - 16;
+                // Regenerate the last 16 uniform values
+                for (result[tail_start..][0..16]) |*item| {
+                    item.* = self.uniformFloat();
+                }
+                normalFill16(result[tail_start..][0..16]);
+            }
+        } else {
+            // Small tensor: use sequential cached approach
+            for (result) |*item| {
+                item.* = self.normalFloat();
+            }
+        }
+        return result;
+    }
+};
+
 pub fn prepare_text_ids(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize) !zml.Buffer {
     const batch_size = 1;
     const count = batch_size * seq_len * 4;
@@ -216,6 +494,29 @@ test "BoxMullerGenerator matches Python reference" {
         try std.testing.expectApproxEqAbs(expected[i], val, 1e-3);
     }
     // std.debug.print("Max difference: {d}\n", .{max_err});
+}
+
+test "TorchGenerator matches torch.randn reference (seed=0)" {
+    const allocator = std.testing.allocator;
+    var gen = TorchGenerator.init(0);
+
+    const shape = [_]usize{24};
+    const samples = try gen.randn(allocator, &shape);
+    defer allocator.free(samples);
+
+    // Reference: torch.randn(24, generator=torch.Generator('cpu').manual_seed(0), dtype=torch.float32)
+    const expected = [_]f32{
+        -1.1258398294, -1.1523602009, -0.2505785823, -0.4338788390,
+        0.8487103581,  0.6920092106,  -0.3160127699, -2.1152195930,
+        0.4680964053,  -0.1577124447, 1.4436601400,  0.2660494149,
+        0.1664553285,  0.8743818402,  -0.1434742361, -0.1116093323,
+        0.9318266511,  1.2590092421,  2.0049805641,  0.0537368990,
+        0.6180566549,  -0.4128022194, -0.8410646915, -2.3160419464,
+    };
+
+    for (samples, 0..) |val, i| {
+        try std.testing.expectApproxEqAbs(expected[i], val, 1e-4);
+    }
 }
 
 pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
@@ -454,7 +755,7 @@ pub fn schedule(
         defer out_slice.free(allocator);
         const out_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(out_slice.items(u8))));
 
-        try scheduler.step(n_data, t_step, l_data, out_data);
+        try scheduler.step(n_data, l_data, out_data);
 
         const next_latents_buf = try zml.Buffer.fromBytes(io, platform, current_latents.shape(), std.mem.sliceAsBytes(out_data));
 

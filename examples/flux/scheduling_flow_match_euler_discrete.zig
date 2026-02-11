@@ -143,12 +143,11 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         }
         const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         errdefer config_json.deinit();
-        log.info("Config: {any}", .{config_json.value});
 
         return try init(allocator, config_json.value);
     }
 
-    pub fn set_timesteps(self: *FlowMatchEulerDiscreteScheduler, num_inference_steps: ?usize, sigmas_opt: ?[]const f32, mu: ?f32, timesteps_opt: ?[]const f32) !void {
+    pub fn set_timesteps(self: *@This(), num_inference_steps: ?usize, sigmas_opt: ?[]const f32, mu: ?f32, timesteps_opt: ?[]const f32) !void {
         if (self.use_dynamic_shifting and mu == null) {
             return error.MuRequired;
         }
@@ -182,7 +181,6 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         } else if (!is_timesteps_provided) {
             const start_t = self.sigma_to_t(self.sigma_max);
             const end_t = self.sigma_to_t(self.sigma_min);
-            // python: np.linspace(sigma_to_t(sigma_max), sigma_to_t(sigma_min), num_inference_steps)
             const timesteps_arr = try linspace(self.allocator, start_t, end_t, num_steps);
             defer self.allocator.free(timesteps_arr);
 
@@ -250,15 +248,12 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
     }
 
     pub fn step(
-        self: *FlowMatchEulerDiscreteScheduler,
+        self: *@This(),
         model_output: []const f32,
-        timestep: f32,
         sample: []const f32,
         out_sample: []f32,
     ) !void {
-        _ = timestep;
         if (self.step_index == null) {
-            // self.init_step_index(timestep);
             return error.StepIndexNotSet;
         }
 
@@ -276,20 +271,12 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         self.step_index.? += 1;
     }
 
-    pub fn set_begin_index(self: *FlowMatchEulerDiscreteScheduler, begin_index: usize) void {
+    pub fn set_begin_index(self: *@This(), begin_index: usize) void {
         self.begin_index = begin_index;
         self.step_index = begin_index;
     }
 
-    // fn init_step_index(self: *FlowMatchEulerDiscreteScheduler, timestep: f32) void {
-    //     if (self.begin_index) |idx| {
-    //         self.step_index = idx;
-    //     } else {
-    //         self.step_index = self.index_for_timestep(timestep);
-    //     }
-    // }
-
-    fn index_for_timestep(self: *FlowMatchEulerDiscreteScheduler, timestep: f32) usize {
+    fn index_for_timestep(self: *@This(), timestep: f32) usize {
         const epsilon = 1e-4; // slightly loose
         var found_i: ?usize = null;
         for (self.timesteps, 0..) |t, i| {
@@ -305,7 +292,7 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         return 0;
     }
 
-    fn sigma_to_t(self: *FlowMatchEulerDiscreteScheduler, sigma: f32) f32 {
+    fn sigma_to_t(self: *@This(), sigma: f32) f32 {
         return sigma * @as(f32, @floatFromInt(self.num_train_timesteps));
     }
 };

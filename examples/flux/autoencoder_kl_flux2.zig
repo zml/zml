@@ -1,5 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
+const tools = @import("tools.zig");
 const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
@@ -12,7 +13,7 @@ pub const Config = struct {
     layers_per_block: i64 = 2,
     latent_channels: i64 = 32,
     norm_num_groups: i64 = 32,
-    patch_size: i64 = 1, // Default to 1 if not specified differently
+    patch_size: []const i64 = &.{ 2, 2 },
     sample_size: i64 = 1024,
     batch_norm_eps: f32 = 1e-4,
     use_quant_conv: bool = true,
@@ -69,6 +70,10 @@ const Conv2d = struct {
             .stride = stride,
             .padding = padding,
         };
+    }
+
+    pub fn deinit(self: @This()) void {
+        _ = self; // autofix
     }
 
     pub fn forward(self: Conv2d, x: Tensor) Tensor {
@@ -192,6 +197,10 @@ const BN = struct {
             .running_var = store.createTensor("running_var"),
             .config = config,
         };
+    }
+
+    pub fn deinit(self: @This()) void {
+        _ = self; // autofix
     }
 };
 
@@ -407,17 +416,17 @@ pub const Decoder = struct {
         // Capacity equal to number of blocks
         var up_blocks = try UpBlockList.initCapacity(allocator, block_out_channels.len);
 
-        var i: usize = block_out_channels.len;
-        while (i > 0) {
-            i -= 1;
-            const out_ch = block_out_channels[i];
-            const in_ch = if (i == block_out_channels.len - 1) mid_channels else block_out_channels[i + 1];
+        var idx: usize = block_out_channels.len;
+        while (idx > 0) {
+            idx -= 1;
+            const out_ch = block_out_channels[idx];
+            const in_ch = if (idx == block_out_channels.len - 1) mid_channels else block_out_channels[idx + 1];
 
-            const add_upsample = i > 0;
+            const add_upsample = idx > 0;
 
             var prefix_buf: [32]u8 = undefined;
             // Weight index: (N-1) - i
-            const weight_idx = (block_out_channels.len - 1) - i;
+            const weight_idx = (block_out_channels.len - 1) - idx;
             const prefix_z = try std.fmt.bufPrint(&prefix_buf, "up_blocks.{d}", .{weight_idx});
 
             try up_blocks.append(allocator, try UpDecoderBlock2D.init(store.withPrefix(prefix_z), allocator, in_ch, out_ch, layers_per_block + 1, 1e-6, norm_num_groups, add_upsample));
@@ -477,44 +486,36 @@ pub const AutoencoderKLFlux2 = struct {
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model_path: []const u8) !ModelContext {
-        log.info("Loading VAE from: {s}/vae", .{model_path});
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !ModelContext {
+        const config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        errdefer config_json.deinit();
 
-        // 1. Resolve Repo/Dir
-        const vae_dir = try std.fs.path.join(allocator, &.{ model_path, "vae" });
-        defer allocator.free(vae_dir);
+        const vae_dir = try repo_dir.openDir(io, options.subfolder, .{});
+        defer vae_dir.close(io);
 
-        // 2. Parse Config - skipping for now, using defaults.
-        const config = Config{};
+        var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, vae_dir, options.safetensors_name);
+        defer tensor_registry.deinit();
 
-        // 3. Load Safetensors
-        const vae_checkpoint = try std.fs.path.join(allocator, &.{ vae_dir, "diffusion_pytorch_model.safetensors" });
-        defer allocator.free(vae_checkpoint);
-        log.info("Loading VAE Checkpoint: {s}", .{vae_checkpoint});
+        var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
+        errdefer tensor_store.deinit();
 
-        var tr_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, vae_checkpoint);
+        var model = try AutoencoderKLFlux2.init(tensor_store.view(), allocator, config_json.value);
+        errdefer model.deinit();
 
-        var tr_store = zml.io.TensorStore.fromRegistry(allocator, &tr_registry);
-
-        // 4. Init Model
-        const model = try init(tr_store.view(), allocator, config);
-
-        // 5. Hydrate Weights
-        log.info("Hydrating VAE Weights...", .{});
         const weights = try zml.io.load(
             AutoencoderKLFlux2,
             &model,
             allocator,
             io,
             platform,
-            .{ .parallelism = 1, .store = &tr_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024 },
+            .{ .parallelism = 1, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = progress },
         );
 
         return .{
             .model = model,
-            .store = tr_store,
-            .registry = tr_registry,
-            .config = config,
+            .store = tensor_store,
+            .registry = tensor_registry,
+            .config = config_json.value,
             .weights = weights,
         };
     }
@@ -529,6 +530,16 @@ pub const AutoencoderKLFlux2 = struct {
             .bn = BN.init(store.withPrefix("bn"), config),
             .config = config,
         };
+    }
+
+    pub fn deinit(
+        self: *AutoencoderKLFlux2,
+    ) void {
+        self.decoder.deinit();
+        if (self.post_quant_conv) |conv| {
+            conv.deinit();
+        }
+        self.bn.deinit();
     }
 
     pub fn decode(self: AutoencoderKLFlux2, z: Tensor) Tensor {

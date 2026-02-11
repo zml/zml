@@ -1443,7 +1443,6 @@ pub const ModelContext = struct {
         defer transformer_dir.close(io);
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, transformer_dir, options.safetensors_name);
-
         defer tensor_registry.deinit();
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
@@ -1451,6 +1450,7 @@ pub const ModelContext = struct {
 
         var model = try Flux2Transformer2DModel.init(allocator, tensor_store.view(), config);
         errdefer model.deinit();
+
         var weights = try zml.io.load(
             Flux2Transformer2DModel,
             &model,
