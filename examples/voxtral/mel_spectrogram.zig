@@ -1,7 +1,7 @@
 const std = @import("std");
 const log = std.log;
 const cfg = @import("config.zig");
-const MelSpectrumConfig = cfg.MelSpectrumConfig;
+const Config = cfg.Config;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
@@ -20,13 +20,14 @@ pub const LogMelSpectrogram = struct {
 
     precision: zml.DataType = .f32,
 
-    pub fn init(config: MelSpectrumConfig) LogMelSpectrogram {
+    pub fn init(config: Config) LogMelSpectrogram {
+	const audio = config.audio();
 	return .{
 	    .window = .hann,
 	    .mel_filters = Tensor.init(.{201, 128}, .f32).withTags(.{.freq_bins, .mel}),
-	    .hop_len = config.hop_length,
-	    .n_fft = config.window_size,
-	    .global_log_mel_max = 1.5,
+	    .hop_len = audio.hop_length,
+	    .n_fft = audio.window_size,
+	    .global_log_mel_max = audio.global_log_mel_max,
 	};
     }
 
