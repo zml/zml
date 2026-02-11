@@ -6,10 +6,16 @@ const cfg = @import("config.zig");
 const MelSpectrumConfig = cfg.MelSpectrumConfig;
 
 const zml = @import("zml");
+const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
 const mel = @import("mel_spectrogram.zig");
 const LogMelSpectrogram = mel.LogMelSpectrogram;
+
+const CliArgs = struct {
+    input: []const u8,
+    // output: []const u8,
+};
 
 pub fn main() !void {
     log.info("Start of Voxtral", .{});
@@ -25,9 +31,11 @@ pub fn main() !void {
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
+    const args = stdx.flags.parseProcessArgs(CliArgs);
+
     var vfs: zml.io.VFS = try .init(allocator, threaded.io());
     defer vfs.deinit();
-    
+
     var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
     defer vfs_file.deinit();
     try vfs.register("file", vfs_file.io());
@@ -37,21 +45,19 @@ pub fn main() !void {
     const arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
 
-    const file = try std.Io.Dir.openFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/inputs/harvard_16k.wav", .{});
+    const file = try std.Io.Dir.openFile(.cwd(), io, args.input, .{});
     defer file.close(io);
 
     var wav_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &wav_buffer);
 
     const wav_file = try loadWav(allocator, &reader.interface);
-    std.debug.print("LEN: {d}\n", .{wav_file.len});
     defer allocator.free(wav_file);
-    std.debug.print("{any}\n", .{wav_file[0..100]});
 
     const melspectrum_config = MelSpectrumConfig{};
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform .deinit(allocator);
+    defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
     var melspectro_model: LogMelSpectrogram = .init(melspectrum_config);
@@ -64,8 +70,8 @@ pub fn main() !void {
     defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
 
     // Execute
-    var args = try compiled_mel_spectrum.args(allocator);
-    defer args.deinit(allocator);
+    var exec_args = try compiled_mel_spectrum.args(allocator);
+    defer exec_args.deinit(allocator);
     var results = try compiled_mel_spectrum.results(allocator);
     defer results.deinit(allocator);
 
@@ -73,7 +79,6 @@ pub fn main() !void {
     var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
     defer input_buffer.deinit();
 
-    // const output_shape = zml.Shape.init(.{ 128, melspectro_model.force_num_frames }, .f32);
     const num_frames = wav_file.len / melspectrum_config.hop_length;
     const output_shape = zml.Shape.init(.{ 128, num_frames }, .f32);
     const output_slice: zml.Slice = try zml.Slice.alloc(allocator, output_shape);
@@ -81,38 +86,21 @@ pub fn main() !void {
     var output_buffer: zml.Buffer = try .fromSlice(io, platform, output_slice);
     defer output_buffer.deinit();
 
-    args.set(.{mel_spectrum_buffers, input_buffer});
-    compiled_mel_spectrum.call(args, &results);
+    exec_args.set(.{mel_spectrum_buffers, input_buffer});
+    compiled_mel_spectrum.call(exec_args, &results);
     results.fill(.{&output_buffer});
-
 
     try output_buffer.toSlice(io, output_slice);
 
-    const outfile = try std.Io.Dir.createFile(.cwd(), io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/out.bin", .{});
-    defer outfile.close(io);
+    // const outfile = try std.Io.Dir.createFile(.cwd(), io, args.output, .{});
+    // defer outfile.close(io);
 
-    var outbuff: [4096]u8 = undefined;
-    var writer = outfile.writer(io, &outbuff);
-    const writer_interface = &writer.interface;
+    // var outbuff: [4096]u8 = undefined;
+    // var writer = outfile.writer(io, &outbuff);
+    // const writer_interface = &writer.interface;
 
-    try writer_interface.writeAll(output_slice.data());
-
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/Users/raph/Documents/Git-Repos/zml/examples/voxtral/outputs/voxtral_activations.safetensors");
-    defer registry.deinit();
-
-    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
-
-    try zml.testing.testLayer(allocator, io, platform, MelTestHarness{ .inner = melspectro_model }, .forward, store.view(), "mel", .{ .inner = mel_spectrum_buffers }, 1e-3);
+    // try writer_interface.writeAll(output_slice.data());
 }
-
-const MelTestHarness = struct {
-    inner: LogMelSpectrogram,
-
-    pub fn forward(self: MelTestHarness, waveform: Tensor) Tensor {
-        return self.inner.forward(waveform.withTags(.{.samples}));
-    }
-};
 
 fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -144,6 +132,5 @@ fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
 }
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram) !zml.Exe {
-    // return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{model.force_num_frames * model.hop_len}, .f32).withTags(.{.freq})});
     return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{293699}, .f32).withTags(.{.samples})});
 }

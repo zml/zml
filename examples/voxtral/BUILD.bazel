@@ -3,8 +3,6 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "voxtral",
-    args = [],
-    data = [],
     main = "voxtral.zig",
     srcs = [
         "mel_spectrogram.zig",
@@ -12,12 +10,26 @@ zig_binary(
         "config.zig",
     ],
     extra_srcs = [
-      "//examples/voxtral/assets:voxtral_mel_filter",  
+        "//examples/voxtral/assets:voxtral_mel_filter",
+    ],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "voxtral_test",
+    main = "test.zig",
+    srcs = [
+        "mel_spectrogram.zig",
+        "wav.zig",
+        "config.zig",
+    ],
+    extra_srcs = [
+        "//examples/voxtral/assets:voxtral_mel_filter",
     ],
     deps = ["//zml"],
 )
 
 build_test(
     name = "test",
-    targets = [":voxtral"],
+    targets = [":voxtral_test"],
 )
