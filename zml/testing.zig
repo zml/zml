@@ -160,10 +160,10 @@ fn countWithPrefix(store: zml.io.TensorStore.View, prefix: []const u8) usize {
 ///
 /// The function arguments need to be valid when initialized to undefined, meaning no slices,
 /// no unions, no pointers.
-pub fn testlayer(
+pub fn testLayer(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     layer: anytype,
     comptime func: std.meta.DeclEnum(@TypeOf(layer)),
     activation_store: zml.io.TensorStore.View,
@@ -215,7 +215,7 @@ pub fn testlayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.loadBuffersFromId(allocator, io, platform, args, activation_store, .{ .size = 4096, .concurrency = 1 }, .{ .size = 4096, .concurrency = 1 });
+    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{ .dma_chunks = 1, .dma_chunk_size = 4096, .store = activation_store.store, .parallelism = 1 });
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
