@@ -1,0 +1,5 @@
+filegroup(
+    name = "voxtral_mel_filter",
+    srcs = ["voxtral_mel_filter.data"],
+    visibility = ["//visibility:public"],
+)
