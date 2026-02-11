@@ -7,20 +7,21 @@ const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 
 const cfg = @import("config.zig");
-pub const EncoderConfig = cfg.EncoderConfig;
+const Config = cfg.Config;
 
 pub const Encoder = struct {
     conv0: CausalConv1d,
     conv1: CausalConv1d,
     layers: []TransformerLayer,
     norm: RmsNorm,
-    config: EncoderConfig,
+    config: Config,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: EncoderConfig) Encoder {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Encoder {
         const conv_store = store.withPrefix("conv_layers");
         const transformer_store = store.withPrefix("transformer");
 
-        const layers = allocator.alloc(TransformerLayer, config.n_layers) catch unreachable;
+        const enc = config.encoder();
+        const layers = allocator.alloc(TransformerLayer, enc.n_layers) catch unreachable;
         for (layers, 0..) |*layer, i| {
             layer.* = TransformerLayer.init(transformer_store.withPrefix("layers").withLayer(i), config);
         }
@@ -29,7 +30,7 @@ pub const Encoder = struct {
             .conv0 = CausalConv1d.init(conv_store.withLayer(0).withPrefix("conv"), 1),
             .conv1 = CausalConv1d.init(conv_store.withLayer(1).withPrefix("conv"), 2),
             .layers = layers,
-            .norm = RmsNorm.init(transformer_store.withPrefix("norm"), config.norm_eps),
+            .norm = RmsNorm.init(transformer_store.withPrefix("norm"), enc.norm_eps),
             .config = config,
         };
     }
@@ -41,9 +42,11 @@ pub const Encoder = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
         CausalConv1d.unloadBuffers(&self.conv0);
         CausalConv1d.unloadBuffers(&self.conv1);
+	
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
+	
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
     }
@@ -63,7 +66,8 @@ pub const Encoder = struct {
 
         // Left-truncate to multiple of downsample_factor
         const seq_len = h.dim(.s);
-        const trunc: i64 = @intCast(@as(usize, @intCast(seq_len)) % self.config.downsample_factor);
+        const trunc: i64 = @intCast(@as(usize, @intCast(seq_len)) % self.config.downsample_factor());
+	
         if (trunc > 0) {
             h = h.slice1d(.s, .{ .start = trunc });
         }
@@ -128,11 +132,12 @@ pub const TransformerLayer = struct {
     ffn_norm: RmsNorm,
     feed_forward: SwiGluFfn,
 
-    pub fn init(store: zml.io.TensorStore.View, config: EncoderConfig) TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: Config) TransformerLayer {
+        const enc = config.encoder();
         return .{
-            .attention_norm = RmsNorm.init(store.withPrefix("attention_norm"), config.norm_eps),
-            .attention = SelfAttention.init(store.withPrefix("attention"), config),
-            .ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), config.norm_eps),
+            .attention_norm = RmsNorm.init(store.withPrefix("attention_norm"), enc.norm_eps),
+            .attention = SelfAttention.init(store.withPrefix("attention")),
+            .ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), enc.norm_eps),
             .feed_forward = SwiGluFfn.init(store.withPrefix("feed_forward")),
         };
     }
@@ -145,7 +150,7 @@ pub const TransformerLayer = struct {
     }
 
     /// h: [s, d] -> [s, d]
-    pub fn forward(self: TransformerLayer, h: Tensor, config: EncoderConfig) Tensor {
+    pub fn forward(self: TransformerLayer, h: Tensor, config: Config) Tensor {
         // Pre-attention norm + attention + residual
         const attn_out = self.attention.forward(self.attention_norm.forward(h), config);
         var out = h.add(attn_out);
@@ -164,13 +169,12 @@ pub const SelfAttention = struct {
     wv: Linear,
     wo: Linear,
 
-    pub fn init(store: zml.io.TensorStore.View, config: EncoderConfig) SelfAttention {
-        _ = config;
+    pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = Linear.initWithBias(store.withPrefix("wq")),
-            .wk = Linear.initNoBias(store.withPrefix("wk")),
-            .wv = Linear.initWithBias(store.withPrefix("wv")),
-            .wo = Linear.initWithBias(store.withPrefix("wo")),
+            .wq = Linear.init(store.withPrefix("wq")),
+            .wk = Linear.init(store.withPrefix("wk")),
+            .wv = Linear.init(store.withPrefix("wv")),
+            .wo = Linear.init(store.withPrefix("wo")),
         };
     }
 
@@ -182,7 +186,8 @@ pub const SelfAttention = struct {
     }
 
     /// x: [s, d] -> [s, d]
-    pub fn forward(self: SelfAttention, x: Tensor, config: EncoderConfig) Tensor {
+    pub fn forward(self: SelfAttention, x: Tensor, config: Config) Tensor {
+        const enc = config.encoder();
         const dtype = x.dtype();
 
         // Q, K, V projections
@@ -192,15 +197,16 @@ pub const SelfAttention = struct {
         var v = self.wv.forward(x); // [s, n_kv_heads * head_dim]
 
         // Split into heads: [s, d] -> [s, h, hd]
-        q = q.splitAxis(.d, .{ .h = config.n_heads, .hd = config.head_dim });
-        k = k.splitAxis(.d, .{ .h = config.n_kv_heads, .hd = config.head_dim });
-        v = v.splitAxis(.d, .{ .h = config.n_kv_heads, .hd = config.head_dim });
+        q = q.splitAxis(.d, .{ .h = enc.n_heads, .hd = enc.head_dim });
+        k = k.splitAxis(.d, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
+        v = v.splitAxis(.d, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
 
         // RoPE (interleaved, matching is_neox_style=False in Python)
         const rope_opts: zml.nn.RopeOpts = .{
             .layout = .interleaved,
-            .freq_base = config.rope_theta,
+            .freq_base = enc.rope_theta,
         };
+	
         q = zml.nn.rope(q, null, rope_opts);
         k = zml.nn.rope(k, null, rope_opts);
 
@@ -211,7 +217,7 @@ pub const SelfAttention = struct {
 
         // Causal attention with sliding window
         const seq_len = q.dim(.q);
-        const attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, config.window_size);
+        const attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, enc.sliding_window);
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
 
         // Merge heads: [s, h, hd] -> [s, d]
@@ -229,9 +235,9 @@ pub const SwiGluFfn = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
         return .{
-            .w1 = Linear.initNoBias(store.withPrefix("w1")),
-            .w2 = Linear.initWithBias(store.withPrefix("w2")),
-            .w3 = Linear.initNoBias(store.withPrefix("w3")),
+            .w1 = Linear.init(store.withPrefix("w1")),
+            .w2 = Linear.init(store.withPrefix("w2")),
+            .w3 = Linear.init(store.withPrefix("w3")),
         };
     }
 
@@ -254,17 +260,10 @@ pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor,
 
-    pub fn initWithBias(store: zml.io.TensorStore.View) Linear {
+    pub fn init(store: zml.io.TensorStore.View) Linear {
         return .{
             .weight = store.createTensorWithTags("weight", .{ .out, .d }),
-            .bias = store.createTensorWithTags("bias", .{.d}),
-        };
-    }
-
-    pub fn initNoBias(store: zml.io.TensorStore.View) Linear {
-        return .{
-            .weight = store.createTensorWithTags("weight", .{ .out, .d }),
-            .bias = null,
+            .bias = store.maybeCreateTensorWithTags("bias", .{.d}),
         };
     }
 
@@ -277,9 +276,11 @@ pub const Linear = struct {
     pub fn forward(self: Linear, x: Tensor) Tensor {
         const dtype = x.dtype();
         var y = x.dot(self.weight.convert(dtype), .d).rename(.{ .out = .d });
+	
         if (self.bias) |bias| {
             y = y.add(bias.convert(dtype).broad(y.shape()));
         }
+	
         return y;
     }
 };
