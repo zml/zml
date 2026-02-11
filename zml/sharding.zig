@@ -28,16 +28,6 @@ pub const Partitioning = struct {
         }
     };
 
-    pub const MeshDescriptor = struct {
-        name: []const u8,
-        attr: []const u8,
-    };
-
-    pub const Cardinality = struct {
-        num_partitions: i32,
-        num_replicas: i32,
-    };
-
     partitioner: Partitioner,
     shardings: []const Sharding,
 
@@ -59,21 +49,18 @@ pub const Partitioning = struct {
         return plan;
     }
 
-    pub fn kind(self: Partitioning) Partitioner {
-        return self.partitioner;
+    pub fn numPartitions(self: Partitioning) i32 {
+        const primary = self.primarySharding();
+        return primary.numPartitions();
     }
 
-    pub fn numPartitions(self: Partitioning) !i32 {
-        return self.cardinality().num_partitions;
+    pub fn numReplicas(self: Partitioning) i32 {
+        const primary = self.primarySharding();
+        return primary.numReplicas();
     }
 
-    pub fn numReplicas(self: Partitioning) !i32 {
-        return self.cardinality().num_replicas;
-    }
-
-    pub fn numDevices(self: Partitioning) !i32 {
-        const card = self.cardinality();
-        return card.num_partitions * card.num_replicas;
+    pub fn numDevices(self: Partitioning) i32 {
+        return self.numPartitions() * self.numReplicas();
     }
 
     pub fn deviceAssignment(self: Partitioning, allocator: std.mem.Allocator) ![]usize {
@@ -86,70 +73,44 @@ pub const Partitioning = struct {
         };
     }
 
-    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?[]const u8 {
+    pub const TensorShardingAttr = struct {
+        name: []const u8,
+        attr: []const u8,
+    };
+
+    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?TensorShardingAttr {
         return switch (self.partitioner) {
-            .shardy => sharding.shardingAttrForShape(allocator, shape),
-            .gspmd => null,
-        };
-    }
-
-    pub fn meshDescriptors(self: Partitioning, allocator: std.mem.Allocator) ![]MeshDescriptor {
-        return switch (self.partitioner) {
-            .shardy => blk: {
-                var list = std.array_list.Managed(MeshDescriptor).init(allocator);
-                errdefer list.deinit();
-
-                for (self.shardings) |sharding| {
-                    const name = sharding.meshName();
-                    const attr: []u8 = blk2: {
-                        var out: std.Io.Writer.Allocating = .init(allocator);
-                        errdefer out.deinit();
-
-                        const view = sharding.physicalView();
-                        try out.writer.writeAll("#sdy.mesh<[");
-                        for (view.axes.constSlice(), 0..) |p, i| {
-                            if (i > 0) try out.writer.writeAll(", ");
-                            try out.writer.print("\"{s}\"={d}", .{ @tagName(p.tag), p.size });
-                        }
-                        try out.writer.writeAll("]>");
-
-                        break :blk2 try out.toOwnedSlice();
-                    };
-                    try list.append(.{ .name = name, .attr = attr });
-                }
-
-                break :blk try list.toOwnedSlice();
-            },
-            .gspmd => error.UnimplementedPartitioner,
+            .shardy => if (try sharding.sdyShardingAttrForShape(allocator, shape)) |attr| .{
+                .name = "sdy.sharding",
+                .attr = attr,
+            } else null,
+            .gspmd => if (try sharding.gspmdShardingAttrForShape(allocator, shape)) |attr| .{
+                .name = "mhlo.sharding",
+                .attr = attr,
+            } else null,
         };
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
-        for (self.shardings) |s| {
-            if (self.shardingCoversShape(s, shape)) return s;
+        for (self.shardings) |sharding| {
+            if (shardingCoversShape(sharding, shape)) return sharding;
         }
 
         return error.NoSuitableSharding;
-    }
-
-    fn cardinality(self: Partitioning) Cardinality {
-        const first = self.primarySharding();
-
-        return .{ .num_partitions = first.numPartitions(), .num_replicas = first.numReplicas() };
     }
 
     fn primarySharding(self: Partitioning) Sharding {
         return self.shardings[0];
     }
 
-    fn shardingCoversShape(self: Partitioning, sharding: Sharding, shape: Shape) bool {
-        _ = self;
+    fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
         for (0..shape.rank()) |ax| {
             switch (shape.partition(ax)) {
                 .axis => |tag| if (sharding.binding(tag) == null) return false,
                 else => {},
             }
         }
+
         return true;
     }
 };
@@ -1009,27 +970,12 @@ pub const Sharding = struct {
         return view;
     }
 
-    pub fn logicalIndexFromCoords(self: Sharding, coords: []const usize) usize {
-        return self.physical.linearIndexFromCoords(coords);
+    pub fn name(self: Sharding) []const u8 {
+        return self.logical.name;
     }
 
-    fn devicesInCanonicalOrder(self: Sharding) !Devices {
-        var devices: Devices = try .init(0);
-        try self.physical.devicesInto(&devices);
-
-        const Order = struct {
-            mesh: PhysicalMesh,
-            fn lessThan(ctx: @This(), a: Device, b: Device) bool {
-                const ca = a.coordsSlice() orelse unreachable;
-                const cb = b.coordsSlice() orelse unreachable;
-                const ia = ctx.mesh.linearIndexFromCoords(ca);
-                const ib = ctx.mesh.linearIndexFromCoords(cb);
-                return ia < ib;
-            }
-        };
-
-        std.mem.sort(Device, devices.slice(), Order{ .mesh = self.physical }, Order.lessThan);
-        return devices;
+    pub fn logicalIndexFromCoords(self: Sharding, coords: []const usize) usize {
+        return self.physical.linearIndexFromCoords(coords);
     }
 
     pub fn numPartitions(self: Sharding) i32 {
@@ -1044,12 +990,7 @@ pub const Sharding = struct {
         return self.numPartitions() * self.numReplicas();
     }
 
-    pub fn meshName(self: Sharding) []const u8 {
-        return self.logical.name;
-    }
-
-    /// Preferred naming for SDY mesh attribute.
-    pub fn sdyMeshAttrString(self: Sharding, allocator: std.mem.Allocator) ![]const u8 {
+    pub fn sdyMeshAttr(self: Sharding, allocator: std.mem.Allocator) ![]const u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
@@ -1060,12 +1001,7 @@ pub const Sharding = struct {
             try out.writer.print("\"{s}\"={d}", .{ @tagName(p.tag), p.size });
         }
         try out.writer.writeAll("]>");
-
         return try out.toOwnedSlice();
-    }
-
-    pub fn meshAttrString(self: Sharding, allocator: std.mem.Allocator) ![]const u8 {
-        return self.sdyMeshAttrString(allocator);
     }
 
     pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
@@ -1081,7 +1017,7 @@ pub const Sharding = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
-        try out.writer.print("#sdy.sharding<@{s}, [", .{self.meshName()});
+        try out.writer.print("#sdy.sharding<@{s}, [", .{self.name()});
         const view = self.physicalView();
 
         var used_in_any_dim = std.EnumSet(PhysicalAxisTag).initEmpty();
@@ -1146,8 +1082,9 @@ pub const Sharding = struct {
         return try out.toOwnedSlice();
     }
 
-    pub fn shardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
-        return self.sdyShardingAttrForShape(allocator, shape);
+    pub fn gspmdShardingAttrForShape(_: Sharding, _: std.mem.Allocator, _: Shape) !?[]const u8 {
+        // todo: implement
+        return error.NotImplemented;
     }
 
     pub fn deviceAssignment(self: Sharding, allocator: std.mem.Allocator) ![]usize {
@@ -1169,6 +1106,25 @@ pub const Sharding = struct {
         }
 
         return ids;
+    }
+
+    fn devicesInCanonicalOrder(self: Sharding) !Devices {
+        var devices: Devices = try .init(0);
+        try self.physical.devicesInto(&devices);
+
+        const Order = struct {
+            mesh: PhysicalMesh,
+            fn lessThan(ctx: @This(), a: Device, b: Device) bool {
+                const ca = a.coordsSlice() orelse unreachable;
+                const cb = b.coordsSlice() orelse unreachable;
+                const ia = ctx.mesh.linearIndexFromCoords(ca);
+                const ib = ctx.mesh.linearIndexFromCoords(cb);
+                return ia < ib;
+            }
+        };
+
+        std.mem.sort(Device, devices.slice(), Order{ .mesh = self.physical }, Order.lessThan);
+        return devices;
     }
 
     pub fn format(self: Sharding, writer: *std.Io.Writer) !void {
@@ -1288,10 +1244,7 @@ pub const Strategy = struct {
     }
 
     /// suggest builds a Strategy from logical intents.
-    pub fn suggest(
-        logical: LogicalMesh,
-        physical: PhysicalMesh,
-    ) !Strategy {
+    pub fn suggest(logical: LogicalMesh, physical: PhysicalMesh) !Strategy {
         var strategy: Strategy = .init;
 
         const base_order = physical.shardableAxes();
@@ -1380,6 +1333,7 @@ pub const Placement = struct {
             try writer.writeAll("]");
         }
     };
+    pub const Shards = stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES);
 
     const AxisSplit = struct {
         product: i64,
@@ -1405,7 +1359,7 @@ pub const Placement = struct {
 
     sharding: Sharding,
     shape: Shape,
-    shards: stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES),
+    shards: Shards,
 
     pub fn init(
         sharding: Sharding,
@@ -1413,7 +1367,7 @@ pub const Placement = struct {
     ) !Placement {
         const ordered_devices = try sharding.devicesInCanonicalOrder();
 
-        var shards = try stdx.BoundedArray(Shard, Platform.MAX_NUM_DEVICES).init(0);
+        var shards: Shards = try .init(0);
 
         for (ordered_devices.constSlice()) |d| {
             if (d.coords.len == 0) return error.MissingDeviceCoords;

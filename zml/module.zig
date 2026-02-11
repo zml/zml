@@ -151,31 +151,6 @@ pub const CompilationContext = struct {
     }
 };
 
-// todo: move
-fn addPartitionerMeshes(compilation_context: *CompilationContext) !void {
-    const allocator = compilation_context.arena.allocator();
-    const mlir_ctx = compilation_context.mlir_ctx;
-    const module = compilation_context.module;
-    const partitioning = compilation_context.partitioning;
-
-    const meshes = try partitioning.meshDescriptors(allocator);
-
-    for (meshes) |mesh| {
-        const mesh_attr = try mlir.Attribute.parse(mlir_ctx, mesh.attr);
-
-        const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
-            .attributes = &.{
-                .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, mesh.name)),
-                .named(mlir_ctx, "mesh", @ptrCast(mesh_attr)),
-            },
-            .location = .unknown(mlir_ctx),
-            .verify = false,
-        });
-
-        _ = mesh_op.appendTo(module.body());
-    }
-}
-
 pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
     var compilation_context: CompilationContext = .init(allocator, platform, opts);
     defer compilation_context.deinit();
@@ -184,13 +159,13 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
-    try addPartitionerMeshes(&compilation_context);
+    try addPartitionerOperations(&compilation_context);
 
     _ = result.func.appendTo(compilation_context.module.body());
 
-    const num_partitions = try compilation_context.partitioning.numPartitions();
-    const num_replicas = try compilation_context.partitioning.numReplicas();
-    const num_devices = try compilation_context.partitioning.numDevices();
+    const num_partitions = compilation_context.partitioning.numPartitions();
+    const num_replicas = compilation_context.partitioning.numReplicas();
+    const num_devices = compilation_context.partitioning.numDevices();
 
     compilation_context.module.operation().setAttributeByName(
         "mhlo.num_partitions",
@@ -229,6 +204,36 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
     errdefer exe.deinit();
 
     return exe;
+}
+
+fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
+    const allocator = compilation_context.arena.allocator();
+    const mlir_ctx = compilation_context.mlir_ctx;
+    const module = compilation_context.module;
+    const partitioning = compilation_context.partitioning;
+
+    switch (partitioning.partitioner) {
+        .gspmd => {},
+        .shardy => {
+            for (partitioning.shardings) |sharding| {
+                const attr_str = try sharding.sdyMeshAttr(allocator);
+                defer allocator.free(attr_str);
+
+                const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
+
+                const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
+                    .attributes = &.{
+                        .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, sharding.name())),
+                        .named(mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+                    },
+                    .location = .unknown(mlir_ctx),
+                    .verify = false,
+                });
+
+                _ = mesh_op.appendTo(module.body());
+            }
+        },
+    }
 }
 
 pub const OutputInfo = struct {
@@ -423,22 +428,22 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
-        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
-            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr| {
+            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
             input_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
-                "sdy.sharding",
+                attr.name,
                 @ptrCast(parsed),
             ));
         }
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
-        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr_str| {
-            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str);
+        if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr| {
+            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
             output_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
-                "sdy.sharding",
+                attr.name,
                 @ptrCast(parsed),
             ));
         }
@@ -492,8 +497,8 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         .gspmd => false,
     };
 
-    const num_partitions = try partitioning.numPartitions();
-    const num_replicas = try partitioning.numReplicas();
+    const num_partitions = partitioning.numPartitions();
+    const num_replicas = partitioning.numReplicas();
 
     const device_assignment = try partitioning.deviceAssignment(arena);
 
