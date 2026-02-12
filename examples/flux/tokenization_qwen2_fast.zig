@@ -78,7 +78,7 @@ pub const Qwen2TokenizerFast = struct {
         return result.toOwnedSlice(self.allocator);
     }
 
-    const TokenizeOutput = struct {
+    pub const TokenizeOutput = struct {
         input_ids: zml.Buffer,
         attention_mask: zml.Buffer,
         pub fn deinit(self: *@This()) void {
@@ -128,7 +128,7 @@ pub const Qwen2TokenizerFast = struct {
         };
     }
 
-    pub fn pipelineRun(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
+    pub fn pipelineRun(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, prompt: []const u8, max_length: usize) !TokenizeOutput {
         if (progress) |p| {
             p.increaseEstimatedTotalItems(1);
             var node = p.start("Executing tokenizer...", 1);
@@ -138,17 +138,17 @@ pub const Qwen2TokenizerFast = struct {
         var tokenizer = try Qwen2TokenizerFast.fromPretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
         defer tokenizer.deinit();
         const messages = [_]Qwen2TokenizerFast.ChatMessage{
-            .{ .role = "user", .content = options.prompt },
+            .{ .role = "user", .content = prompt },
         };
         const text_templated = try tokenizer.applyChatTemplate(&messages, .{
             .add_generation_prompt = true,
         });
         defer allocator.free(text_templated);
-        // log.info("text_templated: from {s} to {s}", .{ options.prompt, text_templated });
+        // log.info("text_templated: from {s} to {s}", .{ prompt, text_templated });
 
         // Tokenize
         return try tokenizer.tokenize(io, platform, text_templated, .{
-            .max_length = options.max_length,
+            .max_length = max_length,
             .truncation = true,
         });
     }

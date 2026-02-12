@@ -1,14 +1,15 @@
 const std = @import("std");
 const zml = @import("zml");
 
+
+const Flux2Transformer2D = @import("flux2_transformer2d_model.zig").Flux2Transformer2D;
+const FlowMatchEulerDiscreteScheduler = @import("scheduling_flow_match_euler_discrete.zig").FlowMatchEulerDiscreteScheduler;
+const AutoencoderKLFlux2 = @import("autoencoder_kl_flux2.zig").AutoencoderKLFlux2;
+const Qwen2TokenizerFast = @import("tokenization_qwen2_fast.zig").Qwen2TokenizerFast;
+const Qwen3ForCausalLM = @import("modeling_qwen3.zig").Qwen3ForCausalLM;
+const config = @import("config");
 const tools = @import("tools.zig");
 const utils = @import("utils.zig");
-const flux_model_transformer2d = @import("flux2_transformer2d_model.zig");
-const flow_match_euler_discrete_scheduler = @import("scheduling_flow_match_euler_discrete.zig");
-const autoencoder_kl = @import("autoencoder_kl_flux2.zig");
-const Qwen2TokenizerFast = @import("tokenization_qwen2_fast.zig").Qwen2TokenizerFast;
-const modeling_qwen3 = @import("modeling_qwen3.zig");
-const config = @import("config");
 
 const stdx = zml.stdx;
 const log = std.log.scoped(.flux2_main);
@@ -69,8 +70,6 @@ const CliArgs = struct {
     model: []const u8 = "/Users/kevin/FLUX.2-klein-4B",
     prompt: []const u8 = "A photo of a cat",
     seqlen: usize = 512,
-    // output_image_path: []const u8 = "output.png",
-    // output_image_path: []const u8 = "/Users/kevin/zml/flux_klein_zml_result.png",
     output_image_path: ?[]const u8 = null,
     kitty_output: bool = false,
     random_seed: u64 = 0,
@@ -116,29 +115,8 @@ const CliArgs = struct {
     ;
 };
 
-// Forward pass
-const QwenEncodingStep = struct {
-    pub fn forward(
-        self: @This(),
-        model: modeling_qwen3.Qwen3ForCausalLM,
-        input_ids: zml.Tensor,
-        attention_mask: zml.Tensor,
-        rope: utils.RoPE,
-        // rope_cos: zml.Tensor,
-        // rope_sin: zml.Tensor,
-    ) zml.Tensor {
-        _ = self;
-        // const rope = utils.RoPE{ .cos = rope_cos, .sin = rope_sin };
-        const out = model.forward(input_ids.convert(.i32), rope, attention_mask.convert(.f32), true);
-        const h9 = out.hidden_states.?.get(9);
-        const h18 = out.hidden_states.?.get(18);
-        const h27 = out.hidden_states.?.get(27);
-        return zml.Tensor.concatenate(&.{ h9, h18, h27 }, -1);
-    }
-};
-
 pub fn main() !void {
-    @setEvalBranchQuota(10_000);
+    // @setEvalBranchQuota(10_000);
 
     log.info("Flux was compiled with {}", .{@import("builtin").mode});
 
@@ -157,11 +135,15 @@ pub fn main() !void {
 
     const io = vfs.io();
     const args = stdx.flags.parseProcessArgs(CliArgs);
-    log.info("args: {s} : {s} : {d}", .{ args.model, args.prompt, args.seqlen });
+
+    if (args.output_image_path == null and !args.kitty_output) {
+        log.err("No output method specified, the generated image will not be saved or displayed. Use --output-image-path=\"<path>\" or --kitty-output to save or display the image.", .{});
+        std.process.exit(1);
+    }
 
     // var platform_auto: *zml.Platform = try zml.Platform.init(allocator, io, .cpu, .{});
-    var platform_auto: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
-    defer platform_auto.deinit(allocator);
+    var zml_compute_platform: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
+    defer zml_compute_platform.deinit(allocator);
 
     var http_client: std.http.Client = .{
         .allocator = allocator,
@@ -201,12 +183,12 @@ pub fn main() !void {
     // ==================== Tokenizing Prompt ====================
 
     var qwen2_node = progress.start("Tokenizing Prompt", 0);
-    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, platform_auto, &qwen2_node, .{ .prompt = args.prompt, .max_length = args.seqlen } });
+    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen2_node, args.prompt, args.seqlen });
 
     defer _ = qwen2_future.cancel(io) catch unreachable;
     qwen2_node.end();
 
-    var tokens = try qwen2_future.await(io);
+    var tokens: Qwen2TokenizerFast.TokenizeOutput = try qwen2_future.await(io);
     defer tokens.deinit();
 
     // try tools.printFlatten(allocator, io, tokens.input_ids, 20, "input_ids", .{ .include_shape = false });
@@ -217,53 +199,16 @@ pub fn main() !void {
     // ==================== Encoding Prompt ====================
 
     var qwen_node = progress.start("Loading Qwen3", 0);
-    var qwen3_model_ctx = try modeling_qwen3.Qwen3ForCausalLM.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &qwen_node, args.data_type);
+    var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, repo, zml_compute_platform, &qwen_node, parallelism_level, args.data_type, tokens);
     qwen_node.end();
-    defer qwen3_model_ctx.deinit(allocator);
+    defer embeding_output.deinit();
 
-    // Prepare RoPE
-    const seq_len: usize = @intCast(tokens.input_ids.shape().dim(1));
-    const head_dim: usize = @intCast(qwen3_model_ctx.model.model.layers[0].self_attn.head_dim);
-    const rope_cpu = try utils.computeRoPE_CPU(allocator, seq_len, head_dim, qwen3_model_ctx.config.rope_theta);
-    defer allocator.free(rope_cpu.cos);
-    defer allocator.free(rope_cpu.sin);
+    // try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, embeding_output.text_embedding, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
 
-    const rope_shape = zml.Shape.init(.{ 1, 1, @as(i64, @intCast(seq_len)), @as(i64, @intCast(head_dim)) }, .f32);
-    var rope_cos_dev = try zml.Buffer.fromBytes(io, platform_auto, rope_shape, std.mem.sliceAsBytes(rope_cpu.cos));
-    defer rope_cos_dev.deinit();
-    var rope_sin_dev = try zml.Buffer.fromBytes(io, platform_auto, rope_shape, std.mem.sliceAsBytes(rope_cpu.sin));
-    defer rope_sin_dev.deinit();
+    // ==================== End Encoding Prompt ====================
 
-    // const rope_compute = utils.computeRoPE(seq_len, head_dim, qwen3_model_ctx.config.rope_theta, args.data_type);
-
-    const input_shape = tokens.input_ids.shape();
-    var qwen_exe = try platform_auto.compile(allocator, io, QwenEncodingStep{}, .forward, .{
-        qwen3_model_ctx.model,
-        zml.Tensor.fromShape(input_shape),
-        zml.Tensor.fromShape(input_shape),
-        // rope_compute,
-        utils.RoPE{ .cos = zml.Tensor.fromShape(rope_shape), .sin = zml.Tensor.fromShape(rope_shape) },
-    });
-    defer qwen_exe.deinit();
-
-    var qwen_args = try qwen_exe.args(allocator);
-    defer qwen_args.deinit(allocator);
-    qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, .{ .cos = rope_cos_dev, .sin = rope_sin_dev } });
-    // qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, rope_compute });
-
-
-    var qwen_res = try qwen_exe.results(allocator);
-    defer qwen_res.deinit(allocator);
-    qwen_exe.call(qwen_args, &qwen_res);
-
-    const prompt_embeds = qwen_res.get(zml.Buffer);
-    const prompt_seq_len: usize = @intCast(prompt_embeds.shape().dim(1));
-    var prompt_text_ids: zml.Buffer = try utils.prepare_text_ids(allocator, io, platform_auto, prompt_seq_len);
-    defer prompt_text_ids.deinit();
-
-    try tools.printFlatten(allocator, io, prompt_text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    try tools.printFlatten(allocator, io, prompt_embeds, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
-    std.process.exit(0);
+    // std.process.exit(0);
 
     {
         // 1. Loading Embeds & Text IDs (Pre-computed for now)
@@ -289,17 +234,10 @@ pub fn main() !void {
     // const prompt_embeds_selector = prompt_embeds_from_python;
 
     // 2. Load Transformer & Scheduler
-    var flux2_transformer2d_node = progress.start("Loading Flux2Transformer2DModel", 0);
-    var transformer2d_model_ctx = try flux_model_transformer2d.ModelContext.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &flux2_transformer2d_node, .{});
+    var flux2_transformer2d_node = progress.start("Loading Flux2Transformer2D", 0);
+    var transformer2d_model_ctx = try Flux2Transformer2D.loadFromFile(allocator, io, zml_compute_platform, repo, parallelism_level, &flux2_transformer2d_node, .{});
     defer transformer2d_model_ctx.deinit(allocator);
     flux2_transformer2d_node.end();
-
-    var scheduler_node = progress.start("Loading FlowMatchEulerDiscreteScheduler", 0);
-    var scheduler = try flow_match_euler_discrete_scheduler.FlowMatchEulerDiscreteScheduler.loadFromFile(allocator, io, repo, &scheduler_node, .{});
-    defer scheduler.deinit();
-    scheduler_node.end();
-
-    log.info("Models initialized successfully", .{});
 
     // 3. Prepare Latents
     log.info(">> Preparing Latents...", .{});
@@ -314,9 +252,16 @@ pub fn main() !void {
         .UHD => .{ .width = 3840, .height = 2160 },
     };
 
-    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, platform_auto, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
+    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
+
+    var scheduler_node = progress.start("Loading FlowMatchEulerDiscreteScheduler", 0);
+    var scheduler = try FlowMatchEulerDiscreteScheduler.loadFromFile(allocator, io, repo, &scheduler_node, .{});
+    defer scheduler.deinit();
+    scheduler_node.end();
+
+    log.info("Models initialized successfully", .{});
 
     // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
     // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
@@ -329,12 +274,12 @@ pub fn main() !void {
         scheduler,
         latent_buf,
         latent_ids_buf,
-        prompt_embeds,
-        prompt_text_ids,
+        embeding_output.text_embedding,
+        embeding_output.text_ids,
         args.num_inference_steps,
         allocator,
         io,
-        platform_auto,
+        zml_compute_platform,
     );
     defer latents_out.deinit();
 
@@ -342,10 +287,12 @@ pub fn main() !void {
 
     log.info(">>> Decoding Latents...", .{});
 
-    var vae_ctx = try autoencoder_kl.AutoencoderKLFlux2.loadFromFile(allocator, io, platform_auto, repo, null, .{});
+    var auto_encoder_node = progress.start("Loading AutoencoderKLFlux2", 0);
+    var vae_ctx = try AutoencoderKLFlux2.loadFromFile(allocator, io, zml_compute_platform, repo, &auto_encoder_node, .{});
     defer vae_ctx.deinit(allocator);
+    auto_encoder_node.end();
 
-    const image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, platform_auto, vae_ctx, latents_out);
+    const image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, zml_compute_platform, vae_ctx, latents_out);
     // try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
 
     // Print directly in terminal without writing to disk

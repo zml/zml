@@ -2,6 +2,7 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
+const Qwen2TokenizerFast = @import("tokenization_qwen2_fast.zig").Qwen2TokenizerFast;
 const tools = @import("tools.zig");
 const utils = @import("utils.zig");
 
@@ -450,6 +451,67 @@ pub const Qwen3ForCausalLM = struct {
             .config = config,
             .weights = weights,
         };
+    }
+
+    const QwenEncodingStep = struct {
+        pub fn forward(
+            self: @This(),
+            model: Qwen3ForCausalLM,
+            input_ids: zml.Tensor,
+            attention_mask: zml.Tensor,
+            rope: utils.RoPE,
+        ) zml.Tensor {
+            _ = self;
+            const out = model.forward(input_ids.convert(.i32), rope, attention_mask.convert(.f32), true);
+            const h9 = out.hidden_states.?.get(9);
+            const h18 = out.hidden_states.?.get(18);
+            const h27 = out.hidden_states.?.get(27);
+            return zml.Tensor.concatenate(&.{ h9, h18, h27 }, -1);
+        }
+    };
+
+    pub const EmbedingOutput = struct {
+        text_ids: zml.Buffer,
+        text_embedding: zml.Buffer,
+        pub fn deinit(self: *@This()) void {
+            self.text_ids.deinit();
+            self.text_embedding.deinit();
+        }
+    };
+
+    pub fn pipelineRun(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, parallelism_level: usize, data_type: zml.DataType, tokens: Qwen2TokenizerFast.TokenizeOutput) !EmbedingOutput {
+        var qwen3_model_ctx = try Qwen3ForCausalLM.loadFromFile(allocator, io, platform, repo_dir, parallelism_level, progress, data_type);
+
+        // Prepare RoPE
+        const seq_len: usize = @intCast(tokens.input_ids.shape().dim(1));
+        const head_dim: usize = @intCast(qwen3_model_ctx.model.model.layers[0].self_attn.head_dim);
+
+        var rope = try utils.computeRoPE(allocator, io, platform, seq_len, head_dim, qwen3_model_ctx.config.rope_theta, data_type);
+        defer rope.deinit();
+
+        const input_shape = tokens.input_ids.shape();
+        var qwen_exe = try platform.compile(allocator, io, QwenEncodingStep{}, .forward, .{
+            qwen3_model_ctx.model,
+            zml.Tensor.fromShape(input_shape),
+            zml.Tensor.fromShape(input_shape),
+            rope.forCompile(),
+        });
+        defer qwen_exe.deinit();
+
+        var qwen_args = try qwen_exe.args(allocator);
+        defer qwen_args.deinit(allocator);
+        qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, rope.forRuntime() });
+
+        var qwen_res = try qwen_exe.results(allocator);
+        defer qwen_res.deinit(allocator);
+        qwen_exe.call(qwen_args, &qwen_res);
+
+        var prompt_embeds = qwen_res.get(zml.Buffer);
+        errdefer prompt_embeds.deinit();
+
+        const prompt_seq_len: usize = @intCast(prompt_embeds.shape().dim(1));
+
+        return .{ .text_ids = try utils.prepare_text_ids(allocator, io, platform, prompt_seq_len), .text_embedding = prompt_embeds };
     }
 };
 

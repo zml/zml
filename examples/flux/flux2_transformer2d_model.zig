@@ -1366,7 +1366,6 @@ pub const Flux2Transformer2DModel = struct {
                     .block0_gated_ff_output_txt => debug.gated_ff_txt,
                     .block0_final_block_output_img => debug.final_img,
                     .block0_final_block_output_txt => debug.final_txt,
-
                     .block0_norm_img => debug.norm_img,
                     .block0_norm_txt => debug.norm_txt,
                     .block0_attn_img => debug.attn_img,
@@ -1418,7 +1417,7 @@ pub const Flux2Transformer2DModel = struct {
     }
 };
 
-pub const ModelContext = struct {
+pub const Flux2Transformer2D = struct {
     model: Flux2Transformer2DModel,
     store: zml.io.TensorStore,
     registry: zml.safetensors.TensorRegistry,

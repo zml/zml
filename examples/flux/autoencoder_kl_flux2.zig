@@ -466,61 +466,13 @@ pub const Decoder = struct {
     }
 };
 
-pub const AutoencoderKLFlux2 = struct {
+pub const AutoencoderKLFlux2Model = struct {
     decoder: Decoder,
     post_quant_conv: ?Conv2d,
     bn: BN, // BatchNorm stats container
     config: Config,
 
-    pub const ModelContext = struct {
-        model: AutoencoderKLFlux2,
-        store: zml.io.TensorStore,
-        registry: zml.safetensors.TensorRegistry,
-        config: Config,
-        weights: zml.Bufferized(AutoencoderKLFlux2),
-
-        pub fn deinit(self: *ModelContext, allocator: std.mem.Allocator) void {
-            unloadWeights(allocator, &self.weights);
-            self.store.deinit();
-            self.registry.deinit();
-        }
-    };
-
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !ModelContext {
-        const config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
-        errdefer config_json.deinit();
-
-        const vae_dir = try repo_dir.openDir(io, options.subfolder, .{});
-        defer vae_dir.close(io);
-
-        var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, vae_dir, options.safetensors_name);
-        defer tensor_registry.deinit();
-
-        var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
-        errdefer tensor_store.deinit();
-
-        var model = try AutoencoderKLFlux2.init(tensor_store.view(), allocator, config_json.value);
-        errdefer model.deinit();
-
-        const weights = try zml.io.load(
-            AutoencoderKLFlux2,
-            &model,
-            allocator,
-            io,
-            platform,
-            .{ .parallelism = 1, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = progress },
-        );
-
-        return .{
-            .model = model,
-            .store = tensor_store,
-            .registry = tensor_registry,
-            .config = config_json.value,
-            .weights = weights,
-        };
-    }
-
-    pub fn init(store: zml.io.TensorStore.View, allocator: std.mem.Allocator, config: Config) !AutoencoderKLFlux2 {
+    pub fn init(store: zml.io.TensorStore.View, allocator: std.mem.Allocator, config: Config) !AutoencoderKLFlux2Model {
         return .{
             .decoder = try Decoder.init(store.withPrefix("decoder"), allocator, config),
             .post_quant_conv = if (config.use_post_quant_conv)
@@ -533,7 +485,7 @@ pub const AutoencoderKLFlux2 = struct {
     }
 
     pub fn deinit(
-        self: *AutoencoderKLFlux2,
+        self: *AutoencoderKLFlux2Model,
     ) void {
         self.decoder.deinit();
         if (self.post_quant_conv) |conv| {
@@ -542,7 +494,7 @@ pub const AutoencoderKLFlux2 = struct {
         self.bn.deinit();
     }
 
-    pub fn decode(self: AutoencoderKLFlux2, z: Tensor) Tensor {
+    pub fn decode(self: AutoencoderKLFlux2Model, z: Tensor) Tensor {
         var h = z;
         if (self.post_quant_conv) |conv| {
             h = conv.forward(h.convert(conv.weight.dtype()));
@@ -552,7 +504,7 @@ pub const AutoencoderKLFlux2 = struct {
 };
 
 pub const VariationalAutoEncoder = struct {
-    pub fn forward(self: VariationalAutoEncoder, model: AutoencoderKLFlux2, latents: Tensor) Tensor {
+    pub fn forward(self: VariationalAutoEncoder, model: AutoencoderKLFlux2Model, latents: Tensor) Tensor {
         _ = self;
         var z = latents;
 
@@ -581,5 +533,52 @@ pub const VariationalAutoEncoder = struct {
         z = z.reshape(.{ B, C_out, H * 2, W * 2 });
 
         return model.decode(z);
+    }
+};
+
+pub const AutoencoderKLFlux2 = struct {
+    model: AutoencoderKLFlux2Model,
+    store: zml.io.TensorStore,
+    registry: zml.safetensors.TensorRegistry,
+    config: Config,
+    weights: zml.Bufferized(AutoencoderKLFlux2Model),
+
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
+        unloadWeights(allocator, &self.weights);
+        self.store.deinit();
+        self.registry.deinit();
+    }
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
+        const config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        errdefer config_json.deinit();
+
+        const vae_dir = try repo_dir.openDir(io, options.subfolder, .{});
+        defer vae_dir.close(io);
+
+        var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, vae_dir, options.safetensors_name);
+        defer tensor_registry.deinit();
+
+        var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
+        errdefer tensor_store.deinit();
+
+        var model = try AutoencoderKLFlux2Model.init(tensor_store.view(), allocator, config_json.value);
+        errdefer model.deinit();
+
+        const weights = try zml.io.load(
+            AutoencoderKLFlux2Model,
+            &model,
+            allocator,
+            io,
+            platform,
+            .{ .parallelism = 1, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = progress },
+        );
+
+        return .{
+            .model = model,
+            .store = tensor_store,
+            .registry = tensor_registry,
+            .config = config_json.value,
+            .weights = weights,
+        };
     }
 };

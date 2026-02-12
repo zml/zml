@@ -14,7 +14,6 @@ const log = std.log.scoped(.utils);
 pub const LatentPacker = struct {
     pub fn forward(input: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         var dummy: flux_model.Flux2Transformer2DModel = undefined;
-        // Methods ignore self, so dummy is safe.
         const latents = dummy.pack_latents(input);
         const ids = dummy.prepare_latent_ids(input);
         return .{ latents, ids };
@@ -435,9 +434,9 @@ test "TorchGenerator matches torch.randn reference (seed=0)" {
     }
 }
 
-pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2.ModelContext, latents: zml.Buffer) !zml.Buffer {
+pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2, latents: zml.Buffer) !zml.Buffer {
     const VAEDecodeStep = struct {
-        pub fn forward(self: @This(), model: autoencoder_kl.AutoencoderKLFlux2, latents_tensor: zml.Tensor) zml.Tensor {
+        pub fn forward(self: @This(), model: autoencoder_kl.AutoencoderKLFlux2Model, latents_tensor: zml.Tensor) zml.Tensor {
             _ = self;
             return autoencoder_kl.VariationalAutoEncoder.forward(autoencoder_kl.VariationalAutoEncoder{}, model, latents_tensor);
         }
@@ -892,72 +891,95 @@ pub const RoPE = struct {
     sin: zml.Tensor,
 };
 
-// [-765.960100, 6.109431, -25.727299, 38.418926, 16133.103000, -14.699767, -13.839429, 46.340530, -8.167663, 80.939940, 0.776761, -13.566395, -27.448166, -2.813722, 53.607510, -5.559852, -1.207579, -16.896482, -8.594539, -207.394740]
+pub const RoPEBuffers = struct {
+    cos: zml.Buffer,
+    sin: zml.Buffer,
+    shape: zml.Shape,
 
-
-pub fn computeRoPE(seq_len: usize, head_dim: usize, theta: f32, data_type: zml.DataType) RoPE {
-    const half = @divExact(head_dim, 2);
-    const shape_half = zml.Shape.init(.{half}, data_type);
-    const idx_half = zml.Tensor.iota(shape_half, 0).convert(data_type);
-    const log_v = @log(theta);
-    const factor: f32 = -log_v / @as(f32, @floatFromInt(half));
-    const exponents = idx_half.scale(@as(f64, @floatCast(factor)));
-    const inv_freq = exponents.exp();
-    const shape_seq = zml.Shape.init(.{seq_len}, data_type);
-    const t = zml.Tensor.iota(shape_seq, 0).convert(data_type);
-
-    // Explicit broadcast for outer product
-    const shape_full = zml.Shape.init(.{ seq_len, half }, data_type);
-
-    const t_reshaped = t.reshape(zml.Shape.init(.{ seq_len, 1 }, data_type));
-    const inv_reshaped = inv_freq.reshape(zml.Shape.init(.{ 1, half }, data_type));
-
-    // Use broad to broadcast to shape
-    const t_broad = t_reshaped.broad(shape_full);
-    const inv_broad = inv_reshaped.broad(shape_full);
-
-    const freqs = t_broad.mul(inv_broad);
-
-    const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
-    const cos = emb.cos().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, data_type));
-    const sin = emb.sin().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, data_type));
-    return .{ .cos = cos, .sin = sin };
-}
-
-pub fn computeRoPE_CPU(allocator: std.mem.Allocator, seq_len: usize, head_dim: usize, theta: f32) !struct { cos: []f32, sin: []f32 } {
-    const dim = head_dim;
-    const half = dim / 2;
-
-    const inv_freq = try allocator.alloc(f32, half);
-    defer allocator.free(inv_freq);
-
-    for (0..half) |i| {
-        const x = -@log(theta) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half));
-        inv_freq[i] = @exp(x);
+    pub fn deinit(self: *@This()) void {
+        self.cos.deinit();
+        self.sin.deinit();
     }
 
-    const total_elems = seq_len * dim;
-    const cos_data = try allocator.alloc(f32, total_elems);
-    const sin_data = try allocator.alloc(f32, total_elems);
-    errdefer {
-        allocator.free(cos_data);
-        allocator.free(sin_data);
+    pub fn forCompile(self: @This()) RoPE {
+        return .{
+            .cos = zml.Tensor.fromShape(self.shape),
+            .sin = zml.Tensor.fromShape(self.shape),
+        };
     }
 
-    for (0..seq_len) |s| { // position
-        for (0..half) |i| { // freq index
-            const freq = @as(f32, @floatFromInt(s)) * inv_freq[i];
-            const cos_val = @cos(freq);
-            const sin_val = @sin(freq);
+    pub fn forRuntime(self: @This()) struct { cos: zml.Buffer, sin: zml.Buffer } {
+        return .{ .cos = self.cos, .sin = self.sin };
+    }
+};
 
-            const offset = s * dim;
-            cos_data[offset + i] = cos_val;
-            cos_data[offset + i + half] = cos_val;
+pub fn computeRoPE(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize, head_dim: usize, theta: f32, data_type: zml.DataType) !RoPEBuffers {
+    const RoPECompute = struct {
+        seq_len_val: usize,
+        head_dim_val: usize,
+        theta_val: f32,
+        data_type_val: zml.DataType,
 
-            sin_data[offset + i] = sin_val;
-            sin_data[offset + i + half] = sin_val;
+        pub fn forward(self: @This()) struct { zml.Tensor, zml.Tensor } {
+            const seq_len_inner = self.seq_len_val;
+            const head_dim_inner = self.head_dim_val;
+            const theta_inner = self.theta_val;
+            const data_type_inner = self.data_type_val;
+
+            const half = @divExact(head_dim_inner, 2);
+            const shape_half = zml.Shape.init(.{half}, data_type_inner);
+            const idx_half = zml.Tensor.iota(shape_half, 0).convert(data_type_inner);
+            const log_v = @log(theta_inner);
+            const factor: f32 = -log_v / @as(f32, @floatFromInt(half));
+            const exponents = idx_half.scale(@as(f64, @floatCast(factor)));
+            const inv_freq = exponents.exp();
+            const shape_seq = zml.Shape.init(.{seq_len_inner}, data_type_inner);
+            const t = zml.Tensor.iota(shape_seq, 0).convert(data_type_inner);
+
+            const shape_full = zml.Shape.init(.{ seq_len_inner, half }, data_type_inner);
+
+            const t_reshaped = t.reshape(zml.Shape.init(.{ seq_len_inner, 1 }, data_type_inner));
+            const inv_reshaped = inv_freq.reshape(zml.Shape.init(.{ 1, half }, data_type_inner));
+
+            const t_broad = t_reshaped.broad(shape_full);
+            const inv_broad = inv_reshaped.broad(shape_full);
+
+            const freqs = t_broad.mul(inv_broad);
+
+            const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
+            const rope_shape = zml.Shape.init(.{ 1, 1, @as(i64, @intCast(seq_len_inner)), @as(i64, @intCast(head_dim_inner)) }, data_type_inner);
+            const cos = emb.cos().reshape(rope_shape);
+            const sin = emb.sin().reshape(rope_shape);
+
+            return .{ cos, sin };
         }
-    }
+    };
 
-    return .{ .cos = cos_data, .sin = sin_data };
+    const compute = RoPECompute{
+        .seq_len_val = seq_len,
+        .head_dim_val = head_dim,
+        .theta_val = theta,
+        .data_type_val = data_type,
+    };
+
+    var exe = try zml.module.compile(allocator, io, RoPECompute.forward, .{compute}, platform);
+    defer exe.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    args.set(.{});
+
+    var res = try exe.results(allocator);
+    defer res.deinit(allocator);
+
+    exe.call(args, &res);
+
+    const buffers = res.get(struct { zml.Buffer, zml.Buffer });
+
+    const rope_shape = zml.Shape.init(.{ 1, 1, @as(i64, @intCast(seq_len)), @as(i64, @intCast(head_dim)) }, data_type);
+    return .{
+        .cos = buffers[0],
+        .sin = buffers[1],
+        .shape = rope_shape,
+    };
 }
