@@ -131,11 +131,12 @@ const ConvStemTestHarness = struct {
     }
 
     pub fn forward(self: ConvStemTestHarness, mel_input: Tensor) Tensor {
-        var h = mel_input.withTags(.{ .channels, .time }).insertAxes(.channels, .{.batch});
+        const dtype = self.conv0.weight.dtype();
+        var h = mel_input.convert(dtype).withTags(.{ .channels, .time }).insertAxes(.channels, .{.batch});
         h = self.conv0.forward(h).gelu();
         h = self.conv1.forward(h).gelu();
         h = h.squeeze(.batch);
-        return h.transpose(.{ .time, .channels });
+        return h.transpose(.{ .time, .channels }).convert(.f32);
     }
 };
 
@@ -148,7 +149,8 @@ const TransformerLayerTestHarness = struct {
     }
 
     pub fn forward(self: TransformerLayerTestHarness, h: Tensor) Tensor {
-        return self.inner.forward(h.withTags(.{ .s, .d }), self.config);
+        const dtype = self.inner.attention.wq.weight.dtype();
+        return self.inner.forward(h.convert(dtype).withTags(.{ .s, .d }), self.config).convert(.f32);
     }
 };
 
