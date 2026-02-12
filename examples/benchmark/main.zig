@@ -8,7 +8,7 @@ pub fn benchmark(a: zml.Tensor, b: zml.Tensor) zml.Tensor {
     return a.dot(b, .k);
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     const CliArgs = struct {
         pub const help =
             \\ benchmark --size=4096 --dtype=f16
@@ -17,38 +17,22 @@ pub fn main() !void {
         dtype: zml.DataType = .f16,
     };
 
-    const allocator = std.heap.smp_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
-    const cli_args: CliArgs = blk: {
-        var ret: CliArgs = .{};
-        var it = std.process.args();
-        defer it.deinit();
-        while (it.next()) |arg| {
-            if (std.mem.startsWith(u8, arg, "--dtype=")) {
-                ret.dtype = std.meta.stringToEnum(zml.DataType, arg["--dtype=".len..]) orelse unreachable;
-            } else if (std.mem.startsWith(u8, arg, "--size=")) {
-                ret.size = try std.fmt.parseUnsigned(usize, arg["--size=".len..], 10);
-            }
-        }
-        break :blk ret;
-    };
+    const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
     const a: zml.Tensor = .init(.{ .m = cli_args.size, .k = cli_args.size }, cli_args.dtype);
     const b: zml.Tensor = .init(.{ .k = cli_args.size, .n = cli_args.size }, cli_args.dtype);
 
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});
-        var timer = try std.time.Timer.start();
-        defer log.info("✅ Compiled benchmark [{D}]", .{timer.read()});
+        const now: std.Io.Timestamp = .now(io, .awake);
+        defer log.info("✅ Compiled benchmark [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
         break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b });
     };
     defer exe.deinit();
@@ -79,12 +63,13 @@ pub fn main() !void {
     }
 
     // call our executable module
-    var timer = try std.time.Timer.start();
+    const run_start: std.Io.Timestamp = .now(io, .awake);
     exe.call(exe_args, &exe_results);
     var result = exe_results.get(zml.Buffer);
     _ = try result.await(io);
     defer result.deinit();
-    const elapsed_ns = timer.read();
+    const elapsed = run_start.untilNow(io, .awake);
+    const elapsed_ns = elapsed.toNanoseconds();
     const elapsed_s = @as(f64, @floatFromInt(elapsed_ns)) / std.time.ns_per_s;
 
     log.info("✅ Benchmark done!", .{});
@@ -95,7 +80,7 @@ pub fn main() !void {
         cli_args.size,
         cli_args.size,
         @tagName(cli_args.dtype),
-        elapsed_ns,
+        stdx.fmt.fmtDuration(elapsed),
         flops / 1_000_000_000,
     });
 }
