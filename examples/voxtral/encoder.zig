@@ -81,7 +81,7 @@ pub const Encoder = struct {
             h = layer.forward(h, self.config);
         }
 
-        return rmsNorm(h, self.norm, self.norm_eps).convert(.f32);
+        return rmsNorm(h, self.norm, self.norm_eps);
     }
 };
 
@@ -126,7 +126,7 @@ pub const CausalConv1d = struct {
         });
 
         // Bias: [channels] broadcasts to [batch, channels, time]
-        h = h.add(self.bias.convert(dtype).broad(h.shape()));
+        h = h.add(self.bias.broad(h.shape()));
         return h;
     }
 };
@@ -275,5 +275,5 @@ fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
 }
 
 pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f32) Tensor {
-    return zml.nn.rmsNorm(x, .d, eps).mul(weight.convert(x.dtype()).broad(x.shape()));
+    return zml.nn.rmsNorm(x, .d, eps).mul(weight.broad(x.shape()));
 }
