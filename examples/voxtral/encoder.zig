@@ -41,6 +41,29 @@ pub const Encoder = struct {
         allocator.free(self.layers);
     }
 
+    pub fn load(self: *const Encoder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Encoder){
+	progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded encoder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
+        }
+	
+	return zml.io.load(Encoder, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
     pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
         CausalConv1d.unloadBuffers(&self.conv0);
         CausalConv1d.unloadBuffers(&self.conv1);
