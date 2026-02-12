@@ -351,14 +351,14 @@ pub fn main() !void {
         log.info(">>> Printing Image to Terminal...", .{});
         try utils.printFluxImageToTerminalKittyFromBuffer(allocator, &rgb_image_buffer);
     } else {
-        log.info("kitty_output flag not set, skipping terminal image output.", .{});
+        log.warn("kitty_output flag not set, skipping terminal image output.", .{});
     }
     // Optional: save to disk
     if (args.output_image_path) |output_image_path| {
         log.info(">>> Saving Image to Disk at {s}...", .{output_image_path});
         try utils.saveFluxImageToPng(allocator, &rgb_image_buffer, output_image_path);
     } else {
-        log.info("No output_image_path provided, skipping saving image to disk.", .{});
+        log.warn("No output_image_path provided, skipping saving image to disk.", .{});
     }
 
     log.info(">>> Pipeline Complete.", .{});
