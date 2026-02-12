@@ -103,13 +103,21 @@ pub const Api = struct {
         defer log.info("Loaded: {s} [{D}]", .{ basename, timer.read() });
 
         var lib: std.DynLib = switch (builtin.os.tag) {
-            .linux => blk: {
-                // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
-                const handle = std.c.dlopen(library, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
-                    log.err("Unable to dlopen plugin: {s}", .{library});
-                    return error.FileNotFound;
+            .linux, .macos => blk: {
+                const rtld: std.c.RTLD = switch (builtin.os.tag) {
+                    // We use RTLD_GLOBAL so that symbols from NEEDED libraries are available in the global namespace.
+                    .linux => .{ .LAZY = true, .GLOBAL = true, .NODELETE = true },
+                    .macos => .{ .LAZY = true, .LOCAL = true },
+                    else => unreachable,
                 };
-                break :blk .{ .inner = .{ .handle = handle } };
+                break :blk .{
+                    .inner = .{
+                        .handle = std.c.dlopen(library, rtld) orelse {
+                            log.err("Unable to dlopen plugin: {s}", .{library});
+                            return error.FileNotFound;
+                        },
+                    },
+                };
             },
             else => std.DynLib.open(library) catch |err| {
                 log.err("Unable to dlopen plugin: {s}", .{library});
