@@ -1,7 +1,6 @@
 const std = @import("std");
 const zml = @import("zml");
 
-
 const Flux2Transformer2D = @import("flux2_transformer2d_model.zig").Flux2Transformer2D;
 const FlowMatchEulerDiscreteScheduler = @import("scheduling_flow_match_euler_discrete.zig").FlowMatchEulerDiscreteScheduler;
 const AutoencoderKLFlux2 = @import("autoencoder_kl_flux2.zig").AutoencoderKLFlux2;
@@ -183,9 +182,10 @@ pub fn main() !void {
     // ==================== Tokenizing Prompt ====================
 
     var qwen2_node = progress.start("Tokenizing Prompt", 0);
-    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen2_node, args.prompt, args.seqlen });
-
-    defer _ = qwen2_future.cancel(io) catch unreachable;
+    var qwen2_future = io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen2_node, args.prompt, args.seqlen }) catch |err| {
+        log.err("Error running Qwen2TokenizerFast pipeline: {}", .{err});
+        return err;
+    };
     qwen2_node.end();
 
     var tokens: Qwen2TokenizerFast.TokenizeOutput = try qwen2_future.await(io);
@@ -198,9 +198,14 @@ pub fn main() !void {
 
     // ==================== Encoding Prompt ====================
 
-    var qwen_node = progress.start("Loading Qwen3", 0);
-    var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, repo, zml_compute_platform, &qwen_node, parallelism_level, args.data_type, tokens);
-    qwen_node.end();
+    var qwen3_node = progress.start("Loading Qwen3", 0);
+    var qwen3 = io.concurrent(Qwen3ForCausalLM.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen3_node, parallelism_level, args.data_type, tokens }) catch |err| {
+        log.err("Error running Qwen3 pipeline: {}", .{err});
+        return err;
+    };
+    // var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, repo, zml_compute_platform, &qwen_node, parallelism_level, args.data_type, tokens);
+    var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try qwen3.await(io);
+    qwen3_node.end();
     defer embeding_output.deinit();
 
     // try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
