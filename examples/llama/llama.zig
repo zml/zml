@@ -35,7 +35,7 @@ pub const LlamaLM = struct {
         rms_norm_eps: f32,
         hf_rope_impl: bool = true,
         tie_word_embeddings: bool = false,
-        rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = {} },
+        rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
     };
 
     pub const Options = struct {
