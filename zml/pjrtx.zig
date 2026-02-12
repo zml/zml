@@ -22,12 +22,14 @@ pub const Client = opaque {
             };
         };
 
-        const stablehlo_version = blk: {
-            if (api.stablehloCurrentVersion()) |requested_version| {
-                break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
-            }
-            break :blk dialects.stablehlo.minimumVersion();
-        };
+        // const stablehlo_version = blk: {
+        //     if (api.stablehloCurrentVersion()) |requested_version| {
+        //         break :blk dialects.stablehlo.smallerVersion(requested_version, dialects.stablehlo.currentVersion());
+        //     }
+        //     std.log.info(">>>>>>> {s}", .{dialects.stablehlo.minimumVersion()});
+        //     break :blk dialects.stablehlo.minimumVersion();
+        // };
+        const stablehlo_version = "1.13.0";
 
         var serialized_buffer: std.Io.Writer.Allocating = try .initCapacity(allocator, 4096);
         defer serialized_buffer.deinit();

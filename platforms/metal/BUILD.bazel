@@ -1,6 +1,6 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 
 cc_library(
     name = "empty",
@@ -10,7 +10,7 @@ cc_library(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        "libIREECompiler.so",
+        "libIREECompiler.dylib",
         "pjrt_plugin_iree_metal.dylib",
         "@toolchains_llvm_bootstrapped//tools:lld",
     ],
@@ -18,7 +18,7 @@ copy_to_directory(
     include_external_repositories = ["**"],
     replace_prefixes = {
         "pjrt_plugin_iree_metal.dylib": "lib/pjrt_plugin_iree_metal.dylib",
-        "libIREECompiler.so": "lib/libIREECompiler.so",
+        "libIREECompiler.dylib": "lib/libIREECompiler.dylib",
     },
 )
 
@@ -44,4 +44,24 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
+)
+
+cc_library(
+    name = "smi_h",
+    hdrs = ["smi.h"],
+)
+
+zig_binary(
+    name = "smi",
+    linkopts = [
+        "-framework",
+        "CoreFoundation",
+        "-framework",
+        "IOKit",
+    ],
+    main = "device.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":smi_h",
+    ],
 )

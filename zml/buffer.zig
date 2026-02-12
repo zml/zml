@@ -138,10 +138,9 @@ pub const Buffer = struct {
 
     pub fn uninitialized(io: std.Io, platform: *const Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
         if (platform.target == .metal) {
-        const slice: Slice = try .alloc(std.heap.c_allocator, shape_);
-        defer slice.free(std.heap.c_allocator);
-
-        return .fromSliceOpts(io, platform, slice, .{});
+            const slice: Slice = try .alloc(std.heap.c_allocator, shape_);
+            defer slice.free(std.heap.c_allocator);
+            return .fromSlice(io, platform, slice);
         }
         var res: Buffer = .{
             .platform = platform,
@@ -216,11 +215,13 @@ pub const Buffer = struct {
 
     /// Copies the content of the Buffer to the provided slice.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
+        _ = io; // autofix
         //stdx.debug.internalAssert(!self.hasShardedAxis(), "TODO: support sharded Buffer -> Host transfer", .{});
         const maybe_event = try self._shards.get(0).toHostBuffer(self.platform.pjrt_api, slice.data());
         if (maybe_event) |event| {
-             try event.await(self.platform.pjrt_api, io);
-            event.deinit(self.platform.pjrt_api);
+            _ = event; // autofix
+            // try event.await(self.platform.pjrt_api, io);
+            // event.deinit(self.platform.pjrt_api);
         }
     }
 

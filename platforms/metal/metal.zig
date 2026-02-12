@@ -18,12 +18,17 @@ fn setupEnv(sandbox_path: []const u8) !void {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = c.setenv(
         "IREE_PJRT_COMPILER_LIB_PATH",
-        @ptrCast(try stdx.Io.Dir.path.bufJoinZ(&path_buf, &.{ sandbox_path, "lib/libIREECompiler.so" })),
+        @ptrCast(try stdx.Io.Dir.path.bufJoinZ(&path_buf, &.{ sandbox_path, "lib/libIREECompiler.dylib" })),
         1,
     ); // must be zero terminated
     _ = c.setenv(
         "IREE_LLVM_EMBEDDED_LINKER_PATH",
         @ptrCast(try stdx.Io.Dir.path.bufJoinZ(&path_buf, &.{ sandbox_path, "bin/lld" })),
+        1,
+    );
+    _ = c.setenv(
+        "IREE_PJRT_IREE_COMPILER_OPTIONS",
+        "--iree-opt-level=O3",
         1,
     );
 }
@@ -53,6 +58,16 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "pjrt_plugin_iree_metal.dylib" });
-        break :blk pjrt.Api.loadFrom(path);
+
+        var lib: std.DynLib = .{
+            .inner = .{
+                .handle = std.c.dlopen(path, .{ .LAZY = true, .LOCAL = true }) orelse {
+                    log.err("Unable to dlopen plugin: {s}", .{path});
+                    return error.FileNotFound;
+                },
+            },
+        };
+
+        break :blk pjrt.Api.fromDynLib(&lib);
     };
 }
