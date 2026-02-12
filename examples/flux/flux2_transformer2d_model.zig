@@ -4,6 +4,8 @@ const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
 const tools = @import("tools.zig");
+const utils = @import("utils.zig");
+
 
 const log = std.log.scoped(.flux2_model);
 
@@ -276,36 +278,6 @@ fn getTimesteps(timesteps: Tensor, freq_vals: Tensor) Tensor {
     // freq_vals: [half] -> [1, half] (broadcasts to [B, half] via mul)
     const out = timesteps.reshape(.{ -1, 1 }).mul(freq_vals.reshape(.{ 1, -1 }));
     return Tensor.concatenate(&.{ out.cos(), out.sin() }, -1);
-}
-
-pub fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
-    const T = @TypeOf(weights.*);
-    const type_info = @typeInfo(T);
-    switch (type_info) {
-        .@"struct" => |info| {
-            if (T == zml.Buffer) {
-                weights.deinit();
-                return;
-            }
-            inline for (info.fields) |field| {
-                unloadWeights(allocator, &@field(weights, field.name));
-            }
-        },
-        .optional => {
-            if (weights.*) |*w| {
-                unloadWeights(allocator, w);
-            }
-        },
-        .pointer => |info| {
-            if (info.size == .slice) {
-                for (weights.*) |*item| {
-                    unloadWeights(allocator, item);
-                }
-                allocator.free(weights.*);
-            }
-        },
-        else => {},
-    }
 }
 
 pub const Flux2PosEmbed = struct {
@@ -1425,7 +1397,7 @@ pub const Flux2Transformer2D = struct {
     weights: zml.Bufferized(Flux2Transformer2DModel),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
-        unloadWeights(allocator, &self.weights);
+        utils.unloadWeights(allocator, &self.weights);
         self.store.deinit();
         self.registry.deinit();
     }
@@ -1457,7 +1429,7 @@ pub const Flux2Transformer2D = struct {
             platform,
             .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
-        errdefer unloadWeights(allocator, &weights);
+        errdefer utils.unloadWeights(allocator, &weights);
         return .{
             .model = model,
             .store = tensor_store,

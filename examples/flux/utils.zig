@@ -886,100 +886,39 @@ pub fn printFluxImageToTerminalKittyFromBuffer(allocator: std.mem.Allocator, rgb
     std.debug.print("\n", .{});
 }
 
+pub fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
+    const T = @TypeOf(weights.*);
+    const type_info = @typeInfo(T);
+    switch (type_info) {
+        .@"struct" => |info| {
+            if (T == zml.Buffer) {
+                weights.deinit();
+                return;
+            }
+            inline for (info.fields) |field| {
+                unloadWeights(allocator, &@field(weights, field.name));
+            }
+        },
+        .optional => {
+            if (weights.*) |*w| {
+                unloadWeights(allocator, w);
+            }
+        },
+        .pointer => |info| {
+            if (info.size == .slice) {
+                for (weights.*) |*item| {
+                    unloadWeights(allocator, item);
+                }
+                allocator.free(weights.*);
+            }
+        },
+        else => {},
+    }
+}
+
+
 pub const RoPE = struct {
     cos: zml.Tensor,
     sin: zml.Tensor,
 };
 
-pub const RoPEBuffers = struct {
-    cos: zml.Buffer,
-    sin: zml.Buffer,
-    shape: zml.Shape,
-
-    pub fn deinit(self: *@This()) void {
-        self.cos.deinit();
-        self.sin.deinit();
-    }
-
-    pub fn forCompile(self: @This()) RoPE {
-        return .{
-            .cos = zml.Tensor.fromShape(self.shape),
-            .sin = zml.Tensor.fromShape(self.shape),
-        };
-    }
-
-    pub fn forRuntime(self: @This()) struct { cos: zml.Buffer, sin: zml.Buffer } {
-        return .{ .cos = self.cos, .sin = self.sin };
-    }
-};
-
-pub fn computeRoPE(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize, head_dim: usize, theta: f32, data_type: zml.DataType) !RoPEBuffers {
-    const RoPECompute = struct {
-        seq_len_val: usize,
-        head_dim_val: usize,
-        theta_val: f32,
-        data_type_val: zml.DataType,
-
-        pub fn forward(self: @This()) struct { zml.Tensor, zml.Tensor } {
-            const seq_len_inner = self.seq_len_val;
-            const head_dim_inner = self.head_dim_val;
-            const theta_inner = self.theta_val;
-            const data_type_inner = self.data_type_val;
-
-            const half = @divExact(head_dim_inner, 2);
-            const shape_half = zml.Shape.init(.{half}, data_type_inner);
-            const idx_half = zml.Tensor.iota(shape_half, 0).convert(data_type_inner);
-            const log_v = @log(theta_inner);
-            const factor: f32 = -log_v / @as(f32, @floatFromInt(half));
-            const exponents = idx_half.scale(@as(f64, @floatCast(factor)));
-            const inv_freq = exponents.exp();
-            const shape_seq = zml.Shape.init(.{seq_len_inner}, data_type_inner);
-            const t = zml.Tensor.iota(shape_seq, 0).convert(data_type_inner);
-
-            const shape_full = zml.Shape.init(.{ seq_len_inner, half }, data_type_inner);
-
-            const t_reshaped = t.reshape(zml.Shape.init(.{ seq_len_inner, 1 }, data_type_inner));
-            const inv_reshaped = inv_freq.reshape(zml.Shape.init(.{ 1, half }, data_type_inner));
-
-            const t_broad = t_reshaped.broad(shape_full);
-            const inv_broad = inv_reshaped.broad(shape_full);
-
-            const freqs = t_broad.mul(inv_broad);
-
-            const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
-            const rope_shape = zml.Shape.init(.{ 1, 1, @as(i64, @intCast(seq_len_inner)), @as(i64, @intCast(head_dim_inner)) }, data_type_inner);
-            const cos = emb.cos().reshape(rope_shape);
-            const sin = emb.sin().reshape(rope_shape);
-
-            return .{ cos, sin };
-        }
-    };
-
-    const compute = RoPECompute{
-        .seq_len_val = seq_len,
-        .head_dim_val = head_dim,
-        .theta_val = theta,
-        .data_type_val = data_type,
-    };
-
-    var exe = try zml.module.compile(allocator, io, RoPECompute.forward, .{compute}, platform);
-    defer exe.deinit();
-
-    var args = try exe.args(allocator);
-    defer args.deinit(allocator);
-    args.set(.{});
-
-    var res = try exe.results(allocator);
-    defer res.deinit(allocator);
-
-    exe.call(args, &res);
-
-    const buffers = res.get(struct { zml.Buffer, zml.Buffer });
-
-    const rope_shape = zml.Shape.init(.{ 1, 1, @as(i64, @intCast(seq_len)), @as(i64, @intCast(head_dim)) }, data_type);
-    return .{
-        .cos = buffers[0],
-        .sin = buffers[1],
-        .shape = rope_shape,
-    };
-}
