@@ -43,6 +43,69 @@ pub const Adapter = struct {
     }
 };
 
+
+/// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
+pub const Decoder = struct {
+    tok_embeddings: Tensor,
+    layers: []DecoderLayer,
+    norm: Tensor,
+    norm_eps: f32,
+    config: Config,
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Decoder {
+        const layers = allocator.alloc(DecoderLayer, config.n_layers) catch unreachable;
+        for (layers, 0..) |*layer, i| {
+            layer.* = DecoderLayer.init(store.withPrefix("layers").withLayer(i), config);
+        }
+
+        return .{
+            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
+            .layers = layers,
+            .norm = store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
+            .norm_eps = config.norm_eps,
+            .config = config,
+        };
+    }
+
+    pub fn deinit(self: Decoder, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
+        self.tok_embeddings.deinit();
+        for (self.layers) |*layer| {
+            DecoderLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
+        self.norm.deinit();
+    }
+
+    /// Run all decoder layers on input embeddings.
+    /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
+    /// Returns: ([s, d], KvCache)
+    pub fn forward(self: Decoder, input_embeds: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
+        var h = input_embeds;
+        var cache = kv_cache;
+
+        for (self.layers, 0..) |layer, i| {
+            const layer_cache = cache.atLayer(i);
+            const result = layer.forward(h, token_index, layer_cache, t_cond, self.config);
+            h = result[0];
+            const updated_layer_cache = result[1];
+            cache = updated_layer_cache.reuseBuffer(layer_cache);
+        }
+
+        h = rmsNorm(h, self.norm, self.norm_eps);
+        return .{ h, cache };
+    }
+
+    /// Compute output logits via tied embeddings: hidden.dot(tok_embeddings, .d)
+    /// hidden: [s, d] → [s, vocab]
+    pub fn logits(self: Decoder, hidden: Tensor) Tensor {
+        return hidden.dot(self.tok_embeddings.convert(hidden.dtype()), .d);
+    }
+};
+
 /// AdaRmsNorm: per-layer time conditioning.
 /// Computes ada_scale = up(gelu(down(t_cond))), then returns h * (1 + ada_scale).
 pub const AdaRmsNorm = struct {
@@ -285,68 +348,6 @@ pub const DecoderLayer = struct {
         out = out.add(ffn_out);
 
         return .{ out, updated_kv_cache };
-    }
-};
-
-/// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
-pub const Decoder = struct {
-    tok_embeddings: Tensor,
-    layers: []DecoderLayer,
-    norm: Tensor,
-    norm_eps: f32,
-    config: Config,
-
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Decoder {
-        const layers = allocator.alloc(DecoderLayer, config.n_layers) catch unreachable;
-        for (layers, 0..) |*layer, i| {
-            layer.* = DecoderLayer.init(store.withPrefix("layers").withLayer(i), config);
-        }
-
-        return .{
-            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
-            .layers = layers,
-            .norm = store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
-            .norm_eps = config.norm_eps,
-            .config = config,
-        };
-    }
-
-    pub fn deinit(self: Decoder, allocator: std.mem.Allocator) void {
-        allocator.free(self.layers);
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
-        self.tok_embeddings.deinit();
-        for (self.layers) |*layer| {
-            DecoderLayer.unloadBuffers(layer);
-        }
-        allocator.free(self.layers);
-        self.norm.deinit();
-    }
-
-    /// Run all decoder layers on input embeddings.
-    /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
-    /// Returns: ([s, d], KvCache)
-    pub fn forward(self: Decoder, input_embeds: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
-        var h = input_embeds;
-        var cache = kv_cache;
-
-        for (self.layers, 0..) |layer, i| {
-            const layer_cache = cache.atLayer(i);
-            const result = layer.forward(h, token_index, layer_cache, t_cond, self.config);
-            h = result[0];
-            const updated_layer_cache = result[1];
-            cache = updated_layer_cache.reuseBuffer(layer_cache);
-        }
-
-        h = rmsNorm(h, self.norm, self.norm_eps);
-        return .{ h, cache };
-    }
-
-    /// Compute output logits via tied embeddings: hidden.dot(tok_embeddings, .d)
-    /// hidden: [s, d] → [s, vocab]
-    pub fn logits(self: Decoder, hidden: Tensor) Tensor {
-        return hidden.dot(self.tok_embeddings.convert(hidden.dtype()), .d);
     }
 };
 

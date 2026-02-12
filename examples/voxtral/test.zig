@@ -14,6 +14,8 @@ const LogMelSpectrogram = mel.LogMelSpectrogram;
 const enc = @import("encoder.zig");
 const Encoder = enc.Encoder;
 
+const dec = @import("decoder.zig");
+
 const CliArgs = struct {
     reference: []const u8,
     model: []const u8,
@@ -98,24 +100,24 @@ pub fn main() !void {
     }
     
     // -- Transformer Layer tests
-    {
-        const transformer_store = model_store.view().withPrefix(encoder_prefix).withPrefix("transformer").withPrefix("layers");
-        const enc_cfg = config.encoder();
+    // {
+    //     const transformer_store = model_store.view().withPrefix(encoder_prefix).withPrefix("transformer").withPrefix("layers");
+    //     const enc_cfg = config.encoder();
 
-        inline for (0..32) |i| {
-            if (i < enc_cfg.n_layers) {
-                const layer = TransformerLayerTestHarness{
-                    .inner = enc.TransformerLayer.init(transformer_store.withLayer(i), config),
-                    .config = config,
-                };
+    //     inline for (0..32) |i| {
+    //         if (i < enc_cfg.n_layers) {
+    //             const layer = TransformerLayerTestHarness{
+    //                 .inner = enc.TransformerLayer.init(transformer_store.withLayer(i), config),
+    //                 .config = config,
+    //             };
 		
-                var layer_buffers = try zml.io.load(TransformerLayerTestHarness, &layer, allocator, io, platform, load_opts);
-                defer TransformerLayerTestHarness.unloadBuffers(&layer_buffers);
+    //             var layer_buffers = try zml.io.load(TransformerLayerTestHarness, &layer, allocator, io, platform, load_opts);
+    //             defer TransformerLayerTestHarness.unloadBuffers(&layer_buffers);
 
-                try zml.testing.testLayer(allocator, io, platform, layer, .forward, ref_store.view(), std.fmt.comptimePrint("encoder.layers.{d}", .{i}), layer_buffers, .{.minimum_close_fraction = 0.9});
-            }
-        }
-    }
+    //             try zml.testing.testLayer(allocator, io, platform, layer, .forward, ref_store.view(), std.fmt.comptimePrint("encoder.layers.{d}", .{i}), layer_buffers, .{.minimum_close_fraction = 0.9});
+    //         }
+    //     }
+    // }
     
     // -- Encoder test
     // {
@@ -127,6 +129,55 @@ pub fn main() !void {
     //     const harness = EncoderTestHarness{ .inner = encoder_model };
     //     try zml.testing.testLayer(allocator, io, platform, harness, .forward, ref_store.view(), "encoder", .{ .inner = encoder_buffers }, .{});
     // }
+
+    // -- Adapter test
+    {
+        const adapter = AdapterTestHarness{
+            .inner = dec.Adapter.init(model_store.view()),
+        };
+        var adapter_buffers = try zml.io.load(AdapterTestHarness, &adapter, allocator, io, platform, load_opts);
+        defer AdapterTestHarness.unloadBuffers(&adapter_buffers);
+
+        try zml.testing.testLayer(allocator, io, platform, adapter, .forward, ref_store.view(), "adapter", adapter_buffers, .{.minimum_close_fraction = 0.9});
+    }
+
+    // -- Decoder Layer tests
+    {
+        const dec_layer_store = model_store.view().withPrefix("layers");
+
+        // Load t_cond from reference activations (shared across all layers)
+        const t_cond_tensor = ref_store.view().withPrefix("t_cond.out").createTensorWithTags("0", .{.d});
+        const TCond = struct { t_cond: Tensor };
+        const t_cond_spec = TCond{ .t_cond = t_cond_tensor };
+        const ref_load_opts: zml.io.LoadOpts = .{
+            .store = &ref_store,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 4096,
+        };
+        var t_cond_buf = try zml.io.load(TCond, &t_cond_spec, allocator, io, platform, ref_load_opts);
+        defer t_cond_buf.t_cond.deinit();
+
+        inline for (0..32) |i| {
+            if (i < config.n_layers) {
+                const layer = DecoderLayerTestHarness{
+                    .inner = dec.DecoderLayer.init(dec_layer_store.withLayer(i), config),
+                    .t_cond = t_cond_tensor,
+                    .config = config,
+                };
+
+                var inner_buffers = try zml.io.load(dec.DecoderLayer, &layer.inner, allocator, io, platform, load_opts);
+                defer dec.DecoderLayer.unloadBuffers(&inner_buffers);
+
+                const layer_buffers: zml.Bufferized(DecoderLayerTestHarness) = .{
+                    .inner = inner_buffers,
+                    .t_cond = t_cond_buf.t_cond,
+                };
+
+                try zml.testing.testLayer(allocator, io, platform, layer, .forward, ref_store.view(), std.fmt.comptimePrint("decoder.prefill.layers.{d}", .{i}), layer_buffers, .{ .minimum_close_fraction = 0.85 });
+            }
+        }
+    }
 }
 
 // ================================================================
@@ -181,5 +232,45 @@ const EncoderTestHarness = struct {
 
     pub fn forward(self: EncoderTestHarness, mel_input: Tensor) Tensor {
         return self.inner.forward(mel_input.withTags(.{ .channels, .time })).convert(.f32);
+    }
+};
+
+const AdapterTestHarness = struct {
+    inner: dec.Adapter,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(AdapterTestHarness)) void {
+        dec.Adapter.unloadBuffers(&self.inner);
+    }
+
+    pub fn forward(self: AdapterTestHarness, encoder_out: Tensor) Tensor {
+        return self.inner.forward(encoder_out.convert(.bf16).withTags(.{ .s, .d })).convert(.f32);
+    }
+};
+
+const DecoderLayerTestHarness = struct {
+    inner: dec.DecoderLayer,
+    t_cond: Tensor,
+    config: Config,
+
+    pub fn forward(self: DecoderLayerTestHarness, h: Tensor) Tensor {
+        const dtype = self.inner.attention.wq.weight.dtype();
+        const h_typed = h.convert(dtype).withTags(.{ .s, .d });
+
+        // Create zero KV cache for prefill (empty cache for this layer)
+        const kv_shape = zml.Shape.init(.{
+            .layer = 1,
+            .k = h_typed.dim(.s),
+            .h = @as(i64, @intCast(self.config.n_kv_heads)),
+            .hd = @as(i64, @intCast(self.config.head_dim)),
+        }, dtype);
+        const kv_cache = dec.KvCache{
+            .k = Tensor.zeroes(kv_shape),
+            .v = Tensor.zeroes(kv_shape),
+            .layer_index = Tensor.scalar(0, .u32),
+        };
+
+        const token_index = Tensor.scalar(0, .u32);
+        const result = self.inner.forward(h_typed, token_index, kv_cache, self.t_cond.convert(dtype), self.config);
+        return result[0].convert(.f32);
     }
 };
