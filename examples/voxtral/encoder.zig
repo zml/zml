@@ -56,12 +56,14 @@ pub const Encoder = struct {
     /// mel: [channels=128, time=frames]
     /// Returns: [s, d=1280]
     pub fn forward(self: Encoder, mel: Tensor) Tensor {
-        // Conv stem: [channels, time] -> [batch=1, channels, time]
-        var h = mel.insertAxes(.channels, .{.batch});
+        // Standardize precision to match model weights (usually bf16)
+        const dtype = self.conv0.weight.dtype();
+        var h = mel.convert(dtype).insertAxes(.channels, .{.batch});
 
         h = self.conv0.forward(h).gelu();
         h = self.conv1.forward(h).gelu();
 
+	
         // [batch=1, channels=1280, time'] -> [s, d=1280]
         h = h.squeeze(.batch);
         h = h.transpose(.{ .time, .channels }).rename(.{ .time = .s, .channels = .d });
@@ -73,10 +75,6 @@ pub const Encoder = struct {
         if (trunc > 0) {
             h = h.slice1d(.s, .{ .start = trunc });
         }
-
-        // Convert to weight dtype (bf16) before transformer layers.
-        // Conv stem operates in f32; transformer weights are stored in bf16.
-        h = h.convert(self.layers[0].attention.wq.weight.dtype());
 
         // Transformer layers
         for (self.layers) |layer| {
@@ -120,7 +118,9 @@ pub const CausalConv1d = struct {
         const padding_right = target_length - input_len;
 
         const dtype = input.dtype();
-        var h = input.conv1d(self.weight.convert(dtype), .{
+        std.debug.assert(dtype == self.weight.dtype());
+
+        var h = input.conv1d(self.weight, .{
             .window_strides = stride,
             .padding = &.{ padding_left, padding_right },
         });
@@ -178,10 +178,10 @@ pub const SelfAttention = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = linear(store.withPrefix("wq")),
-            .wk = linear(store.withPrefix("wk")),
-            .wv = linear(store.withPrefix("wv")),
-            .wo = linear(store.withPrefix("wo")),
+            .wq = initLinear(store.withPrefix("wq")),
+            .wk = initLinear(store.withPrefix("wk")),
+            .wv = initLinear(store.withPrefix("wv")),
+            .wo = initLinear(store.withPrefix("wo")),
         };
     }
 
@@ -196,7 +196,6 @@ pub const SelfAttention = struct {
     pub fn forward(self: SelfAttention, x: Tensor, config: Config) Tensor {
         const enc = config.encoder();
         const dtype = x.dtype();
-	// const converted_x = x.convert(self.wq.weight.dtype());
 
         // Q, K, V projections (encoder: Q and V have biases, K does not)
         var q = self.wq.forward(x);
@@ -240,9 +239,9 @@ pub const SwiGluFfn = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
         return .{
-            .w1 = linear(store.withPrefix("w1")),
-            .w2 = linear(store.withPrefix("w2")),
-            .w3 = linear(store.withPrefix("w3")),
+            .w1 = initLinear(store.withPrefix("w1")),
+            .w2 = initLinear(store.withPrefix("w2")),
+            .w3 = initLinear(store.withPrefix("w3")),
         };
     }
 
@@ -262,7 +261,7 @@ pub const SwiGluFfn = struct {
 
 // -- Helpers
 
-fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
+fn initLinear(store: zml.io.TensorStore.View) zml.nn.Linear {
     return .init(
         store.createTensorWithTags("weight", .{ .dout, .d }),
         store.maybeCreateTensorWithTags("bias", .{.dout}),
