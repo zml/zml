@@ -195,7 +195,7 @@ pub fn compile(
 
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
 
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    // log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
     const num_devices = sharding.num_partitions * sharding.num_replicas;
     const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, num_devices);
