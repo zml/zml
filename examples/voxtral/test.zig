@@ -81,7 +81,7 @@ pub fn main() !void {
         var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
         defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
 
-        try zml.testing.testLayer(allocator, io, platform, MelTestHarness{ .inner = melspectro_model }, .forward, ref_store.view(), "mel", .{ .inner = mel_spectrum_buffers }, 1e-3);
+        try zml.testing.testLayer(allocator, io, platform, MelTestHarness{ .inner = melspectro_model }, .forward, ref_store.view(), "mel", .{ .inner = mel_spectrum_buffers }, .{});
     }
 
     // -- Conv stem test
@@ -94,7 +94,7 @@ pub fn main() !void {
         var conv_buffers = try zml.io.load(ConvStemTestHarness, &conv_stem, allocator, io, platform, load_opts);
         defer ConvStemTestHarness.unloadBuffers(&conv_buffers);
 
-        try zml.testing.testLayer(allocator, io, platform, conv_stem, .forward, ref_store.view(), "conv_stem", conv_buffers, 1e-3);
+        try zml.testing.testLayer(allocator, io, platform, conv_stem, .forward, ref_store.view(), "conv_stem", conv_buffers, .{});
     }
     
     // -- Encoder test
@@ -105,7 +105,7 @@ pub fn main() !void {
         defer Encoder.unloadBuffers(&encoder_buffers, allocator);
 
         const harness = EncoderTestHarness{ .inner = encoder_model };
-        try zml.testing.testLayer(allocator, io, platform, harness, .forward, ref_store.view(), "encoder", .{ .inner = encoder_buffers }, 1e-3);
+        try zml.testing.testLayer(allocator, io, platform, harness, .forward, ref_store.view(), "encoder", .{ .inner = encoder_buffers }, .{});
     }
 }
 
@@ -133,9 +133,11 @@ const ConvStemTestHarness = struct {
     pub fn forward(self: ConvStemTestHarness, mel_input: Tensor) Tensor {
         const dtype = self.conv0.weight.dtype();
         var h = mel_input.convert(dtype).withTags(.{ .channels, .time }).insertAxes(.channels, .{.batch});
+	
         h = self.conv0.forward(h).gelu();
         h = self.conv1.forward(h).gelu();
         h = h.squeeze(.batch);
+	
         return h.transpose(.{ .time, .channels }).convert(.f32);
     }
 };
@@ -158,6 +160,6 @@ const EncoderTestHarness = struct {
     inner: Encoder,
 
     pub fn forward(self: EncoderTestHarness, mel_input: Tensor) Tensor {
-        return self.inner.forward(mel_input.withTags(.{ .channels, .time }));
+        return self.inner.forward(mel_input.withTags(.{ .channels, .time })).convert(.f32);
     }
 };
