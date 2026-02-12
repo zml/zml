@@ -27,6 +27,8 @@ pub const Linear = struct {
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
+        stdx.debug.assert(self.weight.dtype() == x.dtype(), "Linear expects input and weight to have the same dtype, got {} and {}", .{ x.dtype(), self.weight.dtype() });
+
         var y = x.dot(self.weight, self.tag);
 
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
