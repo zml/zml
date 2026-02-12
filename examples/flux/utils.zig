@@ -206,64 +206,6 @@ pub fn get_latents(
     }
 }
 
-pub const BoxMullerGenerator = struct {
-    seed: i64,
-    counter: i64,
-
-    pub fn init(seed: i64) BoxMullerGenerator {
-        return .{
-            .seed = seed,
-            .counter = 0,
-        };
-    }
-
-    fn hash(self: BoxMullerGenerator, index: i64) f32 {
-        var x = index +% self.seed;
-        x = (x ^ (x >> 16)) *% 0x45d9f3b;
-        x = (x ^ (x >> 16)) *% 0x45d9f3b;
-        x = x ^ (x >> 16);
-
-        // Normalize to [0, 1]
-        // Python: (x % 1000000).float() / 1000000.0
-        // Use @mod to emulate Python's modulo behavior (positive result).
-        const m = @mod(x, 1000000);
-        return @as(f32, @floatFromInt(m)) / 1000000.0;
-    }
-
-    pub fn randn(self: *BoxMullerGenerator, allocator: std.mem.Allocator, shape: []const usize) ![]f32 {
-        var count: usize = 1;
-        for (shape) |s| count *= s;
-
-        const result = try allocator.alloc(f32, count);
-        errdefer allocator.free(result);
-
-        const constant_u2_offset = 0x9e3779b9;
-
-        for (result, 0..) |*item, i| {
-            // Python: indices = torch.arange(self.counter, self.counter + num_elements)
-            const idx = self.counter + @as(i64, @intCast(i));
-
-            // val1 = self._hash(indices)
-            const val1 = self.hash(idx);
-            // val2 = self._hash(indices + 0x9e3779b9)
-            const val2 = self.hash(idx +% constant_u2_offset);
-
-            // Box-Muller Transform
-            // mag = sqrt(-2 ln(val1))
-            const ln_val1 = @log(val1 + 1e-10);
-            const mag = @sqrt(-2.0 * ln_val1);
-
-            // dist = mag * cos(2pi * val2)
-            const two_pi = 2.0 * 3.1415926535;
-            const cos_val = @cos(two_pi * val2);
-
-            item.* = mag * cos_val;
-        }
-        self.counter += @as(i64, @intCast(count));
-        return result;
-    }
-};
-
 /// Bit-exact port of PyTorch's CPU `torch.Generator` (MT19937 + Box-Muller).
 ///
 /// Produces the same sequence as:
@@ -468,37 +410,6 @@ pub fn prepare_text_ids(allocator: std.mem.Allocator, io: std.Io, platform: *con
     const shape = zml.Shape.init(.{ @as(i64, @intCast(batch_size)), @as(i64, @intCast(seq_len)), 4 }, .i64);
 
     return try zml.Buffer.fromBytes(io, platform, shape, std.mem.sliceAsBytes(data));
-}
-
-test "BoxMullerGenerator matches Python reference" {
-    const allocator = std.testing.allocator;
-    // Python: generator = BoxMullerGenerator(seed=42, device="cpu")
-    var gen = BoxMullerGenerator.init(42);
-
-    // Python: samples = generator.randn((2, 3, 4))
-    const shape = [_]usize{ 2, 3, 4 };
-    const samples = try gen.randn(allocator, &shape);
-    defer allocator.free(samples);
-
-    // Reference output from Python script
-    const expected = [_]f32{
-        -0.0603, 0.9283,  0.1725,  1.3793,
-        0.5367,  -0.1172, 0.3583,  1.0377,
-        2.6232,  0.8390,  -1.3245, -0.3546,
-        -0.0135, -1.3908, -2.3215, 1.5630,
-        -0.4535, -1.4687, -0.3142, 0.5771,
-        1.2876,  -1.0406, -0.5745, -1.1020,
-    };
-
-    var max_err: f32 = 0;
-    for (samples, 0..) |val, i| {
-        const diff = @abs(val - expected[i]);
-        if (diff > max_err) max_err = diff;
-
-        // Relaxed tolerance due to minor float implementation diffs (e.g. log, cos precision)
-        try std.testing.expectApproxEqAbs(expected[i], val, 1e-3);
-    }
-    // std.debug.print("Max difference: {d}\n", .{max_err});
 }
 
 test "TorchGenerator matches torch.randn reference (seed=0)" {

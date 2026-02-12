@@ -180,7 +180,7 @@ pub fn main() !void {
     // ==================== Tokenizing Prompt ====================
 
     var qwen2_node = progress.start("Tokenizing Prompt", 0);
-    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineTokenizer, .{ allocator, io, repo, platform_auto, &qwen2_node, .{ .prompt = args.prompt, .max_length = args.seqlen } });
+    var qwen2_future = try io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, platform_auto, &qwen2_node, .{ .prompt = args.prompt, .max_length = args.seqlen } });
 
     defer _ = qwen2_future.cancel(io) catch unreachable;
     qwen2_node.end();

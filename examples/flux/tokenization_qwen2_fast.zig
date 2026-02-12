@@ -128,7 +128,7 @@ pub const Qwen2TokenizerFast = struct {
         };
     }
 
-    pub fn pipelineTokenizer(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
+    pub fn pipelineRun(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, platform: *const zml.Platform, progress: ?*std.Progress.Node, options: struct { prompt: []const u8, max_length: usize = 512 }) !TokenizeOutput {
         if (progress) |p| {
             p.increaseEstimatedTotalItems(1);
             var node = p.start("Executing tokenizer...", 1);
@@ -144,7 +144,7 @@ pub const Qwen2TokenizerFast = struct {
             .add_generation_prompt = true,
         });
         defer allocator.free(text_templated);
-        log.info("text_templated: from {s} to {s}", .{ options.prompt, text_templated });
+        // log.info("text_templated: from {s} to {s}", .{ options.prompt, text_templated });
 
         // Tokenize
         return try tokenizer.tokenize(io, platform, text_templated, .{
