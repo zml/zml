@@ -9,65 +9,62 @@ const cfg = @import("config.zig");
 const Config = cfg.Config;
 
 const enc = @import("encoder.zig");
-const Linear = enc.Linear;
-const RmsNorm = enc.RmsNorm;
 const SwiGluFfn = enc.SwiGluFfn;
+const rmsNorm = enc.rmsNorm;
 
 /// Adapter: encoder→decoder projection.
 /// Reshapes encoder output [s, d=1280] → [s/4, d=5120] (concatenate 4 timesteps),
 /// then projects through a 2-layer MLP: Linear(5120→3072) → GELU → Linear(3072→3072).
 pub const Adapter = struct {
-    proj0: Linear,
-    proj1: Linear,
+    proj0: zml.nn.Linear,
+    proj1: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) Adapter {
         const proj_store = store.withPrefix("mm_streams_embeddings.embedding_module.audio_language_projection");
         return .{
-            .proj0 = Linear.init(proj_store.withLayer(0)),
-            .proj1 = Linear.init(proj_store.withLayer(2)),
+            .proj0 = linear(proj_store.withLayer(0)),
+            .proj1 = linear(proj_store.withLayer(2)),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Adapter)) void {
-        Linear.unloadBuffers(&self.proj0);
-        Linear.unloadBuffers(&self.proj1);
+        deinitLinear(&self.proj0);
+        deinitLinear(&self.proj1);
     }
 
     /// encoder_out: [s, d=1280] → [s/4, d=3072]
     pub fn forward(self: Adapter, encoder_out: Tensor) Tensor {
         // Reshape [s, d=1280] → [s/4, d=5120] by concatenating 4 consecutive timesteps.
-        // Split s into (s_new, group=4), then merge (group, d) → d_new.
         const h = encoder_out
             .splitAxis(.s, .{ .s = .auto, .group = 4 })
             .merge(.{ .d = .{ .group, .d } });
 
-        return self.proj1.forward(self.proj0.forward(h).gelu());
+        return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };
 
 /// AdaRmsNorm: per-layer time conditioning.
 /// Computes ada_scale = up(gelu(down(t_cond))), then returns h * (1 + ada_scale).
 pub const AdaRmsNorm = struct {
-    down: Linear,
-    up: Linear,
+    down: zml.nn.Linear,
+    up: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) AdaRmsNorm {
         const ada_store = store.withPrefix("ada_rms_norm_t_cond");
         return .{
-            .down = Linear.init(ada_store.withLayer(0)),
-            .up = Linear.init(ada_store.withLayer(2)),
+            .down = linear(ada_store.withLayer(0)),
+            .up = linear(ada_store.withLayer(2)),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(AdaRmsNorm)) void {
-        Linear.unloadBuffers(&self.down);
-        Linear.unloadBuffers(&self.up);
+        deinitLinear(&self.down);
+        deinitLinear(&self.up);
     }
 
-    /// Apply adaptive conditioning: h * (1 + ada_scale).
     /// h: [s, d], t_cond: [d] → [s, d]
     pub fn forward(self: AdaRmsNorm, h: Tensor, t_cond: Tensor) Tensor {
-        const ada_scale = self.up.forward(self.down.forward(t_cond).gelu());
+        const ada_scale = self.up.forward(self.down.forward(t_cond).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
         const one_plus_scale = ada_scale.broad(h.shape()).add(Tensor.scalar(1.0, h.dtype()).broad(h.shape()));
         return h.mul(one_plus_scale);
     }
@@ -169,40 +166,39 @@ pub const KvCache = struct {
 
 /// Decoder self-attention with KV cache.
 pub const SelfAttention = struct {
-    wq: Linear,
-    wk: Linear,
-    wv: Linear,
-    wo: Linear,
+    wq: zml.nn.Linear,
+    wk: zml.nn.Linear,
+    wv: zml.nn.Linear,
+    wo: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = Linear.init(store.withPrefix("wq")),
-            .wk = Linear.init(store.withPrefix("wk")),
-            .wv = Linear.init(store.withPrefix("wv")),
-            .wo = Linear.init(store.withPrefix("wo")),
+            .wq = linear(store.withPrefix("wq")),
+            .wk = linear(store.withPrefix("wk")),
+            .wv = linear(store.withPrefix("wv")),
+            .wo = linear(store.withPrefix("wo")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
-        Linear.unloadBuffers(&self.wq);
-        Linear.unloadBuffers(&self.wk);
-        Linear.unloadBuffers(&self.wv);
-        Linear.unloadBuffers(&self.wo);
+        deinitLinear(&self.wq);
+        deinitLinear(&self.wk);
+        deinitLinear(&self.wv);
+        deinitLinear(&self.wo);
     }
 
     /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
     pub fn forward(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
         const dtype = x.dtype();
 
-        // Q, K, V projections
         var q = self.wq.forward(x);
         var k = self.wk.forward(x);
         var v = self.wv.forward(x);
 
-        // Split into heads: [s, d] → [s, h, hd]
-        q = q.splitAxis(.d, .{ .h = config.n_heads, .hd = config.head_dim });
-        k = k.splitAxis(.d, .{ .h = config.n_kv_heads, .hd = config.head_dim });
-        v = v.splitAxis(.d, .{ .h = config.n_kv_heads, .hd = config.head_dim });
+        // Split into heads: [s, dout] → [s, h, hd]
+        q = q.splitAxis(.dout, .{ .h = config.n_heads, .hd = config.head_dim });
+        k = k.splitAxis(.dout, .{ .h = config.n_kv_heads, .hd = config.head_dim });
+        v = v.splitAxis(.dout, .{ .h = config.n_kv_heads, .hd = config.head_dim });
 
         // Position indices for RoPE
         const pos_index = b: {
@@ -211,7 +207,6 @@ pub const SelfAttention = struct {
             break :b temp.add(token_index.broad(temp.shape()));
         };
 
-        // RoPE (interleaved)
         const rope_opts: zml.nn.RopeOpts = .{
             .layout = .interleaved,
             .freq_base = config.rope_theta,
@@ -219,7 +214,6 @@ pub const SelfAttention = struct {
         q = zml.nn.rope(q, pos_index, rope_opts);
         k = zml.nn.rope(k, pos_index, rope_opts);
 
-        // Rename for attention: .s → .q/.k
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
@@ -239,35 +233,36 @@ pub const SelfAttention = struct {
         );
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
 
-        // Merge heads: [q, h, hd] → [s, d]
+        // Merge heads and output projection: [q, h, hd] → [s, d]
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-
-        return .{ self.wo.forward(merged), new_kv_cache };
+        return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
     }
 };
 
 /// Single decoder transformer layer with AdaRmsNorm time conditioning.
 pub const DecoderLayer = struct {
-    attention_norm: RmsNorm,
+    attention_norm: Tensor,
     attention: SelfAttention,
-    ffn_norm: RmsNorm,
+    ffn_norm: Tensor,
     feed_forward: SwiGluFfn,
     ada_norm: AdaRmsNorm,
+    norm_eps: f32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) DecoderLayer {
         return .{
-            .attention_norm = RmsNorm.init(store.withPrefix("attention_norm"), config.norm_eps),
+            .attention_norm = store.withPrefix("attention_norm").createTensorWithTags("weight", .{.d}),
             .attention = SelfAttention.init(store.withPrefix("attention")),
-            .ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), config.norm_eps),
+            .ffn_norm = store.withPrefix("ffn_norm").createTensorWithTags("weight", .{.d}),
             .feed_forward = SwiGluFfn.init(store.withPrefix("feed_forward")),
             .ada_norm = AdaRmsNorm.init(store),
+            .norm_eps = config.norm_eps,
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
-        RmsNorm.unloadBuffers(&self.attention_norm);
+        self.attention_norm.deinit();
         SelfAttention.unloadBuffers(&self.attention);
-        RmsNorm.unloadBuffers(&self.ffn_norm);
+        self.ffn_norm.deinit();
         SwiGluFfn.unloadBuffers(&self.feed_forward);
         AdaRmsNorm.unloadBuffers(&self.ada_norm);
     }
@@ -276,7 +271,7 @@ pub const DecoderLayer = struct {
     pub fn forward(self: DecoderLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, config: Config) struct { Tensor, KvCache } {
         // Pre-attention norm → attention (with KV cache) → residual
         const attn_out, const updated_kv_cache = self.attention.forward(
-            self.attention_norm.forward(h),
+            rmsNorm(h, self.attention_norm, self.norm_eps),
             token_index,
             kv_cache,
             config,
@@ -284,7 +279,7 @@ pub const DecoderLayer = struct {
         var out = h.add(attn_out);
 
         // Pre-FFN norm → ada conditioning → FFN → residual
-        const normed = self.ffn_norm.forward(out);
+        const normed = rmsNorm(out, self.ffn_norm, self.norm_eps);
         const conditioned = self.ada_norm.forward(normed, t_cond);
         const ffn_out = self.feed_forward.forward(conditioned);
         out = out.add(ffn_out);
@@ -297,7 +292,8 @@ pub const DecoderLayer = struct {
 pub const Decoder = struct {
     tok_embeddings: Tensor,
     layers: []DecoderLayer,
-    norm: RmsNorm,
+    norm: Tensor,
+    norm_eps: f32,
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Decoder {
@@ -309,7 +305,8 @@ pub const Decoder = struct {
         return .{
             .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
             .layers = layers,
-            .norm = RmsNorm.init(store.withPrefix("norm"), config.norm_eps),
+            .norm = store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
+            .norm_eps = config.norm_eps,
             .config = config,
         };
     }
@@ -324,7 +321,7 @@ pub const Decoder = struct {
             DecoderLayer.unloadBuffers(layer);
         }
         allocator.free(self.layers);
-        RmsNorm.unloadBuffers(&self.norm);
+        self.norm.deinit();
     }
 
     /// Run all decoder layers on input embeddings.
@@ -342,7 +339,7 @@ pub const Decoder = struct {
             cache = updated_layer_cache.reuseBuffer(layer_cache);
         }
 
-        h = self.norm.forward(h);
+        h = rmsNorm(h, self.norm, self.norm_eps);
         return .{ h, cache };
     }
 
@@ -352,3 +349,18 @@ pub const Decoder = struct {
         return hidden.dot(self.tok_embeddings.convert(hidden.dtype()), .d);
     }
 };
+
+// -- Helpers
+
+fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
+    return .init(
+        store.createTensorWithTags("weight", .{ .dout, .d }),
+        store.maybeCreateTensorWithTags("bias", .{.dout}),
+        .d,
+    );
+}
+
+fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
+    l.weight.deinit();
+    if (l.bias) |*b| b.deinit();
+}
