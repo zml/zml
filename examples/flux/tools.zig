@@ -1,7 +1,7 @@
 const std = @import("std");
-const log = std.log.scoped(.tools);
-
 const zml = @import("zml");
+
+const log = std.log.scoped(.tools);
 
 const truncated_shape_msg = "torch.Size([...])";
 const truncated_values_msg = "[...]";

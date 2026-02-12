@@ -53,22 +53,28 @@ pub const std_options: std.Options = .{
 // --model=/Users/kevin/FLUX.2-klein-4B \
 // --prompt="a photo of a cat sleeping on the sofa" \
 // --output-image-path=/Users/kevin/zml/flux_klein_zml_result.png \
+// --kitty-output
 // --resolution=HLD \
 // --num-inference-steps=1 \
 // --random-seed=1 \
 // --generator-type=torch \
 // --data-type=f32 \
+// --seqlen=32
 // --async-limit=1
 
 const Resolution = enum { HLD, LD, SD, HD, FHD, QHD, UHD };
 
 const CliArgs = struct {
-    model: []const u8 = "hf://black-forest-labs/FLUX.2-klein-4B",
+    // model: []const u8 = "hf://black-forest-labs/FLUX.2-klein-4B",
+    model: []const u8 = "/Users/kevin/FLUX.2-klein-4B",
     prompt: []const u8 = "A photo of a cat",
     seqlen: usize = 512,
-    output_image_path: []const u8 = "output.png",
+    // output_image_path: []const u8 = "output.png",
+    // output_image_path: []const u8 = "/Users/kevin/zml/flux_klein_zml_result.png",
+    output_image_path: ?[]const u8 = null,
+    kitty_output: bool = true,
     random_seed: u64 = 0,
-    num_inference_steps: usize = 4,
+    num_inference_steps: usize = 1,
     async_limit: ?usize = null,
     generator_type: utils.GeneratorType = .accelerator_box_muller,
     data_type: zml.DataType = .f32,
@@ -159,15 +165,15 @@ pub fn main() !void {
     const repo: std.Io.Dir = try zml.safetensors.resolveModelRepo(io, args.model);
 
     if (comptime config.enable_stage_debug) {
-        std.log.info("Stage Debug Enabled", .{});
+        log.info("Stage Debug Enabled", .{});
         std.process.exit(0);
     } else {
-        std.log.info("Stage Debug Disabled", .{});
+        log.info("Stage Debug Disabled", .{});
     }
 
     const parallelism_level: usize = if (args.async_limit) |limit| limit else try std.Thread.getCpuCount();
 
-    std.log.info("Parallelism Level: {}", .{parallelism_level});
+    log.info("Parallelism Level: {}", .{parallelism_level});
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
@@ -182,8 +188,8 @@ pub fn main() !void {
     var tokens = try qwen2_future.await(io);
     defer tokens.deinit();
 
-    try tools.printFlatten(allocator, io, tokens.input_ids, 20, "input_ids", .{ .include_shape = false });
-    try tools.printFlatten(allocator, io, tokens.attention_mask, 20, "attention_mask", .{ .include_shape = false });
+    // try tools.printFlatten(allocator, io, tokens.input_ids, 20, "input_ids", .{ .include_shape = false });
+    // try tools.printFlatten(allocator, io, tokens.attention_mask, 20, "attention_mask", .{ .include_shape = false });
 
     log.info("End Tokenizing Prompt", .{});
 
@@ -250,8 +256,8 @@ pub fn main() !void {
     var prompt_text_ids: zml.Buffer = try utils.prepare_text_ids(allocator, io, platform_auto, prompt_seq_len);
     defer prompt_text_ids.deinit();
 
-    try tools.printFlatten(allocator, io, prompt_text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    try tools.printFlatten(allocator, io, prompt_embeds, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, prompt_text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, prompt_embeds, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
 
     {
         // 1. Loading Embeds & Text IDs (Pre-computed for now)
@@ -306,11 +312,10 @@ pub fn main() !void {
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
 
-    try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
-    try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
 
-    // // 4. Schedule (Sampling Loop)
-    log.info("\n>>> Preparing Timesteps...", .{});
+    log.info(">>> Preparing Timesteps...", .{});
 
     var latents_out = try utils.schedule(
         transformer2d_model_ctx.model,
@@ -327,19 +332,32 @@ pub fn main() !void {
     );
     defer latents_out.deinit();
 
-    try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
 
-    log.info("\n>>> Decoding Latents...", .{});
+    log.info(">>> Decoding Latents...", .{});
 
     var vae_ctx = try autoencoder_kl.AutoencoderKLFlux2.loadFromFile(allocator, io, platform_auto, repo, null, .{});
     defer vae_ctx.deinit(allocator);
 
     const image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, platform_auto, vae_ctx, latents_out);
-    try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
 
-    try utils.saveFluxImageToPng(allocator, io, image_decoded_buf, args.output_image_path);
+    // Print directly in terminal without writing to disk
 
-    log.info("\n>>> Pipeline Complete.", .{});
+    const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
+    defer rgb_image_buffer.free(allocator);
+
+    if (args.kitty_output) {
+        log.info(">>> Printing Image to Terminal...", .{});
+        try utils.printFluxImageToTerminalKittyFromBuffer(allocator, &rgb_image_buffer);
+    }
+    // Optional: save to disk
+    if (args.output_image_path) |output_image_path| {
+        log.info(">>> Saving Image to Disk at {s}...", .{output_image_path});
+        try utils.saveFluxImageToPng(allocator, &rgb_image_buffer, output_image_path);
+    }
+
+    log.info(">>> Pipeline Complete.", .{});
 
     std.process.exit(0);
 }

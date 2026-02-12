@@ -653,7 +653,6 @@ pub fn schedule(
 
     // -----------------------
 
-    log.info("   Sigmas: {any}", .{sigmas.items});
     log.info("   Empirical Mu: {d:.4}", .{empirical_mu});
 
     const FluxStep = struct {
@@ -718,10 +717,10 @@ pub fn schedule(
         defer g_proj_buf.deinit();
 
         // Debug: Print Timestep Projection
-        if (idx == 0) {
-            std.log.info("Timestep Frequencies (first 10): {any}", .{freq_vals_arr[0..10]});
-            try tools.printBuffer(allocator, io, t_proj_buf, 20, "T_Proj (Step 1)");
-        }
+        // if (idx == 0) {
+        //     std.log.info("Timestep Frequencies (first 10): {any}", .{freq_vals_arr[0..10]});
+        //     try tools.printBuffer(allocator, io, t_proj_buf, 20, "T_Proj (Step 1)");
+        // }
 
         defer t_proj_buf.deinit();
 
@@ -729,8 +728,8 @@ pub fn schedule(
         defer args_step.deinit(allocator);
 
         // Debug: Print RoPE for verification
-        try tools.printBuffer(allocator, io, rotary_cos_dev, 20, "RoPE Cos");
-        try tools.printBuffer(allocator, io, rotary_sin_dev, 20, "RoPE Sin");
+        // try tools.printBuffer(allocator, io, rotary_cos_dev, 20, "RoPE Cos");
+        // try tools.printBuffer(allocator, io, rotary_sin_dev, 20, "RoPE Sin");
 
         args_step.set(.{ weights, current_latents, prompt_embeds, t_proj_buf, g_proj_buf, rotary_cos_dev, rotary_sin_dev });
 
@@ -753,8 +752,8 @@ pub fn schedule(
         const n_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(noise_slice.items(u8))));
         const l_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(latents_slice.items(u8))));
 
-        try tools.printFlatten(allocator, io, noise_pred_buf, 20, "   noise_pred (transformer output) (first 20)", .{});
-        try tools.printFlatten(allocator, io, current_latents, 20, "   Latents before step.", .{ .include_shape = true });
+        // try tools.printFlatten(allocator, io, noise_pred_buf, 20, "   noise_pred (transformer output) (first 20)", .{});
+        // try tools.printFlatten(allocator, io, current_latents, 20, "   Latents before step.", .{ .include_shape = true });
 
         const out_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .f32));
         defer out_slice.free(allocator);
@@ -768,14 +767,14 @@ pub fn schedule(
         current_latents = next_latents_buf;
         is_first = false;
 
-        try tools.printFlatten(allocator, io, current_latents, 20, "   Latents after step (first 20).", .{ .include_shape = true });
+        // try tools.printFlatten(allocator, io, current_latents, 20, "   Latents after step (first 20).", .{ .include_shape = true });
     }
 
     // unpack_latents_with_ids - scatter tokens into correct spatial positions
     const unpacked = try unpackLatentsWithIds(allocator, io, platform, current_latents, latent_ids);
 
     // Print here to catch output before potential deinit crash
-    try tools.printFlatten(allocator, io, unpacked, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, unpacked, 20, "    Latents Out (first 20).", .{ .include_shape = true });
 
     if (!is_first) current_latents.deinit();
 
@@ -892,7 +891,19 @@ pub fn computeRoPE_CPU(allocator: std.mem.Allocator, seq_len: usize, head_dim: u
     return .{ .cos = cos_data, .sin = sin_data };
 }
 
-pub fn saveFluxImageToPng(allocator: std.mem.Allocator, io: std.Io, image_decoded_buf: zml.Buffer, filename: []const u8) !void {
+const RgbImage = struct {
+    w: c_int,
+    h: c_int,
+    comp: c_int,
+    stride_in_bytes: c_int,
+    data: []u8,
+
+    pub fn free(self: @This(), allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
+    }
+};
+
+pub fn decodeImageToRgb(allocator: std.mem.Allocator, io: std.Io, image_decoded_buf: zml.Buffer) !RgbImage {
     const shape = image_decoded_buf.shape();
     const dim_c = shape.dim(1);
     _ = dim_c;
@@ -909,10 +920,9 @@ pub fn saveFluxImageToPng(allocator: std.mem.Allocator, io: std.Io, image_decode
     defer slice.free(allocator);
     try image_decoded_buf.toSlice(io, slice);
 
-    const png_data = try allocator.alloc(u8, @intCast(dim_h * dim_w * comp));
-    defer allocator.free(png_data);
+    const rgb_data = try allocator.alloc(u8, @intCast(dim_h * dim_w * comp));
 
-    // NCHW -> NHWC + Denormalize
+    // NCHW -> NHWC + denormalize into 8-bit RGB
     var idx: usize = 0;
     for (0..@intCast(dim_h)) |y| {
         for (0..@intCast(dim_w)) |x| {
@@ -927,18 +937,79 @@ pub fn saveFluxImageToPng(allocator: std.mem.Allocator, io: std.Io, image_decode
                 if (val < 0.0) val = 0.0;
                 if (val > 1.0) val = 1.0;
 
-                png_data[idx] = @intFromFloat(val * 255.0);
+                rgb_data[idx] = @intFromFloat(val * 255.0);
                 idx += 1;
             }
         }
     }
 
+    return .{ .w = w, .h = h, .comp = comp, .stride_in_bytes = stride_in_bytes, .data = rgb_data };
+}
+
+pub fn saveFluxImageToPng(allocator: std.mem.Allocator, rgb: *const RgbImage, filename: []const u8) !void {
     const filename_z = try allocator.dupeZ(u8, filename);
     defer allocator.free(filename_z);
 
-    if (c_interface.stbi_write_png(filename_z.ptr, w, h, comp, png_data.ptr, stride_in_bytes) == 0) {
+    if (c_interface.stbi_write_png(filename_z.ptr, rgb.w, rgb.h, rgb.comp, rgb.data.ptr, rgb.stride_in_bytes) == 0) {
         log.err("Failed to write PNG to {s}", .{filename});
     } else {
         log.info("Saved PNG to {s}", .{filename});
     }
+}
+
+const StbiWriteContext = struct {
+    list: std.ArrayList(u8),
+    allocator: std.mem.Allocator,
+    failed: bool = false,
+};
+
+fn stbiWriteCallback(context: ?*anyopaque, data: ?*anyopaque, size: c_int) callconv(.c) void {
+    if (context == null or data == null or size <= 0) return;
+    const ctx: *StbiWriteContext = @ptrCast(@alignCast(context.?));
+    if (ctx.failed) return;
+
+    const bytes = @as([*]const u8, @ptrCast(data.?))[0..@as(usize, @intCast(size))];
+    ctx.list.appendSlice(ctx.allocator, bytes) catch {
+        ctx.failed = true;
+    };
+}
+
+fn encodePngToMemory(allocator: std.mem.Allocator, rgb_image_buffer: *const RgbImage) ![]u8 {
+    var ctx = StbiWriteContext{ .list = .{}, .allocator = allocator };
+    errdefer ctx.list.deinit(allocator);
+    _ = c_interface.stbi_write_png_to_func(stbiWriteCallback, &ctx, rgb_image_buffer.w, rgb_image_buffer.h, rgb_image_buffer.comp, rgb_image_buffer.data.ptr, rgb_image_buffer.stride_in_bytes);
+
+    if (ctx.failed) return error.OutOfMemory;
+    return ctx.list.toOwnedSlice(allocator);
+}
+
+/// Print a PNG image to a Kitty-compatible terminal using the graphics protocol.
+/// This avoids writing the image to disk and is suitable for Ghostty.
+pub fn printFluxImageToTerminalKittyFromBuffer(allocator: std.mem.Allocator, rgb_image_buffer: *const RgbImage) !void {
+    const png_bytes = try encodePngToMemory(allocator, rgb_image_buffer);
+    defer allocator.free(png_bytes);
+
+    const b64_len = std.base64.standard.Encoder.calcSize(png_bytes.len);
+    const b64_buf = try allocator.alloc(u8, b64_len);
+    defer allocator.free(b64_buf);
+    const b64 = std.base64.standard.Encoder.encode(b64_buf, png_bytes);
+
+    const esc = "\x1b_G";
+    const st = "\x1b\\";
+    const chunk_size: usize = 4096;
+
+    var offset: usize = 0;
+    while (offset < b64.len) {
+        const remaining = b64.len - offset;
+        const chunk_len = @min(chunk_size, remaining);
+        const more: u8 = if (offset + chunk_len < b64.len) 1 else 0;
+
+        var header_buf: [128]u8 = undefined;
+        const header = try std.fmt.bufPrint(&header_buf, "{s}a=T,f=100,t=d,m={d};", .{ esc, more });
+
+        std.debug.print("{s}{s}{s}", .{ header, b64[offset .. offset + chunk_len], st });
+        offset += chunk_len;
+    }
+
+    std.debug.print("\n", .{});
 }

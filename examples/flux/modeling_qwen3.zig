@@ -421,11 +421,11 @@ pub const Qwen3ForCausalLM = struct {
         const subfolder = "text_encoder";
 
         const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });
-        log.info("Loaded config type: {s} from {s} with values {any}", .{ @typeName(Config), subfolder, config_json });
+        // log.info("Loaded config type: {s} from {s} with values {any}", .{ @typeName(Config), subfolder, config_json });
         errdefer config_json.deinit();
         const config = config_json.value;
 
-        std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});
+        // std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromRepo(allocator, io, try repo_dir.openDir(io, subfolder, .{}));
         defer tensor_registry.deinit();
@@ -435,7 +435,7 @@ pub const Qwen3ForCausalLM = struct {
         var model = try Qwen3ForCausalLM.init(allocator, tensor_store.view(), config);
         errdefer model.deinit(allocator);
 
-        log.info("Hydrating Qwen3 Weights...", .{});
+        // log.info("Hydrating Qwen3 Weights...", .{});
         var weights = try zml.io.load(
             Qwen3ForCausalLM,
             &model,
