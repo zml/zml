@@ -380,7 +380,7 @@ pub fn testLayer(
                 const stderr = std.debug.lockStderr(&.{});
                 defer std.debug.unlockStderr();
                 const w = &stderr.file_writer.interface;
-                try w.print("{s}.{d} doesn't match !", .{ output_name, i });
+                try w.print("{s}.{d} doesn't match !\n", .{ output_name, i });
                 failed = true;
                 continue;
             },
