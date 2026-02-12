@@ -116,6 +116,27 @@ const CliArgs = struct {
     ;
 };
 
+// Forward pass
+const QwenEncodingStep = struct {
+    pub fn forward(
+        self: @This(),
+        model: modeling_qwen3.Qwen3ForCausalLM,
+        input_ids: zml.Tensor,
+        attention_mask: zml.Tensor,
+        rope: utils.RoPE,
+        // rope_cos: zml.Tensor,
+        // rope_sin: zml.Tensor,
+    ) zml.Tensor {
+        _ = self;
+        // const rope = utils.RoPE{ .cos = rope_cos, .sin = rope_sin };
+        const out = model.forward(input_ids.convert(.i32), rope, attention_mask.convert(.f32), true);
+        const h9 = out.hidden_states.?.get(9);
+        const h18 = out.hidden_states.?.get(18);
+        const h27 = out.hidden_states.?.get(27);
+        return zml.Tensor.concatenate(&.{ h9, h18, h27 }, -1);
+    }
+};
+
 pub fn main() !void {
     @setEvalBranchQuota(10_000);
 
@@ -196,7 +217,7 @@ pub fn main() !void {
     // ==================== Encoding Prompt ====================
 
     var qwen_node = progress.start("Loading Qwen3", 0);
-    var qwen3_model_ctx = try modeling_qwen3.Qwen3ForCausalLM.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &qwen_node);
+    var qwen3_model_ctx = try modeling_qwen3.Qwen3ForCausalLM.loadFromFile(allocator, io, platform_auto, repo, parallelism_level, &qwen_node, args.data_type);
     qwen_node.end();
     defer qwen3_model_ctx.deinit(allocator);
 
@@ -213,39 +234,23 @@ pub fn main() !void {
     var rope_sin_dev = try zml.Buffer.fromBytes(io, platform_auto, rope_shape, std.mem.sliceAsBytes(rope_cpu.sin));
     defer rope_sin_dev.deinit();
 
-    // Forward pass
-    const QwenEncodingStep = struct {
-        pub fn forward(
-            self: @This(),
-            model: modeling_qwen3.Qwen3ForCausalLM,
-            input_ids: zml.Tensor,
-            attention_mask: zml.Tensor,
-            rope_cos: zml.Tensor,
-            rope_sin: zml.Tensor,
-        ) zml.Tensor {
-            _ = self;
-            const rope = modeling_qwen3.RoPE{ .cos = rope_cos, .sin = rope_sin };
-            const out = model.forward(input_ids.convert(.i32), rope, attention_mask.convert(.f32), true);
-            const h9 = out.hidden_states.?.get(9);
-            const h18 = out.hidden_states.?.get(18);
-            const h27 = out.hidden_states.?.get(27);
-            return zml.Tensor.concatenate(&.{ h9, h18, h27 }, -1);
-        }
-    };
+    // const rope_compute = utils.computeRoPE(seq_len, head_dim, qwen3_model_ctx.config.rope_theta, args.data_type);
 
     const input_shape = tokens.input_ids.shape();
     var qwen_exe = try platform_auto.compile(allocator, io, QwenEncodingStep{}, .forward, .{
         qwen3_model_ctx.model,
         zml.Tensor.fromShape(input_shape),
         zml.Tensor.fromShape(input_shape),
-        zml.Tensor.fromShape(rope_shape),
-        zml.Tensor.fromShape(rope_shape),
+        // rope_compute,
+        utils.RoPE{ .cos = zml.Tensor.fromShape(rope_shape), .sin = zml.Tensor.fromShape(rope_shape) },
     });
     defer qwen_exe.deinit();
 
     var qwen_args = try qwen_exe.args(allocator);
     defer qwen_args.deinit(allocator);
-    qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, rope_cos_dev, rope_sin_dev });
+    qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, .{ .cos = rope_cos_dev, .sin = rope_sin_dev } });
+    // qwen_args.set(.{ qwen3_model_ctx.weights, tokens.input_ids, tokens.attention_mask, rope_compute });
+
 
     var qwen_res = try qwen_exe.results(allocator);
     defer qwen_res.deinit(allocator);
@@ -256,8 +261,9 @@ pub fn main() !void {
     var prompt_text_ids: zml.Buffer = try utils.prepare_text_ids(allocator, io, platform_auto, prompt_seq_len);
     defer prompt_text_ids.deinit();
 
-    // try tools.printFlatten(allocator, io, prompt_text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, prompt_embeds, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, prompt_text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, prompt_embeds, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+    std.process.exit(0);
 
     {
         // 1. Loading Embeds & Text IDs (Pre-computed for now)

@@ -3,6 +3,7 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const tools = @import("tools.zig");
+const utils = @import("utils.zig");
 
 const log = std.log.scoped(.modeling_qwen3);
 
@@ -21,11 +22,6 @@ pub const Config = struct {
     rope_theta: f32 = 1000000.0,
     attention_dropout: f32 = 0.0,
     attention_bias: bool = true,
-};
-
-pub const RoPE = struct {
-    cos: zml.Tensor,
-    sin: zml.Tensor,
 };
 
 fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
@@ -168,7 +164,7 @@ pub const Qwen3Attention = struct {
     pub fn forward(
         self: Qwen3Attention,
         hidden_states: zml.Tensor,
-        rope: RoPE,
+        rope: utils.RoPE,
         attention_mask: ?zml.Tensor,
     ) zml.Tensor {
         const b = hidden_states.shape().dim(0);
@@ -284,7 +280,7 @@ pub const Qwen3DecoderLayer = struct {
     pub fn forward(
         self: Qwen3DecoderLayer,
         hidden_states: zml.Tensor, // input is f32
-        rope: RoPE,
+        rope: utils.RoPE,
         attention_mask: ?zml.Tensor,
     ) zml.Tensor { // returns f32
         var h = self.input_layernorm.forward(hidden_states);
@@ -329,7 +325,7 @@ pub const Qwen3Model = struct {
     pub fn forward(
         self: Qwen3Model,
         input_ids: zml.Tensor,
-        rope: RoPE,
+        rope: utils.RoPE,
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { last_hidden_state: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
@@ -365,8 +361,9 @@ pub const Qwen3ForCausalLM = struct {
     model: Qwen3Model,
     lm_head: Linear,
     config: Config,
+    data_type: zml.DataType,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Qwen3ForCausalLM {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, data_type: zml.DataType) !Qwen3ForCausalLM {
         const model = try Qwen3Model.init(allocator, store.withPrefix("model"), config);
 
         var lm_head_weight = store.maybeCreateTensor("lm_head.weight");
@@ -382,6 +379,7 @@ pub const Qwen3ForCausalLM = struct {
             .model = model,
             .lm_head = Linear.init(lm_head_weight.?, null),
             .config = config,
+            .data_type = data_type,
         };
     }
 
@@ -392,7 +390,7 @@ pub const Qwen3ForCausalLM = struct {
     pub fn forward(
         self: @This(),
         input_ids: zml.Tensor,
-        rope: RoPE,
+        rope: utils.RoPE,
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { logits: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
@@ -416,7 +414,7 @@ pub const Qwen3ForCausalLM = struct {
         }
     };
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node) !ModelContext {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node, data_type: zml.DataType) !ModelContext {
         @setEvalBranchQuota(10_000);
         const subfolder = "text_encoder";
 
@@ -432,7 +430,7 @@ pub const Qwen3ForCausalLM = struct {
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();
-        var model = try Qwen3ForCausalLM.init(allocator, tensor_store.view(), config);
+        var model = try Qwen3ForCausalLM.init(allocator, tensor_store.view(), config, data_type);
         errdefer model.deinit(allocator);
 
         // log.info("Hydrating Qwen3 Weights...", .{});
@@ -480,33 +478,4 @@ fn repeat_kv(hidden_states: zml.Tensor, n_rep: i64) zml.Tensor {
     const expanded = hidden_states.reshape(zml.Shape.init(.{ b, h_kv, 1, s, d }, hidden_states.dtype()));
     const broadcasted = expanded.broad(zml.Shape.init(.{ b, h_kv, n_rep, s, d }, hidden_states.dtype()));
     return broadcasted.reshape(zml.Shape.init(.{ b, h_kv * n_rep, s, d }, hidden_states.dtype()));
-}
-
-pub fn computeRoPE(seq_len: i64, head_dim: i64, theta: f32) RoPE {
-    const half = @divExact(head_dim, 2);
-    const shape_half = zml.Shape.init(.{half}, .f32);
-    const idx_half = zml.Tensor.iota(shape_half, 0).convert(.f32);
-    const log_v = @log(theta);
-    const factor: f32 = -log_v / @as(f32, @floatFromInt(half));
-    const exponents = idx_half.scale(@as(f64, @floatCast(factor)));
-    const inv_freq = exponents.exp();
-    const shape_seq = zml.Shape.init(.{seq_len}, .f32);
-    const t = zml.Tensor.iota(shape_seq, 0).convert(.f32);
-
-    // Explicit broadcast for outer product
-    const shape_full = zml.Shape.init(.{ seq_len, half }, .f32);
-
-    const t_reshaped = t.reshape(zml.Shape.init(.{ seq_len, 1 }, .f32));
-    const inv_reshaped = inv_freq.reshape(zml.Shape.init(.{ 1, half }, .f32));
-
-    // Use broad to broadcast to shape
-    const t_broad = t_reshaped.broad(shape_full);
-    const inv_broad = inv_reshaped.broad(shape_full);
-
-    const freqs = t_broad.mul(inv_broad);
-
-    const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
-    const cos = emb.cos().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, .f32));
-    const sin = emb.sin().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, .f32));
-    return .{ .cos = cos, .sin = sin };
 }

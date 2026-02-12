@@ -764,44 +764,6 @@ fn unpackLatentsWithIds(
     return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bytes));
 }
 
-pub fn computeRoPE_CPU(allocator: std.mem.Allocator, seq_len: usize, head_dim: usize, theta: f32) !struct { cos: []f32, sin: []f32 } {
-    const dim = head_dim;
-    const half = dim / 2;
-
-    const inv_freq = try allocator.alloc(f32, half);
-    defer allocator.free(inv_freq);
-
-    for (0..half) |i| {
-        const x = -@log(theta) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half));
-        inv_freq[i] = @exp(x);
-    }
-
-    const total_elems = seq_len * dim;
-    const cos_data = try allocator.alloc(f32, total_elems);
-    const sin_data = try allocator.alloc(f32, total_elems);
-    errdefer {
-        allocator.free(cos_data);
-        allocator.free(sin_data);
-    }
-
-    for (0..seq_len) |s| { // position
-        for (0..half) |i| { // freq index
-            const freq = @as(f32, @floatFromInt(s)) * inv_freq[i];
-            const cos_val = @cos(freq);
-            const sin_val = @sin(freq);
-
-            const offset = s * dim;
-            cos_data[offset + i] = cos_val;
-            cos_data[offset + i + half] = cos_val;
-
-            sin_data[offset + i] = sin_val;
-            sin_data[offset + i + half] = sin_val;
-        }
-    }
-
-    return .{ .cos = cos_data, .sin = sin_data };
-}
-
 const RgbImage = struct {
     w: c_int,
     h: c_int,
@@ -923,4 +885,79 @@ pub fn printFluxImageToTerminalKittyFromBuffer(allocator: std.mem.Allocator, rgb
     }
 
     std.debug.print("\n", .{});
+}
+
+pub const RoPE = struct {
+    cos: zml.Tensor,
+    sin: zml.Tensor,
+};
+
+// [-765.960100, 6.109431, -25.727299, 38.418926, 16133.103000, -14.699767, -13.839429, 46.340530, -8.167663, 80.939940, 0.776761, -13.566395, -27.448166, -2.813722, 53.607510, -5.559852, -1.207579, -16.896482, -8.594539, -207.394740]
+
+
+pub fn computeRoPE(seq_len: usize, head_dim: usize, theta: f32, data_type: zml.DataType) RoPE {
+    const half = @divExact(head_dim, 2);
+    const shape_half = zml.Shape.init(.{half}, data_type);
+    const idx_half = zml.Tensor.iota(shape_half, 0).convert(data_type);
+    const log_v = @log(theta);
+    const factor: f32 = -log_v / @as(f32, @floatFromInt(half));
+    const exponents = idx_half.scale(@as(f64, @floatCast(factor)));
+    const inv_freq = exponents.exp();
+    const shape_seq = zml.Shape.init(.{seq_len}, data_type);
+    const t = zml.Tensor.iota(shape_seq, 0).convert(data_type);
+
+    // Explicit broadcast for outer product
+    const shape_full = zml.Shape.init(.{ seq_len, half }, data_type);
+
+    const t_reshaped = t.reshape(zml.Shape.init(.{ seq_len, 1 }, data_type));
+    const inv_reshaped = inv_freq.reshape(zml.Shape.init(.{ 1, half }, data_type));
+
+    // Use broad to broadcast to shape
+    const t_broad = t_reshaped.broad(shape_full);
+    const inv_broad = inv_reshaped.broad(shape_full);
+
+    const freqs = t_broad.mul(inv_broad);
+
+    const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
+    const cos = emb.cos().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, data_type));
+    const sin = emb.sin().reshape(zml.Shape.init(.{ 1, 1, seq_len, head_dim }, data_type));
+    return .{ .cos = cos, .sin = sin };
+}
+
+pub fn computeRoPE_CPU(allocator: std.mem.Allocator, seq_len: usize, head_dim: usize, theta: f32) !struct { cos: []f32, sin: []f32 } {
+    const dim = head_dim;
+    const half = dim / 2;
+
+    const inv_freq = try allocator.alloc(f32, half);
+    defer allocator.free(inv_freq);
+
+    for (0..half) |i| {
+        const x = -@log(theta) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half));
+        inv_freq[i] = @exp(x);
+    }
+
+    const total_elems = seq_len * dim;
+    const cos_data = try allocator.alloc(f32, total_elems);
+    const sin_data = try allocator.alloc(f32, total_elems);
+    errdefer {
+        allocator.free(cos_data);
+        allocator.free(sin_data);
+    }
+
+    for (0..seq_len) |s| { // position
+        for (0..half) |i| { // freq index
+            const freq = @as(f32, @floatFromInt(s)) * inv_freq[i];
+            const cos_val = @cos(freq);
+            const sin_val = @sin(freq);
+
+            const offset = s * dim;
+            cos_data[offset + i] = cos_val;
+            cos_data[offset + i + half] = cos_val;
+
+            sin_data[offset + i] = sin_val;
+            sin_data[offset + i + half] = sin_val;
+        }
+    }
+
+    return .{ .cos = cos_data, .sin = sin_data };
 }
