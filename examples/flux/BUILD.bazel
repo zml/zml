@@ -48,6 +48,7 @@ zig_binary(
         "tools.zig",
         "utils.zig",
         "config.zig",
+        "interactive.zig",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
@@ -55,6 +56,7 @@ zig_binary(
         ":config",
         "//zml",
         "@stb//:stb",
+        "@linenoise//:linenoise",
     ],
 )
 

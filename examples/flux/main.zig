@@ -9,6 +9,7 @@ const Qwen3ForCausalLM = @import("modeling_qwen3.zig").Qwen3ForCausalLM;
 const config = @import("config");
 const tools = @import("tools.zig");
 const utils = @import("utils.zig");
+const interactive = @import("interactive.zig").interactive;
 
 const stdx = zml.stdx;
 const log = std.log.scoped(.flux2_main);
@@ -76,6 +77,7 @@ const CliArgs = struct {
     async_limit: ?usize = null,
     generator_type: utils.GeneratorType = .accelerator_box_muller,
     data_type: zml.DataType = .f32,
+    interactive: bool = false,
     // 8K UHD 7680x4320
     // 4K QHD 3840x2160
     // FHD 1920x1080
@@ -138,6 +140,11 @@ pub fn main() !void {
     if (args.output_image_path == null and !args.kitty_output) {
         log.err("No output method specified, the generated image will not be saved or displayed. Use --output-image-path=\"<path>\" or --kitty-output to save or display the image.", .{});
         std.process.exit(1);
+    }
+
+    if (args.interactive) {
+        try interactive(allocator);
+        return;
     }
 
     // var platform_auto: *zml.Platform = try zml.Platform.init(allocator, io, .cpu, .{});
