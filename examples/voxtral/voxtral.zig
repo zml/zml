@@ -30,8 +30,6 @@ const tokens: []u32 = .{1, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 3
 const audio_len = 293699;
 
 const n_delay_tokens = 6;
-const max_seq_len = 1024;
-const seq_len = 1024;
 
 pub fn main() !void {
     log.info("Start of Voxtral", .{});
@@ -102,12 +100,12 @@ pub fn main() !void {
     defer model.deinit(allocator);
     const dtype = model.tok_embeddings.dtype();
     const model_params: VoxtralParameters = .{
-	.prefill_embeds = .init(.{.s = max_seq_len, .d = config.dim}, .bf16),
+	.prefill_embeds = .init(.{.s = config.sliding_window, .d = config.dim}, .bf16),
 	.decode_embeds = .init(.{.s = 1, .d = config.dim}, .bf16),
 	.token_index = .init(.{}, .u32),
 	.kv_cache = .init(.init(.{
 	    .layer = model.layers.len,
-	    .k = max_seq_len,
+	    .k = config.sliding_window,
 	    .h = config.n_kv_heads,
 	    .hd = config.head_dim,
 	}, dtype)),
@@ -119,9 +117,9 @@ pub fn main() !void {
     var compiled_encoder_future = try io.concurrent(compileEncoder, .{allocator, io, platform, encoder_model});
     const num_frames = audio_len / config.audio().hop_length;
     const encoder_seq_len: u32 = @intCast((num_frames / 2) - (num_frames / 2) % config.downsample_factor());
-    var compiled_adapter_future = try io.concurrent(compileAdapter, .{allocator, io, platform, adapter, encoder_seq_len});
+    var compiled_adapter_future = try io.concurrent(compileAdapter, .{allocator, io, platform, adapter, encoder_seq_len, config});
     const adapter_seq_len = encoder_seq_len / config.downsample_factor();
-    var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len});
+    var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len, config});
     var compiled_decoder_future = try io.concurrent(compileDecoder, .{allocator, io, platform, model, model_params});
     
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
@@ -243,15 +241,15 @@ pub fn compileEncoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
       });
 }
 
-pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, encoder_seq_len: u32) !zml.Exe {
+pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, encoder_seq_len: u32, config: Config) !zml.Exe {
     return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = encoder_seq_len, .d = 1280 }, .bf16),
+        Tensor.init(.{ .s = encoder_seq_len, .d = config.encoder().dim }, .bf16),
     });
 }
 
-pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, adapter_seq_len: u32) !zml.Exe {
+pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, adapter_seq_len: u32, config: Config) !zml.Exe {
     return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = adapter_seq_len, .d = 3072 }, .bf16),
+        Tensor.init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16),
         Tensor.init(.{ .s = adapter_seq_len }, .u32),
     });
 }
