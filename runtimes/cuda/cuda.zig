@@ -17,7 +17,10 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice() bool {
-    async.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch return false;
+    async.File.access("/dev/nvidiactl", .{ .mode = .read_only }) catch {
+        // check wsl2 location
+        async.File.access("/dev/dxg", .{ .mode = .read_only }) catch return false;
+    };
     return true;
 }
 
