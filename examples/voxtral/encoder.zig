@@ -13,7 +13,8 @@ pub const Encoder = struct {
     conv0: CausalConv1d,
     conv1: CausalConv1d,
     layers: []TransformerLayer,
-    norm: RmsNorm,
+    norm: Tensor,
+    norm_eps: f32,
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Encoder {
@@ -30,7 +31,8 @@ pub const Encoder = struct {
             .conv0 = CausalConv1d.init(conv_store.withLayer(0).withPrefix("conv"), 1),
             .conv1 = CausalConv1d.init(conv_store.withLayer(1).withPrefix("conv"), 2),
             .layers = layers,
-            .norm = RmsNorm.init(transformer_store.withPrefix("norm"), enc.norm_eps),
+            .norm = transformer_store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
+            .norm_eps = enc.norm_eps,
             .config = config,
         };
     }
@@ -42,13 +44,13 @@ pub const Encoder = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
         CausalConv1d.unloadBuffers(&self.conv0);
         CausalConv1d.unloadBuffers(&self.conv1);
-	
+
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
-	
+
         allocator.free(self.layers);
-        RmsNorm.unloadBuffers(&self.norm);
+        self.norm.deinit();
     }
 
     /// mel: [channels=128, time=frames]
@@ -67,18 +69,21 @@ pub const Encoder = struct {
         // Left-truncate to multiple of downsample_factor
         const seq_len = h.dim(.s);
         const trunc: i64 = @intCast(@as(usize, @intCast(seq_len)) % self.config.downsample_factor());
-	
+
         if (trunc > 0) {
             h = h.slice1d(.s, .{ .start = trunc });
         }
+
+        // Convert to weight dtype (bf16) before transformer layers.
+        // Conv stem operates in f32; transformer weights are stored in bf16.
+        h = h.convert(self.layers[0].attention.wq.weight.dtype());
 
         // Transformer layers
         for (self.layers) |layer| {
             h = layer.forward(h, self.config);
         }
 
-        // Final norm
-        return self.norm.forward(h);
+        return rmsNorm(h, self.norm, self.norm_eps).convert(.f32);
     }
 };
 
@@ -127,36 +132,38 @@ pub const CausalConv1d = struct {
 };
 
 pub const TransformerLayer = struct {
-    attention_norm: RmsNorm,
+    attention_norm: Tensor,
     attention: SelfAttention,
-    ffn_norm: RmsNorm,
+    ffn_norm: Tensor,
     feed_forward: SwiGluFfn,
+    norm_eps: f32,
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) TransformerLayer {
         const enc = config.encoder();
         return .{
-            .attention_norm = RmsNorm.init(store.withPrefix("attention_norm"), enc.norm_eps),
+            .attention_norm = store.withPrefix("attention_norm").createTensorWithTags("weight", .{.d}),
             .attention = SelfAttention.init(store.withPrefix("attention")),
-            .ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), enc.norm_eps),
+            .ffn_norm = store.withPrefix("ffn_norm").createTensorWithTags("weight", .{.d}),
             .feed_forward = SwiGluFfn.init(store.withPrefix("feed_forward")),
+            .norm_eps = enc.norm_eps,
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
-        RmsNorm.unloadBuffers(&self.attention_norm);
+        self.attention_norm.deinit();
         SelfAttention.unloadBuffers(&self.attention);
-        RmsNorm.unloadBuffers(&self.ffn_norm);
+        self.ffn_norm.deinit();
         SwiGluFfn.unloadBuffers(&self.feed_forward);
     }
 
     /// h: [s, d] -> [s, d]
     pub fn forward(self: TransformerLayer, h: Tensor, config: Config) Tensor {
         // Pre-attention norm + attention + residual
-        const attn_out = self.attention.forward(self.attention_norm.forward(h), config);
+        const attn_out = self.attention.forward(rmsNorm(h, self.attention_norm, self.norm_eps), config);
         var out = h.add(attn_out);
 
         // Pre-FFN norm + FFN + residual
-        const ffn_out = self.feed_forward.forward(self.ffn_norm.forward(out));
+        const ffn_out = self.feed_forward.forward(rmsNorm(out, self.ffn_norm, self.norm_eps));
         out = out.add(ffn_out);
 
         return out;
@@ -164,49 +171,49 @@ pub const TransformerLayer = struct {
 };
 
 pub const SelfAttention = struct {
-    wq: Linear,
-    wk: Linear,
-    wv: Linear,
-    wo: Linear,
+    wq: zml.nn.Linear,
+    wk: zml.nn.Linear,
+    wv: zml.nn.Linear,
+    wo: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = Linear.init(store.withPrefix("wq")),
-            .wk = Linear.init(store.withPrefix("wk")),
-            .wv = Linear.init(store.withPrefix("wv")),
-            .wo = Linear.init(store.withPrefix("wo")),
+            .wq = linear(store.withPrefix("wq")),
+            .wk = linear(store.withPrefix("wk")),
+            .wv = linear(store.withPrefix("wv")),
+            .wo = linear(store.withPrefix("wo")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
-        Linear.unloadBuffers(&self.wq);
-        Linear.unloadBuffers(&self.wk);
-        Linear.unloadBuffers(&self.wv);
-        Linear.unloadBuffers(&self.wo);
+        deinitLinear(&self.wq);
+        deinitLinear(&self.wk);
+        deinitLinear(&self.wv);
+        deinitLinear(&self.wo);
     }
 
     /// x: [s, d] -> [s, d]
     pub fn forward(self: SelfAttention, x: Tensor, config: Config) Tensor {
         const enc = config.encoder();
         const dtype = x.dtype();
+	// const converted_x = x.convert(self.wq.weight.dtype());
 
-        // Q, K, V projections
-        // Encoder: Q and V have biases, K does not
-        var q = self.wq.forward(x); // [s, n_heads * head_dim]
-        var k = self.wk.forward(x); // [s, n_kv_heads * head_dim]
-        var v = self.wv.forward(x); // [s, n_kv_heads * head_dim]
+        // Q, K, V projections (encoder: Q and V have biases, K does not)
+        var q = self.wq.forward(x);
+        var k = self.wk.forward(x);
+        var v = self.wv.forward(x);
 
-        // Split into heads: [s, d] -> [s, h, hd]
-        q = q.splitAxis(.d, .{ .h = enc.n_heads, .hd = enc.head_dim });
-        k = k.splitAxis(.d, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
-        v = v.splitAxis(.d, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
+        // Split into heads: [s, dout] -> [s, h, hd]
+        q = q.splitAxis(.dout, .{ .h = enc.n_heads, .hd = enc.head_dim });
+        k = k.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
+        v = v.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
 
         // RoPE (interleaved, matching is_neox_style=False in Python)
         const rope_opts: zml.nn.RopeOpts = .{
             .layout = .interleaved,
             .freq_base = enc.rope_theta,
         };
-	
+
         q = zml.nn.rope(q, null, rope_opts);
         k = zml.nn.rope(k, null, rope_opts);
 
@@ -220,88 +227,54 @@ pub const SelfAttention = struct {
         const attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, enc.sliding_window);
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
 
-        // Merge heads: [s, h, hd] -> [s, d]
+        // Merge heads and output projection: [q, h, hd] -> [s, d]
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-
-        // Output projection
-        return self.wo.forward(merged);
+        return self.wo.forward(merged).rename(.{ .dout = .d });
     }
 };
 
 pub const SwiGluFfn = struct {
-    w1: Linear,
-    w2: Linear,
-    w3: Linear,
+    w1: zml.nn.Linear,
+    w2: zml.nn.Linear,
+    w3: zml.nn.Linear,
 
     pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
         return .{
-            .w1 = Linear.init(store.withPrefix("w1")),
-            .w2 = Linear.init(store.withPrefix("w2")),
-            .w3 = Linear.init(store.withPrefix("w3")),
+            .w1 = linear(store.withPrefix("w1")),
+            .w2 = linear(store.withPrefix("w2")),
+            .w3 = linear(store.withPrefix("w3")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SwiGluFfn)) void {
-        Linear.unloadBuffers(&self.w1);
-        Linear.unloadBuffers(&self.w2);
-        Linear.unloadBuffers(&self.w3);
+        deinitLinear(&self.w1);
+        deinitLinear(&self.w2);
+        deinitLinear(&self.w3);
     }
 
     /// x: [s, d] -> [s, d]
     pub fn forward(self: SwiGluFfn, x: Tensor) Tensor {
-        // SwiGLU: silu(gate) * up, then down
         const gate = self.w1.forward(x).silu();
         const up = self.w3.forward(x);
-        return self.w2.forward(gate.mul(up));
+        return self.w2.forward(gate.mul(up).rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };
 
-pub const Linear = struct {
-    weight: Tensor,
-    bias: ?Tensor,
+// -- Helpers
 
-    pub fn init(store: zml.io.TensorStore.View) Linear {
-        return .{
-            .weight = store.createTensorWithTags("weight", .{ .out, .d }),
-            .bias = store.maybeCreateTensorWithTags("bias", .{.d}),
-        };
-    }
+fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
+    return .init(
+        store.createTensorWithTags("weight", .{ .dout, .d }),
+        store.maybeCreateTensorWithTags("bias", .{.dout}),
+        .d,
+    );
+}
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Linear)) void {
-        self.weight.deinit();
-        if (self.bias) |*b| b.deinit();
-    }
+fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
+    l.weight.deinit();
+    if (l.bias) |*b| b.deinit();
+}
 
-    /// x: [..., d] -> [..., out] (renamed back to d)
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        const dtype = x.dtype();
-        var y = x.dot(self.weight.convert(dtype), .d).rename(.{ .out = .d });
-	
-        if (self.bias) |bias| {
-            y = y.add(bias.convert(dtype).broad(y.shape()));
-        }
-	
-        return y;
-    }
-};
-
-pub const RmsNorm = struct {
-    weight: Tensor,
-    eps: f32,
-
-    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{
-            .weight = store.createTensorWithTags("weight", .{.d}),
-            .eps = eps,
-        };
-    }
-
-    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
-        self.weight.deinit();
-    }
-
-    pub fn forward(self: RmsNorm, x: Tensor) Tensor {
-        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
-        return normalized.mul(self.weight.convert(x.dtype()).broad(x.shape()));
-    }
-};
+pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f32) Tensor {
+    return zml.nn.rmsNorm(x, .d, eps).mul(weight.convert(x.dtype()).broad(x.shape()));
+}
