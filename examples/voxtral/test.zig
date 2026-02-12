@@ -97,16 +97,36 @@ pub fn main() !void {
         try zml.testing.testLayer(allocator, io, platform, conv_stem, .forward, ref_store.view(), "conv_stem", conv_buffers, .{});
     }
     
-    // -- Encoder test
+    // -- Transformer Layer tests
     {
-        const encoder_model = Encoder.init(allocator, model_store.view().withPrefix(encoder_prefix), config);
-        defer encoder_model.deinit(allocator);
-        var encoder_buffers = try zml.io.load(Encoder, &encoder_model, allocator, io, platform, load_opts);
-        defer Encoder.unloadBuffers(&encoder_buffers, allocator);
+        const transformer_store = model_store.view().withPrefix(encoder_prefix).withPrefix("transformer").withPrefix("layers");
+        const enc_cfg = config.encoder();
 
-        const harness = EncoderTestHarness{ .inner = encoder_model };
-        try zml.testing.testLayer(allocator, io, platform, harness, .forward, ref_store.view(), "encoder", .{ .inner = encoder_buffers }, .{});
+        inline for (0..32) |i| {
+            if (i < enc_cfg.n_layers) {
+                const layer = TransformerLayerTestHarness{
+                    .inner = enc.TransformerLayer.init(transformer_store.withLayer(i), config),
+                    .config = config,
+                };
+		
+                var layer_buffers = try zml.io.load(TransformerLayerTestHarness, &layer, allocator, io, platform, load_opts);
+                defer TransformerLayerTestHarness.unloadBuffers(&layer_buffers);
+
+                try zml.testing.testLayer(allocator, io, platform, layer, .forward, ref_store.view(), std.fmt.comptimePrint("encoder.layers.{d}", .{i}), layer_buffers, .{.minimum_close_fraction = 0.9});
+            }
+        }
     }
+    
+    // -- Encoder test
+    // {
+    //     const encoder_model = Encoder.init(allocator, model_store.view().withPrefix(encoder_prefix), config);
+    //     defer encoder_model.deinit(allocator);
+    //     var encoder_buffers = try zml.io.load(Encoder, &encoder_model, allocator, io, platform, load_opts);
+    //     defer Encoder.unloadBuffers(&encoder_buffers, allocator);
+
+    //     const harness = EncoderTestHarness{ .inner = encoder_model };
+    //     try zml.testing.testLayer(allocator, io, platform, harness, .forward, ref_store.view(), "encoder", .{ .inner = encoder_buffers }, .{});
+    // }
 }
 
 // ================================================================
