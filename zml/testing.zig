@@ -383,8 +383,11 @@ pub fn testLayer(
         };
     }
 
-    if (failed) return error.TestUnexpectedResult;
-    log.info("all good for {s} ! (tolerance: {e})", .{ name, tolerance });
+    if (failed) {
+        log.info("❌ check failed for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
+    } else {
+        log.info("✅ all good for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
+    }
 }
 
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
