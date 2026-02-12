@@ -72,7 +72,7 @@ const CliArgs = struct {
     // output_image_path: []const u8 = "output.png",
     // output_image_path: []const u8 = "/Users/kevin/zml/flux_klein_zml_result.png",
     output_image_path: ?[]const u8 = null,
-    kitty_output: bool = true,
+    kitty_output: bool = false,
     random_seed: u64 = 0,
     num_inference_steps: usize = 1,
     async_limit: ?usize = null,
@@ -296,7 +296,7 @@ pub fn main() !void {
     log.info("Models initialized successfully", .{});
 
     // 3. Prepare Latents
-    log.info(">>Preparing Latents...", .{});
+    log.info(">> Preparing Latents...", .{});
 
     const output_image_dim: utils.ResolutionInfo = switch (args.resolution) {
         .HLD => .{ .width = 128, .height = 128 },
@@ -350,11 +350,15 @@ pub fn main() !void {
     if (args.kitty_output) {
         log.info(">>> Printing Image to Terminal...", .{});
         try utils.printFluxImageToTerminalKittyFromBuffer(allocator, &rgb_image_buffer);
+    } else {
+        log.info("kitty_output flag not set, skipping terminal image output.", .{});
     }
     // Optional: save to disk
     if (args.output_image_path) |output_image_path| {
         log.info(">>> Saving Image to Disk at {s}...", .{output_image_path});
         try utils.saveFluxImageToPng(allocator, &rgb_image_buffer, output_image_path);
+    } else {
+        log.info("No output_image_path provided, skipping saving image to disk.", .{});
     }
 
     log.info(">>> Pipeline Complete.", .{});

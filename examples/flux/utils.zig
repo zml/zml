@@ -640,7 +640,7 @@ pub fn schedule(
     }
 
     const ids_data_slice = comb_f32;
-    std.log.info("RoPE Theta: {d}", .{transformer.config.rope_theta});
+    // std.log.info("RoPE Theta: {d}", .{transformer.config.rope_theta});
 
     const rope_slices = try flux_model_transformer2d.computeRotaryEmbedding(allocator, ids_data_slice, comb_shape, transformer.config.axes_dims_rope, transformer.config.rope_theta);
     defer rope_slices[0].free(allocator);
