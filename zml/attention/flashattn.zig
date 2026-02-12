@@ -13,7 +13,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     }
 }
 
-pub fn register(platform: *zml.Platform) !void {
+pub fn register(platform: *const zml.Platform) !void {
     if (comptime platforms.isEnabled(.cuda)) {
         try fa2.register(platform);
         try fa3.register(platform);
@@ -132,7 +132,7 @@ fn fixupKvCacheBuffer(buffer: Buffer, layer_index: i64) Buffer {
 
 pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
-        pub fn register(platform: zml.Platform) !void {
+        pub fn register(platform: *const zml.Platform) !void {
             try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "cuda", T.run, .{ .command_buffer_compatible = true });
         }
 
