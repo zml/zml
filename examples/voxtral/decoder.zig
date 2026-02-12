@@ -27,6 +27,29 @@ pub const Adapter = struct {
         };
     }
 
+    pub fn load(self: *const Adapter, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Adapter){
+	progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded adapter weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
+        }
+	
+	return zml.io.load(Adapter, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
     pub fn unloadBuffers(self: *zml.Bufferized(Adapter)) void {
         deinitLinear(&self.proj0);
         deinitLinear(&self.proj1);
@@ -40,6 +63,48 @@ pub const Adapter = struct {
             .merge(.{ .d = .{ .group, .d } });
 
         return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    }
+};
+
+pub const Embedder = struct {
+    tok_embeddings: Tensor,
+
+    pub fn init(store: zml.io.TensorStore.View) Embedder {
+	return .{
+	    .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
+	};
+    }
+
+    pub fn forward(self: Embedder, audio_embeds: Tensor, text_tokens: Tensor) Tensor {
+	const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
+	return text_embeds.add(audio_embeds);
+    }
+
+    pub fn load(self: *const Embedder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Embedder) {
+	progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded embedder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
+        }
+	
+	return zml.io.load(Embedder, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+    
+    pub fn unloadBuffers(self: *zml.Bufferized(Embedder)) !void {
+	self.tok_embeddings.deinit();
     }
 };
 
