@@ -10,7 +10,7 @@ pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
 
-    pub fn auto(platform: zml.Platform) Backend {
+    pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => b: {
                 const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
