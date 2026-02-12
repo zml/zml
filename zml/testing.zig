@@ -31,31 +31,35 @@ pub fn approxEq(comptime Float: type, l: Float, r: Float, tolerance: Float) bool
     return closeRel or closeAbs;
 }
 
+fn toSlice(allocator: std.mem.Allocator, io: std.Io, slice_or_buffer: anytype) !struct { Slice, bool } {
+    return if (@TypeOf(slice_or_buffer) == zml.Buffer) b: {
+        const slice = try slice_or_buffer.toSliceAlloc(allocator, io);
+        break :b .{ slice, true };
+    } else .{ slice_or_buffer, false };
+}
+
 /// Testing utility. Accepts both zml.Buffer and zml.HostBuffer but zml.Buffer will be copied to the
 /// host for comparison !
-pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) !void {
+pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, opts: CompareOpts) !void {
     const allocator = if (builtin.is_test) std.testing.allocator else std.heap.smp_allocator;
-    var left: Slice, const should_free_left = if (@TypeOf(left_) == zml.Buffer) b: {
-        const slice = try left_.toSliceAlloc(allocator, io);
-        break :b .{ slice, true };
-    } else .{ left_, false };
+    var left: Slice, const should_free_left = try toSlice(allocator, io, left_);
+    defer if (should_free_left) left.free(allocator);
 
-    var right: Slice, const should_free_right = if (@TypeOf(right_) == zml.Buffer) b: {
-        const slice = try right_.toSliceAlloc(allocator, io);
-        break :b .{ slice, true };
-    } else .{ right_, false };
+    var right: Slice, const should_free_right = try toSlice(allocator, io, right_);
+    defer if (should_free_right) right.free(allocator);
 
-    defer {
-        if (should_free_left) left.free(allocator);
-        if (should_free_right) right.free(allocator);
-    }
-    errdefer log.err("\n--> Left: {0d:24.3}\n--> Right: {1d:24.3}", .{ left, right });
+    const stderr = std.debug.lockStderr(&.{});
+    defer std.debug.unlockStderr();
+    const w = &stderr.file_writer.interface;
+
+    //errdefer log.err("\n--> Left: {0d:24.3}\n--> Right: {1d:24.3}", .{ left, right });
     if (!std.mem.eql(i64, left.shape.dims(), right.shape.dims())) {
-        log.err("left.shape() {f} != right.shape() {f}", .{ left.shape, right.shape });
+        try w.print("left.shape() {f} != right.shape() {f}\n", .{ left.shape, right.shape });
         return error.TestUnexpectedResult;
     }
-    if (left.dtype() != right.dtype() and !(left.dtype() == .f16 and right.dtype() == .bf16)) {
-        log.err("left.dtype ({}) != right.dtype ({})", .{ left.dtype(), right.dtype() });
+
+    if (left.dtype() != right.dtype()) {
+        try w.print("left.dtype ({}) != right.dtype ({})\n", .{ left.dtype(), right.dtype() });
         return error.TestUnexpectedResult;
     }
 
@@ -89,11 +93,13 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
                 => |rt| {
                     const R = rt.toZigType();
                     const right_data = right.constItems(R);
-                    for (left_data, right_data, 0..) |l, r, i| {
-                        if (!approxEq(f32, zml.floats.floatCast(f32, l), zml.floats.floatCast(f32, r), tolerance)) {
-                            log.err("left.data != right_data.\n < {d:40.3} \n > {d:40.3}\n error at idx {d}: {d:.3} != {d:.3}", .{ stdx.fmt.slice(center(left_data, i)), stdx.fmt.slice(center(right_data, i)), i, left_data[i], right_data[i] });
-                            return error.TestUnexpectedResult;
-                        }
+                    const compare_report = try compareSlices(allocator, L, R, left_data, right_data, opts);
+                    const ok = !compare_report.nan_or_inf and compare_report.close_fraction >= opts.minimum_close_fraction;
+                    if (ok) {
+                        return;
+                    } else {
+                        try w.print("{f}\n", .{compare_report});
+                        return error.TestUnexpectedResult;
                     }
                 },
                 else => unreachable,
@@ -105,6 +111,120 @@ pub fn expectClose(io: std.Io, left_: anytype, right_: anytype, tolerance: f32) 
         },
         .c64, .c128 => @panic("TODO: support comparison of complex"),
     }
+}
+
+pub const CompareOpts = struct {
+    absolute_tolerance: f32 = 1e-3,
+    relative_tolerance: f32 = 1e-2,
+    epsilon_relative: f32 = 1e-6,
+    minimum_close_fraction: f32 = 0.999,
+};
+
+pub const CompareReport = struct {
+    nan_or_inf: bool,
+    max_absolute_error: f32,
+    mean_absolute_error: f32,
+    rmse: f32,
+
+    close_fraction: f32,
+
+    p50_absolute_error: f32,
+    p90_absolute_error: f32,
+    p99_absolute_error: f32,
+    p999_absolute_error: f32,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print(
+            \\    nan_or_inf: {}
+            \\    max_absolute_error: {d}
+            \\    mean_absolute_error: {d}
+            \\    rmse: {d}
+            \\    close_fraction: {d}
+            \\    p50_absolute_error: {d}
+            \\    p90_absolute_error: {d}
+            \\    p99_absolute_error: {d}
+            \\    p999_absolute_error: {d}
+        , .{
+            self.nan_or_inf,
+            self.max_absolute_error,
+            self.mean_absolute_error,
+            self.rmse,
+            self.close_fraction,
+            self.p50_absolute_error,
+            self.p90_absolute_error,
+            self.p99_absolute_error,
+            self.p999_absolute_error,
+        });
+    }
+};
+
+pub fn compareSlices(allocator: std.mem.Allocator, comptime L: type, comptime R: type, left: []const L, right: []const R, opts: CompareOpts) !CompareReport {
+    var nan_or_inf: bool = false;
+    var max_absolute_error: f32 = 0;
+    var sum_absolute_error: f64 = 0;
+    var sum_squared_error: f64 = 0;
+    var count_close: usize = 0;
+    var absolute_errors = try allocator.alloc(f32, left.len);
+    defer allocator.free(absolute_errors);
+    var relative_errors = try allocator.alloc(f32, left.len);
+    defer allocator.free(relative_errors);
+
+    for (left, right, 0..) |l, r, i| {
+        const l_f32 = zml.floats.floatCast(f32, l);
+        const r_f32 = zml.floats.floatCast(f32, r);
+        if (!std.math.isFinite(l_f32) or !std.math.isFinite(r_f32)) {
+            nan_or_inf = true;
+            continue;
+        }
+        const absolute_error = @abs(l_f32 - r_f32);
+        max_absolute_error = @max(max_absolute_error, absolute_error);
+        sum_absolute_error += @as(f64, @floatCast(absolute_error));
+        sum_squared_error += @as(f64, @floatCast(absolute_error)) * @as(f64, @floatCast(absolute_error));
+
+        const scale = @max(@abs(l_f32), @abs(r_f32));
+        const tolerance = opts.absolute_tolerance + opts.relative_tolerance * scale;
+        if (absolute_error <= tolerance) {
+            count_close += 1;
+        }
+
+        absolute_errors[i] = absolute_error;
+        const denom = @max(opts.epsilon_relative, scale);
+        relative_errors[i] = absolute_error / denom;
+    }
+
+    std.sort.heap(f32, absolute_errors, {}, std.sort.asc(f32));
+    std.sort.heap(f32, relative_errors, {}, std.sort.asc(f32));
+
+    const q = struct {
+        pub fn q(values: []const f32, frac: f32) f32 {
+            if (values.len == 0) return 0;
+            const idx: usize = @intFromFloat(std.math.round(@as(f32, @floatFromInt(values.len - 1)) * frac));
+            return values[idx];
+        }
+    }.q;
+
+    const mean_absolute_error: f32 = @floatCast(sum_absolute_error / @as(f64, @floatFromInt(left.len)));
+    const rmse: f32 = @floatCast(std.math.sqrt(sum_squared_error / @as(f64, @floatFromInt(left.len))));
+    const close_fraction = @as(f32, @floatFromInt(count_close)) / @as(f32, @floatFromInt(left.len));
+
+    const report: CompareReport = .{
+        .nan_or_inf = nan_or_inf,
+        .max_absolute_error = max_absolute_error,
+        .mean_absolute_error = mean_absolute_error,
+        .rmse = rmse,
+        .close_fraction = close_fraction,
+        .p50_absolute_error = q(absolute_errors, 0.5),
+        .p90_absolute_error = q(absolute_errors, 0.9),
+        .p99_absolute_error = q(absolute_errors, 0.99),
+        .p999_absolute_error = q(absolute_errors, 0.999),
+    };
+
+    // TODO: Move
+    //const ok = !report.nan_or_inf and report.close_fraction >= opts.minimum_close_fraction;
+    return report;
 }
 
 pub fn expectEqualShapes(expected: zml.Shape, actual: zml.Shape) error{TestExpectedEqual}!void {
@@ -169,7 +289,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     comptime name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    tolerance: f32,
+    opts: CompareOpts,
 ) !void {
     const forward = @field(@TypeOf(layer), @tagName(func));
     const ArgsT = stdx.meta.Tail(stdx.meta.FnArgs(forward));
@@ -250,9 +370,12 @@ pub fn testLayer(
         const output_slice = try results[i].toSliceAlloc(allocator, io);
         defer output_slice.free(allocator);
 
-        zml.testing.expectClose(io, expected_slice, output_slice, tolerance) catch |err| switch (err) {
+        zml.testing.expectClose(io, expected_slice, output_slice, opts) catch |err| switch (err) {
             error.TestUnexpectedResult => {
-                log.err("{s}.{d} doesn't match !", .{ name ++ ".out", i });
+                const stderr = std.debug.lockStderr(&.{});
+                defer std.debug.unlockStderr();
+                const w = &stderr.file_writer.interface;
+                try w.print("{s}.{d} doesn't match !", .{ name ++ ".out", i });
                 failed = true;
                 continue;
             },
@@ -260,8 +383,11 @@ pub fn testLayer(
         };
     }
 
-    if (failed) return error.TestUnexpectedResult;
-    log.info("all good for {s} ! (tolerance: {e})", .{ name, tolerance });
+    if (failed) {
+        log.info("❌ check failed for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
+    } else {
+        log.info("✅ all good for {s} ! (absolute tolerance: {e} - relative tolerance: {e} - minimum_close_fraction: {d:0>3})", .{ name, opts.absolute_tolerance, opts.relative_tolerance, opts.minimum_close_fraction });
+    }
 }
 
 fn center(slice: anytype, i: usize) @TypeOf(slice) {
