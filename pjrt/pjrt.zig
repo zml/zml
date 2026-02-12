@@ -116,8 +116,13 @@ pub const Api = struct {
                 return err;
             },
         };
+
+        return fromDynLib(&lib);
+    }
+
+    pub fn fromDynLib(lib: *std.DynLib) !*const Api {
         const DynGetPjrtApi = lib.lookup(*const fn () callconv(.c) *const Api, "GetPjrtApi") orelse {
-            std.debug.panic("Unable to find GetPjrtApi symbol in library: {s}", .{library});
+            std.debug.panic("Unable to find GetPjrtApi symbol in library", .{});
         };
 
         const api = DynGetPjrtApi();
