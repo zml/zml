@@ -143,7 +143,7 @@ test normalizeL2 {
 pub const RopeOpts = struct {
     layout: Layout = .sequential,
     freq_base: f32 = 10_000,
-    scaling: Scaling = .default,
+    scaling: Scaling = .{ .default = .{} },
 
     /// There are two layouts corresponding to how to split `x` in real/imag parts.
     /// * Interleaved means that the real/imag of each scalar is contiguous.
@@ -153,10 +153,14 @@ pub const RopeOpts = struct {
 
     /// There are several ways to init the scaling aka "inv_freq"
     pub const Scaling = union(enum) {
-        default: void,
-        custom: []const f32,
+        default: Default,
         llama3: Llama3,
         yarn: Yarn,
+        linear: Scaling.Linear,
+
+        pub const Default = struct {
+            rope_theta: f32 = 10000,
+        };
 
         pub const Llama3 = struct {
             factor: f32,
@@ -164,6 +168,7 @@ pub const RopeOpts = struct {
             low_freq_factor: f32,
             original_max_position_embeddings: u32,
             truncate: bool = true,
+            rope_theta: f32 = 10000,
         };
 
         pub const Yarn = struct {
@@ -179,6 +184,11 @@ pub const RopeOpts = struct {
             attention_factor: ?f32 = null,
         };
 
+        pub const Linear = struct {
+            factor: f32,
+            rope_theta: f32,
+        };
+
         /// Read a Rope scaling config from HF config.json format.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
             return jsonParseFromValue(
@@ -191,7 +201,7 @@ pub const RopeOpts = struct {
         pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
             _ = allocator; // autofix
             _ = options; // autofix
-            if (source == .null) return .default;
+            if (source == .null) return .{ .default = .{} };
 
             if (source != .object) return error.InvalidEnumTag;
 
@@ -203,9 +213,11 @@ pub const RopeOpts = struct {
                 return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else if (std.mem.eql(u8, impl.string, "yarn")) {
                 return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "linear")) {
+                return .{ .linear = try std.json.parseFromValueLeaky(Scaling.Linear, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else {
                 log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
-                return .{ .default = {} };
+                return .{ .default = .{} };
             }
         }
 
@@ -228,6 +240,13 @@ pub const RopeOpts = struct {
                     break :yarn_scaling attention_factor;
                 },
                 else => 1.0,
+            };
+        }
+
+        pub fn setRopeTheta(self: *Scaling, rope_theta: f32) void {
+            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
+            return switch (self.*) {
+                inline else => |*s| s.rope_theta = rope_theta,
             };
         }
     };
@@ -314,10 +333,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 
     switch (opts.scaling) {
         .default => {},
-        .custom => {
-            stdx.debug.assert(opts.scaling.custom.len == N, "rope expected custom inv_freq to match half head dimension {d}, got {d}", .{ N, opts.scaling.custom.len });
-            @memcpy(inv_freq, opts.scaling.custom);
-        },
+        .linear => @panic("Not implemented"),
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
             // After Llama2 they observed that the rope frequencies where too sharp and hurting long distance attention.
