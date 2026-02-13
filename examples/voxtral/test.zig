@@ -94,7 +94,7 @@ pub fn main() !void {
             .conv1 = enc.CausalConv1d.init(conv_store.withLayer(1).withPrefix("conv"), 2),
         };
         var conv_buffers = try zml.io.load(ConvStemTestHarness, &conv_stem, allocator, io, platform, load_opts);
-        defer ConvStemTestHarness.unloadBuffers(&conv_buffers);
+        defer ConvStemTestHarness.unload(&conv_buffers);
 
         try zml.testing.testLayer(allocator, io, platform, conv_stem, .forward, ref_store.view(), "conv_stem", conv_buffers, .{});
     }
@@ -105,7 +105,7 @@ pub fn main() !void {
             .inner = dec.Adapter.init(model_store.view()),
         };
         var adapter_buffers = try zml.io.load(AdapterTestHarness, &adapter, allocator, io, platform, load_opts);
-        defer AdapterTestHarness.unloadBuffers(&adapter_buffers);
+        defer AdapterTestHarness.unload(&adapter_buffers);
 
         try zml.testing.testLayer(allocator, io, platform, adapter, .forward, ref_store.view(), "adapter", adapter_buffers, .{.minimum_close_fraction = 0.8});
     }
@@ -136,7 +136,7 @@ pub fn main() !void {
                 };
 
                 var inner_buffers = try zml.io.load(dec.DecoderLayer, &layer.inner, allocator, io, platform, load_opts);
-                defer dec.DecoderLayer.unloadBuffers(&inner_buffers);
+                defer dec.DecoderLayer.unload(&inner_buffers);
 
                 const layer_buffers: zml.Bufferized(DecoderLayerTestHarness) = .{
                     .inner = inner_buffers,
@@ -165,9 +165,9 @@ const ConvStemTestHarness = struct {
     conv0: enc.CausalConv1d,
     conv1: enc.CausalConv1d,
 
-    pub fn unloadBuffers(self: *zml.Bufferized(ConvStemTestHarness)) void {
-        enc.CausalConv1d.unloadBuffers(&self.conv0);
-        enc.CausalConv1d.unloadBuffers(&self.conv1);
+    pub fn unload(self: *zml.Bufferized(ConvStemTestHarness)) void {
+        enc.CausalConv1d.unload(&self.conv0);
+        enc.CausalConv1d.unload(&self.conv1);
     }
 
     pub fn forward(self: ConvStemTestHarness, mel_input: Tensor) Tensor {
@@ -186,8 +186,8 @@ const TransformerLayerTestHarness = struct {
     inner: enc.TransformerLayer,
     config: Config,
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayerTestHarness)) void {
-        enc.TransformerLayer.unloadBuffers(&self.inner);
+    pub fn unload(self: *zml.Bufferized(TransformerLayerTestHarness)) void {
+        enc.TransformerLayer.unload(&self.inner);
     }
 
     pub fn forward(self: TransformerLayerTestHarness, h: Tensor) Tensor {
@@ -207,8 +207,8 @@ const EncoderTestHarness = struct {
 const AdapterTestHarness = struct {
     inner: dec.Adapter,
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AdapterTestHarness)) void {
-        dec.Adapter.unloadBuffers(&self.inner);
+    pub fn unload(self: *zml.Bufferized(AdapterTestHarness)) void {
+        dec.Adapter.unload(&self.inner);
     }
 
     pub fn forward(self: AdapterTestHarness, encoder_out: Tensor) Tensor {
@@ -232,6 +232,7 @@ const DecoderLayerTestHarness = struct {
             .h = @as(i64, @intCast(self.config.n_kv_heads)),
             .hd = @as(i64, @intCast(self.config.head_dim)),
         }, dtype);
+	
         const kv_cache = dec.KvCache{
             .k = Tensor.zeroes(kv_shape),
             .v = Tensor.zeroes(kv_shape),
@@ -240,6 +241,7 @@ const DecoderLayerTestHarness = struct {
 
         const token_index = Tensor.scalar(0, .u32);
         const result = self.inner.forward(h_typed, token_index, kv_cache, self.t_cond.convert(dtype), self.config);
+	
         return result[0].convert(.f32);
     }
 };

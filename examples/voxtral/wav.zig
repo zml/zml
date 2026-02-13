@@ -90,3 +90,24 @@ pub fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f3
 
     return samples;
 }
+
+pub fn loadAndPadWav(
+    allocator: std.mem.Allocator,
+    reader: *std.Io.Reader,
+    left_pad: usize,
+    right_pad_tokens: usize,
+    raw_audio_length_per_tok: usize,
+) ![]const f32 {
+    const wav_file = try loadWav(allocator, reader);
+    defer allocator.free(wav_file);
+
+    const align_pad = (raw_audio_length_per_tok - (wav_file.len % raw_audio_length_per_tok)) % raw_audio_length_per_tok;
+    const right_pad = align_pad + right_pad_tokens * raw_audio_length_per_tok;
+    const audio_len = left_pad + wav_file.len + right_pad;
+
+    const padded_audio = try allocator.alloc(f32, audio_len);
+    @memset(padded_audio, 0);
+    @memcpy(padded_audio[left_pad .. left_pad + wav_file.len], wav_file);
+
+    return padded_audio;
+}
