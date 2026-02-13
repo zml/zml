@@ -19,6 +19,7 @@ pub const LogMelSpectrogram = struct {
 
     pub fn init(config: Config) LogMelSpectrogram {
 	const audio = config.audio();
+	
 	return .{
 	    .window = .hann,
 	    .mel_filters = Tensor.init(.{201, 128}, .f32).withTags(.{.freq_bins, .mel}),
@@ -48,6 +49,7 @@ pub const LogMelSpectrogram = struct {
         var spectrogram = stft(padded_wav, window_weight, num_frames + 1, self.hop_len, self.precision);
         spectrogram = spectrogram.slice1d(.frames, .{ .end = -1 });
         spectrogram = spectrogram.convert(dtype);
+	
         // Re-weight frequencies for speech
         spectrogram = spectrogram.dot(self.mel_filters, .freq_bins);
 
@@ -100,9 +102,11 @@ pub const AudioWindow = enum {
             .boxcar => Tensor.constant(dtype.one()).withTags(.{.samples}),
             .hann => {
                 if (len <= 1) return Tensor.constant(dtype.one());
+		
                 const flen: f64 = @floatFromInt(len);
                 const freq = Tensor.constant(dtype.constant(std.math.pi / flen));
                 const steps = Tensor.arange(.{ .start = -len, .end = len, .step = 2 }, dtype);
+		
                 return steps.mul(freq).cos().scale(0.5).addConstant(0.5).convert(dtype).withTags(.{.samples});
             },
         };

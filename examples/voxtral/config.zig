@@ -72,9 +72,11 @@ pub const Config = struct {
 pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, model_dir: std.Io.Dir) !std.json.Parsed(Config) {
     const config_file = try model_dir.openFile(io, "params.json", .{}); // it is named params not config here
     defer config_file.close(io);
+    
     var buffer: [4096]u8 = undefined;
     var file_reader = config_file.reader(io, &buffer);
     var reader: std.json.Reader = .init(allocator, &file_reader.interface);
     defer reader.deinit();
+    
     return try std.json.parseFromTokenSource(Config, allocator, &reader, .{ .ignore_unknown_fields = true });
 }

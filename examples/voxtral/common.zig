@@ -32,6 +32,7 @@ pub fn loadModel(
     comptime label: []const u8,
 ) !zml.Bufferized(T) {
     progress.increaseEstimatedTotalItems(store.view().count());
+    
     var timer: std.time.Timer = try .start();
     var total_bytes: usize = 0;
     defer {

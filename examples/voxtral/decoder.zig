@@ -22,6 +22,7 @@ pub const Adapter = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Adapter {
         const proj_store = store.withPrefix("mm_streams_embeddings.embedding_module.audio_language_projection");
+	
         return .{
             .proj0 = common.linear(proj_store.withLayer(0)),
             .proj1 = common.linear(proj_store.withLayer(2)),
@@ -32,7 +33,7 @@ pub const Adapter = struct {
         return common.loadModel(Adapter, self, allocator, io, platform, store, progress, "adapter");
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Adapter)) void {
+    pub fn unload(self: *zml.Bufferized(Adapter)) void {
         common.deinitLinear(&self.proj0);
         common.deinitLinear(&self.proj1);
     }
@@ -61,7 +62,9 @@ pub const Embedder = struct {
 	const audio_embeds = full_adapter_out.dynamicSlice(.{
 	    .s = Tensor.DynSlice{ .start = pos, .len = @intCast(text_tokens.dim(.s)) },
 	});
+	
 	const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
+	
 	return text_embeds.add(audio_embeds);
     }
 
@@ -69,7 +72,7 @@ pub const Embedder = struct {
         return common.loadModel(Embedder, self, allocator, io, platform, store, progress, "embedder");
     }
     
-    pub fn unloadBuffers(self: *zml.Bufferized(Embedder)) void {
+    pub fn unload(self: *zml.Bufferized(Embedder)) void {
 	self.tok_embeddings.deinit();
     }
 };
@@ -86,6 +89,7 @@ pub const Decoder = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Decoder {
         const layers = allocator.alloc(DecoderLayer, config.n_layers) catch unreachable;
+	
         for (layers, 0..) |*layer, i| {
             layer.* = DecoderLayer.init(store.withPrefix("layers").withLayer(i), config);
         }
@@ -107,11 +111,13 @@ pub const Decoder = struct {
         return common.loadModel(Decoder, self, allocator, io, platform, store, progress, "decoder");
     }
     
-    pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
+    pub fn unload(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
         self.tok_embeddings.deinit();
+	
         for (self.layers) |*layer| {
-            DecoderLayer.unloadBuffers(layer);
+            DecoderLayer.unload(layer);
         }
+	
         allocator.free(self.layers);
         self.norm.deinit();
     }
@@ -129,6 +135,7 @@ pub const Decoder = struct {
             const result = layer.forward(h, token_index, layer_cache, t, self.config);
             h = result[0];
             const updated_layer_cache = result[1];
+	    
             cache = updated_layer_cache.reuseBuffer(layer_cache);
         }
 
@@ -137,6 +144,7 @@ pub const Decoder = struct {
         // Compute logits in f32 for precision (matching Python reference)
         const output_logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
         const output_tokens = output_logits.argMax(.vocab).indices.convert(.u32);
+	
         return .{ output_tokens, cache };
     }
 };
@@ -155,7 +163,7 @@ pub const AdaRmsNorm = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AdaRmsNorm)) void {
+    pub fn unload(self: *zml.Bufferized(AdaRmsNorm)) void {
         common.deinitLinear(&self.down);
         common.deinitLinear(&self.up);
     }
@@ -164,6 +172,7 @@ pub const AdaRmsNorm = struct {
     pub fn forward(self: AdaRmsNorm, h: Tensor, t_cond: Tensor) Tensor {
         const ada_scale = self.up.forward(self.down.forward(t_cond).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
         const one_plus_scale = ada_scale.broad(h.shape()).add(Tensor.scalar(1.0, h.dtype()).broad(h.shape()));
+	
         return h.mul(one_plus_scale);
     }
 };
@@ -225,6 +234,7 @@ pub const KvCache = struct {
         const k_shape = cache.shape().drop(.layer);
         const converted = new.convert(cache.dtype()).transpose(k_shape);
         const scatter_opts: Tensor.ScatterOpts = .{ .indices_are_sorted = true, .update_fn = Tensor.ScatterOpts.override };
+	
         return if (token_index) |idx|
             cache.scatterSlices(.{ .layer = layer_index.broad(idx.shape()), .k = idx }, converted, scatter_opts).reuseBuffer(cache)
         else
@@ -264,7 +274,7 @@ pub const SelfAttention = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
+    pub fn unload(self: *zml.Bufferized(SelfAttention)) void {
         common.deinitLinear(&self.wq);
         common.deinitLinear(&self.wk);
         common.deinitLinear(&self.wv);
@@ -295,6 +305,7 @@ pub const SelfAttention = struct {
             .layout = .interleaved,
             .freq_base = config.rope_theta,
         };
+	
         q = zml.nn.rope(q, pos_index, rope_opts);
         k = zml.nn.rope(k, pos_index, rope_opts);
 
@@ -315,6 +326,7 @@ pub const SelfAttention = struct {
             token_index.reshape(.{ .coord = 1 }),
             .{},
         );
+	
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
 
         // Merge heads and output projection: [q, h, hd] → [s, d]
@@ -343,12 +355,14 @@ pub const DecoderLayer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
+    pub fn unload(self: *zml.Bufferized(DecoderLayer)) void {
         self.attention_norm.deinit();
-        SelfAttention.unloadBuffers(&self.attention);
+        SelfAttention.unload(&self.attention);
+	
         self.ffn_norm.deinit();
-        SwiGluFfn.unloadBuffers(&self.feed_forward);
-        AdaRmsNorm.unloadBuffers(&self.ada_norm);
+        SwiGluFfn.unload(&self.feed_forward);
+	
+        AdaRmsNorm.unload(&self.ada_norm);
     }
 
     /// h: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d] → ([s, d], KvCache)
@@ -360,12 +374,14 @@ pub const DecoderLayer = struct {
             kv_cache,
             config,
         );
+	
         var out = h.add(attn_out);
 
         // Pre-FFN norm → ada conditioning → FFN → residual
         const normed = rmsNorm(out, self.ffn_norm, self.norm_eps);
         const conditioned = self.ada_norm.forward(normed, t_cond);
         const ffn_out = self.feed_forward.forward(conditioned);
+	
         out = out.add(ffn_out);
 
         return .{ out, updated_kv_cache };
