@@ -10,6 +10,7 @@ zig_binary(
         "config.zig",
         "encoder.zig",
         "decoder.zig",
+        "common.zig",
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
@@ -26,6 +27,7 @@ zig_binary(
         "config.zig",
         "encoder.zig",
         "decoder.zig",
+        "common.zig",
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
