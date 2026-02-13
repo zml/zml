@@ -175,12 +175,13 @@ pub const Decoder = struct {
     /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
     /// Returns: (tokens [s] u32, KvCache)
     pub fn forward(self: Decoder, input_embeds: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
+        const t = t_cond.convert(input_embeds.dtype());
         var h = input_embeds;
         var cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
             const layer_cache = cache.atLayer(i);
-            const result = layer.forward(h, token_index, layer_cache, t_cond, self.config);
+            const result = layer.forward(h, token_index, layer_cache, t, self.config);
             h = result[0];
             const updated_layer_cache = result[1];
             cache = updated_layer_cache.reuseBuffer(layer_cache);
@@ -188,8 +189,8 @@ pub const Decoder = struct {
 
         h = rmsNorm(h, self.norm, self.norm_eps);
 
-        // Compute logits via tied embeddings and take argmax
-        const output_logits = h.dot(self.tok_embeddings.convert(h.dtype()), .d);
+        // Compute logits in f32 for precision (matching Python reference)
+        const output_logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
         const output_tokens = output_logits.argMax(.vocab).indices.convert(.u32);
         return .{ output_tokens, cache };
     }
