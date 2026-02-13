@@ -103,7 +103,7 @@ pub const Embedder = struct {
         });
     }
     
-    pub fn unloadBuffers(self: *zml.Bufferized(Embedder)) !void {
+    pub fn unloadBuffers(self: *zml.Bufferized(Embedder)) void {
 	self.tok_embeddings.deinit();
     }
 };
@@ -136,6 +136,29 @@ pub const Decoder = struct {
         allocator.free(self.layers);
     }
 
+    pub fn load(self: *const Decoder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Decoder) {
+	progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded decoder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
+        }
+	
+	return zml.io.load(Decoder, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+    
     pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
         self.tok_embeddings.deinit();
         for (self.layers) |*layer| {
