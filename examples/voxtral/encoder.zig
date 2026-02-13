@@ -45,12 +45,12 @@ pub const Encoder = struct {
         return common.loadModel(Encoder, self, allocator, io, platform, store, progress, "encoder");
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
-        CausalConv1d.unloadBuffers(&self.conv0);
-        CausalConv1d.unloadBuffers(&self.conv1);
+    pub fn unload(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
+        CausalConv1d.unload(&self.conv0);
+        CausalConv1d.unload(&self.conv1);
 
         for (self.layers) |*layer| {
-            TransformerLayer.unloadBuffers(layer);
+            TransformerLayer.unload(layer);
         }
 
         allocator.free(self.layers);
@@ -103,7 +103,7 @@ pub const CausalConv1d = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(CausalConv1d)) void {
+    pub fn unload(self: *zml.Bufferized(CausalConv1d)) void {
         self.weight.deinit();
         self.bias.deinit();
     }
@@ -153,11 +153,12 @@ pub const TransformerLayer = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+    pub fn unload(self: *zml.Bufferized(TransformerLayer)) void {
         self.attention_norm.deinit();
-        SelfAttention.unloadBuffers(&self.attention);
+        SelfAttention.unload(&self.attention);
+	
         self.ffn_norm.deinit();
-        SwiGluFfn.unloadBuffers(&self.feed_forward);
+        SwiGluFfn.unload(&self.feed_forward);
     }
 
     /// h: [s, d] -> [s, d]
@@ -189,7 +190,7 @@ pub const SelfAttention = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
+    pub fn unload(self: *zml.Bufferized(SelfAttention)) void {
         common.deinitLinear(&self.wq);
         common.deinitLinear(&self.wk);
         common.deinitLinear(&self.wv);
@@ -249,7 +250,7 @@ pub const SwiGluFfn = struct {
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(SwiGluFfn)) void {
+    pub fn unload(self: *zml.Bufferized(SwiGluFfn)) void {
         common.deinitLinear(&self.w1);
         common.deinitLinear(&self.w2);
         common.deinitLinear(&self.w3);
@@ -259,6 +260,7 @@ pub const SwiGluFfn = struct {
     pub fn forward(self: SwiGluFfn, x: Tensor) Tensor {
         const gate = self.w1.forward(x).silu();
         const up = self.w3.forward(x);
+	
         return self.w2.forward(gate.mul(up).rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };

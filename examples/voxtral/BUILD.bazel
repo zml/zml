@@ -3,8 +3,9 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "voxtral",
-    main = "voxtral.zig",
+    main = "main.zig",
     srcs = [
+        "voxtral.zig",
         "mel_spectrogram.zig",
         "wav.zig",
         "config.zig",
@@ -22,6 +23,7 @@ zig_binary(
     name = "voxtral_test",
     main = "test.zig",
     srcs = [
+        "voxtral.zig",
         "mel_spectrogram.zig",
         "wav.zig",
         "config.zig",
