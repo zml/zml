@@ -466,6 +466,7 @@ const MoE = struct {
         // log.info("input : {f}", .{input.shape()});
         //log.info("tokens_mask : {f}", .{tokens_mask.shape()});
         const dt = input.dtype();
+        _ = dt; // autofix
 
         const gating = self.router.forward(input);
 
@@ -532,7 +533,7 @@ const MoE = struct {
                 32,
                 64,
                 64,
-                4,
+                8,
                 3,
             );
 
@@ -540,7 +541,7 @@ const MoE = struct {
             var gate, const up = zml.nn.splitRealImg(out_gate_up, .interleaved);
             _ = up; // autofix
 
-            gate = .minimum(gate, .scalar(7, dt));
+            // gate = .minimum(gate, .scalar(7, dt));
             // up = .clamp(up, .scalar(-7, dt), .scalar(7, dt));
 
             // const out = gate.quickGelu().mul(up.addConstant(1));
@@ -555,8 +556,9 @@ const MoE = struct {
             //     bias_down,
             //     counts_tokens_per_exp,
             //     @intCast(input.dim(.d)),
-            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_down.ttir",
+            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up.ttir",
             //     32,
+            //     64,
             //     64,
             //     4,
             //     3,
@@ -572,8 +574,6 @@ const MoE = struct {
             // general_output = top_output.reshape(.{ .expert = self.moe_opts.experts_per_token, .s = input.dim(.s), .d = input.dim(.d) });
             // general_output = general_output.sum(.expert).squeeze(0);
             general_output = gate.slice1d(.seq, .{ .end = 1024 }).rename(.{ .seq = .s });
-
-            // general_output = gate;
         } else { //Decode
             // const expert_indices_reshaped = expert_indices.reshape(.{ .seq = self.moe_opts.experts_per_token });
             // const expert_scores_reshaped = expert_scores.reshape(.{ .seq = self.moe_opts.experts_per_token });
@@ -606,8 +606,9 @@ const MoE = struct {
             //     bias_gate_up,
             //     counts_tokens_per_exp,
             //     @intCast(input.dim(.d) * 2),
-            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_decode_gate_up.ttir",
-            //     16,
+            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up.ttir",
+            //     32,
+            //     64,
             //     64,
             //     4,
             //     2,
@@ -629,8 +630,9 @@ const MoE = struct {
             //     bias_down,
             //     counts_tokens_per_exp,
             //     @intCast(input.dim(.d)),
-            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_decode_down.ttir",
-            //     16,
+            //     "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up.ttir",
+            //     32,
+            //     64,
             //     64,
             //     4,
             //     2,

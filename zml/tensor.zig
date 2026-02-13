@@ -166,8 +166,8 @@ pub const Tensor = struct {
         const output_3d = Tensor.zeroes(output_3d_shape);
         var w_scales = weights_scales;
 
-        w_scales = w_scales.contiguous(.{ .d, .out });
-
+        w_scales = w_scales.transpose(.{ .expert, .d, .out });
+        w_scales = w_scales.contiguous(.{ .expert, .d, .out });
         const weights_3d = weights.merge(.{ .d = .{ .d, .d_block } });
 
         const input_descriptor = input_sorted_3d.createRaggedDescriptor(&.{ 1, block_m, block_k }, 1);
@@ -313,8 +313,8 @@ pub const Tensor = struct {
 
         // W [Experts, N, K_packed]
         const stride_w_e: i64 = K_packed * N;
-        const stride_w_k: i64 = 1;
-        const stride_w_n: i64 = K_packed;
+        const stride_w_k: i64 = K_packed;
+        const stride_w_n: i64 = 1;
 
         // Scales [Experts, K_mx, N]
         const stride_w_mx_e = w_scales.dim(1) * w_scales.dim(2);
@@ -359,9 +359,7 @@ pub const Tensor = struct {
         const w_shape_2: i64 = weights_3d.dim(2);
 
         const w_stride_0: i64 = K_packed * N;
-        _ = w_stride_0; // autofix
         const w_stride_1: i64 = K_packed;
-        _ = w_stride_1; // autofix
         const w_stride_2: i64 = 1;
 
         const w_mx_shape_0: i64 = w_scales.dim(0);
@@ -460,7 +458,7 @@ pub const Tensor = struct {
             Tensor.scalar(y_stride_2, .i64), // %Y__stride_2
             Tensor.scalar(y_stride_3, .i64), // %Y__stride_3
             Tensor.scalar(y_stride_4, .i64), // %Y__stride_4
-            Tensor.zeroes(output_3d_shape),
+            output_3d,
             //YPtr
             int32Tensor(0), // %stride_y_k
             int32Tensor(stride_y_e), // %stride_y_z
@@ -468,7 +466,7 @@ pub const Tensor = struct {
             int32Tensor(1), // %stride_y_n
 
             // X TMA descriptor + base
-            input_sorted, // %X__base
+            input_sorted_3d, // %X__base
             Tensor.scalar(x_shape_0, .i64), // %X__shape_0
             Tensor.scalar(x_shape_1, .i64), // %X__shape_1
             Tensor.scalar(x_shape_2, .i64), // %X__shape_2
@@ -479,21 +477,21 @@ pub const Tensor = struct {
             Tensor.scalar(x_stride_2, .i64), // %X__stride_2
             Tensor.scalar(x_stride_3, .i64), // %X__stride_3
             Tensor.scalar(x_stride_4, .i64), // %X__stride_4
-            input_sorted, // %XPtr
+            input_sorted_3d, // %XPtr
             int32Tensor(stride_x_e), // %stride_x_e
             int32Tensor(stride_x_m), // %stride_x_m
             int32Tensor(1), // %stride_x_k
 
             // W TMA descriptor + base
-            weights, // %W__base
+            weights_3d, // %W__base
             Tensor.scalar(w_shape_0, .i64), // %W__shape_0
             Tensor.scalar(w_shape_1, .i64), // %W__shape_1
             Tensor.scalar(w_shape_2, .i64), // %W__shape_2
-            Tensor.scalar(stride_w_e, .i64), // %W__stride_0
-            Tensor.scalar(stride_w_n, .i64), // %W__stride_2
-            Tensor.scalar(1, .i64), // %W__stride_1
+            Tensor.scalar(w_stride_0, .i64), // %W__stride_0
+            Tensor.scalar(w_stride_1, .i64), // %W__stride_2
+            Tensor.scalar(w_stride_2, .i64), // %W__stride_1
             // %W__stride_2
-            weights, // %WPtr
+            weights_3d, // %WPtr
             int32Tensor(stride_w_e), // %stride_w_e
             int32Tensor(stride_w_k), // %stride_w_k
             int32Tensor(stride_w_n), // %stride_w_n
@@ -548,7 +546,7 @@ pub const Tensor = struct {
         };
 
         const res = ops.triton(kernel_args, .{output_3d_shape}, ops_);
-        return res[0];
+        return res[0].squeeze(0);
     }
 
     /// Triton MoE MXFP4 kernel wrapper (TTIR signature-aligned).
