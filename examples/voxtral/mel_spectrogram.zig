@@ -37,7 +37,7 @@ pub const LogMelSpectrogram = struct {
         const window_weight = self.window.getWeights(self.n_fft, dtype);
         const fft_len = window_weight.dim(.samples);
         const num_frames: u63 = @intCast(@divFloor(waveform.dim(.samples), self.hop_len));
-
+	
         // var wav = waveform;
 	// const force_num_frames = self.force_num_frames;
         // const force_num_samples = force_num_frames * self.hop_len;

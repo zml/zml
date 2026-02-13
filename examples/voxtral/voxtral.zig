@@ -88,6 +88,10 @@ pub fn main() !void {
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
+    const num_frames = audio_len / config.audio().hop_length;
+    const encoder_seq_len: u32 = @intCast((num_frames / 2) - (num_frames / 2) % config.downsample_factor());
+    const adapter_seq_len = encoder_seq_len / config.downsample_factor();
+    
     var melspectro_model: LogMelSpectrogram = .init(config);
     const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
     var encoder_model: Encoder = .init(allocator, model_store.view().withPrefix(encoder_prefix), config);
@@ -98,6 +102,7 @@ pub fn main() !void {
     
     var model: Decoder = .init(allocator, model_store.view(), config);
     defer model.deinit(allocator);
+    
     const dtype = model.tok_embeddings.dtype();
     const model_params: VoxtralParameters = .{
 	.prefill_embeds = .init(.{.s = config.sliding_window, .d = config.dim}, .bf16),
@@ -115,16 +120,15 @@ pub fn main() !void {
     var tokenizer_future = try io.concurrent(loadTokenizer, .{allocator, io, model_dir});
     var compiled_mel_spectrum_future = try io.concurrent(compileMelSpectrum, .{allocator, io, platform, melspectro_model});
     var compiled_encoder_future = try io.concurrent(compileEncoder, .{allocator, io, platform, encoder_model});
-    const num_frames = audio_len / config.audio().hop_length;
-    const encoder_seq_len: u32 = @intCast((num_frames / 2) - (num_frames / 2) % config.downsample_factor());
     var compiled_adapter_future = try io.concurrent(compileAdapter, .{allocator, io, platform, adapter, encoder_seq_len, config});
-    const adapter_seq_len = encoder_seq_len / config.downsample_factor();
     var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len, config});
     var compiled_decoder_future = try io.concurrent(compileDecoder, .{allocator, io, platform, model, model_params});
     
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{&encoder_model,allocator,io, platform, &model_store, &progress});
     var adapter_buffers_future = try io.concurrent(Adapter.load, .{&adapter, allocator, io, platform, &model_store, &progress});
+    var embedder_buffers_future = try io.concurrent(Embedder.load, .{&embedder, allocator, io, platform, &model_store, &progress});
+    var decoder_buffers_future = try io.concurrent(Decoder.load, .{&model, allocator, io, platform, &model_store, &progress});
 
     var tokenizer = try tokenizer_future.await(io);
     tokenizer.deinit();
@@ -160,7 +164,16 @@ pub fn main() !void {
 
     var adapter_buffers = try adapter_buffers_future.await(io);
     defer Adapter.unloadBuffers(&adapter_buffers);
+
+    var embedder_buffers = try embedder_buffers_future.await(io);
+    defer Embedder.unloadBuffers(&embedder_buffers);
+    
+    var decoder_buffers = try decoder_buffers_future.await(io);
+    defer Decoder.unloadBuffers(&decoder_buffers, allocator);
+    
     progress.end();
+
+    
     
     // try output_buffer.toSlice(io, output_slice);
 
