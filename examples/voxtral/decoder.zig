@@ -1,5 +1,4 @@
 const std = @import("std");
-const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
@@ -10,7 +9,9 @@ const Config = cfg.Config;
 
 const enc = @import("encoder.zig");
 const SwiGluFfn = enc.SwiGluFfn;
-const rmsNorm = enc.rmsNorm;
+
+const common = @import("common.zig");
+const rmsNorm = common.rmsNorm;
 
 /// Adapter: encoder→decoder projection.
 /// Reshapes encoder output [s, d=1280] → [s/4, d=5120] (concatenate 4 timesteps),
@@ -22,37 +23,18 @@ pub const Adapter = struct {
     pub fn init(store: zml.io.TensorStore.View) Adapter {
         const proj_store = store.withPrefix("mm_streams_embeddings.embedding_module.audio_language_projection");
         return .{
-            .proj0 = linear(proj_store.withLayer(0)),
-            .proj1 = linear(proj_store.withLayer(2)),
+            .proj0 = common.linear(proj_store.withLayer(0)),
+            .proj1 = common.linear(proj_store.withLayer(2)),
         };
     }
 
-    pub fn load(self: *const Adapter, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Adapter){
-	progress.increaseEstimatedTotalItems(store.view().count());
-        var timer: std.time.Timer = try .start();
-        var total_bytes: usize = 0;
-        defer {
-            const took = timer.read();
-            log.info("Loaded adapter weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes / took * std.time.ns_per_s,
-            });
-        }
-	
-	return zml.io.load(Adapter, self, allocator, io, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .store = store,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
+    pub fn load(self: *const Adapter, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Adapter) {
+        return common.loadModel(Adapter, self, allocator, io, platform, store, progress, "adapter");
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Adapter)) void {
-        deinitLinear(&self.proj0);
-        deinitLinear(&self.proj1);
+        common.deinitLinear(&self.proj0);
+        common.deinitLinear(&self.proj1);
     }
 
     /// encoder_out: [s, d=1280] → [s/4, d=3072]
@@ -84,26 +66,7 @@ pub const Embedder = struct {
     }
 
     pub fn load(self: *const Embedder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Embedder) {
-	progress.increaseEstimatedTotalItems(store.view().count());
-        var timer: std.time.Timer = try .start();
-        var total_bytes: usize = 0;
-        defer {
-            const took = timer.read();
-            log.info("Loaded embedder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes / took * std.time.ns_per_s,
-            });
-        }
-	
-	return zml.io.load(Embedder, self, allocator, io, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .store = store,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
+        return common.loadModel(Embedder, self, allocator, io, platform, store, progress, "embedder");
     }
     
     pub fn unloadBuffers(self: *zml.Bufferized(Embedder)) void {
@@ -114,6 +77,7 @@ pub const Embedder = struct {
 
 /// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
 pub const Decoder = struct {
+    /// Same weights as Embedder.tok_embeddings; duplicated here for logit computation.
     tok_embeddings: Tensor,
     layers: []DecoderLayer,
     norm: Tensor,
@@ -140,26 +104,7 @@ pub const Decoder = struct {
     }
 
     pub fn load(self: *const Decoder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Decoder) {
-	progress.increaseEstimatedTotalItems(store.view().count());
-        var timer: std.time.Timer = try .start();
-        var total_bytes: usize = 0;
-        defer {
-            const took = timer.read();
-            log.info("Loaded decoder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes / took * std.time.ns_per_s,
-            });
-        }
-	
-	return zml.io.load(Decoder, self, allocator, io, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .store = store,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
+        return common.loadModel(Decoder, self, allocator, io, platform, store, progress, "decoder");
     }
     
     pub fn unloadBuffers(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
@@ -205,14 +150,14 @@ pub const AdaRmsNorm = struct {
     pub fn init(store: zml.io.TensorStore.View) AdaRmsNorm {
         const ada_store = store.withPrefix("ada_rms_norm_t_cond");
         return .{
-            .down = linear(ada_store.withLayer(0)),
-            .up = linear(ada_store.withLayer(2)),
+            .down = common.linear(ada_store.withLayer(0)),
+            .up = common.linear(ada_store.withLayer(2)),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(AdaRmsNorm)) void {
-        deinitLinear(&self.down);
-        deinitLinear(&self.up);
+        common.deinitLinear(&self.down);
+        common.deinitLinear(&self.up);
     }
 
     /// h: [s, d], t_cond: [d] → [s, d]
@@ -269,35 +214,21 @@ pub const KvCache = struct {
     }
 
     pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
-        const k_shape = self.k.shape().drop(.layer);
-        var layer = self.layer_index;
-        layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
-
-        return if (token_index) |idx| .{
-            .k = self.k.scatterSlices(
-                .{ .layer = layer, .k = idx },
-                new_k.convert(self.k.dtype()).transpose(k_shape),
-                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-            ).reuseBuffer(self.k),
-            .v = self.v.scatterSlices(
-                .{ .layer = layer, .k = idx },
-                new_v.convert(self.v.dtype()).transpose(k_shape),
-                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-            ).reuseBuffer(self.v),
-            .layer_index = self.layer_index,
-        } else .{
-            .k = self.k.scatterSlices(
-                .{ .layer = layer },
-                new_k.convert(self.k.dtype()).transpose(k_shape),
-                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-            ).reuseBuffer(self.k),
-            .v = self.v.scatterSlices(
-                .{ .layer = layer },
-                new_v.convert(self.v.dtype()).transpose(k_shape),
-                .{ .indices_are_sorted = true, .update_fn = zml.Tensor.ScatterOpts.override },
-            ).reuseBuffer(self.v),
+        return .{
+            .k = scatterCache(self.k, new_k, self.layer_index, token_index),
+            .v = scatterCache(self.v, new_v, self.layer_index, token_index),
             .layer_index = self.layer_index,
         };
+    }
+
+    fn scatterCache(cache: Tensor, new: Tensor, layer_index: Tensor, token_index: ?Tensor) Tensor {
+        const k_shape = cache.shape().drop(.layer);
+        const converted = new.convert(cache.dtype()).transpose(k_shape);
+        const scatter_opts: Tensor.ScatterOpts = .{ .indices_are_sorted = true, .update_fn = Tensor.ScatterOpts.override };
+        return if (token_index) |idx|
+            cache.scatterSlices(.{ .layer = layer_index.broad(idx.shape()), .k = idx }, converted, scatter_opts).reuseBuffer(cache)
+        else
+            cache.scatterSlices(.{ .layer = layer_index }, converted, scatter_opts).reuseBuffer(cache);
     }
 
     pub fn atLayer(self: KvCache, layer_index: usize) KvCache {
@@ -326,18 +257,18 @@ pub const SelfAttention = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = linear(store.withPrefix("wq")),
-            .wk = linear(store.withPrefix("wk")),
-            .wv = linear(store.withPrefix("wv")),
-            .wo = linear(store.withPrefix("wo")),
+            .wq = common.linear(store.withPrefix("wq")),
+            .wk = common.linear(store.withPrefix("wk")),
+            .wv = common.linear(store.withPrefix("wv")),
+            .wo = common.linear(store.withPrefix("wo")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
-        deinitLinear(&self.wq);
-        deinitLinear(&self.wk);
-        deinitLinear(&self.wv);
-        deinitLinear(&self.wo);
+        common.deinitLinear(&self.wq);
+        common.deinitLinear(&self.wk);
+        common.deinitLinear(&self.wv);
+        common.deinitLinear(&self.wo);
     }
 
     /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
@@ -441,17 +372,3 @@ pub const DecoderLayer = struct {
     }
 };
 
-// -- Helpers
-
-fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
-    return .init(
-        store.createTensorWithTags("weight", .{ .dout, .d }),
-        store.maybeCreateTensorWithTags("bias", .{.dout}),
-        .d,
-    );
-}
-
-fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
-    l.weight.deinit();
-    if (l.bias) |*b| b.deinit();
-}
