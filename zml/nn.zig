@@ -3,11 +3,11 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
 const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 const zml = @import("zml.zig");
 
@@ -29,7 +29,6 @@ pub const Linear = struct {
     pub fn forward(self: Linear, x: Tensor) Tensor {
         var y = x.dot(self.weight.convert(x.dtype()), self.tag);
 
-        // log.debug("Linear({*}): {d} -> {d} -> {d}", .{ self, x.dims(), y.dims(), if (self.bias) |bias| y.add(bias).dims() else y.dims() });
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
 };
