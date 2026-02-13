@@ -26,7 +26,8 @@ const CliArgs = struct {
 };
 
 const prompt = "";
-const tokens: []u32 = .{1, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32};
+const tokens_array = [_]u32{1, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32};
+const tokens: []const u32 = &tokens_array;
 const audio_len = 293699;
 
 const n_delay_tokens = 6;
@@ -105,7 +106,7 @@ pub fn main() !void {
     
     const dtype = model.tok_embeddings.dtype();
     const model_params: VoxtralParameters = .{
-	.prefill_embeds = .init(.{.s = config.sliding_window, .d = config.dim}, .bf16),
+	.prefill_embeds = .init(.{.s = adapter_seq_len, .d = config.dim}, .bf16),
 	.decode_embeds = .init(.{.s = 1, .d = config.dim}, .bf16),
 	.token_index = .init(.{}, .u32),
 	.kv_cache = .init(.init(.{
@@ -122,6 +123,7 @@ pub fn main() !void {
     var compiled_encoder_future = try io.concurrent(compileEncoder, .{allocator, io, platform, encoder_model});
     var compiled_adapter_future = try io.concurrent(compileAdapter, .{allocator, io, platform, adapter, encoder_seq_len, config});
     var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len, config});
+    var compiled_decode_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, @as(u32, 1), config});
     var compiled_decoder_future = try io.concurrent(compileDecoder, .{allocator, io, platform, model, model_params});
     
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
@@ -131,7 +133,7 @@ pub fn main() !void {
     var decoder_buffers_future = try io.concurrent(Decoder.load, .{&model, allocator, io, platform, &model_store, &progress});
 
     var tokenizer = try tokenizer_future.await(io);
-    tokenizer.deinit();
+    defer tokenizer.deinit();
 
     // -- Compiled models
  
@@ -140,15 +142,15 @@ pub fn main() !void {
     
     var compiled_encoder = try compiled_encoder_future.await(io);
     defer compiled_encoder.deinit();
-    _ = &compiled_encoder;
 
     var compiled_adapter = try compiled_adapter_future.await(io);
     defer compiled_adapter.deinit();
-    _ = &compiled_adapter;
 
     var compiled_embedder = try compiled_embedder_future.await(io);
     defer compiled_embedder.deinit();
-    _ = &compiled_embedder;
+
+    var compiled_decode_embedder = try compiled_decode_embedder_future.await(io);
+    defer compiled_decode_embedder.deinit();
 
     var compiled_model = try compiled_decoder_future.await(io);
     defer compiled_model.prefill.deinit();
@@ -173,45 +175,246 @@ pub fn main() !void {
     
     progress.end();
 
+    // --- Execution pipeline ---
+    log.info("Running inference pipeline...", .{});
+
+    // 1. Mel spectrogram
+    log.info("Running mel spectrogram...", .{});
+    var mel_output: zml.Buffer = undefined;
+    {
+        var mel_args = try compiled_mel_spectrum.args(allocator);
+        defer mel_args.deinit(allocator);
+        var mel_results = try compiled_mel_spectrum.results(allocator);
+        defer mel_results.deinit(allocator);
+
+        const audio_slice: zml.Slice = .init(
+            .init(.{audio_len}, .f32),
+            std.mem.sliceAsBytes(wav_file),
+        );
+        var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
+        defer audio_buffer.deinit();
+
+        mel_output = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = num_frames }, .f32), .{});
+
+        mel_args.set(.{ &mel_spectrum_buffers, audio_buffer });
+        compiled_mel_spectrum.call(mel_args, &mel_results);
+        mel_results.fill(.{&mel_output});
+    }
+    defer mel_output.deinit();
+    log.info("Mel spectrogram done.", .{});
+
+    // 2. Encoder
+    log.info("Running encoder...", .{});
+    var encoder_output: zml.Buffer = undefined;
+    {
+        var enc_args = try compiled_encoder.args(allocator);
+        defer enc_args.deinit(allocator);
+        var enc_results = try compiled_encoder.results(allocator);
+        defer enc_results.deinit(allocator);
+
+        encoder_output = try .uninitialized(io, platform, .init(.{ .s = encoder_seq_len, .d = config.encoder().dim }, .bf16), .{});
+
+        enc_args.set(.{ &encoder_buffers, mel_output });
+        compiled_encoder.call(enc_args, &enc_results);
+        enc_results.fill(.{&encoder_output});
+    }
+    defer encoder_output.deinit();
+    log.info("Encoder done.", .{});
+
+    // 3. Adapter
+    log.info("Running adapter...", .{});
+    var adapter_output: zml.Buffer = undefined;
+    {
+        var adp_args = try compiled_adapter.args(allocator);
+        defer adp_args.deinit(allocator);
+        var adp_results = try compiled_adapter.results(allocator);
+        defer adp_results.deinit(allocator);
+
+        adapter_output = try .uninitialized(io, platform, .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16), .{});
+
+        adp_args.set(.{ &adapter_buffers, encoder_output });
+        compiled_adapter.call(adp_args, &adp_results);
+        adp_results.fill(.{&adapter_output});
+    }
+    defer adapter_output.deinit();
+    log.info("Adapter done.", .{});
+
+    // Download adapter_out to CPU for per-position slicing in the decode loop
+    const adapter_out_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16));
+    defer adapter_out_slice.free(allocator);
+    try adapter_output.toSlice(io, adapter_out_slice);
+    const adapter_out_cpu = adapter_out_slice.constItems(u16); // bf16 stored as u16
+
+    // 4. Embedder: combine audio + token embeddings for the prefix (39 positions)
+    log.info("Running prefix embedder...", .{});
+    var combined_embeds: zml.Buffer = undefined;
+    {
+        var emb_args = try compiled_embedder.args(allocator);
+        defer emb_args.deinit(allocator);
+        var emb_results = try compiled_embedder.results(allocator);
+        defer emb_results.deinit(allocator);
+
+        const padded_tokens = try allocator.alloc(u32, adapter_seq_len);
+        defer allocator.free(padded_tokens);
+        @memcpy(padded_tokens[0..tokens.len], tokens);
+        @memset(padded_tokens[tokens.len..], 32); // STREAMING_PAD
+
+        const tokens_slice: zml.Slice = .init(
+            .init(.{ .s = adapter_seq_len }, .u32),
+            std.mem.sliceAsBytes(padded_tokens),
+        );
+        var tokens_buffer: zml.Buffer = try .fromSlice(io, platform, tokens_slice);
+        defer tokens_buffer.deinit();
+
+        combined_embeds = try .uninitialized(io, platform, .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16), .{});
+
+        emb_args.set(.{ &embedder_buffers, adapter_output, tokens_buffer });
+        compiled_embedder.call(emb_args, &emb_results);
+        emb_results.fill(.{&combined_embeds});
+    }
+    defer combined_embeds.deinit();
+    log.info("Prefix embedder done.", .{});
+
+    // 5. Compute time embedding on CPU and upload
+    const t_cond_data = computeTimeEmbedding(allocator, @floatFromInt(n_delay_tokens), config.dim);
+    defer allocator.free(t_cond_data);
+    const t_cond_bf16 = try allocator.alloc(u16, config.dim);
+    defer allocator.free(t_cond_bf16);
+    for (0..config.dim) |i| {
+        t_cond_bf16[i] = @bitCast(zml.floats.BFloat16.fromF32(t_cond_data[i]));
+    }
+    const t_cond_slice: zml.Slice = .init(
+        .init(.{ .d = config.dim }, .bf16),
+        std.mem.sliceAsBytes(t_cond_bf16),
+    );
+    var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
+    defer t_cond_buffer.deinit();
+    log.info("Time embedding computed (t={d}).", .{n_delay_tokens});
+
+    // 6. Init KV cache
+    var kv_cache_buffers = try model_params.kv_cache.initBuffer(io, platform);
+    defer dec.KvCache.deinitBuffer(&kv_cache_buffers);
+
+    // 7. Decoder prefill: process all adapter_seq_len positions at once
+    //    (fills KV cache; we take the token at position tokens.len-1 as the first generated token)
+    log.info("Running decoder prefill ({d} positions)...", .{adapter_seq_len});
+    var prefill_tokens_buffer: zml.Buffer = undefined;
+    {
+        var dec_args = try compiled_model.prefill.args(allocator);
+        defer dec_args.deinit(allocator);
+        var dec_results = try compiled_model.prefill.results(allocator);
+        defer dec_results.deinit(allocator);
+
+        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32);
+        defer token_index_buffer.deinit();
+
+        prefill_tokens_buffer = try .uninitialized(io, platform, .init(.{ .s = adapter_seq_len }, .u32), .{});
+
+        dec_args.set(.{ &decoder_buffers, combined_embeds, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+        compiled_model.prefill.call(dec_args, &dec_results);
+        dec_results.fill(.{ &prefill_tokens_buffer, &kv_cache_buffers });
+    }
+    defer prefill_tokens_buffer.deinit();
+    log.info("Decoder prefill done.", .{});
+
+    // Extract the first generated token from prefill (at position tokens.len - 1)
+    const prefill_out_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = adapter_seq_len }, .u32));
+    defer prefill_out_slice.free(allocator);
+    try prefill_tokens_buffer.toSlice(io, prefill_out_slice);
+    var prev_token: u32 = prefill_out_slice.items(u32)[tokens.len - 1];
+    log.info("First generated token (from prefill pos {d}): {d}", .{ tokens.len - 1, prev_token });
+
+    // 8. Autoregressive decode loop
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    const d: usize = @intCast(config.dim);
+
+    // Prepare reusable args/results for decode embedder and decoder
+    var demb_args = try compiled_decode_embedder.args(allocator);
+    defer demb_args.deinit(allocator);
+    var demb_results = try compiled_decode_embedder.results(allocator);
+    defer demb_results.deinit(allocator);
+
+    var decode_args = try compiled_model.decode.args(allocator);
+    defer decode_args.deinit(allocator);
+    var decode_results = try compiled_model.decode.results(allocator);
+    defer decode_results.deinit(allocator);
+
+    // Reusable token output slice
+    var gen_token_slice: zml.Slice = try .alloc(allocator, .init(.{ .s = 1 }, .u32));
+    defer gen_token_slice.free(allocator);
+    gen_token_slice.items(u32)[0] = prev_token;
+    var gen_token_buffer: zml.Buffer = try .fromSlice(io, platform, gen_token_slice);
+    defer gen_token_buffer.deinit();
+
+    // Reusable combined embed buffer
+    var combined_embed_buffer: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = 1, .d = config.dim }, .bf16), .{});
+    defer combined_embed_buffer.deinit();
+
+    const n_audio: usize = @intCast(adapter_seq_len);
+    log.info("Running decoder decode ({d} steps)...", .{n_audio - tokens.len});
+
+    for (tokens.len..n_audio) |pos| {
+        // Check EOS (token_id=2)
+        if (prev_token == 2) break;
+
+        // Print decoded text for the current token
+        if (try tokenizer_decoder.next(prev_token)) |chunk| {
+	    try stdout.interface.print("{d}: {s}\n", .{pos, chunk});
+            try stdout.interface.flush();
+        }
+
+        // Create audio embed [1, d] from adapter_out_cpu[pos]
+        const pos_offset = pos * d;
+        const audio_embed_slice: zml.Slice = .init(
+            .init(.{ .s = 1, .d = config.dim }, .bf16),
+            std.mem.sliceAsBytes(adapter_out_cpu[pos_offset .. pos_offset + d]),
+        );
+        var audio_embed_buf: zml.Buffer = try .fromSlice(io, platform, audio_embed_slice);
+        defer audio_embed_buf.deinit();
+
+        // Create token [1] buffer
+        const token_data = [_]u32{prev_token};
+        const tok_slice: zml.Slice = .init(
+            .init(.{ .s = 1 }, .u32),
+            std.mem.sliceAsBytes(&token_data),
+        );
+        var tok_buf: zml.Buffer = try .fromSlice(io, platform, tok_slice);
+        defer tok_buf.deinit();
+
+        // Run decode embedder: adapter_out[pos] + tok_embed(prev_token) → [1, d]
+        demb_args.set(.{ &embedder_buffers, audio_embed_buf, tok_buf });
+        compiled_decode_embedder.call(demb_args, &demb_results);
+        demb_results.fill(.{&combined_embed_buffer});
+
+        // Run decoder: combined_embed, token_index=pos, kv_cache, t_cond → next token
+        const pos_data = [_]u32{@intCast(pos)};
+        const pos_slice: zml.Slice = .init(.init(.{}, .u32), std.mem.sliceAsBytes(&pos_data));
+        var pos_buf: zml.Buffer = try .fromSlice(io, platform, pos_slice);
+        defer pos_buf.deinit();
+
+        decode_args.set(.{ &decoder_buffers, combined_embed_buffer, pos_buf, &kv_cache_buffers, t_cond_buffer });
+        compiled_model.decode.call(decode_args, &decode_results);
+        decode_results.fill(.{ &gen_token_buffer, &kv_cache_buffers });
+
+        // Download generated token
+        try gen_token_buffer.toSlice(io, gen_token_slice);
+        prev_token = gen_token_slice.items(u32)[0];
+    }
+
+    // Print final token
+    if (try tokenizer_decoder.next(prev_token)) |chunk| {
+	try stdout.interface.print("{s}", .{chunk});
+    }
     
-    
-    // try output_buffer.toSlice(io, output_slice);
+    try stdout.interface.writeAll("\n");
+    try stdout.interface.flush();
 
-    // const outfile = try std.Io.Dir.createFile(.cwd(), io, args.output, .{});
-    // defer outfile.close(io);
-
-    // var outbuff: [4096]u8 = undefined;
-    // var writer = outfile.writer(io, &outbuff);
-    // const writer_interface = &writer.interface;
-
-    // try writer_interface.writeAll(output_slice.data());
+    log.info("Decode complete.", .{});
 }
 
-fn generateTranscript(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, config: Config, wav_file: []f32, mel_spectogram: zml.Exe) !void {
-        // Execute
-    var mel_args = try mel_spectogram.args(allocator);
-    defer mel_args.deinit(allocator);
-    var mel_results = try mel_spectogram.results(allocator);
-    defer mel_results.deinit(allocator);
-
-    const num_frames = audio_len / config.audio().hop_length;
-    const input_slice = zml.Slice.init(.init(.{ .freq = wav_file.len }, .f32), std.mem.sliceAsBytes(wav_file));
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice);
-    defer input_buffer.deinit();
-
-    const output_shape = zml.Shape.init(.{ 128, num_frames }, .f32);
-    
-    const output_slice: zml.Slice = try zml.Slice.alloc(allocator, output_shape);
-    defer output_slice.free(allocator);
-    
-    var output_buffer: zml.Buffer = try .fromSlice(io, platform, output_slice);
-    defer output_buffer.deinit();
-
-    // mel_args.set(.{mel_spectrum_buffers, input_buffer});
-    // compiled_mel_spectrum.call(exec_args, &results);
-    // results.fill(.{&output_buffer});    
-
-}
 
 fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
     var arena_state: std.heap.ArenaAllocator = .init(allocator);
@@ -260,10 +463,10 @@ pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const
     });
 }
 
-pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, adapter_seq_len: u32, config: Config) !zml.Exe {
+pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, seq_len: u32, config: Config) !zml.Exe {
     return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16),
-        Tensor.init(.{ .s = adapter_seq_len }, .u32),
+        Tensor.init(.{ .s = seq_len, .d = config.dim }, .bf16),
+        Tensor.init(.{ .s = seq_len }, .u32),
     });
 }
 
@@ -314,17 +517,17 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
 /// out[i] = cos(t * inv_freq[i]) for i < half_dim
 /// out[i] = sin(t * inv_freq[i-half_dim]) for i >= half_dim
 /// where inv_freq[i] = exp(-log(theta) * i / half_dim)
-// fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32) []f32 {
-//     const half_dim = dim / 2;
-//     const result = allocator.alloc(f32, dim) catch unreachable;
-//     for (0..half_dim) |i| {
-//         const freq = @exp(-@log(@as(f32, 10000.0)) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half_dim)));
-//         const angle = t_value * freq;
-//         result[i] = @cos(angle);
-//         result[i + half_dim] = @sin(angle);
-//     }
-//     return result;
-// }
+fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32) []f32 {
+    const half_dim = dim / 2;
+    const result = allocator.alloc(f32, dim) catch unreachable;
+    for (0..half_dim) |i| {
+        const freq = @exp(-@log(@as(f32, 10000.0)) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half_dim)));
+        const angle = t_value * freq;
+        result[i] = @cos(angle);
+        result[i + half_dim] = @sin(angle);
+    }
+    return result;
+}
 
 pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
     const bytes = b: {
