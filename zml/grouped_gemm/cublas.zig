@@ -14,6 +14,9 @@ const log = std.log.scoped(.@"zml/grouped_gemm/cublas");
 pub const cublasComputeType_t = c_int;
 pub const CUBLAS_COMPUTE_32F: cublasComputeType_t = 68;
 
+var cublas_mutex: std.Thread.Mutex = .{};
+var cublas_handle: ?gg.cublasHandle_t = null;
+
 fn sliceAt(comptime T: type, base: []u8, offset: usize, len: usize) []T {
     const slice: []T = @ptrCast(@alignCast(base[offset..]));
     return slice[0..len];
@@ -310,16 +313,41 @@ pub const GemmGroupedBatched = struct {
             return error.CublasNotLoaded;
         }
 
-        if (gg.cublas_handle == null) {
-            return error.CublasHandleNotInitialized;
-        }
+        // if (gg.cublas_handle == null) {
+        //     return error.CublasHandleNotInitialized;
+        // }
         if (gg.cublasSetStream == null) {
             return error.CublasSetSreamNotInitialized;
         }
 
+        if (cublas_handle == null) {
+            var handle_ptr: gg.cublasHandle_t = undefined;
+            const status = gg.cublasCreate.?(&handle_ptr);
+            if (status != gg.CUBLAS_STATUS_SUCCESS) {
+                return error.CublasInitFailed;
+            }
+            cublas_handle = handle_ptr;
+        }
+
         const ctx: *ffi.ExecutionContext = @constCast(call_frame.ctx);
         const cu_stream: c.CUstream = @ptrCast(call_frame.api.stream(ctx));
-        _ = gg.cublasSetStream.?(gg.cublas_handle.?, cu_stream);
+
+        if (cu_stream == null) {
+            log.err("PJRT provided a NULL stream! cuBLAS will default to stream 0.", .{});
+        } else {
+            // Check if the stream is actually valid according to the driver
+            var stream_priority: i32 = 0;
+            const res = cuda.streamGetPriority(cu_stream, &stream_priority);
+            if (res != c.CUDA_SUCCESS) {
+                log.err("Invalid Stream Handle detected! CUDA result: {}", .{res});
+                return error.InvalidStream;
+            }
+        }
+        const set_stream_status = gg.cublasSetStream.?(cublas_handle.?, cu_stream);
+
+        if (set_stream_status != gg.CUBLAS_STATUS_SUCCESS) {
+            return error.CublasError;
+        }
 
         const buffers = call_frame.args.buffers();
 
@@ -341,6 +369,7 @@ pub const GemmGroupedBatched = struct {
 
         const host_buffer_slice = host_buffer.buffer.slice(); // slice of bytes
         const device_buffer_slice = device_buffer.buffer.slice(); // slice of bytes
+        _ = device_buffer_slice; // autofix
         const tokens_per_exp_slice = tokens_per_exp_buffer.buffer.slice(); // slice of bytes
 
         const header_size = std.mem.alignForward(usize, @sizeOf(InputHostFunc), 8);
@@ -368,9 +397,11 @@ pub const GemmGroupedBatched = struct {
         const tokens_copy_slice = host_workspace_slice[layout.offset_tokens_copy..layout.offset_ptr_A_host]; // slice of bytes where write
 
         try cuda.check(cuda.memcpyToHostAsync(tokens_copy_slice, tokens_per_exp_slice, cu_stream));
+        // try cuda.check(cuda.streamSynchronize(cu_stream));
 
         try cuda.check(cuda.launchHostFunc(cu_stream, HostFunc.call, input_ptr));
         try cuda.check(cuda.ctxSynchronize());
+        // try cuda.check(cuda.streamSynchronize(cu_stream));
 
         const Atype: gg.cudaDataType_t = switch (A_buffer.shape.dtype()) {
             .f32 => gg.CUDA_R_32F,
@@ -386,33 +417,45 @@ pub const GemmGroupedBatched = struct {
             group_count,
         );
 
-        const ptr_matrixes_slice = host_workspace_slice[layout.offset_ptr_A_host..layout.total_size];
+        // const ptr_matrixes_slice = host_workspace_slice[layout.offset_ptr_A_host..layout.total_size];
 
-        try cuda.check(cuda.memcpyToDeviceAsync(device_buffer_slice, ptr_matrixes_slice, cu_stream));
+        // try cuda.check(cuda.memcpyToDeviceAsync(device_buffer_slice, ptr_matrixes_slice, cu_stream));
 
-        const ptr_array_bytes = group_count * @sizeOf(?*anyopaque);
-        if (device_buffer_slice.len < 3 * ptr_array_bytes) return error.DeviceWorkspaceTooSmall;
+        // const ptr_array_bytes = std.mem.alignForward(usize, group_count * @sizeOf(?*anyopaque), 16);
+        // if (device_buffer_slice.len < 3 * ptr_array_bytes) return error.DeviceWorkspaceTooSmall;
 
-        const device_a: [*c]const ?*const anyopaque = @ptrCast(@alignCast(device_buffer_slice[0..])); //cast to ptr for kernel
-        const device_b: [*c]const ?*const anyopaque = @ptrCast(@alignCast(device_buffer_slice[ptr_array_bytes..]));
-        const device_c: [*c]?*anyopaque = @ptrCast(@alignCast(device_buffer_slice[2 * ptr_array_bytes ..]));
+        // const device_a: [*c]const ?*const anyopaque = @ptrCast(@alignCast(device_buffer_slice[0..])); //cast to ptr for kernel
+        // _ = device_a; // autofix
+        // const device_b: [*c]const ?*const anyopaque = @ptrCast(@alignCast(device_buffer_slice[ptr_array_bytes..]));
+        // _ = device_b; // autofix
+        // const device_c: [*c]?*anyopaque = @ptrCast(@alignCast(device_buffer_slice[2 * ptr_array_bytes ..]));
+        // _ = device_c; // autofix
+
+        // cublas_mutex.lock();
+
+        // const set_stream_status = gg.cublasSetStream.?(gg.cublas_handle.?, cu_stream);
+
+        // try cuda.check(cuda.streamSynchronize(cu_stream));
 
         const status = gg.cublas_gemm_grouped_batched_ex.?(
-            gg.cublas_handle.?,
+            cublas_handle.?,
             ws.transa.ptr,
             ws.transb.ptr,
             ws.m.ptr,
             ws.n.ptr,
             ws.k.ptr,
             ws.alpha.ptr,
-            device_a,
+            ws.h_ptr_A.ptr,
+            // device_a,
             Atype,
             ws.lda.ptr,
-            device_b,
+            ws.h_ptr_B.ptr,
+            // device_b,
             Atype,
             ws.ldb.ptr,
             ws.beta.ptr,
-            device_c,
+            ws.h_ptr_C.ptr,
+            // device_c,
             Atype,
             ws.ldc.ptr,
             group_count_cint,
@@ -420,10 +463,13 @@ pub const GemmGroupedBatched = struct {
             computeType,
         );
 
+        // cublas_mutex.unlock();
+
         if (status != gg.CUBLAS_STATUS_SUCCESS) {
             return error.CublasError;
         }
         try cuda.check(cuda.ctxSynchronize());
+        // try cuda.check(cuda.streamSynchronize(cu_stream));
 
         return null;
     }
@@ -565,6 +611,7 @@ pub const cuda = struct {
     }
 
     const memcpyToHost = @extern(*const @TypeOf(c.cuMemcpyDtoH_v2), .{ .name = "cuMemcpyDtoH_v2", .linkage = .weak }).?;
+    const streamGetPriority = @extern(*const @TypeOf(c.cuStreamGetPriority), .{ .name = "cuStreamGetPriority", .linkage = .weak }).?;
 
     const launchHostFunc = @extern(*const @TypeOf(c.cuLaunchHostFunc), .{ .name = "cuLaunchHostFunc", .linkage = .weak }).?;
     pub const streamSynchronize = @extern(*const @TypeOf(c.cuStreamSynchronize), .{ .name = "cuStreamSynchronize", .linkage = .weak }).?;

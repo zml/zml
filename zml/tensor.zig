@@ -31,6 +31,8 @@ pub const Tensor = struct {
         lhs: Tensor,
         rhs: Tensor,
         tokens_per_exp: Tensor,
+        host_buffer: Tensor,
+        device_buffer: Tensor,
         opts: struct {
             // transa_array: []const cublas_grouped_gemm.cublasOperation_t,
             // transb_array: []const cublas_grouped_gemm.cublasOperation_t,
@@ -44,11 +46,13 @@ pub const Tensor = struct {
             computeType: cublas_grouped_gemm.cublasComputeType_t,
             output_shape: Shape,
         },
-    ) Tensor {
+    ) [3]Tensor {
         return cublas_grouped_gemm.gemmGroupedBatched(
             lhs,
             rhs,
             tokens_per_exp,
+            host_buffer,
+            device_buffer,
             .{
                 // .transa_array = opts.transa_array,
                 // .transb_array = opts.transb_array,

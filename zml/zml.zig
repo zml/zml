@@ -22,6 +22,7 @@ pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
 pub const floats = @import("floats.zig");
+pub const grouped_gemm = @import("grouped_gemm/cublas.zig");
 pub const io = @import("io.zig");
 pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
@@ -44,6 +45,17 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 
+<<<<<<< HEAD
+=======
+//pub const cublas_grouped_gemm = @import("cublas_grouped_gemm.zig");
+/// Return a clone of a type with Tensors replaced by Buffer.
+/// Non-Tensor metadata is stripped out of the resulting struct.
+/// Recursively descends into the type.
+pub fn Bufferized(comptime T: type) type {
+    return meta.MapRestrict(Tensor, Buffer).map(T);
+}
+
+>>>>>>> 6d08222 (checkpoint)
 test "zml" {
     std.testing.refAllDecls(@This());
 }

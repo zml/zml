@@ -6,5 +6,8 @@ zig_binary(
     srcs = ["gpt_oss_gg.zig"],
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = [
+        "//zml",
+
+    ],
 )

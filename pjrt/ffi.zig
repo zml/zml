@@ -252,6 +252,29 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
     f8e4m3b11fnuz = c.XLA_FFI_DataType_F8E4M3B11FNUZ,
     f8e5m2fnuz = c.XLA_FFI_DataType_F8E5M2FNUZ,
     f8e4m3fnuz = c.XLA_FFI_DataType_F8E4M3FNUZ,
+
+    pub fn bitSizeOf(self: DataType) usize {
+        return switch (self) {
+            .invalid => 0,
+            .bool => 1,
+            .i8, .u8 => 8,
+            .i16, .u16, .f16, .bf16 => 16,
+            .i32, .u32, .f32 => 32,
+            .i64, .u64, .f64 => 64,
+            .c64 => 128, // two f64
+            .c128 => 256, // two f128 (matches XLA dtype naming)
+            .token => 0,
+
+            .f8e5m2,
+            .f8e3m4,
+            .f8e4m3,
+            .f8e4m3fn,
+            .f8e4m3b11fnuz,
+            .f8e5m2fnuz,
+            .f8e4m3fnuz,
+            => 8,
+        };
+    }
 };
 
 pub const Buffer = extern struct {
@@ -264,6 +287,22 @@ pub const Buffer = extern struct {
 
     pub fn dims(self: Buffer) []const i64 {
         return self._dims[0..self.rank];
+    }
+
+    pub fn count(self: Buffer) usize {
+        var res: i64 = 1;
+        for (self._dims[0..self.rank]) |d| {
+            res *= d;
+        }
+        return @intCast(res);
+    }
+
+    pub fn byteSizeOf(self: Buffer) usize {
+        return self.count() * self.dtype.bitSizeOf() / 8;
+    }
+
+    pub fn slice(self: Buffer) []u8 {
+        return self.data[0..self.byteSizeOf()];
     }
 
     pub fn format(buffer: Buffer, writer: *std.Io.Writer) !void {

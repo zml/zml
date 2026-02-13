@@ -317,6 +317,12 @@ pub const GemmGroupedBatched = struct {
             a_off_bytes += A_elems * elem_size;
             b_off_bytes += B_elems * elem_size;
             c_off_bytes += C_elems * elem_size;
+
+            // log.info("G[{d}] A_ptr=0x{x} B_ptr=0x{x} C_ptr=0x{x}", .{ gi, @intFromPtr(Aarray[gi]), @intFromPtr(Barray[gi]), @intFromPtr(Carray[gi]) });
+
+            // log.info("G[{d}] m={d} n={d} k={d} lda={d} ldb={d} ldc={d}", .{
+            //     gi, m_array[gi], n_array[gi], k_array[gi], lda, ldb, ldc,
+            // });
         }
 
         // You'll need to populate m_array, n_array, k_array, etc. from your actual data
