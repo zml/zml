@@ -75,7 +75,10 @@ pub const Embedder = struct {
 	};
     }
 
-    pub fn forward(self: Embedder, audio_embeds: Tensor, text_tokens: Tensor) Tensor {
+    pub fn forward(self: Embedder, full_adapter_out: Tensor, text_tokens: Tensor, pos: Tensor) Tensor {
+	const audio_embeds = full_adapter_out.dynamicSlice(.{
+	    .s = Tensor.DynSlice{ .start = pos, .len = @intCast(text_tokens.dim(.s)) },
+	});
 	const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
 	return text_embeds.add(audio_embeds);
     }
@@ -377,7 +380,7 @@ pub const SelfAttention = struct {
         var attn_mask = zml.nn.causalAttnMask(.{ .q = full_seq_len, .k = full_seq_len }, dtype, config.sliding_window);
         attn_mask = attn_mask.gatherSlices(
             Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()),
-            pos_index.rename(.{ .s = .coord }),
+            token_index.reshape(.{ .coord = 1 }),
             .{},
         );
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
