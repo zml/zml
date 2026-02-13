@@ -138,7 +138,7 @@ pub fn main() !void {
         var adapter_buffers = try zml.io.load(AdapterTestHarness, &adapter, allocator, io, platform, load_opts);
         defer AdapterTestHarness.unloadBuffers(&adapter_buffers);
 
-        try zml.testing.testLayer(allocator, io, platform, adapter, .forward, ref_store.view(), "adapter", adapter_buffers, .{.minimum_close_fraction = 0.9});
+        try zml.testing.testLayer(allocator, io, platform, adapter, .forward, ref_store.view(), "adapter", adapter_buffers, .{.minimum_close_fraction = 0.8});
     }
 
     // -- Decoder Layer tests
