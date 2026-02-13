@@ -72,7 +72,6 @@ pub fn main() !void {
     const wav_file = try loadWav(allocator, &reader.interface);
     defer allocator.free(wav_file);
 
-    // Pad audio for offline streaming mode (matching mistral_common AudioEncoder.pad)
     const left_pad = n_left_pad_tokens * raw_audio_length_per_tok; // 32 * 1280 = 40960
     const align_pad = (raw_audio_length_per_tok - (wav_file.len % raw_audio_length_per_tok)) % raw_audio_length_per_tok;
     const right_pad = align_pad + n_right_pad_tokens * raw_audio_length_per_tok; // align + 17 * 1280
@@ -127,7 +126,7 @@ pub fn main() !void {
 	    .h = config.n_kv_heads,
 	    .hd = config.head_dim,
 	}, dtype)),
-	.t_cond = Tensor.init(.{.d = config.dim}, dtype),
+	.t_cond = Tensor.init(.{.d = config.dim}, .f32),
     };
     
     var tokenizer_future = try io.concurrent(loadTokenizer, .{allocator, io, model_dir});
@@ -290,6 +289,121 @@ pub fn main() !void {
     }
     defer embedder_output.deinit();
     log.info("Embedder done.", .{});
+
+    // 5. Init KV cache + t_cond buffer
+    var kv_cache_buffers = try model_params.kv_cache.initBuffer(io, platform);
+    defer dec.KvCache.deinitBuffer(&kv_cache_buffers);
+
+    const t_cond_data = computeTimeEmbedding(allocator, @as(f32, @floatFromInt(n_delay_tokens)), config.dim);
+    defer allocator.free(t_cond_data);
+    const t_cond_slice: zml.Slice = .init(
+        .init(.{config.dim}, .f32),
+        std.mem.sliceAsBytes(t_cond_data),
+    );
+    var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
+    defer t_cond_buffer.deinit();
+    std.debug.print("t_cond first 10 values: ", .{});
+    for (0..@min(10, t_cond_data.len)) |j| {
+        std.debug.print("{d:.4} ", .{t_cond_data[j]});
+    }
+    std.debug.print("\n", .{});
+
+    // 6. Decoder prefill
+    log.info("Running decoder prefill...", .{});
+    var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
+    defer generated_token_slice.free(allocator);
+    {
+        var prefill_args = try compiled_model.prefill.args(allocator);
+        defer prefill_args.deinit(allocator);
+        var prefill_results = try compiled_model.prefill.results(allocator);
+        defer prefill_results.deinit(allocator);
+
+        var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
+        defer token_index_buffer.deinit();
+
+        var prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, @intCast(tokens.len))}, .u32));
+        defer prefill_tokens_slice.free(allocator);
+        var prefill_output: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
+        defer prefill_output.deinit();
+
+        prefill_args.set(.{ &decoder_buffers, embedder_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+        compiled_model.prefill.call(prefill_args, &prefill_results);
+        prefill_results.fill(.{ &prefill_output, &kv_cache_buffers });
+
+        // Extract last token from prefill output (first generated token)
+        try prefill_output.toSlice(io, prefill_tokens_slice);
+        log.info("Prefill output tokens: {any}", .{prefill_tokens_slice.items(u32)[0..tokens.len]});
+        generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[tokens.len - 1];
+        log.info("First generated token (from prefill): {}", .{generated_token_slice.items(u32)[0]});
+    }
+    log.info("Prefill done.", .{});
+
+    // 7. Autoregressive decode loop
+    log.info("Running decoder autoregressive...", .{});
+    const eos_token: u32 = 2;
+    {
+        var decode_args = try compiled_model.decode.args(allocator);
+        defer decode_args.deinit(allocator);
+        var decode_results = try compiled_model.decode.results(allocator);
+        defer decode_results.deinit(allocator);
+
+        var emb_args = try compiled_decode_embedder.args(allocator);
+        defer emb_args.deinit(allocator);
+        var emb_results = try compiled_decode_embedder.results(allocator);
+        defer emb_results.deinit(allocator);
+
+        var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
+        defer current_token_buffer.deinit();
+
+        var decode_embed: zml.Buffer = try .uninitialized(io, platform,
+            .init(.{ .s = @as(u32, 1), .d = config.dim }, .bf16), .{});
+        defer decode_embed.deinit();
+
+        const max_pos = adapter_seq_len;
+        log.info("Decode loop: tokens.len={}, max_pos={}", .{tokens.len, max_pos});
+        var num_generated: usize = 0;
+        for (tokens.len..max_pos) |i| {
+            const generated_token = generated_token_slice.items(u32)[0];
+            num_generated += 1;
+
+            if (generated_token != 32) {
+                if (try tokenizer_decoder.next(generated_token)) |chunk| {
+                    std.debug.print("{s}", .{chunk});
+		}
+            }
+
+            
+            if (generated_token == eos_token) {
+                log.info("  EOS reached at pos={}", .{i});
+                break;
+            }
+
+            // 1. Embedder: combine adapter_output[pos] + tok_embed(token)
+            const token_slice: zml.Slice = .init(.init(.{@as(u32, 1)}, .u32),
+                std.mem.sliceAsBytes(generated_token_slice.items(u32)[0..1]));
+            var token_buf: zml.Buffer = try .fromSlice(io, platform, token_slice);
+            defer token_buf.deinit();
+
+            var pos_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
+            defer pos_buffer.deinit();
+
+            emb_args.set(.{ &embedder_buffers, adapter_output, token_buf, pos_buffer });
+            compiled_decode_embedder.call(emb_args, &emb_results);
+            emb_results.fill(.{&decode_embed});
+
+            // 2. Decoder: get next token
+            var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
+            defer token_index_buffer.deinit();
+
+            decode_args.set(.{ &decoder_buffers, decode_embed, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+            compiled_model.decode.call(decode_args, &decode_results);
+            decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers });
+
+            try current_token_buffer.toSlice(io, generated_token_slice);
+        }
+        std.debug.print("\n", .{});
+        log.info("Decode done. Generated {} tokens total.", .{num_generated});
+    }
 }
 
 
