@@ -1,5 +1,4 @@
 const std = @import("std");
-const log = std.log;
 const cfg = @import("config.zig");
 const Config = cfg.Config;
 
@@ -15,8 +14,6 @@ pub const LogMelSpectrogram = struct {
 
     hop_len: u63,
     global_log_mel_max: f32,
-
-    // force_num_frames: u32 = 3000,
 
     precision: zml.DataType = .f32,
 
@@ -37,20 +34,6 @@ pub const LogMelSpectrogram = struct {
         const window_weight = self.window.getWeights(self.n_fft, dtype);
         const fft_len = window_weight.dim(.samples);
         const num_frames: u63 = @intCast(@divFloor(waveform.dim(.samples), self.hop_len));
-	
-        // var wav = waveform;
-	// const force_num_frames = self.force_num_frames;
-        // const force_num_samples = force_num_frames * self.hop_len;
-        // if (num_frames > force_num_frames) {
-        //     wav = wav.slice1d(-1, .{ .end = force_num_samples });
-        //     num_frames = force_num_frames;
-        // } else if (num_frames < force_num_frames) {
-	//     const tagged = wav.withTags(.{.t});
-	//     wav = tagged.pad(0.0, .{ .t = Tensor.Pad{ .high = force_num_samples - tagged.dim(.t) } });
-        // }
-
-        // num_frames = @intCast(@divFloor(wav.dim(0), self.hop_len));
-        // std.debug.assert(num_frames == force_num_frames);
 
         // Reflect padding
         const padded_wav = blk: {
@@ -95,11 +78,7 @@ pub const LogMelSpectrogram = struct {
 pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, precision: zml.DataType) Tensor {
     const fft_len = weight.dim(0);
 
-    const num_samples = waveform.dim(0);
-
-    // const num_frames = 3000;
     const indices = Tensor.arange(.{ .end = @intCast(num_frames * stride), .step = stride }, .i32);
-    std.log.warn("num_samples: {d}, num_frames: {d}, end: {d}, stride: {d}, indices: {}", .{ num_samples, num_frames, num_frames * stride, stride, indices });
     var windows = waveform.gatherSlices(.{fft_len}, indices.appendAxes(.{.coord }), .{ .indices_are_sorted = true });
 
     windows = windows.mul(weight.broadcastLeft(windows.shape()));
@@ -107,10 +86,7 @@ pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, pr
     var fft = windows.convert(precision).fft(.{ .kind = .RFFT, .length = &.{fft_len} });
     const spectrogram = fft.abs();
 
-    const ret = spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.frames, .freq_bins});
-    log.info("{f}", .{ret.shape()});
-
-    return ret;
+    return spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.frames, .freq_bins});
 }
 
 pub const AudioWindow = enum {

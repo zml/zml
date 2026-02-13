@@ -69,7 +69,7 @@ pub fn main() !void {
     var wav_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &wav_buffer);
 
-    const wav_file = try loadWav(allocator, &reader.interface);
+    const wav_file = try wav_utils.loadWav(allocator, &reader.interface);
     defer allocator.free(wav_file);
 
     const left_pad = n_left_pad_tokens * raw_audio_length_per_tok; // 32 * 1280 = 40960
@@ -163,9 +163,9 @@ pub fn main() !void {
     var compiled_decode_embedder = try compiled_decode_embedder_future.await(io);
     defer compiled_decode_embedder.deinit();
 
-    var compiled_model = try compiled_decoder_future.await(io);
-    defer compiled_model.prefill.deinit();
-    defer compiled_model.decode.deinit();
+    const compiled_prefill, const compiled_decoder = try compiled_decoder_future.await(io);
+    errdefer compiled_prefill.deinit();
+    errdefer compiled_decoder.deinit();
    
     // -- Buffers
     
@@ -231,12 +231,6 @@ pub fn main() !void {
         enc_args.set(.{ &encoder_buffers, mel_output });
         compiled_encoder.call(enc_args, &enc_results);
         enc_results.fill(.{&encoder_output});
-
-	
-	const output = try encoder_output.toSliceAlloc(allocator, io);
-	defer output.free(allocator);
-	
-	std.debug.print("{any}\n", .{output.items(u32)[0..100]});
     }
     defer encoder_output.deinit();
     log.info("Encoder done.", .{});
@@ -255,8 +249,6 @@ pub fn main() !void {
         adp_args.set(.{ &adapter_buffers, encoder_output });
         compiled_adapter.call(adp_args, &adp_results);
         adp_results.fill(.{&adapter_output});
-
-	std.debug.print("{}\n", .{adapter_output.shape()});
     }
     defer adapter_output.deinit();
     log.info("Adapter done.", .{});
@@ -302,20 +294,17 @@ pub fn main() !void {
     );
     var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
     defer t_cond_buffer.deinit();
-    std.debug.print("t_cond first 10 values: ", .{});
-    for (0..@min(10, t_cond_data.len)) |j| {
-        std.debug.print("{d:.4} ", .{t_cond_data[j]});
-    }
-    std.debug.print("\n", .{});
 
     // 6. Decoder prefill
     log.info("Running decoder prefill...", .{});
     var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
     defer generated_token_slice.free(allocator);
     {
-        var prefill_args = try compiled_model.prefill.args(allocator);
+	defer compiled_prefill.deinit();
+	
+        var prefill_args = try compiled_prefill.args(allocator);
         defer prefill_args.deinit(allocator);
-        var prefill_results = try compiled_model.prefill.results(allocator);
+        var prefill_results = try compiled_prefill.results(allocator);
         defer prefill_results.deinit(allocator);
 
         var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
@@ -327,7 +316,7 @@ pub fn main() !void {
         defer prefill_output.deinit();
 
         prefill_args.set(.{ &decoder_buffers, embedder_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
-        compiled_model.prefill.call(prefill_args, &prefill_results);
+        compiled_prefill.call(prefill_args, &prefill_results);
         prefill_results.fill(.{ &prefill_output, &kv_cache_buffers });
 
         // Extract last token from prefill output (first generated token)
@@ -342,9 +331,11 @@ pub fn main() !void {
     log.info("Running decoder autoregressive...", .{});
     const eos_token: u32 = 2;
     {
-        var decode_args = try compiled_model.decode.args(allocator);
+	defer compiled_decoder.deinit();
+	
+        var decode_args = try compiled_decoder.args(allocator);
         defer decode_args.deinit(allocator);
-        var decode_results = try compiled_model.decode.results(allocator);
+        var decode_results = try compiled_decoder.results(allocator);
         defer decode_results.deinit(allocator);
 
         var emb_args = try compiled_decode_embedder.args(allocator);
@@ -396,7 +387,7 @@ pub fn main() !void {
             defer token_index_buffer.deinit();
 
             decode_args.set(.{ &decoder_buffers, decode_embed, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
-            compiled_model.decode.call(decode_args, &decode_results);
+            compiled_decoder.call(decode_args, &decode_results);
             decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers });
 
             try current_token_buffer.toSlice(io, generated_token_slice);
@@ -404,36 +395,6 @@ pub fn main() !void {
         std.debug.print("\n", .{});
         log.info("Decode done. Generated {} tokens total.", .{num_generated});
     }
-}
-
-
-fn loadWav(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
-    var arena_state: std.heap.ArenaAllocator = .init(allocator);
-    defer arena_state.deinit();
-
-    const arena = arena_state.allocator();
-    var sample_list: std.ArrayList(u8) = .empty;
-
-    const wav_fmt = try wav_utils.readPcmWav(arena, reader, &sample_list);
-    const byte_per_sample = wav_fmt.bits_per_sample / 8;
-    const sample_count = sample_list.items.len / (byte_per_sample * wav_fmt.num_channels);
-
-    const samples = try allocator.alloc(f32, sample_count);
-    for (0..sample_count) |i| {
-	const offset = i * byte_per_sample * wav_fmt.num_channels;
-
-	const sample = switch(byte_per_sample) {
-	    1 => (@as(f32, @floatFromInt(std.mem.bytesToValue(u8, sample_list.items[offset .. offset + 1]))) - 128.0) / 128.0,
-	    2 => @as(f32, @floatFromInt(std.mem.bytesToValue(i16, sample_list.items[offset .. offset + 2]))) / 32768.0,
-	    3 => @as(f32, @floatFromInt(std.mem.bytesToValue(i24, sample_list.items[offset .. offset + 3]))) / 8388608.0,
-	    4 => @as(f32, @floatFromInt(std.mem.bytesToValue(i32, sample_list.items[offset .. offset + 4]))) / 2147483648.0,
-	    else => unreachable,
-	};
-
-	samples[i] = sample;
-    }
-
-    return samples;
 }
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, padded_audio_len: usize) !zml.Exe {
@@ -462,11 +423,6 @@ pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *cons
     });
 }
 
-const CompileModelResult = struct {
-    prefill: zml.Exe,
-    decode: zml.Exe,
-};
-
 const VoxtralParameters = struct {
     prefill_embeds: Tensor,
     decode_embeds: Tensor,
@@ -475,34 +431,37 @@ const VoxtralParameters = struct {
     t_cond: Tensor,
 };
 
-pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, params: VoxtralParameters) !CompileModelResult {
-    var prefill_future = try io.concurrent(struct {
-	fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, params_: VoxtralParameters) !zml.Exe {
+pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, params: VoxtralParameters) !struct { zml.Exe, zml.Exe} {
+    const compile = struct {
+	fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, embeds_: Tensor, params_: VoxtralParameters) !zml.Exe {
 	    return try platform_.compile(allocator_, io_, model_, .forward, .{
-		params_.prefill_embeds,
+		embeds_,
 		params_.token_index,
 		params_.kv_cache,
 		params_.t_cond,
 	    });
 	}
-    }.call, .{allocator, io, platform, model, params});
-
-    var decode_future = try io.concurrent(struct {
-	fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, params_: VoxtralParameters) !zml.Exe {
-	    return try platform_.compile(allocator_, io_, model_, .forward, .{
-		params_.decode_embeds,
-		params_.token_index,
-		params_.kv_cache,
-		params_.t_cond,
-	    });
-	}
-    }.call, .{allocator, io, platform, model, params});
+    }.call;
     
+    var prefill_future = try io.concurrent(compile, .{ allocator, io, platform, model, params.prefill_embeds, params });
+    var decode_future = try io.concurrent(compile, .{ allocator, io, platform, model, params.decode_embeds, params });
 
-    const prefill_exe = try prefill_future.await(io);
-    const decode_exe = try decode_future.await(io);
+    return .{
+        try prefill_future.await(io),
+        try decode_future.await(io),
+    };
+}
 
-    return .{ .prefill = prefill_exe, .decode = decode_exe };
+pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    const bytes = b: {
+        const file = try dir.openFile(io, "tokenizer.json", .{});
+        defer file.close(io);
+        var reader = file.reader(io, &.{});
+        break :b try reader.interface.readAlloc(allocator, try file.length(io));
+    };
+    defer allocator.free(bytes);
+
+    return try .fromBytes(allocator, io, bytes);
 }
 
 /// Sinusoidal time embedding: encodes a scalar t into a [dim]-dimensional vector.
@@ -519,16 +478,4 @@ fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32) []
         result[i + half_dim] = @sin(angle);
     }
     return result;
-}
-
-pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
-    const bytes = b: {
-        const file = try dir.openFile(io, "tokenizer.json", .{});
-        defer file.close(io);
-        var reader = file.reader(io, &.{});
-        break :b try reader.interface.readAlloc(allocator, try file.length(io));
-    };
-    defer allocator.free(bytes);
-
-    return try .fromBytes(allocator, io, bytes);
 }

@@ -1,13 +1,13 @@
 const std = @import("std");
-const builtin = @import("builtin");
-const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
-const Shape = zml.Shape;
 
 const cfg = @import("config.zig");
 const Config = cfg.Config;
+
+const common = @import("common.zig");
+const rmsNorm = common.rmsNorm;
 
 pub const Encoder = struct {
     conv0: CausalConv1d,
@@ -41,27 +41,8 @@ pub const Encoder = struct {
         allocator.free(self.layers);
     }
 
-    pub fn load(self: *const Encoder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Encoder){
-	progress.increaseEstimatedTotalItems(store.view().count());
-        var timer: std.time.Timer = try .start();
-        var total_bytes: usize = 0;
-        defer {
-            const took = timer.read();
-            log.info("Loaded encoder weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-                total_bytes,
-                took,
-                total_bytes / took * std.time.ns_per_s,
-            });
-        }
-	
-	return zml.io.load(Encoder, self, allocator, io, platform, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .store = store,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
+    pub fn load(self: *const Encoder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Encoder) {
+        return common.loadModel(Encoder, self, allocator, io, platform, store, progress, "encoder");
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
@@ -201,18 +182,18 @@ pub const SelfAttention = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SelfAttention {
         return .{
-            .wq = initLinear(store.withPrefix("wq")),
-            .wk = initLinear(store.withPrefix("wk")),
-            .wv = initLinear(store.withPrefix("wv")),
-            .wo = initLinear(store.withPrefix("wo")),
+            .wq = common.linear(store.withPrefix("wq")),
+            .wk = common.linear(store.withPrefix("wk")),
+            .wv = common.linear(store.withPrefix("wv")),
+            .wo = common.linear(store.withPrefix("wo")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttention)) void {
-        deinitLinear(&self.wq);
-        deinitLinear(&self.wk);
-        deinitLinear(&self.wv);
-        deinitLinear(&self.wo);
+        common.deinitLinear(&self.wq);
+        common.deinitLinear(&self.wk);
+        common.deinitLinear(&self.wv);
+        common.deinitLinear(&self.wo);
     }
 
     /// x: [s, d] -> [s, d]
@@ -262,16 +243,16 @@ pub const SwiGluFfn = struct {
 
     pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
         return .{
-            .w1 = initLinear(store.withPrefix("w1")),
-            .w2 = initLinear(store.withPrefix("w2")),
-            .w3 = initLinear(store.withPrefix("w3")),
+            .w1 = common.linear(store.withPrefix("w1")),
+            .w2 = common.linear(store.withPrefix("w2")),
+            .w3 = common.linear(store.withPrefix("w3")),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(SwiGluFfn)) void {
-        deinitLinear(&self.w1);
-        deinitLinear(&self.w2);
-        deinitLinear(&self.w3);
+        common.deinitLinear(&self.w1);
+        common.deinitLinear(&self.w2);
+        common.deinitLinear(&self.w3);
     }
 
     /// x: [s, d] -> [s, d]
@@ -282,21 +263,3 @@ pub const SwiGluFfn = struct {
     }
 };
 
-// -- Helpers
-
-fn initLinear(store: zml.io.TensorStore.View) zml.nn.Linear {
-    return .init(
-        store.createTensorWithTags("weight", .{ .dout, .d }),
-        store.maybeCreateTensorWithTags("bias", .{.dout}),
-        .d,
-    );
-}
-
-fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
-    l.weight.deinit();
-    if (l.bias) |*b| b.deinit();
-}
-
-pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f32) Tensor {
-    return zml.nn.rmsNorm(x, .d, eps).mul(weight.broad(x.shape()));
-}
