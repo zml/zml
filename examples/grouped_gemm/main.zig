@@ -10,7 +10,7 @@ const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 const Demo = struct {
     pub fn forward(A: zml.Tensor, B: zml.Tensor, tokens_per_exp: zml.Tensor) zml.Tensor {
         // group_count=1 demo
-        const group_count: c_int = 3;
+        const group_count: c_int = @intCast(tokens_per_exp.dim(0));
         const transa = [_]cublas_gg.cublasOperation_t{cublas_gg.CUBLAS_OP_N};
         const transb = [_]cublas_gg.cublasOperation_t{cublas_gg.CUBLAS_OP_N};
         const m = [_]c_int{@intCast(A.dim(0))}; // nbre tok
@@ -18,7 +18,7 @@ const Demo = struct {
         const n = [_]c_int{@intCast(B.dim(1))}; // dim out
         const group_size = [_]c_int{ 1, 1, 1 };
 
-        const out_shape = zml.Shape.init(.{ 256, B.dim(1) }, A.dtype());
+        const out_shape = zml.Shape.init(.{ @divExact(A.dim(0), group_count), B.dim(1) }, A.dtype());
 
         return zml.Tensor.gemmGroupedBatched(A, B, tokens_per_exp, .{
             .transa_array = &transa,
@@ -45,9 +45,6 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    zml.init();
-    defer zml.deinit();
-
     // Auto-select platform
     const platform: zml.Platform = try .auto(io, .{});
 
@@ -61,11 +58,11 @@ pub fn main() !void {
     try cublas_gg.load(allocator);
 
     // Shapes: A[M,K], B[K,N]
-    const num_exp = 8;
+    const num_exp = 2;
 
-    const M: usize = 4096;
-    const K: usize = 1024;
-    const N: usize = 128;
+    const M: usize = 5;
+    const K: usize = 4;
+    const N: usize = 3;
 
     const A_t: zml.Tensor = .init(.{ num_exp * M, K }, .f32);
     const B_t: zml.Tensor = .init(.{ K, N }, .f32);
@@ -93,10 +90,22 @@ pub fn main() !void {
     defer tokens_per_exp_host.free(allocator);
 
     // Fill with something deterministic (all ones)
-    @memset(A_host.items(f32), 1.0); // 1.0 in f16
-    @memset(B_host.items(f32), 1.0); // 1.0 in f16
+    {
+        const a = A_host.items(f32);
+        for (0..a.len) |i| {
+            // Vary across the whole buffer with a mix of integer + fractional parts.
+            a[i] = @as(f32, @floatFromInt(i));
+        }
+    }
+    {
+        const b = B_host.items(f32);
+        for (0..b.len) |i| {
+            // Alternate signs and vary magnitude to make mistakes obvious.
+            b[i] = @floatFromInt(i + 1);
+        }
+    }
 
-    const data_u32: [num_exp]u32 = .{ 16, 16, 16, 16, 16, 16, 16, 16 };
+    const data_u32: [num_exp]u32 = .{ 1, 2 };
     @memcpy(tokens_per_exp_host.items(u32)[0..num_exp], &data_u32);
 
     var A_buf: zml.Buffer = try .fromSlice(io, platform, A_host);
@@ -113,7 +122,24 @@ pub fn main() !void {
 
     var C_host = try zml.Slice.alloc(allocator, zml.Shape.init(.{ M, N }, .f32));
     defer C_host.free(allocator);
+    log.info(">>>COUCOU", .{});
+    _ = try C_buf.await(io);
+    log.info(">>>COUCOU1", .{});
     try C_buf.toSlice(io, C_host);
+    log.info(">>>COUCOU2", .{});
 
-    log.info("C[0,0] : {d}", .{@as(f32, @bitCast(C_host.items(f32)[100]))});
+    // Column-major buffer print, formatted by rows:
+    // buffer index = col * M + row (cuBLAS convention), but we print row-by-row for readability.
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    const w = &stdout.interface;
+
+    for (0..M) |row| {
+        try w.print("C[row={d}] ", .{row});
+        for (0..N) |col| {
+            const idx = col * M + row; // column-major indexing
+            const v: f32 = @bitCast(C_host.items(f32)[idx]);
+            try w.print("{d:8.4} ", .{v});
+        }
+        try w.print("\n", .{});
+    }
 }

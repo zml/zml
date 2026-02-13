@@ -31,8 +31,8 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    zml.init();
-    defer zml.deinit();
+    // zml.init();
+    // defer zml.deinit();
 
     const args: Args = blk: {
         var ret: Args = .{};
@@ -55,10 +55,10 @@ pub fn main() !void {
     };
 
     log.info("Resolving Model repo", .{});
-    var repo = try zml.safetensors.resolveModelRepo(allocator, io, args.model.?);
-    defer repo.deinit(allocator, io);
+    var repo = try zml.safetensors.resolveModelRepo(io, args.model.?);
+    //defer repo.deinit(allocator, io);
 
-    const parsed_config = try parseConfig(allocator, io, repo.dir);
+    const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
     const config = parsed_config.value;
 
@@ -98,7 +98,7 @@ pub fn main() !void {
         .rng = .init(),
     };
 
-    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo.dir });
+    var tokenizer_future = io.async(loadTokenizer, .{ allocator, io, repo });
     errdefer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
