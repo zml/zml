@@ -1071,8 +1071,8 @@ pub const Tensor = struct {
     /// Axes with the same tag on both sides, and which aren't contracting,
     /// are considered "batching axes".
     pub fn dot(lhs: Tensor, rhs: Tensor, args: anytype) Tensor {
-        stdx.debug.assert(lhs.shape().hasTag(args) != null, "Expected lhs to have {} tag, got {f}", .{ args, lhs.shape() });
-        stdx.debug.assert(rhs.shape().hasTag(args) != null, "Expected rhs to have {} tag, got {f}", .{ args, rhs.shape() });
+        stdx.debug.assert(lhs.shape().hasTag(args) != null, "Expected lhs to have {any} tag, got {f}", .{ args, lhs.shape() });
+        stdx.debug.assert(rhs.shape().hasTag(args) != null, "Expected rhs to have {any} tag, got {f}", .{ args, rhs.shape() });
 
         const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
         const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
