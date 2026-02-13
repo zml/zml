@@ -76,7 +76,6 @@ const CliArgs = struct {
     num_inference_steps: usize = 1,
     async_limit: ?usize = null,
     generator_type: utils.GeneratorType = .accelerator_box_muller,
-    data_type: zml.DataType = .f32,
     interactive: bool = false,
     // 8K UHD 7680x4320
     // 4K QHD 3840x2160
@@ -86,6 +85,7 @@ const CliArgs = struct {
     // LD 256x256
     // HLD 128x128
     resolution: Resolution = .HLD,
+    data_type: zml.DataType = .f32,
 
     pub const help =
         \\ Usage: flux \

@@ -116,18 +116,18 @@ fn get_1d_rotary_pos_embed(dim: i64, pos: Tensor, theta: f32) struct { Tensor, T
     const half = @divExact(dim, 2);
 
     // Symbolic frequency calculation using iota
-    const shape = zml.Shape.init(.{half}, .f32);
+    const shape = zml.Shape.init(.{half}, pos.dtype());
     const iota = Tensor.iota(shape, 0);
 
     // Using standard RoPE formula: theta ^ (-i / half)
     const log_theta = std.math.log(f32, theta, std.math.e);
     const exponent_factor = -log_theta / @as(f32, @floatFromInt(half));
-    const exponents = iota.mul(Tensor.scalar(exponent_factor, .f32));
+    const exponents = iota.mul(Tensor.scalar(exponent_factor, pos.dtype()));
     const freq_half = exponents.exp(); // [half]
 
     // Interleave: [f0, f1] -> [f0, f0, f1, f1]
     // [half] -> [half, 1] -> broad [half, 2] -> reshape [dim]
-    const freq = freq_half.reshape(.{ half, 1 }).broad(zml.Shape.init(.{ half, 2 }, .f32)).reshape(.{dim});
+    const freq = freq_half.reshape(.{ half, 1 }).broad(zml.Shape.init(.{ half, 2 }, pos.dtype())).reshape(.{dim});
 
     // pos: [S] -> [S, 1]
     // freq: [D] -> [1, D]

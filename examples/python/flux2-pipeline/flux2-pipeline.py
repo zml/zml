@@ -6,17 +6,17 @@ import torch
 import numpy as np
 from PIL import Image
 
-# from transformers.models.qwen2 import Qwen2TokenizerFast
-# from transformers.models.qwen3 import Qwen3ForCausalLM
-# from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
-# from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
-# from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from transformers.models.qwen2 import Qwen2TokenizerFast
+from transformers.models.qwen3 import Qwen3ForCausalLM
+from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
+from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
-from tokenization_qwen2_fast import Qwen2TokenizerFast
-from modeling_qwen3 import Qwen3ForCausalLM
-from transformer_flux2 import Flux2Transformer2DModel
-from autoencoder_kl_flux2 import AutoencoderKLFlux2
-from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+# from tokenization_qwen2_fast import Qwen2TokenizerFast
+# from modeling_qwen3 import Qwen3ForCausalLM
+# from transformer_flux2 import Flux2Transformer2DModel
+# from autoencoder_kl_flux2 import AutoencoderKLFlux2
+# from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
 import flux2_tools
 import utils
@@ -54,7 +54,8 @@ def get_encoding_embeded_from_tokens(token_encoder: Qwen3ForCausalLM,
     assert batch_size == 1, "Only batch size 1 is supported currently."
     prompt_embeds = out.permute(0, 2, 1, 3).reshape(batch_size, seq_len, num_channels * hidden_dim)
     text_ids = flux2_tools.prepare_text_ids(prompt_embeds)
-    text_ids = text_ids.to(token_encoder.device)
+    prompt_embeds = prompt_embeds.to(device=token_encoder.device, dtype=token_encoder.dtype)
+    text_ids = text_ids.to(device=token_encoder.device)
     return prompt_embeds, text_ids
 
 
@@ -64,7 +65,6 @@ def get_latents(transformer: Flux2Transformer2DModel,
                 device = "cpu") -> Tuple[torch.Tensor, torch.Tensor]:
     seed = 0
     batch_size = 1
-    transformer.to(device)
     num_channels_latents = transformer.config.in_channels // 4
     vae_scale_factor = 8 
     adjusted_height = 2 * (int(height) // (vae_scale_factor * 2))
@@ -81,11 +81,13 @@ def get_latents(transformer: Flux2Transformer2DModel,
     # latents_raw = torch.randn(shape, generator=generator, device=device, dtype=torch.float32).to(device)
     
     generator = utils.BoxMullerGenerator(seed=seed, device=device)
-    latents_raw = generator.randn(shape).to(torch.float32).to(device)
+    latents_raw = generator.randn(shape).to(device=device)
 
     print(f"    Latents Raw (first 20): {latents_raw.flatten().tolist()[:20]}")
     latent_ids = flux2_tools.prepare_latent_ids(latents_raw)
     latents = flux2_tools.pack_latents(latents_raw)
+    latent_ids = latent_ids.to(device=device, dtype=transformer.dtype)
+    latents = latents.to(device=device, dtype=transformer.dtype)
     return latents, latent_ids
 
 
@@ -95,8 +97,8 @@ def schedule(transformer: Flux2Transformer2DModel,
              latent_ids: torch.Tensor,
              prompt_embeds: torch.Tensor,
              text_ids: torch.Tensor,
-             num_inference_steps: int = 1, 
-             device = "cpu") -> torch.Tensor:
+             device,
+             num_inference_steps: int = 1) -> torch.Tensor:
 
     sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps)
     image_seq_len = latents.shape[1]
@@ -114,19 +116,25 @@ def schedule(transformer: Flux2Transformer2DModel,
     print(f"Scheduler Sigmas (first 20): {scheduler.sigmas.flatten().tolist()[:20]}")
     print(f"   Num Inference Steps: {num_inference_steps}")
     scheduler.set_begin_index(0)
+    transformer = transformer.to(device=device)
+    print(f"{transformer.device=}, {latents.device=} {prompt_embeds.device=} {text_ids.device=} {latent_ids.device=}")
+
     for idx, timestep in enumerate(timesteps):
         print(f"   Step {idx+1}/{num_inference_steps} (t={timestep:.2f})")
         
         # Broadcast timestep
         timestep = timestep.expand(latents.shape[0]).to(latents.dtype)
         
-        latent_model_input = latents.to(transformer.dtype)
+        latent_model_input = latents
         latent_image_ids = latent_ids
+        print(f"{latent_model_input.dtype=}, {timestep.dtype=}, {prompt_embeds.dtype=}, {text_ids.dtype=}, {latent_image_ids.dtype=}")
         
+        # Create guidance tensor
+        guidance = torch.tensor([3.5], device=latents.device, dtype=latents.dtype)
         noise_pred = transformer(
             hidden_states=latent_model_input,
             timestep=timestep / 1000,
-            guidance=None,
+            guidance=guidance,
             encoder_hidden_states=prompt_embeds,
             txt_ids=text_ids,
             img_ids=latent_image_ids,
@@ -150,12 +158,13 @@ def schedule(transformer: Flux2Transformer2DModel,
 
 
 
-def variational_auto_encode(variational_auto_encoder: AutoencoderKLFlux2, latents: torch.Tensor, device="cpu") -> torch.Tensor:
-    variational_auto_encoder.to(device)
-    # assert latents.dtype == torch.float32, "Latents must be float32 for VAE decoding."
+def variational_auto_encode(variational_auto_encoder: AutoencoderKLFlux2, latents: torch.Tensor) -> torch.Tensor:
+    # Convert latents to VAE dtype
+    vae_dtype = next(variational_auto_encoder.parameters()).dtype
+    latents = latents.to(dtype=vae_dtype, device=variational_auto_encoder.device)
+    
     # VAE Normalization (Flux2 Klein Specific)
-    # assert latents.dtype == torch.float32, "Latents must be float32 for VAE decoding."
-    latents_bn_mean = variational_auto_encoder.bn.running_mean.view(1, -1, 1, 1).to(device, latents.dtype)
+    latents_bn_mean = variational_auto_encoder.bn.running_mean.view(1, -1, 1, 1).to(variational_auto_encoder.device, latents.dtype)
     print(f"    VAE BN Running Mean (first 20): {latents_bn_mean.flatten()[:20]}")
     latents_bn_std = torch.sqrt(variational_auto_encoder.bn.running_var.view(1, -1, 1, 1) + variational_auto_encoder.config.batch_norm_eps).to(
         latents.device, latents.dtype
@@ -199,9 +208,15 @@ def save_encoding_embeded_from_tokens(token_encoded_embeds: torch.Tensor, text_i
     np.save(f"/Users/kevin/zml/{file_prefix}_text_ids.npy", text_ids.cpu().detach().numpy())
 
 def run_pipline():
+    torch.set_default_dtype(torch.bfloat16)
+    # torch.set_default_dtype(torch.float32)
+
     repo_id = "black-forest-labs/FLUX.2-klein-4B"
     prompt = "A photo of a cat"
-    img_dim: int = 64
+    img_dim: int = 16
+    # device = "mps"
+    device = "cpu"
+    # device = "cuda"
 
     print("\n>>> Tokenizing Prompt...")
 
@@ -209,28 +224,29 @@ def run_pipline():
         repo_id,
         subfolder="tokenizer"
     )
-    text, token = get_tokens_from_prompt(tokenizer=tokenizer, prompt=prompt, max_length=128)
+    text, token = get_tokens_from_prompt(tokenizer=tokenizer, prompt=prompt, max_length=512)
     print(f"text_templated: from {prompt} to {text}")
     print(f"input_ids: {token['input_ids'].flatten()[:20]}")
     print(f"attention_mask: {token['attention_mask'].flatten()[:20]}")
     
     print(f"token size {token['input_ids'].shape}")
-    # sys.exit(0)
 
     print("\n>>> Tokenizing Prompt...")
 
     token_encoder = Qwen3ForCausalLM.from_pretrained(
         repo_id,
         subfolder="text_encoder",
-        # dtype=torch.bfloat16,
-        dtype=torch.float32,
+        dtype=torch.get_default_dtype(),
     )
-    token_encoder.to("cpu")
+    token_encoder.to(device)
 
+    print(f"{token_encoder.dtype=}")
     token_encoded_embeds, text_ids = get_encoding_embeded_from_tokens(token_encoder=token_encoder, tokens=token)
-    print(f"    text_ids (first 20). {text_ids.shape} : {text_ids.flatten()[:20]}")
-    print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
-    
+    print(f"    text_ids (first 20). {text_ids.dtype} {text_ids.shape} : {text_ids.flatten()[:20]}")
+    print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.dtype} {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
+
+    print(f"{token_encoded_embeds.dtype=}, {text_ids.dtype=}")
+
     # Save embeddings to npy files (convert bf16 to f32 for numpy compatibility)
     # save_encoding_embeded_from_tokens(token_encoded_embeds, text_ids, "flux_klein_notebook")
     # print(f"Saved embeddings to /Users/kevin/zml/flux_klein_notebook_embeds.npy")
@@ -244,18 +260,23 @@ def run_pipline():
     print(f"attention_mask: {token['attention_mask'].flatten()[:20]}")
     print("\n>>> Encoding Prompt...")
 
-    print(f"    text_ids (first 20). {text_ids.shape} : {text_ids.flatten()[:20]}")
-    print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
+    print(f"    text_ids (first 20). {text_ids.dtype} {text_ids.shape} : {text_ids.flatten()[:20]}")
+    print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.dtype} {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
+
 
     print("\n>>>Preparing Latents...")
     transformer = Flux2Transformer2DModel.from_pretrained(
         repo_id,
-        subfolder="transformer"
+        subfolder="transformer",
+        # low_cpu_mem_usage=False
     )
-    latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim)
-    print(f"    Latents (first 20). {latents.shape} : {latents.flatten()[:20]}")
-    print(f"    Latent_ids (first 20). {latent_ids.shape} : {latent_ids.flatten()[:20]}")
-    
+    print(f"{transformer.dtype=}")
+    print(f"{transformer.x_embedder.weight.dtype}")
+    latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim, device=device)
+    print(f"    Latents (first 20). {latents.dtype} {latents.shape} : {latents.flatten()[:20]}")
+    print(f"    Latent_ids (first 20). {latent_ids.dtype} {latent_ids.shape} : {latent_ids.flatten()[:20]}")
+    print(f" {latents.dtype=}, {latent_ids.dtype=}")
+
     print("\n>>> Preparing Timesteps...")
     scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(
         repo_id,
@@ -269,21 +290,25 @@ def run_pipline():
         latent_ids=latent_ids,
         prompt_embeds=token_encoded_embeds,
         text_ids=text_ids,
-        num_inference_steps=1)
+        num_inference_steps=1,
+        device=device)
 
-    print(f"    Latents Out (first 20). {latents_out.shape} : {latents_out.flatten().tolist()[:20]}")
+    print(f"    Latents Out (first 20). {latents_out.dtype} {latents_out.shape} : {latents_out.flatten().tolist()[:20]}")
 
     print("\n>>> Decoding Latents...")
     variational_auto_encoder = AutoencoderKLFlux2.from_pretrained(
         repo_id,
-        subfolder="vae"
+        subfolder="vae",
+        low_cpu_mem_usage=False
     )
+    variational_auto_encoder.to(device)
     image_decoded: torch.Tensor = variational_auto_encode(variational_auto_encoder=variational_auto_encoder,latents=latents_out)
 
     print(f"    Image Decoded (first 20). {image_decoded.shape} : {image_decoded.flatten().tolist()[:20]}")
 
     convert_image_to_pil_png(image_decoded, "flux_klein_notebook_result")
     print("\n>>> Pipeline Complete.")
+    sys.exit(0)
 
 # %%
 
