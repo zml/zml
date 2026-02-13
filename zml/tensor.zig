@@ -295,7 +295,7 @@ pub const Tensor = struct {
         const valid_mask = slices_idx.cmp(.LT, total_blocks_broad);
 
         const minus_one = Tensor.scalar(-1, .i32).broad(Shape.init(.{max_n_blocks}, .i32));
-        const xblock_schedule = valid_mask.select(pack, minus_one);
+        var xblock_schedule = valid_mask.select(pack, minus_one);
 
         const bias_f32 = bias.convert(.f32);
 
@@ -444,6 +444,8 @@ pub const Tensor = struct {
                 w_mx_stride_2,
             },
         );
+
+        xblock_schedule = xblock_schedule.print();
 
         const kernel_args = .{
             // Y TMA descriptor + base
