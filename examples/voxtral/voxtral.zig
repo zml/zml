@@ -134,8 +134,8 @@ pub fn main() !void {
     var compiled_mel_spectrum_future = try io.concurrent(compileMelSpectrum, .{allocator, io, platform, melspectro_model, audio_len});
     var compiled_encoder_future = try io.concurrent(compileEncoder, .{allocator, io, platform, encoder_model, audio_len});
     var compiled_adapter_future = try io.concurrent(compileAdapter, .{allocator, io, platform, adapter, encoder_seq_len, config});
-    var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, @as(u32, @intCast(tokens.len)), config});
-    var compiled_decode_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, @as(u32, 1), config});
+    var compiled_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len, @as(u32, @intCast(tokens.len)), config});
+    var compiled_decode_embedder_future = try io.concurrent(compileEmbedder, .{allocator, io, platform, embedder, adapter_seq_len, @as(u32, 1), config});
     var compiled_decoder_future = try io.concurrent(compileDecoder, .{allocator, io, platform, model, model_params});
     
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{&melspectro_model, io, platform});
@@ -232,6 +232,12 @@ pub fn main() !void {
         enc_args.set(.{ &encoder_buffers, mel_output });
         compiled_encoder.call(enc_args, &enc_results);
         enc_results.fill(.{&encoder_output});
+
+	
+	const output = try encoder_output.toSliceAlloc(allocator, io);
+	defer output.free(allocator);
+	
+	std.debug.print("{any}\n", .{output.items(u32)[0..100]});
     }
     defer encoder_output.deinit();
     log.info("Encoder done.", .{});
@@ -255,6 +261,35 @@ pub fn main() !void {
     }
     defer adapter_output.deinit();
     log.info("Adapter done.", .{});
+
+    // 4. Embedder - combine audio embeddings with token embeddings
+    log.info("Running embedder...", .{});
+    var embedder_output: zml.Buffer = undefined;
+    {
+        var emb_args = try compiled_embedder.args(allocator);
+        defer emb_args.deinit(allocator);
+        var emb_results = try compiled_embedder.results(allocator);
+        defer emb_results.deinit(allocator);
+
+        const token_slice: zml.Slice = .init(
+            .init(.{@as(u32, @intCast(tokens.len))}, .u32),
+            std.mem.sliceAsBytes(tokens),
+        );
+        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice);
+        defer token_buffer.deinit();
+
+        var pos_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
+        defer pos_buffer.deinit();
+
+        embedder_output = try .uninitialized(io, platform,
+            .init(.{ .s = @as(u32, @intCast(tokens.len)), .d = config.dim }, .bf16), .{});
+
+        emb_args.set(.{ &embedder_buffers, adapter_output, token_buffer, pos_buffer });
+        compiled_embedder.call(emb_args, &emb_results);
+        emb_results.fill(.{&embedder_output});
+    }
+    defer embedder_output.deinit();
+    log.info("Embedder done.", .{});
 }
 
 
@@ -305,10 +340,11 @@ pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const
     });
 }
 
-pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, seq_len: u32, config: Config) !zml.Exe {
+pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, adapter_seq_len_: u32, seq_len: u32, config: Config) !zml.Exe {
     return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = seq_len, .d = config.dim }, .bf16),
+        Tensor.init(.{ .s = adapter_seq_len_, .d = config.dim }, .bf16),
         Tensor.init(.{ .s = seq_len }, .u32),
+        Tensor.init(.{}, .u32),
     });
 }
 
