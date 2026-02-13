@@ -168,9 +168,9 @@ pub const Decoder = struct {
         self.norm.deinit();
     }
 
-    /// Run all decoder layers on input embeddings.
+    /// Run all decoder layers on input embeddings, compute logits and return argmax tokens.
     /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
-    /// Returns: ([s, d], KvCache)
+    /// Returns: (tokens [s] u32, KvCache)
     pub fn forward(self: Decoder, input_embeds: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
         var h = input_embeds;
         var cache = kv_cache;
@@ -184,13 +184,11 @@ pub const Decoder = struct {
         }
 
         h = rmsNorm(h, self.norm, self.norm_eps);
-        return .{ h, cache };
-    }
 
-    /// Compute output logits via tied embeddings: hidden.dot(tok_embeddings, .d)
-    /// hidden: [s, d] → [s, vocab]
-    pub fn logits(self: Decoder, hidden: Tensor) Tensor {
-        return hidden.dot(self.tok_embeddings.convert(hidden.dtype()), .d);
+        // Compute logits via tied embeddings and take argmax
+        const output_logits = h.dot(self.tok_embeddings.convert(h.dtype()), .d);
+        const output_tokens = output_logits.argMax(.vocab).indices.convert(.u32);
+        return .{ output_tokens, cache };
     }
 };
 
