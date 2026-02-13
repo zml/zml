@@ -86,7 +86,9 @@ pub const LatentGenerator = struct {
         var dummy: flux_model.Flux2Transformer2DModel = undefined;
         const latents = dummy.pack_latents(latents_raw);
         const ids = dummy.prepare_latent_ids(latents_raw);
-        return .{ rng_out, latents, ids };
+        // Convert to bf16 after computation to avoid NaN during math ops
+        const latents_bf16 = latents.convert(.bf16);
+        return .{ rng_out, latents_bf16, ids };
     }
 
     pub fn forwardPolar(rng: zml.Tensor.Rng, latents_raw_shape: zml.Shape) struct { zml.Tensor.Rng, zml.Tensor, zml.Tensor } {
@@ -95,7 +97,9 @@ pub const LatentGenerator = struct {
         var dummy: flux_model.Flux2Transformer2DModel = undefined;
         const latents = dummy.pack_latents(latents_raw);
         const ids = dummy.prepare_latent_ids(latents_raw);
-        return .{ rng_out, latents, ids };
+        // Convert to bf16 after computation to avoid NaN during math ops
+        const latents_bf16 = latents.convert(.bf16);
+        return .{ rng_out, latents_bf16, ids };
     }
 };
 
@@ -162,20 +166,26 @@ pub fn get_latents(
     const adjusted_width = (img_dim.width / (vae_scale_factor * 2));
 
     const shape_latents = [_]usize{ batch_size, num_channels_latents, adjusted_height, adjusted_width };
-    const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
 
     switch (generator_type) {
         .torch => {
+            const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .bf16);
             // CPU-side MT19937 + Box-Muller, matching torch.Generator exactly.
             var gen = TorchGenerator.init(seed);
-            const data = try gen.randn(allocator, &shape_latents);
-            defer allocator.free(data);
 
-            const latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(data));
+            // Generate bf16 data directly
+            const rand_data = try gen.randnBf16(allocator, &shape_latents);
+            // const rand_data = try gen.randn(allocator, &shape_latents);
+            defer allocator.free(rand_data);
+
+            const latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(rand_data));
             return pack_latents(allocator, io, platform, latents_buffer);
         },
         inline .accelerator_box_muller, .accelerator_marsaglia => |gt| {
+            const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
             // Accelerator-based RNG compiled graph.
+            // Important: Generate in f32 to avoid numerical instability.
+            // bf16 has only 7 mantissa bits, causing NaN values in sqrt/log/cos/sin operations.
             const forward_fn = switch (gt) {
                 .accelerator_box_muller => LatentGenerator.forward,
                 .accelerator_marsaglia => LatentGenerator.forwardPolar,
@@ -390,6 +400,26 @@ pub const TorchGenerator = struct {
         }
         return result;
     }
+
+    /// Generate bf16 samples by converting f32 to bf16 format.
+    /// This matches PyTorch's behavior: generate in f32, then cast to bf16.
+    /// BF16 format: 1 sign bit, 8 exponent bits, 7 mantissa bits (upper 16 bits of f32).
+    pub fn randnBf16(self: *TorchGenerator, allocator: std.mem.Allocator, shape: []const usize) ![]u16 {
+        // Generate f32 samples first
+        const f32_samples = try self.randn(allocator, shape);
+        defer allocator.free(f32_samples);
+
+        // Convert to bf16 by extracting upper 16 bits
+        const result = try allocator.alloc(u16, f32_samples.len);
+        errdefer allocator.free(result);
+
+        for (f32_samples, 0..) |val, i| {
+            const bits: u32 = @bitCast(val);
+            result[i] = @truncate(bits >> 16);
+        }
+
+        return result;
+    }
 };
 
 pub fn prepare_text_ids(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, seq_len: usize) !zml.Buffer {
@@ -561,6 +591,10 @@ pub fn schedule(
     defer rotary_cos_dev.deinit();
     defer rotary_sin_dev.deinit();
 
+    // Debug: Print RoPE values
+    try tools.printFlatten(allocator, io, rotary_cos_dev, 20, "   RoPE Cos (first 20)", .{});
+    try tools.printFlatten(allocator, io, rotary_sin_dev, 20, "   RoPE Sin (first 20)", .{});
+
     // -----------------------
 
     log.info("   Empirical Mu: {d:.4}", .{empirical_mu});
@@ -573,8 +607,8 @@ pub fn schedule(
     };
 
     const latents_shape = latents.shape();
-    const pixel_latents_shape = zml.Shape.init(.{ .b = 1, .s = latents_shape.dim(1), .d = latents_shape.dim(2) }, .f32);
-    const t_proj_shape = zml.Shape.init(.{ .b = 1, .d = 256 }, .f32);
+    const pixel_latents_shape = zml.Shape.init(.{ .b = 1, .s = latents_shape.dim(1), .d = latents_shape.dim(2) }, .bf16);
+    const t_proj_shape = zml.Shape.init(.{ .b = 1, .d = 256 }, .bf16);
     const rotary_shape = rotary_cos_dev.shape();
 
     const sym_latents = zml.Tensor.fromShape(pixel_latents_shape);
@@ -595,9 +629,9 @@ pub fn schedule(
     for (scheduler.timesteps, 0..) |t_step, idx| {
         log.info("   Step {d}/{d} (t={d:.2})", .{ idx + 1, num_inference_steps, t_step });
 
-        // Python output suggests t=1000 is used inside embedding (chaotic output).
-        // transformer_flux2.py multiplies by 1000 inside forward.
-        // So passing t_step (1000) is correct.
+        // Python divides timestep by 1000 before passing to transformer,
+        // but the transformer multiplies by 1000 internally before computing embeddings.
+        // So we use the full timestep value for our precomputed embeddings.
         const t_val: f32 = t_step;
         // Heap allocate to avoid stack-pointer issues with Buffer
         const t_proj_slice = try allocator.alloc(f32, 256);
@@ -609,12 +643,31 @@ pub fn schedule(
             t_proj_slice[j] = @cos(arg);
             t_proj_slice[j + 128] = @sin(arg);
         }
-        var t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(t_proj_slice));
+        // Convert to bf16
+        const t_proj_bf16 = try allocator.alloc(u16, 256);
+        defer allocator.free(t_proj_bf16);
+        for (t_proj_slice, 0..) |val, i| {
+            const bits: u32 = @bitCast(val);
+            t_proj_bf16[i] = @truncate(bits >> 16);
+        }
+        
+        // Debug: print first 20 values
+        if (idx == 0) {
+            log.info("   Timestep Projection (first 20): [{d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}, {d:.6}]", .{
+                t_proj_slice[0], t_proj_slice[1], t_proj_slice[2], t_proj_slice[3],
+                t_proj_slice[4], t_proj_slice[5], t_proj_slice[6], t_proj_slice[7],
+                t_proj_slice[8], t_proj_slice[9], t_proj_slice[10], t_proj_slice[11],
+                t_proj_slice[12], t_proj_slice[13], t_proj_slice[14], t_proj_slice[15],
+                t_proj_slice[16], t_proj_slice[17], t_proj_slice[18], t_proj_slice[19],
+            });
+        }
+        
+        var t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(t_proj_bf16));
         // defer t_proj_buf.deinit();
 
         // Guidance Projection
         const guidance_scale: f32 = 3.5;
-        const g_val: f32 = guidance_scale * 1000.0;
+        const g_val: f32 = guidance_scale * 1000.0; // Python multiplies by 1000 internally
         const g_proj_slice = try allocator.alloc(f32, 256);
         defer allocator.free(g_proj_slice);
 
@@ -623,7 +676,14 @@ pub fn schedule(
             g_proj_slice[j] = @cos(arg);
             g_proj_slice[j + 128] = @sin(arg);
         }
-        var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_slice));
+        // Convert to bf16
+        const g_proj_bf16 = try allocator.alloc(u16, 256);
+        defer allocator.free(g_proj_bf16);
+        for (g_proj_slice, 0..) |val, i| {
+            const bits: u32 = @bitCast(val);
+            g_proj_bf16[i] = @truncate(bits >> 16);
+        }
+        var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_bf16));
         defer g_proj_buf.deinit();
 
         // Debug: Print Timestep Projection
@@ -651,27 +711,48 @@ pub fn schedule(
         const noise_pred_buf = res_step.get(zml.Buffer);
 
         const shape_flat = current_latents.shape().count();
-        const noise_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .f32));
+        const noise_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .bf16));
         defer noise_slice.free(allocator);
         try noise_pred_buf.toSlice(io, noise_slice);
 
-        const latents_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .f32));
+        const latents_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .bf16));
         defer latents_slice.free(allocator);
         try current_latents.toSlice(io, latents_slice);
 
-        const n_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(noise_slice.items(u8))));
-        const l_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(latents_slice.items(u8))));
+        const n_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(noise_slice.items(u8))));
+        const l_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(latents_slice.items(u8))));
 
-        // try tools.printFlatten(allocator, io, noise_pred_buf, 20, "   noise_pred (transformer output) (first 20)", .{});
-        // try tools.printFlatten(allocator, io, current_latents, 20, "   Latents before step.", .{ .include_shape = true });
+        // Convert bf16 to f32 for scheduler computation
+        const n_data_f32 = try allocator.alloc(f32, shape_flat);
+        defer allocator.free(n_data_f32);
+        const l_data_f32 = try allocator.alloc(f32, shape_flat);
+        defer allocator.free(l_data_f32);
+        for (n_data_bf16, 0..) |val, i| {
+            const bits: u32 = @as(u32, val) << 16;
+            n_data_f32[i] = @bitCast(bits);
+        }
+        for (l_data_bf16, 0..) |val, i| {
+            const bits: u32 = @as(u32, val) << 16;
+            l_data_f32[i] = @bitCast(bits);
+        }
 
-        const out_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .f32));
-        defer out_slice.free(allocator);
-        const out_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(out_slice.items(u8))));
+        try tools.printFlatten(allocator, io, noise_pred_buf, 20, "   noise_pred (transformer output) (first 20)", .{});
+        try tools.printFlatten(allocator, io, current_latents, 20, "   Latents before step.", .{ .include_shape = true });
 
-        try scheduler.step(n_data, l_data, out_data);
+        const out_data_f32 = try allocator.alloc(f32, shape_flat);
+        defer allocator.free(out_data_f32);
 
-        const next_latents_buf = try zml.Buffer.fromBytes(io, platform, current_latents.shape(), std.mem.sliceAsBytes(out_data));
+        try scheduler.step(n_data_f32, l_data_f32, out_data_f32);
+
+        // Convert f32 back to bf16
+        const out_data_bf16 = try allocator.alloc(u16, shape_flat);
+        defer allocator.free(out_data_bf16);
+        for (out_data_f32, 0..) |val, i| {
+            const bits: u32 = @bitCast(val);
+            out_data_bf16[i] = @truncate(bits >> 16);
+        }
+
+        const next_latents_buf = try zml.Buffer.fromBytes(io, platform, current_latents.shape(), std.mem.sliceAsBytes(out_data_bf16));
 
         if (!is_first) current_latents.deinit();
         current_latents = next_latents_buf;
@@ -716,8 +797,17 @@ fn unpackLatentsWithIds(
     defer ids_slice.free(allocator);
     try latent_ids.toSlice(io, ids_slice);
 
-    const lat_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(lat_slice.items(u8))));
+    const lat_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(lat_slice.items(u8))));
     const ids_data = std.mem.bytesAsSlice(i32, @as([]align(4) u8, @alignCast(ids_slice.items(u8))));
+
+    // Convert bf16 to f32 for processing
+    const lat_count: usize = @intCast(batch_size * seq_len * channels);
+    const lat_data = try allocator.alloc(f32, lat_count);
+    defer allocator.free(lat_data);
+    for (lat_data_bf16, 0..) |val, i| {
+        const bits: u32 = @as(u32, val) << 16;
+        lat_data[i] = @bitCast(bits);
+    }
 
     // Find max h and w from IDs (column 1 = h_ids, column 2 = w_ids)
     var max_h: i32 = 0;
@@ -732,13 +822,13 @@ fn unpackLatentsWithIds(
     const w: usize = @intCast(max_w + 1);
 
     // Allocate output: [B, C, H, W]
-    const out_shape = zml.Shape.init(.{ batch_size, channels, h, w }, .f32);
+    const out_shape = zml.Shape.init(.{ batch_size, channels, h, w }, .bf16);
     const out_count = out_shape.count();
-    const out_bytes = try allocator.alloc(f32, out_count);
-    defer allocator.free(out_bytes);
+    const out_bytes_f32 = try allocator.alloc(f32, out_count);
+    defer allocator.free(out_bytes_f32);
 
     // Initialize to zero
-    @memset(out_bytes, 0);
+    @memset(out_bytes_f32, 0);
 
     // Scatter tokens into place
     for (0..@intCast(batch_size)) |b| {
@@ -755,12 +845,20 @@ fn unpackLatentsWithIds(
                     c * h * w +
                     h_id * w +
                     w_id;
-                out_bytes[out_idx] = lat_data[in_idx];
+                out_bytes_f32[out_idx] = lat_data[in_idx];
             }
         }
     }
 
-    return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bytes));
+    // Convert f32 to bf16
+    const out_bytes_bf16 = try allocator.alloc(u16, out_count);
+    defer allocator.free(out_bytes_bf16);
+    for (out_bytes_f32, 0..) |val, i| {
+        const bits: u32 = @bitCast(val);
+        out_bytes_bf16[i] = @truncate(bits >> 16);
+    }
+
+    return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bytes_bf16));
 }
 
 const RgbImage = struct {
@@ -916,9 +1014,7 @@ pub fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
     }
 }
 
-
 pub const RoPE = struct {
     cos: zml.Tensor,
     sin: zml.Tensor,
 };
-

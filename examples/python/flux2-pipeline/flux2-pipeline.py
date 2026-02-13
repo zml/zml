@@ -77,11 +77,13 @@ def get_latents(transformer: Flux2Transformer2DModel,
         adjusted_width // 2
     )
 
-    # generator = torch.Generator(device=device).manual_seed(seed)
-    # latents_raw = torch.randn(shape, generator=generator, device=device, dtype=torch.float32).to(device)
+    generator = torch.Generator(device=device).manual_seed(seed)
+    # Generate as f32 first, then convert to bf16 to match Zig implementation
+    # (PyTorch's native bf16 generation uses a different algorithm)
+    latents_raw = torch.randn(shape, generator=generator, device=device, dtype=torch.float32).to(transformer.dtype).to(device)
     
-    generator = utils.BoxMullerGenerator(seed=seed, device=device)
-    latents_raw = generator.randn(shape).to(device=device)
+    # generator = utils.BoxMullerGenerator(seed=seed, device=device)
+    # latents_raw = generator.randn(shape).to(device=device)
 
     print(f"    Latents Raw (first 20): {latents_raw.flatten().tolist()[:20]}")
     latent_ids = flux2_tools.prepare_latent_ids(latents_raw)
@@ -124,6 +126,11 @@ def schedule(transformer: Flux2Transformer2DModel,
         
         # Broadcast timestep
         timestep = timestep.expand(latents.shape[0]).to(latents.dtype)
+        
+        # Debug: Check what timestep embedding looks like (if accessible)
+        if idx == 0:
+            print(f"   Timestep value before division: {timestep.item():.6f}")
+            print(f"   Timestep value after division: {(timestep / 1000).item():.6f}")
         
         latent_model_input = latents
         latent_image_ids = latent_ids
@@ -242,9 +249,9 @@ def run_pipline():
 
     print(f"{token_encoder.dtype=}")
     token_encoded_embeds, text_ids = get_encoding_embeded_from_tokens(token_encoder=token_encoder, tokens=token)
+
     print(f"    text_ids (first 20). {text_ids.dtype} {text_ids.shape} : {text_ids.flatten()[:20]}")
     print(f"    token_encoded_embeds (first 20). {token_encoded_embeds.dtype} {token_encoded_embeds.shape} : {token_encoded_embeds.flatten()[:20]}")
-
     print(f"{token_encoded_embeds.dtype=}, {text_ids.dtype=}")
 
     # Save embeddings to npy files (convert bf16 to f32 for numpy compatibility)
@@ -272,6 +279,7 @@ def run_pipline():
     )
     print(f"{transformer.dtype=}")
     print(f"{transformer.x_embedder.weight.dtype}")
+
     latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim, device=device)
     print(f"    Latents (first 20). {latents.dtype} {latents.shape} : {latents.flatten()[:20]}")
     print(f"    Latent_ids (first 20). {latent_ids.dtype} {latent_ids.shape} : {latent_ids.flatten()[:20]}")
@@ -294,6 +302,7 @@ def run_pipline():
         device=device)
 
     print(f"    Latents Out (first 20). {latents_out.dtype} {latents_out.shape} : {latents_out.flatten().tolist()[:20]}")
+    sys.exit(0)
 
     print("\n>>> Decoding Latents...")
     variational_auto_encoder = AutoencoderKLFlux2.from_pretrained(

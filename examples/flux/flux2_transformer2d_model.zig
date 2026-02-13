@@ -6,7 +6,6 @@ const Tensor = zml.Tensor;
 const tools = @import("tools.zig");
 const utils = @import("utils.zig");
 
-
 const log = std.log.scoped(.flux2_model);
 
 pub const Config = struct {
@@ -161,7 +160,7 @@ fn applyRoPE(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const x_odd = chunks[1].reshape(.{ B, L, H, half });
 
     // x_twisted: [-odd, even]
-    const x_twisted_even = x_odd.mul(Tensor.scalar(-1.0, .f32));
+    const x_twisted_even = x_odd.mul(Tensor.scalar(-1.0, .bf16));
     const x_twisted_odd = x_even;
 
     // Concatenate back to [B, L, H, half, 2]
@@ -183,7 +182,7 @@ fn scaled_dot_product_attention(q: Tensor, k: Tensor, v: Tensor) Tensor {
     const H = shape.dim(2);
     const D = shape.dim(3);
     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(D)));
-    const q_scaled = q.mul(Tensor.scalar(scale, .f32)).withPartialTags(.{ .b, .l, .h, .d });
+    const q_scaled = q.mul(Tensor.scalar(scale, .bf16)).withPartialTags(.{ .b, .l, .h, .d });
     const k_tagged = k.withPartialTags(.{ .b, .m, .h, .d });
     // dot produces [B, H, L, M] (batching dims [B, H] first, then lhs non-batch [L], then rhs non-batch [M])
     const logits = q_scaled.dot(k_tagged, .d);
@@ -257,7 +256,28 @@ pub fn computeRotaryEmbedding(allocator: std.mem.Allocator, ids_data: []const f3
         offset += @intCast(dim);
     }
 
-    return .{ cos_slice, sin_slice };
+    // Convert f32 to bf16
+    const out_shape_bf16 = zml.Shape.init(.{ .b = B, .s = S, .d = total_dim }, .bf16);
+    const cos_slice_bf16 = try zml.Slice.alloc(allocator, out_shape_bf16);
+    const sin_slice_bf16 = try zml.Slice.alloc(allocator, out_shape_bf16);
+
+    const cos_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(cos_slice_bf16.items(u8))));
+    const sin_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(sin_slice_bf16.items(u8))));
+
+    for (cos_data, 0..) |val, i| {
+        const bits: u32 = @bitCast(val);
+        cos_data_bf16[i] = @truncate(bits >> 16);
+    }
+    for (sin_data, 0..) |val, i| {
+        const bits: u32 = @bitCast(val);
+        sin_data_bf16[i] = @truncate(bits >> 16);
+    }
+
+    // Free the f32 slices
+    cos_slice.free(allocator);
+    sin_slice.free(allocator);
+
+    return .{ cos_slice_bf16, sin_slice_bf16 };
 }
 
 pub fn computeTimestepFrequencies(dim: i64) [128]f32 {
@@ -293,7 +313,7 @@ pub const Flux2PosEmbed = struct {
         var sin_list: [4]Tensor = undefined;
 
         for (self.axes_dim, 0..) |dim, i| {
-            const pos = ids_splits[i].reshape(.{S}).convert(.f32);
+            const pos = ids_splits[i].reshape(.{S});
             const res = get_1d_rotary_pos_embed(dim, pos, self.theta);
             cos_list[i] = res[0];
             sin_list[i] = res[1];
@@ -462,26 +482,12 @@ const Flux2Attention = struct {
         self.norm_added_k.deinit();
     }
 
-    const AttentionForward = struct {
-        img: Tensor,
-        txt: Tensor,
-        q_img_normed: Tensor,
-        q_txt_normed: Tensor,
-        q_rotated: Tensor,
-        k_rotated: Tensor,
-        attn_concat: Tensor,
-        attn_concat_flat: Tensor,
-        to_add_out_input: Tensor,
-        v_img: Tensor,
-        v_txt: Tensor,
-    };
-
-    fn forwardInternal(
+    pub fn forward(
         self: Flux2Attention,
         img: Tensor,
         txt: Tensor,
         rotary_emb: struct { Tensor, Tensor },
-    ) AttentionForward {
+    ) struct { Tensor, Tensor } {
         const B = img.shape().dim(0);
         const L_img = img.shape().dim(1);
         const L_txt = txt.shape().dim(1);
@@ -527,7 +533,6 @@ const Flux2Attention = struct {
 
         // SDPA
         var out = scaled_dot_product_attention(q, k, v);
-        const attn_concat = out;
 
         // Flatten from [B, L, H, D] to [B, L, H*D] (matching Python line 205)
         const out_flat = out.reshape(.{ B, L_txt + L_img, H * D });
@@ -536,38 +541,7 @@ const Flux2Attention = struct {
         const txt_slice = out_flat.slice(&.{ .{}, .{ .end = L_txt }, .{} });
         const out_txt = self.to_add_out.forward(txt_slice);
         const out_img = self.to_out.forward(out_flat.slice(&.{ .{}, .{ .start = L_txt }, .{} }));
-        return .{
-            .img = out_img,
-            .txt = out_txt,
-            .q_img_normed = q_img_normed,
-            .q_txt_normed = q_txt_normed,
-            .q_rotated = q,
-            .k_rotated = k,
-            .attn_concat = attn_concat,
-            .attn_concat_flat = out_flat,
-            .to_add_out_input = txt_slice,
-            .v_img = v_img_reshaped,
-            .v_txt = v_txt_reshaped,
-        };
-    }
-
-    pub fn forward(
-        self: Flux2Attention,
-        img: Tensor,
-        txt: Tensor,
-        rotary_emb: struct { Tensor, Tensor },
-    ) struct { Tensor, Tensor } {
-        const res = self.forwardInternal(img, txt, rotary_emb);
-        return .{ res.img, res.txt };
-    }
-
-    pub fn forwardDebug(
-        self: Flux2Attention,
-        img: Tensor,
-        txt: Tensor,
-        rotary_emb: struct { Tensor, Tensor },
-    ) AttentionForward {
-        return self.forwardInternal(img, txt, rotary_emb);
+        return .{ out_img, out_txt };
     }
 };
 
@@ -608,34 +582,6 @@ const Flux2TransformerBlock = struct {
         self.attn.deinit();
     }
 
-    pub const DebugResult = struct {
-        input_txt: Tensor,
-        input_img: Tensor,
-        txt: Tensor,
-        img: Tensor,
-        attn_details: Flux2Attention.AttentionForward,
-        gate_msa: Tensor,
-        c_gate_msa: Tensor,
-        gate_mlp: Tensor,
-        c_gate_mlp: Tensor,
-        norm_img: Tensor,
-        norm_txt: Tensor,
-        attn_img: Tensor,
-        attn_txt: Tensor,
-        gated_img: Tensor,
-        gated_txt: Tensor,
-        residual_after_attn_img: Tensor,
-        residual_after_attn_txt: Tensor,
-        norm2_img: Tensor,
-        norm2_txt: Tensor,
-        ff_img: Tensor,
-        ff_txt: Tensor,
-        gated_ff_img: Tensor,
-        gated_ff_txt: Tensor,
-        final_img: Tensor,
-        final_txt: Tensor,
-    };
-
     fn geglu(input: Tensor) Tensor {
         const last_dim = input.rank() - 1;
         const d = input.shape().dim(last_dim);
@@ -671,12 +617,12 @@ const Flux2TransformerBlock = struct {
 
         // Img stream: norm1 + modulation
         var norm_hidden_states = self.norm1.forward(hidden_states).withPartialTags(.{ .b, .s, .d });
-        norm_hidden_states = norm_hidden_states.mul(scale_msa.add(Tensor.scalar(1.0, .f32)).broad(norm_hidden_states.shape()))
+        norm_hidden_states = norm_hidden_states.mul(scale_msa.add(Tensor.scalar(1.0, .bf16)).broad(norm_hidden_states.shape()))
             .add(shift_msa.broad(norm_hidden_states.shape()));
 
         // Txt stream: norm1_context + modulation
         var norm_encoder_hidden_states = self.norm1_context.forward(encoder_hidden_states).withPartialTags(.{ .b, .s, .d });
-        norm_encoder_hidden_states = norm_encoder_hidden_states.mul(c_scale_msa.add(Tensor.scalar(1.0, .f32)).broad(norm_encoder_hidden_states.shape()))
+        norm_encoder_hidden_states = norm_encoder_hidden_states.mul(c_scale_msa.add(Tensor.scalar(1.0, .bf16)).broad(norm_encoder_hidden_states.shape()))
             .add(c_shift_msa.broad(norm_encoder_hidden_states.shape()));
 
         // Attention
@@ -687,7 +633,7 @@ const Flux2TransformerBlock = struct {
         // Res + MLP (Img)
         var h = hidden_states.add(attn_out);
         var norm_h = self.norm2.forward(h).withPartialTags(.{ .b, .s, .d });
-        norm_h = norm_h.mul(scale_mlp.add(Tensor.scalar(1.0, .f32)).broad(norm_h.shape()))
+        norm_h = norm_h.mul(scale_mlp.add(Tensor.scalar(1.0, .bf16)).broad(norm_h.shape()))
             .add(shift_mlp.broad(norm_h.shape()));
 
         var ff_out = self.ff_linear_in.forward(norm_h);
@@ -698,7 +644,7 @@ const Flux2TransformerBlock = struct {
         // Res + MLP (Txt)
         var c = encoder_hidden_states.add(context_attn_out);
         var norm_c = self.norm2_context.forward(c).withPartialTags(.{ .b, .s, .d });
-        norm_c = norm_c.mul(c_scale_mlp.add(Tensor.scalar(1.0, .f32)).broad(norm_c.shape()))
+        norm_c = norm_c.mul(c_scale_mlp.add(Tensor.scalar(1.0, .bf16)).broad(norm_c.shape()))
             .add(c_shift_mlp.broad(norm_c.shape()));
 
         var ff_c_out = self.ff_context_linear_in.forward(norm_c);
@@ -707,95 +653,6 @@ const Flux2TransformerBlock = struct {
         const out_encoder_hidden_states = c.add(c_gate_mlp.broad(ff_c_out.shape()).mul(ff_c_out));
 
         return .{ out_encoder_hidden_states, out_hidden_states };
-    }
-
-    pub fn forwardDebug(
-        self: Flux2TransformerBlock,
-        hidden_states: Tensor,
-        encoder_hidden_states: Tensor,
-        temb_mod_params_img: []const Tensor,
-        temb_mod_params_txt: []const Tensor,
-        rotary_emb: struct { Tensor, Tensor },
-    ) DebugResult {
-        const shift_msa = temb_mod_params_img[0];
-        const scale_msa = temb_mod_params_img[1];
-        const gate_msa = temb_mod_params_img[2];
-
-        const shift_mlp = temb_mod_params_img[3];
-        const scale_mlp = temb_mod_params_img[4];
-        const gate_mlp = temb_mod_params_img[5];
-
-        const c_shift_msa = temb_mod_params_txt[0];
-        const c_scale_msa = temb_mod_params_txt[1];
-        const c_gate_msa = temb_mod_params_txt[2];
-
-        const c_shift_mlp = temb_mod_params_txt[3];
-        const c_scale_mlp = temb_mod_params_txt[4];
-        const c_gate_mlp = temb_mod_params_txt[5];
-
-        var norm_hidden_states = self.norm1.forward(hidden_states).withPartialTags(.{ .b, .s, .d });
-        norm_hidden_states = norm_hidden_states.mul(scale_msa.add(Tensor.scalar(1.0, .f32)).broad(norm_hidden_states.shape()))
-            .add(shift_msa.broad(norm_hidden_states.shape()));
-
-        var norm_encoder_hidden_states = self.norm1_context.forward(encoder_hidden_states).withPartialTags(.{ .b, .s, .d });
-        norm_encoder_hidden_states = norm_encoder_hidden_states.mul(c_scale_msa.add(Tensor.scalar(1.0, .f32)).broad(norm_encoder_hidden_states.shape()))
-            .add(c_shift_msa.broad(norm_encoder_hidden_states.shape()));
-
-        const attn_outputs = self.attn.forwardDebug(norm_hidden_states, norm_encoder_hidden_states, rotary_emb);
-        const attn_img = attn_outputs.img;
-        const attn_txt = attn_outputs.txt;
-        const gated_img = gate_msa.broad(attn_img.shape()).mul(attn_img);
-        const gated_txt = c_gate_msa.broad(attn_txt.shape()).mul(attn_txt);
-
-        var residual_img = hidden_states.add(gated_img);
-        var norm_h = self.norm2.forward(residual_img).withPartialTags(.{ .b, .s, .d });
-        norm_h = norm_h.mul(scale_mlp.add(Tensor.scalar(1.0, .f32)).broad(norm_h.shape()))
-            .add(shift_mlp.broad(norm_h.shape()));
-
-        var ff_out = self.ff_linear_in.forward(norm_h);
-        ff_out = geglu(ff_out);
-        ff_out = self.ff_linear_out.forward(ff_out);
-        const gated_ff_img = gate_mlp.broad(ff_out.shape()).mul(ff_out);
-        const final_img = residual_img.add(gated_ff_img);
-
-        var residual_txt = encoder_hidden_states.add(gated_txt);
-        var norm_c = self.norm2_context.forward(residual_txt).withPartialTags(.{ .b, .s, .d });
-        norm_c = norm_c.mul(c_scale_mlp.add(Tensor.scalar(1.0, .f32)).broad(norm_c.shape()))
-            .add(c_shift_mlp.broad(norm_c.shape()));
-
-        var ff_c_out = self.ff_context_linear_in.forward(norm_c);
-        ff_c_out = geglu(ff_c_out);
-        ff_c_out = self.ff_context_linear_out.forward(ff_c_out);
-        const gated_ff_txt = c_gate_mlp.broad(ff_c_out.shape()).mul(ff_c_out);
-        const final_txt = residual_txt.add(gated_ff_txt);
-
-        return .{
-            .input_txt = encoder_hidden_states,
-            .input_img = hidden_states,
-            .txt = final_txt,
-            .img = final_img,
-            .attn_details = attn_outputs,
-            .gate_msa = gate_msa,
-            .c_gate_msa = c_gate_msa,
-            .gate_mlp = gate_mlp,
-            .c_gate_mlp = c_gate_mlp,
-            .norm_img = norm_hidden_states,
-            .norm_txt = norm_encoder_hidden_states,
-            .attn_img = attn_img,
-            .attn_txt = attn_txt,
-            .gated_img = gated_img,
-            .gated_txt = gated_txt,
-            .residual_after_attn_img = residual_img,
-            .residual_after_attn_txt = residual_txt,
-            .norm2_img = norm_h,
-            .norm2_txt = norm_c,
-            .ff_img = ff_out,
-            .ff_txt = ff_c_out,
-            .gated_ff_img = gated_ff_img,
-            .gated_ff_txt = gated_ff_txt,
-            .final_img = final_img,
-            .final_txt = final_txt,
-        };
     }
 };
 
@@ -863,7 +720,7 @@ const Flux2SingleTransformerBlock = struct {
         const mod_gate = temb_mod_params[2].reshape(.{ B, 1, D });
 
         var h = self.norm.forward(hidden_states);
-        h = h.mul(mod_scale.add(Tensor.scalar(1.0, .f32)).broad(h.shape())).add(mod_shift.broad(h.shape()));
+        h = h.mul(mod_scale.add(Tensor.scalar(1.0, .bf16)).broad(h.shape())).add(mod_shift.broad(h.shape()));
 
         var qkv_mlp = self.linear1.forward(h);
 
@@ -931,7 +788,7 @@ const AdaLayerNormContinuous = struct {
         const shift = chunks[1];
 
         var out = self.norm.forward(x).withPartialTags(.{ .b, .s, .d });
-        const scale_b = scale.add(Tensor.scalar(1.0, .f32));
+        const scale_b = scale.add(Tensor.scalar(1.0, .bf16));
         out = out.mul(scale_b.broad(out.shape())).add(shift.broad(out.shape()));
         return out;
     }
@@ -956,86 +813,6 @@ pub const Flux2Transformer2DModel = struct {
 
     norm_out: AdaLayerNormContinuous,
     proj_out: Linear,
-
-    pub const DebugStage = enum {
-        // High level stages
-        img,
-        txt,
-        joint,
-        single_stream,
-        img_out,
-        result,
-
-        // Block 0 detailed stages (matching Python trace labels)
-        block0_input_img,
-        block0_input_txt,
-        block0_gate_msa,
-        block0_c_gate_msa,
-        block0_gate_mlp,
-        block0_c_gate_mlp,
-        block0_norm1_img,
-        block0_norm1_txt,
-        block0_attn_output_img,
-        block0_attn_output_txt,
-        block0_gated_attn_img,
-        block0_gated_attn_txt,
-        block0_residual_after_attn_img,
-        block0_residual_after_attn_txt,
-        block0_norm2_img,
-        block0_norm2_txt,
-        block0_gated_ff_output_img,
-        block0_gated_ff_output_txt,
-        block0_final_block_output_img,
-        block0_final_block_output_txt,
-
-        // Legacy/Alternate names for block 0 (keeping some for consistency if needed)
-        block0_norm_img,
-        block0_norm_txt,
-        block0_attn_img,
-        block0_attn_txt,
-        block0_gated_img,
-        block0_gated_txt,
-        block0_residual_img,
-        block0_residual_txt,
-        block0_ff_img,
-        block0_ff_txt,
-        block0_final_img,
-        block0_final_txt,
-
-        // Internal Attention details
-        block0_q_img_norm,
-        block0_q_txt_norm,
-        block0_q_rotated,
-        block0_k_rotated,
-        block0_attn_concat,
-        block0_attn_concat_txt,
-        block0_attn_concat_img,
-        block0_q_rotated_txt,
-        block0_q_rotated_img,
-        block0_k_rotated_txt,
-        block0_k_rotated_img,
-        block0_v_txt,
-        block0_v_img,
-        block0_q_rotated_img_token1,
-        block0_q_rotated_img_token1_part1,
-        block0_q_txt_norm_head1,
-        block0_attn_concat_flat,
-        block0_to_add_out_input,
-        block0_to_add_out_input_mid,
-        block0_encoder_hidden_states_after_to_add_out,
-        block0_residual_after_attn_ff,
-    };
-
-    const ForwardStages = struct {
-        img: Tensor,
-        txt: Tensor,
-        joint: Tensor,
-        single_stream: Tensor,
-        img_out: Tensor,
-        result: Tensor,
-    };
-
-    const debug_double_block_limit: ?usize = null;
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !@This() {
         const blocks = try allocator.alloc(Flux2TransformerBlock, @intCast(config.num_layers));
@@ -1139,7 +916,7 @@ pub const Flux2Transformer2DModel = struct {
         return grid_expanded;
     }
 
-    fn forwardStages(
+    pub fn forward(
         self: Flux2Transformer2DModel,
         hidden_states: Tensor,
         encoder_hidden_states: Tensor,
@@ -1147,14 +924,10 @@ pub const Flux2Transformer2DModel = struct {
         guidance_proj: ?Tensor,
         rotary_cos: Tensor,
         rotary_sin: Tensor,
-    ) ForwardStages {
-        // Ensure everything is in f32 as per user request
-        const hidden_states_f32 = hidden_states.convert(.f32);
-        const encoder_hidden_states_f32 = encoder_hidden_states.convert(.f32);
-
+    ) Tensor {
         // 1. Embeddings
-        var img = self.x_embedder.forward(hidden_states_f32);
-        var txt = self.context_embedder.forward(encoder_hidden_states_f32);
+        var img = self.x_embedder.forward(hidden_states);
+        var txt = self.context_embedder.forward(encoder_hidden_states);
 
         const temb = self.time_guidance_embed.forward(timesteps_proj, guidance_proj);
 
@@ -1171,10 +944,7 @@ pub const Flux2Transformer2DModel = struct {
         const concat_rotary_emb = .{ rotary_cos, rotary_sin };
 
         // 4. Double Stream Blocks
-        for (self.transformer_blocks, 0..) |block, block_index| {
-            if (debug_double_block_limit) |limit| {
-                if (block_index >= limit) break;
-            }
+        for (self.transformer_blocks) |block| {
             const out = block.forward(img, txt, double_stream_mod_img, double_stream_mod_txt, concat_rotary_emb);
             txt = out[0];
             img = out[1];
@@ -1195,197 +965,8 @@ pub const Flux2Transformer2DModel = struct {
 
         const normed = self.norm_out.forward(img_out, temb);
         const projected = self.proj_out.forward(normed);
-        const final = projected.convert(.f32);
 
-        return .{
-            .img = img,
-            .txt = txt,
-            .joint = joint,
-            .single_stream = single_stream,
-            .img_out = img_out,
-            .result = final,
-        };
-    }
-
-    fn forwardBlock0Debug(
-        self: Flux2Transformer2DModel,
-        hidden_states: Tensor,
-        encoder_hidden_states: Tensor,
-        timesteps_proj: Tensor,
-        guidance_proj: ?Tensor,
-        rotary_cos: Tensor,
-        rotary_sin: Tensor,
-    ) Flux2TransformerBlock.DebugResult {
-        const hidden_states_f32 = hidden_states.convert(.f32);
-        const encoder_hidden_states_f32 = encoder_hidden_states.convert(.f32);
-
-        const img = self.x_embedder.forward(hidden_states_f32);
-        const txt = self.context_embedder.forward(encoder_hidden_states_f32);
-
-        const temb = self.time_guidance_embed.forward(timesteps_proj, guidance_proj);
-
-        var double_stream_mod_img_buf = self.double_stream_modulation_img.forward(temb);
-        var double_stream_mod_txt_buf = self.double_stream_modulation_txt.forward(temb);
-
-        const double_stream_mod_img = double_stream_mod_img_buf.slice();
-        const double_stream_mod_txt = double_stream_mod_txt_buf.slice();
-
-        const concat_rotary_emb = .{ rotary_cos, rotary_sin };
-
-        const block0 = self.transformer_blocks[0];
-        const debug = block0.forwardDebug(img, txt, double_stream_mod_img, double_stream_mod_txt, concat_rotary_emb);
-        return debug;
-    }
-
-    pub fn forward(
-        self: Flux2Transformer2DModel,
-        hidden_states: Tensor,
-        encoder_hidden_states: Tensor,
-        timesteps_proj: Tensor,
-        guidance_proj: ?Tensor,
-        rotary_cos: Tensor,
-        rotary_sin: Tensor,
-    ) Tensor {
-        const stages = self.forwardStages(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin);
-        return stages.result;
-    }
-
-    pub fn forwardStage(
-        self: Flux2Transformer2DModel,
-        hidden_states: Tensor,
-        encoder_hidden_states: Tensor,
-        timesteps_proj: Tensor,
-        guidance_proj: ?Tensor,
-        rotary_cos: Tensor,
-        rotary_sin: Tensor,
-        stage: DebugStage,
-    ) Tensor {
-        return switch (stage) {
-            .block0_input_img,
-            .block0_input_txt,
-            .block0_gate_msa,
-            .block0_c_gate_msa,
-            .block0_gate_mlp,
-            .block0_c_gate_mlp,
-            .block0_norm1_img,
-            .block0_norm1_txt,
-            .block0_attn_output_img,
-            .block0_attn_output_txt,
-            .block0_gated_attn_img,
-            .block0_gated_attn_txt,
-            .block0_residual_after_attn_img,
-            .block0_residual_after_attn_txt,
-            .block0_norm2_img,
-            .block0_norm2_txt,
-            .block0_gated_ff_output_img,
-            .block0_gated_ff_output_txt,
-            .block0_final_block_output_img,
-            .block0_final_block_output_txt,
-            .block0_norm_img,
-            .block0_norm_txt,
-            .block0_attn_img,
-            .block0_attn_txt,
-            .block0_gated_img,
-            .block0_gated_txt,
-            .block0_residual_img,
-            .block0_residual_txt,
-            .block0_ff_img,
-            .block0_ff_txt,
-            .block0_final_img,
-            .block0_final_txt,
-            .block0_q_img_norm,
-            .block0_q_txt_norm,
-            .block0_q_rotated,
-            .block0_k_rotated,
-            .block0_attn_concat,
-            .block0_attn_concat_txt,
-            .block0_attn_concat_img,
-            .block0_q_rotated_txt,
-            .block0_q_rotated_img,
-            .block0_k_rotated_txt,
-            .block0_k_rotated_img,
-            .block0_v_txt,
-            .block0_v_img,
-            .block0_q_rotated_img_token1,
-            .block0_q_rotated_img_token1_part1,
-            .block0_q_txt_norm_head1,
-            .block0_attn_concat_flat,
-            .block0_to_add_out_input,
-            .block0_to_add_out_input_mid,
-            .block0_encoder_hidden_states_after_to_add_out,
-            => {
-                const debug = self.forwardBlock0Debug(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin);
-                const attn_details = debug.attn_details;
-                const L_txt = attn_details.q_txt_normed.shape().dim(1);
-                return switch (stage) {
-                    .block0_input_img => debug.input_img,
-                    .block0_input_txt => debug.input_txt,
-                    .block0_gate_msa => debug.gate_msa,
-                    .block0_c_gate_msa => debug.c_gate_msa,
-                    .block0_gate_mlp => debug.gate_mlp,
-                    .block0_c_gate_mlp => debug.c_gate_mlp,
-                    .block0_norm1_img => debug.norm_img,
-                    .block0_norm1_txt => debug.norm_txt,
-                    .block0_attn_output_img => debug.attn_img,
-                    .block0_attn_output_txt => debug.attn_txt,
-                    .block0_gated_attn_img => debug.gated_img,
-                    .block0_gated_attn_txt => debug.gated_txt,
-                    .block0_residual_after_attn_img => debug.residual_after_attn_img,
-                    .block0_residual_after_attn_txt => debug.residual_after_attn_txt,
-                    .block0_norm2_img => debug.norm2_img,
-                    .block0_norm2_txt => debug.norm2_txt,
-                    .block0_gated_ff_output_img => debug.gated_ff_img,
-                    .block0_gated_ff_output_txt => debug.gated_ff_txt,
-                    .block0_final_block_output_img => debug.final_img,
-                    .block0_final_block_output_txt => debug.final_txt,
-                    .block0_norm_img => debug.norm_img,
-                    .block0_norm_txt => debug.norm_txt,
-                    .block0_attn_img => debug.attn_img,
-                    .block0_attn_txt => debug.attn_txt,
-                    .block0_gated_img => debug.gated_img,
-                    .block0_gated_txt => debug.gated_txt,
-                    .block0_residual_img => debug.residual_after_attn_img,
-                    .block0_residual_txt => debug.residual_after_attn_txt,
-                    .block0_ff_img => debug.ff_img,
-                    .block0_ff_txt => debug.ff_txt,
-                    .block0_final_img => debug.final_img,
-                    .block0_final_txt => debug.final_txt,
-                    .block0_q_img_norm => attn_details.q_img_normed,
-                    .block0_q_txt_norm => attn_details.q_txt_normed,
-                    .block0_q_rotated => attn_details.q_rotated,
-                    .block0_k_rotated => attn_details.k_rotated,
-                    .block0_attn_concat => attn_details.attn_concat,
-                    .block0_attn_concat_txt => attn_details.attn_concat.slice(&.{ .{}, .{ .end = L_txt }, .{} }),
-                    .block0_attn_concat_img => attn_details.attn_concat.slice(&.{ .{}, .{ .start = L_txt }, .{} }),
-                    .block0_q_rotated_txt => attn_details.q_rotated.slice(&.{ .{}, .{ .end = L_txt }, .{}, .{} }),
-                    .block0_q_rotated_img => attn_details.q_rotated.slice(&.{ .{}, .{ .start = L_txt }, .{}, .{} }),
-                    .block0_k_rotated_txt => attn_details.k_rotated.slice(&.{ .{}, .{ .end = L_txt }, .{}, .{} }),
-                    .block0_k_rotated_img => attn_details.k_rotated.slice(&.{ .{}, .{ .start = L_txt }, .{}, .{} }),
-                    .block0_v_txt => attn_details.v_txt,
-                    .block0_v_img => attn_details.v_img,
-                    .block0_q_rotated_img_token1 => attn_details.q_rotated.slice(&.{ .{}, .{ .start = L_txt + 1, .end = L_txt + 2 }, .{}, .{} }),
-                    .block0_q_rotated_img_token1_part1 => attn_details.q_rotated.slice(&.{ .{}, .{ .start = L_txt + 1, .end = L_txt + 2 }, .{}, .{ .start = 32, .end = 52 } }),
-                    .block0_q_txt_norm_head1 => attn_details.q_txt_normed.slice(&.{ .{}, .{ .end = 1 }, .{ .start = 1, .end = 2 }, .{ .start = 0, .end = 20 } }),
-                    .block0_attn_concat_flat => attn_details.attn_concat_flat.slice(&.{ .{}, .{ .end = L_txt }, .{} }),
-                    .block0_to_add_out_input => attn_details.to_add_out_input,
-                    .block0_to_add_out_input_mid => attn_details.to_add_out_input.slice(&.{ .{}, .{ .end = 1 }, .{ .start = 100, .end = 120 } }),
-                    .block0_encoder_hidden_states_after_to_add_out => attn_details.txt,
-                    else => unreachable,
-                };
-            },
-            else => {
-                const stages = self.forwardStages(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin);
-                return switch (stage) {
-                    .img => stages.img,
-                    .txt => stages.txt,
-                    .joint => stages.joint,
-                    .single_stream => stages.single_stream,
-                    .img_out => stages.img_out,
-                    .result => stages.result,
-                    else => unreachable,
-                };
-            },
-        };
+        return projected;
     }
 };
 

@@ -63,19 +63,19 @@ pub const std_options: std.Options = .{
 // --seqlen=32
 // --async-limit=1
 
-const Resolution = enum { HLD, LD, SD, HD, FHD, QHD, UHD };
+const Resolution = enum { DBGD, HLD, LD, SD, HD, FHD, QHD, UHD };
 
 const CliArgs = struct {
     // model: []const u8 = "hf://black-forest-labs/FLUX.2-klein-4B",
     model: []const u8 = "/Users/kevin/FLUX.2-klein-4B",
     prompt: []const u8 = "A photo of a cat",
-    seqlen: usize = 512,
+    seqlen: usize = 512, // 512
     output_image_path: ?[]const u8 = null,
     kitty_output: bool = false,
     random_seed: u64 = 0,
     num_inference_steps: usize = 1,
     async_limit: ?usize = null,
-    generator_type: utils.GeneratorType = .accelerator_box_muller,
+    generator_type: utils.GeneratorType = .torch,
     interactive: bool = false,
     // 8K UHD 7680x4320
     // 4K QHD 3840x2160
@@ -84,7 +84,7 @@ const CliArgs = struct {
     // SD 512x512
     // LD 256x256
     // HLD 128x128
-    resolution: Resolution = .HLD,
+    resolution: Resolution = .DBGD,
     data_type: zml.DataType = .f32,
 
     pub const help =
@@ -206,17 +206,16 @@ pub fn main() !void {
     // ==================== Encoding Prompt ====================
 
     var qwen3_node = progress.start("Loading Qwen3", 0);
-    var qwen3 = io.concurrent(Qwen3ForCausalLM.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen3_node, parallelism_level, args.data_type, tokens }) catch |err| {
+    var qwen3 = io.concurrent(Qwen3ForCausalLM.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen3_node, parallelism_level, tokens }) catch |err| {
         log.err("Error running Qwen3 pipeline: {}", .{err});
         return err;
     };
-    // var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, repo, zml_compute_platform, &qwen_node, parallelism_level, args.data_type, tokens);
     var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try qwen3.await(io);
     qwen3_node.end();
     defer embeding_output.deinit();
 
-    // try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, embeding_output.text_embedding, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, embeding_output.text_embedding, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
 
     // ==================== End Encoding Prompt ====================
 
@@ -255,6 +254,7 @@ pub fn main() !void {
     log.info(">> Preparing Latents...", .{});
 
     const output_image_dim: utils.ResolutionInfo = switch (args.resolution) {
+        .DBGD => .{ .width = 16, .height = 16 },
         .HLD => .{ .width = 128, .height = 128 },
         .LD => .{ .width = 256, .height = 256 },
         .SD => .{ .width = 512, .height = 512 },
@@ -267,6 +267,8 @@ pub fn main() !void {
     var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
+    try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
 
     var scheduler_node = progress.start("Loading FlowMatchEulerDiscreteScheduler", 0);
     var scheduler = try FlowMatchEulerDiscreteScheduler.loadFromFile(allocator, io, repo, &scheduler_node, .{});
@@ -274,9 +276,6 @@ pub fn main() !void {
     scheduler_node.end();
 
     log.info("Models initialized successfully", .{});
-
-    // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
 
     log.info(">>> Preparing Timesteps...", .{});
 
@@ -295,7 +294,9 @@ pub fn main() !void {
     );
     defer latents_out.deinit();
 
-    // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+    // Stop here for now to check latents before decoding, since decoding is usually where most of the bugs are
+    // std.process.exit(0);
 
     log.info(">>> Decoding Latents...", .{});
 
