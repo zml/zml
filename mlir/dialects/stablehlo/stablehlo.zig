@@ -722,7 +722,7 @@ pub const CustomCallOpts = struct {
 };
 
 pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result_types: []const *const mlir.Type, opts: CustomCallOpts, location: *const mlir.Location) *mlir.Operation {
-    const MAX_OPERANDS = 64;
+    const MAX_OPERANDS = 128;
     const MAX_RESULTS = 16;
     const MINOR_TO_MAJOR = comptime blk: {
         var ret: [mlir.ShapedType.MAX_RANK]usize = undefined;

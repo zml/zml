@@ -72,71 +72,167 @@ pub const Tensor = struct {
     }
 
     /// Helper to create scalar i32 constants for kernel arguments.
-    fn int32Const(val: anytype) Tensor {
+    fn int32Tensor(val: anytype) Tensor {
         return Tensor.scalar(@as(i32, @intCast(val)), .i32);
     }
 
-    /// Helper to create scalar i64 constants for kernel arguments.
-    fn int64Const(val: anytype) Tensor {
-        return Tensor.scalar(@as(i64, @intCast(val)), .i64);
+    const RaggedTmaDescriptor = struct {
+        tma_shape: stdx.BoundedArray(i64, 5),
+        tma_stride: stdx.BoundedArray(i64, 5),
+        box_shape: stdx.BoundedArray(i64, 5),
+    };
+
+    fn contiguousStride(shape_: Shape, axis_: usize) i64 {
+        var stride: i64 = 1;
+        var i: usize = axis_ + 1;
+        const rank_: usize = @intCast(shape_.rank());
+        while (i < rank_) : (i += 1) {
+            stride *= shape_.dim(@as(i64, @intCast(i)));
+        }
+        return stride;
     }
 
-    /// Helper to create a dummy null tensor for unused pointer arguments.
-    /// We pass a 1-element zero tensor so the kernel receives a valid pointer.
-    fn nullTensor() Tensor {
-        return Tensor.scalar(0, .u8).broad(Shape.init(.{1}, .u8));
+    /// Helper to compute TMA shapes/strides for a ragged tensor.
+    fn createRaggedDescriptor(T: Tensor, block_shape: []const i64, ragged_dim_: i64) RaggedTmaDescriptor {
+        const rank_i64: i64 = @intCast(T.rank());
+        var ragged_dim: i64 = ragged_dim_;
+
+        if (ragged_dim < 0) ragged_dim += rank_i64;
+
+        stdx.debug.assert(ragged_dim >= 0 and ragged_dim < rank_i64 - 1, "last dimension cannot be ragged", .{});
+        stdx.debug.assert(rank_i64 <= 3, "read-write ragged descriptors must have at most 3 dimensions", .{});
+        stdx.debug.assert(block_shape.len == @as(usize, @intCast(rank_i64)), "block shape must have same length as tensor shape", .{});
+
+        const max_int: i64 = 0x7fff0000;
+        const billion: i64 = 0x40000000; // == 2**30
+        const wrap_stride: i64 = (@as(i64, 1) << 34);
+
+        const ragged_axis: usize = @intCast(ragged_dim);
+
+        stdx.debug.assert(T.dim(@as(i64, @intCast(ragged_axis))) <= billion, "number of rows may not exceed 2**30", .{});
+
+        const ragged_stride = contiguousStride(T.shape(), ragged_axis);
+
+        var tma_stride: stdx.BoundedArray(i64, 5) = .{};
+        tma_stride.appendAssumeCapacity(wrap_stride - ragged_stride);
+        tma_stride.appendAssumeCapacity(ragged_stride);
+
+        var tma_shape: stdx.BoundedArray(i64, 5) = .{};
+        tma_shape.appendAssumeCapacity(max_int);
+        tma_shape.appendAssumeCapacity(max_int);
+
+        var box_shape: stdx.BoundedArray(i64, 5) = .{};
+        box_shape.appendAssumeCapacity(1);
+        box_shape.appendAssumeCapacity(1);
+
+        const dims_ = T.dims();
+        for (dims_, 0..) |d, i| {
+            const dim_val = if (i == ragged_axis) billion else d;
+            tma_shape.appendAssumeCapacity(dim_val);
+            tma_stride.appendAssumeCapacity(contiguousStride(T.shape(), i));
+        }
+
+        for (block_shape) |b| {
+            box_shape.appendAssumeCapacity(b);
+        }
+
+        return .{
+            .tma_shape = tma_shape,
+            .tma_stride = tma_stride,
+            .box_shape = box_shape,
+        };
     }
 
     /// Triton MoE MXFP4 kernel wrapper (TTIR signature-aligned).
-    pub fn moeTritonOp(
+    pub fn moeTritonOpTma(
         input_sorted: Tensor, // [M_tokens, K] (bf16)
-        weights: Tensor, // [Experts, K, N_exp] (mxfp4/u8) - layout may be adapted later
-        weights_scales: Tensor, // [Experts, K_mx, N_exp] (scales) - layout may be adapted later
+        weights: Tensor, // [Experts, K, N_exp] (mxfp4/u8)
+        weights_scales: Tensor, // [Experts, K_mx, N_exp] (scales)
         bias: Tensor, // [Experts, N_exp] (bf16)
         counts: Tensor, // [Experts] i32 (tokens per expert)
         output_dim: i32, // N (per exp)
         ttir_file: []const u8,
+        block_m: i64,
+        block_k: i64,
+        block_n: i64,
+        num_warps: i32,
+        num_stages: i32,
     ) Tensor {
-        // _log.info("moeTritonOp input_sorted shape={f}", .{input_sorted.shape()});
-        // _log.info("moeTritonOp weights shape={f}", .{weights.shape()});
-        // _log.info("moeTritonOp weights_scales shape={f}", .{weights_scales.shape()});
-        // _log.info("moeTritonOp bias shape={f}", .{bias.shape()});
-        // _log.info("moeTritonOp counts shape={f}", .{counts.shape()});
         const M: i64 = input_sorted.dim(0);
         const K: i64 = input_sorted.dim(1);
         const N: i64 = @as(i64, output_dim);
-        // _log.info("moeTritonOp M={d}", .{M});
-        // _log.info("moeTritonOp K={d}", .{K});
-        // _log.info("moeTritonOp N={d}", .{N});
+        const input_sorted_3d = input_sorted.reshape(.{ .b = 1, .seq = input_sorted.dim(0), .d = input_sorted.dim(1) });
+        const output_3d_shape: Shape = .init(.{ .b = 1, .seq = M, .d = N }, input_sorted.dtype());
+        const output_3d = Tensor.zeroes(output_3d_shape);
+        var w_scales = weights_scales;
+
+        w_scales = w_scales.contiguous(.{ .d, .out });
+
+        const weights_3d = weights.merge(.{ .d = .{ .d, .d_block } });
+
+        const input_descriptor = input_sorted_3d.createRaggedDescriptor(&.{ 1, block_m, block_k }, 1);
+        for (input_descriptor.tma_shape.constSlice(), 0..) |d, i| {
+            _log.info("X output.tma_shape[{d}] = {d}", .{ i, d });
+        }
+        for (input_descriptor.tma_stride.constSlice(), 0..) |d, i| {
+            _log.info("X output.tma_strides[{d}] = {d}", .{ i, d });
+        }
+        for (input_descriptor.box_shape.constSlice(), 0..) |d, i| {
+            _log.info("X output.box_shape[{d}] = {d}", .{ i, d });
+        }
+
+        const output_descriptor = output_3d.createRaggedDescriptor(&.{ 1, block_m, block_n }, 1);
+        for (output_descriptor.tma_shape.constSlice(), 0..) |d, i| {
+            _log.info("Y output.tma_shape[{d}] = {d}", .{ i, d });
+        }
+        for (output_descriptor.tma_stride.constSlice(), 0..) |d, i| {
+            _log.info("Y output.tma_strides[{d}] = {d}", .{ i, d });
+        }
+        for (output_descriptor.box_shape.constSlice(), 0..) |d, i| {
+            _log.info("Y output.box_shape[{d}] = {d}", .{ i, d });
+        }
+
+        _log.info("scales shape: {f}", .{w_scales.shape()});
+
+        // const n = w_scales.dim(-1);
+        // _log.info("n >>>> {d}", .{n});
+        // const padded_n = @divFloor(n + 15, 16) * 16;
+        // _log.info("Padded n >>>> {d}", .{padded_n});
+
+        // if (padded_n != n) {
+        //     const padding = padded_n - n;
+        //     w_scales = w_scales.pad(0, .{ .k = Tensor.Pad{ .high = padding } });
+        // }
+
+        _log.info(
+            "moeTritonOp inputs: input_sorted={f}, weights={f}, weights_scales={f}, bias={f}, counts={f}",
+            .{ input_sorted.shape(), weights.shape(), w_scales.shape(), bias.shape(), counts.shape() },
+        );
+
+        //alignements
+
+        // Output: M tokens x output_dim_per_expert (pad N to satisfy TMA stride alignment)
+        // const align_elems = 8; // bf16 => 2 bytes, so 8 elements == 16 bytes
+        // const padded_output_dim_per_exp = @divFloor((N + align_elems - 1), align_elems) * align_elems;
+        // _ = padded_output_dim_per_exp; // autofix
 
         const num_experts = weights.dim(0);
 
-        const N_TOTAL = N * num_experts;
-        _ = N_TOTAL; // autofix
-
         const K_w: i64 = @divFloor(K, 2);
-        // _log.info("moeTritonOp K_w={d}", .{K_w});
         const K_mx: i64 = @divFloor(K, 32);
-        // _log.info("moeTritonOp K_mx={d}", .{K_mx});
-
-        const BLOCK_M: i64 = 32;
-        const BLOCK_N: i64 = 128;
-
-        const num_slices = input_sorted.dim(.seq);
-        _ = num_slices; // autofix
 
         const grid_m: i64 = if (M <= num_experts)
             M
         else
-            num_experts - 1 - @divFloor(num_experts - M - 1, BLOCK_M);
-        // _log.info("grid_m={d}", .{grid_m});
-        // _log.info("N = {d}", .{N});
-        // _log.info("M = {d}", .{M});
-        // _log.info("BLOCK_M = {d}", .{BLOCK_M});
-        // _log.info("BLOCK_N = {d}", .{BLOCK_N});
+            num_experts - 1 - @divFloor(num_experts - M - 1, block_m);
 
-        const grid_n: i64 = @divFloor(N + BLOCK_N - 1, BLOCK_N);
-        // _log.info("grid_n={d}", .{grid_n});
+        _log.info("grid_m {d}", .{grid_m});
+        _log.info("block_n {d}", .{block_n});
+        _log.info("N {d}", .{N});
+
+        const grid_n: i64 = @divFloor(N + block_n - 1, block_n);
+
+        _log.info("grid_n {d}", .{grid_n});
 
         var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
         defer threaded.deinit();
@@ -160,36 +256,26 @@ pub const Tensor = struct {
 
         // Device-side ragged metadata (prefix sum for XSliceOffs).
         const slice_sizes = counts.convert(.i32);
-        // const slice_offs_shape: Shape = .init(.{ .d = slice_sizes.dim(0) + 1 }, .i32);
-        // _ = slice_offs_shape; // autofix
         const slice_offs_inclusive = slice_sizes.cumulativeSum(0);
         const first_off = Tensor.zeroes(.init(.{ .d = 1 }, .i32));
         const slice_offs = Tensor.concatenate(&.{ first_off, slice_offs_inclusive }, 0);
 
-        const block_m_i32: i32 = @intCast(BLOCK_M);
+        const block_m_i32: i32 = @intCast(block_m);
         const n_blocks = slice_sizes.addConstant(block_m_i32 - 1).divByConst(block_m_i32);
+
+        // blocks offsets
         const xblocks_off_values = n_blocks.cumulativeSum(0);
         const xblocks_off = Tensor.concatenate(&.{ first_off, xblocks_off_values }, 0);
 
         const total_blocks = n_blocks.sum(0);
 
-        // // Minimal XBlockOffs/XBlockSchedule on device.
-        // const xblock_prefix = Tensor.zeroes(Shape.init(.{ .d = 32 }, .i32));
-        // _ = xblock_prefix; // autofix
-        // const grid_m_tensor = Tensor.constant(.{ .i32 = @as(i32, @intCast(grid_m)) }).reshape(.{ .d = 1 });
-        // _ = grid_m_tensor; // autofix
-        // const xblock_offs = Tensor.concatenate(&.{ xblock_prefix, grid_m_tensor }, 0);
-        // const xblock_schedule = Tensor.zeroes(Shape.init(.{ .d = grid_m }, .i32));
         const seq = input_sorted.dim(.seq);
-        // _log.info("seq {d}", .{seq});
         const max_n_blocks = num_experts - 1 - (@divFloor(num_experts - seq - 1, 16)); //verifier le divFloor
-        // _log.info("seq {d}", .{max_n_blocks});
 
         var slices_idx = Tensor.iota(.init(.{ .d = max_n_blocks }, .i32), 0);
 
         const slices_idx_2d = slices_idx.broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
 
-        // B. Batch ID via comparaison à tous les offsets, shape [max_n_blocks, num_experts+1]
         const offsets_2d = xblocks_off.reshape(.{ 1, num_experts + 1 }).broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
         const mask = slices_idx_2d.cmp(.GE, offsets_2d);
 
@@ -198,7 +284,7 @@ pub const Tensor = struct {
 
         const batch_ids_1d = batch_ids.reshape(.{max_n_blocks});
 
-        // C. Block ID interne = global_idx - start_offset(batch)
+        // blocks schedule
         const start_offsets = xblocks_off_1d.gather(.{ .d = batch_ids_1d }, .{});
         const internal_block_ids = slices_idx.reshape(.{max_n_blocks}).sub(start_offsets);
 
@@ -208,7 +294,356 @@ pub const Tensor = struct {
         const total_blocks_broad = total_blocks.reshape(Shape.init(.{1}, .i32)).broad(Shape.init(.{max_n_blocks}, .i32));
         const valid_mask = slices_idx.cmp(.LT, total_blocks_broad);
 
-        // Remplir les invalides avec -1
+        const minus_one = Tensor.scalar(-1, .i32).broad(Shape.init(.{max_n_blocks}, .i32));
+        const xblock_schedule = valid_mask.select(pack, minus_one);
+
+        const bias_f32 = bias.convert(.f32);
+
+        // const output_shape: Shape = .init(.{ .seq = M, .d = N }, .bf16);
+
+        const K_packed = weights.dim(2) * weights.dim(3); // 90 * 16 = 1440
+
+        // Y [M, N]
+        const stride_y_e: i64 = N * M;
+        const stride_y_m: i64 = N;
+
+        // X [M, K]
+        const stride_x_e: i64 = K * M;
+        const stride_x_m: i64 = K;
+
+        // W [Experts, N, K_packed]
+        const stride_w_e: i64 = K_packed * N;
+        const stride_w_k: i64 = 1;
+        const stride_w_n: i64 = K_packed;
+
+        // Scales [Experts, K_mx, N]
+        const stride_w_mx_e = w_scales.dim(1) * w_scales.dim(2);
+        const stride_w_mx_k = w_scales.dim(2);
+        const stride_w_mx_n = 1;
+
+        const stride_b_e: i64 = N;
+
+        const output_tma_shape_slice = output_descriptor.tma_shape.constSlice();
+        const output_tma_stride_slice = output_descriptor.tma_stride.constSlice();
+
+        // TMA descriptors use expanded shapes/strides.
+        const y_shape_0: i64 = output_tma_shape_slice[0];
+        const y_shape_1: i64 = output_tma_shape_slice[1];
+        const y_shape_2: i64 = output_tma_shape_slice[2];
+        const y_shape_3: i64 = output_tma_shape_slice[3];
+        const y_shape_4: i64 = output_tma_shape_slice[4];
+
+        const y_stride_0: i64 = output_tma_stride_slice[0];
+        const y_stride_1: i64 = output_tma_stride_slice[1];
+        const y_stride_2: i64 = output_tma_stride_slice[2];
+        const y_stride_3: i64 = output_tma_stride_slice[3];
+        const y_stride_4: i64 = output_tma_stride_slice[4];
+
+        const input_tma_shape_slice = input_descriptor.tma_shape.constSlice();
+        const input_tma_stride_slice = input_descriptor.tma_stride.constSlice();
+
+        const x_shape_0: i64 = input_tma_shape_slice[0];
+        const x_shape_1: i64 = input_tma_shape_slice[1];
+        const x_shape_2: i64 = input_tma_shape_slice[2];
+        const x_shape_3: i64 = input_tma_shape_slice[3];
+        const x_shape_4: i64 = input_tma_shape_slice[4];
+
+        const x_stride_0: i64 = input_tma_stride_slice[0];
+        const x_stride_1: i64 = input_tma_stride_slice[1];
+        const x_stride_2: i64 = input_tma_stride_slice[2];
+        const x_stride_3: i64 = input_tma_stride_slice[3];
+        const x_stride_4: i64 = input_tma_stride_slice[4];
+
+        const w_shape_0: i64 = weights_3d.dim(0);
+        const w_shape_1: i64 = weights_3d.dim(1);
+        const w_shape_2: i64 = weights_3d.dim(2);
+
+        const w_stride_0: i64 = K_packed * N;
+        _ = w_stride_0; // autofix
+        const w_stride_1: i64 = K_packed;
+        _ = w_stride_1; // autofix
+        const w_stride_2: i64 = 1;
+
+        const w_mx_shape_0: i64 = w_scales.dim(0);
+        const w_mx_shape_1: i64 = w_scales.dim(1);
+        const w_mx_shape_2: i64 = w_scales.dim(2);
+
+        const w_mx_stride_0: i64 = K_mx * N;
+        _ = w_mx_stride_0; // autofix
+        const w_mx_stride_1: i64 = N;
+        _ = w_mx_stride_1; // autofix
+        const w_mx_stride_2: i64 = 1;
+
+        // const Y = Tensor.zeroes(output_shape); // %Yout
+
+        _log.info(
+            "kernel inputs: Y={f}, input_sorted={f}, weights={f}, w_scales={f}, bias={f}, counts={f}",
+            .{ output_3d.shape(), input_sorted_3d.shape(), weights.shape(), w_scales.shape(), bias.shape(), counts.shape() },
+        );
+        _log.info(
+            "kernel dims: M={d}, N={d}, K={d}, K_w={d}, K_mx={d}, num_experts={d}",
+            .{ M, N, K, K_w, K_mx, num_experts },
+        );
+        _log.info(
+            "kernel grid/config: grid_m={d}, grid_n={d}, block_m={d}, block_n={d}, num_warps={d}, num_stages={d}",
+            .{ grid_m, grid_n, block_m, block_n, num_warps, num_stages },
+        );
+        _log.info(
+            "strides Y: e={d}, m={d} | X: e={d}, m={d} | W: e={d}, n={d}, k={d} | WMxScale: e={d}, k={d}, n={d} | B: e={d}",
+            .{
+                stride_y_e,
+                stride_y_m,
+                stride_x_e,
+                stride_x_m,
+                stride_w_e,
+                stride_w_n,
+                stride_w_k,
+                stride_w_mx_e,
+                stride_w_mx_k,
+                stride_w_mx_n,
+                stride_b_e,
+            },
+        );
+        _log.info(
+            "TMA shapes: Y=[{d},{d},{d},{d},{d}] X=[{d},{d},{d},{d},{d}] W=[{d},{d},{d}] WMx=[{d},{d},{d}]",
+            .{
+                y_shape_0,
+                y_shape_1,
+                y_shape_2,
+                y_shape_3,
+                y_shape_4,
+                x_shape_0,
+                x_shape_1,
+                x_shape_2,
+                x_shape_3,
+                x_shape_4,
+                w_shape_0,
+                w_shape_1,
+                w_shape_2,
+                w_mx_shape_0,
+                w_mx_shape_1,
+                w_mx_shape_2,
+            },
+        );
+        _log.info(
+            "TMA strides: Y=[{d},{d},{d},{d},{d}] X=[{d},{d},{d},{d},{d}] W=[{d},{d},{d}] WMx=[{d},{d},{d}]",
+            .{
+                y_stride_0,
+                y_stride_1,
+                y_stride_2,
+                y_stride_3,
+                y_stride_4,
+                x_stride_0,
+                x_stride_1,
+                x_stride_2,
+                x_stride_3,
+                x_stride_4,
+                stride_w_e,
+                stride_w_n,
+                w_stride_2,
+                stride_w_mx_e,
+                stride_w_mx_k,
+                w_mx_stride_2,
+            },
+        );
+
+        const kernel_args = .{
+            // Y TMA descriptor + base
+            output_3d, // %Y__base
+            Tensor.scalar(y_shape_0, .i64), // %Y__shape_0
+            Tensor.scalar(y_shape_1, .i64), // %Y__shape_1
+            Tensor.scalar(y_shape_2, .i64), // %Y__shape_2
+            Tensor.scalar(y_shape_3, .i64), // %Y__shape_3
+            Tensor.scalar(y_shape_4, .i64), // %Y__shape_4
+            Tensor.scalar(y_stride_0, .i64), // %Y__stride_0
+            Tensor.scalar(y_stride_1, .i64), // %Y__stride_1
+            Tensor.scalar(y_stride_2, .i64), // %Y__stride_2
+            Tensor.scalar(y_stride_3, .i64), // %Y__stride_3
+            Tensor.scalar(y_stride_4, .i64), // %Y__stride_4
+            Tensor.zeroes(output_3d_shape),
+            //YPtr
+            int32Tensor(0), // %stride_y_k
+            int32Tensor(stride_y_e), // %stride_y_z
+            int32Tensor(stride_y_m), // %stride_y_m
+            int32Tensor(1), // %stride_y_n
+
+            // X TMA descriptor + base
+            input_sorted, // %X__base
+            Tensor.scalar(x_shape_0, .i64), // %X__shape_0
+            Tensor.scalar(x_shape_1, .i64), // %X__shape_1
+            Tensor.scalar(x_shape_2, .i64), // %X__shape_2
+            Tensor.scalar(x_shape_3, .i64), // %X__shape_3
+            Tensor.scalar(x_shape_4, .i64), // %X__shape_4
+            Tensor.scalar(x_stride_0, .i64), // %X__stride_0
+            Tensor.scalar(x_stride_1, .i64), // %X__stride_1
+            Tensor.scalar(x_stride_2, .i64), // %X__stride_2
+            Tensor.scalar(x_stride_3, .i64), // %X__stride_3
+            Tensor.scalar(x_stride_4, .i64), // %X__stride_4
+            input_sorted, // %XPtr
+            int32Tensor(stride_x_e), // %stride_x_e
+            int32Tensor(stride_x_m), // %stride_x_m
+            int32Tensor(1), // %stride_x_k
+
+            // W TMA descriptor + base
+            weights, // %W__base
+            Tensor.scalar(w_shape_0, .i64), // %W__shape_0
+            Tensor.scalar(w_shape_1, .i64), // %W__shape_1
+            Tensor.scalar(w_shape_2, .i64), // %W__shape_2
+            Tensor.scalar(stride_w_e, .i64), // %W__stride_0
+            Tensor.scalar(stride_w_n, .i64), // %W__stride_2
+            Tensor.scalar(1, .i64), // %W__stride_1
+            // %W__stride_2
+            weights, // %WPtr
+            int32Tensor(stride_w_e), // %stride_w_e
+            int32Tensor(stride_w_k), // %stride_w_k
+            int32Tensor(stride_w_n), // %stride_w_n
+
+            // WMxScale TMA descriptor + base
+            w_scales, // %WMxScale__base
+            Tensor.scalar(w_mx_shape_0, .i64), // %WMxScale__shape_0
+            Tensor.scalar(w_mx_shape_1, .i64), // %WMxScale__shape_1
+            Tensor.scalar(w_mx_shape_2, .i64), // %WMxScale__shape_2
+            Tensor.scalar(stride_w_mx_e, .i64), // %WMxScale__stride_0
+            Tensor.scalar(stride_w_mx_k, .i64), // %WMxScale__stride_2
+            Tensor.scalar(stride_w_mx_n, .i64), // %WMxScale__stride_1
+            int32Tensor(stride_w_mx_e), // %stride_w_mx_e
+            int32Tensor(stride_w_mx_k), // %stride_w_mx_k
+            int32Tensor(stride_w_mx_n), // %stride_w_mx_n
+
+            // Bias
+            bias_f32, // %B
+            int32Tensor(stride_b_e), // %stride_b_e
+
+            // Dimensions
+            int32Tensor(M), // %M
+            int32Tensor(N), // %N
+            int32Tensor(K), // %K
+            int32Tensor(K_w), // %K_W
+
+            // Metadata
+            slice_sizes, // %XSliceSizes
+            slice_offs, // %XSliceOffs
+            xblocks_off, // %XBlockOffs
+            xblock_schedule, // %XBlockSchedule
+
+            // Grid & Config
+            int32Tensor(1), // %batch_size
+            int32Tensor(grid_m), // %grid_m
+            int32Tensor(grid_n), // %grid_n
+            Tensor.scalar(1.0, .f32), // %out_alpha
+            int32Tensor(0), // %reduce_rank
+            // Tensor.zeroes(output_shape),
+        };
+
+        const NUM_SMS = 170;
+
+        const ops_ = ops.TritonOps{
+            .name = "_p_matmul__tensorized_wrapper",
+            .ir = ir_z,
+            .grid = .{ NUM_SMS, 1, 1 },
+            .num_warps = num_warps,
+            .num_stages = num_stages,
+            .debug = true,
+            .output_operand_aliases = &.{11},
+        };
+
+        const res = ops.triton(kernel_args, .{output_3d_shape}, ops_);
+        return res[0];
+    }
+
+    /// Triton MoE MXFP4 kernel wrapper (TTIR signature-aligned).
+    pub fn moeTritonOp(
+        input_sorted: Tensor, // [M_tokens, K] (bf16)
+        weights: Tensor, // [Experts, K, N_exp] (mxfp4/u8)
+        weights_scales: Tensor, // [Experts, K_mx, N_exp] (scales)
+        bias: Tensor, // [Experts, N_exp] (bf16)
+        counts: Tensor, // [Experts] i32 (tokens per expert)
+        output_dim: i32, // N (per exp)
+        ttir_file: []const u8,
+        block_m: i64,
+        block_n: i64,
+        num_warps: i32,
+        num_stages: i32,
+    ) Tensor {
+        _log.info(
+            "moeTritonOp inputs: input_sorted={f}, weights={f}, weights_scales={f}, bias={f}, counts={f}",
+            .{ input_sorted.shape(), weights.shape(), weights_scales.shape(), bias.shape(), counts.shape() },
+        );
+        const M: i64 = input_sorted.dim(0);
+        const K: i64 = input_sorted.dim(1);
+        const N: i64 = @as(i64, output_dim);
+
+        const num_experts = weights.dim(0);
+
+        const K_w: i64 = @divFloor(K, 2);
+        const K_mx: i64 = @divFloor(K, 32);
+
+        const grid_m: i64 = if (M <= num_experts)
+            M
+        else
+            num_experts - 1 - @divFloor(num_experts - M - 1, block_m);
+
+        const grid_n: i64 = @divFloor(N + block_n - 1, block_n);
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const io = threaded.io();
+
+        var buf: [1024 * 1024]u8 = undefined;
+        const cwd = std.Io.Dir.cwd();
+        var file = cwd.openFile(io, ttir_file, .{}) catch |err| {
+            std.debug.panic("failed to open PTX file: {s}", .{@errorName(err)});
+        };
+        var reader = file.reader(io, &buf);
+        const len = file.length(io) catch |err| {
+            std.debug.panic("failed to get PTX file length: {s}", .{@errorName(err)});
+        };
+        const ir_buf = reader.interface.readAlloc(CompilationContext.current().allocator, len) catch |err| {
+            std.debug.panic("failed to read PTX file: {s}", .{@errorName(err)});
+        };
+        const ir_z: [:0]const u8 = CompilationContext.current().allocator.dupeZ(u8, ir_buf) catch |err| {
+            std.debug.panic("failed to null-terminate PTX: {s}", .{@errorName(err)});
+        };
+
+        // Device-side ragged metadata (prefix sum for XSliceOffs).
+        const slice_sizes = counts.convert(.i32);
+        const slice_offs_inclusive = slice_sizes.cumulativeSum(0);
+        const first_off = Tensor.zeroes(.init(.{ .d = 1 }, .i32));
+        const slice_offs = Tensor.concatenate(&.{ first_off, slice_offs_inclusive }, 0);
+
+        const block_m_i32: i32 = @intCast(block_m);
+        const n_blocks = slice_sizes.addConstant(block_m_i32 - 1).divByConst(block_m_i32);
+
+        // blocks offsets
+        const xblocks_off_values = n_blocks.cumulativeSum(0);
+        const xblocks_off = Tensor.concatenate(&.{ first_off, xblocks_off_values }, 0);
+
+        const total_blocks = n_blocks.sum(0);
+
+        const seq = input_sorted.dim(.seq);
+        const max_n_blocks = num_experts - 1 - (@divFloor(num_experts - seq - 1, 16)); //verifier le divFloor
+
+        var slices_idx = Tensor.iota(.init(.{ .d = max_n_blocks }, .i32), 0);
+
+        const slices_idx_2d = slices_idx.broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
+
+        const offsets_2d = xblocks_off.reshape(.{ 1, num_experts + 1 }).broad(.init(.{ .d = max_n_blocks, .b = num_experts + 1 }, .i32));
+        const mask = slices_idx_2d.cmp(.GE, offsets_2d);
+
+        const batch_ids = mask.convert(.i32).sum(1).sub(Tensor.scalar(1, .i32));
+        const xblocks_off_1d = xblocks_off.reshape(.{ .d = num_experts + 1 });
+
+        const batch_ids_1d = batch_ids.reshape(.{max_n_blocks});
+
+        // blocks schedule
+        const start_offsets = xblocks_off_1d.gather(.{ .d = batch_ids_1d }, .{});
+        const internal_block_ids = slices_idx.reshape(.{max_n_blocks}).sub(start_offsets);
+
+        const shift_16 = Tensor.scalar(16, .i32);
+        const pack = internal_block_ids.shiftLeft(shift_16).add(batch_ids_1d);
+
+        const total_blocks_broad = total_blocks.reshape(Shape.init(.{1}, .i32)).broad(Shape.init(.{max_n_blocks}, .i32));
+        const valid_mask = slices_idx.cmp(.LT, total_blocks_broad);
+
         const minus_one = Tensor.scalar(-1, .i32).broad(Shape.init(.{max_n_blocks}, .i32));
         const xblock_schedule = valid_mask.select(pack, minus_one);
 
@@ -216,79 +651,59 @@ pub const Tensor = struct {
 
         const output_shape: Shape = .init(.{ .seq = M, .d = N }, .bf16);
 
-        // _log.info("moeTritonOp: M={d} K={d} N={d} N_exp={d} K_w={d} K_mx={d} num_experts={d}", .{ M, K, N_TOTAL, N, K_w, K_mx, num_experts });
-        // _log.info("block sizes: BLOCK_M={d} BLOCK_N={d} grid_m={d} grid_n={d}", .{ BLOCK_M, BLOCK_N, grid_m, grid_n });
-        // _log.info("input_sorted shape={f}", .{input_sorted.shape()});
-        // _log.info("weights shape={f}", .{weights.shape()});
-        // _log.info("weights_scales shape={f} ", .{weights_scales.shape()});
-        // _log.info("bias shape={f} ", .{bias.shape()});
-        // _log.info("counts shape={f} ", .{counts.shape()});
-        // _log.info("slice_sizes shape={f} slice_offs shape={f}", .{ slice_sizes.shape(), slice_offs.shape() });
-        // _log.info("xblock_offs shape={f} xblock_schedule shape={f}", .{ xblocks_off.shape(), xblock_schedule.shape() });
-        // _log.info("output_shape={f}", .{output_shape});
-
         const K_packed = weights.dim(2) * weights.dim(3); // 90 * 16 = 1440
 
         // Y [M, N]
         const stride_y_m: i64 = N;
 
         // X [M, K]
-        const stride_x_z: i64 = M * K;
-        _ = stride_x_z; // autofix
         const stride_x_m: i64 = K;
 
-        // W [Experts, K, N]
+        // W [Experts, N, K_packed]
         const stride_w_e: i64 = K_packed * N;
         const stride_w_k: i64 = 1;
         const stride_w_n: i64 = K_packed;
 
-        // Scales [Experts, K_mx, N]
+        // Scales [Experts, N, K_mx]
         const stride_w_mx_e: i64 = N * K_mx;
         const stride_w_mx_k: i64 = 1;
         const stride_w_mx_n: i64 = K_mx;
 
         const stride_b_e: i64 = N;
-
-        // _log.info(
-        //     "strides: stride_y_m={d} stride_x_z={d} stride_x_m={d} stride_w_e={d} stride_w_n={d} stride_w_mx_e={d} stride_w_mx_k={d} stride_b_e={d}",
-        //     .{ stride_y_m, stride_x_z, stride_x_m, stride_w_e, stride_w_n, stride_w_mx_e, stride_w_mx_k, stride_b_e },
-        // );
-
-        // --- Liste des Arguments (32 items, Match Exact Signature) ---
         const kernel_args = .{
-            // 1. Y & Strides
-            int32Const(0), // %stride_y_k
-            int32Const(0), // %stride_y_z
-            int32Const(stride_y_m), // %stride_y_m
-            int32Const(1), // %stride_y_n
+            // 1. Y Strides
+            int32Tensor(0), // %stride_y_k
+            int32Tensor(0), // %stride_y_z
+            int32Tensor(stride_y_m), // %stride_y_m
+            int32Tensor(1), // %stride_y_n
 
             // 2. X & Strides
             input_sorted, // %X
-            int32Const(0), // %stride_x_z
-            int32Const(stride_x_m), // %stride_x_m
-            int32Const(1), // %stride_x_k
+            int32Tensor(0), // %stride_x_z
+            int32Tensor(stride_x_m), // %stride_x_m
+            int32Tensor(1), // %stride_x_k
 
             // 3. W & Strides
             weights, // %W
-            int32Const(stride_w_e), // %stride_w_e
-            int32Const(stride_w_k), // %stride_w_k
-            int32Const(stride_w_n), // %stride_w_n
+            int32Tensor(stride_w_e), // %stride_w_e
+            int32Tensor(stride_w_k), // %stride_w_k
+            int32Tensor(stride_w_n), // %stride_w_n
 
             // 4. Scales & Strides
             weights_scales, // %WMxScale
-            int32Const(stride_w_mx_e), // %stride_w_mx_e
-            int32Const(stride_w_mx_k), // %stride_w_mx_k
-            int32Const(stride_w_mx_n), // %stride_w_mx_n
+            int32Tensor(stride_w_mx_e), // %stride_w_mx_e
+            int32Tensor(stride_w_mx_k), // %stride_w_mx_k
+            int32Tensor(stride_w_mx_n), // %stride_w_mx_n
 
             // 5. Bias
             bias_f32, // %B
-            int32Const(stride_b_e), // %stride_b_e
+            int32Tensor(stride_b_e), // %stride_b_e
 
             // 6. Dimensions
-            int32Const(M), // %M
-            int32Const(N), // %N
-            int32Const(K), // %K
-            int32Const(K_w), // %K_W
+            int32Tensor(M), // %M
+            int32Tensor(N), // %N
+            int32Tensor(K), // %K
+            int32Tensor(K_w), // %K_W
 
             // 7. Metadata
             slice_sizes, // %XSliceSizes
@@ -297,11 +712,11 @@ pub const Tensor = struct {
             xblock_schedule, // %XBlockSchedule
 
             // 8. Grid & Config
-            int32Const(1), // %batch_size
-            int32Const(grid_m), // %grid_m
-            int32Const(grid_n), // %grid_n
+            int32Tensor(1), // %batch_size
+            int32Tensor(grid_m), // %grid_m
+            int32Tensor(grid_n), // %grid_n
             Tensor.scalar(1.0, .f32), // %out_alpha
-            int32Const(0), // %reduce_rank
+            int32Tensor(0), // %reduce_rank
             Tensor.zeroes(output_shape), // %Yout
         };
 
@@ -309,8 +724,8 @@ pub const Tensor = struct {
             .name = "_matmul__tensorized_wrapper",
             .ir = ir_z,
             .grid = .{ @intCast(grid_m * grid_n), 1, 1 },
-            .num_warps = 4,
-            .num_stages = 2,
+            .num_warps = num_warps,
+            .num_stages = num_stages,
             .debug = true,
             .output_operand_aliases = &.{kernel_args.len - 1},
         };
@@ -2420,8 +2835,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
             .unknown(mlirCtx()),
+            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));
