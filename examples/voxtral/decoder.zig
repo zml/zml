@@ -368,7 +368,7 @@ pub const SelfAttention = struct {
         v = v.rename(.{ .s = .k });
 
         // Update KV cache and retrieve cached K/V
-        const new_kv_cache = kv_cache.update(k, v, token_index);
+        const new_kv_cache = kv_cache.update(k, v, pos_index.rename(.{ .s = .k }));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
@@ -377,7 +377,7 @@ pub const SelfAttention = struct {
         var attn_mask = zml.nn.causalAttnMask(.{ .q = full_seq_len, .k = full_seq_len }, dtype, config.sliding_window);
         attn_mask = attn_mask.gatherSlices(
             Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()),
-            token_index.reshape(.{ .coord = 1 }),
+            pos_index.rename(.{ .s = .coord }),
             .{},
         );
         const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
