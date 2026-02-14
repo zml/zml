@@ -115,3 +115,22 @@ common:alldebug --strategy=local
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
 common:release  --@rules_zig//zig/settings:mode=release_safe
+
+common:remote --bes_results_url=https://app.buildbuddy.io/invocation/
+common:remote --bes_backend=grpcs://remote.buildbuddy.io
+common:remote --remote_cache=grpcs://remote.buildbuddy.io
+common:remote --remote_download_toplevel
+common:remote --nobuild_runfile_links
+common:remote --remote_timeout=3600
+common:remote --remote_executor=grpcs://remote.buildbuddy.io
+common:remote --noexperimental_throttle_remote_action_building
+common:remote --experimental_remote_execution_keepalive
+common:remote --experimental_remote_cache_compression
+common:remote --grpc_keepalive_time=30s
+common:remote --jobs=800
+common:remote --extra_execution_platforms=//:rbe_platform
+
+# Load from the local configuration file, if it exists. This needs to be the
+# *last* statement in the root configuration file, as the local configuration
+# file should be able to overwrite flags from the root configuration.
+try-import %workspace%/.bazelrc.user

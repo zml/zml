@@ -1,6 +1,9 @@
 # Bazel symlinks
 bazel-*
 
+# Bazel user config
+.bazelrc.user
+
 # macOS
 .DS_Store
 
