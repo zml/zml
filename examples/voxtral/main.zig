@@ -25,19 +25,18 @@ const voxtral = @import("voxtral.zig");
 const CliArgs = struct {
     input: []const u8,
     model: []const u8,
+    transcription_delay_ms: f32 = 480.0,
 };
 
-const tokens_array = [_]u32{ 1, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32 };
-const tokens: []const u32 = &tokens_array;
-const n_delay_tokens = 6;
-const n_left_pad_tokens = 32;
-const n_right_pad_tokens = (n_delay_tokens + 1) + 10; // 17
-const raw_audio_length_per_tok = 1280; // SAMPLE_RATE / FRAME_RATE = 16000 / 12.5
+// Streaming protocol constants
+const token_bos: u32 = 1;
+const token_streaming_pad: u32 = 32;
+const n_left_pad_tokens: u32 = 32;
 
 pub fn main() !void {
     log.info("Start of Voxtral", .{});
 
-    var dbg = std.heap.DebugAllocator(.{}).init;
+    var dbg = std.heap.DebugAllocator(.{ .thread_safe = true }).init;
     defer if (builtin.mode == .Debug) std.debug.assert(dbg.deinit() == .ok);
 
     const allocator = switch (builtin.mode) {
@@ -64,14 +63,6 @@ pub fn main() !void {
     const file = try std.Io.Dir.openFile(.cwd(), io, args.input, .{});
     defer file.close(io);
 
-    var wav_buffer: [4096]u8 = undefined;
-    var reader = file.reader(io, &wav_buffer);
-
-    const left_pad = n_left_pad_tokens * raw_audio_length_per_tok;
-    const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, left_pad, n_right_pad_tokens, raw_audio_length_per_tok);
-    defer allocator.free(padded_wav);
-    const audio_len = padded_wav.len;
-
     const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
 
     var model_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.model);
@@ -83,6 +74,31 @@ pub fn main() !void {
     var parsed_config = try cfg.parseConfig(allocator, io, model_dir);
     defer parsed_config.deinit();
     const config = parsed_config.value;
+
+    const sample_rate: f32 = @floatFromInt(config.audio().sampling_rate);
+    const frame_rate = config.audio().frame_rate;
+    const raw_audio_length_per_tok: u32 = @intFromFloat(sample_rate / frame_rate);
+    const hop_length = config.audio().hop_length;
+
+    const delay_samples: u32 = @intFromFloat(args.transcription_delay_ms / 1000.0 * sample_rate);
+    const audio_length_per_tok = raw_audio_length_per_tok / hop_length;
+    const n_delay_tokens = std.math.divCeil(u32, delay_samples / hop_length, audio_length_per_tok) catch unreachable;
+    const n_right_pad_tokens = (n_delay_tokens + 1) + 10;
+
+    // Build tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
+    const n_prompt_tokens = 1 + n_left_pad_tokens + n_delay_tokens;
+    const tokens = try allocator.alloc(u32, n_prompt_tokens);
+    defer allocator.free(tokens);
+    tokens[0] = token_bos;
+    @memset(tokens[1..], token_streaming_pad);
+
+    var wav_buffer: [4096]u8 = undefined;
+    var reader = file.reader(io, &wav_buffer);
+
+    const left_pad = n_left_pad_tokens * raw_audio_length_per_tok;
+    const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, left_pad, n_right_pad_tokens, raw_audio_length_per_tok);
+    defer allocator.free(padded_wav);
+    const audio_len = padded_wav.len;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
