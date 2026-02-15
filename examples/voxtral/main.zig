@@ -127,6 +127,7 @@ pub fn main() !void {
             .hd = config.head_dim,
         }, dtype)),
         .t_cond = Tensor.init(.{ .d = config.dim }, .f32),
+        .rng = .init(),
     };
 
     // Launch concurrent compilation and buffer loading
