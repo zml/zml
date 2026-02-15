@@ -8,6 +8,7 @@ const Config = cfg.Config;
 
 const common = @import("common.zig");
 const rmsNorm = common.rmsNorm;
+const KvCache = common.KvCache;
 
 pub const Encoder = struct {
     conv0: CausalConv1d,
@@ -60,7 +61,19 @@ pub const Encoder = struct {
     /// mel: [channels=128, time=frames]
     /// Returns: [s, d=1280]
     pub fn forward(self: Encoder, mel: Tensor) Tensor {
-        // Standardize precision to match model weights (usually bf16)
+        var h = self.convStem(mel);
+
+        // Transformer layers
+        for (self.layers) |layer| {
+            h = layer.forward(h, self.config);
+        }
+
+        return rmsNorm(h, self.norm, self.norm_eps);
+    }
+
+    /// Run the convolutional stem: conv0 + gelu + conv1 + gelu + reshape.
+    /// mel: [channels=128, time=frames] → [s=(frames+1)/2, d=1280]
+    pub fn convStem(self: Encoder, mel: Tensor) Tensor {
         const dtype = self.conv0.weight.dtype();
         var h = mel.convert(dtype).insertAxes(.channels, .{.batch});
 
@@ -69,14 +82,25 @@ pub const Encoder = struct {
 
         // [batch=1, channels=1280, time'] -> [s, d=1280]
         h = h.squeeze(.batch);
-        h = h.transpose(.{ .time, .channels }).rename(.{ .time = .s, .channels = .d });
+        return h.transpose(.{ .time, .channels }).rename(.{ .time = .s, .channels = .d });
+    }
 
-        // Transformer layers
-        for (self.layers) |layer| {
-            h = layer.forward(h, self.config);
+    /// Process a chunk of conv stem output through all transformer layers with KV cache.
+    /// x: [s=dsf, d=1280], token_index: scalar, kv_cache: KvCache
+    /// Returns: ([s=dsf, d=1280], KvCache)
+    pub fn transformerStep(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+        var h = x;
+        var cache = kv_cache;
+
+        for (self.layers, 0..) |layer, i| {
+            const layer_cache = cache.atLayer(i);
+            const result = layer.forwardStep(h, token_index, layer_cache, self.config);
+            h = result[0];
+            const updated_layer_cache = result[1];
+            cache = updated_layer_cache.reuseBuffer(layer_cache);
         }
 
-        return rmsNorm(h, self.norm, self.norm_eps);
+        return .{ rmsNorm(h, self.norm, self.norm_eps), cache };
     }
 };
 
@@ -164,6 +188,22 @@ pub const TransformerLayer = struct {
 
         return out;
     }
+
+    /// h: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
+    pub fn forwardStep(self: TransformerLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
+        const attn_out, const updated_kv_cache = self.attention.forwardStep(
+            rmsNorm(h, self.attention_norm, self.norm_eps),
+            token_index,
+            kv_cache,
+            config,
+        );
+        var out = h.add(attn_out);
+
+        const ffn_out = self.feed_forward.forward(rmsNorm(out, self.ffn_norm, self.norm_eps));
+        out = out.add(ffn_out);
+
+        return .{ out, updated_kv_cache };
+    }
 };
 
 pub const SelfAttention = struct {
@@ -225,6 +265,58 @@ pub const SelfAttention = struct {
         // Merge heads and output projection: [q, h, hd] -> [s, d]
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return self.wo.forward(merged).rename(.{ .dout = .d });
+    }
+
+    /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
+    pub fn forwardStep(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
+        const enc = config.encoder();
+        const dtype = x.dtype();
+
+        var q = self.wq.forward(x);
+        var k = self.wk.forward(x);
+        var v = self.wv.forward(x);
+
+        q = q.splitAxis(.dout, .{ .h = enc.n_heads, .hd = enc.head_dim });
+        k = k.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
+        v = v.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
+
+        // Position indices for RoPE: token_index + arange(s)
+        const pos_index = b: {
+            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
+                .withTags(.{.s}).broad(zml.Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+            break :b temp.add(token_index.broad(temp.shape()));
+        };
+
+        const rope_opts: zml.nn.RopeOpts = .{
+            .layout = .interleaved,
+            .freq_base = enc.rope_theta,
+        };
+
+        q = zml.nn.rope(q, pos_index, rope_opts);
+        k = zml.nn.rope(k, pos_index, rope_opts);
+
+        q = q.rename(.{ .s = .q });
+        k = k.rename(.{ .s = .k });
+        v = v.rename(.{ .s = .k });
+
+        // Update KV cache and retrieve cached K/V
+        const new_kv_cache = kv_cache.update(k, v, pos_index.rename(.{ .s = .k }));
+        k = new_kv_cache.keys().convert(dtype);
+        v = new_kv_cache.values().convert(dtype);
+
+        // Causal attention with sliding window
+        const full_seq_len = k.dim(.k);
+        var attn_mask = zml.nn.causalAttnMask(.{ .q = full_seq_len, .k = full_seq_len }, dtype, enc.sliding_window);
+        attn_mask = attn_mask.gatherSlices(
+            zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()),
+            token_index.reshape(.{ .coord = 1 }),
+            .{},
+        );
+
+        const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
+
+        const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
     }
 };
 

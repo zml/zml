@@ -58,6 +58,19 @@ pub const Adapter = struct {
 
         return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
+
+    /// encoder_chunk: [s=dsf, d] → [s=1, dim]
+    /// Like forward but input is always exactly dsf frames, so no padding needed.
+    pub fn forwardStep(self: Adapter, encoder_chunk: Tensor) Tensor {
+        const dsf = self.downsample_factor;
+
+        // Reshape [s=dsf, d] → [s=1, d*dsf]
+        const h = encoder_chunk
+            .splitAxis(.s, .{ .s = .auto, .group = dsf })
+            .merge(.{ .d = .{ .group, .d } });
+
+        return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    }
 };
 
 /// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
@@ -105,15 +118,11 @@ pub const Decoder = struct {
     }
 
     /// Run all decoder layers on input embeddings, sample next tokens and return updated KV cache + RNG.
-    /// text_tokens: [s] u32, adapter_out: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d], rng: Rng
+    /// text_tokens: [s] u32, audio_embed: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d], rng: Rng
     /// Returns: (tokens [s] u32, KvCache, Rng)
-    pub fn forward(self: Decoder, text_tokens: Tensor, adapter_out: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng) struct { Tensor, KvCache, Tensor.Rng } {
-        const audio_embeds = adapter_out.dynamicSlice(.{
-            .s = Tensor.DynSlice{ .start = token_index, .len = @intCast(text_tokens.dim(.s)) },
-        });
-
+    pub fn forward(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng) struct { Tensor, KvCache, Tensor.Rng } {
         const text_embeds = self.tok_embeddings.gather(.{ .voc = text_tokens }, .{});
-        const input_embeds = text_embeds.add(audio_embeds);
+        const input_embeds = text_embeds.add(audio_embed);
 
         const t = t_cond.convert(input_embeds.dtype());
 
@@ -167,86 +176,7 @@ pub const AdaRmsNorm = struct {
     }
 };
 
-/// KV cache for all decoder layers.
-/// Stores K/V tensors with shape {layer, k=max_seq_len, h, hd}.
-pub const KvCache = struct {
-    k: Tensor,
-    v: Tensor,
-    layer_index: Tensor,
-
-    pub fn init(kv_shape: Shape) KvCache {
-        return .{
-            .k = .fromShape(kv_shape),
-            .v = .fromShape(kv_shape),
-            .layer_index = .init(.{}, .u32),
-        };
-    }
-
-    pub fn initShape(kv_shape: Shape) zml.ShapeOf(KvCache) {
-        return .{
-            .k = kv_shape,
-            .v = kv_shape,
-            .layer_index = Shape.init(.{}, .u32),
-        };
-    }
-
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
-        return .{
-            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
-            .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
-        };
-    }
-
-    pub fn deinitBuffer(self: *zml.Bufferized(KvCache)) void {
-        self.k.deinit();
-        self.v.deinit();
-        self.layer_index.deinit();
-    }
-
-    pub fn keys(self: KvCache) Tensor {
-        return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn values(self: KvCache) Tensor {
-        return self.v.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
-    }
-
-    pub fn update(self: KvCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) KvCache {
-        return .{
-            .k = scatterCache(self.k, new_k, self.layer_index, token_index),
-            .v = scatterCache(self.v, new_v, self.layer_index, token_index),
-            .layer_index = self.layer_index,
-        };
-    }
-
-    fn scatterCache(cache: Tensor, new: Tensor, layer_index: Tensor, token_index: ?Tensor) Tensor {
-        const k_shape = cache.shape().drop(.layer);
-        const converted = new.convert(cache.dtype()).transpose(k_shape);
-        const scatter_opts: Tensor.ScatterOpts = .{ .indices_are_sorted = true, .update_fn = Tensor.ScatterOpts.override };
-
-        return if (token_index) |idx|
-            cache.scatterSlices(.{ .layer = layer_index.broad(idx.shape()), .k = idx }, converted, scatter_opts).reuseBuffer(cache)
-        else
-            cache.scatterSlices(.{ .layer = layer_index }, converted, scatter_opts).reuseBuffer(cache);
-    }
-
-    pub fn atLayer(self: KvCache, layer_index: usize) KvCache {
-        return .{
-            .k = self.k,
-            .v = self.v,
-            .layer_index = Tensor.scalar(layer_index, .u32),
-        };
-    }
-
-    pub fn reuseBuffer(self: KvCache, other: KvCache) KvCache {
-        return .{
-            .k = self.k.reuseBuffer(other.k),
-            .v = self.v.reuseBuffer(other.v),
-            .layer_index = self.layer_index.reuseBuffer(other.layer_index),
-        };
-    }
-};
+pub const KvCache = common.KvCache;
 
 /// Decoder self-attention with KV cache.
 pub const SelfAttention = struct {
