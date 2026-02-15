@@ -18,7 +18,6 @@ const Encoder = enc.Encoder;
 const dec = @import("decoder.zig");
 const Decoder = dec.Decoder;
 const Adapter = dec.Adapter;
-const Embedder = dec.Embedder;
 
 const voxtral = @import("voxtral.zig");
 
@@ -111,15 +110,15 @@ pub fn main() !void {
     defer encoder_model.deinit(allocator);
 
     const adapter: Adapter = .init(model_store.view(), config);
-    const embedder: Embedder = .init(model_store.view());
 
     var model: Decoder = .init(allocator, model_store.view(), config);
     defer model.deinit(allocator);
 
     const dtype = model.tok_embeddings.dtype();
     const model_params: voxtral.VoxtralParameters = .{
-        .prefill_embeds = .init(.{ .s = @as(u32, @intCast(tokens.len)), .d = config.dim }, .bf16),
-        .decode_embeds = .init(.{ .s = 1, .d = config.dim }, .bf16),
+        .prefill_tokens = .init(.{ .s = @as(u32, @intCast(tokens.len)) }, .u32),
+        .decode_tokens = .init(.{ .s = 1 }, .u32),
+        .adapter_out = .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16),
         .token_index = .init(.{}, .u32),
         .kv_cache = .init(.init(.{
             .layer = model.layers.len,
@@ -135,14 +134,11 @@ pub fn main() !void {
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
     var compiled_encoder_future = try io.concurrent(voxtral.compileEncoder, .{ allocator, io, platform, encoder_model, audio_len, &progress });
     var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, encoder_seq_len, config, &progress });
-    var compiled_embedder_future = try io.concurrent(voxtral.compileEmbedder, .{ allocator, io, platform, embedder, adapter_seq_len, @as(u32, @intCast(tokens.len)), config, &progress });
-    var compiled_decode_embedder_future = try io.concurrent(voxtral.compileEmbedder, .{ allocator, io, platform, embedder, adapter_seq_len, @as(u32, 1), config, &progress });
     var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, model, model_params, &progress });
 
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
     var adapter_buffers_future = try io.concurrent(Adapter.load, .{ &adapter, allocator, io, platform, &model_store, &progress });
-    var embedder_buffers_future = try io.concurrent(Embedder.load, .{ &embedder, allocator, io, platform, &model_store, &progress });
     var decoder_buffers_future = try io.concurrent(Decoder.load, .{ &model, allocator, io, platform, &model_store, &progress });
 
     // Await tokenizer and look up special token IDs
@@ -164,12 +160,6 @@ pub fn main() !void {
     var compiled_adapter = try compiled_adapter_future.await(io);
     defer compiled_adapter.deinit();
 
-    var compiled_embedder = try compiled_embedder_future.await(io);
-    defer compiled_embedder.deinit();
-
-    var compiled_decode_embedder = try compiled_decode_embedder_future.await(io);
-    defer compiled_decode_embedder.deinit();
-
     var compiled_prefill, var compiled_decoder = try compiled_decoder_future.await(io);
     defer compiled_prefill.deinit();
     defer compiled_decoder.deinit();
@@ -183,9 +173,6 @@ pub fn main() !void {
 
     var adapter_buffers = try adapter_buffers_future.await(io);
     defer Adapter.unload(&adapter_buffers);
-
-    var embedder_buffers = try embedder_buffers_future.await(io);
-    defer Embedder.unload(&embedder_buffers);
 
     var decoder_buffers = try decoder_buffers_future.await(io);
     defer Decoder.unload(&decoder_buffers, allocator);
@@ -205,14 +192,11 @@ pub fn main() !void {
         &compiled_mel_spectrum,
         &compiled_encoder,
         &compiled_adapter,
-        &compiled_embedder,
-        &compiled_decode_embedder,
         &compiled_prefill,
         &compiled_decoder,
         &mel_spectrum_buffers,
         &encoder_buffers,
         &adapter_buffers,
-        &embedder_buffers,
         &decoder_buffers,
         model_params,
     );

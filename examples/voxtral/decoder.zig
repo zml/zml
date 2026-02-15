@@ -60,37 +60,9 @@ pub const Adapter = struct {
     }
 };
 
-pub const Embedder = struct {
-    tok_embeddings: Tensor,
-
-    pub fn init(store: zml.io.TensorStore.View) Embedder {
-        return .{
-            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
-        };
-    }
-
-    pub fn forward(self: Embedder, full_adapter_out: Tensor, text_tokens: Tensor, pos: Tensor) Tensor {
-        const audio_embeds = full_adapter_out.dynamicSlice(.{
-            .s = Tensor.DynSlice{ .start = pos, .len = @intCast(text_tokens.dim(.s)) },
-        });
-
-        const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
-
-        return text_embeds.add(audio_embeds);
-    }
-
-    pub fn load(self: *const Embedder, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node) !zml.Bufferized(Embedder) {
-        return common.loadModel(Embedder, self, allocator, io, platform, store, progress, "embedder");
-    }
-
-    pub fn unload(self: *zml.Bufferized(Embedder)) void {
-        self.tok_embeddings.deinit();
-    }
-};
-
 /// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
 pub const Decoder = struct {
-    /// Same weights as Embedder.tok_embeddings; duplicated here for logit computation.
+    /// Token embeddings: used for both input embedding and output logit computation.
     tok_embeddings: Tensor,
     layers: []DecoderLayer,
     norm: Tensor,
@@ -135,8 +107,16 @@ pub const Decoder = struct {
     /// Run all decoder layers on input embeddings, compute logits and return argmax tokens.
     /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
     /// Returns: (tokens [s] u32, KvCache)
-    pub fn forward(self: Decoder, input_embeds: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
+    pub fn forward(self: Decoder, text_tokens: Tensor, adapter_out: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
+        const audio_embeds = adapter_out.dynamicSlice(.{
+            .s = Tensor.DynSlice{ .start = token_index, .len = @intCast(text_tokens.dim(.s)) },
+        });
+
+        const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
+        const input_embeds = text_embeds.add(audio_embeds);
+
         const t = t_cond.convert(input_embeds.dtype());
+
         var h = input_embeds;
         var cache = kv_cache;
 
@@ -153,7 +133,7 @@ pub const Decoder = struct {
 
         // Compute logits in f32 for precision (matching Python reference)
         const output_logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
-        const output_tokens = output_logits.argMax(.vocab).indices.convert(.u32);
+        const output_tokens = output_logits.argMax(.vocab).indices.squeeze(.vocab).convert(.u32);
 
         return .{ output_tokens, cache };
     }

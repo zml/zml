@@ -15,11 +15,11 @@ const Encoder = enc.Encoder;
 const dec = @import("decoder.zig");
 const Decoder = dec.Decoder;
 const Adapter = dec.Adapter;
-const Embedder = dec.Embedder;
 
 pub const VoxtralParameters = struct {
-    prefill_embeds: Tensor,
-    decode_embeds: Tensor,
+    prefill_tokens: Tensor,
+    decode_tokens: Tensor,
+    adapter_out: Tensor,
     token_index: Tensor,
     kv_cache: dec.KvCache,
     t_cond: Tensor,
@@ -29,7 +29,7 @@ pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *c
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling mel spectrogram...", 1);
     defer node.end();
-    
+
     return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{padded_audio_len}, .f32).withTags(.{.samples})});
 }
 
@@ -37,9 +37,9 @@ pub fn compileEncoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling encoder...", 1);
     defer node.end();
-    
+
     const num_frames = padded_audio_len / model.config.audio().hop_length;
-    
+
     return try platform.compile(allocator, io, model, .forward, .{
         Tensor.init(.{ .channels = 128, .time = num_frames }, .f32),
     });
@@ -47,54 +47,26 @@ pub fn compileEncoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
 
 pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, encoder_seq_len: u32, config: Config, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    
+
     var node = progress.start("Compiling adapter...", 1);
     defer node.end();
-    
+
     return try platform.compile(allocator, io, model, .forward, .{
         Tensor.init(.{ .s = encoder_seq_len, .d = config.encoder().dim }, .bf16),
     });
 }
 
-pub fn compileEmbedder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Embedder, adapter_seq_len_: u32, seq_len: u32, config: Config, progress: *std.Progress.Node) !zml.Exe {
-    progress.increaseEstimatedTotalItems(1);
-    
-    var node = progress.start("Compiling embedder...", 1);
-    defer node.end();
-    
-    return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = adapter_seq_len_, .d = config.dim }, .bf16),
-        Tensor.init(.{ .s = seq_len }, .u32),
-        Tensor.init(.{}, .u32),
-    });
-}
-
 pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, params: VoxtralParameters, progress: *std.Progress.Node) !struct { zml.Exe, zml.Exe } {
     const compilePrefill = struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, embeds_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, tokens_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
-	    
+
             var node_ = progress_.start("Compiling decoder prefill...", 1);
             defer node_.end();
-	    
+
             return try platform_.compile(allocator_, io_, model_, .forward, .{
-                embeds_,
-                params_.token_index,
-                params_.kv_cache,
-                params_.t_cond,
-            });
-        }
-    }.call;
-    
-    const compileDecode = struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, embeds_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
-            progress_.increaseEstimatedTotalItems(1);
-	    
-            var node_ = progress_.start("Compiling decoder decode...", 1);
-            defer node_.end();
-	    
-            return try platform_.compile(allocator_, io_, model_, .forward, .{
-                embeds_,
+                tokens_,
+                params_.adapter_out,
                 params_.token_index,
                 params_.kv_cache,
                 params_.t_cond,
@@ -102,8 +74,25 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
         }
     }.call;
 
-    var prefill_future = try io.concurrent(compilePrefill, .{ allocator, io, platform, model, params.prefill_embeds, params, progress });
-    var decode_future = try io.concurrent(compileDecode, .{ allocator, io, platform, model, params.decode_embeds, params, progress });
+    const compileDecode = struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, tokens_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+
+            var node_ = progress_.start("Compiling decoder decode...", 1);
+            defer node_.end();
+
+            return try platform_.compile(allocator_, io_, model_, .forward, .{
+                tokens_,
+                params_.adapter_out,
+                params_.token_index,
+                params_.kv_cache,
+                params_.t_cond,
+            });
+        }
+    }.call;
+
+    var prefill_future = try io.concurrent(compilePrefill, .{ allocator, io, platform, model, params.prefill_tokens, params, progress });
+    var decode_future = try io.concurrent(compileDecode, .{ allocator, io, platform, model, params.decode_tokens, params, progress });
 
     return .{
         try prefill_future.await(io),
@@ -113,14 +102,14 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
 
 pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
     progress.increaseEstimatedTotalItems(1);
-    
+
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
-    
+
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
-	
+
         var reader = file.reader(io, &.{});
         break :b try reader.interface.readAlloc(allocator, try file.length(io));
     };
@@ -136,14 +125,14 @@ pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, 
 pub fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32) []f32 {
     const half_dim = dim / 2;
     const result = allocator.alloc(f32, dim) catch unreachable;
-    
+
     for (0..half_dim) |i| {
         const freq = @exp(-@log(@as(f32, 10000.0)) * @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(half_dim)));
         const angle = t_value * freq;
         result[i] = @cos(angle);
         result[i + half_dim] = @sin(angle);
     }
-    
+
     return result;
 }
 
@@ -160,14 +149,11 @@ pub fn runPipeline(
     compiled_mel_spectrum: *zml.Exe,
     compiled_encoder: *zml.Exe,
     compiled_adapter: *zml.Exe,
-    compiled_embedder: *zml.Exe,
-    compiled_decode_embedder: *zml.Exe,
     compiled_prefill: *zml.Exe,
     compiled_decoder: *zml.Exe,
     mel_spectrum_buffers: *zml.Bufferized(LogMelSpectrogram),
     encoder_buffers: *zml.Bufferized(Encoder),
     adapter_buffers: *zml.Bufferized(Adapter),
-    embedder_buffers: *zml.Bufferized(Embedder),
     decoder_buffers: *zml.Bufferized(Decoder),
     model_params: VoxtralParameters,
 ) !void {
@@ -243,36 +229,7 @@ pub fn runPipeline(
     defer adapter_output.deinit();
     log.info("Adapter done.", .{});
 
-    // 4. Embedder - combine audio embeddings with token embeddings
-    log.info("Running embedder...", .{});
-    var embedder_output: zml.Buffer = undefined;
-    {
-        var emb_args = try compiled_embedder.args(allocator);
-        defer emb_args.deinit(allocator);
-        var emb_results = try compiled_embedder.results(allocator);
-        defer emb_results.deinit(allocator);
-
-        const token_slice: zml.Slice = .init(
-            .init(.{@as(u32, @intCast(tokens.len))}, .u32),
-            std.mem.sliceAsBytes(tokens),
-        );
-        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice);
-        defer token_buffer.deinit();
-
-        var pos_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
-        defer pos_buffer.deinit();
-
-        embedder_output = try .uninitialized(io, platform,
-            .init(.{ .s = @as(u32, @intCast(tokens.len)), .d = config.dim }, .bf16), .{});
-
-        emb_args.set(.{ embedder_buffers, adapter_output, token_buffer, pos_buffer });
-        compiled_embedder.call(emb_args, &emb_results);
-        emb_results.fill(.{&embedder_output});
-    }
-    defer embedder_output.deinit();
-    log.info("Embedder done.", .{});
-
-    // 5. Init KV cache + t_cond buffer
+    // 4. Init KV cache + t_cond buffer
     var kv_cache_buffers = try model_params.kv_cache.initBuffer(io, platform);
     defer dec.KvCache.deinitBuffer(&kv_cache_buffers);
 
@@ -285,7 +242,7 @@ pub fn runPipeline(
     var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
     defer t_cond_buffer.deinit();
 
-    // 6. Decoder prefill
+    // 5. Decoder prefill
     log.info("Running decoder prefill...", .{});
     var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
     defer generated_token_slice.free(allocator);
@@ -295,6 +252,13 @@ pub fn runPipeline(
         var prefill_results = try compiled_prefill.results(allocator);
         defer prefill_results.deinit(allocator);
 
+        const token_slice: zml.Slice = .init(
+            .init(.{@as(u32, @intCast(tokens.len))}, .u32),
+            std.mem.sliceAsBytes(tokens),
+        );
+        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice);
+        defer token_buffer.deinit();
+
         var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
         defer token_index_buffer.deinit();
 
@@ -303,7 +267,7 @@ pub fn runPipeline(
         var prefill_output: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
         defer prefill_output.deinit();
 
-        prefill_args.set(.{ decoder_buffers, embedder_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+        prefill_args.set(.{ decoder_buffers, token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
         compiled_prefill.call(prefill_args, &prefill_results);
         prefill_results.fill(.{ &prefill_output, &kv_cache_buffers });
 
@@ -315,7 +279,7 @@ pub fn runPipeline(
     }
     log.info("Prefill done.", .{});
 
-    // 7. Autoregressive decode loop
+    // 6. Autoregressive decode loop
     log.info("Running decoder autoregressive...", .{});
     const eos_token = tokenizer.tokenToId("</s>") orelse @panic("tokenizer missing </s> token");
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
@@ -325,17 +289,8 @@ pub fn runPipeline(
         var decode_results = try compiled_decoder.results(allocator);
         defer decode_results.deinit(allocator);
 
-        var emb_args = try compiled_decode_embedder.args(allocator);
-        defer emb_args.deinit(allocator);
-        var emb_results = try compiled_decode_embedder.results(allocator);
-        defer emb_results.deinit(allocator);
-
         var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
         defer current_token_buffer.deinit();
-
-        var decode_embed: zml.Buffer = try .uninitialized(io, platform,
-            .init(.{ .s = @as(u32, 1), .d = config.dim }, .bf16), .{});
-        defer decode_embed.deinit();
 
         const max_pos = adapter_seq_len;
         log.info("Decode loop: tokens.len={}, max_pos={}", .{ tokens.len, max_pos });
@@ -355,24 +310,10 @@ pub fn runPipeline(
                 break;
             }
 
-            // 1. Embedder: combine adapter_output[pos] + tok_embed(token)
-            const token_slice: zml.Slice = .init(.init(.{@as(u32, 1)}, .u32),
-                std.mem.sliceAsBytes(generated_token_slice.items(u32)[0..1]));
-            var token_buf: zml.Buffer = try .fromSlice(io, platform, token_slice);
-            defer token_buf.deinit();
-
-            var pos_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
-            defer pos_buffer.deinit();
-
-            emb_args.set(.{ embedder_buffers, adapter_output, token_buf, pos_buffer });
-            compiled_decode_embedder.call(emb_args, &emb_results);
-            emb_results.fill(.{&decode_embed});
-
-            // 2. Decoder: get next token
             var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
             defer token_index_buffer.deinit();
 
-            decode_args.set(.{ decoder_buffers, decode_embed, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+            decode_args.set(.{ decoder_buffers, current_token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
             compiled_decoder.call(decode_args, &decode_results);
             decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers });
 
