@@ -16,15 +16,8 @@ const dec = @import("decoder.zig");
 const Decoder = dec.Decoder;
 const Adapter = dec.Adapter;
 
-pub const VoxtralParameters = struct {
-    prefill_tokens: Tensor,
-    decode_tokens: Tensor,
-    adapter_out: Tensor,
-    token_index: Tensor,
-    kv_cache: dec.KvCache,
-    t_cond: Tensor,
-    rng: Tensor.Rng,
-};
+const common = @import("common.zig");
+const KvCache = common.KvCache;
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
@@ -34,73 +27,60 @@ pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *c
     return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{padded_audio_len}, .f32).withTags(.{.samples})});
 }
 
-pub fn compileEncoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
+pub fn compileConvStem(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling encoder...", 1);
+    var node = progress.start("Compiling conv stem...", 1);
     defer node.end();
 
     const num_frames = padded_audio_len / model.config.audio().hop_length;
 
-    return try platform.compile(allocator, io, model, .forward, .{
+    return try platform.compile(allocator, io, model, .convStem, .{
         Tensor.init(.{ .channels = 128, .time = num_frames }, .f32),
     });
 }
 
-pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, encoder_seq_len: u32, config: Config, progress: *std.Progress.Node) !zml.Exe {
+pub fn compileEncoderStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, enc_kv_cache: KvCache, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-
-    var node = progress.start("Compiling adapter...", 1);
+    var node = progress.start("Compiling encoder step...", 1);
     defer node.end();
 
-    return try platform.compile(allocator, io, model, .forward, .{
-        Tensor.init(.{ .s = encoder_seq_len, .d = config.encoder().dim }, .bf16),
+    const enc_cfg = model.config.encoder();
+    const dsf = model.config.downsample_factor();
+
+    return try platform.compile(allocator, io, model, .transformerStep, .{
+        Tensor.init(.{ .s = dsf, .d = enc_cfg.dim }, .bf16),
+        Tensor.init(.{}, .u32),
+        enc_kv_cache,
     });
 }
 
-pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, params: VoxtralParameters, progress: *std.Progress.Node) !struct { zml.Exe, zml.Exe } {
-    const compilePrefill = struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, tokens_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
-            progress_.increaseEstimatedTotalItems(1);
+pub fn compileAdapterStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, config: Config, progress: *std.Progress.Node) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Compiling adapter step...", 1);
+    defer node.end();
 
-            var node_ = progress_.start("Compiling decoder prefill...", 1);
-            defer node_.end();
+    const dsf = config.downsample_factor();
 
-            return try platform_.compile(allocator_, io_, model_, .forward, .{
-                tokens_,
-                params_.adapter_out,
-                params_.token_index,
-                params_.kv_cache,
-                params_.t_cond,
-                params_.rng,
-            });
-        }
-    }.call;
+    return try platform.compile(allocator, io, model, .forwardStep, .{
+        Tensor.init(.{ .s = dsf, .d = config.encoder().dim }, .bf16),
+    });
+}
 
-    const compileDecode = struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, tokens_: Tensor, params_: VoxtralParameters, progress_: *std.Progress.Node) !zml.Exe {
-            progress_.increaseEstimatedTotalItems(1);
+pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, dec_kv_cache: KvCache, progress: *std.Progress.Node) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Compiling decoder...", 1);
+    defer node.end();
 
-            var node_ = progress_.start("Compiling decoder decode...", 1);
-            defer node_.end();
+    const dim = model.config.dim;
 
-            return try platform_.compile(allocator_, io_, model_, .forward, .{
-                tokens_,
-                params_.adapter_out,
-                params_.token_index,
-                params_.kv_cache,
-                params_.t_cond,
-                params_.rng,
-            });
-        }
-    }.call;
-
-    var prefill_future = try io.concurrent(compilePrefill, .{ allocator, io, platform, model, params.prefill_tokens, params, progress });
-    var decode_future = try io.concurrent(compileDecode, .{ allocator, io, platform, model, params.decode_tokens, params, progress });
-
-    return .{
-        try prefill_future.await(io),
-        try decode_future.await(io),
-    };
+    return try platform.compile(allocator, io, model, .forward, .{
+        Tensor.init(.{ .s = 1 }, .u32),
+        Tensor.init(.{ .s = 1, .d = dim }, .bf16),
+        Tensor.init(.{}, .u32),
+        dec_kv_cache,
+        Tensor.init(.{ .d = dim }, .f32),
+        Tensor.Rng.init(),
+    });
 }
 
 pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
@@ -150,23 +130,24 @@ pub fn runPipeline(
     tokens: []const u32,
     n_delay_tokens: u32,
     compiled_mel_spectrum: *zml.Exe,
-    compiled_encoder: *zml.Exe,
-    compiled_adapter: *zml.Exe,
-    compiled_prefill: *zml.Exe,
+    compiled_conv_stem: *zml.Exe,
+    compiled_encoder_step: *zml.Exe,
+    compiled_adapter_step: *zml.Exe,
     compiled_decoder: *zml.Exe,
     mel_spectrum_buffers: *zml.Bufferized(LogMelSpectrogram),
     encoder_buffers: *zml.Bufferized(Encoder),
     adapter_buffers: *zml.Bufferized(Adapter),
     decoder_buffers: *zml.Bufferized(Decoder),
-    model_params: VoxtralParameters,
+    enc_kv_cache: KvCache,
+    dec_kv_cache: KvCache,
 ) !void {
     log.info("Running inference pipeline...", .{});
 
     const num_frames = audio_len / config.audio().hop_length;
     const dsf: u32 = config.downsample_factor();
-    // Natural encoder output length after stride-2 causal conv (adapter pads to multiple of dsf)
     const encoder_seq_len: u32 = @intCast((num_frames + 1) / 2);
-    const adapter_seq_len = (encoder_seq_len + dsf - 1) / dsf;
+    const total_steps = (encoder_seq_len + dsf - 1) / dsf;
+    const enc_dim: u32 = config.encoder().dim;
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
@@ -196,45 +177,48 @@ pub fn runPipeline(
     defer mel_output.deinit();
     log.info("Mel spectrogram done.", .{});
 
-    // 2. Encoder
-    log.info("Running encoder...", .{});
-    var encoder_output: zml.Buffer = undefined;
+    // 2. Conv stem
+    log.info("Running conv stem...", .{});
+    var conv_output: zml.Buffer = undefined;
     {
-        var enc_args = try compiled_encoder.args(allocator);
-        defer enc_args.deinit(allocator);
-        var enc_results = try compiled_encoder.results(allocator);
-        defer enc_results.deinit(allocator);
+        var args = try compiled_conv_stem.args(allocator);
+        defer args.deinit(allocator);
+        var results = try compiled_conv_stem.results(allocator);
+        defer results.deinit(allocator);
 
-        encoder_output = try .uninitialized(io, platform, .init(.{ .s = encoder_seq_len, .d = config.encoder().dim }, .bf16), .{});
+        conv_output = try .uninitialized(io, platform, .init(.{ .s = encoder_seq_len, .d = enc_dim }, .bf16), .{});
 
-        enc_args.set(.{ encoder_buffers, mel_output });
-        compiled_encoder.call(enc_args, &enc_results);
-        enc_results.fill(.{&encoder_output});
+        args.set(.{ encoder_buffers, mel_output });
+        compiled_conv_stem.call(args, &results);
+        results.fill(.{&conv_output});
     }
-    defer encoder_output.deinit();
-    log.info("Encoder done.", .{});
+    defer conv_output.deinit();
+    log.info("Conv stem done.", .{});
 
-    // 3. Adapter
-    log.info("Running adapter...", .{});
-    var adapter_output: zml.Buffer = undefined;
+    // 3. Download conv output to host (for per-step slicing)
+    const bf16_bytes: usize = 2;
+    const frame_bytes: usize = @as(usize, enc_dim) * bf16_bytes;
+    const chunk_bytes: usize = @as(usize, dsf) * frame_bytes;
+    const padded_enc_len: u32 = total_steps * dsf;
+
+    const conv_host = try allocator.alloc(u8, @as(usize, padded_enc_len) * frame_bytes);
+    defer allocator.free(conv_host);
+    @memset(conv_host, 0); // zero-pad for last chunk if encoder_seq_len % dsf != 0
+
     {
-        var adp_args = try compiled_adapter.args(allocator);
-        defer adp_args.deinit(allocator);
-        var adp_results = try compiled_adapter.results(allocator);
-        defer adp_results.deinit(allocator);
-
-        adapter_output = try .uninitialized(io, platform, .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16), .{});
-
-        adp_args.set(.{ adapter_buffers, encoder_output });
-        compiled_adapter.call(adp_args, &adp_results);
-        adp_results.fill(.{&adapter_output});
+        var download = try conv_output.toSliceAlloc(allocator, io);
+        defer download.free(allocator);
+        const src = download.constData();
+        @memcpy(conv_host[0..src.len], src);
     }
-    defer adapter_output.deinit();
-    log.info("Adapter done.", .{});
+    log.info("Conv output downloaded to host ({} frames, {} steps).", .{ encoder_seq_len, total_steps });
 
-    // 4. Init KV cache + t_cond buffer
-    var kv_cache_buffers = try model_params.kv_cache.initBuffer(io, platform);
-    defer dec.KvCache.deinitBuffer(&kv_cache_buffers);
+    // 4. Init KV caches + t_cond + RNG
+    var enc_kv_buffers = try enc_kv_cache.initBuffer(io, platform);
+    defer KvCache.deinitBuffer(&enc_kv_buffers);
+
+    var dec_kv_buffers = try dec_kv_cache.initBuffer(io, platform);
+    defer KvCache.deinitBuffer(&dec_kv_buffers);
 
     const t_cond_data = computeTimeEmbedding(allocator, @as(f32, @floatFromInt(n_delay_tokens)), config.dim);
     defer allocator.free(t_cond_data);
@@ -248,61 +232,87 @@ pub fn runPipeline(
     var rng_buffers = try Tensor.Rng.initBuffer(platform, 0, io);
     defer Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    // 5. Decoder prefill
-    log.info("Running decoder prefill...", .{});
-    var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
-    defer generated_token_slice.free(allocator);
-    {
-        var prefill_args = try compiled_prefill.args(allocator);
-        defer prefill_args.deinit(allocator);
-        var prefill_results = try compiled_prefill.results(allocator);
-        defer prefill_results.deinit(allocator);
-
-        const token_slice: zml.Slice = .init(
-            .init(.{@as(u32, @intCast(tokens.len))}, .u32),
-            std.mem.sliceAsBytes(tokens),
-        );
-        var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice);
-        defer token_buffer.deinit();
-
-        var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
-        defer token_index_buffer.deinit();
-
-        var prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, @intCast(tokens.len))}, .u32));
-        defer prefill_tokens_slice.free(allocator);
-        var prefill_output: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
-        defer prefill_output.deinit();
-
-        prefill_args.set(.{ decoder_buffers, token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer, rng_buffers });
-        compiled_prefill.call(prefill_args, &prefill_results);
-        prefill_results.fill(.{ &prefill_output, &kv_cache_buffers, &rng_buffers });
-
-        // Extract last token from prefill output (first generated token)
-        try prefill_output.toSlice(io, prefill_tokens_slice);
-        log.info("Prefill output tokens: {any}", .{prefill_tokens_slice.items(u32)[0..tokens.len]});
-        generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[tokens.len - 1];
-        log.info("First generated token (from prefill): {}", .{generated_token_slice.items(u32)[0]});
-    }
-    log.info("Prefill done.", .{});
-
-    // 6. Autoregressive decode loop
-    log.info("Running decoder autoregressive...", .{});
+    // 5. Step-by-step loop
+    log.info("Starting step-by-step loop ({} steps, {} prompt tokens)...", .{ total_steps, tokens.len });
     const eos_token = tokenizer.tokenToId("</s>") orelse @panic("tokenizer missing </s> token");
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
-    {
-        var decode_args = try compiled_decoder.args(allocator);
-        defer decode_args.deinit(allocator);
-        var decode_results = try compiled_decoder.results(allocator);
-        defer decode_results.deinit(allocator);
 
-        var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
-        defer current_token_buffer.deinit();
+    // Pre-allocate exe args/results (reused across iterations)
+    var enc_step_args = try compiled_encoder_step.args(allocator);
+    defer enc_step_args.deinit(allocator);
+    var enc_step_results = try compiled_encoder_step.results(allocator);
+    defer enc_step_results.deinit(allocator);
 
-        const max_pos = adapter_seq_len;
-        log.info("Decode loop: tokens.len={}, max_pos={}", .{ tokens.len, max_pos });
-        var num_generated: usize = 0;
-        for (tokens.len..max_pos) |i| {
-            const generated_token = generated_token_slice.items(u32)[0];
+    var adp_step_args = try compiled_adapter_step.args(allocator);
+    defer adp_step_args.deinit(allocator);
+    var adp_step_results = try compiled_adapter_step.results(allocator);
+    defer adp_step_results.deinit(allocator);
+
+    var dec_args = try compiled_decoder.args(allocator);
+    defer dec_args.deinit(allocator);
+    var dec_results = try compiled_decoder.results(allocator);
+    defer dec_results.deinit(allocator);
+
+    // Pre-allocate step output buffers (reused across iterations)
+    var enc_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = dsf, .d = enc_dim }, .bf16), .{});
+    defer enc_step_output.deinit();
+
+    var adapter_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = 1, .d = config.dim }, .bf16), .{});
+    defer adapter_output.deinit();
+
+    var token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
+    defer token_slice.free(allocator);
+    var token_output: zml.Buffer = try .uninitialized(io, platform, .init(.{@as(u32, 1)}, .u32), .{});
+    defer token_output.deinit();
+
+    var num_generated: usize = 0;
+
+    for (0..total_steps) |t| {
+        const t_u32: u32 = @intCast(t);
+
+        // --- Encoder step: process dsf frames through transformer with KV cache ---
+        const byte_offset = t * chunk_bytes;
+        const chunk_slice: zml.Slice = .init(
+            .init(.{ .s = dsf, .d = enc_dim }, .bf16),
+            conv_host[byte_offset .. byte_offset + chunk_bytes],
+        );
+        var chunk_buffer: zml.Buffer = try .fromSlice(io, platform, chunk_slice);
+        defer chunk_buffer.deinit();
+
+        var enc_token_index: zml.Buffer = try .scalar(io, platform, t_u32 * dsf, .u32);
+        defer enc_token_index.deinit();
+
+        enc_step_args.set(.{ encoder_buffers, chunk_buffer, enc_token_index, &enc_kv_buffers });
+        compiled_encoder_step.call(enc_step_args, &enc_step_results);
+        enc_step_results.fill(.{ &enc_step_output, &enc_kv_buffers });
+
+        // --- Adapter step: dsf encoded frames → 1 audio embedding ---
+        adp_step_args.set(.{ adapter_buffers, enc_step_output });
+        compiled_adapter_step.call(adp_step_args, &adp_step_results);
+        adp_step_results.fill(.{&adapter_output});
+
+        // --- Decoder step: 1 token + 1 audio embedding → 1 output token ---
+        // During prompt: use prompt token. After prompt: use previous output.
+        if (t < tokens.len) {
+            token_slice.items(u32)[0] = tokens[t];
+        }
+
+        var text_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice);
+        defer text_token_buffer.deinit();
+
+        var dec_token_index: zml.Buffer = try .scalar(io, platform, t_u32, .u32);
+        defer dec_token_index.deinit();
+
+        dec_args.set(.{ decoder_buffers, text_token_buffer, adapter_output, dec_token_index, &dec_kv_buffers, t_cond_buffer, rng_buffers });
+        compiled_decoder.call(dec_args, &dec_results);
+        dec_results.fill(.{ &token_output, &dec_kv_buffers, &rng_buffers });
+
+        // Download output token
+        try token_output.toSlice(io, token_slice);
+        const generated_token = token_slice.items(u32)[0];
+
+        // Print tokens after prompt phase
+        if (t >= tokens.len) {
             num_generated += 1;
 
             if (generated_token != streaming_pad_token) {
@@ -312,20 +322,12 @@ pub fn runPipeline(
             }
 
             if (generated_token == eos_token) {
-                log.info("  EOS reached at pos={}", .{i});
+                log.info("EOS reached at step={}", .{t});
                 break;
             }
-
-            var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
-            defer token_index_buffer.deinit();
-
-            decode_args.set(.{ decoder_buffers, current_token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer, rng_buffers });
-            compiled_decoder.call(decode_args, &decode_results);
-            decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
-
-            try current_token_buffer.toSlice(io, generated_token_slice);
         }
-        std.debug.print("\n", .{});
-        log.info("Decode done. Generated {} tokens total.", .{num_generated});
     }
+
+    std.debug.print("\n", .{});
+    log.info("Done. Generated {} tokens.", .{num_generated});
 }

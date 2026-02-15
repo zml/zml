@@ -19,6 +19,9 @@ const dec = @import("decoder.zig");
 const Decoder = dec.Decoder;
 const Adapter = dec.Adapter;
 
+const common = @import("common.zig");
+const KvCache = common.KvCache;
+
 const voxtral = @import("voxtral.zig");
 
 const CliArgs = struct {
@@ -98,12 +101,6 @@ pub fn main() !void {
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
-    const num_frames = audio_len / config.audio().hop_length;
-    const dsf: u32 = config.downsample_factor();
-    // Natural encoder output length after stride-2 causal conv (adapter pads to multiple of dsf)
-    const encoder_seq_len: u32 = @intCast((num_frames + 1) / 2);
-    const adapter_seq_len = (encoder_seq_len + dsf - 1) / dsf;
-
     var melspectro_model: LogMelSpectrogram = .init(config);
     const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
     var encoder_model: Encoder = .init(allocator, model_store.view().withPrefix(encoder_prefix), config);
@@ -111,36 +108,39 @@ pub fn main() !void {
 
     const adapter: Adapter = .init(model_store.view(), config);
 
-    var model: Decoder = .init(allocator, model_store.view(), config);
-    defer model.deinit(allocator);
+    var decoder_model: Decoder = .init(allocator, model_store.view(), config);
+    defer decoder_model.deinit(allocator);
 
-    const dtype = model.tok_embeddings.dtype();
-    const model_params: voxtral.VoxtralParameters = .{
-        .prefill_tokens = .init(.{ .s = @as(u32, @intCast(tokens.len)) }, .u32),
-        .decode_tokens = .init(.{ .s = 1 }, .u32),
-        .adapter_out = .init(.{ .s = adapter_seq_len, .d = config.dim }, .bf16),
-        .token_index = .init(.{}, .u32),
-        .kv_cache = .init(.init(.{
-            .layer = model.layers.len,
-            .k = config.sliding_window,
-            .h = config.n_kv_heads,
-            .hd = config.head_dim,
-        }, dtype)),
-        .t_cond = Tensor.init(.{ .d = config.dim }, .f32),
-        .rng = .init(),
-    };
+    // KV cache shapes for encoder and decoder
+    const enc_cfg = config.encoder();
+    const enc_dtype = encoder_model.norm.dtype();
+    const enc_kv_cache: KvCache = .init(.init(.{
+        .layer = enc_cfg.n_layers,
+        .k = enc_cfg.sliding_window,
+        .h = enc_cfg.n_kv_heads,
+        .hd = enc_cfg.head_dim,
+    }, enc_dtype));
+
+    const dec_dtype = decoder_model.tok_embeddings.dtype();
+    const dec_kv_cache: KvCache = .init(.init(.{
+        .layer = decoder_model.layers.len,
+        .k = config.sliding_window,
+        .h = config.n_kv_heads,
+        .hd = config.head_dim,
+    }, dec_dtype));
 
     // Launch concurrent compilation and buffer loading
     var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
-    var compiled_encoder_future = try io.concurrent(voxtral.compileEncoder, .{ allocator, io, platform, encoder_model, audio_len, &progress });
-    var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, encoder_seq_len, config, &progress });
-    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, model, model_params, &progress });
+    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, audio_len, &progress });
+    var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, &progress });
+    var compiled_adapter_step_future = try io.concurrent(voxtral.compileAdapterStep, .{ allocator, io, platform, adapter, config, &progress });
+    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, dec_kv_cache, &progress });
 
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
     var adapter_buffers_future = try io.concurrent(Adapter.load, .{ &adapter, allocator, io, platform, &model_store, &progress });
-    var decoder_buffers_future = try io.concurrent(Decoder.load, .{ &model, allocator, io, platform, &model_store, &progress });
+    var decoder_buffers_future = try io.concurrent(Decoder.load, .{ &decoder_model, allocator, io, platform, &model_store, &progress });
 
     // Await tokenizer and look up special token IDs
     var tokenizer = try tokenizer_future.await(io);
@@ -155,14 +155,16 @@ pub fn main() !void {
     var compiled_mel_spectrum = try compiled_mel_spectrum_future.await(io);
     defer compiled_mel_spectrum.deinit();
 
-    var compiled_encoder = try compiled_encoder_future.await(io);
-    defer compiled_encoder.deinit();
+    var compiled_conv_stem = try compiled_conv_stem_future.await(io);
+    defer compiled_conv_stem.deinit();
 
-    var compiled_adapter = try compiled_adapter_future.await(io);
-    defer compiled_adapter.deinit();
+    var compiled_encoder_step = try compiled_encoder_step_future.await(io);
+    defer compiled_encoder_step.deinit();
 
-    var compiled_prefill, var compiled_decoder = try compiled_decoder_future.await(io);
-    defer compiled_prefill.deinit();
+    var compiled_adapter_step = try compiled_adapter_step_future.await(io);
+    defer compiled_adapter_step.deinit();
+
+    var compiled_decoder = try compiled_decoder_future.await(io);
     defer compiled_decoder.deinit();
 
     // -- Buffers
@@ -191,14 +193,15 @@ pub fn main() !void {
         tokens,
         n_delay_tokens,
         &compiled_mel_spectrum,
-        &compiled_encoder,
-        &compiled_adapter,
-        &compiled_prefill,
+        &compiled_conv_stem,
+        &compiled_encoder_step,
+        &compiled_adapter_step,
         &compiled_decoder,
         &mel_spectrum_buffers,
         &encoder_buffers,
         &adapter_buffers,
         &decoder_buffers,
-        model_params,
+        enc_kv_cache,
+        dec_kv_cache,
     );
 }
