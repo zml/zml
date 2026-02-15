@@ -67,18 +67,9 @@ pub const Encoder = struct {
         h = self.conv0.forward(h).gelu();
         h = self.conv1.forward(h).gelu();
 
-	
         // [batch=1, channels=1280, time'] -> [s, d=1280]
         h = h.squeeze(.batch);
         h = h.transpose(.{ .time, .channels }).rename(.{ .time = .s, .channels = .d });
-
-        // Left-truncate to multiple of downsample_factor
-        const seq_len = h.dim(.s);
-        const trunc: i64 = @intCast(@as(usize, @intCast(seq_len)) % self.config.downsample_factor());
-
-        if (trunc > 0) {
-            h = h.slice1d(.s, .{ .start = trunc });
-        }
 
         // Transformer layers
         for (self.layers) |layer| {

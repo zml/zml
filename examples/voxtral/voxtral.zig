@@ -174,8 +174,10 @@ pub fn runPipeline(
     log.info("Running inference pipeline...", .{});
 
     const num_frames = audio_len / config.audio().hop_length;
-    const encoder_seq_len: u32 = @intCast((num_frames / 2) - (num_frames / 2) % config.downsample_factor());
-    const adapter_seq_len = encoder_seq_len / config.downsample_factor();
+    const dsf: u32 = config.downsample_factor();
+    // Natural encoder output length after stride-2 causal conv (adapter pads to multiple of dsf)
+    const encoder_seq_len: u32 = @intCast((num_frames + 1) / 2);
+    const adapter_seq_len = (encoder_seq_len + dsf - 1) / dsf;
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
@@ -315,7 +317,8 @@ pub fn runPipeline(
 
     // 7. Autoregressive decode loop
     log.info("Running decoder autoregressive...", .{});
-    const eos_token: u32 = 2;
+    const eos_token = tokenizer.tokenToId("</s>") orelse @panic("tokenizer missing </s> token");
+    const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
     {
         var decode_args = try compiled_decoder.args(allocator);
         defer decode_args.deinit(allocator);
@@ -341,7 +344,7 @@ pub fn runPipeline(
             const generated_token = generated_token_slice.items(u32)[0];
             num_generated += 1;
 
-            if (generated_token != 32) {
+            if (generated_token != streaming_pad_token) {
                 if (try tokenizer_decoder.next(generated_token)) |chunk| {
                     std.debug.print("{s}", .{chunk});
                 }

@@ -102,7 +102,7 @@ pub fn main() !void {
     // -- Adapter test
     {
         const adapter = AdapterTestHarness{
-            .inner = dec.Adapter.init(model_store.view()),
+            .inner = dec.Adapter.init(model_store.view(), config),
         };
         var adapter_buffers = try zml.io.load(AdapterTestHarness, &adapter, allocator, io, platform, load_opts);
         defer AdapterTestHarness.unload(&adapter_buffers);
