@@ -77,7 +77,7 @@ pub const Decoder = struct {
         }
 
         return .{
-            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .vocab, .d }),
+            .tok_embeddings = store.withPrefix("mm_streams_embeddings.embedding_module.tok_embeddings").createTensorWithTags("weight", .{ .voc, .d }),
             .layers = layers,
             .norm = store.withPrefix("norm").createTensorWithTags("weight", .{.d}),
             .norm_eps = config.norm_eps,
@@ -104,15 +104,15 @@ pub const Decoder = struct {
         self.norm.deinit();
     }
 
-    /// Run all decoder layers on input embeddings, compute logits and return argmax tokens.
-    /// input_embeds: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d]
-    /// Returns: (tokens [s] u32, KvCache)
-    pub fn forward(self: Decoder, text_tokens: Tensor, adapter_out: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor) struct { Tensor, KvCache } {
+    /// Run all decoder layers on input embeddings, sample next tokens and return updated KV cache + RNG.
+    /// text_tokens: [s] u32, adapter_out: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d], rng: Rng
+    /// Returns: (tokens [s] u32, KvCache, Rng)
+    pub fn forward(self: Decoder, text_tokens: Tensor, adapter_out: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng) struct { Tensor, KvCache, Tensor.Rng } {
         const audio_embeds = adapter_out.dynamicSlice(.{
             .s = Tensor.DynSlice{ .start = token_index, .len = @intCast(text_tokens.dim(.s)) },
         });
 
-        const text_embeds = self.tok_embeddings.gather(.{ .vocab = text_tokens }, .{});
+        const text_embeds = self.tok_embeddings.gather(.{ .voc = text_tokens }, .{});
         const input_embeds = text_embeds.add(audio_embeds);
 
         const t = t_cond.convert(input_embeds.dtype());
@@ -132,10 +132,10 @@ pub const Decoder = struct {
         h = rmsNorm(h, self.norm, self.norm_eps);
 
         // Compute logits in f32 for precision (matching Python reference)
-        const output_logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
-        const output_tokens = output_logits.argMax(.vocab).indices.squeeze(.vocab).convert(.u32);
+        const logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
+        const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{}, rng);
 
-        return .{ output_tokens, cache };
+        return .{ output_tokens.convert(.u32), cache, new_rng };
     }
 };
 

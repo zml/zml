@@ -23,6 +23,7 @@ pub const VoxtralParameters = struct {
     token_index: Tensor,
     kv_cache: dec.KvCache,
     t_cond: Tensor,
+    rng: Tensor.Rng,
 };
 
 pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
@@ -70,6 +71,7 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
                 params_.token_index,
                 params_.kv_cache,
                 params_.t_cond,
+                params_.rng,
             });
         }
     }.call;
@@ -87,6 +89,7 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
                 params_.token_index,
                 params_.kv_cache,
                 params_.t_cond,
+                params_.rng,
             });
         }
     }.call;
@@ -242,6 +245,9 @@ pub fn runPipeline(
     var t_cond_buffer: zml.Buffer = try .fromSlice(io, platform, t_cond_slice);
     defer t_cond_buffer.deinit();
 
+    var rng_buffers = try Tensor.Rng.initBuffer(platform, 0, io);
+    defer Tensor.Rng.deinitBuffer(&rng_buffers);
+
     // 5. Decoder prefill
     log.info("Running decoder prefill...", .{});
     var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
@@ -267,9 +273,9 @@ pub fn runPipeline(
         var prefill_output: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
         defer prefill_output.deinit();
 
-        prefill_args.set(.{ decoder_buffers, token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+        prefill_args.set(.{ decoder_buffers, token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer, rng_buffers });
         compiled_prefill.call(prefill_args, &prefill_results);
-        prefill_results.fill(.{ &prefill_output, &kv_cache_buffers });
+        prefill_results.fill(.{ &prefill_output, &kv_cache_buffers, &rng_buffers });
 
         // Extract last token from prefill output (first generated token)
         try prefill_output.toSlice(io, prefill_tokens_slice);
@@ -313,9 +319,9 @@ pub fn runPipeline(
             var token_index_buffer: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(i)), .u32);
             defer token_index_buffer.deinit();
 
-            decode_args.set(.{ decoder_buffers, current_token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer });
+            decode_args.set(.{ decoder_buffers, current_token_buffer, adapter_output, token_index_buffer, &kv_cache_buffers, t_cond_buffer, rng_buffers });
             compiled_decoder.call(decode_args, &decode_results);
-            decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers });
+            decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
 
             try current_token_buffer.toSlice(io, generated_token_slice);
         }
