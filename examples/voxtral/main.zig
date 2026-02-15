@@ -28,9 +28,6 @@ const CliArgs = struct {
     transcription_delay_ms: f32 = 480.0,
 };
 
-// Streaming protocol constants
-const token_bos: u32 = 1;
-const token_streaming_pad: u32 = 32;
 const n_left_pad_tokens: u32 = 32;
 
 pub fn main() !void {
@@ -89,8 +86,6 @@ pub fn main() !void {
     const n_prompt_tokens = 1 + n_left_pad_tokens + n_delay_tokens;
     const tokens = try allocator.alloc(u32, n_prompt_tokens);
     defer allocator.free(tokens);
-    tokens[0] = token_bos;
-    @memset(tokens[1..], token_streaming_pad);
 
     var wav_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &wav_buffer);
@@ -105,15 +100,17 @@ pub fn main() !void {
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
 
     const num_frames = audio_len / config.audio().hop_length;
-    const encoder_seq_len: u32 = @intCast((num_frames / 2) - (num_frames / 2) % config.downsample_factor());
-    const adapter_seq_len = encoder_seq_len / config.downsample_factor();
+    const dsf: u32 = config.downsample_factor();
+    // Natural encoder output length after stride-2 causal conv (adapter pads to multiple of dsf)
+    const encoder_seq_len: u32 = @intCast((num_frames + 1) / 2);
+    const adapter_seq_len = (encoder_seq_len + dsf - 1) / dsf;
 
     var melspectro_model: LogMelSpectrogram = .init(config);
     const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
     var encoder_model: Encoder = .init(allocator, model_store.view().withPrefix(encoder_prefix), config);
     defer encoder_model.deinit(allocator);
 
-    const adapter: Adapter = .init(model_store.view());
+    const adapter: Adapter = .init(model_store.view(), config);
     const embedder: Embedder = .init(model_store.view());
 
     var model: Decoder = .init(allocator, model_store.view(), config);
@@ -148,9 +145,14 @@ pub fn main() !void {
     var embedder_buffers_future = try io.concurrent(Embedder.load, .{ &embedder, allocator, io, platform, &model_store, &progress });
     var decoder_buffers_future = try io.concurrent(Decoder.load, .{ &model, allocator, io, platform, &model_store, &progress });
 
-    // Await tokenizer
+    // Await tokenizer and look up special token IDs
     var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
+
+    const token_bos = tokenizer.tokenToId("<s>") orelse @panic("tokenizer missing <s> token");
+    const token_streaming_pad = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
+    tokens[0] = token_bos;
+    @memset(tokens[1..], token_streaming_pad);
 
     // -- Compiled models
     var compiled_mel_spectrum = try compiled_mel_spectrum_future.await(io);
