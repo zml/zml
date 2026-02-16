@@ -465,10 +465,20 @@ pub const DirectMemoryWriter = struct {
             }
         }
 
-        self.flip_flop ^= 1;
-        self.offset += written;
         if (is_last) {
-            self.interface = .failing;
+            defer ctx.* = null;
+            defer self.interface = .failing;
+            const ctx_ = &ctx.*.?;
+            ctx_.event.waitUncancelable(self.io);
+            defer ctx_.pjrt_event.deinit(pjrt_api);
+            if (ctx_.err) |e| {
+                defer e.deinit(pjrt_api);
+                log.err("error while awaiting: {s}: {s}", .{
+                    @tagName(e.getCode(pjrt_api)),
+                    e.getMessage(pjrt_api),
+                });
+                return std.Io.Writer.Error.WriteFailed;
+            }
         } else {
             self.interface.end = 0;
             self.interface.buffer = self.pool.get(self.allocator, self.io) catch |err| {
@@ -476,6 +486,9 @@ pub const DirectMemoryWriter = struct {
                 return std.Io.Writer.Error.WriteFailed;
             };
         }
+        self.flip_flop ^= 1;
+        self.offset += written;
+
         return 0;
     }
 };
