@@ -2,6 +2,7 @@ const std = @import("std");
 const log = std.log;
 
 const zml = @import("zml");
+const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 
@@ -34,14 +35,14 @@ pub fn loadModel(
 ) !zml.Bufferized(T) {
     progress.increaseEstimatedTotalItems(store.view().count());
 
-    var timer: std.time.Timer = try .start();
+    const now: std.Io.Timestamp = .now(io, .awake);
     var total_bytes: usize = 0;
     defer {
-        const took = timer.read();
+        const took = now.untilNow(io, .awake);
         log.info("Loaded " ++ label ++ " weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
             total_bytes,
-            took,
-            total_bytes / took * std.time.ns_per_s,
+            stdx.fmt.fmtDuration(took),
+            total_bytes / @as(usize, @intCast(took.toNanoseconds())) * std.time.ns_per_s,
         });
     }
 
