@@ -49,6 +49,19 @@ zig.mirrors(urls = [
     "https://pkg.earth/zig",
     "https://fs.liujiacai.net/zigbuilds",
     "https://ziglang.org/builds/",
+    "https://pkg.machengine.org/zig",
+    "https://zigmirror.hryx.net/zig",
+    "https://zig.linus.dev/zig",
+    "https://zig.squirl.dev",
+    "https://zig.florent.dev",
+    "https://zig.mirror.mschae23.de/zig",
+    "https://zigmirror.meox.dev",
+    "https://ziglang.freetls.fastly.net",
+    "https://zig.tilok.dev",
+    "https://zig-mirror.tsimnet.eu/zig",
+    "https://zig.karearl.com/zig",
+    "https://pkg.earth/zig",
+    "https://fs.liujiacai.net/zigbuilds",
 ])
 use_repo(zig, "zig_toolchains")
 
@@ -126,7 +139,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "linenoise", "mnist", "org_swig_swig", "translate-c", "xla")
+use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "mnist", "org_swig_swig", "stb", "linenoise", "translate-c", "xla")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(

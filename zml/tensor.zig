@@ -732,7 +732,7 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
+    pub fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());
@@ -3201,10 +3201,8 @@ pub const Tensor = struct {
         for (split_sizes) |n| split_sum += n;
         stdx.debug.assert(split_sum == d, "split expects sum of 'split_sizes' values and axis dimension to be equal, got {} and {}", .{ split_sum, d });
 
-        var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
-        defer arena.deinit();
-
-        const res = arena.allocator().alloc(Tensor, split_sizes.len) catch @panic("OOM");
+        const allocator = CompilationContext.current().arena.allocator();
+        const res = allocator.alloc(Tensor, split_sizes.len) catch @panic("OOM");
 
         var start: i64 = 0;
         for (split_sizes, 0..) |n, i| {

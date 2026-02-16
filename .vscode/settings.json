@@ -33,5 +33,8 @@
     },
     "rust-analyzer.linkedProjects": [
         "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
-    ]
+    ],
+    "chat.tools.terminal.autoApprove": {
+        "bazel": true
+    }
 }

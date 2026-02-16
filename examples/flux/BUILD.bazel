@@ -1,0 +1,125 @@
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+
+bool_flag(
+    name = "enable_stage_debug",
+    build_setting_default = False,
+)
+
+config_setting(
+    name = "stage_debug_enabled",
+    flag_values = {":enable_stage_debug": "True"},
+)
+
+cc_library(
+    name = "config_defines",
+    defines = ["ZML_CONFIG_DEFINED"] + select({
+        ":stage_debug_enabled": ["ZML_ENABLE_STAGE_DEBUG"],
+        "//conditions:default": [],
+    }),
+)
+
+zig_library(
+    name = "config",
+    srcs = ["config.zig"],
+    main = "config.zig",
+    deps = [":config_defines"],
+)
+
+zig_test(
+    name = "utils_test",
+    srcs = ["utils.zig"],
+    main = "utils.zig",
+)
+
+zig_binary(
+    name = "flux",
+    srcs = [
+        "autoencoder_kl_flux2.zig",
+        "flux2_transformer2d_model.zig",
+        "main.zig",
+        "scheduling_flow_match_euler_discrete.zig",
+        "modeling_qwen3.zig",
+        "tokenization_qwen2_fast.zig",
+        "tools.zig",
+        "utils.zig",
+        "config.zig",
+        "interactive.zig",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config",
+        "//zml",
+        "@stb//:stb",
+        "@linenoise//:linenoise",
+    ],
+)
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":flux"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":flux"],
+    args = [
+        "--options",
+        ",".join([
+            "zstd:compression-level=9",
+            "zstd:threads=16",
+        ]),
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["/{}/flux".format(package_name())],
+    target_compatible_with = [
+        "@platforms//os:linux",
+    ],
+    tars = [":archive"],
+)
+
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = ["zmlai/flux:latest"],
+    tags = ["manual"],
+)
+
+oci_push(
+    name = "push",
+    image = ":image",
+    remote_tags = ["latest"],
+    repository = "index.docker.io/zmlai/flux",
+    tags = ["manual"],
+)
+
+build_test(
+    name = "test",
+    targets = [":flux"],
+)
+
+zig_binary(
+    name = "test_embed",
+    srcs = ["test.zig"],
+    main = "test.zig",
+    deps = ["//zml"],
+    data = ["FLUX.2-klein-4B.activations.safetensors"],
+)
