@@ -61,7 +61,7 @@ def zls_completion(name, deps, **kwargs):
         main = name + ".runner",
         data = [
             "@rules_zig//zig:resolved_toolchain",
-            "@@//third_party/zls:resolved_toolchain",
+            "@zml//third_party/zls:resolved_toolchain",
             name + ".build_runner",
         ],
         deps = [
