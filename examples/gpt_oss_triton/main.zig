@@ -102,14 +102,9 @@ pub fn main() !void {
         v.deinit();
     }
 
-    var platform: zml.Platform = try .auto(allocator, io, .{});
-    platform = platform.withCompilationOptions(.{ .xla_dump_to = "/tmp/zml/gpt_oss/" });
-    defer platform.deinit();
-    var it = platform.devicesIterator();
-    log.info("Devices:", .{});
-    while (it.next()) |device| {
-        log.info("\t- {f}", .{device});
-    }
+    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    // platform = platform.withCompilationOptions(.{ .xla_dump_to = "/tmp/zml/gpt_oss/" });
+    defer platform.deinit(allocator);
 
     if (platform.target != .cuda) {
         log.warn("Platform is not CUDA, skipping execution. This example requires CUDA.", .{});
@@ -119,40 +114,15 @@ pub fn main() !void {
     // try MoeTriton.register(platform);
     // try moe_triton.load(allocator, io);
 
-    var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
+    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
         defer v.prefill_exe.deinit();
         defer v.decode_exe.deinit();
     } else |_| {};
 
-    var load_model_buffers: zml.stdx.Io.AllocatingLimitedConcurrentGroup = try .init(allocator, threaded.async_limit.toInt() orelse 16);
-    defer {
-        load_model_buffers.cancel(io);
-        load_model_buffers.deinit();
-    }
+    var progress = std.Progress.start(io, .{ .root_name = args.model.? });
 
-    var read_pool, var write_pool = try zml.io.ConcurrentBufferPool.initRW(
-        allocator,
-        platform,
-        .{
-            .size = (64 * 1024 * 1024),
-            .concurrency = load_model_buffers.limit,
-            .dma = true,
-        },
-        .{
-            .size = (64 * 1024 * 1024),
-            .concurrency = load_model_buffers.limit,
-            .dma = true,
-        },
-    );
-    defer {
-        read_pool.deinit();
-        write_pool.deinit();
-    }
-
-    var progress = std.Progress.start(io, .{ .root_name = "gpt_oss", .estimated_total_items = store.view().count() });
-
-    var gpt_buffers_future = io.async(loadModelBuffers, .{ allocator, io, &progress, &load_model_buffers, &read_pool, &write_pool, platform, &store, gpt_model });
+    var gpt_buffers_future = try io.concurrent(GptOss.load, .{ &gpt_model, allocator, io, platform, &store, &progress });
     errdefer b: {
         var v = gpt_buffers_future.cancel(io) catch break :b;
         GptOss.unloadBuffers(&v, allocator);
@@ -183,12 +153,12 @@ pub fn main() !void {
     var tokenizer = try tokenizer_future.await(io);
     defer tokenizer.deinit();
 
-    const prompt = blk: {
-        var reader = std.Io.File.stdin().reader(io, &.{});
-        break :blk try reader.interface.allocRemaining(allocator, .unlimited);
-    };
-    // const prompt = "Present shortly the city of paris";
-    defer allocator.free(prompt);
+    // const prompt = blk: {
+    //     var reader = std.Io.File.stdin().reader(io, &.{});
+    //     break :blk try reader.interface.allocRemaining(allocator, .unlimited);
+    // };
+    const prompt = "Present shortly the city of paris";
+    // defer allocator.free(prompt);
 
     // const prompt = cli.args.prompt orelse "What is the capital of France?";
     log.info("✅\tPrompt: {s}", .{prompt});
@@ -268,14 +238,14 @@ const CompileModelResult = struct {
     decode_exe: zml.Exe,
 };
 
-fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform, gpt_model: gpt_oss.GptOss, parameters: GptOssParameters) !CompileModelResult {
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, gpt_model: gpt_oss.GptOss, parameters: GptOssParameters) !CompileModelResult {
     var timer = try std.time.Timer.start();
     log.info("Compiling model", .{});
     defer log.info("Compiled model [{D}]", .{timer.read()});
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = io.async(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
             var timer_ = try std.time.Timer.start();
             log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
@@ -293,7 +263,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_future = io.async(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *zml.Platform, gpt_model_: gpt_oss.GptOss, parameters_: GptOssParameters) !zml.Exe {
             var timer_ = try std.time.Timer.start();
             log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
@@ -314,79 +284,6 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
     const decode_exe = try decode_future.await(io);
 
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
-}
-
-fn loadModelBuffers(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    progress: *std.Progress.Node,
-    group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
-    read_pool: *zml.io.ConcurrentBufferPool,
-    write_pool: *zml.io.ConcurrentBufferPool,
-    platform: zml.Platform,
-    store: *zml.io.TensorStore,
-    gpt_model: gpt_oss.GptOss,
-) !zml.Bufferized(gpt_oss.GptOss) {
-    var transferred_bytes: usize = 0;
-    var timer = try stdx.time.Timer.start();
-    log.info("Loading model", .{});
-    defer {
-        const duration = timer.read();
-        const seconds = @as(f64, @floatFromInt(duration.ns)) / 1e9;
-        const gb_per_sec = @as(f64, @floatFromInt(transferred_bytes)) / (1024.0 * 1024.0 * 1024.0) / seconds;
-        const gbps = gb_per_sec * 8.0;
-        log.info("Loaded model [{D} {d:.3} GB/s {d:.3} gbps]", .{ duration, gb_per_sec, gbps });
-    }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    const bufferize_ctx: zml.io.BufferizeContext(gpt_oss.TransferCtx) = .{
-        .allocator = allocator,
-        .arena = &arena,
-        .io = io,
-        .platform = platform,
-        .cb_ctx = .{ .read_pool = read_pool, .write_pool = write_pool, .transferred_bytes = &transferred_bytes, .progress = progress },
-    };
-
-    const bufferized = gpt_model.loadBuffers(
-        bufferize_ctx,
-        group,
-        store.view(),
-        transferBuffer,
-    );
-
-    try group.await(io);
-
-    return bufferized;
-}
-
-fn transferBuffer(ctx: zml.io.TensorBufferTransfer(gpt_oss.TransferCtx)) !void {
-    const read_pool = ctx.cb_ctx.read_pool;
-    const write_pool = ctx.cb_ctx.write_pool;
-    const progress = ctx.cb_ctx.progress;
-
-    const read_buffer = read_pool.acquire(ctx.io) catch unreachable;
-    defer read_pool.release(ctx.io, read_buffer) catch {};
-
-    const write_buffer = write_pool.acquire(ctx.io) catch unreachable;
-    defer write_pool.release(ctx.io, write_buffer) catch {};
-
-    var transfer_progress = progress.start(ctx.tensor.name, ctx.tensor.byteSize());
-
-    var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, read_buffer) catch unreachable;
-    defer reader.deinit();
-
-    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.tensor.shape, ctx.buffer, .device, write_buffer) catch unreachable;
-    defer {
-        writer.interface.flush() catch unreachable;
-        writer.deinit();
-    }
-
-    _ = reader.interface.streamRemaining(&writer.interface) catch unreachable;
-
-    transfer_progress.end();
-    ctx.cb_ctx.transferred_bytes.* += ctx.tensor.byteSize();
 }
 
 pub fn tokenizePrompt(tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, no_chat: bool, out: []u32) ![]u32 {
@@ -443,7 +340,7 @@ pub fn generateText(
     seed: u128,
     prompt_tok: []const u32,
     writer: *std.Io.Writer,
-    platform: zml.Platform,
+    platform: *const zml.Platform,
 ) !void {
     var tokenizer_decoder = try tokenizer.decoder();
 
@@ -537,7 +434,7 @@ pub fn generateText(
 
         // current token pos needs to go into a zml.Buffer
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
-        const token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
+        var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
         defer token_pos_buffer.deinit();
 
         // call to generate the next token
