@@ -1160,11 +1160,12 @@ pub const Event = opaque {
             err: ?*Error = null,
             event: std.Io.Event = .unset,
             io: std.Io,
-        }{ .io = io };
+        };
 
-        try self.onReady(api, struct {
-            fn call(err: ?*Error, user_arg: ?*anyopaque) callconv(.c) void {
-                const ctx_: *@TypeOf(ctx) = @ptrCast(@alignCast(user_arg.?));
+        var ctx: Ctx = .{ .io = io };
+
+        try self.onReady(api, Ctx, struct {
+            fn call(err: ?*Error, ctx_: *Ctx) void {
                 ctx_.err = err;
                 ctx_.event.set(ctx_.io);
             }

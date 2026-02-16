@@ -2,12 +2,12 @@ const std = @import("std");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-const pjrtx = @import("pjrtx.zig");
 const platforms = @import("platforms");
 pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const Exe = @import("exe.zig").Exe;
+const pjrtx = @import("pjrtx.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
@@ -382,7 +382,7 @@ pub const CreateOptions = struct {
     // bump memory fraction from XLA defaults of 75% to 90%.
     // Even on a 8GB GPU it should leave enough space for the Cuda driver
     // https://github.com/openxla/xla/blob/3e87afa11a865cf91137522492918ad18bfe5b7c/xla/pjrt/plugin/xla_gpu/xla_gpu_allocator_config.h#L25-L60
-    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.95 } } },
+    cuda: Cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
@@ -556,7 +556,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    log.info("{s}: {d}", .{ name, slice });
+    log.info("{s}: {d:280}", .{ name, slice });
 
     return null;
 }

@@ -6,11 +6,11 @@ const mlir = @import("mlir");
 const stdx = @import("stdx");
 
 const Buffer = @import("buffer.zig").Buffer;
-const Memory = Buffer.Memory;
 const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const cublas_grouped_gemm = @import("grouped_gemm/cublas.zig");
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -161,14 +161,22 @@ pub const Tensor = struct {
         const M: i64 = input_sorted.dim(0);
         const K: i64 = input_sorted.dim(1);
         const N: i64 = @as(i64, output_dim);
-        const input_sorted_3d = input_sorted.reshape(.{ .b = 1, .seq = input_sorted.dim(0), .d = input_sorted.dim(1) });
+        const num_experts = weights.dim(0);
+
+        const input_sorted_3d = input_sorted.reshape(.{ .b = 1, .seq = input_sorted.dim(0), .d = input_sorted.dim(1) }).contiguous(.{ .b, .seq, .d });
         const output_3d_shape: Shape = .init(.{ .b = 1, .seq = M, .d = N }, input_sorted.dtype());
         const output_3d = Tensor.zeroes(output_3d_shape);
         var w_scales = weights_scales;
 
-        w_scales = w_scales.transpose(.{ .expert, .d, .out });
         w_scales = w_scales.contiguous(.{ .expert, .d, .out });
-        const weights_3d = weights.merge(.{ .d = .{ .d, .d_block } });
+        const K_w: i64 = @divFloor(K, 2);
+
+        // weights must be [E, N, K_w] in memory (packed mxfp4)
+        const weights_3d = weights.reshape(.{
+            .expert = num_experts,
+            .out = N,
+            .k = K_w,
+        }).contiguous(.{ .expert, .out, .k });
 
         const input_descriptor = input_sorted_3d.createRaggedDescriptor(&.{ 1, block_m, block_k }, 1);
         for (input_descriptor.tma_shape.constSlice(), 0..) |d, i| {
@@ -194,31 +202,11 @@ pub const Tensor = struct {
 
         _log.info("scales shape: {f}", .{w_scales.shape()});
 
-        // const n = w_scales.dim(-1);
-        // _log.info("n >>>> {d}", .{n});
-        // const padded_n = @divFloor(n + 15, 16) * 16;
-        // _log.info("Padded n >>>> {d}", .{padded_n});
-
-        // if (padded_n != n) {
-        //     const padding = padded_n - n;
-        //     w_scales = w_scales.pad(0, .{ .k = Tensor.Pad{ .high = padding } });
-        // }
-
         _log.info(
             "moeTritonOp inputs: input_sorted={f}, weights={f}, weights_scales={f}, bias={f}, counts={f}",
             .{ input_sorted.shape(), weights.shape(), w_scales.shape(), bias.shape(), counts.shape() },
         );
 
-        //alignements
-
-        // Output: M tokens x output_dim_per_expert (pad N to satisfy TMA stride alignment)
-        // const align_elems = 8; // bf16 => 2 bytes, so 8 elements == 16 bytes
-        // const padded_output_dim_per_exp = @divFloor((N + align_elems - 1), align_elems) * align_elems;
-        // _ = padded_output_dim_per_exp; // autofix
-
-        const num_experts = weights.dim(0);
-
-        const K_w: i64 = @divFloor(K, 2);
         const K_mx: i64 = @divFloor(K, 32);
 
         const grid_m: i64 = if (M <= num_experts)
@@ -270,7 +258,9 @@ pub const Tensor = struct {
         const total_blocks = n_blocks.sum(0);
 
         const seq = input_sorted.dim(.seq);
-        const max_n_blocks = num_experts - 1 - (@divFloor(num_experts - seq - 1, 16)); //verifier le divFloor
+        const max_n_blocks = num_experts - 1 - (@divFloor(num_experts - seq - 1, 16)); //16 is the minimal block size
+
+        _log.info(" max N blocks : {d}", .{max_n_blocks});
 
         var slices_idx = Tensor.iota(.init(.{ .d = max_n_blocks }, .i32), 0);
 
@@ -295,13 +285,17 @@ pub const Tensor = struct {
         const valid_mask = slices_idx.cmp(.LT, total_blocks_broad);
 
         const minus_one = Tensor.scalar(-1, .i32).broad(Shape.init(.{max_n_blocks}, .i32));
-        var xblock_schedule = valid_mask.select(pack, minus_one);
+        const xblock_schedule = valid_mask.select(pack, minus_one);
+
+        _log.info("x block schedule shape {f}", .{xblock_schedule.shape()});
 
         const bias_f32 = bias.convert(.f32);
 
         // const output_shape: Shape = .init(.{ .seq = M, .d = N }, .bf16);
+        //
+        _log.info("Weights 3d shape {f}", .{weights_3d.shape()});
 
-        const K_packed = weights.dim(2) * weights.dim(3); // 90 * 16 = 1440
+        const K_packed = weights_3d.dim(2); // 90 * 16 = 1440
 
         // Y [M, N]
         const stride_y_e: i64 = N * M;
@@ -313,8 +307,8 @@ pub const Tensor = struct {
 
         // W [Experts, N, K_packed]
         const stride_w_e: i64 = K_packed * N;
-        const stride_w_k: i64 = K_packed;
-        const stride_w_n: i64 = 1;
+        const stride_w_n: i64 = K_packed;
+        const stride_w_k: i64 = 1;
 
         // Scales [Experts, K_mx, N]
         const stride_w_mx_e = w_scales.dim(1) * w_scales.dim(2);
@@ -445,7 +439,11 @@ pub const Tensor = struct {
             },
         );
 
-        xblock_schedule = xblock_schedule.print();
+        print(slice_sizes, "SIZES SLICES");
+        print(slice_offs, "OFF SLICES");
+        print(xblocks_off, "X BLOCKS OFF");
+
+        print(xblock_schedule, "X BLOCK SCHEDULE");
 
         const kernel_args = .{
             // Y TMA descriptor + base
@@ -490,8 +488,8 @@ pub const Tensor = struct {
             Tensor.scalar(w_shape_1, .i64), // %W__shape_1
             Tensor.scalar(w_shape_2, .i64), // %W__shape_2
             Tensor.scalar(w_stride_0, .i64), // %W__stride_0
-            Tensor.scalar(w_stride_1, .i64), // %W__stride_2
             Tensor.scalar(w_stride_2, .i64), // %W__stride_1
+            Tensor.scalar(w_stride_1, .i64), // %W__stride_2
             // %W__stride_2
             weights_3d, // %WPtr
             int32Tensor(stride_w_e), // %stride_w_e
@@ -504,8 +502,8 @@ pub const Tensor = struct {
             Tensor.scalar(w_mx_shape_1, .i64), // %WMxScale__shape_1
             Tensor.scalar(w_mx_shape_2, .i64), // %WMxScale__shape_2
             Tensor.scalar(stride_w_mx_e, .i64), // %WMxScale__stride_0
-            Tensor.scalar(stride_w_mx_k, .i64), // %WMxScale__stride_2
-            Tensor.scalar(stride_w_mx_n, .i64), // %WMxScale__stride_1
+            Tensor.scalar(stride_w_mx_k, .i64), // %WMxScale__stride_1
+            Tensor.scalar(stride_w_mx_n, .i64), // %WMxScale__stride_2
             int32Tensor(stride_w_mx_e), // %stride_w_mx_e
             int32Tensor(stride_w_mx_k), // %stride_w_mx_k
             int32Tensor(stride_w_mx_n), // %stride_w_mx_n
@@ -532,7 +530,7 @@ pub const Tensor = struct {
             int32Tensor(grid_n), // %grid_n
             Tensor.scalar(1.0, .f32), // %out_alpha
             int32Tensor(0), // %reduce_rank
-            // Tensor.zeroes(output_shape),
+            output_3d,
         };
 
         const NUM_SMS = 170;
@@ -544,7 +542,7 @@ pub const Tensor = struct {
             .num_warps = num_warps,
             .num_stages = num_stages,
             .debug = true,
-            .output_operand_aliases = &.{11},
+            .output_operand_aliases = &.{kernel_args.len - 1},
         };
 
         const res = ops.triton(kernel_args, .{output_3d_shape}, ops_);

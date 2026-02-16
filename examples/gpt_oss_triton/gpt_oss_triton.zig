@@ -10,8 +10,8 @@ const ops = zml.ops;
 const log = std.log.scoped(.gpt_oss);
 
 pub const TransferCtx = struct {
-    read_pool: *zml.io.ConcurrentBufferPool,
-    write_pool: *zml.io.ConcurrentBufferPool,
+    allocator: std.mem.Allocator,
+    pool: *zml.mem.DynamicBufferPool,
     transferred_bytes: *usize,
     progress: *std.Progress.Node,
 };
@@ -76,10 +76,39 @@ pub const GptOss = struct {
         self.model.deinit(allocator);
     }
 
+    pub fn load(
+        self: *const GptOss,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(GptOss) {
+        progress.increaseEstimatedTotalItems(store.view().count());
+        var timer: std.time.Timer = try .start();
+        var total_bytes: usize = 0;
+        defer {
+            const took = timer.read();
+            log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+                total_bytes,
+                took,
+                total_bytes / took * std.time.ns_per_s,
+            });
+        }
+        return zml.io.load(GptOss, self, allocator, io, platform, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .store = store,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
     pub fn loadBuffers(
         self: *const GptOss,
         bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
-        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+        group: *stdx.Io.LimitedGroup,
         store: zml.io.TensorStore.View,
         cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
     ) !zml.Bufferized(GptOss) {
@@ -181,7 +210,7 @@ pub const Model = struct {
     pub fn loadBuffers(
         self: *const Model,
         bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
-        group: *zml.stdx.Io.AllocatingLimitedConcurrentGroup,
+        group: *stdx.Io.LimitedGroup,
         store: zml.io.TensorStore.View,
         cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
     ) !zml.Bufferized(Model) {
@@ -502,11 +531,14 @@ const MoE = struct {
             _ = expert_scores_repeated; // autofix
 
             const mask_repeated = mask.repeat1d(.s, self.moe_opts.experts_per_token).rename(.{ .s = .seq });
+            _ = mask_repeated; // autofix
             const counts0 = zml.Tensor.zeroes(.init(.{ .expert = num_experts }, .i32));
+            const ones = zml.Tensor.constant(.{ .i32 = 1 }).broad(zml.Shape.init(.{ .seq = input.dim(.s) * self.moe_opts.experts_per_token }, .i32));
 
             const counts_tokens_per_exp = counts0.scatterSlices(
                 .{ .expert = expert_indices_repeated }, // indices: [seq]
-                mask_repeated.convert(.i32), // updates: [seq]
+                // mask_repeated.convert(.i32), // updates: [seq]
+                ones,
                 .{
                     .update_fn = zml.Tensor.ScatterOpts.increment,
                     .indices_are_unique = false, // plusieurs tokens peuvent aller au même expert
@@ -529,7 +561,7 @@ const MoE = struct {
                 counts_tokens_per_exp,
 
                 @intCast(input.dim(.d) * 2),
-                "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up.ttir",
+                "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up_test.ttir",
                 32,
                 64,
                 64,
@@ -975,7 +1007,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
             .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
