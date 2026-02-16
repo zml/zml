@@ -34,7 +34,7 @@ const CliArgs = struct {
 
 const n_left_pad_tokens: u32 = 32;
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     log.info("Start of Voxtral", .{});
 
     var dbg = std.heap.DebugAllocator(.{ .thread_safe = true }).init;
@@ -45,19 +45,17 @@ pub fn main() !void {
         else => std.heap.c_allocator,
     };
 
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
+    const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const args = stdx.flags.parseProcessArgs(CliArgs);
+    // var vfs: zml.io.VFS = try .init(allocator, init.io);
+    // defer vfs.deinit();
 
-    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
-    defer vfs.deinit();
+    // var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
+    // defer vfs_file.deinit();
+    // try vfs.register("file", vfs_file.io());
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-    defer vfs_file.deinit();
-    try vfs.register("file", vfs_file.io());
-
-    const io = vfs.io();
+    // const io = vfs.io();
+    const io = init.io;
 
     var progress = std.Progress.start(io, .{ .root_name = "Voxtral" });
 
