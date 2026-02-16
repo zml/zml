@@ -5,6 +5,7 @@ const Config = cfg.Config;
 const StreamParams = cfg.StreamParams;
 
 const zml = @import("zml");
+const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
 const mel = @import("mel_spectrogram.zig");
@@ -439,8 +440,10 @@ pub fn runGenerationLoop(
 
     const eos_token = tokenizer.tokenToId("</s>") orelse @panic("tokenizer missing </s> token");
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
+    const streaming_word_token = tokenizer.tokenToId("[STREAMING_WORD]");
 
     log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
+    const decode_start: std.Io.Timestamp = .now(io, .awake);
 
     var conv_step_args = try compiled_conv_stem_step.args(allocator);
     defer conv_step_args.deinit(allocator);
@@ -487,7 +490,7 @@ pub fn runGenerationLoop(
         const generated_token = generated_token_slice.items(u32)[0];
         num_generated += 1;
 
-        if (generated_token != streaming_pad_token) {
+        if (generated_token != streaming_pad_token and (streaming_word_token == null or generated_token != streaming_word_token.?)) {
             if (try tokenizer_decoder.next(generated_token)) |chunk| {
                 std.debug.print("{s}", .{chunk});
             }
@@ -538,8 +541,13 @@ pub fn runGenerationLoop(
 
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
+    const decode_duration = decode_start.untilNow(io, .awake);
     std.debug.print("\n", .{});
-    log.info("Decode done. Generated {} tokens total.", .{num_generated});
+    log.info("Decode done. Generated {} tokens in {D}: {:.3}tok/s", .{
+        num_generated,
+        stdx.fmt.fmtDuration(decode_duration),
+        stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(decode_duration, num_generated)),
+    });
 }
 
 pub fn runPipeline(

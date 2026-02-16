@@ -81,8 +81,8 @@ pub const KvCache = struct {
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
+            .k = try .uninitialized(io, platform, self.k.shape(), .{}),
+            .v = try .uninitialized(io, platform, self.v.shape(), .{}),
             .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
         };
     }
