@@ -53,9 +53,9 @@ pub const Config = struct {
         window_size: u32 = 400,
         global_log_mel_max: f32 = 1.5,
     };
-    
+
     // -- Shortcuts
-    
+
     pub fn encoder(self: Config) EncoderArgs {
         return self.multimodal.whisper_model_args.encoder_args;
     }
@@ -72,11 +72,65 @@ pub const Config = struct {
 pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, model_dir: std.Io.Dir) !std.json.Parsed(Config) {
     const config_file = try model_dir.openFile(io, "params.json", .{}); // it is named params not config here
     defer config_file.close(io);
-    
+
     var buffer: [4096]u8 = undefined;
     var file_reader = config_file.reader(io, &buffer);
     var reader: std.json.Reader = .init(allocator, &file_reader.interface);
     defer reader.deinit();
-    
+
     return try std.json.parseFromTokenSource(Config, allocator, &reader, .{ .ignore_unknown_fields = true });
 }
+
+pub const StreamParams = struct {
+    dsf: u32,
+    mel_per_step: u32,
+    mel_history: u32,
+    chunk_mel: u32,
+    raw_audio_length_per_tok: u32,
+    _hop_length: u32,
+    n_delay_tokens: u32,
+    n_right_pad_tokens: u32,
+    left_pad: u32,
+    prompt_len: u32,
+
+    pub fn init(config: Config, transcription_delay_ms: f32, n_left_pad_tokens: u32) StreamParams {
+        const sample_rate: f32 = @floatFromInt(config.audio().sampling_rate);
+        const frame_rate = config.audio().frame_rate;
+        const raw_audio_length_per_tok: u32 = @intFromFloat(sample_rate / frame_rate);
+        const hop_length = config.audio().hop_length;
+
+        const delay_samples: u32 = @intFromFloat(transcription_delay_ms / 1000.0 * sample_rate);
+        const audio_length_per_tok = raw_audio_length_per_tok / hop_length;
+        const n_delay_tokens = std.math.divCeil(u32, delay_samples / hop_length, audio_length_per_tok) catch unreachable;
+
+        const dsf = config.downsample_factor();
+        const mel_history: u32 = 4;
+
+        return .{
+            .dsf = dsf,
+            .mel_per_step = dsf * 2,
+            .mel_history = mel_history,
+            .chunk_mel = mel_history + dsf * 2,
+            .raw_audio_length_per_tok = raw_audio_length_per_tok,
+            ._hop_length = hop_length,
+            .n_delay_tokens = n_delay_tokens,
+            .n_right_pad_tokens = (n_delay_tokens + 1) + 10,
+            .left_pad = n_left_pad_tokens * raw_audio_length_per_tok,
+            .prompt_len = 1 + n_left_pad_tokens + n_delay_tokens,
+        };
+    }
+
+    pub fn numFrames(self: StreamParams, audio_len: usize) u32 {
+        return @intCast(audio_len / self._hop_length);
+    }
+
+    pub fn totalSteps(self: StreamParams, audio_len: usize) u32 {
+        const nf = self.numFrames(audio_len);
+        const encoder_seq_len = (nf + 1) / 2;
+        return (encoder_seq_len + self.dsf - 1) / self.dsf;
+    }
+
+    pub fn paddedMelFrames(self: StreamParams, audio_len: usize) u32 {
+        return self.totalSteps(audio_len) * self.mel_per_step;
+    }
+};
