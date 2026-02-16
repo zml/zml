@@ -22,6 +22,7 @@ zig_library(
     srcs = [
         "attention/attention.zig",
         "attention/flashattn.zig",
+        "attention/paged_attention.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
