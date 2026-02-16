@@ -129,13 +129,17 @@ pub fn main() !void {
         .hd = config.head_dim,
     }, dec_dtype));
 
+    const prompt_len: u32 = @intCast(tokens.len);
+
     // Launch concurrent compilation and buffer loading
     var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
     var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, audio_len, &progress });
+    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, prompt_len, enc_kv_cache, &progress });
     var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, &progress });
+    var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, prompt_len, config, &progress });
     var compiled_adapter_step_future = try io.concurrent(voxtral.compileAdapterStep, .{ allocator, io, platform, adapter, config, &progress });
-    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, dec_kv_cache, &progress });
+    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, prompt_len, dec_kv_cache, &progress });
 
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
@@ -158,14 +162,21 @@ pub fn main() !void {
     var compiled_conv_stem = try compiled_conv_stem_future.await(io);
     defer compiled_conv_stem.deinit();
 
+    var compiled_encoder_prefill = try compiled_encoder_prefill_future.await(io);
+    defer compiled_encoder_prefill.deinit();
+
     var compiled_encoder_step = try compiled_encoder_step_future.await(io);
     defer compiled_encoder_step.deinit();
+
+    var compiled_adapter = try compiled_adapter_future.await(io);
+    defer compiled_adapter.deinit();
 
     var compiled_adapter_step = try compiled_adapter_step_future.await(io);
     defer compiled_adapter_step.deinit();
 
-    var compiled_decoder = try compiled_decoder_future.await(io);
-    defer compiled_decoder.deinit();
+    var compiled_decoder_prefill, var compiled_decoder_decode = try compiled_decoder_future.await(io);
+    defer compiled_decoder_prefill.deinit();
+    defer compiled_decoder_decode.deinit();
 
     // -- Buffers
     var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
@@ -194,9 +205,12 @@ pub fn main() !void {
         n_delay_tokens,
         &compiled_mel_spectrum,
         &compiled_conv_stem,
+        &compiled_encoder_prefill,
         &compiled_encoder_step,
+        &compiled_adapter,
         &compiled_adapter_step,
-        &compiled_decoder,
+        &compiled_decoder_prefill,
+        &compiled_decoder_decode,
         &mel_spectrum_buffers,
         &encoder_buffers,
         &adapter_buffers,
