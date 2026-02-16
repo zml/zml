@@ -186,7 +186,7 @@ pub const RopeOpts = struct {
 
         pub const Linear = struct {
             factor: f32,
-            rope_theta: f32,
+            rope_theta: f32 = 10000,
         };
 
         /// Read a Rope scaling config from HF config.json format.
@@ -247,6 +247,13 @@ pub const RopeOpts = struct {
             // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
             return switch (self.*) {
                 inline else => |*s| s.rope_theta = rope_theta,
+            };
+        }
+
+        pub fn getRopeTheta(self: *const Scaling) f32 {
+            // NOTE(Corendos): We can use a "inline else" because `rope_theta` is mandatory in each variant.
+            return switch (self.*) {
+                inline else => |s| s.rope_theta,
             };
         }
     };
@@ -333,7 +340,9 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 
     switch (opts.scaling) {
         .default => {},
-        .linear => @panic("Not implemented"),
+        .linear => |l| {
+            for (inv_freq) |*f| f.* /= l.factor;
+        },
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
             // After Llama2 they observed that the rope frequencies where too sharp and hurting long distance attention.
