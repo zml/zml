@@ -1,6 +1,5 @@
 """Generates the ZLS build config file."""
 
-load("@apple_support//lib:apple_support.bzl", "apple_support")
 load("@rules_cc//cc:find_cc_toolchain.bzl", "use_cc_toolchain")
 load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("@rules_cc//cc/common:cc_info.bzl", "CcInfo")
@@ -168,7 +167,7 @@ zls_write_build_config = rule(
         "_c_builtins": attr.label(
             default = Label("@rules_zig//zig/private/common:c_builtins"),
         ),
-    } | apple_support.action_required_attrs() | apple_support.platform_constraint_attrs(),
+    },
     toolchains = [
         "@rules_zig//zig:toolchain_type",
         "@rules_zig//zig/target:toolchain_type",

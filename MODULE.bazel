@@ -2,31 +2,26 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "apple_support", version = "1.24.5")
-bazel_dep(name = "abseil-cpp", version = "20250814.0")
-bazel_dep(name = "aspect_bazel_lib", version = "2.21.2")
-bazel_dep(name = "aspect_rules_py", version = "1.6.3")
-bazel_dep(name = "bazel_skylib", version = "1.8.2")
-bazel_dep(name = "libxev", version = "0.0.0-20251014.0-9f785d2")
+bazel_dep(name = "abseil-cpp", version = "20260107.1")
+bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "aspect_rules_py", version = "1.8.4")
+bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "protobuf", version = "33.1", repo_name = "com_google_protobuf")
-
-# Needs to be added before rules_cc so that the cc toolchain declared by
-# apple_support wins over the one in rules_cc.
 bazel_dep(name = "rules_cc", version = "0.2.16")
-bazel_dep(name = "rules_distroless", version = "0.5.1")
+bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
-bazel_dep(name = "rules_oci", version = "2.2.6")
+bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_python", version = "1.8.0-rc1")
+bazel_dep(name = "rules_python", version = "1.8.4")
 bazel_dep(name = "rules_rust", version = "0.68.1")
 bazel_dep(name = "rules_rs", version = "0.0.28")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.5")
-bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
+bazel_dep(name = "with_cfg.bzl", version = "0.14.1")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
 
@@ -55,13 +50,6 @@ use_repo(zig, "zig_toolchains")
 register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
-###
-
-### Apple C/C++ toolchain (needs to be first)
-apple_cc_configure = use_extension("@apple_support//crosstool:setup.bzl", "apple_cc_configure_extension")
-use_repo(apple_cc_configure, "local_config_apple_cc", "local_config_apple_cc_toolchains")
-
-register_toolchains("@local_config_apple_cc_toolchains//:all")
 ###
 
 ### LLVM Bootstrapped toolchains
