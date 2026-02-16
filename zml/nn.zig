@@ -27,7 +27,7 @@ pub const Linear = struct {
     }
 
     pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight.convert(x.dtype()), self.tag);
+        var y = x.dot(self.weight, self.tag);
 
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
