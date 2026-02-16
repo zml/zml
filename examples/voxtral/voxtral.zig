@@ -21,12 +21,12 @@ const Adapter = dec.Adapter;
 const common = @import("common.zig");
 const KvCache = common.KvCache;
 
-pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
+pub fn compileMelStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start("Compiling mel spectrogram...", 1);
+    var node = progress.start("Compiling mel step...", 1);
     defer node.end();
 
-    return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{padded_audio_len}, .f32).withTags(.{.samples})});
+    return try platform.compile(allocator, io, model, .melStep, .{Tensor.init(.{sp.chunk_audio}, .f32).withTags(.{.samples})});
 }
 
 pub fn compileConvStem(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, num_mel_frames: u32, progress: *std.Progress.Node) !zml.Exe {
@@ -198,63 +198,80 @@ pub fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32
     return result;
 }
 
-/// Run mel spectrogram and download result to host memory.
-/// Returns zero-padded mel data as bytes (channels-major: [128][padded_mel_frames]). Caller owns the memory.
-pub fn runMelSpectrogram(
+/// Prepend n_fft/2 reflected samples at the start and append n_fft/2 zeros at the end.
+/// Left reflect skips boundary sample (index 0) to match Tensor reflect padding in forward().
+/// Right zero-padding ensures STFT windows at the tail have enough samples.
+pub fn reflectPadAudio(allocator: std.mem.Allocator, audio: []const f32, pad: usize) ![]f32 {
+    const result = try allocator.alloc(f32, pad + audio.len + pad);
+    // Reflect: result[i] = audio[pad - i] for i in 0..pad
+    // i=0 → audio[pad], i=1 → audio[pad-1], ..., i=pad-1 → audio[1]
+    for (0..pad) |i| {
+        result[i] = audio[pad - i];
+    }
+    @memcpy(result[pad..][0..audio.len], audio);
+    @memset(result[pad + audio.len ..], 0);
+    return result;
+}
+
+/// Run mel spectrogram chunk-by-chunk and download result to host memory.
+/// Returns mel data as bytes (channels-major: [128][prompt_len * mel_per_step]). Caller owns the memory.
+pub fn runMelPrefill(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     sp: StreamParams,
     padded_audio: []const f32,
-    audio_len: usize,
-    compiled_mel_spectrum: *zml.Exe,
+    compiled_mel_step: *zml.Exe,
     mel_spectrum_buffers: *zml.Bufferized(LogMelSpectrogram),
 ) ![]u8 {
-    const num_frames = sp.numFrames(audio_len);
-    const padded_mel_frames = sp.paddedMelFrames(audio_len);
-    const total_steps = sp.totalSteps(audio_len);
+    const prompt_len = sp.prompt_len;
     const f32_bytes: usize = @sizeOf(f32);
+    const prefill_mel_frames: u32 = prompt_len * sp.mel_per_step;
 
-    log.info("Running mel spectrogram...", .{});
-    var mel_output: zml.Buffer = undefined;
-    {
-        var mel_args = try compiled_mel_spectrum.args(allocator);
-        defer mel_args.deinit(allocator);
-        var mel_results = try compiled_mel_spectrum.results(allocator);
-        defer mel_results.deinit(allocator);
+    log.info("Running mel prefill ({} chunks of {} frames, keeping {} per chunk)...", .{ prompt_len, sp.chunk_mel, sp.mel_per_step });
+
+    // Allocate host mel buffer: [128][prefill_mel_frames] zero-initialized
+    const mel_host = try allocator.alloc(u8, @as(usize, 128) * prefill_mel_frames * f32_bytes);
+    @memset(mel_host, 0);
+
+    var mel_step_args = try compiled_mel_step.args(allocator);
+    defer mel_step_args.deinit(allocator);
+    var mel_step_results = try compiled_mel_step.results(allocator);
+    defer mel_step_results.deinit(allocator);
+
+    var mel_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.chunk_mel }, .f32), .{});
+    defer mel_step_output.deinit();
+
+    for (0..prompt_len) |t| {
+        // Audio chunk starts at t * mel_per_step * hop_length in the reflect-padded audio
+        const audio_start: usize = t * sp.mel_per_step * sp._hop_length;
+        const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
 
         const audio_slice: zml.Slice = .init(
-            .init(.{audio_len}, .f32),
-            std.mem.sliceAsBytes(padded_audio),
+            .init(.{sp.chunk_audio}, .f32),
+            std.mem.sliceAsBytes(audio_chunk),
         );
         var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
         defer audio_buffer.deinit();
 
-        mel_output = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = num_frames }, .f32), .{});
+        mel_step_args.set(.{ mel_spectrum_buffers, audio_buffer });
+        compiled_mel_step.call(mel_step_args, &mel_step_results);
+        mel_step_results.fill(.{&mel_step_output});
 
-        mel_args.set(.{ mel_spectrum_buffers, audio_buffer });
-        compiled_mel_spectrum.call(mel_args, &mel_results);
-        mel_results.fill(.{&mel_output});
-    }
-    defer mel_output.deinit();
-    log.info("Mel spectrogram done.", .{});
-
-    // Download mel to host (channels-major: [128][padded_mel_frames] in f32)
-    const mel_host = try allocator.alloc(u8, @as(usize, 128) * padded_mel_frames * f32_bytes);
-    @memset(mel_host, 0); // zero-pad beyond num_frames
-
-    {
-        var download = try mel_output.toSliceAlloc(allocator, io);
+        // Download chunk and keep first mel_per_step frames for conv stem prefill
+        var download = try mel_step_output.toSliceAlloc(allocator, io);
         defer download.free(allocator);
         const src = download.constData();
-        const src_stride = @as(usize, num_frames) * f32_bytes;
-        const dst_stride = @as(usize, padded_mel_frames) * f32_bytes;
-        const copy_len = @as(usize, num_frames) * f32_bytes;
+
+        const src_stride = @as(usize, sp.chunk_mel) * f32_bytes;
+        const dst_stride = @as(usize, prefill_mel_frames) * f32_bytes;
+        const copy_len = @as(usize, sp.mel_per_step) * f32_bytes;
+        const dst_offset = t * sp.mel_per_step * f32_bytes;
         for (0..128) |c| {
-            @memcpy(mel_host[c * dst_stride ..][0..copy_len], src[c * src_stride ..][0..copy_len]);
+            @memcpy(mel_host[c * dst_stride + dst_offset ..][0..copy_len], src[c * src_stride ..][0..copy_len]);
         }
     }
-    log.info("Mel downloaded to host ({} frames, padded to {}, {} steps).", .{ num_frames, padded_mel_frames, total_steps });
+    log.info("Mel prefill done ({} frames).", .{prefill_mel_frames});
 
     return mel_host;
 }
@@ -268,7 +285,6 @@ pub fn runPrefill(
     config: Config,
     sp: StreamParams,
     mel_host: []const u8,
-    audio_len: usize,
     tokens: []const u32,
     compiled_conv_stem: *zml.Exe,
     compiled_encoder_prefill: *zml.Exe,
@@ -285,30 +301,18 @@ pub fn runPrefill(
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     generated_token_slice: zml.Slice,
 ) !void {
-    const padded_mel_frames = sp.paddedMelFrames(audio_len);
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
     const f32_bytes: usize = @sizeOf(f32);
 
-    // Conv stem prefill: process first prompt_len*mel_per_step mel frames
+    // Conv stem prefill: mel_host is already [128][prompt_len*mel_per_step]
     log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * sp.mel_per_step});
     var conv_prefill_output: zml.Buffer = undefined;
     {
         const prefill_mel_time: u32 = prompt_len * sp.mel_per_step;
-        const prefill_staging_bytes: usize = @as(usize, 128) * prefill_mel_time * f32_bytes;
-        const prefill_mel_staging = try allocator.alloc(u8, prefill_staging_bytes);
-        defer allocator.free(prefill_mel_staging);
-
-        const src_stride = @as(usize, padded_mel_frames) * f32_bytes;
-        const dst_stride = @as(usize, prefill_mel_time) * f32_bytes;
-        const copy_len = @as(usize, prefill_mel_time) * f32_bytes;
-        for (0..128) |c| {
-            @memcpy(prefill_mel_staging[c * dst_stride ..][0..copy_len], mel_host[c * src_stride ..][0..copy_len]);
-        }
-
         const mel_slice: zml.Slice = .init(
             .init(.{ .channels = 128, .time = prefill_mel_time }, .f32),
-            prefill_mel_staging[0..prefill_staging_bytes],
+            mel_host[0 .. @as(usize, 128) * prefill_mel_time * f32_bytes],
         );
         var mel_buffer: zml.Buffer = try .fromSlice(io, platform, mel_slice);
         defer mel_buffer.deinit();
@@ -412,12 +416,14 @@ pub fn runGenerationLoop(
     config: Config,
     sp: StreamParams,
     tokenizer: *zml.tokenizer.Tokenizer,
-    mel_host: []const u8,
+    padded_audio: []const f32,
     audio_len: usize,
+    compiled_mel_step: *zml.Exe,
     compiled_conv_stem_step: *zml.Exe,
     compiled_encoder_step: *zml.Exe,
     compiled_adapter_step: *zml.Exe,
     compiled_decoder_decode: *zml.Exe,
+    mel_spectrum_buffers: *zml.Bufferized(LogMelSpectrogram),
     encoder_buffers: *zml.Bufferized(Encoder),
     adapter_buffers: *zml.Bufferized(Adapter),
     decoder_buffers: *zml.Bufferized(Decoder),
@@ -429,11 +435,9 @@ pub fn runGenerationLoop(
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     generated_token_slice: zml.Slice,
 ) !void {
-    const padded_mel_frames = sp.paddedMelFrames(audio_len);
     const total_steps = sp.totalSteps(audio_len);
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
-    const f32_bytes: usize = @sizeOf(f32);
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
@@ -444,6 +448,11 @@ pub fn runGenerationLoop(
 
     log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
     const decode_start: std.Io.Timestamp = .now(io, .awake);
+
+    var mel_step_args = try compiled_mel_step.args(allocator);
+    defer mel_step_args.deinit(allocator);
+    var mel_step_results = try compiled_mel_step.results(allocator);
+    defer mel_step_results.deinit(allocator);
 
     var conv_step_args = try compiled_conv_stem_step.args(allocator);
     defer conv_step_args.deinit(allocator);
@@ -465,6 +474,9 @@ pub fn runGenerationLoop(
     var decode_results = try compiled_decoder_decode.results(allocator);
     defer decode_results.deinit(allocator);
 
+    var mel_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.chunk_mel }, .f32), .{});
+    defer mel_step_output.deinit();
+
     var conv_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = sp.dsf, .d = enc_dim }, .bf16), .{});
     defer conv_step_output.deinit();
 
@@ -476,14 +488,6 @@ pub fn runGenerationLoop(
 
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
     defer current_token_buffer.deinit();
-
-    // Mel staging buffer for conv stem step (reused each iteration)
-    const mel_staging_bytes: usize = @as(usize, 128) * sp.chunk_mel * f32_bytes;
-    const mel_staging = try allocator.alloc(u8, mel_staging_bytes);
-    defer allocator.free(mel_staging);
-
-    const mel_src_stride = @as(usize, padded_mel_frames) * f32_bytes;
-    const mel_dst_stride = @as(usize, sp.chunk_mel) * f32_bytes;
 
     var num_generated: usize = 0;
     for (prompt_len..total_steps) |t| {
@@ -501,20 +505,23 @@ pub fn runGenerationLoop(
             break;
         }
 
-        // Conv stem step: prepare mel chunk with history, run conv stem
-        const mel_t_start: usize = t * sp.mel_per_step - sp.mel_history;
-        for (0..128) |c| {
-            @memcpy(mel_staging[c * mel_dst_stride ..][0..mel_dst_stride], mel_host[c * mel_src_stride + mel_t_start * f32_bytes ..][0..mel_dst_stride]);
-        }
+        // Mel step: upload audio chunk → mel spectrogram on device (no host round-trip)
+        const audio_start: usize = (t * sp.mel_per_step - sp.mel_history) * sp._hop_length;
+        const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
 
-        const mel_chunk_slice: zml.Slice = .init(
-            .init(.{ .channels = 128, .time = sp.chunk_mel }, .f32),
-            mel_staging[0..mel_staging_bytes],
+        const audio_slice: zml.Slice = .init(
+            .init(.{sp.chunk_audio}, .f32),
+            std.mem.sliceAsBytes(audio_chunk),
         );
-        var mel_chunk_buffer: zml.Buffer = try .fromSlice(io, platform, mel_chunk_slice);
-        defer mel_chunk_buffer.deinit();
+        var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
+        defer audio_buffer.deinit();
 
-        conv_step_args.set(.{ encoder_buffers, mel_chunk_buffer });
+        mel_step_args.set(.{ mel_spectrum_buffers, audio_buffer });
+        compiled_mel_step.call(mel_step_args, &mel_step_results);
+        mel_step_results.fill(.{&mel_step_output});
+
+        // Conv stem step: mel step output stays on device → conv stem
+        conv_step_args.set(.{ encoder_buffers, mel_step_output });
         compiled_conv_stem_step.call(conv_step_args, &conv_step_results);
         conv_step_results.fill(.{&conv_step_output});
 
@@ -560,7 +567,7 @@ pub fn runPipeline(
     audio_len: usize,
     tokens: []const u32,
     sp: StreamParams,
-    compiled_mel_spectrum: *zml.Exe,
+    compiled_mel_step: *zml.Exe,
     compiled_conv_stem: *zml.Exe,
     compiled_conv_stem_step: *zml.Exe,
     compiled_encoder_prefill: *zml.Exe,
@@ -580,8 +587,14 @@ pub fn runPipeline(
 ) !void {
     log.info("Running inference pipeline...", .{});
 
-    // 1. Mel spectrogram
-    const mel_host = try runMelSpectrogram(allocator, io, platform, sp, padded_audio, audio_len, compiled_mel_spectrum, mel_spectrum_buffers);
+    // 0. Reflect-pad audio on host (prepend n_fft/2 samples)
+    const n_fft: usize = config.audio().window_size;
+    const reflect_pad: usize = n_fft / 2;
+    const reflect_padded_audio = try reflectPadAudio(allocator, padded_audio, reflect_pad);
+    defer allocator.free(reflect_padded_audio);
+
+    // 1. Mel prefill (chunk-by-chunk)
+    const mel_host = try runMelPrefill(allocator, io, platform, sp, reflect_padded_audio, compiled_mel_step, mel_spectrum_buffers);
     defer allocator.free(mel_host);
 
     // 2. Init KV caches + t_cond + RNG
@@ -614,7 +627,6 @@ pub fn runPipeline(
         config,
         sp,
         mel_host,
-        audio_len,
         tokens,
         compiled_conv_stem,
         compiled_encoder_prefill,
@@ -640,12 +652,14 @@ pub fn runPipeline(
         config,
         sp,
         tokenizer,
-        mel_host,
+        reflect_padded_audio,
         audio_len,
+        compiled_mel_step,
         compiled_conv_stem_step,
         compiled_encoder_step,
         compiled_adapter_step,
         compiled_decoder_decode,
+        mel_spectrum_buffers,
         encoder_buffers,
         adapter_buffers,
         decoder_buffers,

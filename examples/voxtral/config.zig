@@ -86,6 +86,7 @@ pub const StreamParams = struct {
     mel_per_step: u32,
     mel_history: u32,
     chunk_mel: u32,
+    chunk_audio: u32,
     raw_audio_length_per_tok: u32,
     _hop_length: u32,
     n_delay_tokens: u32,
@@ -105,12 +106,15 @@ pub const StreamParams = struct {
 
         const dsf = config.downsample_factor();
         const mel_history: u32 = 4;
+        const window_size = config.audio().window_size;
+        const chunk_mel = mel_history + dsf * 2;
 
         return .{
             .dsf = dsf,
             .mel_per_step = dsf * 2,
             .mel_history = mel_history,
-            .chunk_mel = mel_history + dsf * 2,
+            .chunk_mel = chunk_mel,
+            .chunk_audio = (chunk_mel - 1) * hop_length + window_size,
             .raw_audio_length_per_tok = raw_audio_length_per_tok,
             ._hop_length = hop_length,
             .n_delay_tokens = n_delay_tokens,

@@ -63,6 +63,33 @@ pub const LogMelSpectrogram = struct {
         return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames });
     }
 
+    /// Like forward(), but for fixed-size audio chunks with reflect padding done on host.
+    /// Produces exactly (audio_len - n_fft) / hop_len + 1 mel frames.
+    /// Output tags: .channels and .time (matching conv stem input).
+    pub fn melStep(self: LogMelSpectrogram, audio_chunk: Tensor) Tensor {
+	const dtype = audio_chunk.dtype();
+
+        const window_weight = self.window.getWeights(self.n_fft, dtype);
+        const fft_len = window_weight.dim(.samples);
+        const audio_len: u63 = @intCast(audio_chunk.dim(.samples));
+        const num_frames: u63 = @intCast(@divFloor(audio_len - fft_len, self.hop_len) + 1);
+
+        // No reflect padding — done on host
+        var spectrogram = stft(audio_chunk, window_weight, num_frames, self.hop_len, self.precision);
+        spectrogram = spectrogram.convert(dtype);
+
+        // Re-weight frequencies for speech
+        spectrogram = spectrogram.dot(self.mel_filters, .freq_bins);
+
+        spectrogram = spectrogram.maximum(Tensor.constant(dtype.constant(self.mel_floor)));
+        var log_spec = spectrogram.log().scale(1.0 / @log(10.0));
+
+        const log_spec_min = Tensor.constant(dtype.constant(self.global_log_mel_max - 8.0));
+        log_spec = log_spec.maximum(log_spec_min);
+
+        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames }).withTags(.{ .channels, .time });
+    }
+
     pub fn load(self: *LogMelSpectrogram, io: std.Io, platform: *zml.Platform) !zml.Bufferized(LogMelSpectrogram) {
 	const mel_filters_data = @embedFile("assets/voxtral_mel_filter.data");
 	const slice = zml.Slice.init(self.mel_filters.shape(), mel_filters_data);
