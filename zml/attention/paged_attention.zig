@@ -13,7 +13,7 @@ pub const Backend = enum {
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
             .cuda => b: {
-                const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
+                const first_device = platform.devices[0].pjrt_device;
 
                 if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
                     if (std.mem.eql(u8, cc, "9.0")) {
@@ -130,11 +130,16 @@ pub const Context = union(Backend) {
     }
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor) zml.Tensor {
+pub const AttentionOptions = struct {
+    is_causal: bool = true,
+    sliding_window: i32 = -1,
+};
+
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     _ = k; // autofix
     _ = v; // autofix
     return switch (parameters) {
-        .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index),
-        .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index),
+        .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
+        .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),
     };
 }
