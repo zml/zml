@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
@@ -141,5 +142,43 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
         .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),
+    };
+}
+
+pub fn computeNextTokenIndices(parameters: Parameters, context: Context) zml.Tensor {
+    return switch (parameters) {
+        inline .cuda_fa2, .cuda_fa3 => |flashattn_parameters, tag| b: {
+            const mixed = switch (flashattn_parameters) {
+                .mixed => |m| m,
+                else => {
+                    std.debug.panic("computeIndices should only be called when there is some prefill", .{});
+                },
+            };
+
+            const prefill_last_token_indices = b2: {
+                const cu_seqlens_q_prefill = mixed.cu_seqlens_q_prefill;
+
+                // For each prefill compute the next token index. If empty we use maxInt(i32).
+                const start = cu_seqlens_q_prefill.slice1d(0, .{ .end = cu_seqlens_q_prefill.dim(0) - 1 });
+                const end = cu_seqlens_q_prefill.slice1d(0, .{ .start = 1 });
+                const token_count = end.sub(start);
+
+                var last_token_index = end.sub(zml.Tensor.scalar(1, end.dtype()));
+                const is_empty = token_count.cmp(.EQ, zml.Tensor.constant(token_count.dtype().zero()).broad(token_count.shape()));
+                const out_of_bound_sentinel = zml.Tensor.constant(last_token_index.dtype().constant(std.math.maxInt(i32))).broad(last_token_index.shape());
+                last_token_index = is_empty.select(out_of_bound_sentinel, last_token_index);
+                break :b2 last_token_index;
+            };
+            const decode_token_indices = b2: {
+                const shape = zml.Shape.init(.{ .b = mixed.block_table_decode.dim(0) }, .i32);
+                const offset = @field(context, @tagName(tag)).decode_offset.?.broad(shape);
+                const iota = zml.Tensor.iota(shape, .b);
+                break :b2 offset.add(iota);
+            };
+
+            const next_token_indices = zml.Tensor.concatenate(&.{ prefill_last_token_indices, decode_token_indices }, 0).withTags(.{.n});
+
+            break :b next_token_indices;
+        },
     };
 }
