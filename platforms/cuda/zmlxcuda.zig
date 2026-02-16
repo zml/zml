@@ -4,13 +4,13 @@ const stdx = @import("stdx");
 
 pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
     const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
-        .{ "libcublas.so", "libcublas.so.12" },
-        .{ "libcublasLt.so", "libcublasLt.so.12" },
-        .{ "libcudart.so", "libcudart.so.12" },
+        .{ "libcublas.so", "libcublas.so.13" },
+        .{ "libcublasLt.so", "libcublasLt.so.13" },
+        .{ "libcudart.so", "libcudart.so.13" },
         .{ "libcudnn.so", "libcudnn.so.9" },
-        .{ "libcufft.so", "libcufft.so.11" },
-        .{ "libcupti.so", "libcupti.so.12" },
-        .{ "libcusolver.so", "libcusolver.so.11" },
+        .{ "libcufft.so", "libcufft.so.12" },
+        .{ "libcupti.so", "libcupti.so.13" },
+        .{ "libcusolver.so", "libcusolver.so.12" },
         .{ "libcusparse.so", "libcusparse.so.12" },
         .{ "libnccl.so", "libnccl.so.2" },
     });
