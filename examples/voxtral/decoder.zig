@@ -120,7 +120,7 @@ pub const Decoder = struct {
     /// Run all decoder layers on input embeddings, sample next tokens and return updated KV cache + RNG.
     /// text_tokens: [s] u32, audio_embed: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d], rng: Rng
     /// Returns: (tokens [s] u32, KvCache, Rng)
-    pub fn forward(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng) struct { Tensor, KvCache, Tensor.Rng } {
+    pub fn forward(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng } {
         const text_embeds = self.tok_embeddings.gather(.{ .voc = text_tokens }, .{});
         const input_embeds = text_embeds.add(audio_embed);
 
@@ -131,7 +131,7 @@ pub const Decoder = struct {
 
         for (self.layers, 0..) |layer, i| {
             const layer_cache = cache.atLayer(i);
-            const result = layer.forward(h, token_index, layer_cache, t, self.config);
+            const result = layer.forward(h, token_index, layer_cache, t, self.config, attention_metadata, attention_parameters);
             h = result[0];
             const updated_layer_cache = result[1];
 
@@ -202,7 +202,7 @@ pub const SelfAttention = struct {
     }
 
     /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
-    pub fn forward(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
+    pub fn forward(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         const dtype = x.dtype();
 
         var q = self.wq.forward(x);
@@ -238,16 +238,7 @@ pub const SelfAttention = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        // Causal attention with sliding window
-        const full_seq_len = k.dim(.k);
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = full_seq_len, .k = full_seq_len }, dtype, config.sliding_window);
-        attn_mask = attn_mask.gatherSlices(
-            Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()),
-            token_index.reshape(.{ .coord = 1 }),
-            .{},
-        );
-
-        const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
+        const attn_out = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
 
         // Merge heads and output projection: [q, h, hd] → [s, d]
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
@@ -286,13 +277,15 @@ pub const DecoderLayer = struct {
     }
 
     /// h: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d] → ([s, d], KvCache)
-    pub fn forward(self: DecoderLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, config: Config) struct { Tensor, KvCache } {
+    pub fn forward(self: DecoderLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         // Pre-attention norm → attention (with KV cache) → residual
         const attn_out, const updated_kv_cache = self.attention.forward(
             rmsNorm(h, self.attention_norm, self.norm_eps),
             token_index,
             kv_cache,
             config,
+            attention_metadata,
+            attention_parameters,
         );
 
         var out = h.add(attn_out);
