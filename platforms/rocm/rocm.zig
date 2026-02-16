@@ -48,9 +48,6 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
     try setupRocmEnv(sandbox_path);
 
-    var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
-
     // We must load the PJRT plugin from the main thread.
     //
     // This is because libamdhip64.so use thread local storage as part of the static destructors...
@@ -60,5 +57,9 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     // on the library, the thread-local storage (TLS) offset may be resolved
     // relative to the TLS base of the main thread, rather than the thread actually
     // executing the destructor. Accessing this variable results in a segmentation fault...
-    return try pjrt.Api.loadFrom(lib_path);
+    return blk: {
+        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const lib_path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_rocm.so" });
+        break :blk .loadFrom(lib_path);
+    };
 }

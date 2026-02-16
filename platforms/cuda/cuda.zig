@@ -26,9 +26,8 @@ fn hasCudaPathInLDPath() bool {
 }
 
 fn setupXlaGpuCudaDirFlag(allocator: std.mem.Allocator, sandbox: []const u8) !void {
-    const xla_flags = std.process.getEnvVarOwned(allocator, "XLA_FLAGS") catch "";
+    const xla_flags = std.c.getenv("XLA_FLAGS") orelse "";
     const new_xla_flagsZ = try std.fmt.allocPrintSentinel(allocator, "{s} --xla_gpu_cuda_data_dir={s}", .{ xla_flags, sandbox }, 0);
-
     _ = c.setenv("XLA_FLAGS", new_xla_flagsZ, 1);
 }
 
@@ -49,7 +48,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {
@@ -73,7 +72,6 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     return blk: {
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libpjrt_cuda.so" });
-        var future = io.async(pjrt.Api.loadFrom, .{path});
-        break :blk future.await(io);
+        break :blk .loadFrom(path);
     };
 }
