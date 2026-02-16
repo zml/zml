@@ -496,9 +496,7 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                         .{ "gfx906", {} },
                         .{ "gfx900", {} },
                     });
-                    const first_device = platform.pjrt_client.devices(platform.pjrt_api)[0];
-                    const description = first_device.getDescription(platform.pjrt_api);
-                    break :gemm_blk supported.has(description.attribute(platform.pjrt_api, "compute_capability").?.string);
+                    break :gemm_blk supported.has(platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "compute_capability").?.string);
                 }, upb_arena);
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.

@@ -17,11 +17,6 @@ alias(
     actual = "@libpjrt_rocm//:hipblaslt",
 )
 
-alias(
-    name = "gfx",
-    actual = "@libpjrt_rocm//:gfx",
-)
-
 cc_library(
     name = "empty",
     defines = ["ZML_RUNTIME_ROCM_DISABLED"],

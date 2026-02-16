@@ -4,39 +4,39 @@
 version: 1
 
 sources:
-    - channel: jammy main
-      url: https://repo.radeon.com/rocm/apt/7.1.1
-    - channel: jammy main
-      url: https://repo.radeon.com/graphics/7.1.1/ubuntu
-    - channel: jammy main
-      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-    - channel: jammy-security main
-      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
-    - channel: jammy-updates main
-      url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: jammy main
+    url: https://repo.radeon.com/rocm/apt/7.2
+  - channel: jammy main
+    url: https://repo.radeon.com/graphics/7.2/ubuntu
+  - channel: jammy main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: jammy-security main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
+  - channel: jammy-updates main
+    url: https://snapshot.ubuntu.com/ubuntu/20250711T030400Z
 
 archs:
-    - "amd64"
+  - "amd64"
 
-# readelf -d libpjrt_rosm.so | grep NEEDED
+# readelf -d libpjrt_rocm.so | grep NEEDED
 packages:
-    # - "rocm-smi-lib"
-    - "libdrm-amdgpu-common"
-    # Do not use hsa-rocr from amdgpu repo because it is overriden by hsa-runtime-rocr4wsl-amdgpu
-    - "hsa-rocr (<< 20)"
-    - "hsa-amd-aqlprofile"
-    - "comgr"
-    - "rocprofiler-register"
-    - "rocprofiler-sdk"
-    - "miopen-hip"
-    - "rccl"
-    - "rocm-device-libs"
-    - "hip-dev"
-    - "rocblas"
-    - "rocsolver"
-    - "hipsolver"
-    - "hipfft"
-    - "roctracer"
-    - "hipblaslt"
-    - "hipblaslt-dev"
-    - "hip-runtime-amd"
+  # - "rocm-smi-lib"
+  - "libdrm-amdgpu-common"
+  # Do not use hsa-rocr from amdgpu repo because it is overriden by hsa-runtime-rocr4wsl-amdgpu
+  - "hsa-rocr (<< 20)"
+  - "hsa-amd-aqlprofile"
+  - "comgr"
+  - "rocprofiler-register"
+  - "rocprofiler-sdk"
+  - "miopen-hip"
+  - "rccl"
+  - "rocm-device-libs"
+  - "hip-dev"
+  - "rocblas"
+  - "rocsolver"
+  - "hipsolver"
+  - "hipfft"
+  - "roctracer"
+  - "hipblaslt"
+  - "hipblaslt-dev"
+  - "hip-runtime-amd"

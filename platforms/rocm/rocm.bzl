@@ -6,7 +6,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "opt/rocm-7.1.1"
+_ROCM_STRIP_PREFIX = "opt/rocm-7.2.0"
 
 _UBUNTU_PACKAGES = {
     "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
@@ -61,7 +61,6 @@ _ROCM_PACKAGES = {
     "hip-dev": """filegroup(name = "runfiles", srcs = glob(["share/**"]))""",
     "rocblas": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.load_("@zml//platforms/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "rocblas",
             src = "lib/librocblas.so.5",
@@ -70,19 +69,11 @@ _ROCM_PACKAGES = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        """bytecode_select(
-            name = "bytecodes",
-            srcs = glob(["lib/rocblas/library/*"]),
-            enabled_gfx = "@libpjrt_rocm//:gfx",
-        )
-        """,
-        packages.filegroup(
+        """filegroup(
             name = "runfiles",
-            srcs = [
-                "lib/rocblas/library/TensileManifest.txt",
-                ":bytecodes",
-            ],
-        ),
+            srcs = glob(["lib/rocblas/library/**"]),
+        )
+        """
     ]),
     "rocfft": packages.filegroup(name = "rocfft", srcs = ["lib/librocfft.so.0"]),
     "rocsolver": packages.filegroup(name = "rocsolver", srcs = ["lib/librocsolver.so.0"]),
@@ -92,7 +83,6 @@ _ROCM_PACKAGES = {
     ]),
     "hipblaslt": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
-        packages.load_("@zml//platforms/rocm:gfx.bzl", "bytecode_select"),
         packages.patchelf(
             name = "hipblaslt",
             src = "lib/libhipblaslt.so.1",
@@ -110,22 +100,11 @@ _ROCM_PACKAGES = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        """bytecode_select(
-            name = "bytecodes",
-            srcs = glob(
-                include = ["lib/hipblaslt/library/*"],
-                exclude = ["lib/hipblaslt/library/hipblasltExtOpLibrary.dat"],
-            ),
-            enabled_gfx = "@libpjrt_rocm//:gfx",
-        )
-        """,
-        packages.filegroup(
+        """filegroup(
             name = "runfiles",
-            srcs = [
-                "lib/hipblaslt/library/hipblasltExtOpLibrary.dat",
-                ":bytecodes",
-            ],
-        ),
+            srcs = glob(["lib/hipblaslt/library/**"]),
+        )
+        """
     ]),
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([

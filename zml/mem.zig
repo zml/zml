@@ -21,9 +21,9 @@ pub const DmaAllocator = union(enum) {
 
     pub fn init(parent: std.mem.Allocator, device: *const Device) DmaAllocator {
         return switch (device.platform.target) {
-            .cuda, .rocm => .{ .dmam = .init(parent, device.platform) },
+            .cuda => .{ .dmam = .init(parent, device.platform) },
             .tpu, .neuron => .{ .uib = .init(device.memory(.host_pinned)) },
-            .cpu => .{ .passthrough = parent },
+            .rocm, .cpu => .{ .passthrough = parent },
         };
     }
 

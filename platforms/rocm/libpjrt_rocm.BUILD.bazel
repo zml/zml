@@ -3,15 +3,9 @@ load("@aspect_bazel_lib//lib:tar.bzl", "tar")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
-string_list_flag(
-    name = "gfx",
-    build_setting_default = ["all"],
-    visibility = ["//visibility:public"],
-)
-
 bool_flag(
     name = "hipblaslt",
-    build_setting_default = True,
+    build_setting_default = False,
     visibility = ["//visibility:public"],
 )
 
