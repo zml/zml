@@ -134,9 +134,7 @@ pub fn main(init: std.process.Init) !void {
     // Launch concurrent compilation and buffer loading
     var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
 
-    // -- Fixed len for now
-    var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
-    // --
+    var compiled_mel_step_future = try io.concurrent(voxtral.compileMelStep, .{ allocator, io, platform, melspectro_model, sp, &progress });
 
     var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
     var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, sp, &progress });
@@ -161,8 +159,8 @@ pub fn main(init: std.process.Init) !void {
     @memset(tokens[1..], token_streaming_pad);
 
     // -- Compiled models
-    var compiled_mel_spectrum = try compiled_mel_spectrum_future.await(io);
-    defer compiled_mel_spectrum.deinit();
+    var compiled_mel_step = try compiled_mel_step_future.await(io);
+    defer compiled_mel_step.deinit();
 
     var compiled_conv_stem = try compiled_conv_stem_future.await(io);
     defer compiled_conv_stem.deinit();
@@ -217,7 +215,7 @@ pub fn main(init: std.process.Init) !void {
         audio_len,
         tokens,
         sp,
-        &compiled_mel_spectrum,
+        &compiled_mel_step,
         &compiled_conv_stem,
         &compiled_conv_stem_step,
         &compiled_encoder_prefill,
