@@ -149,7 +149,9 @@ pub fn main() !void {
 
     // -- Fixed len for now
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
-    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, audio_len, &progress });
+    const mel_per_step: u32 = config.downsample_factor() * 2;
+    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, prompt_len * mel_per_step, &progress });
+    var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, &progress });
     // --
 
     var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
@@ -178,6 +180,9 @@ pub fn main() !void {
 
     var compiled_conv_stem = try compiled_conv_stem_future.await(io);
     defer compiled_conv_stem.deinit();
+
+    var compiled_conv_stem_step = try compiled_conv_stem_step_future.await(io);
+    defer compiled_conv_stem_step.deinit();
 
     var compiled_encoder_prefill = try compiled_encoder_prefill_future.await(io);
     defer compiled_encoder_prefill.deinit();
@@ -228,6 +233,7 @@ pub fn main() !void {
         n_delay_tokens,
         &compiled_mel_spectrum,
         &compiled_conv_stem,
+        &compiled_conv_stem_step,
         &compiled_encoder_prefill,
         &compiled_encoder_step,
         &compiled_adapter,

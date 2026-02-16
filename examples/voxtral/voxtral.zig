@@ -27,15 +27,27 @@ pub fn compileMelSpectrum(allocator: std.mem.Allocator, io: std.Io, platform: *c
     return try platform.compile(allocator, io, model, .forward, .{Tensor.init(.{padded_audio_len}, .f32).withTags(.{.samples})});
 }
 
-pub fn compileConvStem(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, padded_audio_len: usize, progress: *std.Progress.Node) !zml.Exe {
+pub fn compileConvStem(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, num_mel_frames: u32, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling conv stem...", 1);
     defer node.end();
 
-    const num_frames = padded_audio_len / model.config.audio().hop_length;
-
     return try platform.compile(allocator, io, model, .convStem, .{
-        Tensor.init(.{ .channels = 128, .time = num_frames }, .f32),
+        Tensor.init(.{ .channels = 128, .time = num_mel_frames }, .f32),
+    });
+}
+
+pub fn compileConvStemStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, progress: *std.Progress.Node) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Compiling conv stem step...", 1);
+    defer node.end();
+
+    const mel_history = 4;
+    const mel_per_step = model.config.downsample_factor() * 2;
+    const chunk_mel = mel_history + mel_per_step;
+
+    return try platform.compile(allocator, io, model, .convStemStep, .{
+        Tensor.init(.{ .channels = 128, .time = chunk_mel }, .f32),
     });
 }
 
@@ -200,6 +212,7 @@ pub fn runPipeline(
     n_delay_tokens: u32,
     compiled_mel_spectrum: *zml.Exe,
     compiled_conv_stem: *zml.Exe,
+    compiled_conv_stem_step: *zml.Exe,
     compiled_encoder_prefill: *zml.Exe,
     compiled_encoder_step: *zml.Exe,
     compiled_adapter: *zml.Exe,
@@ -217,8 +230,11 @@ pub fn runPipeline(
 ) !void {
     log.info("Running inference pipeline...", .{});
 
-    const num_frames = audio_len / config.audio().hop_length;
+    const num_frames: u32 = @intCast(audio_len / config.audio().hop_length);
     const dsf: u32 = config.downsample_factor();
+    const mel_per_step: u32 = dsf * 2;
+    const mel_history: u32 = 4;
+    const chunk_mel: u32 = mel_history + mel_per_step;
     const encoder_seq_len: u32 = @intCast((num_frames + 1) / 2);
     const total_steps = (encoder_seq_len + dsf - 1) / dsf;
     const enc_dim: u32 = config.encoder().dim;
@@ -252,43 +268,28 @@ pub fn runPipeline(
     defer mel_output.deinit();
     log.info("Mel spectrogram done.", .{});
 
-    // 2. Conv stem
-    log.info("Running conv stem...", .{});
-    var conv_output: zml.Buffer = undefined;
-    {
-        var args = try compiled_conv_stem.args(allocator);
-        defer args.deinit(allocator);
-        var results = try compiled_conv_stem.results(allocator);
-        defer results.deinit(allocator);
+    // 2. Download mel to host (channels-major: [128][padded_mel_frames] in f32)
+    const f32_bytes: usize = @sizeOf(f32);
+    const padded_mel_frames: u32 = total_steps * mel_per_step;
 
-        conv_output = try .uninitialized(io, platform, .init(.{ .s = encoder_seq_len, .d = enc_dim }, .bf16), .{});
-
-        args.set(.{ encoder_buffers, mel_output });
-        compiled_conv_stem.call(args, &results);
-        results.fill(.{&conv_output});
-    }
-    defer conv_output.deinit();
-    log.info("Conv stem done.", .{});
-
-    // 3. Download conv output to host (for per-step slicing)
-    const bf16_bytes: usize = 2;
-    const frame_bytes: usize = @as(usize, enc_dim) * bf16_bytes;
-    const chunk_bytes: usize = @as(usize, dsf) * frame_bytes;
-    const padded_enc_len: u32 = total_steps * dsf;
-
-    const conv_host = try allocator.alloc(u8, @as(usize, padded_enc_len) * frame_bytes);
-    defer allocator.free(conv_host);
-    @memset(conv_host, 0); // zero-pad for last chunk if encoder_seq_len % dsf != 0
+    const mel_host = try allocator.alloc(u8, @as(usize, 128) * padded_mel_frames * f32_bytes);
+    defer allocator.free(mel_host);
+    @memset(mel_host, 0); // zero-pad beyond num_frames
 
     {
-        var download = try conv_output.toSliceAlloc(allocator, io);
+        var download = try mel_output.toSliceAlloc(allocator, io);
         defer download.free(allocator);
         const src = download.constData();
-        @memcpy(conv_host[0..src.len], src);
+        const src_stride = @as(usize, num_frames) * f32_bytes;
+        const dst_stride = @as(usize, padded_mel_frames) * f32_bytes;
+        const copy_len = @as(usize, num_frames) * f32_bytes;
+        for (0..128) |c| {
+            @memcpy(mel_host[c * dst_stride ..][0..copy_len], src[c * src_stride ..][0..copy_len]);
+        }
     }
-    log.info("Conv output downloaded to host ({} frames, {} steps).", .{ encoder_seq_len, total_steps });
+    log.info("Mel downloaded to host ({} frames, padded to {}, {} steps).", .{ num_frames, padded_mel_frames, total_steps });
 
-    // 4. Init KV caches + t_cond + RNG
+    // 3. Init KV caches + t_cond + RNG
     var enc_kv_buffers = try enc_kv_cache.initBuffer(io, platform);
     defer KvCache.deinitBuffer(&enc_kv_buffers);
 
@@ -311,22 +312,52 @@ pub fn runPipeline(
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
 
     // ===== Prefill phase =====
+    // 4. Conv stem prefill: process first prompt_len*mel_per_step mel frames
+    log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * mel_per_step});
+    var conv_prefill_output: zml.Buffer = undefined;
+    {
+        const prefill_mel_time: u32 = prompt_len * mel_per_step;
+        const prefill_staging_bytes: usize = @as(usize, 128) * prefill_mel_time * f32_bytes;
+        const prefill_mel_staging = try allocator.alloc(u8, prefill_staging_bytes);
+        defer allocator.free(prefill_mel_staging);
+
+        const src_stride = @as(usize, padded_mel_frames) * f32_bytes;
+        const dst_stride = @as(usize, prefill_mel_time) * f32_bytes;
+        const copy_len = @as(usize, prefill_mel_time) * f32_bytes;
+        for (0..128) |c| {
+            @memcpy(prefill_mel_staging[c * dst_stride ..][0..copy_len], mel_host[c * src_stride ..][0..copy_len]);
+        }
+
+        const mel_slice: zml.Slice = .init(
+            .init(.{ .channels = 128, .time = prefill_mel_time }, .f32),
+            prefill_mel_staging[0..prefill_staging_bytes],
+        );
+        var mel_buffer: zml.Buffer = try .fromSlice(io, platform, mel_slice);
+        defer mel_buffer.deinit();
+
+        const prefill_enc_frames = prompt_len * dsf;
+        conv_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prefill_enc_frames, .d = enc_dim }, .bf16), .{});
+
+        var args = try compiled_conv_stem.args(allocator);
+        defer args.deinit(allocator);
+        var results = try compiled_conv_stem.results(allocator);
+        defer results.deinit(allocator);
+
+        args.set(.{ encoder_buffers, mel_buffer });
+        compiled_conv_stem.call(args, &results);
+        results.fill(.{&conv_prefill_output});
+    }
+    defer conv_prefill_output.deinit();
+    log.info("Conv stem prefill done.", .{});
+
     // 5. Encoder prefill: first prompt_len*dsf frames through transformer with KV cache
     log.info("Running encoder prefill ({} frames)...", .{prompt_len * dsf});
     var encoder_prefill_output: zml.Buffer = undefined;
     {
-        const prefill_frames = prompt_len * dsf;
-        const prefill_conv_bytes = @as(usize, prefill_frames) * frame_bytes;
-        const prefill_conv_slice: zml.Slice = .init(
-            .init(.{ .s = prefill_frames, .d = enc_dim }, .bf16),
-            conv_host[0..prefill_conv_bytes],
-        );
-        var prefill_conv_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_conv_slice);
-        defer prefill_conv_buffer.deinit();
-
         var enc_token_index: zml.Buffer = try .scalar(io, platform, @as(u32, 0), .u32);
         defer enc_token_index.deinit();
 
+        const prefill_frames = prompt_len * dsf;
         encoder_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prefill_frames, .d = enc_dim }, .bf16), .{});
 
         var args = try compiled_encoder_prefill.args(allocator);
@@ -334,7 +365,7 @@ pub fn runPipeline(
         var results = try compiled_encoder_prefill.results(allocator);
         defer results.deinit(allocator);
 
-        args.set(.{ encoder_buffers, prefill_conv_buffer, enc_token_index, &enc_kv_buffers, enc_attention_metadata_buffers });
+        args.set(.{ encoder_buffers, conv_prefill_output, enc_token_index, &enc_kv_buffers, enc_attention_metadata_buffers });
         compiled_encoder_prefill.call(args, &results);
         results.fill(.{ &encoder_prefill_output, &enc_kv_buffers });
     }
@@ -396,8 +427,13 @@ pub fn runPipeline(
     }
     log.info("Decoder prefill done.", .{});
 
-    // ===== Decode phase: step-by-step encoder → adapter → decoder =====
+    // ===== Decode phase: step-by-step conv_stem → encoder → adapter → decoder =====
     log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
+
+    var conv_step_args = try compiled_conv_stem_step.args(allocator);
+    defer conv_step_args.deinit(allocator);
+    var conv_step_results = try compiled_conv_stem_step.results(allocator);
+    defer conv_step_results.deinit(allocator);
 
     var enc_step_args = try compiled_encoder_step.args(allocator);
     defer enc_step_args.deinit(allocator);
@@ -414,6 +450,9 @@ pub fn runPipeline(
     var decode_results = try compiled_decoder_decode.results(allocator);
     defer decode_results.deinit(allocator);
 
+    var conv_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = dsf, .d = enc_dim }, .bf16), .{});
+    defer conv_step_output.deinit();
+
     var enc_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = dsf, .d = enc_dim }, .bf16), .{});
     defer enc_step_output.deinit();
 
@@ -422,6 +461,14 @@ pub fn runPipeline(
 
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
     defer current_token_buffer.deinit();
+
+    // Mel staging buffer for conv stem step (reused each iteration)
+    const mel_staging_bytes: usize = @as(usize, 128) * chunk_mel * f32_bytes;
+    const mel_staging = try allocator.alloc(u8, mel_staging_bytes);
+    defer allocator.free(mel_staging);
+
+    const mel_src_stride = @as(usize, padded_mel_frames) * f32_bytes;
+    const mel_dst_stride = @as(usize, chunk_mel) * f32_bytes;
 
     var num_generated: usize = 0;
     for (prompt_len..total_steps) |t| {
@@ -439,19 +486,28 @@ pub fn runPipeline(
             break;
         }
 
-        // Encoder step: dsf frames → encoded chunk
-        const byte_offset = t * chunk_bytes;
-        const chunk_slice: zml.Slice = .init(
-            .init(.{ .s = dsf, .d = enc_dim }, .bf16),
-            conv_host[byte_offset .. byte_offset + chunk_bytes],
-        );
-        var chunk_buffer: zml.Buffer = try .fromSlice(io, platform, chunk_slice);
-        defer chunk_buffer.deinit();
+        // Conv stem step: prepare mel chunk with history, run conv stem
+        const mel_t_start: usize = t * mel_per_step - mel_history;
+        for (0..128) |c| {
+            @memcpy(mel_staging[c * mel_dst_stride ..][0..mel_dst_stride], mel_host[c * mel_src_stride + mel_t_start * f32_bytes ..][0..mel_dst_stride]);
+        }
 
+        const mel_chunk_slice: zml.Slice = .init(
+            .init(.{ .channels = 128, .time = chunk_mel }, .f32),
+            mel_staging[0..mel_staging_bytes],
+        );
+        var mel_chunk_buffer: zml.Buffer = try .fromSlice(io, platform, mel_chunk_slice);
+        defer mel_chunk_buffer.deinit();
+
+        conv_step_args.set(.{ encoder_buffers, mel_chunk_buffer });
+        compiled_conv_stem_step.call(conv_step_args, &conv_step_results);
+        conv_step_results.fill(.{&conv_step_output});
+
+        // Encoder step: conv stem output → encoded chunk
         var enc_token_index: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(t)) * dsf, .u32);
         defer enc_token_index.deinit();
 
-        enc_step_args.set(.{ encoder_buffers, chunk_buffer, enc_token_index, &enc_kv_buffers, enc_attention_metadata_buffers });
+        enc_step_args.set(.{ encoder_buffers, conv_step_output, enc_token_index, &enc_kv_buffers, enc_attention_metadata_buffers });
         compiled_encoder_step.call(enc_step_args, &enc_step_results);
         enc_step_results.fill(.{ &enc_step_output, &enc_kv_buffers });
 

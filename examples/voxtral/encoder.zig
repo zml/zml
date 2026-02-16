@@ -58,6 +58,18 @@ pub const Encoder = struct {
         self.norm.deinit();
     }
 
+    /// Streaming conv stem: processes a mel chunk with history prepended.
+    /// Input: mel_chunk [channels=128, time=mel_history+mel_per_step]
+    /// Output: [s=dsf, d=1280] — only the new frames (history-derived outputs discarded)
+    pub fn convStemStep(self: Encoder, mel_chunk: Tensor) Tensor {
+        const full_output = self.convStem(mel_chunk);
+        // full_output: [s=(12+1)/2=6, d=1280] when chunk is 12 frames
+        // Skip first 2 (history-derived), keep last dsf=4
+        const dsf: u32 = self.config.downsample_factor();
+        const total: u32 = @intCast(full_output.dim(.s));
+        return full_output.slice1d(.s, .{ .start = total - dsf });
+    }
+
     /// Run the convolutional stem: conv0 + gelu + conv1 + gelu + reshape.
     /// mel: [channels=128, time=frames] → [s=(frames+1)/2, d=1280]
     pub fn convStem(self: Encoder, mel: Tensor) Tensor {
