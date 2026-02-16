@@ -140,7 +140,7 @@ pub const Decoder = struct {
 
         h = rmsNorm(h, self.norm, self.norm_eps);
 
-        // Compute logits in f32 for precision (matching Python reference)
+        // Compute logits in f32 for precision
         const logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
         const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{}, rng);
 

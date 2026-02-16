@@ -102,8 +102,7 @@ pub fn main() !void {
     };
 
     var melspectro_model: LogMelSpectrogram = .init(config);
-    const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
-    var encoder_model: Encoder = .init(allocator, model_store.view().withPrefix(encoder_prefix), config);
+    var encoder_model: Encoder = .init(allocator, model_store.view(), config);
     defer encoder_model.deinit(allocator);
 
     const adapter: Adapter = .init(model_store.view(), config);

@@ -19,8 +19,9 @@ pub const Encoder = struct {
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) Encoder {
-        const conv_store = store.withPrefix("conv_layers");
-        const transformer_store = store.withPrefix("transformer");
+        const encoder_store = store.withPrefix("mm_streams_embeddings.embedding_module.whisper_encoder");
+        const conv_store = encoder_store.withPrefix("conv_layers");
+        const transformer_store = encoder_store.withPrefix("transformer");
 
         const enc = config.encoder();
         const layers = allocator.alloc(TransformerLayer, enc.n_layers) catch unreachable;
