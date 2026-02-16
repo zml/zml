@@ -58,19 +58,6 @@ pub const Encoder = struct {
         self.norm.deinit();
     }
 
-    /// mel: [channels=128, time=frames]
-    /// Returns: [s, d=1280]
-    pub fn forward(self: Encoder, mel: Tensor) Tensor {
-        var h = self.convStem(mel);
-
-        // Transformer layers
-        for (self.layers) |layer| {
-            h = layer.forward(h, self.config);
-        }
-
-        return rmsNorm(h, self.norm, self.norm_eps);
-    }
-
     /// Run the convolutional stem: conv0 + gelu + conv1 + gelu + reshape.
     /// mel: [channels=128, time=frames] → [s=(frames+1)/2, d=1280]
     pub fn convStem(self: Encoder, mel: Tensor) Tensor {
@@ -88,13 +75,13 @@ pub const Encoder = struct {
     /// Process a chunk of conv stem output through all transformer layers with KV cache.
     /// x: [s=dsf, d=1280], token_index: scalar, kv_cache: KvCache
     /// Returns: ([s=dsf, d=1280], KvCache)
-    pub fn transformerStep(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache) struct { Tensor, KvCache } {
+    pub fn transformer(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         var h = x;
         var cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
             const layer_cache = cache.atLayer(i);
-            const result = layer.forwardStep(h, token_index, layer_cache, self.config);
+            const result = layer.forward(h, token_index, layer_cache, self.config, attention_metadata, attention_parameters);
             h = result[0];
             const updated_layer_cache = result[1];
             cache = updated_layer_cache.reuseBuffer(layer_cache);
@@ -171,31 +158,20 @@ pub const TransformerLayer = struct {
     pub fn unload(self: *zml.Bufferized(TransformerLayer)) void {
         self.attention_norm.deinit();
         SelfAttention.unload(&self.attention);
-	
+
         self.ffn_norm.deinit();
         SwiGluFfn.unload(&self.feed_forward);
     }
 
-    /// h: [s, d] -> [s, d]
-    pub fn forward(self: TransformerLayer, h: Tensor, config: Config) Tensor {
-        // Pre-attention norm + attention + residual
-        const attn_out = self.attention.forward(rmsNorm(h, self.attention_norm, self.norm_eps), config);
-        var out = h.add(attn_out);
-
-        // Pre-FFN norm + FFN + residual
-        const ffn_out = self.feed_forward.forward(rmsNorm(out, self.ffn_norm, self.norm_eps));
-        out = out.add(ffn_out);
-
-        return out;
-    }
-
     /// h: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
-    pub fn forwardStep(self: TransformerLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
-        const attn_out, const updated_kv_cache = self.attention.forwardStep(
+    pub fn forward(self: TransformerLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
+        const attn_out, const updated_kv_cache = self.attention.forward(
             rmsNorm(h, self.attention_norm, self.norm_eps),
             token_index,
             kv_cache,
             config,
+            attention_metadata,
+            attention_parameters,
         );
         var out = h.add(attn_out);
 
@@ -228,47 +204,8 @@ pub const SelfAttention = struct {
         common.deinitLinear(&self.wo);
     }
 
-    /// x: [s, d] -> [s, d]
-    pub fn forward(self: SelfAttention, x: Tensor, config: Config) Tensor {
-        const enc = config.encoder();
-        const dtype = x.dtype();
-
-        // Q, K, V projections (encoder: Q and V have biases, K does not)
-        var q = self.wq.forward(x);
-        var k = self.wk.forward(x);
-        var v = self.wv.forward(x);
-
-        // Split into heads: [s, dout] -> [s, h, hd]
-        q = q.splitAxis(.dout, .{ .h = enc.n_heads, .hd = enc.head_dim });
-        k = k.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
-        v = v.splitAxis(.dout, .{ .h = enc.n_kv_heads, .hd = enc.head_dim });
-
-        // RoPE (interleaved, matching is_neox_style=False in Python)
-        const rope_opts: zml.nn.RopeOpts = .{
-            .layout = .interleaved,
-            .freq_base = enc.rope_theta,
-        };
-
-        q = zml.nn.rope(q, null, rope_opts);
-        k = zml.nn.rope(k, null, rope_opts);
-
-        // Rename seq dim for sdpa: .s -> .q/.k
-        q = q.rename(.{ .s = .q });
-        k = k.rename(.{ .s = .k });
-        v = v.rename(.{ .s = .k });
-
-        // Causal attention with sliding window
-        const seq_len = q.dim(.q);
-        const attn_mask = zml.nn.causalAttnMask(.{ .q = seq_len, .k = seq_len }, dtype, enc.sliding_window);
-        const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
-
-        // Merge heads and output projection: [q, h, hd] -> [s, d]
-        const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        return self.wo.forward(merged).rename(.{ .dout = .d });
-    }
-
     /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
-    pub fn forwardStep(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config) struct { Tensor, KvCache } {
+    pub fn forward(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         const enc = config.encoder();
         const dtype = x.dtype();
 
@@ -304,16 +241,7 @@ pub const SelfAttention = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        // Causal attention with sliding window
-        const full_seq_len = k.dim(.k);
-        var attn_mask = zml.nn.causalAttnMask(.{ .q = full_seq_len, .k = full_seq_len }, dtype, enc.sliding_window);
-        attn_mask = attn_mask.gatherSlices(
-            zml.Shape.init(.{ .q = q.dim(.q) }, attn_mask.dtype()),
-            token_index.reshape(.{ .coord = 1 }),
-            .{},
-        );
-
-        const attn_out = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask });
+        const attn_out = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
 
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
@@ -343,8 +271,7 @@ pub const SwiGluFfn = struct {
     pub fn forward(self: SwiGluFfn, x: Tensor) Tensor {
         const gate = self.w1.forward(x).silu();
         const up = self.w3.forward(x);
-	
+
         return self.w2.forward(gate.mul(up).rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
 };
-

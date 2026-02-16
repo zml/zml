@@ -28,6 +28,7 @@ const CliArgs = struct {
     input: []const u8,
     model: []const u8,
     transcription_delay_ms: f32 = 480.0,
+    backend: ?zml.attention.Backend = null,
 };
 
 const n_left_pad_tokens: u32 = 32;
@@ -97,9 +98,17 @@ pub fn main() !void {
     defer allocator.free(padded_wav);
     const audio_len = padded_wav.len;
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    var platform: *zml.Platform = try .auto(allocator, io, .{
+        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.75 } } },
+    });
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
+
+    const backend = args.backend orelse b: {
+        const selected = zml.attention.Backend.auto(platform);
+        log.info("Selected backend: {}", .{selected});
+        break :b selected;
+    };
 
     var melspectro_model: LogMelSpectrogram = .init(config);
     const encoder_prefix = "mm_streams_embeddings.embedding_module.whisper_encoder";
@@ -131,15 +140,23 @@ pub fn main() !void {
 
     const prompt_len: u32 = @intCast(tokens.len);
 
+    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_cfg.sliding_window)));
+    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(config.sliding_window)));
+    const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
+
     // Launch concurrent compilation and buffer loading
     var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
+
+    // -- Fixed len for now
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
     var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, audio_len, &progress });
-    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, prompt_len, enc_kv_cache, &progress });
-    var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, &progress });
+    // --
+
+    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
+    var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
     var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, prompt_len, config, &progress });
     var compiled_adapter_step_future = try io.concurrent(voxtral.compileAdapterStep, .{ allocator, io, platform, adapter, config, &progress });
-    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, prompt_len, dec_kv_cache, &progress });
+    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, prompt_len, dec_kv_cache, dec_attention_metadata, attention_parameters, &progress });
 
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
@@ -191,6 +208,12 @@ pub fn main() !void {
     var decoder_buffers = try decoder_buffers_future.await(io);
     defer Decoder.unload(&decoder_buffers, allocator);
 
+    var enc_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try enc_attention_metadata.initBuffer(io, platform);
+    defer zml.attention.Metadata.deinitBuffer(&enc_attention_metadata_buffers);
+
+    var dec_attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata) = try dec_attention_metadata.initBuffer(io, platform);
+    defer zml.attention.Metadata.deinitBuffer(&dec_attention_metadata_buffers);
+
     progress.end();
 
     try voxtral.runPipeline(
@@ -217,5 +240,7 @@ pub fn main() !void {
         &decoder_buffers,
         enc_kv_cache,
         dec_kv_cache,
+        &enc_attention_metadata_buffers,
+        &dec_attention_metadata_buffers,
     );
 }
