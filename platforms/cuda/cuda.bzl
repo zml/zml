@@ -13,16 +13,16 @@ load("@rules_cc//cc:cc_import.bzl", "cc_import")
 ARCH = "linux-x86_64"
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
-CUDA_VERSION = "13.0.2"
-CUDA_REDIST_JSON_SHA256 = ""
+CUDA_VERSION = "13.1.1"
+CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a9ecb1f0d422"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.14.0"
-CUDNN_REDIST_JSON_SHA256 = "fe58e8e9559ef5c61ab7a9954472d16acdcbad3b099004296ae410d25982830d"
+CUDNN_VERSION = "9.19.0"
+CUDNN_REDIST_JSON_SHA256 = "6ad4f2c047ee03131d1efb95db56f78c24953cb30880a2edcf99407ff9362a04"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
-NVSHMEM_VERSION = "3.4.5"
-NVSHMEM_REDIST_JSON_SHA256 = "a656614a6ec638d85922bc816e5e26063308c3905273a72a863cf0f24e188f38"
+NVSHMEM_VERSION = "3.5.19"
+NVSHMEM_REDIST_JSON_SHA256 = "6dced4193eb728542504b346cfb768da6e3de2abca0cded95fda3a69729994d2"
 
 _UBUNTU_PACKAGES = {
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
@@ -99,7 +99,7 @@ CUDA_PACKAGES = {
             name = "cuda_nvrtc",
             srcs = [
                 "lib/libnvrtc.so.13",
-                "lib/libnvrtc-builtins.so.13.0",
+                "lib/libnvrtc-builtins.so.13.1",
             ],
         ),
     ]),
@@ -138,7 +138,7 @@ NVSHMEM_PACKAGES = {
         srcs = [
             "lib/libnvshmem_host.so.3",
             "lib/nvshmem_bootstrap_uid.so.3",
-            "lib/nvshmem_transport_ibrc.so.3",
+            "lib/nvshmem_transport_ibrc.so.4",
         ],
     ),
 }
@@ -201,7 +201,7 @@ def _cuda_impl(mctx):
         arch_data = pkg_data.get(ARCH)
         if not arch_data:
             continue
-        arch_data = arch_data.get("cuda12", arch_data)
+        arch_data = arch_data.get("cuda13", arch_data)
         http_archive(
             name = pkg,
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
@@ -215,7 +215,7 @@ def _cuda_impl(mctx):
         arch_data = pkg_data.get(ARCH)
         if not arch_data:
             continue
-        arch_data = arch_data.get("cuda12", arch_data)
+        arch_data = arch_data.get("cuda13", arch_data)
         http_archive(
             name = pkg,
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
@@ -226,9 +226,9 @@ def _cuda_impl(mctx):
 
     http_archive(
         name = "nccl",
-        urls = ["https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.27.7-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl"],
+        urls = ["https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_x86_64.whl"],
         type = "zip",
-        sha256 = "b28a524abd8389b76a4a3f133c76a7aaa7005e47fcaa9d9603b90103927a3f93",
+        sha256 = "2a321629f49490e4e0122ecb578a4b4a6f89e72740dd988e04dfa4758fab7fc3",
         build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
             name = "nccl",
             srcs = ["nvidia/nccl/lib/libnccl.so.2"],

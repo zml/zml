@@ -11,6 +11,10 @@ patchelf(
     rename_dynamic_symbols = {
         "dlopen": "zmlxcuda_dlopen",
     },
+    replace_needed = {
+        "nvshmem_transport_ibrc.so.3": "nvshmem_transport_ibrc.so.4",
+        "libnvrtc-builtins.so.13.0": "libnvrtc-builtins.so.13.1",
+    },
     set_rpath = "$ORIGIN",
 )
 
