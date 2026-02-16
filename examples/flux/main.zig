@@ -131,9 +131,7 @@ const CliArgs = struct {
     ;
 };
 
-pub fn main() !void {
-    // @setEvalBranchQuota(10_000);
-
+pub fn main(init: std.process.Init) !void {
     log.info("Flux was compiled with {}", .{@import("builtin").mode});
 
     var debug_allocator: ?std.heap.DebugAllocator(.{}) = null;
@@ -150,7 +148,7 @@ pub fn main() !void {
     defer vfs.deinit();
 
     const io = vfs.io();
-    const args = stdx.flags.parseProcessArgs(CliArgs);
+    const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
     if (args.output_image_path == null and !args.kitty_output) {
         log.err("No output method specified, the generated image will not be saved or displayed. Use --output-image-path=\"<path>\" or --kitty-output to save or display the image.", .{});
@@ -166,24 +164,24 @@ pub fn main() !void {
     var zml_compute_platform: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
     defer zml_compute_platform.deinit(allocator);
 
-    var http_client: std.http.Client = .{
-        .allocator = allocator,
-        .io = threaded.io(),
-    };
-    try http_client.initDefaultProxies(allocator);
-    defer http_client.deinit();
+    // var http_client: std.http.Client = .{
+    //     .allocator = allocator,
+    //     .io = threaded.io(),
+    // };
+    // try http_client.initDefaultProxies(arena);
+    // defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-    defer vfs_file.deinit();
-    try vfs.register("file", vfs_file.io());
+    // var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
+    // defer vfs_file.deinit();
+    // try vfs.register("file", vfs_file.io());
 
-    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
-    defer vfs_https.deinit();
-    try vfs.register("https", vfs_https.io());
+    // var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
+    // defer vfs_https.deinit();
+    // try vfs.register("https", vfs_https.io());
 
-    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
-    defer hf_vfs.deinit();
-    try vfs.register("hf", hf_vfs.io());
+    // var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
+    // defer hf_vfs.deinit();
+    // try vfs.register("hf", hf_vfs.io());
 
     log.info("Resolving model repo", .{});
     const repo: std.Io.Dir = try zml.safetensors.resolveModelRepo(io, args.model);
@@ -250,9 +248,9 @@ pub fn main() !void {
     defer qwen3_model_ctx.deinit(allocator);
 
     var qwen3_node = progress.start("Running Qwen3", 0);
-    var timer_qwen3 = try std.time.Timer.start();
+    const timer_qwen3_start = std.Io.Clock.awake.now(io);
     var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, zml_compute_platform, qwen3_model_ctx, tokens);
-    const qwen3_ns = timer_qwen3.read();
+    const qwen3_ns: i64 = @intCast(timer_qwen3_start.untilNow(io, .awake).toNanoseconds());
     const qwen3_time_ms = @as(f64, @floatFromInt(qwen3_ns)) / 1_000_000.0;
     log.info("Qwen3 completed in {d:.2} ms.", .{qwen3_time_ms});
     qwen3_node.end();
@@ -305,9 +303,9 @@ pub fn main() !void {
 
     log.info(">> Preparing Latents...", .{});
 
-    var timer_prepare_latents = try std.time.Timer.start();
+    const timer_prepare_latents_start = std.Io.Clock.awake.now(io);
     var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
-    const prepare_latents_ns = timer_prepare_latents.read();
+    const prepare_latents_ns: i64 = @intCast(timer_prepare_latents_start.untilNow(io, .awake).toNanoseconds());
     const prepare_latents_time_ms = @as(f64, @floatFromInt(prepare_latents_ns)) / 1_000_000.0;
     log.info("Latents prepared in {d:.2} ms.", .{prepare_latents_time_ms});
 
@@ -320,7 +318,7 @@ pub fn main() !void {
     defer scheduler.deinit();
     scheduler_node.end();
 
-    var timer_scheduler = try std.time.Timer.start();
+    const timer_scheduler_start = std.Io.Clock.awake.now(io);
     var latents_out = try utils.schedule(
         transformer2d_model_ctx.model,
         transformer2d_model_ctx.weights,
@@ -334,7 +332,7 @@ pub fn main() !void {
         io,
         zml_compute_platform,
     );
-    const scheduler_ns = timer_scheduler.read();
+    const scheduler_ns: i64 = @intCast(timer_scheduler_start.untilNow(io, .awake).toNanoseconds());
     const scheduler_load_time_ms = @as(f64, @floatFromInt(scheduler_ns)) / 1_000_000.0;
     log.info("Scheduler completed in {d:.2} ms.", .{scheduler_load_time_ms});
     defer latents_out.deinit();
@@ -347,9 +345,9 @@ pub fn main() !void {
     auto_encoder_node.end();
     defer vae_ctx.deinit(allocator);
 
-    var timer_vae = try std.time.Timer.start();
+    const timer_vae_start = std.Io.Clock.awake.now(io);
     const image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, zml_compute_platform, vae_ctx, latents_out);
-    const vae_ns = timer_vae.read();
+    const vae_ns: i64 = @intCast(timer_vae_start.untilNow(io, .awake).toNanoseconds());
     const vae_load_time_ms = @as(f64, @floatFromInt(vae_ns)) / 1_000_000.0;
     log.info("VAE completed in {d:.2} ms.", .{vae_load_time_ms});
 
@@ -357,9 +355,9 @@ pub fn main() !void {
 
     // Print directly in terminal without writing to disk
 
-    var timer_rgb_conversion = try std.time.Timer.start();
+    const timer_rgb_start = std.Io.Clock.awake.now(io);
     const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
-    const rgb_conversion_ns = timer_rgb_conversion.read();
+    const rgb_conversion_ns: i64 = @intCast(timer_rgb_start.untilNow(io, .awake).toNanoseconds());
     const rgb_conversion_time_ms = @as(f64, @floatFromInt(rgb_conversion_ns)) / 1_000_000.0;
     log.info("RGB conversion completed in {d:.2} ms.", .{rgb_conversion_time_ms});
 

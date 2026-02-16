@@ -11,6 +11,7 @@ pub const VFSBase = struct {
 
     pub fn vtable(overrides: anytype) std.Io.VTable {
         var new_vtable: std.Io.VTable = .{
+            .crashHandler = crashHandler,
             .async = async,
             .concurrent = concurrent,
             .await = await,
@@ -26,6 +27,10 @@ pub const VFSBase = struct {
             .futexWait = futexWait,
             .futexWaitUncancelable = futexWaitUncancelable,
             .futexWake = futexWake,
+            .operate = operate,
+            .batchAwaitAsync = batchAwaitAsync,
+            .batchAwaitConcurrent = batchAwaitConcurrent,
+            .batchCancel = batchCancel,
             .dirCreateDir = dirCreateDir,
             .dirCreateDirPath = dirCreateDirPath,
             .dirCreateDirPathOpen = dirCreateDirPathOpen,
@@ -34,6 +39,7 @@ pub const VFSBase = struct {
             .dirStatFile = dirStatFile,
             .dirAccess = dirAccess,
             .dirCreateFile = dirCreateFile,
+            .dirCreateFileAtomic = dirCreateFileAtomic,
             .dirOpenFile = dirOpenFile,
             .dirClose = dirClose,
             .dirRead = dirRead,
@@ -42,6 +48,7 @@ pub const VFSBase = struct {
             .dirDeleteFile = dirDeleteFile,
             .dirDeleteDir = dirDeleteDir,
             .dirRename = dirRename,
+            .dirRenamePreserve = dirRenamePreserve,
             .dirSymLink = dirSymLink,
             .dirReadLink = dirReadLink,
             .dirSetOwner = dirSetOwner,
@@ -53,11 +60,9 @@ pub const VFSBase = struct {
             .fileStat = fileStat,
             .fileLength = fileLength,
             .fileClose = fileClose,
-            .fileWriteStreaming = fileWriteStreaming,
             .fileWritePositional = fileWritePositional,
             .fileWriteFileStreaming = fileWriteFileStreaming,
             .fileWriteFilePositional = fileWriteFilePositional,
-            .fileReadStreaming = fileReadStreaming,
             .fileReadPositional = fileReadPositional,
             .fileSeekBy = fileSeekBy,
             .fileSeekTo = fileSeekTo,
@@ -74,14 +79,31 @@ pub const VFSBase = struct {
             .fileUnlock = fileUnlock,
             .fileDowngradeLock = fileDowngradeLock,
             .fileRealPath = fileRealPath,
+            .fileHardLink = fileHardLink,
+            .fileMemoryMapCreate = fileMemoryMapCreate,
+            .fileMemoryMapDestroy = fileMemoryMapDestroy,
+            .fileMemoryMapSetLength = fileMemoryMapSetLength,
+            .fileMemoryMapRead = fileMemoryMapRead,
+            .fileMemoryMapWrite = fileMemoryMapWrite,
             .processExecutableOpen = processExecutableOpen,
             .processExecutablePath = processExecutablePath,
             .lockStderr = lockStderr,
             .tryLockStderr = tryLockStderr,
             .unlockStderr = unlockStderr,
+            .processCurrentPath = processCurrentPath,
             .processSetCurrentDir = processSetCurrentDir,
+            .processReplace = processReplace,
+            .processReplacePath = processReplacePath,
+            .processSpawn = processSpawn,
+            .processSpawnPath = processSpawnPath,
+            .childWait = childWait,
+            .childKill = childKill,
+            .progressParentFile = progressParentFile,
             .now = now,
+            .clockResolution = clockResolution,
             .sleep = sleep,
+            .random = random,
+            .randomSecure = randomSecure,
             .netListenIp = netListenIp,
             .netAccept = netAccept,
             .netBindIp = netBindIp,
@@ -95,6 +117,7 @@ pub const VFSBase = struct {
             .netWriteFile = netWriteFile,
             .netClose = netClose,
             .netShutdown = netShutdown,
+            .netSocketCreatePair = netSocketCreatePair,
             .netInterfaceNameResolve = netInterfaceNameResolve,
             .netInterfaceName = netInterfaceName,
             .netLookup = netLookup,
@@ -107,6 +130,11 @@ pub const VFSBase = struct {
 
     pub fn as(userdata: ?*anyopaque) *VFSBase {
         return @ptrCast(@alignCast(userdata.?));
+    }
+
+    pub fn crashHandler(userdata: ?*anyopaque) void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.crashHandler(self.inner.userdata);
     }
 
     pub fn async(userdata: ?*anyopaque, result: []u8, result_alignment: std.mem.Alignment, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque, result: *anyopaque) void) ?*std.Io.AnyFuture {
@@ -184,6 +212,26 @@ pub const VFSBase = struct {
         return self.inner.vtable.futexWake(self.inner.userdata, ptr, max_waiters);
     }
 
+    pub fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.operate(self.inner.userdata, operation);
+    }
+
+    pub fn batchAwaitAsync(userdata: ?*anyopaque, batch: *std.Io.Batch) std.Io.Cancelable!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.batchAwaitAsync(self.inner.userdata, batch);
+    }
+
+    pub fn batchAwaitConcurrent(userdata: ?*anyopaque, batch: *std.Io.Batch, timeout: std.Io.Timeout) std.Io.Batch.AwaitConcurrentError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.batchAwaitConcurrent(self.inner.userdata, batch, timeout);
+    }
+
+    pub fn batchCancel(userdata: ?*anyopaque, batch: *std.Io.Batch) void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.batchCancel(self.inner.userdata, batch);
+    }
+
     pub fn dirCreateDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, permissions: std.Io.Dir.Permissions) std.Io.Dir.CreateDirError!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirCreateDir(self.inner.userdata, dir, sub_path, permissions);
@@ -224,6 +272,11 @@ pub const VFSBase = struct {
         return self.inner.vtable.dirCreateFile(self.inner.userdata, dir, sub_path, flags);
     }
 
+    pub fn dirCreateFileAtomic(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.CreateFileAtomicOptions) std.Io.Dir.CreateFileAtomicError!std.Io.File.Atomic {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.dirCreateFileAtomic(self.inner.userdata, dir, sub_path, options);
+    }
+
     pub fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirOpenFile(self.inner.userdata, dir, sub_path, flags);
@@ -262,6 +315,11 @@ pub const VFSBase = struct {
     pub fn dirRename(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_sub_path: []const u8, new_dir: std.Io.Dir, new_sub_path: []const u8) std.Io.Dir.RenameError!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.dirRename(self.inner.userdata, old_dir, old_sub_path, new_dir, new_sub_path);
+    }
+
+    pub fn dirRenamePreserve(userdata: ?*anyopaque, old_dir: std.Io.Dir, old_sub_path: []const u8, new_dir: std.Io.Dir, new_sub_path: []const u8) std.Io.Dir.RenamePreserveError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.dirRenamePreserve(self.inner.userdata, old_dir, old_sub_path, new_dir, new_sub_path);
     }
 
     pub fn dirSymLink(userdata: ?*anyopaque, dir: std.Io.Dir, target_path: []const u8, sym_link_path: []const u8, flags: std.Io.Dir.SymLinkFlags) std.Io.Dir.SymLinkError!void {
@@ -319,11 +377,6 @@ pub const VFSBase = struct {
         self.inner.vtable.fileClose(self.inner.userdata, files);
     }
 
-    pub fn fileWriteStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize) std.Io.File.Writer.Error!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.fileWriteStreaming(self.inner.userdata, file, header, data, splat);
-    }
-
     pub fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.fileWritePositional(self.inner.userdata, file, header, data, splat, offset);
@@ -337,11 +390,6 @@ pub const VFSBase = struct {
     pub fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.fileWriteFilePositional(self.inner.userdata, file, header, reader, limit, offset);
-    }
-
-    pub fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.fileReadStreaming(self.inner.userdata, file, data);
     }
 
     pub fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
@@ -424,6 +472,36 @@ pub const VFSBase = struct {
         return self.inner.vtable.fileRealPath(self.inner.userdata, file, out_buffer);
     }
 
+    pub fn fileHardLink(userdata: ?*anyopaque, file: std.Io.File, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.File.HardLinkOptions) std.Io.File.HardLinkError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileHardLink(self.inner.userdata, file, dir, sub_path, options);
+    }
+
+    pub fn fileMemoryMapCreate(userdata: ?*anyopaque, file: std.Io.File, options: std.Io.File.MemoryMap.CreateOptions) std.Io.File.MemoryMap.CreateError!std.Io.File.MemoryMap {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileMemoryMapCreate(self.inner.userdata, file, options);
+    }
+
+    pub fn fileMemoryMapDestroy(userdata: ?*anyopaque, mmap: *std.Io.File.MemoryMap) void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileMemoryMapDestroy(self.inner.userdata, mmap);
+    }
+
+    pub fn fileMemoryMapSetLength(userdata: ?*anyopaque, mmap: *std.Io.File.MemoryMap, length: usize) std.Io.File.MemoryMap.SetLengthError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileMemoryMapSetLength(self.inner.userdata, mmap, length);
+    }
+
+    pub fn fileMemoryMapRead(userdata: ?*anyopaque, mmap: *std.Io.File.MemoryMap) std.Io.File.ReadPositionalError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileMemoryMapRead(self.inner.userdata, mmap);
+    }
+
+    pub fn fileMemoryMapWrite(userdata: ?*anyopaque, mmap: *std.Io.File.MemoryMap) std.Io.File.WritePositionalError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.fileMemoryMapWrite(self.inner.userdata, mmap);
+    }
+
     pub fn processExecutableOpen(userdata: ?*anyopaque, flags: std.Io.File.OpenFlags) std.process.OpenExecutableError!std.Io.File {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.processExecutableOpen(self.inner.userdata, flags);
@@ -454,14 +532,69 @@ pub const VFSBase = struct {
         return self.inner.vtable.processSetCurrentDir(self.inner.userdata, dir);
     }
 
-    pub fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.Error!std.Io.Timestamp {
+    pub fn processCurrentPath(userdata: ?*anyopaque, buffer: []u8) std.process.CurrentPathError!usize {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processCurrentPath(self.inner.userdata, buffer);
+    }
+
+    pub fn processReplace(userdata: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processReplace(self.inner.userdata, options);
+    }
+
+    pub fn processReplacePath(userdata: ?*anyopaque, dir: std.Io.Dir, options: std.process.ReplaceOptions) std.process.ReplaceError {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processReplacePath(self.inner.userdata, dir, options);
+    }
+
+    pub fn processSpawn(userdata: ?*anyopaque, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processSpawn(self.inner.userdata, options);
+    }
+
+    pub fn processSpawnPath(userdata: ?*anyopaque, dir: std.Io.Dir, options: std.process.SpawnOptions) std.process.SpawnError!std.process.Child {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processSpawnPath(self.inner.userdata, dir, options);
+    }
+
+    pub fn childWait(userdata: ?*anyopaque, child: *std.process.Child) std.process.Child.WaitError!std.process.Child.Term {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.childWait(self.inner.userdata, child);
+    }
+
+    pub fn childKill(userdata: ?*anyopaque, child: *std.process.Child) void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.childKill(self.inner.userdata, child);
+    }
+
+    pub fn progressParentFile(userdata: ?*anyopaque) std.Progress.ParentFileError!std.Io.File {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.progressParentFile(self.inner.userdata);
+    }
+
+    pub fn now(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Timestamp {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.now(self.inner.userdata, clock);
     }
 
-    pub fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.SleepError!void {
+    pub fn sleep(userdata: ?*anyopaque, timeout: std.Io.Timeout) std.Io.Cancelable!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.sleep(self.inner.userdata, timeout);
+    }
+
+    pub fn clockResolution(userdata: ?*anyopaque, clock: std.Io.Clock) std.Io.Clock.ResolutionError!std.Io.Duration {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.clockResolution(self.inner.userdata, clock);
+    }
+
+    pub fn random(userdata: ?*anyopaque, buffer: []u8) void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.random(self.inner.userdata, buffer);
+    }
+
+    pub fn randomSecure(userdata: ?*anyopaque, buffer: []u8) std.Io.RandomSecureError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.randomSecure(self.inner.userdata, buffer);
     }
 
     pub fn netListenIp(userdata: ?*anyopaque, address: std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
@@ -527,6 +660,11 @@ pub const VFSBase = struct {
     pub fn netShutdown(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, how: std.Io.net.ShutdownHow) std.Io.net.ShutdownError!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netShutdown(self.inner.userdata, handle, how);
+    }
+
+    pub fn netSocketCreatePair(userdata: ?*anyopaque, options: std.Io.net.Socket.CreatePairOptions) std.Io.net.Socket.CreatePairError![2]std.Io.net.Socket {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.netSocketCreatePair(self.inner.userdata, options);
     }
 
     pub fn netInterfaceNameResolve(userdata: ?*anyopaque, name: *const std.Io.net.Interface.Name) std.Io.net.Interface.Name.ResolveError!std.Io.net.Interface {
