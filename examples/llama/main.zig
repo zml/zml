@@ -53,13 +53,14 @@ const CliArgs = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const arena = init.arena;
+    _ = arena; // autofix
 
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    var vfs: zml.io.VFS = try .init(allocator, init.io);
-    defer vfs.deinit();
+    // var vfs: zml.io.VFS = try .init(allocator, init.io);
+    // defer vfs.deinit();
 
     // var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     // defer vfs_file.deinit();
@@ -69,22 +70,22 @@ pub fn main(init: std.process.Init) !void {
     // defer vfs_https.deinit();
     // try vfs.register("https", vfs_https.io());
 
-    var http_client: std.http.Client = .{
-        .allocator = allocator,
-        .io = init.io,
-    };
-    try http_client.initDefaultProxies(arena.allocator(), init.environ_map);
-    defer http_client.deinit();
+    // var http_client: std.http.Client = .{
+    //     .allocator = allocator,
+    //     .io = init.io,
+    // };
+    // try http_client.initDefaultProxies(arena.allocator(), init.environ_map);
+    // defer http_client.deinit();
 
-    var hf_vfs: zml.io.VFS.HF = try .auto(
-        allocator,
-        init.io,
-        &http_client,
-    );
-    defer hf_vfs.deinit();
-    try vfs.register("hf", hf_vfs.io());
+    // var hf_vfs: zml.io.VFS.HF = try .auto(
+    //     allocator,
+    //     init.io,
+    //     &http_client,
+    // );
+    // defer hf_vfs.deinit();
+    // try vfs.register("hf", hf_vfs.io());
 
-    const io = vfs.io;
+    const io = init.io;
 
     log.info("Resolving model repo", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
