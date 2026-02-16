@@ -201,8 +201,7 @@ pub const fa2 = struct {
     pub const Parameters = struct {
         pub const InitOptions = struct {};
 
-        pub fn init(opts: InitOptions) fa2.Parameters {
-            _ = opts; // autofix
+        pub fn init(_: InitOptions) fa2.Parameters {
             return .{};
         }
     };
@@ -214,21 +213,37 @@ pub const fa2 = struct {
 
         pub const InitOptions = struct {
             seqlen: i64,
+            num_heads: i64,
         };
 
         pub fn init(opts: InitOptions) Metadata {
+            // We must match the RANK of the Query tensor: [SeqLen, Heads, HeadDim]
+            // Q is tagged as {.s, .h, .hd}.
+            // We tag metadata similarly and shard on .h (the .model axis).
+
             return .{
-                .softmax_lse = .init(.{1 * 32 * opts.seqlen * 4}, .i8),
-                .softmax_lse_accum = .init(.{32 * 1 * 32 * 4 * 4}, .i8),
-                .out_accum = .init(.{32 * 1 * 32 * 4 * 128 * 4}, .i8),
+                // LSE is [SeqLen, Heads]. We add a dummy 3rd dim to match Q's rank (3).
+                .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
+                    .withTags(.{ .s, .h, .dummy })
+                    .withPartitioning(.{ .s = .replicated, .h = .model, .dummy = .replicated })),
+
+                // LSE Accum is used for split-K, usually [Heads, Splits]
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
+                    .withTags(.{ .dummy, .h, .hd })
+                    .withPartitioning(.{ .dummy = .replicated, .h = .model, .hd = .replicated })),
+
+                // Out Accum is [SeqLen, Heads, HeadDim]
+                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
+                    .withTags(.{ .s, .h, .hd })
+                    .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })),
             };
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
             return .{
-                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), .{}),
-                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), .{}),
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
+                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding, .{}),
             };
         }
 
@@ -290,7 +305,7 @@ pub const fa2 = struct {
             },
             .{
                 .output_operand_aliases = &.{0},
-                .has_side_effect = true,
+                .has_side_effect = false,
             },
         );
 
@@ -394,23 +409,27 @@ pub const fa3 = struct {
 
         pub const InitOptions = struct {
             seqlen: i64,
+            num_heads: i64,
         };
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = .init(.{1 * 32 * opts.seqlen * 4}, .i8),
-                .softmax_lse_accum = .init(.{32 * 1 * 32 * 4 * 4}, .i8),
-                .out_accum = .init(.{32 * 1 * 32 * 4 * 128 * 4}, .i8),
+                .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
                 .scheduler_metadata = .init(.{2}, .i32),
             };
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
             return .{
-                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), .{}),
-                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), .{}),
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
-                .scheduler_metadata = try zml.Buffer.uninitialized(io, platform, self.scheduler_metadata.shape(), .{}),
+                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
+                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding, .{}),
+                .scheduler_metadata = try zml.Buffer.uninitialized(io, platform, self.scheduler_metadata.shape(), sharding, .{}),
             };
         }
 
@@ -422,8 +441,7 @@ pub const fa3 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        _ = parameters; // autofix
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -462,7 +480,7 @@ pub const fa3 = struct {
             },
             .{
                 .output_operand_aliases = &.{0},
-                .has_side_effect = true,
+                .has_side_effect = false,
             },
         );
 

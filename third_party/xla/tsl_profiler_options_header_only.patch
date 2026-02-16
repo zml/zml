@@ -1,0 +1,11 @@
+--- a/third_party/tsl/tsl/profiler/protobuf/BUILD
++++ b/third_party/tsl/tsl/profiler/protobuf/BUILD
+@@ -20,7 +20,7 @@ tf_proto_library(
+ tf_proto_library(
+     name = "profiler_options_proto",
+     srcs = ["profiler_options.proto"],
+-    make_default_target_header_only = True,
++    make_default_target_header_only = False,
+     visibility = ["//visibility:public"],
+ )
+ 

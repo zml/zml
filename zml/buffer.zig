@@ -125,7 +125,7 @@ pub const Buffer = struct {
         }
     }
 
-    pub const UnitializedOptions = struct { memory: Memory = .device };
+    pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
 
     pub fn uninitialized(
         _: std.Io,
@@ -147,10 +147,10 @@ pub const Buffer = struct {
         for (res.placement().shards.constSlice()) |shard| {
             const args = pjrt.Client.CreateUninitializedBufferArgs{
                 .dims = shard.shape.dims(),
-                .element_type = pjrtx.bufferTypeFromDtype(shard.shap.dtype()),
+                .element_type = pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
                 .layout = .{
                     .tiled = .{
-                        .minor_to_major = constants.minorToMajor(shard.shap.rank()),
+                        .minor_to_major = constants.minorToMajor(shard.shape.rank()),
                         .tile_dims = &.{},
                         .tile_dims_sizes = &.{},
                     },

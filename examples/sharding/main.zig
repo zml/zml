@@ -262,6 +262,19 @@ pub fn main() !void {
 
     log.info("{f}\n\n", .{platform.fmtVerbose()});
 
+    var profiler = try platform.profiler(allocator);
+
+    try profiler.?.start();
+    defer {
+        profiler.?.stop() catch unreachable;
+        const data = profiler.?.collectData(allocator) catch unreachable;
+        log.warn("data: {any}", .{data});
+        var file = std.Io.Dir.createFile(.cwd(), io, "/home/hugo/zml/proto.pb", .{ .read = true }) catch unreachable;
+        defer file.close(io);
+        file.writeStreamingAll(io, data) catch unreachable;
+        allocator.free(data);
+    }
+
     // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
     // defer physical_mesh.deinit();
 

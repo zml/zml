@@ -67,11 +67,11 @@ pub const Metadata = union(Backend) {
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
 
-        pub fn fromBackend(backend: Backend, seqlen: i64) InitOptions {
+        pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
-                .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen } },
-                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen } },
+                .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads  } },
             };
         }
     };
@@ -84,11 +84,11 @@ pub const Metadata = union(Backend) {
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
-            .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform) },
-            .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform) },
+            .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
+            .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
         };
     }
 

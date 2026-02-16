@@ -16,6 +16,7 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("sharding.zig").Sharding;
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -479,9 +480,9 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(platform: *const Platform, seed: u128, io: std.Io) !Bufferized(Rng) {
+        pub fn initBuffer(platform: *const Platform, seed: u128, io: std.Io, sharding: Sharding) !Bufferized(Rng) {
             return .{
-                ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), std.mem.asBytes(&seed)),
+                ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
             };
         }
 

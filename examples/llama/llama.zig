@@ -51,7 +51,7 @@ pub const LlamaLM = struct {
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, options: Options) !LlamaLM {
-        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensorWithTags("weight", .{ .dout, .d })) |weight|
+        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensorWithTags2("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated })) |weight|
             .init(weight, null, .d)
         else
             null;
@@ -74,6 +74,8 @@ pub const LlamaLM = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
+        shardings: []zml.sharding.Sharding,
+        replicated_sharding: zml.sharding.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(LlamaLM) {
         progress.increaseEstimatedTotalItems(store.view().count());
@@ -92,6 +94,8 @@ pub const LlamaLM = struct {
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
             .store = store,
+            .shardings = shardings,
+            .replicated_sharding = replicated_sharding,
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
@@ -170,8 +174,8 @@ pub const Llama = struct {
         }
 
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight") },
-            .norm = .{ .weight = store.withPrefix("norm").createTensorWithTags("weight", .{.d}), .eps = config.rms_norm_eps },
+            .embed_tokens = .{ .weight = store.createTensorWithTags2("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) },
+            .norm = .{ .weight = store.withPrefix("norm").createTensorWithTags2("weight", .{.d}, .{ .d = .voc }), .eps = config.rms_norm_eps },
             .layers = layers,
         };
     }
@@ -298,7 +302,7 @@ const RmsNorm = struct {
     eps: f32 = 1e-5,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{ .weight = store.createTensorWithTags("weight", .{.d}), .eps = eps };
+        return .{ .weight = store.createTensorWithTags2("weight", .{.d}, .{ .d = .replicated }), .eps = eps };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
@@ -318,15 +322,11 @@ const Mlp = struct {
     gate_proj: zml.nn.Linear, // (dim -> hidden_dim)
     down_proj: zml.nn.Linear, // (hidden_dim -> dim)
 
-    fn initLinear(store: zml.io.TensorStore.View) zml.nn.Linear {
-        return .init(store.createTensorWithTags("weight", .{ .dout, .d }), store.maybeCreateTensorWithTags("bias", .{.dout}), .d);
-    }
-
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .up_proj = initLinear(store.withPrefix("up_proj")),
-            .gate_proj = initLinear(store.withPrefix("gate_proj")),
-            .down_proj = initLinear(store.withPrefix("down_proj")),
+            .up_proj = .init(store.createTensorWithTags2("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .gate_proj = .init(store.createTensorWithTags2("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .down_proj = .init(store.createTensorWithTags2("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
         };
     }
 
@@ -360,16 +360,12 @@ pub const SelfAttn = struct {
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    fn initProj(store: zml.io.TensorStore.View) zml.nn.Linear {
-        return .init(store.createTensorWithTags("weight", .{ .dout, .d }), store.maybeCreateTensorWithTags("bias", .{.dout}), .d);
-    }
-
     pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config) !SelfAttn {
         return .{
-            .q_proj = initProj(store.withPrefix("q_proj")),
-            .k_proj = initProj(store.withPrefix("k_proj")),
-            .v_proj = initProj(store.withPrefix("v_proj")),
-            .o_proj = initProj(store.withPrefix("o_proj")),
+            .q_proj = .init(store.createTensorWithTags2("q_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .k_proj = .init(store.createTensorWithTags2("k_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .v_proj = .init(store.createTensorWithTags2("v_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
+            .o_proj = .init(store.createTensorWithTags2("o_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
             // TODO(Corentin): fix that
             .q_norm = null,
             .k_norm = null,
@@ -449,9 +445,11 @@ pub const KvCache = struct {
     layer_index: Tensor,
 
     pub fn init(kv_shape: zml.Shape) KvCache {
+        const sharded_shape = kv_shape.withPartitioning(.{ .h = .model });
+
         return .{
-            .k = .fromShape(kv_shape),
-            .v = .fromShape(kv_shape),
+            .k = .fromShape(sharded_shape),
+            .v = .fromShape(sharded_shape),
             .layer_index = .init(.{}, .u32),
         };
     }
@@ -464,11 +462,11 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
-            .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
+            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}),
+            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}),
+            .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
         };
     }
 

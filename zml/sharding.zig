@@ -133,7 +133,7 @@ pub const Device = struct {
     pub fn format(self: Device, writer: *std.Io.Writer) !void {
         try writer.print(
             "Device(id={d} compute_units={d} coords={any})",
-            .{ self.id, self.compute_units, self.coords },
+            .{ self.id, self.compute_units, self.coords.constSlice() },
         );
     }
 };
