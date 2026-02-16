@@ -58,19 +58,6 @@ pub const Adapter = struct {
 
         return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
     }
-
-    /// encoder_chunk: [s=dsf, d] → [s=1, dim]
-    /// Like forward but input is always exactly dsf frames, so no padding needed.
-    pub fn forwardStep(self: Adapter, encoder_chunk: Tensor) Tensor {
-        const dsf = self.downsample_factor;
-
-        // Reshape [s=dsf, d] → [s=1, d*dsf]
-        const h = encoder_chunk
-            .splitAxis(.s, .{ .s = .auto, .group = dsf })
-            .merge(.{ .d = .{ .group, .d } });
-
-        return self.proj1.forward(self.proj0.forward(h).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
-    }
 };
 
 /// Top-level decoder: runs all transformer layers, returns hidden states + updated KV cache.
