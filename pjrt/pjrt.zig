@@ -99,8 +99,7 @@ pub const Api = struct {
     pub fn loadFrom(library: [:0]const u8) !*const Api {
         const basename = std.Io.Dir.path.basename(library);
         log.info("Loading: {s}...", .{basename});
-        var timer: std.time.Timer = try .start();
-        defer log.info("Loaded: {s} [{D}]", .{ basename, timer.read() });
+        defer log.info("Loaded: {s}", .{basename});
 
         var lib: std.DynLib = switch (builtin.os.tag) {
             .linux, .macos => blk: {

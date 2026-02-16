@@ -4,6 +4,6 @@ def repo():
     new_git_repository(
         name = "arocc",
         remote = "https://github.com/zml/arocc.git",
-        commit = "7e60c78a9660016e46d8be8907591b143ba2e700",
+        commit = "73acf3aa8164cc8fee16b0f79036b92b07dab053",
         build_file = "//third_party/arocc:arocc.bazel",
     )

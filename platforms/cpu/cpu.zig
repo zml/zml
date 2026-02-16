@@ -15,12 +15,13 @@ pub fn isEnabled() bool {
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
+    _ = io; // autofix
     _ = allocator; // autofix
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }
 
-    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("zml/platforms/cpu/sandbox/lib", &path_buf) orelse {
@@ -37,11 +38,6 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
 
         var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "libpjrt_cpu" ++ ext });
-        var future = io.async(struct {
-            fn call(path_: [:0]const u8) !*const pjrt.Api {
-                return pjrt.Api.loadFrom(path_);
-            }
-        }.call, .{path});
-        break :blk future.await(io);
+        break :blk .loadFrom(path);
     };
 }

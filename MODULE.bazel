@@ -22,9 +22,10 @@ bazel_dep(name = "rules_oci", version = "2.2.6")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.8.0-rc1")
 bazel_dep(name = "rules_rust", version = "0.68.1")
+bazel_dep(name = "rules_rs", version = "0.0.28")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
-bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.3.1")
+bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.5")
 bazel_dep(name = "with_cfg.bzl", version = "0.11.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
@@ -32,9 +33,21 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = Tr
 ### Zig toolchain
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.16.0-dev.1912+0cbaaa5eb")
+zig.toolchain(zig_version = "0.16.0-dev.2611+f996d2866")
 zig.mirrors(urls = [
-    "https://mirror.zml.ai/zig",
+    "https://pkg.machengine.org/zig",
+    "https://zigmirror.hryx.net/zig",
+    "https://zig.linus.dev/zig",
+    "https://zig.squirl.dev",
+    "https://zig.florent.dev",
+    "https://zig.mirror.mschae23.de/zig",
+    "https://zigmirror.meox.dev",
+    "https://ziglang.freetls.fastly.net",
+    "https://zig.tilok.dev",
+    "https://zig-mirror.tsimnet.eu/zig",
+    "https://zig.karearl.com/zig",
+    "https://pkg.earth/zig",
+    "https://fs.liujiacai.net/zigbuilds",
     "https://ziglang.org/builds/",
 ])
 use_repo(zig, "zig_toolchains")
@@ -153,12 +166,12 @@ use_repo(rust, "rust_toolchains")
 
 register_toolchains("@rust_toolchains//:all")
 
-crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
-    cargo_lockfile = "//zml/tokenizer/hftokenizers:Cargo.lock",
-    manifests = ["//zml/tokenizer/hftokenizers:Cargo.toml"],
-    supported_platform_triples = [
+    cargo_lock = "//zml/tokenizer/hftokenizers:Cargo.lock",
+    cargo_toml = "//zml/tokenizer/hftokenizers:Cargo.toml",
+    platform_triples = [
         "aarch64-apple-darwin",
         "x86_64-apple-darwin",
         "aarch64-unknown-linux-gnu",
@@ -198,47 +211,8 @@ oci.pull(
 )
 use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
 
-huggingface = use_extension("@zml//bazel:huggingface.bzl", "huggingface")
-
-################################################################################
-# ModernBERT
-huggingface.model(
-    name = "ModernBERT-base",
-    build_file_content = """exports_files(glob(["**"]), visibility = ["//visibility:public"])""",
-    commit = "94032bb66234a691cf6248265170006a7ced4970",
-    includes = [
-        "model.safetensors",
-        "tokenizer.json",
-    ],
-    model = "answerdotai/ModernBERT-base",
-)
-huggingface.model(
-    name = "ModernBERT-large",
-    build_file_content = """exports_files(glob(["**"]), visibility = ["//visibility:public"])""",
-    commit = "4bbcbf40bed02ce487125bcb3c897ea9bdc88340",
-    includes = [
-        "model.safetensors",
-        "tokenizer.json",
-    ],
-    model = "answerdotai/ModernBERT-large",
-)
-use_repo(huggingface, "ModernBERT-base", "ModernBERT-large")
-################################################################################
-
 git_override(
     module_name = "rules_zig",
-    commit = "b4ae496abfd61f880927dd01ea59823df7b42c29",
+    commit = "6c75cd2e0ef95dec8c8dbcbecb4586d0b313cf06",
     remote = "https://github.com/zml/rules_zig.git",
-)
-
-git_override(
-    module_name = "toolchains_llvm_bootstrapped",
-    commit = "023f62a94eb38d2991432a766a1d4c05e90414d7",
-    remote = "https://github.com/cerisier/toolchains_llvm_bootstrapped.git",
-)
-
-git_override(
-    module_name = "apple_support",
-    commit = "6ddcf9c1c46be1a7eb8767c7dbec7714dd47efb8",
-    remote = "https://github.com/cerisier/apple_support.git",
 )

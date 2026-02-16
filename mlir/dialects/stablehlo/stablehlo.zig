@@ -1326,31 +1326,15 @@ pub fn smallerVersion(version1: []const u8, version2: []const u8) []const u8 {
 pub fn currentVersion() []const u8 {
     const state = struct {
         var buf: [32]u8 = undefined;
-        var str: []const u8 = undefined;
-        var once = std.once(call);
-
-        fn call() void {
-            str = stringFromStream(&buf, c.stablehloGetCurrentVersion, .{});
-        }
     };
-
-    state.once.call();
-    return state.str;
+    return stringFromStream(&state.buf, c.stablehloGetCurrentVersion, .{});
 }
 
 pub fn minimumVersion() []const u8 {
     const state = struct {
         var buf: [32]u8 = undefined;
-        var str: []const u8 = undefined;
-        var once = std.once(call);
-
-        fn call() void {
-            str = stringFromStream(&buf, c.stablehloGetMinimumVersion, .{});
-        }
     };
-
-    state.once.call();
-    return state.str;
+    return stringFromStream(&state.buf, c.stablehloGetMinimumVersion, .{});
 }
 
 pub fn serializePortableArtifact(bytecode: []const u8, target_version: []const u8, writer: *std.Io.Writer) !void {

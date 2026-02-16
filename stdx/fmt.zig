@@ -176,3 +176,15 @@ fn printValue(
         inline else => try w.printValue("any", options, value, max_depth - 1),
     }
 }
+
+pub const FormatDuration = struct {
+    inner: std.Io.Duration,
+
+    pub fn formatDuration(self: FormatDuration, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        try w.printDurationSigned(@intCast(self.inner.toNanoseconds()));
+    }
+};
+
+pub fn fmtDuration(ts: std.Io.Duration) FormatDuration {
+    return .{ .inner = ts };
+}

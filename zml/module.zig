@@ -59,14 +59,9 @@ pub const CompilationContext = struct {
 
     threadlocal var _current: ?*CompilationContext = null;
 
-    var mlir_once = std.once(struct {
-        fn call() void {
-            mlir.registerPasses("Transforms");
-        }
-    }.call);
-
-    pub fn init(allocator: std.mem.Allocator, platform: *const Platform) CompilationContext {
-        mlir_once.call();
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) CompilationContext {
+        _ = io; // autofix
+        mlir.registerPasses("Transforms");
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
@@ -176,8 +171,14 @@ pub const CompilationContext = struct {
     //}
 };
 
-pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, platform);
+pub fn compile(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    comptime func: anytype,
+    args: std.meta.ArgsTuple(@TypeOf(func)),
+    platform: *const Platform,
+) !Exe {
+    var compilation_context: CompilationContext = .init(allocator, io, platform);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;

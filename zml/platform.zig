@@ -2,12 +2,12 @@ const std = @import("std");
 
 const c = @import("c");
 const pjrt = @import("pjrt");
-const pjrtx = @import("pjrtx.zig");
 const platforms = @import("platforms");
 pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const Exe = @import("exe.zig").Exe;
+const pjrtx = @import("pjrtx.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
@@ -44,7 +44,7 @@ fn disableXlaLogs() void {
     };
     _ = c.setenv(
         "TF_CPP_MIN_LOG_LEVEL",
-        std.posix.getenv("TF_CPP_MIN_LOG_LEVEL") orelse TF_CPP_LOG_LEVEL.ERROR,
+        std.c.getenv("TF_CPP_MIN_LOG_LEVEL") orelse TF_CPP_LOG_LEVEL.ERROR,
         1,
     );
 }
@@ -339,7 +339,9 @@ pub const Platform = struct {
         io: std.Io,
         model_: anytype,
         comptime func: std.meta.DeclEnum(@TypeOf(model_)),
-        args: stdx.meta.Tail(stdx.meta.FnArgs(@field(@TypeOf(model_), @tagName(func)))),
+        args: stdx.meta.Tail(
+            std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
+        ),
     ) !Exe {
         return self.compileFn(
             allocator,
@@ -349,11 +351,24 @@ pub const Platform = struct {
         );
     }
 
-    pub fn compileModel(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, model: stdx.meta.Head(stdx.meta.FnArgs(func)), args: stdx.meta.Tail(stdx.meta.FnArgs(func))) !Exe {
+    pub fn compileModel(
+        self: *const Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        comptime func: anytype,
+        model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
+        args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
+    ) !Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args);
     }
 
-    pub fn compileFn(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func)) !Exe {
+    pub fn compileFn(
+        self: *const Platform,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        comptime func: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(func)),
+    ) !Exe {
         return zml.module.compile(allocator, io, func, args, self);
     }
 

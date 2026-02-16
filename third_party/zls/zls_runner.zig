@@ -4,11 +4,12 @@
 ///
 /// This file is used as a template by `zls_write_runner_zig_src.bzl`.
 const std = @import("std");
-const runfiles = @import("runfiles");
+
 const bazel_builtin = @import("bazel_builtin");
+const runfiles = @import("runfiles");
 
 fn getRandomFilename(io: std.Io, buf: []u8, extension: []const u8) ![]const u8 {
-    const now = try std.Io.Clock.real.now(io);
+    const now = std.Io.Clock.real.now(io);
     return std.fmt.bufPrint(buf, "/tmp/{d}{s}", .{ now.nanoseconds, extension }) catch @panic("OOM");
 }
 
@@ -26,29 +27,21 @@ const Config = struct {
     global_cache_path: ?[]const u8 = null,
 };
 
-pub fn main() !void {
-    const gpa = std.heap.page_allocator;
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    const allocator = arena.allocator();
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena;
+    const io = init.io;
 
-    var threaded: std.Io.Threaded = .init(gpa, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
-
-    var r_ = try runfiles.Runfiles.create(.{ .allocator = allocator, .io = io }) orelse
+    var r_ = try runfiles.Runfiles.create(.{ .allocator = arena.allocator(), .io = io, .environ_map = init.environ_map, .argv = init.minimal.args }) orelse
         return error.RunfilesNotFound;
-    defer r_.deinit(allocator);
-
     const r = r_.withSourceRepo(bazel_builtin.current_repository);
 
     const zls_bin_rpath = "@@__ZLS_BIN_RPATH__@@";
-    var zls_bin_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var zls_bin_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const zls_bin_path = try r.rlocation(zls_bin_rpath, &zls_bin_path_buf) orelse
         return error.RLocationNotFound;
 
     const zig_exe_rpath = "@@__ZIG_EXE_RPATH__@@";
-    var zig_exe_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var zig_exe_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const zig_exe_path = blk2: {
         if (zig_exe_rpath[0] == '/') {
             break :blk2 zig_exe_rpath;
@@ -68,7 +61,7 @@ pub fn main() !void {
     };
 
     const zls_build_runner_rpath = "@@__ZLS_BUILD_RUNNER_RPATH__@@";
-    var zls_build_runner_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var zls_build_runner_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const zls_build_runner_path = try r.rlocation(zls_build_runner_rpath, &zls_build_runner_path_buf) orelse
         return error.RLocationNotFound;
 
@@ -97,20 +90,20 @@ pub fn main() !void {
         try tmp_file_writer.interface.flush();
     }
 
-    const args = std.process.argsAlloc(allocator) catch return error.ArgsAllocFailed;
-    defer std.process.argsFree(allocator, args);
+    const args = init.minimal.args.toSlice(arena.allocator()) catch return error.ArgsAllocFailed;
 
     const exec_args_len = args.len - 1 + 3; // Skip args[0] and add "zls" + --config-path + tmp_file_path
-    var exec_args = try allocator.alloc([]const u8, exec_args_len);
+    var exec_args = try arena.allocator().alloc([]const u8, exec_args_len);
 
     exec_args[0] = zls_bin_path; // "zls"
 
-    // ${@}
-    for (args[1..], 0..) |arg, i| {
-        exec_args[1 + i] = arg;
-    }
-    exec_args[exec_args.len - 2] = "--config-path";
-    exec_args[exec_args.len - 1] = tmp_file_path;
-
-    return std.process.execv(arena.allocator(), exec_args);
+    @memcpy(exec_args[1 .. exec_args.len - 2], args[1..]);
+    @memcpy(exec_args[exec_args.len - 2 ..], &[_][]const u8{
+        "--config-path",
+        tmp_file_path,
+    });
+    var child = try std.process.spawn(io, .{
+        .argv = exec_args,
+    });
+    _ = try child.wait(io);
 }

@@ -159,14 +159,13 @@ pub const TensorRegistry = struct {
     tensors: Tensors,
     metadata: Metadatas,
 
-    mutex: std.Thread.Mutex,
+    mutex: std.Io.Mutex = .init,
 
     pub fn init(allocator: std.mem.Allocator) TensorRegistry {
         return .{
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
             .metadata = .{},
-            .mutex = .{},
         };
     }
 
@@ -178,7 +177,6 @@ pub const TensorRegistry = struct {
             .arena = std.heap.ArenaAllocator.init(allocator),
             .tensors = .{},
             .metadata = .empty,
-            .mutex = .{},
         };
 
         try self.mergeMetadata(metadata);
@@ -223,8 +221,8 @@ pub const TensorRegistry = struct {
         self: *TensorRegistry,
         other: Metadatas,
     ) !void {
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // self.mutex.lock();
+        // defer self.mutex.unlock();
 
         const allocator = self.arena.allocator();
 
@@ -251,8 +249,8 @@ pub const TensorRegistry = struct {
     ) !void {
         const allocator = self.arena.allocator();
 
-        self.mutex.lock();
-        defer self.mutex.unlock();
+        // self.mutex.lock();
+        // defer self.mutex.unlock();
 
         var tensor_copy = tensor;
 

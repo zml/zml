@@ -14,11 +14,6 @@ common          --experimental_remote_cache_eviction_retries=5
 # Self explanatory
 common          --enable_platform_specific_config
 
-# Use local and ZML registries
-common          --registry=file://%workspace%/third_party/
-common          --registry=https://bazel-registry.zml.ai
-common          --registry=https://bcr.bazel.build
-
 # Ensure host tools are built optimized
 common          --host_compilation_mode=opt
 
@@ -82,12 +77,11 @@ common          --@rules_zig//zig/settings:zigopt=-fllvm
 
 common          --@toolchains_llvm_bootstrapped//config:experimental_stub_libgcc_s=True
 
-common:macos    --action_env=MACOSX_DEPLOYMENT_TARGET=13.0
-common:macos    --macos_sdk_version=13.0
+common          --macos_minimum_os=13.0
 
-# Don't detect the local C++ toolchain, be fully hermetic
-# This is done only on Linux for now since we use the local toolchain on macOS
-common:linux    --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common          --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=false
+common          --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
+common          --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 
 # Required for protobuf upb on Linux
 common:linux    --copt=-fPIC

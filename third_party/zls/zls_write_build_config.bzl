@@ -53,8 +53,11 @@ zls_construct_zig_module_info = aspect(
     implementation = _zls_construct_zig_module_info_impl,
 )
 
-def _add_context(context):
-    return json.encode(struct(name = context.name, path = "@@__BUILD_WORKSPACE_DIRECTORY__@@/" + context.main))
+def format_main_file(main):
+    prefix = "@@__BUILD_WORKSPACE_DIRECTORY__@@/"
+    if (main.startswith("bazel-out/") or main.startswith("external/")):
+        prefix = "@@__BAZEL_EXECUTION_ROOT__@@/"
+    return prefix + main
 
 def _zls_write_build_config_impl(ctx):
     zigtoolchaininfo = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo
@@ -91,7 +94,10 @@ def _zls_write_build_config_impl(ctx):
             cc_infos = [cc_info],
         )
 
-        c_module_contexts = [depset(direct = [c_module.module_context])]
+        c_module_contexts = [depset(
+            direct = [c_module.module_context],
+            transitive = [c_module.transitive_module_contexts],
+        )]
         c_module_inputs = [c_module.transitive_inputs]
 
     contexts = depset(
@@ -99,14 +105,33 @@ def _zls_write_build_config_impl(ctx):
         transitive = [dep[ZigModuleInfo].transitive_module_contexts for dep in ctx.attr.deps] + c_module_contexts,
     )
 
-    template_dict = ctx.actions.template_dict()
-    template_dict.add_joined("@@PACKAGES@@", contexts, map_each = _add_context, join_with = ",\n        ")
+    modules = {
+        mod.canonical_name: mod
+        for mod in contexts.to_list()
+    }
+
+    output = {
+        "dependencies": {},
+        "modules": {
+            format_main_file(mod.main): {
+                "import_table": {
+                    dep.name: format_main_file(modules.get(dep.canonical_name, "").main)
+                    for dep in mod.dependency_mappings
+                },
+                "c_macros": [],
+                "include_dirs": [],
+            }
+            for mod in modules.values()
+        },
+        "compilations": [],
+        "top_level_steps": [],
+        "available_options": {},
+    }
 
     config = ctx.outputs.out
-    ctx.actions.expand_template(
+    ctx.actions.write(
         output = config,
-        template = ctx.file._zls_completion_tpl,
-        computed_substitutions = template_dict,
+        content = json.encode(output),
     )
 
     return [

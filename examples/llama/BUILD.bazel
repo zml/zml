@@ -9,7 +9,10 @@ zig_binary(
     srcs = ["llama.zig"],
     main = "main.zig",
     visibility = ["//visibility:public"],
-    deps = ["//zml"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
 )
 
 zig_binary(
@@ -19,7 +22,6 @@ zig_binary(
     visibility = ["//visibility:public"],
     deps = ["//zml"],
 )
-
 
 mtree_spec(
     name = "mtree",

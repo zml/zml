@@ -44,3 +44,8 @@ zig_binary(
     name = "workspace_printer",
     main = "workspace_printer.zig",
 )
+
+zig_binary(
+    name = "build_runner",
+    main = "zls_build_runner.zig",
+)

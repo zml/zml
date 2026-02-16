@@ -6,6 +6,7 @@
 // Namespaces
 const std = @import("std");
 
+pub const bazel = @import("bazel");
 const c = @import("c");
 pub const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
@@ -51,3 +52,7 @@ pub const KiB = 1024;
 pub const MiB = 1024 * KiB;
 pub const GiB = 1024 * MiB;
 pub const TiB = 1024 * GiB;
+
+pub fn init(init_: std.process.Init) !void {
+    try bazel.initSimple(init_);
+}

@@ -38,43 +38,40 @@ pub fn pinToCore(core_id: usize) void {
     }
 }
 
-pub fn onceWithArgs(comptime f: anytype) OnceWithArgs(f) {
+pub fn once(comptime f: anytype) once(f) {
     return .{};
 }
 
 /// An object that executes the function `f` just once.
 /// It is undefined behavior if `f` re-enters the same Once instance.
-pub fn OnceWithArgs(comptime f: anytype) type {
+pub fn Once(comptime f: anytype) type {
     const Args = std.meta.ArgsTuple(@TypeOf(f));
-    const Result = meta.FnResult(f);
     return struct {
         done: bool = false,
-        mutex: std.Thread.Mutex = .{},
-        result: Result = undefined,
+        mutex: std.Io.Mutex = .init,
 
         /// Call the function `f`.
         /// If `call` is invoked multiple times `f` will be executed only the
         /// first time.
         /// The invocations are thread-safe.
-        pub fn call(self: *@This(), args: Args) Result {
+        pub fn call(self: *@This(), io: std.Io, args: Args) void {
             if (@atomicLoad(bool, &self.done, .acquire))
-                return self.result;
+                return;
 
-            return self.callSlow(args);
+            self.callSlow(io, args);
         }
 
-        fn callSlow(self: *@This(), args: Args) Result {
+        fn callSlow(self: *@This(), io: std.Io, args: Args) void {
             @branchHint(.cold);
 
-            self.mutex.lock();
-            defer self.mutex.unlock();
+            self.mutex.lock(io);
+            defer self.mutex.unlock(io);
 
             // The first thread to acquire the mutex gets to run the initializer
             if (!self.done) {
-                self.result = @call(.auto, f, args);
+                @call(.auto, f, args);
                 @atomicStore(bool, &self.done, true, .release);
             }
-            return self.result;
         }
     };
 }

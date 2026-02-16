@@ -135,3 +135,17 @@ pub const AllocatingLimitedConcurrentGroup = struct {
         self.group.cancel(io);
     }
 };
+
+pub const Duration = struct {
+    pub fn div(self: std.Io.Duration, rhs: u64) std.Io.Duration {
+        return .fromNanoseconds(@divTrunc(self.nanoseconds, @as(i96, @intCast(rhs))));
+    }
+
+    pub fn hz(self: std.Io.Duration) u64 {
+        return @intCast(std.time.ns_per_s / self.nanoseconds);
+    }
+
+    pub fn hzFloat(self: std.Io.Duration) f64 {
+        return (1 * std.time.ns_per_s) / @as(f64, @floatFromInt(self.nanoseconds));
+    }
+};

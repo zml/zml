@@ -1,4 +1,5 @@
 """Implementation of the zls_completion macro."""
+
 load("@aspect_bazel_lib//lib:utils.bzl", "utils")
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -13,6 +14,7 @@ def zls_completion(name, deps, **kwargs):
         deps: The List of Zig modules to include for completion.
         **kwargs: Additional keyword arguments passed to the `zig_binary`
     """
+
     # Generate the ZLS BuildConfig file.
     # It contains the list of Zig packages alongside their main Zig file paths.
     build_config = name + ".build_config"
@@ -59,7 +61,7 @@ def zls_completion(name, deps, **kwargs):
         main = name + ".runner",
         data = [
             "@rules_zig//zig:resolved_toolchain",
-            "@zml//third_party/zls:resolved_toolchain",
+            "@@//third_party/zls:resolved_toolchain",
             name + ".build_runner",
         ],
         deps = [

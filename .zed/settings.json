@@ -8,12 +8,12 @@
             "formatter": "language_server",
             "code_actions_on_format": {
                 "source.fixAll": true,
-                "source.organizeImports": true
-            }
+                "source.organizeImports": true,
+            },
         },
         "YAML": {
-            "tab_size": 2
-        }
+            "tab_size": 2,
+        },
     },
     "file_scan_exclusions": [
         "**/.git",
@@ -25,17 +25,17 @@
         "**/Thumbs.db",
         "**/.classpath",
         "**/.settings",
-        "**/bazel-*"
+        "**/bazel-*",
     ],
     "tab_size": 4,
     "inlay_hints": {
-        "enabled": true
+        "enabled": true,
     },
     "lsp": {
         "zls": {
             "binary": {
-                "path": "tools/zls.sh"
-            }
-        }
-    }
+                "path": "tools/zls.sh",
+            },
+        },
+    },
 }

@@ -50,46 +50,41 @@ const CliArgs = struct {
     ;
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const arena = init.arena;
+
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
-    // var debug_allocator: ?std.heap.DebugAllocator(.{}) = null;
-    // const allocator = if (@import("builtin").mode == .Debug) blk: {
-    //     debug_allocator = .init;
-    //     break :blk debug_allocator.?.allocator();
-    // } else std.heap.c_allocator;
-    // defer if (debug_allocator) |*da| std.debug.assert(da.deinit() == .ok);
-    const allocator = std.heap.c_allocator;
+    const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const args = stdx.flags.parseProcessArgs(CliArgs);
-
-    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
+
+    // var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
+    // defer vfs_file.deinit();
+    // try vfs.register("file", vfs_file.io());
+
+    // var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
+    // defer vfs_https.deinit();
+    // try vfs.register("https", vfs_https.io());
 
     var http_client: std.http.Client = .{
         .allocator = allocator,
-        .io = threaded.io(),
+        .io = init.io,
     };
-
-    try http_client.initDefaultProxies(allocator);
+    try http_client.initDefaultProxies(arena.allocator(), init.environ_map);
     defer http_client.deinit();
 
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-    defer vfs_file.deinit();
-    try vfs.register("file", vfs_file.io());
-
-    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
-    defer vfs_https.deinit();
-    try vfs.register("https", vfs_https.io());
-
-    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
+    var hf_vfs: zml.io.VFS.HF = try .auto(
+        allocator,
+        init.io,
+        &http_client,
+    );
     defer hf_vfs.deinit();
     try vfs.register("hf", hf_vfs.io());
 
-    const io = vfs.io();
+    const io = vfs.io;
 
     log.info("Resolving model repo", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
@@ -219,7 +214,7 @@ pub fn main() !void {
         tokenizer,
         config,
         llama_options,
-        @intCast((try std.Io.Clock.now(.real, io)).toNanoseconds()),
+        @intCast(std.Io.Clock.now(.awake, io).toNanoseconds()),
         prompt[0..],
         false,
         &stdout.interface,
@@ -228,9 +223,11 @@ pub fn main() !void {
 }
 
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(LlamaLM.Config) {
-    var timer = try std.time.Timer.start();
+    const now: std.Io.Timestamp = .now(io, .awake);
     log.info("Loading model config", .{});
-    defer log.info("Loaded model config [{D}]", .{timer.read()});
+    defer log.info("Loaded model config [{D}]", .{
+        stdx.fmt.fmtDuration(now.untilNow(io, .awake)),
+    });
 
     const parsed_config = blk: {
         const config_json_file = try dir.openFile(io, "config.json", .{});
@@ -251,8 +248,10 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
-    var timer = try std.time.Timer.start();
-    defer log.info("Loaded tokenizer [{D}]", .{timer.read()});
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Loaded tokenizer [{D}]", .{
+        stdx.fmt.fmtDuration(now.untilNow(io, .awake)),
+    });
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
@@ -287,8 +286,8 @@ fn compileModel(
     parameters: LlamaParameters,
     progress: *std.Progress.Node,
 ) !CompileModelResult {
-    var timer = try std.time.Timer.start();
-    defer log.info("Compiled model [{D}]", .{timer.read()});
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled model [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = try io.concurrent(struct {
@@ -296,8 +295,8 @@ fn compileModel(
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling prefill...", 1);
             defer node_.end();
-            var timer_ = try std.time.Timer.start();
-            defer log.info("Compiled prefill [{D}]", .{timer_.read()});
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled prefill [{D}]", .{stdx.fmt.fmtDuration(now_.untilNow(io_, .awake))});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.prefill_tokens,
                 parameters_.token_index,
@@ -315,8 +314,8 @@ fn compileModel(
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling decode...", 1);
             defer node_.end();
-            var timer_ = try std.time.Timer.start();
-            defer log.info("Compiled decode [{D}]", .{timer_.read()});
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled decode [{D}]", .{stdx.fmt.fmtDuration(now_.untilNow(io_, .awake))});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.decode_tokens,
                 parameters_.token_index,
@@ -348,13 +347,13 @@ fn loadModelBuffers(
 ) !zml.Bufferized(llama.LlamaLM) {
     var transferred_bytes: usize = 0;
 
-    var timer = try stdx.time.Timer.start();
+    const now: std.Io.Timestamp = .now(io, .awake);
     defer {
-        const duration = timer.read();
+        const duration = now.untilNow(io, .awake);
         const seconds = @as(f64, @floatFromInt(duration.ns)) / 1e9;
         const gb_per_sec = @as(f64, @floatFromInt(transferred_bytes)) / (1024.0 * 1024.0 * 1024.0) / seconds;
         const gbps = gb_per_sec * 8.0;
-        log.info("Loaded model [{D} {d:.3} GB/s {d:.3} gbps]", .{ duration, gb_per_sec, gbps });
+        log.info("Loaded model [{D} {d:.3} GB/s {d:.3} gbps]", .{ stdx.fmt.fmtDuration(duration), gb_per_sec, gbps });
     }
 
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -499,7 +498,7 @@ pub fn generateText(
     defer current_token_buffer.deinit();
 
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
-    var timer = try stdx.time.Timer.start();
+    const now: std.Io.Timestamp = .now(io, .awake);
 
     // One token has alreadyh been generated by the prefill.
     var num_tokens_generated: usize = 1;
@@ -539,7 +538,11 @@ pub fn generateText(
         // extract the generated token from the buffer
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
-    const duration = timer.read();
+    const duration = now.untilNow(io, .awake);
     std.debug.print("\n", .{});
-    log.info("✅ Generated {} tokens in {D}: {:.3}tok/s", .{ num_tokens_generated, duration, duration.div(num_tokens_generated).hzFloat() });
+    log.info("✅ Generated {} tokens in {D}: {:.3}tok/s", .{
+        num_tokens_generated,
+        stdx.fmt.fmtDuration(duration),
+        stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(duration, num_tokens_generated)),
+    });
 }

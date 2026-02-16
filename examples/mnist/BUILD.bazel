@@ -12,7 +12,11 @@ zig_binary(
         "@mnist//:t10k-images.idx3-ubyte",
     ],
     main = "mnist.zig",
-    deps = ["//zml"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
 )
 
 build_test(

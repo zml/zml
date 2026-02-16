@@ -69,17 +69,13 @@ const Mnist = struct {
     }
 };
 
-pub fn main() !void {
-    const allocator = std.heap.smp_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena;
+    const allocator = init.gpa;
+    const io = init.io;
 
     // Parse program args
-    const process_args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, process_args);
+    const process_args = try init.minimal.args.toSlice(arena.allocator());
     const model_path = process_args[1];
     const t10kfilename = process_args[2];
 
@@ -94,13 +90,14 @@ pub fn main() !void {
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator);
 
-    // Compile model
+    // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
     var exe = blk: {
         log.info("Compiling model....", .{});
-        var timer = try std.time.Timer.start();
-        defer log.info("✅ Compiled model [{D}]", .{timer.read()});
+        const start: std.Io.Timestamp = .now(io, .awake);
+        defer log.info("✅ Compiled model [{D}]", .{stdx.fmt.fmtDuration(start.untilNow(io, .awake))});
         break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input});
     };
     defer exe.deinit();
@@ -108,8 +105,10 @@ pub fn main() !void {
     // Load buffers
     var mnist_buffers = blk: {
         log.info("Transfering weights....", .{});
-        var timer = try std.time.Timer.start();
-        defer log.info("✅ Transferred weights [{D}]", .{timer.read()});
+        const start: std.Io.Timestamp = .now(io, .awake);
+        defer log.info("✅ Transferred weights [{D}]", .{
+            stdx.fmt.fmtDuration(start.untilNow(io, .awake)),
+        });
         break :blk try mnist_model.load(allocator, io, platform, &store);
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
@@ -125,7 +124,7 @@ pub fn main() !void {
     defer dataset.close(io);
 
     var rng: std.Random.DefaultPrng = blk: {
-        const now = try std.Io.Clock.now(.awake, io);
+        const now: std.Io.Timestamp = .now(io, .awake);
         break :blk .init(@intCast(now.toMilliseconds()));
     };
 

@@ -75,24 +75,24 @@ pub fn fatal(comptime fmt_string: []const u8, args: anytype) noreturn {
 /// `positional` field is treated specially, it designates positional arguments.
 ///
 /// If `pub const help` declaration is present, it is used to implement `-h/--help` argument.
-pub fn parse(args: *std.process.ArgIterator, comptime CliArgs: type) CliArgs {
-    assert(args.skip()); // Discard executable name.
+pub fn parse(args: std.process.Args, comptime CliArgs: type) CliArgs {
+    var it = args.iterate();
+    assert(it.skip()); // Discard executable name.
 
     return switch (@typeInfo(CliArgs)) {
-        .@"union" => parse_commands(args, CliArgs),
-        .@"struct" => parse_flags(args, CliArgs),
+        .@"union" => parse_commands(&it, CliArgs),
+        .@"struct" => parse_flags(&it, CliArgs),
         else => unreachable,
     };
 }
 
 /// Parse CLI arguments for current process.
 /// See `stdx.flags.parse` documentation for more.
-pub fn parseProcessArgs(comptime CliArgs: type) CliArgs {
-    var args = std.process.args();
-    return parse(&args, CliArgs);
+pub fn parseProcessArgs(init_: std.process.Init.Minimal, comptime CliArgs: type) CliArgs {
+    return parse(init_.args, CliArgs);
 }
 
-fn parse_commands(args: *std.process.ArgIterator, comptime Commands: type) Commands {
+fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Commands {
     comptime assert(@typeInfo(Commands) == .Union);
     comptime assert(std.meta.fields(Commands).len >= 2);
 
@@ -118,7 +118,7 @@ fn parse_commands(args: *std.process.ArgIterator, comptime Commands: type) Comma
     fatal("unknown subcommand: '{s}'", .{first_arg});
 }
 
-fn parse_flags(args: *std.process.ArgIterator, comptime Flags: type) Flags {
+fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
     @setEvalBranchQuota(5_000);
 
     if (Flags == void) {

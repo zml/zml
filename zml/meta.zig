@@ -491,7 +491,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
                     else => {},
                 }
             },
-            .array => |_| for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
+            .array => for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
             .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
             .@"union" => switch (v.*) {
                 inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),
@@ -511,7 +511,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
                             if (can_error) try visit(cb, ctx, &@field(v_elem, field.name)) else visit(cb, ctx, &@field(v_elem, field.name));
                         }
                     },
-                    .array => |_| for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
+                    .array => for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
                     .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
                     .@"union" => switch (v_elem.*) {
                         inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),

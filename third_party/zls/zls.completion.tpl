@@ -1,6 +1,6 @@
 {
-    "deps_build_roots": [],
-    "packages": [
+    "dependencies": {},
+    "modules": [
         @@PACKAGES@@
     ],
     "include_dirs": [],
