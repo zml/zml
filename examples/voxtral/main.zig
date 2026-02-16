@@ -4,6 +4,7 @@ const log = std.log;
 const wav_utils = @import("wav.zig");
 const cfg = @import("config.zig");
 const Config = cfg.Config;
+const StreamParams = cfg.StreamParams;
 
 const zml = @import("zml");
 const stdx = zml.stdx;
@@ -75,26 +76,16 @@ pub fn main() !void {
     defer parsed_config.deinit();
     const config = parsed_config.value;
 
-    const sample_rate: f32 = @floatFromInt(config.audio().sampling_rate);
-    const frame_rate = config.audio().frame_rate;
-    const raw_audio_length_per_tok: u32 = @intFromFloat(sample_rate / frame_rate);
-    const hop_length = config.audio().hop_length;
-
-    const delay_samples: u32 = @intFromFloat(args.transcription_delay_ms / 1000.0 * sample_rate);
-    const audio_length_per_tok = raw_audio_length_per_tok / hop_length;
-    const n_delay_tokens = std.math.divCeil(u32, delay_samples / hop_length, audio_length_per_tok) catch unreachable;
-    const n_right_pad_tokens = (n_delay_tokens + 1) + 10;
+    const sp: StreamParams = .init(config, args.transcription_delay_ms, n_left_pad_tokens);
 
     // Build tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
-    const n_prompt_tokens = 1 + n_left_pad_tokens + n_delay_tokens;
-    const tokens = try allocator.alloc(u32, n_prompt_tokens);
+    const tokens = try allocator.alloc(u32, sp.prompt_len);
     defer allocator.free(tokens);
 
     var wav_buffer: [4096]u8 = undefined;
     var reader = file.reader(io, &wav_buffer);
 
-    const left_pad = n_left_pad_tokens * raw_audio_length_per_tok;
-    const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, left_pad, n_right_pad_tokens, raw_audio_length_per_tok);
+    const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, sp.left_pad, sp.n_right_pad_tokens, sp.raw_audio_length_per_tok);
     defer allocator.free(padded_wav);
     const audio_len = padded_wav.len;
 
@@ -138,8 +129,6 @@ pub fn main() !void {
         .hd = config.head_dim,
     }, dec_dtype));
 
-    const prompt_len: u32 = @intCast(tokens.len);
-
     const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_cfg.sliding_window)));
     const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(config.sliding_window)));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
@@ -149,16 +138,15 @@ pub fn main() !void {
 
     // -- Fixed len for now
     var compiled_mel_spectrum_future = try io.concurrent(voxtral.compileMelSpectrum, .{ allocator, io, platform, melspectro_model, audio_len, &progress });
-    const mel_per_step: u32 = config.downsample_factor() * 2;
-    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, prompt_len * mel_per_step, &progress });
-    var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, &progress });
     // --
 
-    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
+    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
+    var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, sp, &progress });
+    var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
     var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
-    var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, prompt_len, config, &progress });
+    var compiled_adapter_future = try io.concurrent(voxtral.compileAdapter, .{ allocator, io, platform, adapter, sp.prompt_len, config, &progress });
     var compiled_adapter_step_future = try io.concurrent(voxtral.compileAdapterStep, .{ allocator, io, platform, adapter, config, &progress });
-    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, prompt_len, dec_kv_cache, dec_attention_metadata, attention_parameters, &progress });
+    var compiled_decoder_future = try io.concurrent(voxtral.compileDecoder, .{ allocator, io, platform, decoder_model, sp.prompt_len, dec_kv_cache, dec_attention_metadata, attention_parameters, &progress });
 
     var mel_spectrum_buffers_future = try io.concurrent(LogMelSpectrogram.load, .{ &melspectro_model, io, platform });
     var encoder_buffers_future = try io.concurrent(Encoder.load, .{ &encoder_model, allocator, io, platform, &model_store, &progress });
@@ -230,7 +218,7 @@ pub fn main() !void {
         padded_wav,
         audio_len,
         tokens,
-        n_delay_tokens,
+        sp,
         &compiled_mel_spectrum,
         &compiled_conv_stem,
         &compiled_conv_stem_step,
