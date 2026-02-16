@@ -53,7 +53,6 @@ const CliArgs = struct {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const arena = init.arena;
-    _ = arena; // autofix
 
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
@@ -163,7 +162,7 @@ pub fn main(init: std.process.Init) !void {
 
     var llama_buffers_future = try io.concurrent(LlamaLM.load, .{
         &llama_model,
-        allocator,
+        arena.allocator(),
         io,
         platform,
         &store,
