@@ -445,59 +445,13 @@ fn parseSafetensorsIndexFiles(
     safetensors_index: SafetensorsIndex,
     repo: std.Io.Dir,
 ) !void {
-    var group: std.Io.Group = .init;
-    defer group.cancel(io);
-
-    var err: ?anyerror = null;
-
     const filenames = safetensors_index.map.keys();
-
     for (filenames) |filename| {
-        group.async(io, AsyncParseSafetensorsIndexFile.run, .{
-            allocator,
-            io,
-            registry,
-            repo,
-            filename,
-            &err,
-        });
-    }
-
-    try group.await(io);
-
-    if (err) |e| {
-        log.err("Error parsing safetensors index files: {any}", .{e});
-        return e;
-    }
-}
-
-const AsyncParseSafetensorsIndexFile = struct {
-    pub fn run(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        registry: *TensorRegistry,
-        repo: std.Io.Dir,
-        filename: []const u8,
-        err_ptr: *?anyerror,
-    ) void {
-        parse(allocator, io, registry, repo, filename) catch |err| {
-            err_ptr.* = err;
-        };
-    }
-
-    fn parse(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        registry: *TensorRegistry,
-        repo: std.Io.Dir,
-        filename: []const u8,
-    ) !void {
         const file = try repo.openFile(io, filename, .{});
         defer file.close(io);
-
         try parseSafetensors(allocator, io, registry, file);
     }
-};
+}
 
 pub fn resolveFiletype(io: std.Io, file: std.Io.File) !FileType {
     var path_buf: [1024]u8 = undefined;
