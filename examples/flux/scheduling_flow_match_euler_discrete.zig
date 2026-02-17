@@ -137,7 +137,7 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "scheduler", json_name: []const u8 = "scheduler_config.json" }) !*@This() {
         const timer_start = std.Io.Clock.awake.now(io);
-        defer log.info("Loaded FlowMatchEulerDiscrete Scheduler in {} ms", .{std.time.milliTimestamp(std.Io.Clock.awake.now(io) - timer_start)});
+        defer log.info("Loaded FlowMatchEulerDiscrete Scheduler in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         if (progress) |p| {
             p.increaseEstimatedTotalItems(1);
