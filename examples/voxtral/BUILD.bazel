@@ -12,6 +12,7 @@ zig_binary(
         "encoder.zig",
         "decoder.zig",
         "common.zig",
+        "terminalwave/terminalwave.zig"
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
@@ -30,6 +31,7 @@ zig_binary(
         "encoder.zig",
         "decoder.zig",
         "common.zig",
+        "terminalwave/terminalwave.zig"
     ],
     extra_srcs = [
         "//examples/voxtral/assets:voxtral_mel_filter",
