@@ -10,7 +10,7 @@ pub const std_options: std.Options = .{
 };
 
 const ttir_path: []const u8 =
-    "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up_test.ttir";
+    "/home/louislechevalier/zml/moe_mxfp4_p_tma_tensorized_prefill_gate_up.ttir";
 
 const NUM_SMS: i32 = 170;
 const NUM_WARPS: i32 = 8;
@@ -92,7 +92,6 @@ const KernelInputs = struct {
     out_alpha: zml.Tensor,
     reduce_rank: zml.Tensor,
 
-    YOut: zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) KernelInputs {
         return .{
@@ -171,7 +170,6 @@ const KernelInputs = struct {
             .out_alpha = store.createTensor("out_alpha"),
             .reduce_rank = store.createTensor("reduce_rank"),
 
-            .YOut = store.createTensor("YOut"),
         };
     }
 };
@@ -278,7 +276,6 @@ fn runKernel(inputs: KernelInputs) zml.Tensor {
     inputs.out_alpha.print("out_alpha");
     inputs.reduce_rank.print("reduce_rank");
 
-    inputs.YOut.print("YOut");
 
     std.log.info("Y__base {f}", .{inputs.Y__base.shape()});
     std.log.info("Y__shape_0 {f}", .{inputs.Y__shape_0.shape()});
@@ -354,8 +351,9 @@ fn runKernel(inputs: KernelInputs) zml.Tensor {
     std.log.info("grid_n {f}", .{inputs.grid_n.shape()});
     std.log.info("reduce_rank {f}", .{inputs.reduce_rank.shape()});
 
-    std.log.info("YOut {f}", .{inputs.YOut.shape()});
     std.log.info("ALPHA {f}", .{inputs.out_alpha.shape()});
+
+    // const Y = zml.Tensor.zeroes(inputs.Y__base.shape());
 
     const kernel_args = .{
         inputs.Y__base,
@@ -432,7 +430,7 @@ fn runKernel(inputs: KernelInputs) zml.Tensor {
         inputs.grid_n,
         inputs.out_alpha,
         inputs.reduce_rank,
-        inputs.YOut,
+
     };
 
     const ops_ = ops.TritonOps{
@@ -442,10 +440,10 @@ fn runKernel(inputs: KernelInputs) zml.Tensor {
         .num_warps = NUM_WARPS,
         .num_stages = NUM_STAGES,
         .debug = true,
-        .output_operand_aliases = &.{kernel_args.len - 1},
+        .output_operand_aliases = &.{0},
     };
 
-    const res = ops.triton(kernel_args, .{inputs.YOut.shape()}, ops_);
+    const res = ops.triton(kernel_args, .{inputs.Y__base.shape()}, ops_);
     return res[0];
 }
 
@@ -525,7 +523,13 @@ fn deinitKernelInputsBuffers(buffers: *zml.mem.Bufferized(KernelInputs)) void {
     buffers.out_alpha.deinit();
     buffers.reduce_rank.deinit();
 
-    buffers.YOut.deinit();
+}
+
+fn assertAligned16(buf: zml.Buffer, name: []const u8) void {
+    const addr = @intFromPtr(buf.devicePtr());
+    if ((addr % 16) != 0) {
+        std.debug.panic("{s} device ptr not 16-byte aligned: 0x{x}", .{ name, addr });
+    }
 }
 
 pub fn main() !void {
@@ -536,7 +540,7 @@ pub fn main() !void {
 
     const io = threaded.io();
 
-    var safetensors_path: []const u8 = "moe_kernel.safetensors";
+    var safetensors_path: []const u8 = "/home/louislechevalier/zml/examples/moe_test/moe_kernel.safetensors";
     var it = std.process.args();
     defer it.deinit();
     while (it.next()) |arg| {
@@ -573,6 +577,78 @@ pub fn main() !void {
     });
     defer deinitKernelInputsBuffers(&buffers);
 
+    assertAligned16(buffers.Y__shape_0, "Y__shape_0");
+    assertAligned16(buffers.Y__shape_1, "Y__shape_1");
+    assertAligned16(buffers.Y__shape_2, "Y__shape_2");
+    assertAligned16(buffers.Y__shape_3, "Y__shape_3");
+    assertAligned16(buffers.Y__shape_4, "Y__shape_4");
+    assertAligned16(buffers.Y__stride_0, "Y__stride_0");
+    assertAligned16(buffers.Y__stride_1, "Y__stride_1");
+    assertAligned16(buffers.Y__stride_2, "Y__stride_2");
+    assertAligned16(buffers.Y__stride_3, "Y__stride_3");
+    assertAligned16(buffers.Y__stride_4, "Y__stride_4");
+    assertAligned16(buffers.YPtr, "YPtr");
+    assertAligned16(buffers.stride_y_k, "stride_y_k");
+    assertAligned16(buffers.stride_y_z, "stride_y_z");
+    assertAligned16(buffers.stride_y_m, "stride_y_m");
+    assertAligned16(buffers.stride_y_n, "stride_y_n");
+
+    assertAligned16(buffers.X__shape_0, "X__shape_0");
+    assertAligned16(buffers.X__shape_1, "X__shape_1");
+    assertAligned16(buffers.X__shape_2, "X__shape_2");
+    assertAligned16(buffers.X__shape_3, "X__shape_3");
+    assertAligned16(buffers.X__shape_4, "X__shape_4");
+    assertAligned16(buffers.X__stride_0, "X__stride_0");
+    assertAligned16(buffers.X__stride_1, "X__stride_1");
+    assertAligned16(buffers.X__stride_2, "X__stride_2");
+    assertAligned16(buffers.X__stride_3, "X__stride_3");
+    assertAligned16(buffers.X__stride_4, "X__stride_4");
+    assertAligned16(buffers.XPtr, "XPtr");
+    assertAligned16(buffers.stride_x_z, "stride_x_z");
+    assertAligned16(buffers.stride_x_m, "stride_x_m");
+    assertAligned16(buffers.stride_x_k, "stride_x_k");
+
+    assertAligned16(buffers.W__shape_0, "W__shape_0");
+    assertAligned16(buffers.W__shape_1, "W__shape_1");
+    assertAligned16(buffers.W__shape_2, "W__shape_2");
+    assertAligned16(buffers.W__stride_0, "W__stride_0");
+    assertAligned16(buffers.W__stride_1, "W__stride_1");
+    assertAligned16(buffers.W__stride_2, "W__stride_2");
+    assertAligned16(buffers.WPtr, "WPtr");
+    assertAligned16(buffers.stride_w_e, "stride_w_e");
+    assertAligned16(buffers.stride_w_k, "stride_w_k");
+    assertAligned16(buffers.stride_w_n, "stride_w_n");
+
+    assertAligned16(buffers.WMxScale__shape_0, "WMxScale__shape_0");
+    assertAligned16(buffers.WMxScale__shape_1, "WMxScale__shape_1");
+    assertAligned16(buffers.WMxScale__shape_2, "WMxScale__shape_2");
+    assertAligned16(buffers.WMxScale__stride_0, "WMxScale__stride_0");
+    assertAligned16(buffers.WMxScale__stride_1, "WMxScale__stride_1");
+    assertAligned16(buffers.WMxScale__stride_2, "WMxScale__stride_2");
+    assertAligned16(buffers.stride_w_mx_e, "stride_w_mx_e");
+    assertAligned16(buffers.stride_w_mx_k, "stride_w_mx_k");
+    assertAligned16(buffers.stride_w_mx_n, "stride_w_mx_n");
+
+    assertAligned16(buffers.B, "B");
+    assertAligned16(buffers.stride_b_e, "stride_b_e");
+
+    assertAligned16(buffers.M, "M");
+    assertAligned16(buffers.N, "N");
+    assertAligned16(buffers.K, "K");
+    assertAligned16(buffers.K_W, "K_W");
+
+    assertAligned16(buffers.XSliceSizes, "XSliceSizes");
+    assertAligned16(buffers.XSliceOffs, "XSliceOffs");
+    assertAligned16(buffers.XBlockOffs, "XBlockOffs");
+    assertAligned16(buffers.XBlockSchedule, "XBlockSchedule");
+
+    assertAligned16(buffers.batch_size, "batch_size");
+    assertAligned16(buffers.grid_m, "grid_m");
+    assertAligned16(buffers.grid_n, "grid_n");
+    assertAligned16(buffers.out_alpha, "out_alpha");
+    assertAligned16(buffers.reduce_rank, "reduce_rank");
+
+
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
     args.set(.{buffers});
@@ -593,5 +669,5 @@ pub fn main() !void {
         checksum +%= b;
     }
 
-    log.info("Kernel completed. YOut shape={f} checksum(bytes)={d}", .{ y_slice.shape, checksum });
+    log.info("Kernel completed. Out shape={f} checksum(bytes)={d}", .{ y_slice.shape, checksum });
 }
