@@ -21,6 +21,8 @@ const Adapter = dec.Adapter;
 const common = @import("common.zig");
 const KvCache = common.KvCache;
 
+const terminalwave = @import("terminalwave/terminalwave.zig");
+
 pub fn compileMelStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling mel step...", 1);
@@ -496,7 +498,30 @@ pub fn runGenerationLoop(
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
     defer current_token_buffer.deinit();
 
-    log.info("Start of transcription:\n", .{});
+    // Wave visualization + transcript accumulation
+    var wave = terminalwave.State.init(.{
+        .sensitivity = 2.0,
+        .num_bars = 50,
+        .half_height = 20,
+    });
+    errdefer wave.deinit();
+
+    var transcript: std.ArrayListUnmanaged(u8) = .empty;
+    defer transcript.deinit(allocator);
+
+    // Set up scroll region: wave is fixed at top, transcript scrolls below
+    const title_rows: u16 = if (wave.config.show_title) 3 else 0;
+    const transcript_start_row: u16 = title_rows + wave.config.half_height + 4;
+
+    // Render initial empty wave + separator, set scroll region
+    _ = wave.render(0);
+    renderSeparator(&wave);
+    wave.fmt("\x1b[{d};999r", .{transcript_start_row});
+    wave.fmt("\x1b[{d};{d}H", .{ transcript_start_row, wave.config.padding_left + 1 });
+    wave.put("\x1b[J");
+    wave.flush();
+
+    var last_transcript_len: usize = 0;
     var num_generated: usize = 0;
     var t: usize = prompt_len;
     while (true) : (t += 1) {
@@ -505,25 +530,36 @@ pub fn runGenerationLoop(
 
         if (generated_token != streaming_pad_token and (streaming_word_token == null or generated_token != streaming_word_token.?)) {
             if (try tokenizer_decoder.next(generated_token)) |chunk| {
-                std.debug.print("{s}", .{chunk});
+                try transcript.appendSlice(allocator, chunk);
             }
         }
 
-        if (generated_token == eos_token) {
-            log.info("  EOS reached at step={}", .{t});
-            break;
-        }
+        if (generated_token == eos_token) break;
 
         // Mel step: read new audio, slide history buffer, upload full chunk
         const new_samples = readStdinSamples(allocator, stdin_reader, new_audio_per_step) catch |err| switch (err) {
-            error.EndOfStream => {
-                std.debug.print("\n\n", .{});
-                log.info("Audio stream ended at step={}", .{t});
-                break;
-            },
+            error.EndOfStream => break,
             else => return err,
         };
         defer allocator.free(new_samples);
+
+        // Save cursor position (in transcript scroll region)
+        std.debug.print("\x1b7", .{});
+
+        // Render wave with current audio level (fixed area above scroll region)
+        const rms = computeRms(new_samples);
+        _ = wave.render(rms);
+        renderSeparator(&wave);
+
+        // Restore cursor and print only new transcript text
+        wave.put("\x1b8");
+        if (transcript.items.len > last_transcript_len) {
+            wave.put("\x1b[97m");
+            wave.put(transcript.items[last_transcript_len..]);
+            wave.put("\x1b[0m");
+            last_transcript_len = transcript.items.len;
+        }
+        wave.flush();
 
         // Shift history left, append new samples
         std.mem.copyForwards(f32, audio_buf[0..audio_overlap], audio_buf[new_audio_per_step..]);
@@ -568,8 +604,13 @@ pub fn runGenerationLoop(
 
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
+
+    // Reset scroll region and exit wave visualization (returns to main screen)
+    std.debug.print("\x1b[r", .{});
+    wave.deinit();
+
     const decode_duration = decode_start.untilNow(io, .awake);
-    std.debug.print("\n", .{});
+    std.debug.print("\n\x1b[1mTranscription:\x1b[0m\n{s}\n\n", .{transcript.items});
     log.info("Decode done. Generated {} tokens in {D}: {:.3}tok/s", .{
         num_generated,
         stdx.fmt.fmtDuration(decode_duration),
@@ -713,6 +754,24 @@ pub fn runPipeline(
         dec_attention_metadata_buffers,
         generated_token_slice,
     );
+}
+
+fn renderSeparator(wave: *terminalwave.State) void {
+    wave.put("\n\x1b[38;2;60;60;60m");
+    wave.putPadding();
+    for (0..wave.config.num_bars) |_| {
+        wave.put("\xe2\x94\x80");
+    }
+    wave.put("\x1b[0m\n\n");
+}
+
+fn computeRms(samples: []const f32) f32 {
+    if (samples.len == 0) return 0;
+    var sum: f32 = 0;
+    for (samples) |s| {
+        sum += s * s;
+    }
+    return @sqrt(sum / @as(f32, @floatFromInt(samples.len)));
 }
 
 fn readStdinSamples(allocator: std.mem.Allocator, reader: *std.Io.Reader, n_samples: usize) ![]f32 {
