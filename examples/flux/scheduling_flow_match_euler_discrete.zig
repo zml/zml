@@ -137,7 +137,6 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "scheduler", json_name: []const u8 = "scheduler_config.json" }) !*@This() {
         const timer_start = std.Io.Clock.awake.now(io);
-        defer log.info("Loaded FlowMatchEulerDiscrete Scheduler in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         if (progress) |p| {
             p.increaseEstimatedTotalItems(1);
@@ -147,7 +146,11 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         defer config_json.deinit();
 
-        return try init(allocator, config_json.value);
+        const value = try init(allocator, config_json.value);
+
+        defer log.info("Loaded FlowMatchEulerDiscrete Scheduler in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
+
+        return value;
     }
 
     pub fn set_timesteps(self: *@This(), num_inference_steps: ?usize, sigmas_opt: ?[]const f32, mu: ?f32, timesteps_opt: ?[]const f32) !void {

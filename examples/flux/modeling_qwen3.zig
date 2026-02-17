@@ -385,7 +385,6 @@ pub const Qwen3ForCausalLM = struct {
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, seq_len: usize, progress: ?*std.Progress.Node) !ModelContext {
         @setEvalBranchQuota(10_000);
         const timer_start = std.Io.Clock.awake.now(io);
-        defer log.info("Loaded Qwen3 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         const subfolder = "text_encoder";
 
@@ -425,6 +424,8 @@ pub const Qwen3ForCausalLM = struct {
             zml.Tensor.fromShape(input_shape),
             rope.forCompile(),
         });
+
+        log.info("Loaded Qwen3 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         return .{
             .model = model,
