@@ -139,17 +139,6 @@ pub fn compute_empirical_mu(image_seq_len: f64, num_steps: f64) f32 {
     return @floatCast(a * num_steps + b);
 }
 
-pub const EulerStep = struct {
-    pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
-        _ = self;
-        // Convert to f32 for precision, matching original logic
-        const s_f32 = sample.convert(.f32);
-        const m_f32 = model_output.convert(.f32);
-        const res = s_f32.add(m_f32.mul(dt));
-        return res.convert(.bf16);
-    }
-};
-
 pub const ResolutionInfo = struct {
     width: usize,
     height: usize,
@@ -472,33 +461,6 @@ test "TorchGenerator matches torch.randn reference (seed=0)" {
     }
 }
 
-pub fn variational_auto_encode(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, vae_ctx: autoencoder_kl.AutoencoderKLFlux2, latents: zml.Buffer) !zml.Buffer {
-    const VAEDecodeStep = struct {
-        pub fn forward(self: @This(), model: autoencoder_kl.AutoencoderKLFlux2Model, latents_tensor: zml.Tensor) zml.Tensor {
-            _ = self;
-            return autoencoder_kl.VariationalAutoEncoder.forward(autoencoder_kl.VariationalAutoEncoder{}, model, latents_tensor);
-        }
-    };
-
-    const latents_shape = latents.shape();
-    const sym_latents = zml.Tensor.fromShape(latents_shape);
-
-    log.info("Compiling VAE Decode...", .{});
-    var vae_exe = try platform.compile(allocator, io, VAEDecodeStep{}, .forward, .{ vae_ctx.model, sym_latents });
-    defer vae_exe.deinit();
-
-    var vae_args = try vae_exe.args(allocator);
-    defer vae_args.deinit(allocator);
-    vae_args.set(.{ vae_ctx.weights, latents });
-
-    var vae_res = try vae_exe.results(allocator);
-    defer vae_res.deinit(allocator);
-
-    vae_exe.call(vae_args, &vae_res);
-
-    return vae_res.get(zml.Buffer);
-}
-
 pub fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
     const npy = tools.NumpyData.load(allocator, path) catch {
         log.warn("Input not found at {s}, using zeros", .{path});
@@ -634,6 +596,17 @@ pub fn schedule(
     const sym_dt = zml.Tensor.fromShape(zml.Shape.init(.{}, .f32));
     const sym_sample = zml.Tensor.fromShape(pixel_latents_shape);
     const sym_model = zml.Tensor.fromShape(pixel_latents_shape);
+
+    const EulerStep = struct {
+        pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
+            _ = self;
+            // Convert to f32 for precision, matching original logic
+            const s_f32 = sample.convert(.f32);
+            const m_f32 = model_output.convert(.f32);
+            const res = s_f32.add(m_f32.mul(dt));
+            return res.convert(.bf16);
+        }
+    };
     var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model, sym_dt });
     defer euler_exe.deinit();
 

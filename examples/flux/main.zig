@@ -188,6 +188,17 @@ pub fn main(init: std.process.Init) !void {
     defer progress.end();
     // ============ Model loader =================
 
+    const output_image_dim: utils.ResolutionInfo = switch (args.resolution) {
+        .DBGD => .{ .width = 16, .height = 16 },
+        .HLD => .{ .width = 128, .height = 128 },
+        .LD => .{ .width = 256, .height = 256 },
+        .SD => .{ .width = 512, .height = 512 },
+        .HD => .{ .width = 1280, .height = 720 },
+        .FHD => .{ .width = 1920, .height = 1080 },
+        .QHD => .{ .width = 2560, .height = 1440 },
+        .UHD => .{ .width = 3840, .height = 2160 },
+    };
+
     var qwen2_node = progress.start("Tokenizing Prompt", 0);
     var qwen2_future = io.concurrent(Qwen2TokenizerFast.pipelineRun, .{ allocator, io, repo, zml_compute_platform, &qwen2_node, args.prompt, args.seqlen }) catch |err| {
         log.err("Error running Qwen2TokenizerFast pipeline: {}", .{err});
@@ -206,15 +217,15 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    var auto_encoder_node = progress.start("Loading AutoencoderKLFlux2", 0);
-    var vae_ctx_future = io.concurrent(AutoencoderKLFlux2.loadFromFile, .{ allocator, io, zml_compute_platform, repo, &auto_encoder_node, .{} }) catch |err| {
-        log.err("Error loading AutoencoderKLFlux2 model: {}", .{err});
-        return err;
-    };
-
     var scheduler_node = progress.start("Loading FlowMatchEulerDiscreteScheduler", 0);
     var scheduler_future = io.concurrent(FlowMatchEulerDiscreteScheduler.loadFromFile, .{ allocator, io, repo, &scheduler_node, .{} }) catch |err| {
         log.err("Error loading FlowMatchEulerDiscreteScheduler: {}", .{err});
+        return err;
+    };
+
+    var auto_encoder_node = progress.start("Loading AutoencoderKLFlux2", 0);
+    var vae_ctx_future = io.concurrent(AutoencoderKLFlux2.loadFromFile, .{ allocator, io, zml_compute_platform, repo, output_image_dim.height, output_image_dim.width, &auto_encoder_node, .{} }) catch |err| {
+        log.err("Error loading AutoencoderKLFlux2 model: {}", .{err});
         return err;
     };
 
@@ -238,9 +249,7 @@ pub fn main(init: std.process.Init) !void {
     var qwen3_node = progress.start("Running Qwen3", 0);
     const timer_qwen3_start = std.Io.Clock.awake.now(io);
     var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, zml_compute_platform, qwen3_model_ctx, tokens);
-    const qwen3_ns: i64 = @intCast(timer_qwen3_start.untilNow(io, .awake).toNanoseconds());
-    const qwen3_time_ms = @as(f64, @floatFromInt(qwen3_ns)) / 1_000_000.0;
-    log.info("Qwen3 completed in {d:.2} ms.", .{qwen3_time_ms});
+    log.info("Qwen3 completed in {d:.2} ms.", .{timer_qwen3_start.untilNow(io, .awake).toMilliseconds()});
     qwen3_node.end();
     defer embeding_output.deinit();
 
@@ -274,28 +283,14 @@ pub fn main(init: std.process.Init) !void {
     // const text_ids_selector = text_ids_from_python;
     // const prompt_embeds_selector = prompt_embeds_from_python;
 
-    const output_image_dim: utils.ResolutionInfo = switch (args.resolution) {
-        .DBGD => .{ .width = 16, .height = 16 },
-        .HLD => .{ .width = 128, .height = 128 },
-        .LD => .{ .width = 256, .height = 256 },
-        .SD => .{ .width = 512, .height = 512 },
-        .HD => .{ .width = 1280, .height = 720 },
-        .FHD => .{ .width = 1920, .height = 1080 },
-        .QHD => .{ .width = 2560, .height = 1440 },
-        .UHD => .{ .width = 3840, .height = 2160 },
-    };
-
     var transformer2d_model_ctx: Flux2Transformer2D = try transformer2d_model_ctx_future.await(io);
     flux2_transformer2d_node.end();
     defer transformer2d_model_ctx.deinit(allocator);
 
     log.info(">> Preparing Latents...", .{});
-
     const timer_prepare_latents_start = std.Io.Clock.awake.now(io);
     var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
-    const prepare_latents_ns: i64 = @intCast(timer_prepare_latents_start.untilNow(io, .awake).toNanoseconds());
-    const prepare_latents_time_ms = @as(f64, @floatFromInt(prepare_latents_ns)) / 1_000_000.0;
-    log.info("Latents prepared in {d:.2} ms.", .{prepare_latents_time_ms});
+    log.info("Latents prepared in {d:.2} ms.", .{timer_prepare_latents_start.untilNow(io, .awake).toMilliseconds()});
 
     defer latent_buf.deinit();
     defer latent_ids_buf.deinit();
@@ -306,6 +301,7 @@ pub fn main(init: std.process.Init) !void {
     defer scheduler.deinit();
     scheduler_node.end();
 
+    log.info(">> Running Scheduler...", .{});
     const timer_scheduler_start = std.Io.Clock.awake.now(io);
     var latents_out = try utils.schedule(
         transformer2d_model_ctx.model,
@@ -320,9 +316,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         zml_compute_platform,
     );
-    const scheduler_ns: i64 = @intCast(timer_scheduler_start.untilNow(io, .awake).toNanoseconds());
-    const scheduler_load_time_ms = @as(f64, @floatFromInt(scheduler_ns)) / 1_000_000.0;
-    log.info("Scheduler completed in {d:.2} ms.", .{scheduler_load_time_ms});
+    log.info("Scheduler completed in {d:.2} ms.", .{timer_scheduler_start.untilNow(io, .awake).toMilliseconds()});
     defer latents_out.deinit();
 
     // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });=
@@ -334,11 +328,9 @@ pub fn main(init: std.process.Init) !void {
     defer vae_ctx.deinit(allocator);
 
     const timer_vae_start = std.Io.Clock.awake.now(io);
-    var image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, zml_compute_platform, vae_ctx, latents_out);
+    var image_decoded_buf: zml.Buffer = try vae_ctx.decode(allocator, latents_out);
+    log.info("VAE completed in {d:.2} ms.", .{timer_vae_start.untilNow(io, .awake).toMilliseconds()});
     defer image_decoded_buf.deinit();
-    const vae_ns: i64 = @intCast(timer_vae_start.untilNow(io, .awake).toNanoseconds());
-    const vae_load_time_ms = @as(f64, @floatFromInt(vae_ns)) / 1_000_000.0;
-    log.info("VAE completed in {d:.2} ms.", .{vae_load_time_ms});
 
     // try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
 
@@ -346,9 +338,7 @@ pub fn main(init: std.process.Init) !void {
 
     const timer_rgb_start = std.Io.Clock.awake.now(io);
     const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
-    const rgb_conversion_ns: i64 = @intCast(timer_rgb_start.untilNow(io, .awake).toNanoseconds());
-    const rgb_conversion_time_ms = @as(f64, @floatFromInt(rgb_conversion_ns)) / 1_000_000.0;
-    log.info("RGB conversion completed in {d:.2} ms.", .{rgb_conversion_time_ms});
+    log.info("RGB conversion completed in {d:.2} ms.", .{timer_rgb_start.untilNow(io, .awake).toMilliseconds()});
 
     defer rgb_image_buffer.free(allocator);
 

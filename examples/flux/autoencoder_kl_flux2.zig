@@ -543,6 +543,7 @@ pub const AutoencoderKLFlux2 = struct {
     config: Config,
     config_json: std.json.Parsed(Config),
     weights: zml.Bufferized(AutoencoderKLFlux2Model),
+    exe: zml.Exe,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         unloadWeights(allocator, &self.weights);
@@ -550,8 +551,10 @@ pub const AutoencoderKLFlux2 = struct {
         self.store.deinit();
         self.registry.deinit();
         self.config_json.deinit();
+        self.exe.deinit();
     }
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
+
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, image_height: usize, image_width: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         var config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         errdefer config_json.deinit();
 
@@ -567,7 +570,7 @@ pub const AutoencoderKLFlux2 = struct {
         var model = try AutoencoderKLFlux2Model.init(tensor_store.view(), allocator, config_json.value);
         errdefer model.deinit();
 
-        const weights = try zml.io.load(
+        var weights = try zml.io.load(
             AutoencoderKLFlux2Model,
             &model,
             allocator,
@@ -575,6 +578,30 @@ pub const AutoencoderKLFlux2 = struct {
             platform,
             .{ .parallelism = 1, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = progress },
         );
+        errdefer unloadWeights(allocator, &weights);
+
+        // Compile VAE Decode Step
+        const VAEDecodeStep = struct {
+            pub fn forward(self: @This(), model_inner: AutoencoderKLFlux2Model, latents_tensor: zml.Tensor) zml.Tensor {
+                _ = self;
+                return VariationalAutoEncoder.forward(VariationalAutoEncoder{}, model_inner, latents_tensor);
+            }
+        };
+
+        const batch_size = 1;
+        // In Flux signal flow:
+        // Image [1, 3, H, W] -> VAE Encode -> [1, 16, H/8, W/8] -> Patchify -> [1, 64, H/16, W/16]
+        // Transformer operates on [1, 64, H/16, W/16]
+        // Input to VAE Decode is the output of Transformer (unpacked): [1, 64, H/16, W/16]
+        // VariationalAutoEncoder.forward handles the unpatchify (depth_to_space) logic.
+        const c_dim = @as(usize, @intCast(config_json.value.latent_channels * 4));
+        const h_dim = image_height / 16;
+        const w_dim = image_width / 16;
+        const latents_shape = zml.Shape.init(.{ batch_size, @as(i64, @intCast(c_dim)), @as(i64, @intCast(h_dim)), @as(i64, @intCast(w_dim)) }, .bf16);
+        const sym_latents = zml.Tensor.fromShape(latents_shape);
+
+        var vae_exe = try platform.compile(allocator, io, VAEDecodeStep{}, .forward, .{ model, sym_latents });
+        errdefer vae_exe.deinit();
 
         return .{
             .model = model,
@@ -583,6 +610,20 @@ pub const AutoencoderKLFlux2 = struct {
             .config = config_json.value,
             .config_json = config_json,
             .weights = weights,
+            .exe = vae_exe,
         };
+    }
+
+    pub fn decode(self: *const @This(), allocator: std.mem.Allocator, latents: zml.Buffer) !zml.Buffer {
+        var vae_args = try self.exe.args(allocator);
+        defer vae_args.deinit(allocator);
+        vae_args.set(.{ self.weights, latents });
+
+        var vae_res = try self.exe.results(allocator);
+        defer vae_res.deinit(allocator);
+
+        self.exe.call(vae_args, &vae_res);
+
+        return vae_res.get(zml.Buffer);
     }
 };

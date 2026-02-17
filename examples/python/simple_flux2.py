@@ -16,9 +16,9 @@ def run_pipeline():
 
     # dtype = torch.float32
     # device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    # device = "cpu"
+    device = "cpu"
     # device = "mps"
-    device = "cuda"
+    # device = "cuda"
 
     # prompt = "A flying surperman style cat"
     prompt = "A photo of a cat on a bed"
@@ -32,8 +32,8 @@ def run_pipeline():
 
     output = pipeline(
             prompt=prompt,
-            width=512,
-            height=512,
+            width=128,
+            height=128,
             # width=1920,
             # height=1080,
             num_inference_steps=4,
