@@ -572,16 +572,6 @@ pub const AutoencoderKLFlux2 = struct {
         var model = try AutoencoderKLFlux2Model.init(tensor_store.view(), allocator, config_json.value);
         errdefer model.deinit();
 
-        var weights = try zml.io.load(
-            AutoencoderKLFlux2Model,
-            &model,
-            allocator,
-            io,
-            platform,
-            .{ .parallelism = 1, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = progress },
-        );
-        errdefer unloadWeights(allocator, &weights);
-
         // Compile VAE Decode Step
         const VAEDecodeStep = struct {
             pub fn forward(self: @This(), model_inner: AutoencoderKLFlux2Model, latents_tensor: zml.Tensor) zml.Tensor {
@@ -602,7 +592,30 @@ pub const AutoencoderKLFlux2 = struct {
         const latents_shape = zml.Shape.init(.{ batch_size, @as(i64, @intCast(c_dim)), @as(i64, @intCast(h_dim)), @as(i64, @intCast(w_dim)) }, .bf16);
         const sym_latents = zml.Tensor.fromShape(latents_shape);
 
-        var vae_exe = try platform.compile(allocator, io, VAEDecodeStep{}, .forward, .{ model, sym_latents });
+        const Loader = struct {
+            pub fn load(_model: *AutoencoderKLFlux2Model, _allocator: std.mem.Allocator, _io: std.Io, _platform: *const zml.Platform, _store: *zml.io.TensorStore, _progress: ?*std.Progress.Node) !zml.Bufferized(AutoencoderKLFlux2Model) {
+                return zml.io.load(
+                    AutoencoderKLFlux2Model,
+                    _model,
+                    _allocator,
+                    _io,
+                    _platform,
+                    .{ .parallelism = 1, .store = _store, .dma_chunks = 4, .dma_chunk_size = 128 * 1024 * 1024, .progress = _progress },
+                );
+            }
+
+            pub fn compile(_model: AutoencoderKLFlux2Model, _allocator: std.mem.Allocator, _io: std.Io, _platform: *const zml.Platform, _sym_latents: zml.Tensor) !zml.Exe {
+                return _platform.compile(_allocator, _io, VAEDecodeStep{}, .forward, .{ _model, _sym_latents });
+            }
+        };
+
+        var load_future = try io.concurrent(Loader.load, .{ &model, allocator, io, platform, &tensor_store, progress });
+        var compile_future = try io.concurrent(Loader.compile, .{ model, allocator, io, platform, sym_latents });
+
+        var weights = try load_future.await(io);
+        errdefer unloadWeights(allocator, &weights);
+
+        var vae_exe = try compile_future.await(io);
         errdefer vae_exe.deinit();
 
         log.info("Loaded AutoencoderKLFlux2 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});

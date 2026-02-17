@@ -1019,18 +1019,6 @@ pub const Flux2Transformer2D = struct {
         log.info("Model init in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
         timer_last = std.Io.Clock.awake.now(io);
 
-        var weights = try zml.io.load(
-            Flux2Transformer2DModel,
-            &model,
-            allocator,
-            io,
-            platform,
-            .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
-        );
-        errdefer utils.unloadWeights(allocator, &weights);
-        log.info("Weights loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
-        timer_last = std.Io.Clock.awake.now(io);
-
         const adjusted_height = image_height / 16;
         const adjusted_width = image_width / 16;
         const S = adjusted_height * adjusted_width;
@@ -1048,6 +1036,7 @@ pub const Flux2Transformer2D = struct {
         const sym_t_proj = zml.Tensor.fromShape(t_proj_shape);
         const sym_g_proj = zml.Tensor.fromShape(t_proj_shape);
         const sym_prompt = zml.Tensor.fromShape(prompt_embeds_shape);
+
         const sym_rotary_cos = zml.Tensor.fromShape(rotary_shape);
         const sym_rotary_sin = zml.Tensor.fromShape(rotary_shape);
 
@@ -1058,9 +1047,33 @@ pub const Flux2Transformer2D = struct {
             }
         };
 
-        var step_exe = try platform.compile(allocator, io, FluxStep{}, .forward, .{ model, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
-        errdefer step_exe.deinit();
+        const Loader = struct {
+            pub fn load(_model: *Flux2Transformer2DModel, _allocator: std.mem.Allocator, _io: std.Io, _platform: *const zml.Platform, _parallelism_level: usize, _store: *zml.io.TensorStore, _progress: ?*std.Progress.Node) !zml.Bufferized(Flux2Transformer2DModel) {
+                return zml.io.load(
+                    Flux2Transformer2DModel,
+                    _model,
+                    _allocator,
+                    _io,
+                    _platform,
+                    .{ .parallelism = _parallelism_level, .store = _store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = _progress },
+                );
+            }
+
+            pub fn compile(_model: Flux2Transformer2DModel, _allocator: std.mem.Allocator, _io: std.Io, _platform: *const zml.Platform, _sym_latents: zml.Tensor, _sym_prompt: zml.Tensor, _sym_t_proj: zml.Tensor, _sym_g_proj: zml.Tensor, _sym_rotary_cos: zml.Tensor, _sym_rotary_sin: zml.Tensor) !zml.Exe {
+                return _platform.compile(_allocator, _io, FluxStep{}, .forward, .{ _model, _sym_latents, _sym_prompt, _sym_t_proj, _sym_g_proj, _sym_rotary_cos, _sym_rotary_sin });
+            }
+        };
+
+        var load_future = try io.concurrent(Loader.load, .{ &model, allocator, io, platform, @max(1, parallelism_level / 4), &tensor_store, progress });
+        var compile_future = try io.concurrent(Loader.compile, .{ model, allocator, io, platform, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
+
+        var weights = try load_future.await(io);
+        errdefer utils.unloadWeights(allocator, &weights);
+        log.info("Weights loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+
+        const step_exe = try compile_future.await(io);
         log.info("Flux Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+
         timer_last = std.Io.Clock.awake.now(io);
 
         const EulerStep = struct {
@@ -1079,7 +1092,6 @@ pub const Flux2Transformer2D = struct {
         var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model_out, sym_dt });
         errdefer euler_exe.deinit();
         log.info("Euler Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
-
 
         return .{
             .model = model,

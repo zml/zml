@@ -385,6 +385,9 @@ pub const Qwen3ForCausalLM = struct {
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, seq_len: usize, progress: ?*std.Progress.Node) !ModelContext {
         @setEvalBranchQuota(10_000);
         const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded Qwen3 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
+
+        var timer_last = timer_start;
 
         const subfolder = "text_encoder";
 
@@ -392,40 +395,69 @@ pub const Qwen3ForCausalLM = struct {
         // log.info("Loaded config type: {s} from {s} with values {any}", .{ @typeName(Config), subfolder, config_json });
         defer config_json.deinit();
         const config = config_json.value;
+        log.info("Configs parsed in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        timer_last = std.Io.Clock.awake.now(io);
 
         // std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromRepo(allocator, io, try repo_dir.openDir(io, subfolder, .{}));
         errdefer tensor_registry.deinit();
+        log.info("TensorRegistry created in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        timer_last = std.Io.Clock.awake.now(io);
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();
         var model = try Qwen3ForCausalLM.init(allocator, tensor_store.view(), config);
         errdefer model.deinit(allocator);
-
-        // log.info("Hydrating Qwen3 Weights...", .{});
-        var weights = try zml.io.load(
-            Qwen3ForCausalLM,
-            &model,
-            allocator,
-            io,
-            platform,
-            .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
-        );
-        errdefer utils.unloadWeights(allocator, &weights);
+        log.info("Model initialized in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        timer_last = std.Io.Clock.awake.now(io);
 
         const head_dim: usize = @intCast(model.model.layers[0].self_attn.head_dim);
 
         const rope = try computeRoPE(allocator, io, platform, seq_len, head_dim, config.rope_theta);
-        const input_shape = zml.Shape.init(.{ 1, seq_len }, .i64);
-        const qwen_exe = try platform.compile(allocator, io, QwenEncodingStep{}, .forward, .{
-            model,
-            zml.Tensor.fromShape(input_shape),
-            zml.Tensor.fromShape(input_shape),
-            rope.forCompile(),
-        });
+        log.info("RoPE computed in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        timer_last = std.Io.Clock.awake.now(io);
 
-        log.info("Loaded Qwen3 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
+        const input_shape = zml.Shape.init(.{ 1, seq_len }, .i64);
+
+        const Loader = struct {
+            pub fn load(_model: *Qwen3ForCausalLM, _allocator: std.mem.Allocator, _io: std.Io, _platform: *const zml.Platform, _parallelism_level: usize, _store: *zml.io.TensorStore, _progress: ?*std.Progress.Node) !zml.Bufferized(Qwen3ForCausalLM) {
+                return zml.io.load(
+                    Qwen3ForCausalLM,
+                    _model,
+                    _allocator,
+                    _io,
+                    _platform,
+                    .{ .parallelism = _parallelism_level, .store = _store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = _progress },
+                );
+            }
+
+            pub fn compile(
+                _model: Qwen3ForCausalLM,
+                _allocator: std.mem.Allocator,
+                _io: std.Io,
+                _platform: *const zml.Platform,
+                _input_shape: zml.Shape,
+                _rope: utils.RoPE,
+            ) !zml.Exe {
+                return _platform.compile(_allocator, _io, QwenEncodingStep{}, .forward, .{
+                    _model,
+                    zml.Tensor.fromShape(_input_shape),
+                    zml.Tensor.fromShape(_input_shape),
+                    _rope,
+                });
+            }
+        };
+
+        var load_future = try io.concurrent(Loader.load, .{ &model, allocator, io, platform, @max(1, parallelism_level / 4), &tensor_store, progress });
+        var compile_future = try io.concurrent(Loader.compile, .{ model, allocator, io, platform, input_shape, rope.forCompile() });
+
+        var weights = try load_future.await(io);
+        errdefer utils.unloadWeights(allocator, &weights);
+        log.info("Weights loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+
+        const qwen_exe = try compile_future.await(io);
+        log.info("Model compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
 
         return .{
             .model = model,
