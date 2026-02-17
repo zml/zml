@@ -89,7 +89,7 @@ pub fn main(init: std.process.Init) !void {
     // const audio_len = padded_wav.len;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
-        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.50 } } },
+        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.90 } } },
     });
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
