@@ -436,7 +436,7 @@ pub const SelfAttn = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_output = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+        const attn_output = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters, .{});
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };

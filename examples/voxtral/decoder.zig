@@ -220,12 +220,19 @@ pub const SelfAttention = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        // Update KV cache and retrieve cached K/V
-        const new_kv_cache = kv_cache.update(k, v, pos_index.rename(.{ .s = .k }));
+        // Update KV cache with modular indexing for sliding window circular buffer
+        const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
+        const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
+        const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
-        const attn_out = zml.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+        // Cap token_index so seqused_k doesn't exceed cache bounds
+        const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
+        const attn_token_index = token_index.minimum(max_token_index);
+        const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
+            .sliding_window = @intCast(config.sliding_window),
+        });
 
         // Merge heads and output projection: [q, h, hd] → [s, d]
         const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });

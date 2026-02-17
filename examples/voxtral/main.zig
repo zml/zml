@@ -30,7 +30,6 @@ const CliArgs = struct {
     model: []const u8,
     transcription_delay_ms: f32 = 480.0,
     backend: ?zml.attention.Backend = null,
-    max_seqlen: u32 = 1500,
 };
 
 const n_left_pad_tokens: u32 = 32;
@@ -109,12 +108,12 @@ pub fn main(init: std.process.Init) !void {
     var decoder_model: Decoder = .init(allocator, model_store.view(), config);
     defer decoder_model.deinit(allocator);
 
-    // KV cache shapes for encoder and decoder
+    // KV cache shapes for encoder and decoder, sized to sliding_window for memory efficiency
     const enc_cfg = config.encoder();
     const enc_dtype = encoder_model.norm.dtype();
     const enc_kv_cache: KvCache = .init(.init(.{
         .layer = enc_cfg.n_layers,
-        .k = args.max_seqlen,
+        .k = enc_cfg.sliding_window,
         .h = enc_cfg.n_kv_heads,
         .hd = enc_cfg.head_dim,
     }, enc_dtype));
@@ -122,13 +121,13 @@ pub fn main(init: std.process.Init) !void {
     const dec_dtype = decoder_model.tok_embeddings.dtype();
     const dec_kv_cache: KvCache = .init(.init(.{
         .layer = decoder_model.layers.len,
-        .k = args.max_seqlen,
+        .k = config.sliding_window,
         .h = config.n_kv_heads,
         .hd = config.head_dim,
     }, dec_dtype));
 
-    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(args.max_seqlen)));
-    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(args.max_seqlen)));
+    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_cfg.sliding_window)));
+    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(config.sliding_window)));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
 
     // Launch concurrent compilation and buffer loading
