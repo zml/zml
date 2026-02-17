@@ -37,7 +37,7 @@ zig_test(
 )
 
 zig_binary(
-    name = "flux",
+    name = "flux2",
     srcs = [
         "autoencoder_kl_flux2.zig",
         "flux2_transformer2d_model.zig",
@@ -62,12 +62,12 @@ zig_binary(
 
 mtree_spec(
     name = "mtree",
-    srcs = [":flux"],
+    srcs = [":flux2"],
 )
 
 tar(
     name = "archive",
-    srcs = [":flux"],
+    srcs = [":flux2"],
     args = [
         "--options",
         ",".join([
@@ -82,7 +82,7 @@ tar(
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
-    entrypoint = ["/{}/flux".format(package_name())],
+    entrypoint = ["/{}/flux2".format(package_name())],
     target_compatible_with = [
         "@platforms//os:linux",
     ],
@@ -107,13 +107,13 @@ oci_push(
     name = "push",
     image = ":image",
     remote_tags = ["latest"],
-    repository = "index.docker.io/zmlai/flux",
+    repository = "index.docker.io/zmlai/flux2",
     tags = ["manual"],
 )
 
 build_test(
     name = "test",
-    targets = [":flux"],
+    targets = [":flux2"],
 )
 
 zig_binary(

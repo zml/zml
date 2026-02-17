@@ -8,7 +8,7 @@ zls_completion(
         "//examples/mnist",
         "//stdx",
         "//zml",
-        "//examples/flux",
+        "//examples/flux2",
     ],
 )
 
