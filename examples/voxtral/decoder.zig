@@ -129,7 +129,7 @@ pub const Decoder = struct {
 
         // Compute logits in f32 for precision
         const logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
-        const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{}, rng);
+        const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{ .temperature = 0 }, rng);
 
         return .{ output_tokens.convert(.u32), cache, new_rng };
     }
