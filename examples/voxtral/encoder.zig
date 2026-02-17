@@ -256,6 +256,22 @@ pub const SelfAttention = struct {
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
 
+        // EXPERIMENTAL
+        // Reorder K/V from circular buffer to temporal order for correct causal masking.
+        // When the cache wraps, physical order != temporal order, which breaks FA2's
+        // position-based causal mask for multi-token (q_len > 1) attention.
+        {
+            const pos_end = token_index.addConstant(x.dim(.s));
+            const is_full = pos_end.cmp(.GE, cache_size);
+            const rotation_start = pos_end.remainder(cache_size);
+            const safe_start = is_full.select(rotation_start, Tensor.scalar(@as(u32, 0), token_index.dtype()));
+            const reorder_arange = Tensor.arange(.{ .end = kv_cache.k.dim(.k) }, token_index.dtype()).withTags(.{.kk});
+            const reorder_idx = reorder_arange.add(safe_start.broad(reorder_arange.shape()))
+                .remainder(cache_size.broad(reorder_arange.shape()));
+            k = k.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+            v = v.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+        }
+
         // Cap token_index so seqused_k doesn't exceed cache bounds
         const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
         const attn_token_index = token_index.minimum(max_token_index);
