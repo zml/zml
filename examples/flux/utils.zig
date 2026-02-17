@@ -139,6 +139,17 @@ pub fn compute_empirical_mu(image_seq_len: f64, num_steps: f64) f32 {
     return @floatCast(a * num_steps + b);
 }
 
+pub const EulerStep = struct {
+    pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
+        _ = self;
+        // Convert to f32 for precision, matching original logic
+        const s_f32 = sample.convert(.f32);
+        const m_f32 = model_output.convert(.f32);
+        const res = s_f32.add(m_f32.mul(dt));
+        return res.convert(.bf16);
+    }
+};
+
 pub const ResolutionInfo = struct {
     width: usize,
     height: usize,
@@ -619,133 +630,106 @@ pub fn schedule(
     var step_exe = try platform.compile(allocator, io, FluxStep{}, .forward, .{ transformer, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
     defer step_exe.deinit();
 
+    // Compiling Scheduler Step
+    const sym_dt = zml.Tensor.fromShape(zml.Shape.init(.{}, .f32));
+    const sym_sample = zml.Tensor.fromShape(pixel_latents_shape);
+    const sym_model = zml.Tensor.fromShape(pixel_latents_shape);
+    var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model, sym_dt });
+    defer euler_exe.deinit();
+
     var current_latents = latents;
     var is_first = true;
     scheduler.set_begin_index(0);
 
-    for (scheduler.timesteps) |t_step| {
-        // log.info("   Step {d}/{d} (t={d:.2})", .{ idx + 1, num_inference_steps, t_step });
+    // TODO: Make this configurable
+    const guidance_scale: f32 = 3.5;
 
-        // Python divides timestep by 1000 before passing to transformer,
-        // but the transformer multiplies by 1000 internally before computing embeddings.
-        // So we use the full timestep value for our precomputed embeddings.
+    // Guidance Projection (constant across all steps — compute once)
+    const g_val: f32 = guidance_scale * 1000.0; // Python multiplies by 1000 internally
+    var g_proj_f32: [256]f32 = undefined;
+    for (0..128) |j| {
+        const arg = g_val * freq_vals_arr[j];
+        g_proj_f32[j] = @cos(arg);
+        g_proj_f32[j + 128] = @sin(arg);
+    }
+    var g_proj_bf16: [256]u16 = undefined;
+    for (g_proj_f32, 0..) |val, i| {
+        const bits: u32 = @bitCast(val);
+        g_proj_bf16[i] = @truncate(bits >> 16);
+    }
+    var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(&g_proj_bf16));
+    defer g_proj_buf.deinit();
+
+    // Batch-precompute all timestep projection buffers (timesteps are known ahead of time)
+    const t_proj_bufs = try allocator.alloc(zml.Buffer, scheduler.timesteps.len);
+    defer {
+        for (t_proj_bufs) |*buf| buf.deinit();
+        allocator.free(t_proj_bufs);
+    }
+    for (scheduler.timesteps, 0..) |t_step, step_i| {
         const t_val: f32 = t_step;
-        // Heap allocate to avoid stack-pointer issues with Buffer
-        const t_proj_slice = try allocator.alloc(f32, 256);
-        defer allocator.free(t_proj_slice);
-
-        // Project t_val using freq_vals_arr
+        var t_proj_f32: [256]f32 = undefined;
         for (0..128) |j| {
             const arg = t_val * freq_vals_arr[j];
-            t_proj_slice[j] = @cos(arg);
-            t_proj_slice[j + 128] = @sin(arg);
+            t_proj_f32[j] = @cos(arg);
+            t_proj_f32[j + 128] = @sin(arg);
         }
-        // Convert to bf16
-        const t_proj_bf16 = try allocator.alloc(u16, 256);
-        defer allocator.free(t_proj_bf16);
-        for (t_proj_slice, 0..) |val, i| {
+        var t_proj_bf16: [256]u16 = undefined;
+        for (t_proj_f32, 0..) |val, i| {
             const bits: u32 = @bitCast(val);
             t_proj_bf16[i] = @truncate(bits >> 16);
         }
+        t_proj_bufs[step_i] = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(&t_proj_bf16));
+    }
 
-        var t_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(t_proj_bf16));
+    // Pre-allocate executor args/results for reuse across all iterations
+    var args_step = try step_exe.args(allocator);
+    defer args_step.deinit(allocator);
+    var res_step = try step_exe.results(allocator);
+    defer res_step.deinit(allocator);
+    var args_euler = try euler_exe.args(allocator);
+    defer args_euler.deinit(allocator);
+    var res_euler = try euler_exe.results(allocator);
+    defer res_euler.deinit(allocator);
 
-        // Guidance Projection
-        const guidance_scale: f32 = 3.5;
-        const g_val: f32 = guidance_scale * 1000.0; // Python multiplies by 1000 internally
-        const g_proj_slice = try allocator.alloc(f32, 256);
-        defer allocator.free(g_proj_slice);
+    for (0..scheduler.timesteps.len) |step_i| {
+        // log.info("   Step {d}/{d} (t={d:.2})", .{ step_i + 1, num_inference_steps, scheduler.timesteps[step_i] });
 
-        for (0..128) |j| {
-            const arg = g_val * freq_vals_arr[j];
-            g_proj_slice[j] = @cos(arg);
-            g_proj_slice[j + 128] = @sin(arg);
-        }
-        // Convert to bf16
-        const g_proj_bf16 = try allocator.alloc(u16, 256);
-        defer allocator.free(g_proj_bf16);
-        for (g_proj_slice, 0..) |val, i| {
-            const bits: u32 = @bitCast(val);
-            g_proj_bf16[i] = @truncate(bits >> 16);
-        }
-        var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_bf16));
-        defer g_proj_buf.deinit();
-
-        defer t_proj_buf.deinit();
-
-        var args_step = try step_exe.args(allocator);
-        defer args_step.deinit(allocator);
-
-        // Debug: Print RoPE for verification
-        // try tools.printBuffer(allocator, io, rotary_cos_dev, 20, "RoPE Cos");
-        // try tools.printBuffer(allocator, io, rotary_sin_dev, 20, "RoPE Sin");
-
-        args_step.set(.{ weights, current_latents, prompt_embeds, t_proj_buf, g_proj_buf, rotary_cos_dev, rotary_sin_dev });
-
-        var res_step = try step_exe.results(allocator);
-        defer res_step.deinit(allocator);
+        args_step.set(.{ weights, current_latents, prompt_embeds, t_proj_bufs[step_i], g_proj_buf, rotary_cos_dev, rotary_sin_dev });
 
         step_exe.call(args_step, &res_step);
 
         var noise_pred_buf = res_step.get(zml.Buffer);
         defer noise_pred_buf.deinit();
 
-        const shape_flat = current_latents.shape().count();
-        const noise_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .bf16));
-        defer noise_slice.free(allocator);
-        try noise_pred_buf.toSlice(io, noise_slice);
+        // Calculate dt on CPU
+        const step_idx = scheduler.step_index.?;
+        const sigma = scheduler.sigmas[step_idx];
+        const sigma_next = scheduler.sigmas[step_idx + 1];
+        const dt = sigma_next - sigma;
+        scheduler.step_index.? += 1;
 
-        const latents_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .bf16));
-        defer latents_slice.free(allocator);
-        try current_latents.toSlice(io, latents_slice);
+        // Create dt buffer
+        var dt_arr = [1]f32{dt};
+        var dt_buf = try zml.Buffer.fromBytes(io, platform, sym_dt.shape(), std.mem.sliceAsBytes(&dt_arr));
+        defer dt_buf.deinit();
 
-        const n_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(noise_slice.items(u8))));
-        const l_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(latents_slice.items(u8))));
+        // Run Euler Step on Device
+        args_euler.set(.{ current_latents, noise_pred_buf, dt_buf });
 
-        // Convert bf16 to f32 for scheduler computation
-        const n_data_f32 = try allocator.alloc(f32, shape_flat);
-        defer allocator.free(n_data_f32);
-        const l_data_f32 = try allocator.alloc(f32, shape_flat);
-        defer allocator.free(l_data_f32);
-        for (n_data_bf16, 0..) |val, i| {
-            const bits: u32 = @as(u32, val) << 16;
-            n_data_f32[i] = @bitCast(bits);
-        }
-        for (l_data_bf16, 0..) |val, i| {
-            const bits: u32 = @as(u32, val) << 16;
-            l_data_f32[i] = @bitCast(bits);
-        }
+        euler_exe.call(args_euler, &res_euler);
 
-        // try tools.printFlatten(allocator, io, noise_pred_buf, 20, "   noise_pred (transformer output) (first 20)", .{});
-        // try tools.printFlatten(allocator, io, current_latents, 20, "   Latents before step.", .{ .include_shape = true });
-
-        const out_data_f32 = try allocator.alloc(f32, shape_flat);
-        defer allocator.free(out_data_f32);
-
-        try scheduler.step(n_data_f32, l_data_f32, out_data_f32);
-
-        // Convert f32 back to bf16
-        const out_data_bf16 = try allocator.alloc(u16, shape_flat);
-        defer allocator.free(out_data_bf16);
-        for (out_data_f32, 0..) |val, i| {
-            const bits: u32 = @bitCast(val);
-            out_data_bf16[i] = @truncate(bits >> 16);
-        }
-
-        const next_latents_buf = try zml.Buffer.fromBytes(io, platform, current_latents.shape(), std.mem.sliceAsBytes(out_data_bf16));
+        const next_latents_buf = res_euler.get(zml.Buffer);
 
         if (!is_first) current_latents.deinit();
         current_latents = next_latents_buf;
         is_first = false;
-
-        // try tools.printFlatten(allocator, io, current_latents, 20, "   Latents after step (first 20).", .{ .include_shape = true });
     }
 
+    try tools.printFlatten(allocator, io, current_latents, 20, "Latents after steps (first 20).", .{ .include_shape = true });
     // unpack_latents_with_ids - scatter tokens into correct spatial positions
     const unpacked = try unpackLatentsWithIds(allocator, io, platform, current_latents, latent_ids);
-
-    // Print here to catch output before potential deinit crash
-    // try tools.printFlatten(allocator, io, unpacked, 20, "    Latents Out (first 20).", .{ .include_shape = true });
+    try tools.printFlatten(allocator, io, unpacked, 20, "Unpacked Latents (first 20).", .{ .include_shape = true });
 
     if (!is_first) current_latents.deinit();
 
@@ -768,6 +752,11 @@ fn unpackLatentsWithIds(
     const seq_len = lat_shape.dim(1);
     const channels = lat_shape.dim(2);
 
+    // Precompute dimension sizes as usize to avoid repeated @intCast in loops
+    const bs: usize = @intCast(batch_size);
+    const sl: usize = @intCast(seq_len);
+    const ch: usize = @intCast(channels);
+
     // Read latents and IDs to CPU
     var lat_slice = try zml.Slice.alloc(allocator, lat_shape);
     defer lat_slice.free(allocator);
@@ -780,19 +769,10 @@ fn unpackLatentsWithIds(
     const lat_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(lat_slice.items(u8))));
     const ids_data = std.mem.bytesAsSlice(i32, @as([]align(4) u8, @alignCast(ids_slice.items(u8))));
 
-    // Convert bf16 to f32 for processing
-    const lat_count: usize = @intCast(batch_size * seq_len * channels);
-    const lat_data = try allocator.alloc(f32, lat_count);
-    defer allocator.free(lat_data);
-    for (lat_data_bf16, 0..) |val, i| {
-        const bits: u32 = @as(u32, val) << 16;
-        lat_data[i] = @bitCast(bits);
-    }
-
     // Find max h and w from IDs (column 1 = h_ids, column 2 = w_ids)
     var max_h: i32 = 0;
     var max_w: i32 = 0;
-    for (0..@intCast(seq_len)) |s| {
+    for (0..sl) |s| {
         const h_id = ids_data[s * 4 + 1];
         const w_id = ids_data[s * 4 + 2];
         if (h_id > max_h) max_h = h_id;
@@ -801,44 +781,36 @@ fn unpackLatentsWithIds(
     const h: usize = @intCast(max_h + 1);
     const w: usize = @intCast(max_w + 1);
 
-    // Allocate output: [B, C, H, W]
+    // Allocate output: [B, C, H, W] — scatter bf16 values directly (no f32 intermediate)
     const out_shape = zml.Shape.init(.{ batch_size, channels, h, w }, .bf16);
     const out_count = out_shape.count();
-    const out_bytes_f32 = try allocator.alloc(f32, out_count);
-    defer allocator.free(out_bytes_f32);
+    const out_bf16 = try allocator.alloc(u16, out_count);
+    defer allocator.free(out_bf16);
 
     // Initialize to zero
-    @memset(out_bytes_f32, 0);
+    @memset(out_bf16, 0);
 
-    // Scatter tokens into place
-    for (0..@intCast(batch_size)) |b| {
-        for (0..@intCast(seq_len)) |s| {
-            const h_id: usize = @intCast(ids_data[b * @as(usize, @intCast(seq_len)) * 4 + s * 4 + 1]);
-            const w_id: usize = @intCast(ids_data[b * @as(usize, @intCast(seq_len)) * 4 + s * 4 + 2]);
+    // Scatter tokens into place (bf16 directly, no conversion needed)
+    for (0..bs) |b| {
+        const b_out_base = b * ch * h * w;
+        const b_in_base = b * sl * ch;
+        for (0..sl) |s| {
+            const h_id: usize = @intCast(ids_data[b * sl * 4 + s * 4 + 1]);
+            const w_id: usize = @intCast(ids_data[b * sl * 4 + s * 4 + 2]);
+            const spatial_offset = h_id * w + w_id;
+            const in_base = b_in_base + s * ch;
 
-            for (0..@intCast(channels)) |c| {
-                // Input: [B, seq_len, C]
-                const in_idx = b * @as(usize, @intCast(seq_len)) * @as(usize, @intCast(channels)) +
-                    s * @as(usize, @intCast(channels)) + c;
-                // Output: [B, C, H, W]
-                const out_idx = b * @as(usize, @intCast(channels)) * h * w +
-                    c * h * w +
-                    h_id * w +
-                    w_id;
-                out_bytes_f32[out_idx] = lat_data[in_idx];
+            for (0..ch) |c| {
+                // Input: [B, seq_len, C] — sequential read
+                const in_idx = in_base + c;
+                // Output: [B, C, H, W] — strided write (stride = h*w)
+                const out_idx = b_out_base + c * h * w + spatial_offset;
+                out_bf16[out_idx] = lat_data_bf16[in_idx];
             }
         }
     }
 
-    // Convert f32 to bf16
-    const out_bytes_bf16 = try allocator.alloc(u16, out_count);
-    defer allocator.free(out_bytes_bf16);
-    for (out_bytes_f32, 0..) |val, i| {
-        const bits: u32 = @bitCast(val);
-        out_bytes_bf16[i] = @truncate(bits >> 16);
-    }
-
-    return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bytes_bf16));
+    return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bf16));
 }
 
 const RgbImage = struct {

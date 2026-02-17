@@ -169,25 +169,6 @@ pub fn main(init: std.process.Init) !void {
     var zml_compute_platform: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
     defer zml_compute_platform.deinit(allocator);
 
-    // var http_client: std.http.Client = .{
-    //     .allocator = allocator,
-    //     .io = threaded.io(),
-    // };
-    // try http_client.initDefaultProxies(arena);
-    // defer http_client.deinit();
-
-    // var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-    // defer vfs_file.deinit();
-    // try vfs.register("file", vfs_file.io());
-
-    // var vfs_https: zml.io.VFS.HTTP = try .init(allocator, threaded.io(), &http_client, .https);
-    // defer vfs_https.deinit();
-    // try vfs.register("https", vfs_https.io());
-
-    // var hf_vfs: zml.io.VFS.HF = try .auto(allocator, threaded.io(), &http_client);
-    // defer hf_vfs.deinit();
-    // try vfs.register("hf", hf_vfs.io());
-
     log.info("Resolving model repo", .{});
     const repo: std.Io.Dir = try zml.safetensors.resolveModelRepo(io, args.model);
 
