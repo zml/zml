@@ -804,8 +804,6 @@ pub fn saveFluxImageToPng(allocator: std.mem.Allocator, rgb: *const RgbImage, fi
 
     if (c_interface.stbi_write_png(filename_z.ptr, rgb.w, rgb.h, rgb.comp, rgb.data.ptr, rgb.stride_in_bytes) == 0) {
         log.err("Failed to write PNG to {s}", .{filename});
-    } else {
-        log.info("Saved PNG to {s}", .{filename});
     }
 }
 

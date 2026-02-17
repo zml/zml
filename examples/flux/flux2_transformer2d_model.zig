@@ -993,6 +993,8 @@ pub const Flux2Transformer2D = struct {
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, image_height: usize, image_width: usize, seqlen: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
         const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded Flux2Transformer2D Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
+
         var timer_last = timer_start;
 
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
@@ -1056,7 +1058,6 @@ pub const Flux2Transformer2D = struct {
             }
         };
 
-        log.info("Compiling Flux Step...", .{});
         var step_exe = try platform.compile(allocator, io, FluxStep{}, .forward, .{ model, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
         errdefer step_exe.deinit();
         log.info("Flux Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
@@ -1075,12 +1076,10 @@ pub const Flux2Transformer2D = struct {
         const sym_sample = zml.Tensor.fromShape(pixel_latents_shape);
         const sym_model_out = zml.Tensor.fromShape(pixel_latents_shape);
 
-        log.info("Compiling Euler Step...", .{});
         var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model_out, sym_dt });
         errdefer euler_exe.deinit();
         log.info("Euler Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
 
-        log.info("Loaded Flux2Transformer2D Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         return .{
             .model = model,

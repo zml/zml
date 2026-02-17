@@ -1,7 +1,10 @@
 import torch
 import transformers
 import sys
-from diffusers import Flux2KleinPipeline
+import os
+# from diffusers import Flux2KleinPipeline
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__))))
+from flux2.pipeline_flux2_klein import Flux2KleinPipeline
 import time
 
 
@@ -16,9 +19,9 @@ def run_pipeline():
 
     # dtype = torch.float32
     # device = "mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu"
-    device = "cpu"
+    # device = "cpu"
     # device = "mps"
-    # device = "cuda"
+    device = "cuda"
 
     # prompt = "A flying surperman style cat"
     prompt = "A photo of a cat on a bed"
@@ -32,10 +35,10 @@ def run_pipeline():
 
     output = pipeline(
             prompt=prompt,
-            width=128,
-            height=128,
-            # width=1920,
-            # height=1080,
+            # width=128,
+            # height=128,
+            width=1920,
+            height=1080,
             num_inference_steps=4,
             max_sequence_length=512,
             generator=torch.Generator(device=device).manual_seed(0))

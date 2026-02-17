@@ -85,7 +85,7 @@ const CliArgs = struct {
     // model: []const u8 = "/home/kevin/FLUX.2-klein-4B",
 
     prompt: []const u8 = "A photo of a cat",
-    seqlen: usize = 512, // 512
+    seqlen: usize = 512,
     output_image_path: ?[]const u8 = null,
     kitty_output: bool = false,
     random_seed: u64 = 0,
@@ -179,6 +179,7 @@ pub fn main(init: std.process.Init) !void {
         log.info("Stage Debug Disabled", .{});
     }
     const timer_full_pipline = std.Io.Clock.awake.now(io);
+    defer log.info("Full pipeline completed in {d:.2} ms", .{timer_full_pipline.untilNow(io, .awake).toMilliseconds()});
 
     const parallelism_level: usize = if (args.async_limit) |limit| limit else try std.Thread.getCpuCount();
 
@@ -229,10 +230,26 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
+    var qwen3_model_ctx: Qwen3ForCausalLM.ModelContext = try qwen3_model_ctx_future.await(io);
+    qwen3_model_ctx_node.end();
+    defer qwen3_model_ctx.deinit(allocator);
+
+    var transformer2d_model_ctx: Flux2Transformer2D = try transformer2d_model_ctx_future.await(io);
+    flux2_transformer2d_node.end();
+    defer transformer2d_model_ctx.deinit(allocator);
+
+    var scheduler: *FlowMatchEulerDiscreteScheduler = try scheduler_future.await(io);
+    defer scheduler.deinit();
+    scheduler_node.end();
+
+
+
+    // START COMPUTE-INTENSIVE PART OF THE PIPELINE
+
     // ==================== Tokenizing Prompt ====================
 
-    log.info("Qwen2 tokenizing prompt", .{});
-
+    const timer_compute_start = std.Io.Clock.awake.now(io);
+    defer log.info(" ================= Total compute time (tokenization to RGB conversion) is {d:.2} ms. ================= ", .{timer_compute_start.untilNow(io, .awake).toMilliseconds()});
     var tokens: Qwen2TokenizerFast.TokenizeOutput = try qwen2_future.await(io);
     qwen2_node.end();
     defer tokens.deinit();
@@ -242,9 +259,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ==================== Encoding Prompt ====================
 
-    var qwen3_model_ctx: Qwen3ForCausalLM.ModelContext = try qwen3_model_ctx_future.await(io);
-    qwen3_model_ctx_node.end();
-    defer qwen3_model_ctx.deinit(allocator);
+
 
     var qwen3_node = progress.start("Running Qwen3", 0);
     const timer_qwen3_start = std.Io.Clock.awake.now(io);
@@ -283,11 +298,6 @@ pub fn main(init: std.process.Init) !void {
     // const text_ids_selector = text_ids_from_python;
     // const prompt_embeds_selector = prompt_embeds_from_python;
 
-    var transformer2d_model_ctx: Flux2Transformer2D = try transformer2d_model_ctx_future.await(io);
-    flux2_transformer2d_node.end();
-    defer transformer2d_model_ctx.deinit(allocator);
-
-    log.info(">> Preparing Latents...", .{});
     const timer_prepare_latents_start = std.Io.Clock.awake.now(io);
     var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
     log.info("Latents prepared in {d:.2} ms.", .{timer_prepare_latents_start.untilNow(io, .awake).toMilliseconds()});
@@ -297,11 +307,6 @@ pub fn main(init: std.process.Init) !void {
     // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
     // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
 
-    var scheduler: *FlowMatchEulerDiscreteScheduler = try scheduler_future.await(io);
-    defer scheduler.deinit();
-    scheduler_node.end();
-
-    log.info(">> Running Scheduler...", .{});
     const timer_scheduler_start = std.Io.Clock.awake.now(io);
     var latents_out = try utils.schedule(
         &transformer2d_model_ctx,
@@ -320,8 +325,6 @@ pub fn main(init: std.process.Init) !void {
 
     // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });=
 
-    log.info(">>> Decoding Latents...", .{});
-
     var vae_ctx: AutoencoderKLFlux2 = try vae_ctx_future.await(io);
     auto_encoder_node.end();
     defer vae_ctx.deinit(allocator);
@@ -338,7 +341,6 @@ pub fn main(init: std.process.Init) !void {
     const timer_rgb_start = std.Io.Clock.awake.now(io);
     const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
     log.info("RGB conversion completed in {d:.2} ms.", .{timer_rgb_start.untilNow(io, .awake).toMilliseconds()});
-
     defer rgb_image_buffer.free(allocator);
 
     if (args.kitty_output) {
@@ -355,8 +357,6 @@ pub fn main(init: std.process.Init) !void {
         log.warn("No output_image_path provided, skipping saving image to disk.", .{});
     }
 
-    log.info(">>> Pipeline Complete.", .{});
-    log.info("Full pipeline completed in {d:.2} ms", .{timer_full_pipline.untilNow(io, .awake).toMilliseconds()});
-
     // std.process.exit(0);
+    return;
 }
