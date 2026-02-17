@@ -152,9 +152,9 @@ pub fn main(init: std.process.Init) !void {
     }
 
     var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, &progress });
-    errdefer if (compiled_model_result_future.cancel(io)) |v| {
-        defer v.prefill_exe.deinit();
-        defer v.decode_exe.deinit();
+    defer if (compiled_model_result_future.cancel(io)) |v| {
+        v.prefill_exe.deinit();
+        v.decode_exe.deinit();
     } else |_| {};
 
     var load_group: stdx.Io.LimitedGroup = .init(16);
@@ -168,19 +168,14 @@ pub fn main(init: std.process.Init) !void {
         &store,
         &progress,
     });
-    errdefer b: {
-        var v = llama_buffers_future.cancel(io) catch break :b;
-        v = v; // autofix
-        // LlamaLM.unloadBuffers(&v, allocator);
+    defer blk: {
+        var v = llama_buffers_future.cancel(io) catch break :blk;
+        LlamaLM.unloadBuffers(&v, arena.allocator());
     }
 
     const compiled_model_result = try compiled_model_result_future.await(io);
-    defer compiled_model_result.prefill_exe.deinit();
-    defer compiled_model_result.decode_exe.deinit();
 
     var llama_buffers = try llama_buffers_future.await(io);
-    llama_buffers = llama_buffers; // autofix
-    // defer LlamaLM.unloadBuffers(&llama_buffers, allocator);
     progress.end();
 
     log.info("Creating KvCache", .{});
@@ -190,8 +185,7 @@ pub fn main(init: std.process.Init) !void {
     var attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
-    var tokenizer = try tokenizer_future.await(io);
-    defer tokenizer.deinit();
+    const tokenizer = try tokenizer_future.await(io);
 
     const prompt = if (args.prompt) |p| p else blk: {
         var reader = std.Io.File.stdin().reader(io, &.{});
@@ -307,7 +301,9 @@ fn compileModel(
             });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, progress });
-    errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
+    errdefer if (prefill_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
 
     var decode_future = try io.concurrent(struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, progress_: *std.Progress.Node) !zml.Exe {
@@ -326,7 +322,9 @@ fn compileModel(
             });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, progress });
-    errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
+    errdefer if (decode_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
 
     const prefill_exe = try prefill_future.await(io);
     const decode_exe = try decode_future.await(io);
