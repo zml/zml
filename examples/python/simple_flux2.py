@@ -32,8 +32,10 @@ def run_pipeline():
 
     output = pipeline(
             prompt=prompt,
-            width=1920,
-            height=1080,
+            width=512,
+            height=512,
+            # width=1920,
+            # height=1080,
             num_inference_steps=4,
             max_sequence_length=512,
             generator=torch.Generator(device=device).manual_seed(0))
