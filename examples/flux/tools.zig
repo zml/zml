@@ -592,7 +592,7 @@ pub fn getElementAsF64(slice: zml.Slice, dtype: zml.DataType, idx: usize) f64 {
 }
 
 pub fn parseConfig(comptime TemplateConfig: type, allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = null, json_name: ?[]const u8 = null }) !std.json.Parsed(TemplateConfig) {
-    const timer_start = std.Io.Clock.awake.now(io);
+    // const timer_start = std.Io.Clock.awake.now(io);
     const subfolder = options.subfolder orelse "";
     const json_name = options.json_name orelse "config.json";
 
@@ -602,7 +602,7 @@ pub fn parseConfig(comptime TemplateConfig: type, allocator: std.mem.Allocator, 
         try allocator.dupe(u8, json_name);
     defer allocator.free(config_sub_path);
 
-    defer log.info("Loaded config {s} from {s} [{d}ms]", .{ @typeName(TemplateConfig), config_sub_path, timer_start.untilNow(io, .awake).toMilliseconds() });
+    // defer log.info("Loaded config {s} from {s} [{d}ms]", .{ @typeName(TemplateConfig), config_sub_path, timer_start.untilNow(io, .awake).toMilliseconds() });
 
     const parsed_config: std.json.Parsed(TemplateConfig) = label_parsing_block: {
         const config_json_file = try repo_dir.openFile(io, config_sub_path, .{});

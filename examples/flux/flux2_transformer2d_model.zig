@@ -994,7 +994,7 @@ pub const Flux2Transformer2D = struct {
         defer transformer_dir.close(io);
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, transformer_dir, options.safetensors_name);
-        defer tensor_registry.deinit();
+        errdefer tensor_registry.deinit();
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();

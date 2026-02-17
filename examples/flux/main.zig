@@ -192,6 +192,8 @@ pub fn main(init: std.process.Init) !void {
     } else {
         log.info("Stage Debug Disabled", .{});
     }
+    const timer_full_pipline = std.Io.Clock.awake.now(io);
+    defer log.info("Full pipeline completed in {d:.2} ms", .{timer_full_pipline.untilNow(io, .awake).toMilliseconds()});
 
     const parallelism_level: usize = if (args.async_limit) |limit| limit else try std.Thread.getCpuCount();
 
@@ -379,5 +381,5 @@ pub fn main(init: std.process.Init) !void {
 
     log.info(">>> Pipeline Complete.", .{});
 
-    std.process.exit(0);
+    // std.process.exit(0);
 }

@@ -4,14 +4,20 @@ export CUDA_VISIBLE_DEVICES=1
 
 # hf download black-forest-labs/FLUX.2-klein-4B --local-dir FLUX.2-klein-4B
 # /Users/kevin/zml
+# --output-image-path=/home/kevin/flux_klein_zml_result.png \
+# --output-image-path=/Users/kevin/zml/flux_klein_zml_result.png \
 
-bazel run //examples/flux --//platforms:cuda=false -- \
-    --model=/Users/kevin/zml \
-    --prompt="A photo of a cat" \
-    --output-image-path=/home/kevin/flux_klein_zml_result.png \
+# --config=release
+# --run_under="lldb --"
+# --run_under="lldb --" \
+
+bazel run //examples/flux \
+    --//platforms:cuda=false -- \
+    --model=/Users/kevin/FLUX.2-klein-4B \
+    --prompt="A photo of a cat with a hello world sign" \
     --kitty-output \
-    --resolution=HLD \
-    --num-inference-steps=1 \
+    --resolution=FHD \
+    --num-inference-steps=4 \
     --random-seed=0 \
     --generator-type=torch
 

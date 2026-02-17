@@ -394,7 +394,7 @@ pub const Qwen3ForCausalLM = struct {
         // std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromRepo(allocator, io, try repo_dir.openDir(io, subfolder, .{}));
-        defer tensor_registry.deinit();
+        errdefer tensor_registry.deinit();
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();

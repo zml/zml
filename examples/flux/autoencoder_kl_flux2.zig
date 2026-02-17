@@ -556,7 +556,7 @@ pub const AutoencoderKLFlux2 = struct {
         defer vae_dir.close(io);
 
         var tensor_registry = try zml.safetensors.TensorRegistry.fromFile(allocator, io, vae_dir, options.safetensors_name);
-        defer tensor_registry.deinit();
+        errdefer tensor_registry.deinit();
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();
