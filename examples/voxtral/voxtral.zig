@@ -416,8 +416,9 @@ pub fn runGenerationLoop(
     config: Config,
     sp: StreamParams,
     tokenizer: *zml.tokenizer.Tokenizer,
-    padded_audio: []const f32,
-    audio_len: usize,
+    // padded_audio: []const f32,
+    // audio_len: usize,
+    stdin_reader: *std.Io.Reader,
     compiled_mel_step: *zml.Exe,
     compiled_conv_stem_step: *zml.Exe,
     compiled_encoder_step: *zml.Exe,
@@ -435,7 +436,7 @@ pub fn runGenerationLoop(
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     generated_token_slice: zml.Slice,
 ) !void {
-    const total_steps = sp.totalSteps(audio_len);
+    // const total_steps = sp.totalSteps(audio_len);
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
 
@@ -446,7 +447,7 @@ pub fn runGenerationLoop(
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
     const streaming_word_token = tokenizer.tokenToId("[STREAMING_WORD]");
 
-    log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
+    // log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
     const decode_start: std.Io.Timestamp = .now(io, .awake);
 
     var mel_step_args = try compiled_mel_step.args(allocator);
@@ -490,7 +491,7 @@ pub fn runGenerationLoop(
     defer current_token_buffer.deinit();
 
     var num_generated: usize = 0;
-    for (prompt_len..total_steps) |t| {
+    for (prompt_len..500) |t| {
         const generated_token = generated_token_slice.items(u32)[0];
         num_generated += 1;
 
@@ -506,8 +507,10 @@ pub fn runGenerationLoop(
         }
 
         // Mel step: upload audio chunk → mel spectrogram on device (no host round-trip)
-        const audio_start: usize = (t * sp.mel_per_step - sp.mel_history) * sp._hop_length;
-        const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
+        // const audio_start: usize = (t * sp.mel_per_step - sp.mel_history) * sp._hop_length;
+        const audio_chunk = try readStdinChunk(allocator, stdin_reader);
+        defer allocator.free(audio_chunk);
+        // const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
 
         const audio_slice: zml.Slice = .init(
             .init(.{sp.chunk_audio}, .f32),
@@ -563,8 +566,8 @@ pub fn runPipeline(
     platform: *zml.Platform,
     config: Config,
     tokenizer: *zml.tokenizer.Tokenizer,
-    padded_audio: []const f32,
-    audio_len: usize,
+    // padded_audio: []const f32,
+    // audio_len: usize,
     tokens: []const u32,
     sp: StreamParams,
     compiled_mel_step: *zml.Exe,
@@ -587,10 +590,17 @@ pub fn runPipeline(
 ) !void {
     log.info("Running inference pipeline...", .{});
 
+    var stdin_buff: [2560 * 4]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buff);
+    const stdin_reader_interface = &stdin_reader.interface;
+
+    const first_audio_chunk = try readStdinChunk(allocator, stdin_reader_interface);
+    defer allocator.free(first_audio_chunk);
+
     // 0. Reflect-pad audio on host (prepend n_fft/2 samples)
     const n_fft: usize = config.audio().window_size;
     const reflect_pad: usize = n_fft / 2;
-    const reflect_padded_audio = try reflectPadAudio(allocator, padded_audio, reflect_pad);
+    const reflect_padded_audio = try reflectPadAudio(allocator, first_audio_chunk, reflect_pad);
     defer allocator.free(reflect_padded_audio);
 
     // 1. Mel prefill (chunk-by-chunk)
@@ -652,8 +662,9 @@ pub fn runPipeline(
         config,
         sp,
         tokenizer,
-        reflect_padded_audio,
-        audio_len,
+        // reflect_padded_audio,
+        // audio_len,
+        stdin_reader_interface,
         compiled_mel_step,
         compiled_conv_stem_step,
         compiled_encoder_step,
@@ -671,4 +682,17 @@ pub fn runPipeline(
         dec_attention_metadata_buffers,
         generated_token_slice,
     );
+}
+
+fn readStdinChunk(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
+    var read: [1280 * 2]u8 = undefined;
+    var converted = try allocator.alloc(f32, 1280);
+    try reader.readSliceAll(&read);
+
+    for (0..1280) |i| {
+        const offset = i * 2;
+        converted[i] = @as(f32, @floatFromInt(std.mem.bytesToValue(i16, read[offset .. offset + 2]))) / 32768.0;
+    }
+
+    return converted;
 }

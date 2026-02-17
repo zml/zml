@@ -26,7 +26,7 @@ const KvCache = common.KvCache;
 const voxtral = @import("voxtral.zig");
 
 const CliArgs = struct {
-    input: []const u8,
+    input: ?[]const u8 = null,
     model: []const u8,
     transcription_delay_ms: f32 = 480.0,
     backend: ?zml.attention.Backend = null,
@@ -60,8 +60,8 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = "Voxtral" });
 
-    const file = try std.Io.Dir.openFile(.cwd(), io, args.input, .{});
-    defer file.close(io);
+    // const file = try std.Io.Dir.openFile(.cwd(), io, args.input, .{});
+    // defer file.close(io);
 
     const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
 
@@ -81,12 +81,12 @@ pub fn main(init: std.process.Init) !void {
     const tokens = try allocator.alloc(u32, sp.prompt_len);
     defer allocator.free(tokens);
 
-    var wav_buffer: [4096]u8 = undefined;
-    var reader = file.reader(io, &wav_buffer);
+    // var wav_buffer: [4096]u8 = undefined;
+    // var reader = file.reader(io, &wav_buffer);
 
-    const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, sp.left_pad, sp.n_right_pad_tokens, sp.raw_audio_length_per_tok);
-    defer allocator.free(padded_wav);
-    const audio_len = padded_wav.len;
+    // const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, sp.left_pad, sp.n_right_pad_tokens, sp.raw_audio_length_per_tok);
+    // defer allocator.free(padded_wav);
+    // const audio_len = padded_wav.len;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
         .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.50 } } },
@@ -211,8 +211,8 @@ pub fn main(init: std.process.Init) !void {
         platform,
         config,
         &tokenizer,
-        padded_wav,
-        audio_len,
+        // padded_wav,
+        // audio_len,
         tokens,
         sp,
         &compiled_mel_step,
