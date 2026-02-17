@@ -1,4 +1,5 @@
 #%%
+import time
 from typing import Dict, Tuple
 import os
 import sys
@@ -6,20 +7,24 @@ import torch
 import numpy as np
 from PIL import Image
 
-from transformers.models.qwen2 import Qwen2TokenizerFast
-from transformers.models.qwen3 import Qwen3ForCausalLM
-from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
-from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
-from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+# from transformers.models.qwen2 import Qwen2TokenizerFast
+# from transformers.models.qwen3 import Qwen3ForCausalLM
+# from diffusers.models.transformers.transformer_flux2 import Flux2Transformer2DModel
+# from diffusers.models.autoencoders.autoencoder_kl_flux2 import AutoencoderKLFlux2
+# from diffusers.schedulers.scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
-# from tokenization_qwen2_fast import Qwen2TokenizerFast
-# from modeling_qwen3 import Qwen3ForCausalLM
-# from transformer_flux2 import Flux2Transformer2DModel
-# from autoencoder_kl_flux2 import AutoencoderKLFlux2
-# from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
+from tokenization_qwen2_fast import Qwen2TokenizerFast
+from modeling_qwen3 import Qwen3ForCausalLM
+from transformer_flux2 import Flux2Transformer2DModel
+from autoencoder_kl_flux2 import AutoencoderKLFlux2
+from scheduling_flow_match_euler_discrete import FlowMatchEulerDiscreteScheduler
 
 import flux2_tools
 import utils
+
+
+dtype = torch.bfloat16
+torch.set_default_dtype(dtype)
 
 def get_tokens_from_prompt(tokenizer: Qwen2TokenizerFast, prompt: str, max_length=512) -> Tuple[str, Dict[str, torch.Tensor]]:
     text = tokenizer.apply_chat_template(
@@ -215,15 +220,16 @@ def save_encoding_embeded_from_tokens(token_encoded_embeds: torch.Tensor, text_i
     np.save(f"/Users/kevin/zml/{file_prefix}_text_ids.npy", text_ids.cpu().detach().numpy())
 
 def run_pipline():
-    torch.set_default_dtype(torch.bfloat16)
     # torch.set_default_dtype(torch.float32)
 
     repo_id = "black-forest-labs/FLUX.2-klein-4B"
     prompt = "A photo of a cat"
-    img_dim: int = 16
+    # img_dim: int = 16
+    height = 1920
+    width = 1080
     # device = "mps"
-    device = "cpu"
-    # device = "cuda"
+    # device = "cpu"
+    device = "cuda"
 
     print("\n>>> Tokenizing Prompt...")
 
@@ -243,7 +249,6 @@ def run_pipline():
     token_encoder = Qwen3ForCausalLM.from_pretrained(
         repo_id,
         subfolder="text_encoder",
-        dtype=torch.get_default_dtype(),
     )
     token_encoder.to(device)
 
@@ -280,7 +285,7 @@ def run_pipline():
     print(f"{transformer.dtype=}")
     print(f"{transformer.x_embedder.weight.dtype}")
 
-    latents, latent_ids = get_latents(transformer=transformer, height=img_dim, width=img_dim, device=device)
+    latents, latent_ids = get_latents(transformer=transformer, height=height, width=width, device=device)
     print(f"    Latents (first 20). {latents.dtype} {latents.shape} : {latents.flatten()[:20]}")
     print(f"    Latent_ids (first 20). {latent_ids.dtype} {latent_ids.shape} : {latent_ids.flatten()[:20]}")
     print(f" {latents.dtype=}, {latent_ids.dtype=}")
@@ -322,6 +327,10 @@ def run_pipline():
 # %%
 
 if __name__ == "__main__":
+    start_time = time.time()
     run_pipline()
+    end_time = time.time()
+    elapsed_time_ms = (end_time - start_time) * 1000
+    print(f">>> Pipeline completed in {elapsed_time_ms:.2f} ms.")
 
 # %%

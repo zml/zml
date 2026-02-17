@@ -1,4 +1,4 @@
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=0
 
 #  -c opt 
 
@@ -11,25 +11,27 @@ export CUDA_VISIBLE_DEVICES=1
 # --run_under="lldb --"
 # --run_under="lldb --" \
 
+# bazel run //examples/flux \
+#     --//platforms:cuda=false -- \
+#     --model=/Users/kevin/FLUX.2-klein-4B \
+#     --prompt="A photo of a cat with a hello world sign" \
+#     --kitty-output \
+#     --resolution=FHD \
+#     --num-inference-steps=4 \
+#     --random-seed=0 \
+#     --generator-type=torch
+# --output-image-path=/home/kevin/flux_klein_zml_result.png \
+
 bazel run //examples/flux \
-    --//platforms:cuda=false -- \
-    --model=/Users/kevin/FLUX.2-klein-4B \
-    --prompt="A photo of a cat with a hello world sign" \
+    --config=release \
+    --//platforms:cuda=true -- \
+    --model=/var/models/black-forest-labs/FLUX.2-klein-4B/ \
+    --prompt="A photo of a cat on a bed" \
     --kitty-output \
     --resolution=FHD \
     --num-inference-steps=4 \
     --random-seed=0 \
     --generator-type=torch
-
-# bazel run //examples/flux --//platforms:cuda=false -- \
-#     --model=/var/models/black-forest-labs/FLUX.2-klein-4B/ \
-#     --prompt="A photo of a cat" \
-#     --output-image-path=/home/kevin/flux_klein_zml_result.png \
-#     --kitty-output \
-#     --resolution=SD \
-#     --num-inference-steps=4 \
-#     --random-seed=0 \
-#     --generator-type=torch
 
 # --seqlen=256 \
 

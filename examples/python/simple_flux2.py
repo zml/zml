@@ -21,7 +21,7 @@ def run_pipeline():
     device = "cuda"
 
     # prompt = "A flying surperman style cat"
-    prompt = "A photo of a cat with a hello world sign"
+    prompt = "A photo of a cat on a bed"
 
     model_path = "black-forest-labs/FLUX.2-klein-4B"
     pipeline = Flux2KleinPipeline.from_pretrained(
