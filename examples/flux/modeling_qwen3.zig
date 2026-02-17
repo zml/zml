@@ -386,9 +386,9 @@ pub const Qwen3ForCausalLM = struct {
         @setEvalBranchQuota(10_000);
         const subfolder = "text_encoder";
 
-        const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });
+        var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });
         // log.info("Loaded config type: {s} from {s} with values {any}", .{ @typeName(Config), subfolder, config_json });
-        errdefer config_json.deinit();
+        defer config_json.deinit();
         const config = config_json.value;
 
         // std.log.info("Loaded Qwen3 Config: rms_norm_eps {any}", .{config_json});

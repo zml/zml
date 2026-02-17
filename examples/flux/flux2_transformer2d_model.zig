@@ -850,7 +850,7 @@ pub const Flux2Transformer2DModel = struct {
         return model;
     }
 
-    pub fn deinit(self: *@This()) void {
+    pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         self.time_guidance_embed.deinit();
         self.double_stream_modulation_img.deinit();
         self.double_stream_modulation_txt.deinit();
@@ -858,7 +858,9 @@ pub const Flux2Transformer2DModel = struct {
         self.x_embedder.deinit();
         self.context_embedder.deinit();
         for (self.transformer_blocks) |*b| b.deinit();
+        allocator.free(self.transformer_blocks);
         for (self.single_transformer_blocks) |*b| b.deinit();
+        allocator.free(self.single_transformer_blocks);
         self.norm_out.deinit();
         self.proj_out.deinit();
     }
@@ -979,6 +981,7 @@ pub const Flux2Transformer2D = struct {
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         utils.unloadWeights(allocator, &self.weights);
+        self.model.deinit(allocator);
         self.store.deinit();
         self.registry.deinit();
     }
@@ -986,8 +989,8 @@ pub const Flux2Transformer2D = struct {
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
 
-        const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
-        errdefer config_json.deinit();
+        var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        defer config_json.deinit();
         const config = config_json.value;
 
         const transformer_dir = try repo_dir.openDir(io, options.subfolder, .{});
@@ -1000,7 +1003,7 @@ pub const Flux2Transformer2D = struct {
         errdefer tensor_store.deinit();
 
         var model = try Flux2Transformer2DModel.init(allocator, tensor_store.view(), config);
-        errdefer model.deinit();
+        errdefer model.deinit(allocator);
 
         var weights = try zml.io.load(
             Flux2Transformer2DModel,

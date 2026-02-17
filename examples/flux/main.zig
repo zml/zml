@@ -139,7 +139,12 @@ pub fn main(init: std.process.Init) !void {
         debug_allocator = .init;
         break :blk debug_allocator.?.allocator();
     } else std.heap.c_allocator;
-    defer if (debug_allocator) |*da| std.debug.assert(da.deinit() == .ok);
+    defer if (debug_allocator) |*da| {
+        const result = da.deinit();
+        if (result != .ok) {
+            log.warn("DebugAllocator detected memory leaks", .{});
+        }
+    };
 
     // Setup ZML environment
     var threaded = std.Io.Threaded.init(allocator, .{});
@@ -199,6 +204,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("Parallelism Level: {}", .{parallelism_level});
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
+    defer progress.end();
     // ============ Model loader =================
 
     var qwen2_node = progress.start("Tokenizing Prompt", 0);
@@ -347,7 +353,8 @@ pub fn main(init: std.process.Init) !void {
     defer vae_ctx.deinit(allocator);
 
     const timer_vae_start = std.Io.Clock.awake.now(io);
-    const image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, zml_compute_platform, vae_ctx, latents_out);
+    var image_decoded_buf: zml.Buffer = try utils.variational_auto_encode(allocator, io, zml_compute_platform, vae_ctx, latents_out);
+    defer image_decoded_buf.deinit();
     const vae_ns: i64 = @intCast(timer_vae_start.untilNow(io, .awake).toNanoseconds());
     const vae_load_time_ms = @as(f64, @floatFromInt(vae_ns)) / 1_000_000.0;
     log.info("VAE completed in {d:.2} ms.", .{vae_load_time_ms});

@@ -141,8 +141,8 @@ pub const FlowMatchEulerDiscreteScheduler = struct {
             var node = p.start("Loading scheduler config...", 1);
             defer node.end();
         }
-        const config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
-        errdefer config_json.deinit();
+        var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        defer config_json.deinit();
 
         return try init(allocator, config_json.value);
     }

@@ -541,15 +541,18 @@ pub const AutoencoderKLFlux2 = struct {
     store: zml.io.TensorStore,
     registry: zml.safetensors.TensorRegistry,
     config: Config,
+    config_json: std.json.Parsed(Config),
     weights: zml.Bufferized(AutoencoderKLFlux2Model),
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         unloadWeights(allocator, &self.weights);
+        self.model.deinit();
         self.store.deinit();
         self.registry.deinit();
+        self.config_json.deinit();
     }
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
-        const config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
+        var config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         errdefer config_json.deinit();
 
         const vae_dir = try repo_dir.openDir(io, options.subfolder, .{});
@@ -578,6 +581,7 @@ pub const AutoencoderKLFlux2 = struct {
             .store = tensor_store,
             .registry = tensor_registry,
             .config = config_json.value,
+            .config_json = config_json,
             .weights = weights,
         };
     }

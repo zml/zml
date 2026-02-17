@@ -174,7 +174,8 @@ pub fn get_latents(
             // const rand_data = try gen.randn(allocator, &shape_latents);
             defer allocator.free(rand_data);
 
-            const latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(rand_data));
+            var latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(rand_data));
+            defer latents_buffer.deinit();
             return pack_latents(allocator, io, platform, latents_buffer);
         },
         inline .accelerator_box_muller, .accelerator_marsaglia => |gt| {
@@ -670,12 +671,6 @@ pub fn schedule(
         var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(g_proj_bf16));
         defer g_proj_buf.deinit();
 
-        // Debug: Print Timestep Projection
-        // if (idx == 0) {
-        //     std.log.info("Timestep Frequencies (first 10): {any}", .{freq_vals_arr[0..10]});
-        //     try tools.printBuffer(allocator, io, t_proj_buf, 20, "T_Proj (Step 1)");
-        // }
-
         defer t_proj_buf.deinit();
 
         var args_step = try step_exe.args(allocator);
@@ -692,7 +687,8 @@ pub fn schedule(
 
         step_exe.call(args_step, &res_step);
 
-        const noise_pred_buf = res_step.get(zml.Buffer);
+        var noise_pred_buf = res_step.get(zml.Buffer);
+        defer noise_pred_buf.deinit();
 
         const shape_flat = current_latents.shape().count();
         const noise_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{shape_flat}, .bf16));
