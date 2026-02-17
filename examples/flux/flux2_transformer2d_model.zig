@@ -992,6 +992,8 @@ pub const Flux2Transformer2D = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, image_height: usize, image_width: usize, seqlen: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
+        const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded Flux2Transformer2D Model in {} ms", .{std.time.milliTimestamp(std.Io.Clock.awake.now(io) - timer_start)});
 
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         defer config_json.deinit();

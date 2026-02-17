@@ -384,6 +384,9 @@ pub const Qwen3ForCausalLM = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, seq_len: usize, progress: ?*std.Progress.Node) !ModelContext {
         @setEvalBranchQuota(10_000);
+        const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded Qwen3 Model in {} ms", .{std.time.milliTimestamp(std.Io.Clock.awake.now(io) - timer_start)});
+
         const subfolder = "text_encoder";
 
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = subfolder, .json_name = "config.json" });

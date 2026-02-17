@@ -555,6 +555,9 @@ pub const AutoencoderKLFlux2 = struct {
     }
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, image_height: usize, image_width: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
+        const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded AutoencoderKLFlux2 Model in {} ms", .{std.time.milliTimestamp(std.Io.Clock.awake.now(io) - timer_start)});
+
         var config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         errdefer config_json.deinit();
 
