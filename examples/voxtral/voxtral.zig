@@ -416,8 +416,7 @@ pub fn runGenerationLoop(
     config: Config,
     sp: StreamParams,
     tokenizer: *zml.tokenizer.Tokenizer,
-    // padded_audio: []const f32,
-    // audio_len: usize,
+    initial_audio_history: []const f32,
     stdin_reader: *std.Io.Reader,
     compiled_mel_step: *zml.Exe,
     compiled_conv_stem_step: *zml.Exe,
@@ -436,9 +435,16 @@ pub fn runGenerationLoop(
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     generated_token_slice: zml.Slice,
 ) !void {
-    // const total_steps = sp.totalSteps(audio_len);
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
+    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp._hop_length;
+    const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
+
+    // Sliding audio buffer: [overlap from previous step | new samples]
+    const audio_buf = try allocator.alloc(f32, sp.chunk_audio);
+    defer allocator.free(audio_buf);
+    @memcpy(audio_buf[0..audio_overlap], initial_audio_history);
+    @memset(audio_buf[audio_overlap..], 0);
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
@@ -508,9 +514,8 @@ pub fn runGenerationLoop(
             break;
         }
 
-        // Mel step: upload audio chunk → mel spectrogram on device (no host round-trip)
-        // const audio_start: usize = (t * sp.mel_per_step - sp.mel_history) * sp._hop_length;
-        const audio_chunk = readStdinSamples(allocator, stdin_reader, 1280) catch |err| switch (err) {
+        // Mel step: read new audio, slide history buffer, upload full chunk
+        const new_samples = readStdinSamples(allocator, stdin_reader, new_audio_per_step) catch |err| switch (err) {
             error.EndOfStream => {
                 std.debug.print("\n\n", .{});
                 log.info("Audio stream ended at step={}", .{t});
@@ -518,12 +523,15 @@ pub fn runGenerationLoop(
             },
             else => return err,
         };
-        defer allocator.free(audio_chunk);
-        // const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
+        defer allocator.free(new_samples);
+
+        // Shift history left, append new samples
+        std.mem.copyForwards(f32, audio_buf[0..audio_overlap], audio_buf[new_audio_per_step..]);
+        @memcpy(audio_buf[audio_overlap..], new_samples);
 
         const audio_slice: zml.Slice = .init(
             .init(.{sp.chunk_audio}, .f32),
-            std.mem.sliceAsBytes(audio_chunk),
+            std.mem.sliceAsBytes(audio_buf),
         );
         var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
         defer audio_buffer.deinit();
@@ -673,7 +681,12 @@ pub fn runPipeline(
         generated_token_slice,
     );
 
-    // 4. Generation loop
+    // 4. Generation loop — extract audio history for sliding buffer
+    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp._hop_length;
+    const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
+    const history_start: usize = @as(usize, sp.prompt_len) * sp.mel_per_step * sp._hop_length;
+    const initial_audio_history = reflect_padded_audio[history_start .. history_start + audio_overlap];
+
     try runGenerationLoop(
         allocator,
         io,
@@ -681,8 +694,7 @@ pub fn runPipeline(
         config,
         sp,
         tokenizer,
-        // reflect_padded_audio,
-        // audio_len,
+        initial_audio_history,
         stdin_reader_interface,
         compiled_mel_step,
         compiled_conv_stem_step,
