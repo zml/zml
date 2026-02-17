@@ -212,7 +212,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var flux2_transformer2d_node = progress.start("Loading Flux2Transformer2D", 0);
-    var transformer2d_model_ctx_future = io.concurrent(Flux2Transformer2D.loadFromFile, .{ allocator, io, zml_compute_platform, repo, parallelism_level, &flux2_transformer2d_node, .{} }) catch |err| {
+    var transformer2d_model_ctx_future = io.concurrent(Flux2Transformer2D.loadFromFile, .{ allocator, io, zml_compute_platform, repo, parallelism_level, output_image_dim.height, output_image_dim.width, args.seqlen, &flux2_transformer2d_node, .{} }) catch |err| {
         log.err("Error loading Flux2Transformer2D model: {}", .{err});
         return err;
     };
@@ -304,8 +304,7 @@ pub fn main(init: std.process.Init) !void {
     log.info(">> Running Scheduler...", .{});
     const timer_scheduler_start = std.Io.Clock.awake.now(io);
     var latents_out = try utils.schedule(
-        transformer2d_model_ctx.model,
-        transformer2d_model_ctx.weights,
+        &transformer2d_model_ctx,
         scheduler,
         latent_buf,
         latent_ids_buf,

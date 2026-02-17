@@ -477,8 +477,7 @@ pub fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.
 }
 
 pub fn schedule(
-    transformer: flux_model_transformer2d.Flux2Transformer2DModel,
-    weights: zml.Bufferized(flux_model_transformer2d.Flux2Transformer2DModel),
+    model_ctx: *const flux_model_transformer2d.Flux2Transformer2D,
     scheduler: *flow_match_euler_discrete_scheduler.FlowMatchEulerDiscreteScheduler,
     latents: zml.Buffer,
     latent_ids: zml.Buffer,
@@ -508,7 +507,7 @@ pub fn schedule(
     try scheduler.set_timesteps(num_inference_steps, sigmas.items, empirical_mu, null);
 
     // Precompute frequencies and Rotary Embeddings (CPU)
-    const freq_vals_arr = flux_model_transformer2d.computeTimestepFrequencies(transformer.config.timestep_guidance_channels);
+    const freq_vals_arr = flux_model_transformer2d.computeTimestepFrequencies(model_ctx.config.timestep_guidance_channels);
 
     // --- RoPE Precompute ---
     const txt_shape = text_ids.shape();
@@ -550,9 +549,9 @@ pub fn schedule(
     }
 
     const ids_data_slice = comb_f32;
-    // std.log.info("RoPE Theta: {d}", .{transformer.config.rope_theta});
+    // std.log.info("RoPE Theta: {d}", .{model_ctx.config.rope_theta});
 
-    const rope_slices = try flux_model_transformer2d.computeRotaryEmbedding(allocator, ids_data_slice, comb_shape, transformer.config.axes_dims_rope, transformer.config.rope_theta);
+    const rope_slices = try flux_model_transformer2d.computeRotaryEmbedding(allocator, ids_data_slice, comb_shape, model_ctx.config.axes_dims_rope, model_ctx.config.rope_theta);
     defer rope_slices[0].free(allocator);
     defer rope_slices[1].free(allocator);
 
@@ -561,54 +560,12 @@ pub fn schedule(
     defer rotary_cos_dev.deinit();
     defer rotary_sin_dev.deinit();
 
-    // Debug: Print RoPE values
-    // try tools.printFlatten(allocator, io, rotary_cos_dev, 20, "   RoPE Cos (first 20)", .{});
-    // try tools.printFlatten(allocator, io, rotary_sin_dev, 20, "   RoPE Sin (first 20)", .{});
-
+    // -----------------------
+    // Compilation of Step and Euler is now handled in Flux2Transformer2D.loadFromFile (stored in model_ctx)
     // -----------------------
 
-    // log.info("   Empirical Mu: {d:.4}", .{empirical_mu});
-
-    const FluxStep = struct {
-        pub fn forward(self: @This(), model: flux_model_transformer2d.Flux2Transformer2DModel, hidden_states: zml.Tensor, encoder_hidden_states: zml.Tensor, timesteps_proj: zml.Tensor, guidance_proj: ?zml.Tensor, rotary_cos: zml.Tensor, rotary_sin: zml.Tensor) zml.Tensor {
-            _ = self;
-            return model.forward(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin);
-        }
-    };
-
-    const latents_shape = latents.shape();
-    const pixel_latents_shape = zml.Shape.init(.{ .b = 1, .s = latents_shape.dim(1), .d = latents_shape.dim(2) }, .bf16);
     const t_proj_shape = zml.Shape.init(.{ .b = 1, .d = 256 }, .bf16);
-    const rotary_shape = rotary_cos_dev.shape();
-
-    const sym_latents = zml.Tensor.fromShape(pixel_latents_shape);
-    const sym_t_proj = zml.Tensor.fromShape(t_proj_shape);
-    const sym_g_proj = zml.Tensor.fromShape(t_proj_shape);
-    const sym_prompt = zml.Tensor.fromShape(prompt_embeds.shape());
-    const sym_rotary_cos = zml.Tensor.fromShape(rotary_shape);
-    const sym_rotary_sin = zml.Tensor.fromShape(rotary_shape);
-
-    // log.info("Compiling Step...", .{});
-    var step_exe = try platform.compile(allocator, io, FluxStep{}, .forward, .{ transformer, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
-    defer step_exe.deinit();
-
-    // Compiling Scheduler Step
     const sym_dt = zml.Tensor.fromShape(zml.Shape.init(.{}, .f32));
-    const sym_sample = zml.Tensor.fromShape(pixel_latents_shape);
-    const sym_model = zml.Tensor.fromShape(pixel_latents_shape);
-
-    const EulerStep = struct {
-        pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
-            _ = self;
-            // Convert to f32 for precision, matching original logic
-            const s_f32 = sample.convert(.f32);
-            const m_f32 = model_output.convert(.f32);
-            const res = s_f32.add(m_f32.mul(dt));
-            return res.convert(.bf16);
-        }
-    };
-    var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model, sym_dt });
-    defer euler_exe.deinit();
 
     var current_latents = latents;
     var is_first = true;
@@ -655,22 +612,22 @@ pub fn schedule(
         t_proj_bufs[step_i] = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(&t_proj_bf16));
     }
 
-    // Pre-allocate executor args/results for reuse across all iterations
-    var args_step = try step_exe.args(allocator);
+    // Pre-allocate executor args/results using pre-compiled executors
+    var args_step = try model_ctx.step_exe.args(allocator);
     defer args_step.deinit(allocator);
-    var res_step = try step_exe.results(allocator);
+    var res_step = try model_ctx.step_exe.results(allocator);
     defer res_step.deinit(allocator);
-    var args_euler = try euler_exe.args(allocator);
+    var args_euler = try model_ctx.euler_exe.args(allocator);
     defer args_euler.deinit(allocator);
-    var res_euler = try euler_exe.results(allocator);
+    var res_euler = try model_ctx.euler_exe.results(allocator);
     defer res_euler.deinit(allocator);
 
     for (0..scheduler.timesteps.len) |step_i| {
         // log.info("   Step {d}/{d} (t={d:.2})", .{ step_i + 1, num_inference_steps, scheduler.timesteps[step_i] });
 
-        args_step.set(.{ weights, current_latents, prompt_embeds, t_proj_bufs[step_i], g_proj_buf, rotary_cos_dev, rotary_sin_dev });
+        args_step.set(.{ model_ctx.weights, current_latents, prompt_embeds, t_proj_bufs[step_i], g_proj_buf, rotary_cos_dev, rotary_sin_dev });
 
-        step_exe.call(args_step, &res_step);
+        model_ctx.step_exe.call(args_step, &res_step);
 
         var noise_pred_buf = res_step.get(zml.Buffer);
         defer noise_pred_buf.deinit();
@@ -690,7 +647,7 @@ pub fn schedule(
         // Run Euler Step on Device
         args_euler.set(.{ current_latents, noise_pred_buf, dt_buf });
 
-        euler_exe.call(args_euler, &res_euler);
+        model_ctx.euler_exe.call(args_euler, &res_euler);
 
         const next_latents_buf = res_euler.get(zml.Buffer);
 
@@ -699,10 +656,10 @@ pub fn schedule(
         is_first = false;
     }
 
-    try tools.printFlatten(allocator, io, current_latents, 20, "Latents after steps (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, current_latents, 20, "Latents after steps (first 20).", .{ .include_shape = true });
     // unpack_latents_with_ids - scatter tokens into correct spatial positions
     const unpacked = try unpackLatentsWithIds(allocator, io, platform, current_latents, latent_ids);
-    try tools.printFlatten(allocator, io, unpacked, 20, "Unpacked Latents (first 20).", .{ .include_shape = true });
+    // try tools.printFlatten(allocator, io, unpacked, 20, "Unpacked Latents (first 20).", .{ .include_shape = true });
 
     if (!is_first) current_latents.deinit();
 

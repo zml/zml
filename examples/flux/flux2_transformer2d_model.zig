@@ -978,15 +978,19 @@ pub const Flux2Transformer2D = struct {
     registry: zml.safetensors.TensorRegistry,
     config: Config,
     weights: zml.Bufferized(Flux2Transformer2DModel),
+    step_exe: zml.Exe,
+    euler_exe: zml.Exe,
 
     pub fn deinit(self: *@This(), allocator: std.mem.Allocator) void {
         utils.unloadWeights(allocator, &self.weights);
+        self.step_exe.deinit();
+        self.euler_exe.deinit();
         self.model.deinit(allocator);
         self.store.deinit();
         self.registry.deinit();
     }
 
-    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
+    pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, image_height: usize, image_width: usize, seqlen: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
 
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
@@ -1014,12 +1018,63 @@ pub const Flux2Transformer2D = struct {
             .{ .parallelism = parallelism_level, .store = &tensor_store, .dma_chunks = 4, .dma_chunk_size = 64 * 1024 * 1024, .progress = progress },
         );
         errdefer utils.unloadWeights(allocator, &weights);
+
+        const adjusted_height = image_height / 16;
+        const adjusted_width = image_width / 16;
+        const S = adjusted_height * adjusted_width;
+        const dim_latents = @as(i64, @intCast(config.in_channels));
+        const pixel_latents_shape = zml.Shape.init(.{ .b = 1, .s = @as(i64, @intCast(S)), .d = dim_latents }, .bf16);
+
+        const t_proj_shape = zml.Shape.init(.{ .b = 1, .d = 256 }, .bf16);
+
+        const prompt_embeds_shape = zml.Shape.init(.{ .b = 1, .s = @as(i64, @intCast(seqlen)), .d = @as(i64, @intCast(config.joint_attention_dim)) }, .bf16);
+
+        var total_rope_dim: i64 = 0;
+        for (config.axes_dims_rope) |d| total_rope_dim += d;
+        const rotary_shape = zml.Shape.init(.{ .b = 1, .s = @as(i64, @intCast(S + seqlen)), .d = total_rope_dim }, .bf16);
+        const sym_latents = zml.Tensor.fromShape(pixel_latents_shape);
+        const sym_t_proj = zml.Tensor.fromShape(t_proj_shape);
+        const sym_g_proj = zml.Tensor.fromShape(t_proj_shape);
+        const sym_prompt = zml.Tensor.fromShape(prompt_embeds_shape);
+        const sym_rotary_cos = zml.Tensor.fromShape(rotary_shape);
+        const sym_rotary_sin = zml.Tensor.fromShape(rotary_shape);
+
+        const FluxStep = struct {
+            pub fn forward(self: @This(), m: Flux2Transformer2DModel, hidden_states: zml.Tensor, encoder_hidden_states: zml.Tensor, timesteps_proj: zml.Tensor, guidance_proj: ?zml.Tensor, rotary_cos: zml.Tensor, rotary_sin: zml.Tensor) zml.Tensor {
+                _ = self;
+                return m.forward(hidden_states, encoder_hidden_states, timesteps_proj, guidance_proj, rotary_cos, rotary_sin);
+            }
+        };
+
+        log.info("Compiling Flux Step...", .{});
+        var step_exe = try platform.compile(allocator, io, FluxStep{}, .forward, .{ model, sym_latents, sym_prompt, sym_t_proj, sym_g_proj, sym_rotary_cos, sym_rotary_sin });
+        errdefer step_exe.deinit();
+
+        const EulerStep = struct {
+            pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
+                _ = self;
+                const s_f32 = sample.convert(.f32);
+                const m_f32 = model_output.convert(.f32);
+                const res = s_f32.add(m_f32.mul(dt));
+                return res.convert(.bf16);
+            }
+        };
+        const sym_dt = zml.Tensor.fromShape(zml.Shape.init(.{}, .f32));
+        const sym_sample = zml.Tensor.fromShape(pixel_latents_shape);
+        const sym_model_out = zml.Tensor.fromShape(pixel_latents_shape);
+
+        log.info("Compiling Euler Step...", .{});
+        var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model_out, sym_dt });
+        errdefer euler_exe.deinit();
+
         return .{
             .model = model,
             .store = tensor_store,
             .registry = tensor_registry,
             .config = config,
             .weights = weights,
+            .step_exe = step_exe,
+            .euler_exe = euler_exe,
         };
     }
 };
