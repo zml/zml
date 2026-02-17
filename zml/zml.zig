@@ -14,6 +14,7 @@ pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
 
 pub const attention = @import("attention/attention.zig");
+pub const paged_attention = @import("attention/paged_attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;
 pub const constants = @import("constants.zig");
 pub const dtype = @import("dtype.zig");
