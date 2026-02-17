@@ -408,11 +408,11 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         return try allocator.dupe(u32, try encoder.encode(prompt));
     }
 
-    const start_header = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
-    const end_header = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+    const start_header = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+    const end_header = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
     const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
     const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-    const eot = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
+    const eot = tokenizer.tokenToId("<|endoftext|>") orelse return error.NoSuchToken;
     const newline = (try encoder.encode("\n"))[0];
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
