@@ -405,7 +405,7 @@ pub fn runPrefill(
         generated_token_slice.items(u32)[0] = prefill_output_slice.items(u32)[prompt_len - 1];
         log.info("First generated token (from prefill): {}", .{generated_token_slice.items(u32)[0]});
     }
-    log.info("Decoder prefill done.", .{});
+    log.info("Decoder prefill done.\n", .{});
 }
 
 /// Run the streaming decode loop: step-by-step conv_stem -> encoder -> adapter -> decoder.
@@ -490,8 +490,10 @@ pub fn runGenerationLoop(
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
     defer current_token_buffer.deinit();
 
+    log.info("Start of transcription:\n", .{});
     var num_generated: usize = 0;
-    for (prompt_len..500) |t| {
+    var t: usize = prompt_len;
+    while (true) : (t += 1) {
         const generated_token = generated_token_slice.items(u32)[0];
         num_generated += 1;
 
@@ -508,7 +510,14 @@ pub fn runGenerationLoop(
 
         // Mel step: upload audio chunk → mel spectrogram on device (no host round-trip)
         // const audio_start: usize = (t * sp.mel_per_step - sp.mel_history) * sp._hop_length;
-        const audio_chunk = try readStdinChunk(allocator, stdin_reader);
+        const audio_chunk = readStdinSamples(allocator, stdin_reader, 1280) catch |err| switch (err) {
+            error.EndOfStream => {
+                std.debug.print("\n\n", .{});
+                log.info("Audio stream ended at step={}", .{t});
+                break;
+            },
+            else => return err,
+        };
         defer allocator.free(audio_chunk);
         // const audio_chunk = padded_audio[audio_start .. audio_start + sp.chunk_audio];
 
@@ -594,13 +603,23 @@ pub fn runPipeline(
     var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buff);
     const stdin_reader_interface = &stdin_reader.interface;
 
-    const first_audio_chunk = try readStdinChunk(allocator, stdin_reader_interface);
-    defer allocator.free(first_audio_chunk);
-
-    // 0. Reflect-pad audio on host (prepend n_fft/2 samples)
+    // 0. Read initial audio from stdin and build padded buffer for prefill (like loadAndPadWav)
     const n_fft: usize = config.audio().window_size;
     const reflect_pad: usize = n_fft / 2;
-    const reflect_padded_audio = try reflectPadAudio(allocator, first_audio_chunk, reflect_pad);
+
+    const n_prefill_stdin: usize = @as(usize, sp.n_delay_tokens + 1) * sp.raw_audio_length_per_tok;
+    const stdin_audio = try readStdinSamples(allocator, stdin_reader_interface, n_prefill_stdin);
+    defer allocator.free(stdin_audio);
+
+    // Pad: [left_pad zeros][stdin audio][right_pad zeros]
+    const right_pad: usize = @as(usize, sp.n_right_pad_tokens) * sp.raw_audio_length_per_tok;
+    const prefill_audio_len: usize = @as(usize, sp.left_pad) + stdin_audio.len + right_pad;
+    const prefill_audio = try allocator.alloc(f32, prefill_audio_len);
+    defer allocator.free(prefill_audio);
+    @memset(prefill_audio, 0);
+    @memcpy(prefill_audio[@as(usize, sp.left_pad)..][0..stdin_audio.len], stdin_audio);
+
+    const reflect_padded_audio = try reflectPadAudio(allocator, prefill_audio, reflect_pad);
     defer allocator.free(reflect_padded_audio);
 
     // 1. Mel prefill (chunk-by-chunk)
@@ -684,15 +703,16 @@ pub fn runPipeline(
     );
 }
 
-fn readStdinChunk(allocator: std.mem.Allocator, reader: *std.Io.Reader) ![]const f32 {
-    var read: [1280 * 2]u8 = undefined;
-    var converted = try allocator.alloc(f32, 1280);
-    try reader.readSliceAll(&read);
+fn readStdinSamples(allocator: std.mem.Allocator, reader: *std.Io.Reader, n_samples: usize) ![]f32 {
+    const byte_count = n_samples * 2;
+    const raw = try allocator.alloc(u8, byte_count);
+    defer allocator.free(raw);
+    try reader.readSliceAll(raw);
 
-    for (0..1280) |i| {
+    const samples = try allocator.alloc(f32, n_samples);
+    for (0..n_samples) |i| {
         const offset = i * 2;
-        converted[i] = @as(f32, @floatFromInt(std.mem.bytesToValue(i16, read[offset .. offset + 2]))) / 32768.0;
+        samples[i] = @as(f32, @floatFromInt(std.mem.bytesToValue(i16, raw[offset..][0..2]))) / 32768.0;
     }
-
-    return converted;
+    return samples;
 }
