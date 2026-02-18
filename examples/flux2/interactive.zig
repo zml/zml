@@ -28,6 +28,9 @@ fn completion(buf: [*c]const u8, lc: [*c]c_interface.linenoiseCompletions) callc
         if (std.mem.startsWith(u8, "/he", str)) {
             _ = c_interface.linenoiseAddCompletion(lc, "/help");
         }
+        if (std.mem.startsWith(u8, "/cl", str)) {
+            _ = c_interface.linenoiseAddCompletion(lc, "/clear");
+        }
     } else {
         _ = c_interface.linenoiseAddCompletion(lc, "/help");
     }
