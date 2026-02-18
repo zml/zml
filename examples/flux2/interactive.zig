@@ -42,8 +42,9 @@ fn hints(buf: [*c]const u8, color: [*c]c_int, bold: [*c]c_int) callconv(.c) [*c]
     if (str.len == 0) {
         return @constCast("/help");
     }
-    if (std.ascii.eqlIgnoreCase(str, "hello")) {
-        return @constCast(" World");
+
+    if (std.ascii.eqlIgnoreCase(str, "a classic")) {
+        return @constCast(" buger");
     }
 
     if (std.mem.startsWith(u8, str, "/")) {
@@ -117,6 +118,8 @@ pub fn interactive(allocator: std.mem.Allocator, pipeline: *FluxPipeline) !void 
             c_interface.linenoiseMaskModeEnable();
         } else if (std.mem.startsWith(u8, line_slice, "/unmask")) {
             c_interface.linenoiseMaskModeDisable();
+        } else if (std.mem.startsWith(u8, line_slice, "/clear")) {
+            c_interface.linenoiseClearScreen();
         } else if (std.mem.startsWith(u8, line_slice, "/help")) {
             std.debug.print("Available commands:\n", .{});
             std.debug.print("  /generator_type <type>    Set generator type (torch, accelerator_box_muller, accelerator_marsaglia)\n", .{});
@@ -125,6 +128,7 @@ pub fn interactive(allocator: std.mem.Allocator, pipeline: *FluxPipeline) !void 
             std.debug.print("  /historylen <int>         Set history length\n", .{});
             std.debug.print("  /mask                     Enable input masking\n", .{});
             std.debug.print("  /unmask                   Disable input masking\n", .{});
+            std.debug.print("  /clear                    Clear the screen\n", .{});
             std.debug.print("  /help                     Show this help message\n", .{});
         } else if (line_slice.len > 0 and line_slice[0] == '/') {
             std.debug.print("Unrecognized command: {s}\n", .{line_slice});
