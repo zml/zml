@@ -18,45 +18,22 @@ pub const LogMelSpectrogram = struct {
     precision: zml.DataType = .f32,
 
     pub fn init(config: Config) LogMelSpectrogram {
-	const audio = config.audio();
-	
-	return .{
-	    .window = .hann,
-	    .mel_filters = Tensor.init(.{201, 128}, .f32).withTags(.{.freq_bins, .mel}),
-	    .hop_len = audio.hop_length,
-	    .n_fft = audio.window_size,
-	    .global_log_mel_max = audio.global_log_mel_max,
-	};
-    }
+        const audio = config.audio();
 
-    pub fn forward(self: LogMelSpectrogram, waveform: Tensor) Tensor {
-	const dtype = waveform.dtype();
-
-        const window_weight = self.window.getWeights(self.n_fft, dtype);
-        const fft_len = window_weight.dim(.samples);
-        const num_frames: u63 = @intCast(@divFloor(waveform.dim(.samples), self.hop_len));
-
-        // Reflect padding
-        const padded_wav = blk: {
-            const l = waveform.slice1d(.samples, .{ .start = 1, .end = @divExact(fft_len, 2) + 1 }).reverse(.{.samples});
-            const r = waveform.slice1d(.samples, .{ .start = -@divExact(fft_len, 2) - 1, .end = -1 }).reverse(.{.samples});
-            break :blk zml.Tensor.concatenate(&.{ l, waveform, r }, .samples);
+        return .{
+            .window = .hann,
+            .mel_filters = Tensor.init(.{ 201, 128 }, .f32).withTags(.{ .freq_bins, .mel }),
+            .hop_len = audio.hop_length,
+            .n_fft = audio.window_size,
+            .global_log_mel_max = audio.global_log_mel_max,
         };
-
-        // Use Short Time Fourier Transform to compute features.
-        // Generate num_frames+1 (matching torch.stft center=True frame count),
-        // then drop the last frame to match Whisper convention (stft[..., :-1]).
-        var spectrogram = stft(padded_wav, window_weight, num_frames + 1, self.hop_len, self.precision);
-        spectrogram = spectrogram.slice1d(.frames, .{ .end = -1 });
-
-        return self.postProcess(spectrogram, dtype);
     }
 
     /// Like forward(), but for fixed-size audio chunks with reflect padding done on host.
     /// Produces exactly (audio_len - n_fft) / hop_len + 1 mel frames.
     /// Output tags: .channels and .time (matching conv stem input).
     pub fn melStep(self: LogMelSpectrogram, audio_chunk: Tensor) Tensor {
-	const dtype = audio_chunk.dtype();
+        const dtype = audio_chunk.dtype();
 
         const window_weight = self.window.getWeights(self.n_fft, dtype);
         const fft_len = window_weight.dim(.samples);
@@ -87,16 +64,16 @@ pub const LogMelSpectrogram = struct {
     }
 
     pub fn load(self: *LogMelSpectrogram, io: std.Io, platform: *zml.Platform) !zml.Bufferized(LogMelSpectrogram) {
-	const mel_filters_data = @embedFile("assets/voxtral_mel_filter.data");
-	const slice = zml.Slice.init(self.mel_filters.shape(), mel_filters_data);
+        const mel_filters_data = @embedFile("assets/voxtral_mel_filter.data");
+        const slice = zml.Slice.init(self.mel_filters.shape(), mel_filters_data);
 
-	return .{
-	    .mel_filters = try zml.Buffer.fromSlice(io, platform, slice),
-	};
+        return .{
+            .mel_filters = try zml.Buffer.fromSlice(io, platform, slice),
+        };
     }
 
     pub fn unload(self: *zml.Bufferized(LogMelSpectrogram)) void {
-	self.mel_filters.deinit();
+        self.mel_filters.deinit();
     }
 };
 
@@ -104,14 +81,14 @@ pub fn stft(waveform: Tensor, weight: Tensor, num_frames: usize, stride: u63, pr
     const fft_len = weight.dim(0);
 
     const indices = Tensor.arange(.{ .end = @intCast(num_frames * stride), .step = stride }, .i32);
-    var windows = waveform.gatherSlices(.{fft_len}, indices.appendAxes(.{.coord }), .{ .indices_are_sorted = true });
+    var windows = waveform.gatherSlices(.{fft_len}, indices.appendAxes(.{.coord}), .{ .indices_are_sorted = true });
 
     windows = windows.mul(weight.broadcastLeft(windows.shape()));
 
     var fft = windows.convert(precision).fft(.{ .kind = .RFFT, .length = &.{fft_len} });
     const spectrogram = fft.abs();
 
-    return spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{.frames, .freq_bins});
+    return spectrogram.mul(spectrogram).convert(waveform.dtype()).withTags(.{ .frames, .freq_bins });
 }
 
 pub const AudioWindow = enum {
@@ -125,11 +102,11 @@ pub const AudioWindow = enum {
             .boxcar => Tensor.constant(dtype.one()).withTags(.{.samples}),
             .hann => {
                 if (len <= 1) return Tensor.constant(dtype.one());
-		
+
                 const flen: f64 = @floatFromInt(len);
                 const freq = Tensor.constant(dtype.constant(std.math.pi / flen));
                 const steps = Tensor.arange(.{ .start = -len, .end = len, .step = 2 }, dtype);
-		
+
                 return steps.mul(freq).cos().scale(0.5).addConstant(0.5).convert(dtype).withTags(.{.samples});
             },
         };
