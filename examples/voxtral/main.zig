@@ -48,21 +48,9 @@ pub fn main(init: std.process.Init) !void {
     };
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
-
-    // var vfs: zml.io.VFS = try .init(allocator, init.io);
-    // defer vfs.deinit();
-
-    // var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    // defer vfs_file.deinit();
-    // try vfs.register("file", vfs_file.io());
-
-    // const io = vfs.io();
     const io = init.io;
 
     var progress = std.Progress.start(io, .{ .root_name = "Voxtral" });
-
-    // const file = try std.Io.Dir.openFile(.cwd(), io, args.input, .{});
-    // defer file.close(io);
 
     const model_dir = try zml.safetensors.resolveModelRepo(io, args.model);
 
@@ -81,13 +69,6 @@ pub fn main(init: std.process.Init) !void {
     // Build tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
     const tokens = try allocator.alloc(u32, sp.prompt_len);
     defer allocator.free(tokens);
-
-    // var wav_buffer: [4096]u8 = undefined;
-    // var reader = file.reader(io, &wav_buffer);
-
-    // const padded_wav = try wav_utils.loadAndPadWav(allocator, &reader.interface, sp.left_pad, sp.n_right_pad_tokens, sp.raw_audio_length_per_tok);
-    // defer allocator.free(padded_wav);
-    // const audio_len = padded_wav.len;
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
         .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.90 } } },
