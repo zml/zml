@@ -12,7 +12,7 @@ pub const Qwen2TokenizerFast = struct {
         content: []const u8,
     };
 
-    pub fn fromPretrained(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = "tokenizer" }) !Qwen2TokenizerFast {
+    pub fn fromPretrained(allocator: std.mem.Allocator, io: std.Io, repo_dir: std.Io.Dir, options: struct { subfolder: ?[]const u8 = "tokenizer" }) !@This() {
         const subfolder = options.subfolder orelse "";
 
         const tokenizer_path = try std.fmt.allocPrint(allocator, "{s}/tokenizer.json", .{subfolder});
@@ -26,17 +26,17 @@ pub const Qwen2TokenizerFast = struct {
         };
         defer allocator.free(bytes);
 
-        return Qwen2TokenizerFast{
+        return @This(){
             .tokenizer = try zml.tokenizer.Tokenizer.fromBytes(allocator, io, bytes),
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *Qwen2TokenizerFast) void {
+    pub fn deinit(self: *@This()) void {
         self.tokenizer.deinit();
     }
 
-    pub fn applyChatTemplate(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
+    pub fn applyChatTemplate(self: @This(), messages: []const ChatMessage, options: struct {
         add_generation_prompt: bool = true,
     }) ![]const u8 {
         const im_start = "<|im_start|>";
@@ -87,7 +87,7 @@ pub const Qwen2TokenizerFast = struct {
         }
     };
 
-    pub fn tokenize(self: *Qwen2TokenizerFast, io: std.Io, platform: *const zml.Platform, text: []const u8, options: struct {
+    pub fn tokenize(self: *@This(), io: std.Io, platform: *const zml.Platform, text: []const u8, options: struct {
         max_length: usize = 512,
         truncation: bool = true,
     }) !TokenizeOutput {
@@ -135,9 +135,9 @@ pub const Qwen2TokenizerFast = struct {
             defer node.end();
         }
         // Tokenizer Setup
-        var tokenizer = try Qwen2TokenizerFast.fromPretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
+        var tokenizer = try @This().fromPretrained(allocator, io, repo_dir, .{ .subfolder = "tokenizer" });
         defer tokenizer.deinit();
-        const messages = [_]Qwen2TokenizerFast.ChatMessage{
+        const messages = [_]@This().ChatMessage{
             .{ .role = "user", .content = prompt },
         };
         const text_templated = try tokenizer.applyChatTemplate(&messages, .{

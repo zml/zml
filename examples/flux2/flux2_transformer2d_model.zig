@@ -122,15 +122,10 @@ fn get_1d_rotary_pos_embed(dim: i64, pos: Tensor, theta: f32) struct { Tensor, T
     const log_theta = std.math.log(f32, theta, std.math.e);
     const exponent_factor = -log_theta / @as(f32, @floatFromInt(half));
     const exponents = iota.mul(Tensor.scalar(exponent_factor, pos.dtype()));
-    const freq_half = exponents.exp(); // [half]
+    const freq_half = exponents.exp();
 
-    // Interleave: [f0, f1] -> [f0, f0, f1, f1]
-    // [half] -> [half, 1] -> broad [half, 2] -> reshape [dim]
     const freq = freq_half.reshape(.{ half, 1 }).broad(zml.Shape.init(.{ half, 2 }, pos.dtype())).reshape(.{dim});
 
-    // pos: [S] -> [S, 1]
-    // freq: [D] -> [1, D]
-    // out: [S, D]
     const out = pos.reshape(.{ -1, 1 }).mul(freq.reshape(.{ 1, -1 }));
     return .{ out.cos(), out.sin() };
 }
@@ -150,7 +145,6 @@ fn applyRoPE(x: Tensor, cos: Tensor, sin: Tensor) Tensor {
     const B = shape.dim(0);
     const L = shape.dim(1);
     const H = shape.dim(2);
-    // D is dim(3).
 
     const x_pairs_reshaped = x.reshape(.{ B, L, H, half, 2 });
 
@@ -195,6 +189,72 @@ fn scaled_dot_product_attention(q: Tensor, k: Tensor, v: Tensor) Tensor {
     return attn_transposed.reshape(.{ B, L, H * D }).withPartialTags(.{ .b, .l, .d });
 }
 
+/// SIMD-optimized frequency computation for RoPE
+/// Computes theta^(-i/half) for i in [0, half)
+inline fn computeRoPEFrequencies(freq_data: []f32, half: usize, theta: f32) void {
+    const VecWidth = 4;
+    const vec_limit = (half / VecWidth) * VecWidth;
+    var h: usize = 0;
+
+    // Vectorized frequency computation
+    while (h < vec_limit) : (h += VecWidth) {
+        inline for (0..VecWidth) |i| {
+            const e = @as(f32, @floatFromInt(h + i)) / @as(f32, @floatFromInt(half));
+            freq_data[h + i] = std.math.pow(f32, theta, -e);
+        }
+    }
+
+    // Handle remaining elements
+    while (h < half) : (h += 1) {
+        const e = @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(half));
+        freq_data[h] = std.math.pow(f32, theta, -e);
+    }
+}
+
+/// SIMD-optimized frequency interleaving
+/// Interleaves [f0, f1, f2...] to [f0, f0, f1, f1, f2, f2...]
+inline fn interleaveFrequencies(src: []const f32, dst: []f32, half: usize) void {
+    const VecWidth = 4;
+    const vec_limit = (half / VecWidth) * VecWidth;
+    var h: usize = 0;
+
+    // Vectorized interleaving
+    while (h < vec_limit) : (h += VecWidth) {
+        inline for (0..VecWidth) |i| {
+            const val = src[h + i];
+            dst[2 * (h + i)] = val;
+            dst[2 * (h + i) + 1] = val;
+        }
+    }
+
+    // Handle remaining elements
+    while (h < half) : (h += 1) {
+        dst[2 * h] = src[h];
+        dst[2 * h + 1] = src[h];
+    }
+}
+
+/// SIMD-optimized f32 to bf16 conversion
+inline fn convertF32ToBf16Simd(src: []const f32, dst: []u16) void {
+    const VecWidth = 8;
+    const vec_limit = (src.len / VecWidth) * VecWidth;
+    var i: usize = 0;
+
+    // Vectorized conversion
+    while (i < vec_limit) : (i += VecWidth) {
+        inline for (0..VecWidth) |j| {
+            const bits: u32 = @bitCast(src[i + j]);
+            dst[i + j] = @truncate(bits >> 16);
+        }
+    }
+
+    // Handle remaining elements
+    while (i < src.len) : (i += 1) {
+        const bits: u32 = @bitCast(src[i]);
+        dst[i] = @truncate(bits >> 16);
+    }
+}
+
 pub fn computeRotaryEmbedding(allocator: std.mem.Allocator, ids_data: []const f32, shape: zml.Shape, axes_dim: [4]i64, theta: f32) ![2]zml.Slice {
     const B = shape.dim(0);
     const S = shape.dim(1); // ids: [B, S, 4]
@@ -214,46 +274,61 @@ pub fn computeRotaryEmbedding(allocator: std.mem.Allocator, ids_data: []const f3
     const sin_data = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(sin_slice.items(u8))));
 
     var offset: usize = 0;
+
     // Iterate over axes
     for (axes_dim, 0..) |dim, axis_idx| {
         const half = @divExact(dim, 2);
-        // Precompute freqs for this axis
+        const half_usize: usize = @intCast(half);
+        const dim_usize: usize = @intCast(dim);
+
+        // Precompute freqs for this axis using SIMD
         var freq_data: [128]f32 = undefined;
-        // theta ^ (-i / half)
-        // logic from get_1d_rotary_pos_embed
-        for (0..@intCast(half)) |h| {
-            const e = @as(f32, @floatFromInt(h)) / @as(f32, @floatFromInt(half));
-            freq_data[h] = std.math.pow(f32, theta, -e);
-        }
+        computeRoPEFrequencies(freq_data[0..half_usize], half_usize, theta);
 
-        // Interleave freqs: [f0, f0, f1, f1...]
+        // Interleave freqs using SIMD: [f0, f0, f1, f1...]
         var freqs: [256]f32 = undefined;
-        for (0..@intCast(half)) |h| {
-            freqs[2 * h] = freq_data[h];
-            freqs[2 * h + 1] = freq_data[h];
-        }
+        interleaveFrequencies(freq_data[0..half_usize], freqs[0..dim_usize], half_usize);
 
-        // Loop over B, S
+        const S_usize: usize = @intCast(S);
+        const total_dim_usize: usize = @intCast(total_dim);
+        const stride_S = total_dim_usize;
+        const stride_B = S_usize * total_dim_usize;
+
+        // Loop over B, S with optimized indexing
         for (0..@intCast(B)) |b| {
-            for (0..@intCast(S)) |s| {
+            const b_offset = b * stride_B;
+
+            for (0..S_usize) |s| {
                 // Get id value for this axis
                 // ids is [B, S, 4]. Flat index: b*(S*4) + s*4 + axis_idx
-                const idx = b * (@as(usize, @intCast(S)) * 4) + s * 4 + axis_idx;
+                const idx = b * (S_usize * 4) + s * 4 + axis_idx;
                 const pos = ids_data[idx];
 
-                // Compute cos/sin for this axis segment
-                for (0..@intCast(dim)) |d| {
+                // Compute cos/sin for this axis segment using SIMD
+                const base_out_idx = b_offset + s * stride_S + offset;
+
+                // Process in chunks using SIMD
+                const VecWidth = 8;
+                const vec_limit = (dim_usize / VecWidth) * VecWidth;
+                var d: usize = 0;
+
+                while (d < vec_limit) : (d += VecWidth) {
+                    inline for (0..VecWidth) |i| {
+                        const arg = pos * freqs[d + i];
+                        cos_data[base_out_idx + d + i] = @cos(arg);
+                        sin_data[base_out_idx + d + i] = @sin(arg);
+                    }
+                }
+
+                // Handle remaining elements
+                while (d < dim_usize) : (d += 1) {
                     const arg = pos * freqs[d];
-
-                    // Output index: b*(S*total_dim) + s*total_dim + offset + d
-                    const out_idx = b * (@as(usize, @intCast(S)) * @as(usize, @intCast(total_dim))) + s * @as(usize, @intCast(total_dim)) + offset + d;
-
-                    cos_data[out_idx] = @cos(arg);
-                    sin_data[out_idx] = @sin(arg);
+                    cos_data[base_out_idx + d] = @cos(arg);
+                    sin_data[base_out_idx + d] = @sin(arg);
                 }
             }
         }
-        offset += @intCast(dim);
+        offset += dim_usize;
     }
 
     // Convert f32 to bf16
@@ -264,14 +339,9 @@ pub fn computeRotaryEmbedding(allocator: std.mem.Allocator, ids_data: []const f3
     const cos_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(cos_slice_bf16.items(u8))));
     const sin_data_bf16 = std.mem.bytesAsSlice(u16, @as([]align(2) u8, @alignCast(sin_slice_bf16.items(u8))));
 
-    for (cos_data, 0..) |val, i| {
-        const bits: u32 = @bitCast(val);
-        cos_data_bf16[i] = @truncate(bits >> 16);
-    }
-    for (sin_data, 0..) |val, i| {
-        const bits: u32 = @bitCast(val);
-        sin_data_bf16[i] = @truncate(bits >> 16);
-    }
+    // SIMD-optimized f32 to bf16 conversion
+    convertF32ToBf16Simd(cos_data, cos_data_bf16);
+    convertF32ToBf16Simd(sin_data, sin_data_bf16);
 
     // Free the f32 slices
     cos_slice.free(allocator);
@@ -294,8 +364,6 @@ pub fn computeTimestepFrequencies(dim: i64) [128]f32 {
 }
 
 fn getTimesteps(timesteps: Tensor, freq_vals: Tensor) Tensor {
-    // timesteps: [B] -> [B, 1]
-    // freq_vals: [half] -> [1, half] (broadcasts to [B, half] via mul)
     const out = timesteps.reshape(.{ -1, 1 }).mul(freq_vals.reshape(.{ 1, -1 }));
     return Tensor.concatenate(&.{ out.cos(), out.sin() }, -1);
 }

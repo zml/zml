@@ -20,8 +20,6 @@ pub const Config = struct {
     use_post_quant_conv: bool = true,
 };
 
-// --- Helpers ---
-
 pub fn unloadWeights(allocator: std.mem.Allocator, weights: anytype) void {
     const T = @TypeOf(weights.*);
     const type_info = @typeInfo(T);
@@ -61,7 +59,6 @@ const Conv2d = struct {
     groups: i64 = 1,
 
     pub fn init(store: zml.io.TensorStore.View, stride: i64, padding: i64) Conv2d {
-        // weights: [Out, In, H, W] -> zml [out, in, k_h, k_w]
         const weight = store.createTensor("weight");
         const bias = store.maybeCreateTensor("bias");
         return .{
@@ -73,12 +70,10 @@ const Conv2d = struct {
     }
 
     pub fn deinit(self: @This()) void {
-        _ = self; // autofix
+        _ = self;
     }
 
     pub fn forward(self: Conv2d, x: Tensor) Tensor {
-        // NCHW layout
-        // Weight: OIHW (Output, Input, Height, Width)
         const input_spatial = [_]i64{ 2, 3 };
         const kernel_spatial = [_]i64{ 2, 3 };
         const output_spatial = [_]i64{ 2, 3 };
@@ -110,11 +105,10 @@ const Conv2d = struct {
             .window_reversal = &.{ false, false },
             .feature_group_count = self.groups,
             .batch_group_count = 1,
-            .precision_config = &.{ .DEFAULT, .DEFAULT }, // Check precision enum
+            .precision_config = &.{ .DEFAULT, .DEFAULT },
         });
 
         if (self.bias) |b| {
-            // b: [C] -> [1, C, 1, 1]
             y = y.add(b.reshape(.{ 1, b.dim(0), 1, 1 }).broad(y.shape()));
         }
         return y;
@@ -122,8 +116,8 @@ const Conv2d = struct {
 };
 
 const GroupNorm = struct {
-    weight: ?Tensor, // gamma
-    bias: ?Tensor, // beta
+    weight: ?Tensor,
+    bias: ?Tensor,
     num_groups: i64,
     eps: f32,
 
@@ -137,12 +131,6 @@ const GroupNorm = struct {
     }
 
     pub fn forward(self: GroupNorm, x: Tensor) Tensor {
-        // specific group norm implementation or fallback
-        // zml.nn.groupNorm might be missing.
-        // x: [B, C, H, W]
-        // Reshape to [B, G, C/G, H*W]
-        // Normalize over last 2 dims?
-        // Let's rely on manual implementation for now to be safe.
         const B = x.shape().dim(0);
         const C = x.shape().dim(1);
         const H = x.shape().dim(2);
@@ -150,31 +138,22 @@ const GroupNorm = struct {
         const G = self.num_groups;
         const C_per_G = @divExact(C, G);
 
-        // [B, G, C/G, H, W]
         const x_g = x.reshape(.{ B, G, C_per_G, H, W });
 
-        // Mean/Var over C/G, H, W
-        // Axes: 2, 3, 4
-        // zml.nn.normalize (x, axes, eps) ??
-        // zml.nn.mean(x, axes)
-
-        // Flatten G, C/G, H, W into one dim for stats
-        // x_g: [B, G, C/G, H, W]
-        const flat = x_g.reshape(.{ B, G, -1 }); // [B, G, N]
-        const mean = flat.mean(2); // [B, G]
+        const flat = x_g.reshape(.{ B, G, -1 });
+        const mean = flat.mean(2);
         const mean_broad = mean.reshape(.{ B, G, 1, 1, 1 }).broad(x_g.shape());
 
         const diff = x_g.sub(mean_broad);
         const sq_diff = diff.mul(diff);
 
-        // flatten sq_diff to mean
         const sq_diff_flat = sq_diff.reshape(.{ B, G, -1 });
-        const var_val = sq_diff_flat.mean(2); // [B, G]
+        const var_val = sq_diff_flat.mean(2);
         const std_val = var_val.add(Tensor.scalar(self.eps, var_val.dtype())).sqrt();
         const std_broad = std_val.reshape(.{ B, G, 1, 1, 1 }).broad(x_g.shape());
 
         var out = diff.div(std_broad);
-        out = out.reshape(x.shape()); // [B, C, H, W]
+        out = out.reshape(x.shape());
 
         if (self.weight) |gamma| {
             out = out.mul(gamma.reshape(.{ 1, C, 1, 1 }).broad(x.shape()));
@@ -200,11 +179,9 @@ const BatchNorm = struct {
     }
 
     pub fn deinit(self: @This()) void {
-        _ = self; // autofix
+        _ = self;
     }
 };
-
-// --- ResNet Block ---
 
 const ResnetBlock2D = struct {
     norm1: GroupNorm,
@@ -214,14 +191,14 @@ const ResnetBlock2D = struct {
     conv_shortcut: ?Conv2d,
 
     pub fn init(store: zml.io.TensorStore.View, in_channels: i64, out_channels: i64, temb_channels: ?i64, eps: f32, groups: i64) ResnetBlock2D {
-        _ = temb_channels; // Unused in VAE ResNet generally
+        _ = temb_channels;
         return .{
             .norm1 = GroupNorm.init(store.withPrefix("norm1"), groups, eps, true),
-            .conv1 = Conv2d.init(store.withPrefix("conv1"), 1, 1), // stride 1, padding 1 (3x3 kernel assumed typically, check weights)
+            .conv1 = Conv2d.init(store.withPrefix("conv1"), 1, 1),
             .norm2 = GroupNorm.init(store.withPrefix("norm2"), groups, eps, true),
             .conv2 = Conv2d.init(store.withPrefix("conv2"), 1, 1),
             .conv_shortcut = if (in_channels != out_channels)
-                Conv2d.init(store.withPrefix("conv_shortcut"), 1, 0) // 1x1 conv usually
+                Conv2d.init(store.withPrefix("conv_shortcut"), 1, 0)
             else
                 null,
         };
@@ -246,8 +223,6 @@ const ResnetBlock2D = struct {
     }
 };
 
-// --- Attention Block (VAE) ---
-
 const Attention = struct {
     group_norm: GroupNorm,
     to_q: Conv2d,
@@ -261,7 +236,7 @@ const Attention = struct {
         const num_heads = 1;
         return .{
             .group_norm = GroupNorm.init(store.withPrefix("group_norm"), num_groups, eps, true),
-            .to_q = Conv2d.init(store.withPrefix("to_q"), 1, 0), // 1x1 conv
+            .to_q = Conv2d.init(store.withPrefix("to_q"), 1, 0),
             .to_k = Conv2d.init(store.withPrefix("to_k"), 1, 0),
             .to_v = Conv2d.init(store.withPrefix("to_v"), 1, 0),
             .to_out = Conv2d.init(store.withPrefix("to_out.0"), 1, 0),
@@ -278,24 +253,21 @@ const Attention = struct {
         const residual = x;
         const norm = self.group_norm.forward(x);
 
-        const q = self.to_q.forward(norm).reshape(.{ B, -1, H * W }).transpose(.{ 0, 2, 1 }); // [B, HW, C]
+        const q = self.to_q.forward(norm).reshape(.{ B, -1, H * W }).transpose(.{ 0, 2, 1 });
         const k = self.to_k.forward(norm).reshape(.{ B, -1, H * W }).transpose(.{ 0, 2, 1 });
         const v = self.to_v.forward(norm).reshape(.{ B, -1, H * W }).transpose(.{ 0, 2, 1 });
 
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(C)));
 
-        // q: [B, HW, C]
-        // k: [B, HW, C] -> k_t: [B, C, HW]
-        // Use tags for dot product
         const q_tagged = q.withPartialTags(.{ .b, .y, .c });
         const k_tagged = k.withPartialTags(.{ .b, .x, .c });
-        const k_t_tagged = k_tagged.transpose(.{ 0, 2, 1 }); // [b, c, x]
+        const k_t_tagged = k_tagged.transpose(.{ 0, 2, 1 });
 
-        var attn = q_tagged.dot(k_t_tagged, .c).mul(Tensor.scalar(scale, q_tagged.dtype())); // [b, y, x]
+        var attn = q_tagged.dot(k_t_tagged, .c).mul(Tensor.scalar(scale, q_tagged.dtype()));
         attn = attn.softmax(-1);
 
         const v_tagged = v.withPartialTags(.{ .b, .x, .c });
-        const out_attn = attn.dot(v_tagged, .x); // [b, y, c]
+        const out_attn = attn.dot(v_tagged, .x);
 
         const out_transposed = out_attn.transpose(.{ 0, 2, 1 }).reshape(.{ B, C, H, W });
         const result = self.to_out.forward(out_transposed);
@@ -306,17 +278,15 @@ const Attention = struct {
 
 const UpDecoderBlock2D = struct {
     resnets: []ResnetBlock2D,
-    upsamplers: []Conv2d, // Usually just one upsampler or none/empty
+    upsamplers: []Conv2d,
     allocator: std.mem.Allocator,
 
     pub fn init(store: zml.io.TensorStore.View, allocator: std.mem.Allocator, in_channels: i64, out_channels: i64, num_layers: i64, eps: f32, num_groups: i64, add_upsample: bool) !UpDecoderBlock2D {
         const ResnetList = std.ArrayList(ResnetBlock2D);
         var resnets = try ResnetList.initCapacity(allocator, @intCast(num_layers));
 
-        // First resnet: in -> out
         try resnets.append(allocator, ResnetBlock2D.init(store.withPrefix("resnets.0"), in_channels, out_channels, null, eps, num_groups));
 
-        // Subsequent resnets: out -> out
         for (1..@intCast(num_layers)) |i| {
             var prefix_buf: [32]u8 = undefined;
             const prefix = try std.fmt.bufPrint(&prefix_buf, "resnets.{d}", .{i});
@@ -351,7 +321,6 @@ const UpDecoderBlock2D = struct {
         }
 
         for (self.upsamplers) |conv| {
-            // Resize (Nearest Neighbor 2x)
             h = zml.nn.upsample(h, .{ .mode = .nearest, .scale_factor = &.{ 2.0, 2.0 } });
             h = conv.forward(h);
         }
@@ -404,16 +373,13 @@ pub const Decoder = struct {
         const layers_per_block = config.layers_per_block;
         const norm_num_groups = config.norm_num_groups;
 
-        // Initial Conv
         const conv_in = Conv2d.init(store.withPrefix("conv_in"), 1, 1);
 
-        // Mid Block
         const mid_channels = block_out_channels[block_out_channels.len - 1];
         const mid_block = try UNetMidBlock2D.init(store.withPrefix("mid_block"), allocator, mid_channels, 1e-6, norm_num_groups, 1);
 
-        // Up Blocks
         const UpBlockList = std.ArrayList(UpDecoderBlock2D);
-        // Capacity equal to number of blocks
+
         var up_blocks = try UpBlockList.initCapacity(allocator, block_out_channels.len);
 
         var idx: usize = block_out_channels.len;
@@ -425,7 +391,7 @@ pub const Decoder = struct {
             const add_upsample = idx > 0;
 
             var prefix_buf: [32]u8 = undefined;
-            // Weight index: (N-1) - i
+
             const weight_idx = (block_out_channels.len - 1) - idx;
             const prefix_z = try std.fmt.bufPrint(&prefix_buf, "up_blocks.{d}", .{weight_idx});
 
@@ -508,7 +474,6 @@ pub const VariationalAutoEncoder = struct {
         _ = self;
         var z = latents;
 
-        // Denormalize
         const mean = model.bn.running_mean;
         const var_val = model.bn.running_var;
         const eps = model.config.batch_norm_eps;
@@ -521,8 +486,6 @@ pub const VariationalAutoEncoder = struct {
 
         z = z.mul(std_b.convert(z.dtype())).add(mean_b.convert(z.dtype()));
 
-        // Unpatchify
-        // [B, C, H, W] -> [B, C/4, H*2, W*2]
         const B = z.shape().dim(0);
         const H = z.shape().dim(2);
         const W = z.shape().dim(3);
@@ -573,7 +536,6 @@ pub const AutoencoderKLFlux2 = struct {
         var model = try AutoencoderKLFlux2Model.init(tensor_store.view(), allocator, config_json.value);
         errdefer model.deinit();
 
-        // Compile VAE Decode Step
         const VAEDecodeStep = struct {
             pub fn forward(self: @This(), model_inner: AutoencoderKLFlux2Model, latents_tensor: zml.Tensor) zml.Tensor {
                 _ = self;
@@ -582,11 +544,7 @@ pub const AutoencoderKLFlux2 = struct {
         };
 
         const batch_size = 1;
-        // In Flux signal flow:
-        // Image [1, 3, H, W] -> VAE Encode -> [1, 16, H/8, W/8] -> Patchify -> [1, 64, H/16, W/16]
-        // Transformer operates on [1, 64, H/16, W/16]
-        // Input to VAE Decode is the output of Transformer (unpacked): [1, 64, H/16, W/16]
-        // VariationalAutoEncoder.forward handles the unpatchify (depth_to_space) logic.
+
         const c_dim = @as(usize, @intCast(config_json.value.latent_channels * 4));
         const h_dim = image_height / 16;
         const w_dim = image_width / 16;
@@ -618,7 +576,6 @@ pub const AutoencoderKLFlux2 = struct {
 
         var vae_exe = try compile_future.await(io);
         errdefer vae_exe.deinit();
-
 
         return .{
             .model = model,

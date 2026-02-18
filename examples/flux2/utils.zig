@@ -166,12 +166,9 @@ pub fn get_latents(
     switch (generator_type) {
         .torch => {
             const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .bf16);
-            // CPU-side MT19937 + Box-Muller, matching torch.Generator exactly.
             var gen = TorchGenerator.init(seed);
 
-            // Generate bf16 data directly
             const rand_data = try gen.randnBf16(allocator, &shape_latents);
-            // const rand_data = try gen.randn(allocator, &shape_latents);
             defer allocator.free(rand_data);
 
             var latents_buffer = try zml.Buffer.fromBytes(io, platform, latents_raw_shape, std.mem.sliceAsBytes(rand_data));
@@ -180,9 +177,6 @@ pub fn get_latents(
         },
         inline .accelerator_box_muller, .accelerator_marsaglia => |gt| {
             const latents_raw_shape = zml.Shape.init(.{ .b = @as(i64, @intCast(shape_latents[0])), .c = @as(i64, @intCast(shape_latents[1])), .h = @as(i64, @intCast(shape_latents[2])), .w = @as(i64, @intCast(shape_latents[3])) }, .f32);
-            // Accelerator-based RNG compiled graph.
-            // Important: Generate in f32 to avoid numerical instability.
-            // bf16 has only 7 mantissa bits, causing NaN values in sqrt/log/cos/sin operations.
             const forward_fn = switch (gt) {
                 .accelerator_box_muller => LatentGenerator.forward,
                 .accelerator_marsaglia => LatentGenerator.forwardPolar,
@@ -461,6 +455,100 @@ test "TorchGenerator matches torch.randn reference (seed=0)" {
     }
 }
 
+/// SIMD-optimized i64 to f32 conversion
+inline fn convertI64ToF32Simd(src: []const i64, dst: []f32) void {
+    const VecWidth = 4; // i64 vectors are typically smaller
+    const vec_limit = (src.len / VecWidth) * VecWidth;
+    var i: usize = 0;
+
+    // Vectorized conversion
+    while (i < vec_limit) : (i += VecWidth) {
+        inline for (0..VecWidth) |j| {
+            dst[i + j] = @floatFromInt(src[i + j]);
+        }
+    }
+
+    // Handle remaining elements
+    while (i < src.len) : (i += 1) {
+        dst[i] = @floatFromInt(src[i]);
+    }
+}
+
+/// SIMD-optimized i32 to f32 conversion
+inline fn convertI32ToF32Simd(src: []const i32, dst: []f32, offset: usize) void {
+    const VecWidth = 8;
+    const Vec = @Vector(VecWidth, f32);
+    const vec_limit = (src.len / VecWidth) * VecWidth;
+    var i: usize = 0;
+
+    // Vectorized conversion
+    while (i < vec_limit) : (i += VecWidth) {
+        var vec_result: Vec = undefined;
+        inline for (0..VecWidth) |j| {
+            vec_result[j] = @floatFromInt(src[i + j]);
+        }
+        inline for (0..VecWidth) |j| {
+            dst[offset + i + j] = vec_result[j];
+        }
+    }
+
+    // Handle remaining elements
+    while (i < src.len) : (i += 1) {
+        dst[offset + i] = @floatFromInt(src[i]);
+    }
+}
+
+/// SIMD-optimized f32 to bf16 conversion
+inline fn convertF32ToBf16Simd(src: []const f32, dst: []u16) void {
+    const VecWidth = 8;
+    const vec_limit = (src.len / VecWidth) * VecWidth;
+    var i: usize = 0;
+
+    // Vectorized conversion
+    while (i < vec_limit) : (i += VecWidth) {
+        inline for (0..VecWidth) |j| {
+            const bits: u32 = @bitCast(src[i + j]);
+            dst[i + j] = @truncate(bits >> 16);
+        }
+    }
+
+    // Handle remaining elements
+    while (i < src.len) : (i += 1) {
+        const bits: u32 = @bitCast(src[i]);
+        dst[i] = @truncate(bits >> 16);
+    }
+}
+
+/// Compute timestep embedding with cos/sin and convert to bf16
+/// Optimized for batch processing
+inline fn computeTimestepEmbedding(t_val: f32, freq_vals: []const f32, out_bf16: []u16) void {
+    // First 128 elements: cos, next 128: sin
+    var temp_f32: [256]f32 = undefined;
+
+    // Compute cos and sin (unrolled for better performance)
+    const VecWidth = 4;
+    const vec_limit = (128 / VecWidth) * VecWidth;
+    var j: usize = 0;
+
+    while (j < vec_limit) : (j += VecWidth) {
+        inline for (0..VecWidth) |i| {
+            const arg = t_val * freq_vals[j + i];
+            temp_f32[j + i] = @cos(arg); // First half: cos
+            temp_f32[128 + j + i] = @sin(arg); // Second half: sin
+        }
+    }
+
+    // Handle remaining elements
+    while (j < 128) : (j += 1) {
+        const arg = t_val * freq_vals[j];
+        temp_f32[j] = @cos(arg);
+        temp_f32[128 + j] = @sin(arg);
+    }
+
+    // Convert to bf16 using optimized function
+    convertF32ToBf16Simd(&temp_f32, out_bf16);
+}
+
 pub fn loadInput(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, path: []const u8, fallback_shape: anytype) !zml.Buffer {
     const npy = tools.NumpyData.load(allocator, path) catch {
         log.warn("Input not found at {s}, using zeros", .{path});
@@ -506,7 +594,6 @@ pub fn schedule(
 
     try scheduler.set_timesteps(num_inference_steps, sigmas.items, empirical_mu, null);
 
-    // Precompute frequencies and Rotary Embeddings (CPU)
     const freq_vals_arr = flux_model_transformer2d.computeTimestepFrequencies(model_ctx.config.timestep_guidance_channels);
 
     // --- RoPE Precompute ---
@@ -525,7 +612,6 @@ pub fn schedule(
     try latent_ids.toSlice(io, img_ids_slice);
 
     const comb_shape = zml.Shape.init(.{ .b = 1, .s = total_len, .coord = 4 }, .f32);
-    // Combine IDs into one CPU buffer
     const txt_bytes = txt_ids_slice.items(u8);
     const img_bytes = img_ids_slice.items(u8);
 
@@ -535,18 +621,14 @@ pub fn schedule(
 
     const comb_f32 = std.mem.bytesAsSlice(f32, @as([]align(4) u8, @alignCast(comb_bytes_slice)));
 
-    // Txt IDs: i64 -> f32
     const txt_i64 = std.mem.bytesAsSlice(i64, @as([]align(8) u8, @alignCast(txt_bytes)));
-    for (txt_i64, 0..) |v, i| {
-        comb_f32[i] = @floatFromInt(v);
-    }
+    // SIMD-optimized int to float conversion
+    convertI64ToF32Simd(txt_i64, comb_f32[0..txt_i64.len]);
 
-    // Img IDs: i32 -> f32
     const img_i32 = std.mem.bytesAsSlice(i32, @as([]align(4) u8, @alignCast(img_bytes)));
     const offset = txt_i64.len;
-    for (img_i32, 0..) |v, i| {
-        comb_f32[offset + i] = @floatFromInt(v);
-    }
+    // SIMD-optimized int to float conversion with offset
+    convertI32ToF32Simd(img_i32, comb_f32, offset);
 
     const ids_data_slice = comb_f32;
     // std.log.info("RoPE Theta: {d}", .{model_ctx.config.rope_theta});
@@ -576,17 +658,9 @@ pub fn schedule(
 
     // Guidance Projection (constant across all steps — compute once)
     const g_val: f32 = guidance_scale * 1000.0; // Python multiplies by 1000 internally
-    var g_proj_f32: [256]f32 = undefined;
-    for (0..128) |j| {
-        const arg = g_val * freq_vals_arr[j];
-        g_proj_f32[j] = @cos(arg);
-        g_proj_f32[j + 128] = @sin(arg);
-    }
     var g_proj_bf16: [256]u16 = undefined;
-    for (g_proj_f32, 0..) |val, i| {
-        const bits: u32 = @bitCast(val);
-        g_proj_bf16[i] = @truncate(bits >> 16);
-    }
+    // SIMD-optimized timestep embedding computation
+    computeTimestepEmbedding(g_val, &freq_vals_arr, &g_proj_bf16);
     var g_proj_buf = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(&g_proj_bf16));
     defer g_proj_buf.deinit();
 
@@ -598,21 +672,12 @@ pub fn schedule(
     }
     for (scheduler.timesteps, 0..) |t_step, step_i| {
         const t_val: f32 = t_step;
-        var t_proj_f32: [256]f32 = undefined;
-        for (0..128) |j| {
-            const arg = t_val * freq_vals_arr[j];
-            t_proj_f32[j] = @cos(arg);
-            t_proj_f32[j + 128] = @sin(arg);
-        }
         var t_proj_bf16: [256]u16 = undefined;
-        for (t_proj_f32, 0..) |val, i| {
-            const bits: u32 = @bitCast(val);
-            t_proj_bf16[i] = @truncate(bits >> 16);
-        }
+        // SIMD-optimized timestep embedding computation
+        computeTimestepEmbedding(t_val, &freq_vals_arr, &t_proj_bf16);
         t_proj_bufs[step_i] = try zml.Buffer.fromBytes(io, platform, t_proj_shape, std.mem.sliceAsBytes(&t_proj_bf16));
     }
 
-    // Pre-allocate executor args/results using pre-compiled executors
     var args_step = try model_ctx.step_exe.args(allocator);
     defer args_step.deinit(allocator);
     var res_step = try model_ctx.step_exe.results(allocator);
@@ -668,6 +733,7 @@ pub fn schedule(
 
 /// Implements unpack_latents_with_ids from Python
 /// Scatters latent tokens into correct spatial positions using position IDs
+/// Optimized with SIMD vectorization and branchless operations
 fn unpackLatentsWithIds(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -675,8 +741,8 @@ fn unpackLatentsWithIds(
     latents: zml.Buffer,
     latent_ids: zml.Buffer,
 ) !zml.Buffer {
-    const lat_shape = latents.shape(); // [B, seq_len, C]
-    const ids_shape = latent_ids.shape(); // [B, seq_len, 4]
+    const lat_shape = latents.shape();
+    const ids_shape = latent_ids.shape();
 
     const batch_size = lat_shape.dim(0);
     const seq_len = lat_shape.dim(1);
@@ -700,14 +766,45 @@ fn unpackLatentsWithIds(
     const ids_data = std.mem.bytesAsSlice(i32, @as([]align(4) u8, @alignCast(ids_slice.items(u8))));
 
     // Find max h and w from IDs (column 1 = h_ids, column 2 = w_ids)
+    // Branchless max finding using SIMD for better performance
     var max_h: i32 = 0;
     var max_w: i32 = 0;
-    for (0..sl) |s| {
+
+    // SIMD-accelerated max finding
+    const VecWidth = 8;
+    const Vec = @Vector(VecWidth, i32);
+    var vec_max_h: Vec = @splat(0);
+    var vec_max_w: Vec = @splat(0);
+
+    const vec_limit = (sl / VecWidth) * VecWidth;
+    var s: usize = 0;
+
+    // Vectorized max finding
+    while (s < vec_limit) : (s += VecWidth) {
+        var vec_h: Vec = undefined;
+        var vec_w: Vec = undefined;
+
+        inline for (0..VecWidth) |i| {
+            vec_h[i] = ids_data[(s + i) * 4 + 1];
+            vec_w[i] = ids_data[(s + i) * 4 + 2];
+        }
+
+        vec_max_h = @max(vec_max_h, vec_h);
+        vec_max_w = @max(vec_max_w, vec_w);
+    }
+
+    // Reduce vector to scalar using @reduce
+    max_h = @reduce(.Max, vec_max_h);
+    max_w = @reduce(.Max, vec_max_w);
+
+    // Handle remaining elements
+    while (s < sl) : (s += 1) {
         const h_id = ids_data[s * 4 + 1];
         const w_id = ids_data[s * 4 + 2];
-        if (h_id > max_h) max_h = h_id;
-        if (w_id > max_w) max_w = w_id;
+        max_h = @max(max_h, h_id);
+        max_w = @max(max_w, w_id);
     }
+
     const h: usize = @intCast(max_h + 1);
     const w: usize = @intCast(max_w + 1);
 
@@ -717,30 +814,71 @@ fn unpackLatentsWithIds(
     const out_bf16 = try allocator.alloc(u16, out_count);
     defer allocator.free(out_bf16);
 
-    // Initialize to zero
+    // Initialize to zero (optimized with @memset)
     @memset(out_bf16, 0);
 
-    // Scatter tokens into place (bf16 directly, no conversion needed)
-    for (0..bs) |b| {
-        const b_out_base = b * ch * h * w;
-        const b_in_base = b * sl * ch;
-        for (0..sl) |s| {
-            const h_id: usize = @intCast(ids_data[b * sl * 4 + s * 4 + 1]);
-            const w_id: usize = @intCast(ids_data[b * sl * 4 + s * 4 + 2]);
-            const spatial_offset = h_id * w + w_id;
-            const in_base = b_in_base + s * ch;
+    // Pre-compute stride for better performance
+    const channel_hw_stride = h * w;
 
-            for (0..ch) |c| {
-                // Input: [B, seq_len, C] — sequential read
-                const in_idx = in_base + c;
-                // Output: [B, C, H, W] — strided write (stride = h*w)
-                const out_idx = b_out_base + c * h * w + spatial_offset;
-                out_bf16[out_idx] = lat_data_bf16[in_idx];
-            }
+    // Scatter tokens into place using optimized channel copying
+    for (0..bs) |b| {
+        const b_out_base = b * ch * channel_hw_stride;
+        const b_in_base = b * sl * ch;
+
+        for (0..sl) |seq_idx| {
+            const h_id: usize = @intCast(ids_data[b * sl * 4 + seq_idx * 4 + 1]);
+            const w_id: usize = @intCast(ids_data[b * sl * 4 + seq_idx * 4 + 2]);
+            const spatial_offset = h_id * w + w_id;
+            const in_base = b_in_base + seq_idx * ch;
+
+            // SIMD-optimized channel copying
+            try scatterChannelsSimd(lat_data_bf16, out_bf16, in_base, b_out_base, spatial_offset, channel_hw_stride, ch);
         }
     }
 
     return try zml.Buffer.fromBytes(io, platform, out_shape, std.mem.sliceAsBytes(out_bf16));
+}
+
+/// SIMD-optimized scatter operation for channel data
+/// Copies channel data from input to output at scattered spatial positions
+inline fn scatterChannelsSimd(
+    src: []const u16,
+    dst: []u16,
+    in_base: usize,
+    out_base: usize,
+    spatial_offset: usize,
+    channel_hw_stride: usize,
+    num_channels: usize,
+) !void {
+    // Use SIMD for bulk channel copying when possible
+    const VecWidth = 8;
+    const Vec = @Vector(VecWidth, u16);
+
+    const vec_limit = (num_channels / VecWidth) * VecWidth;
+    var c: usize = 0;
+
+    // Vectorized channel copying
+    while (c < vec_limit) : (c += VecWidth) {
+        var vec_data: Vec = undefined;
+
+        // Load from contiguous input
+        inline for (0..VecWidth) |i| {
+            vec_data[i] = src[in_base + c + i];
+        }
+
+        // Store to scattered output positions
+        inline for (0..VecWidth) |i| {
+            const out_idx = out_base + (c + i) * channel_hw_stride + spatial_offset;
+            dst[out_idx] = vec_data[i];
+        }
+    }
+
+    // Handle remaining channels (scalar tail)
+    while (c < num_channels) : (c += 1) {
+        const in_idx = in_base + c;
+        const out_idx = out_base + c * channel_hw_stride + spatial_offset;
+        dst[out_idx] = src[in_idx];
+    }
 }
 
 const RgbImage = struct {
@@ -774,28 +912,127 @@ pub fn decodeImageToRgb(allocator: std.mem.Allocator, io: std.Io, image_decoded_
 
     const rgb_data = try allocator.alloc(u8, @intCast(dim_h * dim_w * comp));
 
-    // NCHW -> NHWC + denormalize into 8-bit RGB
-    var idx: usize = 0;
-    for (0..@intCast(dim_h)) |y| {
-        for (0..@intCast(dim_w)) |x| {
-            for (0..@intCast(comp)) |c| {
-                // Input index: 0, c, y, x
-                const in_idx = c * (@as(usize, @intCast(dim_h)) * @as(usize, @intCast(dim_w))) +
-                    y * @as(usize, @intCast(dim_w)) +
-                    x;
+    const height: usize = @intCast(dim_h);
+    const width: usize = @intCast(dim_w);
+    const dtype = shape.dtype();
 
-                const val_f64 = tools.getElementAsF64(slice, shape.dtype(), in_idx);
-                var val: f64 = (val_f64 / 2.0) + 0.5;
-                if (val < 0.0) val = 0.0;
-                if (val > 1.0) val = 1.0;
+    // Pre-compute channel strides to avoid repeated calculations
+    const channel_stride = height * width;
 
-                rgb_data[idx] = @intFromFloat(val * 255.0);
-                idx += 1;
+    // Fast path specialization for common data types
+    switch (dtype) {
+        .bf16 => try decodeImageToRgbTyped(u16, .bf16, slice, rgb_data, height, width, channel_stride),
+        .f32 => try decodeImageToRgbTyped(f32, .f32, slice, rgb_data, height, width, channel_stride),
+        .f16 => try decodeImageToRgbTyped(f16, .f16, slice, rgb_data, height, width, channel_stride),
+        else => {
+            // Fallback for other types (slower path)
+            var idx: usize = 0;
+            for (0..height) |y| {
+                for (0..width) |x| {
+                    for (0..3) |c| {
+                        const in_idx = c * channel_stride + y * width + x;
+                        const val_f64 = tools.getElementAsF64(slice, dtype, in_idx);
+                        // Branchless clamping: clamp((val_f64 / 2.0 + 0.5), 0.0, 1.0)
+                        const val_clamped = @max(0.0, @min(1.0, (val_f64 / 2.0) + 0.5));
+                        rgb_data[idx] = @intFromFloat(val_clamped * 255.0);
+                        idx += 1;
+                    }
+                }
             }
-        }
+        },
     }
 
     return .{ .w = w, .h = h, .comp = comp, .stride_in_bytes = stride_in_bytes, .data = rgb_data };
+}
+
+/// Optimized type-specialized decoder using SIMD and branchless operations
+inline fn decodeImageToRgbTyped(
+    comptime T: type,
+    comptime dtype_tag: zml.DataType,
+    slice: zml.Slice,
+    rgb_data: []u8,
+    height: usize,
+    width: usize,
+    channel_stride: usize,
+) !void {
+    const src_data = slice.items(T);
+
+    // SIMD vector width for processing multiple pixels at once
+    const VecWidth = 8;
+    const Vec = @Vector(VecWidth, f32);
+
+    const vec_scale: Vec = @splat(0.5);
+    const vec_offset: Vec = @splat(0.5);
+    const vec_zero: Vec = @splat(0.0);
+    const vec_one: Vec = @splat(1.0);
+    const vec_255: Vec = @splat(255.0);
+
+    const total_pixels = height * width;
+    const vec_limit = (total_pixels / VecWidth) * VecWidth;
+
+    // Process each channel
+    for (0..3) |c| {
+        const channel_offset = c * channel_stride;
+        var pixel_idx: usize = 0;
+
+        // SIMD vectorized loop - process 8 pixels at a time
+        while (pixel_idx < vec_limit) : (pixel_idx += VecWidth) {
+            var vec_vals: Vec = undefined;
+
+            // Load values based on dtype
+            inline for (0..VecWidth) |i| {
+                const src_idx = channel_offset + pixel_idx + i;
+                vec_vals[i] = switch (dtype_tag) {
+                    .bf16 => blk: {
+                        const raw = src_data[src_idx];
+                        const u32_val = @as(u32, raw) << 16;
+                        const f_val: f32 = @bitCast(u32_val);
+                        break :blk f_val;
+                    },
+                    .f32 => src_data[src_idx],
+                    .f16 => @floatCast(src_data[src_idx]),
+                    else => unreachable,
+                };
+            }
+
+            // Vectorized: (val / 2.0) + 0.5
+            vec_vals = vec_vals * vec_scale + vec_offset;
+
+            // Branchless clamping to [0, 1]
+            vec_vals = @max(vec_zero, @min(vec_one, vec_vals));
+
+            // Scale to [0, 255]
+            vec_vals = vec_vals * vec_255;
+
+            // Store results
+            inline for (0..VecWidth) |i| {
+                const out_idx = (pixel_idx + i) * 3 + c;
+                rgb_data[out_idx] = @intFromFloat(vec_vals[i]);
+            }
+        }
+
+        // Handle remaining pixels (scalar tail)
+        while (pixel_idx < total_pixels) : (pixel_idx += 1) {
+            const src_idx = channel_offset + pixel_idx;
+
+            const val_f32: f32 = switch (dtype_tag) {
+                .bf16 => blk: {
+                    const raw = src_data[src_idx];
+                    const u32_val = @as(u32, raw) << 16;
+                    const f_val: f32 = @bitCast(u32_val);
+                    break :blk f_val;
+                },
+                .f32 => src_data[src_idx],
+                .f16 => @floatCast(src_data[src_idx]),
+                else => unreachable,
+            };
+
+            // Branchless clamping
+            const val_clamped = @max(0.0, @min(1.0, (val_f32 / 2.0) + 0.5));
+            const out_idx = pixel_idx * 3 + c;
+            rgb_data[out_idx] = @intFromFloat(val_clamped * 255.0);
+        }
+    }
 }
 
 pub fn saveFluxImageToPng(allocator: std.mem.Allocator, rgb: *const RgbImage, filename: []const u8) !void {

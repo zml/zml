@@ -110,10 +110,7 @@ pub const Qwen3Attention = struct {
 
         const q_proj = Linear.init(store.createTensor("q_proj.weight"), bias_q);
 
-        // Dynamic head_dim detection:
-        // q_proj weight is [out, in]. We tagged it {.out, .d}.
-        // The underlying tensor dimensions are still 0 and 1.
-        // We can access inner.weight.shape().dim(0) for output features.
+
         const head_dim = @divExact(q_proj.inner.weight.shape().dim(0), config.num_attention_heads);
 
         return .{
@@ -180,31 +177,22 @@ pub const Qwen3Attention = struct {
         );
         attn_weights = attn_weights.scale(scale);
 
-        // Causal Masking: mask out future tokens (j > i)
-        // Create [s, 1] and [1, s] index tensors, broadcast to [s, s], compare
         const i_idx = zml.Tensor.arange(.{ .end = s }, .i32).reshape(.{ s, 1 });
         const j_idx = zml.Tensor.arange(.{ .end = s }, .i32).reshape(.{ 1, s });
-        // Broadcast to [s, s]
         const i_broad = i_idx.broadcastLeft(zml.Shape.init(.{ s, s }, .i32));
         const j_broad = j_idx.broadcastLeft(zml.Shape.init(.{ s, s }, .i32));
         const causal_mask = j_broad.cmp(.GT, i_broad); // bool [s, s], true where should be masked
-        // Expand to [1, 1, s, s] for broadcasting with [b, h, s, s]
         const causal_4d = causal_mask.reshape(zml.Shape.init(.{ 1, 1, s, s }, .bool));
         const causal_broad = causal_4d.broadcastLeft(attn_weights.shape().withDtype(.bool));
-        // Use very large negative value matching Python's torch.finfo(dtype).min behavior
         const neg_inf = zml.Tensor.scalar(-3.4e38, default_dtype);
         attn_weights = causal_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
 
         if (attention_mask) |mask| {
-            // mask is [b, s]. 1=valid, 0=pad.
-            // Expand to [b, 1, 1, s]
             const mask_i32 = mask.convert(.i32);
             const b_dim = mask_i32.shape().dim(0);
             const s_dim = mask_i32.shape().dim(1);
             const mask_4d = mask_i32.reshape(zml.Shape.init(.{ b_dim, 1, 1, s_dim }, .i32));
-            // Create boolean mask: pad positions (mask==0) should be masked
             const pad_mask = mask_4d.cmp(.EQ, zml.Tensor.scalar(0, .i32));
-            // Broadcast to [b, h, s, s]
             const pad_mask_broad = pad_mask.broadcastLeft(attn_weights.shape().withDtype(.bool));
             attn_weights = pad_mask_broad.select(neg_inf.broadcastLeft(attn_weights.shape()), attn_weights);
         }
@@ -262,7 +250,6 @@ pub const Qwen3DecoderLayer = struct {
 
 pub const Qwen3Model = struct {
     embed_tokens: zml.nn.TokenEmbedding,
-    // Use Allocator slice instead of BoundedArray to match zml.io.load path
     layers: []Qwen3DecoderLayer,
     norm: Qwen3RMSNorm,
     config: Config,
@@ -295,7 +282,6 @@ pub const Qwen3Model = struct {
         attention_mask: ?zml.Tensor,
         output_hidden_states: bool,
     ) struct { last_hidden_state: zml.Tensor, hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) } {
-        // Initial conversion to f32. All activations stay f32 until the very end.
         var hidden_states = self.embed_tokens.forward(input_ids);
 
         var all_hidden_states: ?stdx.BoundedArray(zml.Tensor, 64) = null;
@@ -304,19 +290,19 @@ pub const Qwen3Model = struct {
         }
 
         if (output_hidden_states) {
-            all_hidden_states.?.append(hidden_states) catch {}; // Index 0: embeddings (f32)
+            all_hidden_states.?.append(hidden_states) catch {};
         }
 
         for (self.layers) |layer| {
             hidden_states = layer.forward(hidden_states, rope, attention_mask);
             if (output_hidden_states) {
-                all_hidden_states.?.append(hidden_states) catch {}; // Index 1..36 (f32)
+                all_hidden_states.?.append(hidden_states) catch {};
             }
         }
 
         hidden_states = self.norm.forward(hidden_states);
         if (output_hidden_states) {
-            all_hidden_states.?.append(hidden_states) catch {}; // Index 37: final norm (f32)
+            all_hidden_states.?.append(hidden_states) catch {};
         }
 
         return .{ .last_hidden_state = hidden_states, .hidden_states = all_hidden_states };

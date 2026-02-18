@@ -30,7 +30,7 @@ pub const FluxPipeline = struct {
         random_seed: u64 = 0,
         generator_type: utils.GeneratorType = .torch,
         max_sequence_length: usize = 256,
-        output_image_dim: utils.ResolutionInfo = .{ .width = 1024, .height = 1024 },
+        output_image_dim: utils.ResolutionInfo,
     };
 
     pub fn deinit(self: *FluxPipeline) void {
