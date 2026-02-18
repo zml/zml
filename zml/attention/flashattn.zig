@@ -225,17 +225,17 @@ pub const fa2 = struct {
                 // LSE is [SeqLen, Heads]. We add a dummy 3rd dim to match Q's rank (3).
                 .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
                     .withTags(.{ .s, .h, .dummy })
-                    .withPartitioning(.{ .s = .replicated, .h = .model, .dummy = .replicated })),
+                    .withPartitioning(.{ .h = .model })),
 
                 // LSE Accum is used for split-K, usually [Heads, Splits]
                 .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
                     .withTags(.{ .dummy, .h, .hd })
-                    .withPartitioning(.{ .dummy = .replicated, .h = .model, .hd = .replicated })),
+                    .withPartitioning(.{ .h = .model })),
 
                 // Out Accum is [SeqLen, Heads, HeadDim]
                 .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
                     .withTags(.{ .s, .h, .hd })
-                    .withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated })),
+                    .withPartitioning(.{ .h = .model })),
             };
         }
 

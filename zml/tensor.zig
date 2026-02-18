@@ -144,12 +144,56 @@ pub const Tensor = struct {
     }
 
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        // todo: custom call
-
         const partitioned_shape = self._shape.withPartitioning(axes_);
-        var res = self;
-        res._shape = partitioned_shape;
-        return res;
+        const ctx = CompilationContext.current();
+
+        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch unreachable;
+        const attr_info = ctx.partitioning.tensorShardingAttr(ctx.allocator, partitioned_shape, sharding) catch unreachable;
+        defer ctx.allocator.free(attr_info.?.attr);
+
+        const op_result = switch (ctx.partitioning.partitioner) {
+            .shardy => blk: {
+                const sdy_attr = mlir.Attribute.parse(ctx.mlir_ctx, attr_info.?.attr) catch unreachable;
+
+                const op = dialects.stablehlo.custom_call(
+                    ctx.mlir_ctx,
+                    &.{self.value()},
+                    &.{self.value().type_()},
+                    .{
+                        .call_target_name = "sdy.sharding_constraint",
+                        .has_side_effect = false,
+                        .backend_config = .{ .original = "" },
+                        .additional_attributes = &.{
+                            .named(ctx.mlir_ctx, "sharding", sdy_attr),
+                        },
+                    },
+                    .unknown(ctx.mlir_ctx),
+                ).appendTo(currentBlock());
+                break :blk op.result(0);
+            },
+            .gspmd => blk: {
+                const op = dialects.stablehlo.custom_call(
+                    ctx.mlir_ctx,
+                    &.{self.value()},
+                    &.{self.value().type_()},
+                    .{
+                        .call_target_name = "sharding_constraint", // todo
+                        .has_side_effect = false,
+                        .backend_config = .{ .original = "" },
+                        .additional_attributes = &.{
+                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, attr_info.?.attr)),
+                        },
+                    },
+                    .unknown(ctx.mlir_ctx),
+                ).appendTo(currentBlock());
+                break :blk op.result(0);
+            },
+        };
+
+        std.log.warn(">>>>>>>>>> Applied partitioning on tensor {d} with sharding {s}", .{ self.id, attr_info.?.attr });
+        std.log.warn(">>>>>>>>>> Partitioned shape: {f}", .{partitioned_shape});
+        // std.log.warn(">>>>>>>>>> MLIR op: {f}", .{op_result.*});
+        return _result(partitioned_shape, op_result);
     }
 
     pub fn toMemory(self: Tensor, kind: Memory) Tensor {
