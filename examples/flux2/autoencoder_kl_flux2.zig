@@ -186,12 +186,12 @@ const GroupNorm = struct {
     }
 };
 
-const BN = struct {
+const BatchNorm = struct {
     running_mean: Tensor,
     running_var: Tensor,
     config: Config,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) BN {
+    pub fn init(store: zml.io.TensorStore.View, config: Config) BatchNorm {
         return .{
             .running_mean = store.createTensor("running_mean"),
             .running_var = store.createTensor("running_var"),
@@ -469,7 +469,7 @@ pub const Decoder = struct {
 pub const AutoencoderKLFlux2Model = struct {
     decoder: Decoder,
     post_quant_conv: ?Conv2d,
-    bn: BN, // BatchNorm stats container
+    bn: BatchNorm,
     config: Config,
 
     pub fn init(store: zml.io.TensorStore.View, allocator: std.mem.Allocator, config: Config) !AutoencoderKLFlux2Model {
@@ -479,7 +479,7 @@ pub const AutoencoderKLFlux2Model = struct {
                 Conv2d.init(store.withPrefix("post_quant_conv"), 1, 0)
             else
                 null,
-            .bn = BN.init(store.withPrefix("bn"), config),
+            .bn = BatchNorm.init(store.withPrefix("bn"), config),
             .config = config,
         };
     }
@@ -556,6 +556,7 @@ pub const AutoencoderKLFlux2 = struct {
 
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, image_height: usize, image_width: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "vae", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         const timer_start = std.Io.Clock.awake.now(io);
+        defer log.info("Loaded/Compiled AutoencoderKLFlux2 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         var config_json: std.json.Parsed(Config) = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         errdefer config_json.deinit();
@@ -618,7 +619,6 @@ pub const AutoencoderKLFlux2 = struct {
         var vae_exe = try compile_future.await(io);
         errdefer vae_exe.deinit();
 
-        log.info("Loaded AutoencoderKLFlux2 Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
         return .{
             .model = model,

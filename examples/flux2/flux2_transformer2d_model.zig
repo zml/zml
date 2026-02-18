@@ -993,15 +993,15 @@ pub const Flux2Transformer2D = struct {
     pub fn loadFromFile(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, repo_dir: std.Io.Dir, parallelism_level: usize, image_height: usize, image_width: usize, seqlen: usize, progress: ?*std.Progress.Node, options: struct { subfolder: []const u8 = "transformer", json_name: []const u8 = "config.json", safetensors_name: []const u8 = "diffusion_pytorch_model.safetensors" }) !@This() {
         @setEvalBranchQuota(10_000);
         const timer_start = std.Io.Clock.awake.now(io);
-        defer log.info("Loaded Flux2Transformer2D Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
+        defer log.info("Loaded/Compiled Flux2Transformer2D Model in {} ms", .{timer_start.untilNow(io, .awake).toMilliseconds()});
 
-        var timer_last = timer_start;
+        // var timer_last = timer_start;
 
         var config_json = try tools.parseConfig(Config, allocator, io, repo_dir, .{ .subfolder = options.subfolder, .json_name = options.json_name });
         defer config_json.deinit();
         const config = config_json.value;
-        log.info("Config parsed in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
-        timer_last = std.Io.Clock.awake.now(io);
+        // log.info("Config parsed in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // timer_last = std.Io.Clock.awake.now(io);
 
         const transformer_dir = try repo_dir.openDir(io, options.subfolder, .{});
         defer transformer_dir.close(io);
@@ -1011,13 +1011,13 @@ pub const Flux2Transformer2D = struct {
 
         var tensor_store = zml.io.TensorStore.fromRegistry(allocator, &tensor_registry);
         errdefer tensor_store.deinit();
-        log.info("Registry/Store loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
-        timer_last = std.Io.Clock.awake.now(io);
+        // log.info("Registry/Store loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // timer_last = std.Io.Clock.awake.now(io);
 
         var model = try Flux2Transformer2DModel.init(allocator, tensor_store.view(), config);
         errdefer model.deinit(allocator);
-        log.info("Model init in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
-        timer_last = std.Io.Clock.awake.now(io);
+        // log.info("Model init in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // timer_last = std.Io.Clock.awake.now(io);
 
         const adjusted_height = image_height / 16;
         const adjusted_width = image_width / 16;
@@ -1069,12 +1069,12 @@ pub const Flux2Transformer2D = struct {
 
         var weights = try load_future.await(io);
         errdefer utils.unloadWeights(allocator, &weights);
-        log.info("Weights loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // log.info("Weights loaded in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
 
         const step_exe = try compile_future.await(io);
-        log.info("Flux Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // log.info("Flux Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
 
-        timer_last = std.Io.Clock.awake.now(io);
+        // timer_last = std.Io.Clock.awake.now(io);
 
         const EulerStep = struct {
             pub fn forward(self: @This(), sample: zml.Tensor, model_output: zml.Tensor, dt: zml.Tensor) zml.Tensor {
@@ -1091,7 +1091,7 @@ pub const Flux2Transformer2D = struct {
 
         var euler_exe = try platform.compile(allocator, io, EulerStep{}, .forward, .{ sym_sample, sym_model_out, sym_dt });
         errdefer euler_exe.deinit();
-        log.info("Euler Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
+        // log.info("Euler Step compiled in {} ms", .{timer_last.untilNow(io, .awake).toMilliseconds()});
 
         return .{
             .model = model,

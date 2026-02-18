@@ -80,10 +80,6 @@ const Resolution = enum { DBGD, HLD, LD, SD, HD, FHD, QHD, UHD };
 
 const CliArgs = struct {
     model: []const u8 = "hf://black-forest-labs/FLUX.2-klein-4B",
-    // model: []const u8 = "/Users/kevin/FLUX.2-klein-4B",
-    // model: []const u8 = "/home/kevin/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-klein-4B/snapshots/5e67da950fce4a097bc150c22958a05716994cea",
-    // model: []const u8 = "/home/kevin/FLUX.2-klein-4B",
-
     prompt: []const u8 = "A photo of a cat",
     seqlen: usize = 512,
     output_image_path: ?[]const u8 = null,
@@ -160,12 +156,6 @@ pub fn main(init: std.process.Init) !void {
         std.process.exit(1);
     }
 
-    if (args.interactive) {
-        try interactive(allocator);
-        return;
-    }
-
-    // var zml_compute_platform: *zml.Platform = try zml.Platform.init(allocator, io, .cpu, .{});
     var zml_compute_platform: *zml.Platform = try zml.Platform.auto(allocator, io, .{});
     defer zml_compute_platform.deinit(allocator);
 
@@ -242,119 +232,120 @@ pub fn main(init: std.process.Init) !void {
     defer scheduler.deinit();
     scheduler_node.end();
 
-
-
-    // START COMPUTE-INTENSIVE PART OF THE PIPELINE
-
-    // ==================== Tokenizing Prompt ====================
-
-    const timer_compute_start = std.Io.Clock.awake.now(io);
-    defer log.info(" ================= Total compute time (tokenization to RGB conversion) is {d:.2} ms. ================= ", .{timer_compute_start.untilNow(io, .awake).toMilliseconds()});
-    var tokens: Qwen2TokenizerFast.TokenizeOutput = try qwen2_future.await(io);
-    qwen2_node.end();
-    defer tokens.deinit();
-
-    // try tools.printFlatten(allocator, io, tokens.input_ids, 20, "input_ids", .{ .include_shape = false });
-    // try tools.printFlatten(allocator, io, tokens.attention_mask, 20, "attention_mask", .{ .include_shape = false });
-
-    // ==================== Encoding Prompt ====================
-
-
-
-    var qwen3_node = progress.start("Running Qwen3", 0);
-    const timer_qwen3_start = std.Io.Clock.awake.now(io);
-    var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, zml_compute_platform, qwen3_model_ctx, tokens);
-    log.info("Qwen3 completed in {d:.2} ms.", .{timer_qwen3_start.untilNow(io, .awake).toMilliseconds()});
-    qwen3_node.end();
-    defer embeding_output.deinit();
-
-    // try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, embeding_output.text_embedding, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
-
-    // ==================== End Encoding Prompt ====================
-
-    // std.process.exit(0);
-
-    // {
-    // 1. Loading Embeds & Text IDs (Pre-computed for now)
-    // const embeds_path = "/Users/kevin/zml/flux_klein_notebook_embeds.npy";
-    // const text_ids_path = "/Users/kevin/zml/flux_klein_notebook_text_ids.npy";
-    // var prompt_embeds_from_python: zml.Buffer = try utils.loadInput(allocator, io, platform_auto, embeds_path, .{ 1, 20, 7680 });
-    // defer prompt_embeds_from_python.deinit();
-    // var text_ids_from_python: zml.Buffer = try utils.loadInput(allocator, io, platform_auto, text_ids_path, .{ 1, 20, 4 });
-    // defer text_ids_from_python.deinit();
-
-    // try tools.printFlatten(allocator, io, text_ids_from_python, 20, "    text_ids (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, prompt_embeds_from_python, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
-    // try tools.assertBuffersEqual(allocator, io, prompt_text_ids, text_ids_from_python, 1e-6);
-    // try tools.assertBuffersEqual(allocator, io, prompt_embeds, prompt_embeds_from_python, 1e-1);
-    // }
-    // std.process.exit(0);
-
-    // // text_ids_selector is the pb
-    // const text_ids_selector = prompt_text_ids;
-    // const prompt_embeds_selector = prompt_embeds;
-
-    // const text_ids_selector = text_ids_from_python;
-    // const prompt_embeds_selector = prompt_embeds_from_python;
-
-    const timer_prepare_latents_start = std.Io.Clock.awake.now(io);
-    var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
-    log.info("Latents prepared in {d:.2} ms.", .{timer_prepare_latents_start.untilNow(io, .awake).toMilliseconds()});
-
-    defer latent_buf.deinit();
-    defer latent_ids_buf.deinit();
-    // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
-    // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
-
-    const timer_scheduler_start = std.Io.Clock.awake.now(io);
-    var latents_out = try utils.schedule(
-        &transformer2d_model_ctx,
-        scheduler,
-        latent_buf,
-        latent_ids_buf,
-        embeding_output.text_embedding,
-        embeding_output.text_ids,
-        args.num_inference_steps,
-        allocator,
-        io,
-        zml_compute_platform,
-    );
-    log.info("Scheduler completed in {d:.2} ms.", .{timer_scheduler_start.untilNow(io, .awake).toMilliseconds()});
-    defer latents_out.deinit();
-
-    // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });=
-
-    var vae_ctx: AutoencoderKLFlux2 = try vae_ctx_future.await(io);
-    auto_encoder_node.end();
-    defer vae_ctx.deinit(allocator);
-
-    const timer_vae_start = std.Io.Clock.awake.now(io);
-    var image_decoded_buf: zml.Buffer = try vae_ctx.decode(allocator, latents_out);
-    log.info("VAE completed in {d:.2} ms.", .{timer_vae_start.untilNow(io, .awake).toMilliseconds()});
-    defer image_decoded_buf.deinit();
-
-    // try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
-
-    // Print directly in terminal without writing to disk
-
-    const timer_rgb_start = std.Io.Clock.awake.now(io);
-    const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
-    log.info("RGB conversion completed in {d:.2} ms.", .{timer_rgb_start.untilNow(io, .awake).toMilliseconds()});
-    defer rgb_image_buffer.free(allocator);
-
-    if (args.kitty_output) {
-        log.info(">>> Printing Image to Terminal...", .{});
-        try utils.printFluxImageToTerminalKittyFromBuffer(allocator, &rgb_image_buffer);
+    if (args.interactive) {
+        try interactive(allocator);
+        return;
     } else {
-        log.warn("kitty_output flag not set, skipping terminal image output.", .{});
-    }
-    // Optional: save to disk
-    if (args.output_image_path) |output_image_path| {
-        log.info(">>> Saving Image to Disk at {s}...", .{output_image_path});
-        try utils.saveFluxImageToPng(allocator, &rgb_image_buffer, output_image_path);
-    } else {
-        log.warn("No output_image_path provided, skipping saving image to disk.", .{});
+        // START COMPUTE-INTENSIVE PART OF THE PIPELINE
+
+        // ==================== Tokenizing Prompt ====================
+
+        const timer_compute_start = std.Io.Clock.awake.now(io);
+        defer log.info(" ================= Total compute time (tokenization to RGB conversion) is {d:.2} ms. ================= ", .{timer_compute_start.untilNow(io, .awake).toMilliseconds()});
+        var tokens: Qwen2TokenizerFast.TokenizeOutput = try qwen2_future.await(io);
+        qwen2_node.end();
+        defer tokens.deinit();
+
+        // try tools.printFlatten(allocator, io, tokens.input_ids, 20, "input_ids", .{ .include_shape = false });
+        // try tools.printFlatten(allocator, io, tokens.attention_mask, 20, "attention_mask", .{ .include_shape = false });
+
+        // ==================== Encoding Prompt ====================
+
+        var qwen3_node = progress.start("Running Qwen3", 0);
+        const timer_qwen3_start = std.Io.Clock.awake.now(io);
+        var embeding_output: Qwen3ForCausalLM.EmbedingOutput = try Qwen3ForCausalLM.pipelineRun(allocator, io, zml_compute_platform, qwen3_model_ctx, tokens);
+        log.info("Qwen3 completed in {d:.2} ms.", .{timer_qwen3_start.untilNow(io, .awake).toMilliseconds()});
+        qwen3_node.end();
+        defer embeding_output.deinit();
+
+        // try tools.printFlatten(allocator, io, embeding_output.text_ids, 20, "    text_ids (first 20).", .{ .include_shape = true });
+        // try tools.printFlatten(allocator, io, embeding_output.text_embedding, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+
+        // ==================== End Encoding Prompt ====================
+
+        // std.process.exit(0);
+
+        // {
+        // 1. Loading Embeds & Text IDs (Pre-computed for now)
+        // const embeds_path = "/Users/kevin/zml/flux_klein_notebook_embeds.npy";
+        // const text_ids_path = "/Users/kevin/zml/flux_klein_notebook_text_ids.npy";
+        // var prompt_embeds_from_python: zml.Buffer = try utils.loadInput(allocator, io, platform_auto, embeds_path, .{ 1, 20, 7680 });
+        // defer prompt_embeds_from_python.deinit();
+        // var text_ids_from_python: zml.Buffer = try utils.loadInput(allocator, io, platform_auto, text_ids_path, .{ 1, 20, 4 });
+        // defer text_ids_from_python.deinit();
+
+        // try tools.printFlatten(allocator, io, text_ids_from_python, 20, "    text_ids (first 20).", .{ .include_shape = true });
+        // try tools.printFlatten(allocator, io, prompt_embeds_from_python, 20, "    token_encoded_embeds (first 20).", .{ .include_shape = true });
+        // try tools.assertBuffersEqual(allocator, io, prompt_text_ids, text_ids_from_python, 1e-6);
+        // try tools.assertBuffersEqual(allocator, io, prompt_embeds, prompt_embeds_from_python, 1e-1);
+        // }
+        // std.process.exit(0);
+
+        // // text_ids_selector is the pb
+        // const text_ids_selector = prompt_text_ids;
+        // const prompt_embeds_selector = prompt_embeds;
+
+        // const text_ids_selector = text_ids_from_python;
+        // const prompt_embeds_selector = prompt_embeds_from_python;
+
+        const timer_prepare_latents_start = std.Io.Clock.awake.now(io);
+        var latent_buf, var latent_ids_buf = try utils.get_latents(allocator, io, zml_compute_platform, transformer2d_model_ctx.config, output_image_dim, args.generator_type, args.random_seed);
+        log.info("Latents prepared in {d:.2} ms.", .{timer_prepare_latents_start.untilNow(io, .awake).toMilliseconds()});
+
+        defer latent_buf.deinit();
+        defer latent_ids_buf.deinit();
+        // try tools.printFlatten(allocator, io, latent_buf, 20, "    Latents (first 20).", .{ .include_shape = true });
+        // try tools.printFlatten(allocator, io, latent_ids_buf, 20, "    Latent_ids (first 20).", .{ .include_shape = true });
+
+        const timer_scheduler_start = std.Io.Clock.awake.now(io);
+        var latents_out = try utils.schedule(
+            &transformer2d_model_ctx,
+            scheduler,
+            latent_buf,
+            latent_ids_buf,
+            embeding_output.text_embedding,
+            embeding_output.text_ids,
+            args.num_inference_steps,
+            allocator,
+            io,
+            zml_compute_platform,
+        );
+        log.info("Scheduler completed in {d:.2} ms.", .{timer_scheduler_start.untilNow(io, .awake).toMilliseconds()});
+        defer latents_out.deinit();
+
+        // try tools.printFlatten(allocator, io, latents_out, 20, "    Latents Out (first 20).", .{ .include_shape = true });=
+
+        var vae_ctx: AutoencoderKLFlux2 = try vae_ctx_future.await(io);
+        auto_encoder_node.end();
+        defer vae_ctx.deinit(allocator);
+
+        const timer_vae_start = std.Io.Clock.awake.now(io);
+        var image_decoded_buf: zml.Buffer = try vae_ctx.decode(allocator, latents_out);
+        log.info("VAE completed in {d:.2} ms.", .{timer_vae_start.untilNow(io, .awake).toMilliseconds()});
+        defer image_decoded_buf.deinit();
+
+        // try tools.printFlatten(allocator, io, image_decoded_buf, 20, "    Image Decoded (first 20).", .{ .include_shape = true });
+
+        // Print directly in terminal without writing to disk
+
+        const timer_rgb_start = std.Io.Clock.awake.now(io);
+        const rgb_image_buffer = try utils.decodeImageToRgb(allocator, io, image_decoded_buf);
+        log.info("RGB conversion completed in {d:.2} ms.", .{timer_rgb_start.untilNow(io, .awake).toMilliseconds()});
+        defer rgb_image_buffer.free(allocator);
+
+        if (args.kitty_output) {
+            log.info(">>> Printing Image to Terminal...", .{});
+            try utils.printFluxImageToTerminalKittyFromBuffer(allocator, &rgb_image_buffer);
+        } else {
+            log.warn("kitty_output flag not set, skipping terminal image output.", .{});
+        }
+        // Optional: save to disk
+        if (args.output_image_path) |output_image_path| {
+            log.info(">>> Saving Image to Disk at {s}...", .{output_image_path});
+            try utils.saveFluxImageToPng(allocator, &rgb_image_buffer, output_image_path);
+        } else {
+            log.warn("No output_image_path provided, skipping saving image to disk.", .{});
+        }
     }
 
     // std.process.exit(0);

@@ -15,10 +15,11 @@ export CUDA_VISIBLE_DEVICES=0
 
 # --kitty-output \
 # HLD
+    # --config=release \
 
 bazel run //examples/flux2 \
-    --config=release \
     --//platforms:cuda=false -- \
+    --interactive \
     --model=/Users/kevin/FLUX.2-klein-4B \
     --prompt="A photo of a cat on a bed" \
     --resolution=DBGD \

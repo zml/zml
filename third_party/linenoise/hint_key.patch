@@ -1,0 +1,18 @@
+--- a/linenoise.c
++++ b/linenoise.c
+@@ -1430,6 +1430,15 @@
+                     linenoiseEditHistoryNext(l, LINENOISE_HISTORY_NEXT);
+                     break;
+                 case 'C': /* Right */
++                    if (l->pos == l->len && hintsCallback) {
++                        int color = -1, bold = 0;
++                        char *hint = hintsCallback(l->buf,&color,&bold);
++                        if (hint) {
++                            linenoiseEditInsert(l,hint,strlen(hint));
++                            if (freeHintsCallback) freeHintsCallback(hint);
++                            break;
++                        }
++                    }
+                     linenoiseEditMoveRight(l);
+                     break;
+                 case 'D': /* Left */

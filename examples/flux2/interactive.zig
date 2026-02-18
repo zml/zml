@@ -2,21 +2,19 @@ const std = @import("std");
 const c_interface = @import("c");
 
 // Callback for completion
-fn completion(buf: [*c]const u8, lc: *c_interface.Completions) callconv(.c) void {
+fn completion(buf: [*c]const u8, lc: [*c]c_interface.linenoiseCompletions) callconv(.c) void {
     if (buf[0] == 'h') {
         _ = c_interface.linenoiseAddCompletion(lc, "hello");
-        _ = c_interface.linenoiseAddCompletion(lc, "hello there");
+        _ = c_interface.linenoiseAddCompletion(lc, "Hello World");
     }
 }
 
 // Callback for hints
-fn hints(buf: [*c]const u8, color: *c_int, bold: *c_int) callconv(.c) [*c]u8 {
+fn hints(buf: [*c]const u8, color: [*c]c_int, bold: [*c]c_int) callconv(.c) [*c]u8 {
     const str = std.mem.span(buf);
     if (std.ascii.eqlIgnoreCase(str, "hello")) {
         color.* = 35;
         bold.* = 0;
-        // Hints must be static strings or allocated, but here we return a string literal.
-        // linenoise does not free hints.
         return @constCast(" World");
     }
     return null;
@@ -24,34 +22,10 @@ fn hints(buf: [*c]const u8, color: *c_int, bold: *c_int) callconv(.c) [*c]u8 {
 
 pub fn interactive(allocator: std.mem.Allocator) !void {
     _ = allocator; // autofix
-    // var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    // defer _ = gpa.deinit();
-    // const allocator = gpa.allocator();
-
-    // var args_iter = try @TypeOf(init.args).Iterator.initAllocator(init.args, allocator);
-    // defer args_iter.deinit();
-
-    // const prgname = args_iter.next() orelse "linenoise";
-
-    // Parse options
-    // while (args_iter.next()) |arg| {
-    //     if (std.mem.eql(u8, arg, "--multiline")) {
-    //         c_interface.linenoiseSetMultiLine(1);
-    //         std.debug.print("Multi-line mode enabled.\n", .{});
-    //     } else if (std.mem.eql(u8, arg, "--keycodes")) {
-    //         c_interface.linenoisePrintKeyCodes();
-    //         std.process.exit(0);
-    //     } else if (std.mem.eql(u8, arg, "--async")) {
-    //         async_mode = true;
-    //     } else {
-    //         std.debug.print("Usage: {s} [--multiline] [--keycodes] [--async]\n", .{prgname});
-    //         std.process.exit(1);
-    //     }
-    // }
 
     // Set callbacks
-    // c_interface.linenoiseSetCompletionCallback(completion);
-    // c_interface.linenoiseSetHintsCallback(hints);
+    c_interface.linenoiseSetCompletionCallback(completion);
+    c_interface.linenoiseSetHintsCallback(hints);
 
     // Load history
     _ = c_interface.linenoiseHistoryLoad("history.txt");
