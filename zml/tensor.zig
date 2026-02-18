@@ -187,6 +187,12 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn renameTag(self: Tensor, old: anytype, new: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.setTag(old, new);
+        return res;
+    }
+
     pub fn renameAxis(self: Tensor, ax: i8, name: @EnumLiteral()) Tensor {
         var res = self;
         res._shape._tags.set(self.axis(ax), @tagName(name).ptr);

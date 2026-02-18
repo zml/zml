@@ -3,11 +3,11 @@ const std = @import("std");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const ops = @import("ops.zig");
 const Shape = @import("shape.zig").Shape;
+const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 const zml = @import("zml.zig");
 
@@ -16,30 +16,54 @@ const log = std.log.scoped(.@"zml/nn");
 pub const Linear = struct {
     weight: Tensor,
     bias: ?Tensor = null,
-    tag: Shape.Tag,
+    in_tag: Shape.Tag,
+    out_tag: Shape.Tag,
 
     pub fn init(weight: Tensor, bias: ?Tensor, tag: anytype) Linear {
+        stdx.debug.guard(weight.shape().hasTag(tag) != null, @src());
+        // Detecting the out_tag allows us to
+        const axis = weight.shape().axis(tag);
+        const out_tag = weight.shape().tag(1 - axis);
         return .{
             .weight = weight,
             .bias = bias,
-            .tag = zml.Shape.toTag(tag),
+            .in_tag = zml.Shape.toTag(tag),
+            .out_tag = out_tag,
         };
     }
 
-    pub fn forward(self: Linear, x: Tensor) Tensor {
-        var y = x.dot(self.weight, self.tag);
+    pub fn unloadBuffers(linear: *zml.Bufferized(Linear)) void {
+        linear.weight.deinit();
+        if (linear.bias) |*bias| bias.deinit();
+    }
 
-        return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
+    pub fn forward(self: Linear, x: Tensor) Tensor {
+        var y = x.dot(self.weight, self.in_tag).renameTag(self.out_tag, self.in_tag);
+
+        return if (self.bias) |bias| y.add(bias.broad(y.shape())).reuseBuffer(x) else y;
     }
 };
 
 pub const TokenEmbedding = struct {
     weight: Tensor,
 
+    pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
+        return .{ .weight = store.createTensor("weight").withTags(.{ .voc, .d }) };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TokenEmbedding)) void {
+        self.weight.deinit();
+    }
+
     pub fn forward(self: TokenEmbedding, idx: Tensor) Tensor {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
         return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
+    }
+
+    pub fn unembed(self: TokenEmbedding, embeds: Tensor) Tensor {
+        stdx.debug.assert(embeds.shape().hasTags(.{.d}), "TokenEmbedding expects the input embeds to have a .d tag, got {f}", .{embeds.shape()});
+        return self.weight.dot(embeds, .d);
     }
 };
 
