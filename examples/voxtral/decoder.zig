@@ -2,7 +2,6 @@ const std = @import("std");
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
-const Shape = zml.Shape;
 
 const cfg = @import("config.zig");
 const Config = cfg.Config;
@@ -36,8 +35,7 @@ pub const Adapter = struct {
     }
 
     pub fn unload(self: *zml.Bufferized(Adapter)) void {
-        common.deinitLinear(&self.proj0);
-        common.deinitLinear(&self.proj1);
+        common.deinitBufferized(self);
     }
 
     /// encoder_out: [s, d] → [s/dsf, dim]
@@ -94,14 +92,8 @@ pub const Decoder = struct {
     }
 
     pub fn unload(self: *zml.Bufferized(Decoder), allocator: std.mem.Allocator) void {
-        self.tok_embeddings.deinit();
-
-        for (self.layers) |*layer| {
-            DecoderLayer.unload(layer);
-        }
-
+        common.deinitBufferized(self);
         allocator.free(self.layers);
-        self.norm.deinit();
     }
 
     /// Run all decoder layers on input embeddings, sample next tokens and return updated KV cache + RNG.
@@ -115,10 +107,11 @@ pub const Decoder = struct {
 
         var h = input_embeds;
         var cache = kv_cache;
+        const attn_config = self.config.attentionConfig();
 
         for (self.layers, 0..) |layer, i| {
             const layer_cache = cache.atLayer(i);
-            const result = layer.forward(h, token_index, layer_cache, t, self.config, attention_metadata, attention_parameters);
+            const result = layer.forward(h, token_index, layer_cache, t, attn_config, attention_metadata, attention_parameters);
             h = result[0];
             const updated_layer_cache = result[1];
 
@@ -150,8 +143,7 @@ pub const AdaRmsNorm = struct {
     }
 
     pub fn unload(self: *zml.Bufferized(AdaRmsNorm)) void {
-        common.deinitLinear(&self.down);
-        common.deinitLinear(&self.up);
+        common.deinitBufferized(self);
     }
 
     /// h: [s, d], t_cond: [d] → [s, d]
@@ -165,80 +157,7 @@ pub const AdaRmsNorm = struct {
 
 pub const KvCache = common.KvCache;
 
-/// Decoder self-attention with KV cache.
-pub const SelfAttention = struct {
-    wq: zml.nn.Linear,
-    wk: zml.nn.Linear,
-    wv: zml.nn.Linear,
-    wo: zml.nn.Linear,
-
-    pub fn init(store: zml.io.TensorStore.View) SelfAttention {
-        return .{
-            .wq = common.linear(store.withPrefix("wq")),
-            .wk = common.linear(store.withPrefix("wk")),
-            .wv = common.linear(store.withPrefix("wv")),
-            .wo = common.linear(store.withPrefix("wo")),
-        };
-    }
-
-    pub fn unload(self: *zml.Bufferized(SelfAttention)) void {
-        common.deinitLinear(&self.wq);
-        common.deinitLinear(&self.wk);
-        common.deinitLinear(&self.wv);
-        common.deinitLinear(&self.wo);
-    }
-
-    /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
-    pub fn forward(self: SelfAttention, x: Tensor, token_index: Tensor, kv_cache: KvCache, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
-        const dtype = x.dtype();
-
-        var q = self.wq.forward(x);
-        var k = self.wk.forward(x);
-        var v = self.wv.forward(x);
-
-        // Split into heads: [s, dout] → [s, h, hd]
-        q = q.splitAxis(.dout, .{ .h = config.n_heads, .hd = config.head_dim });
-        k = k.splitAxis(.dout, .{ .h = config.n_kv_heads, .hd = config.head_dim });
-        v = v.splitAxis(.dout, .{ .h = config.n_kv_heads, .hd = config.head_dim });
-
-        // Position indices for RoPE
-        const pos_index = b: {
-            const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
-                .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
-            break :b temp.add(token_index.broad(temp.shape()));
-        };
-
-        const rope_opts: zml.nn.RopeOpts = .{
-            .layout = .interleaved,
-            .freq_base = config.rope_theta,
-        };
-
-        q = zml.nn.rope(q, pos_index, rope_opts);
-        k = zml.nn.rope(k, pos_index, rope_opts);
-
-        q = q.rename(.{ .s = .q });
-        k = k.rename(.{ .s = .k });
-        v = v.rename(.{ .s = .k });
-
-        // Update KV cache with modular indexing for sliding window circular buffer
-        const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
-        const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
-        const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
-
-        // Cap token_index so seqused_k doesn't exceed cache bounds
-        const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
-        const attn_token_index = token_index.minimum(max_token_index);
-        const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
-            .sliding_window = @intCast(config.sliding_window),
-        });
-
-        // Merge heads and output projection: [q, h, hd] → [s, d]
-        const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
-    }
-};
+pub const SelfAttention = common.SelfAttention(false);
 
 /// Single decoder transformer layer with AdaRmsNorm time conditioning.
 pub const DecoderLayer = struct {
@@ -261,23 +180,17 @@ pub const DecoderLayer = struct {
     }
 
     pub fn unload(self: *zml.Bufferized(DecoderLayer)) void {
-        self.attention_norm.deinit();
-        SelfAttention.unload(&self.attention);
-
-        self.ffn_norm.deinit();
-        SwiGluFfn.unload(&self.feed_forward);
-
-        AdaRmsNorm.unload(&self.ada_norm);
+        common.deinitBufferized(self);
     }
 
     /// h: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d] → ([s, d], KvCache)
-    pub fn forward(self: DecoderLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, config: Config, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
+    pub fn forward(self: DecoderLayer, h: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, attn_config: cfg.AttentionConfig, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         // Pre-attention norm → attention (with KV cache) → residual
         const attn_out, const updated_kv_cache = self.attention.forward(
             rmsNorm(h, self.attention_norm, self.norm_eps),
             token_index,
             kv_cache,
-            config,
+            attn_config,
             attention_metadata,
             attention_parameters,
         );

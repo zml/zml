@@ -21,30 +21,20 @@ const CliArgs = struct {
     model: []const u8,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     log.info("Start of Voxtral test", .{});
 
-    var dbg = std.heap.DebugAllocator(.{}).init;
+    var dbg = std.heap.DebugAllocator(.{ .thread_safe = true }).init;
     defer if (builtin.mode == .Debug) std.debug.assert(dbg.deinit() == .ok);
 
     const allocator = switch (builtin.mode) {
-	.Debug => dbg.allocator(),
-	else => std.heap.c_allocator,
+        .Debug => dbg.allocator(),
+        else => std.heap.c_allocator,
     };
 
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
+    const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const args = stdx.flags.parseProcessArgs(CliArgs);
-
-    var vfs: zml.io.VFS = try .init(allocator, threaded.io());
-    defer vfs.deinit();
-
-    var vfs_file: zml.io.VFS.File = .init(allocator, threaded.io(), .{});
-    defer vfs_file.deinit();
-    try vfs.register("file", vfs_file.io());
-
-    const io = vfs.io();
+    const io = init.io;
 
     var ref_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, args.reference);
     defer ref_registry.deinit();
@@ -226,13 +216,14 @@ const DecoderLayerTestHarness = struct {
         const h_typed = h.convert(dtype).withTags(.{ .s, .d });
 
         // Create zero KV cache for prefill (empty cache for this layer)
+        const attn_config = self.config.attentionConfig();
         const kv_shape = zml.Shape.init(.{
             .layer = 1,
             .k = h_typed.dim(.s),
-            .h = @as(i64, @intCast(self.config.n_kv_heads)),
-            .hd = @as(i64, @intCast(self.config.head_dim)),
+            .h = @as(i64, @intCast(attn_config.n_kv_heads)),
+            .hd = @as(i64, @intCast(attn_config.head_dim)),
         }, dtype);
-	
+
         const kv_cache = dec.KvCache{
             .k = Tensor.zeroes(kv_shape),
             .v = Tensor.zeroes(kv_shape),
@@ -240,8 +231,10 @@ const DecoderLayerTestHarness = struct {
         };
 
         const token_index = Tensor.scalar(0, .u32);
-        const result = self.inner.forward(h_typed, token_index, kv_cache, self.t_cond.convert(dtype), self.config);
-	
+        const attention_metadata: zml.attention.Metadata = .{ .vanilla = {} };
+        const attention_parameters: zml.attention.Parameters = .{ .vanilla = {} };
+        const result = self.inner.forward(h_typed, token_index, kv_cache, self.t_cond.convert(dtype), attn_config, attention_metadata, attention_parameters);
+
         return result[0].convert(.f32);
     }
 };

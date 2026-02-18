@@ -6,17 +6,29 @@ const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 
+const cfg = @import("config.zig");
+
+/// Recursively deinit all Buffer fields in a Bufferized struct.
+/// For models with allocated slices (e.g. layers), the caller must also free the slice.
+pub fn deinitBufferized(bufferized: anytype) void {
+    zml.meta.visit((struct {
+        fn cb(_: void, buf: *zml.Buffer) void {
+            buf.deinit();
+        }
+    }).cb, {}, bufferized);
+}
+
+pub fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
+    l.weight.deinit();
+    if (l.bias) |*b| b.deinit();
+}
+
 pub fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
     return .init(
         store.createTensorWithTags("weight", .{ .dout, .d }),
         store.maybeCreateTensorWithTags("bias", .{.dout}),
         .d,
     );
-}
-
-pub fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
-    l.weight.deinit();
-    if (l.bias) |*b| b.deinit();
 }
 
 pub fn rmsNorm(x: Tensor, weight: Tensor, eps: f32) Tensor {
@@ -54,6 +66,97 @@ pub fn loadModel(
         .parallelism = 16,
         .total_bytes = &total_bytes,
     });
+}
+
+/// Unified self-attention with KV cache, parameterized on whether to reorder
+/// the circular KV buffer for correct causal masking (encoder needs this, decoder does not).
+pub fn SelfAttention(comptime reorder_kv_cache: bool) type {
+    return struct {
+        wq: zml.nn.Linear,
+        wk: zml.nn.Linear,
+        wv: zml.nn.Linear,
+        wo: zml.nn.Linear,
+
+        const Self = @This();
+
+        pub fn init(store: zml.io.TensorStore.View) Self {
+            return .{
+                .wq = linear(store.withPrefix("wq")),
+                .wk = linear(store.withPrefix("wk")),
+                .wv = linear(store.withPrefix("wv")),
+                .wo = linear(store.withPrefix("wo")),
+            };
+        }
+
+        pub fn unload(self: *zml.Bufferized(Self)) void {
+            deinitBufferized(self);
+        }
+
+        /// x: [s, d], token_index: scalar, kv_cache: KvCache → ([s, d], KvCache)
+        pub fn forward(self: Self, x: Tensor, token_index: Tensor, kv_cache: KvCache, attn_config: cfg.AttentionConfig, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
+            const dtype = x.dtype();
+
+            var q = self.wq.forward(x);
+            var k = self.wk.forward(x);
+            var v = self.wv.forward(x);
+
+            q = q.splitAxis(.dout, .{ .h = attn_config.n_heads, .hd = attn_config.head_dim });
+            k = k.splitAxis(.dout, .{ .h = attn_config.n_kv_heads, .hd = attn_config.head_dim });
+            v = v.splitAxis(.dout, .{ .h = attn_config.n_kv_heads, .hd = attn_config.head_dim });
+
+            // Position indices for RoPE: token_index + arange(s)
+            const pos_index = b: {
+                const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
+                    .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+                break :b temp.add(token_index.broad(temp.shape()));
+            };
+
+            const rope_opts: zml.nn.RopeOpts = .{
+                .layout = .interleaved,
+                .freq_base = attn_config.rope_theta,
+            };
+
+            q = zml.nn.rope(q, pos_index, rope_opts);
+            k = zml.nn.rope(k, pos_index, rope_opts);
+
+            q = q.rename(.{ .s = .q });
+            k = k.rename(.{ .s = .k });
+            v = v.rename(.{ .s = .k });
+
+            // Update KV cache with modular indexing for sliding window circular buffer
+            const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
+            const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
+            const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
+            k = new_kv_cache.keys().convert(dtype);
+            v = new_kv_cache.values().convert(dtype);
+
+            if (reorder_kv_cache) {
+                // EXPERIMENTAL
+                // Reorder K/V from circular buffer to temporal order for correct causal masking.
+                // When the cache wraps, physical order != temporal order, which breaks FA2's
+                // position-based causal mask for multi-token (q_len > 1) attention.
+                const pos_end = token_index.addConstant(x.dim(.s));
+                const is_full = pos_end.cmp(.GE, cache_size);
+                const rotation_start = pos_end.remainder(cache_size);
+                const safe_start = is_full.select(rotation_start, Tensor.scalar(@as(u32, 0), token_index.dtype()));
+                const reorder_arange = Tensor.arange(.{ .end = kv_cache.k.dim(.k) }, token_index.dtype()).withTags(.{.kk});
+                const reorder_idx = reorder_arange.add(safe_start.broad(reorder_arange.shape()))
+                    .remainder(cache_size.broad(reorder_arange.shape()));
+                k = k.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+                v = v.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+            }
+
+            // Cap token_index so seqused_k doesn't exceed cache bounds
+            const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
+            const attn_token_index = token_index.minimum(max_token_index);
+            const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
+                .sliding_window = @intCast(attn_config.sliding_window),
+            });
+
+            const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+            return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
+        }
+    };
 }
 
 /// KV cache for all layers of a transformer.

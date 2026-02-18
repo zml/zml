@@ -48,19 +48,8 @@ pub const LogMelSpectrogram = struct {
         // then drop the last frame to match Whisper convention (stft[..., :-1]).
         var spectrogram = stft(padded_wav, window_weight, num_frames + 1, self.hop_len, self.precision);
         spectrogram = spectrogram.slice1d(.frames, .{ .end = -1 });
-        spectrogram = spectrogram.convert(dtype);
-	
-        // Re-weight frequencies for speech
-        spectrogram = spectrogram.dot(self.mel_filters, .freq_bins);
 
-        spectrogram = spectrogram.maximum(Tensor.constant(dtype.constant(self.mel_floor)));
-        var log_spec = spectrogram.log().scale(1.0 / @log(10.0));
-
-        const log_spec_min = Tensor.constant(dtype.constant(self.global_log_mel_max - 8.0));
-        log_spec = log_spec.maximum(log_spec_min);
-
-        // "center" the distribution
-        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames });
+        return self.postProcess(spectrogram, dtype);
     }
 
     /// Like forward(), but for fixed-size audio chunks with reflect padding done on host.
@@ -75,8 +64,14 @@ pub const LogMelSpectrogram = struct {
         const num_frames: u63 = @intCast(@divFloor(audio_len - fft_len, self.hop_len) + 1);
 
         // No reflect padding — done on host
-        var spectrogram = stft(audio_chunk, window_weight, num_frames, self.hop_len, self.precision);
-        spectrogram = spectrogram.convert(dtype);
+        const spectrogram = stft(audio_chunk, window_weight, num_frames, self.hop_len, self.precision);
+
+        return self.postProcess(spectrogram, dtype).withTags(.{ .channels, .time });
+    }
+
+    /// Shared post-STFT processing: mel filter dot product, log scale, clamp, normalize.
+    fn postProcess(self: LogMelSpectrogram, raw_spectrogram: Tensor, dtype: zml.DataType) Tensor {
+        var spectrogram = raw_spectrogram.convert(dtype);
 
         // Re-weight frequencies for speech
         spectrogram = spectrogram.dot(self.mel_filters, .freq_bins);
@@ -87,7 +82,8 @@ pub const LogMelSpectrogram = struct {
         const log_spec_min = Tensor.constant(dtype.constant(self.global_log_mel_max - 8.0));
         log_spec = log_spec.maximum(log_spec_min);
 
-        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames }).withTags(.{ .channels, .time });
+        // "center" the distribution
+        return log_spec.addConstant(4).scale(1.0 / 4.0).transpose(.{ .mel, .frames });
     }
 
     pub fn load(self: *LogMelSpectrogram, io: std.Io, platform: *zml.Platform) !zml.Bufferized(LogMelSpectrogram) {
