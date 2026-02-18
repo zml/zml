@@ -408,20 +408,25 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
         return try allocator.dupe(u32, try encoder.encode(prompt));
     }
 
-    const start_header = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-    const end_header = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+    const start = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+    const end = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+    const system = tokenizer.tokenToId("system") orelse return error.NoSuchToken;
     const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
     const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-    const eot = tokenizer.tokenToId("<|endoftext|>") orelse return error.NoSuchToken;
     const newline = (try encoder.encode("\n"))[0];
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-    try tokens.appendSlice(allocator, &.{ config.bos_token_id, start_header, user, end_header, newline });
+    try tokens.appendSlice(allocator, &.{config.bos_token_id});
 
+    try tokens.appendSlice(allocator, &.{ start, system, newline });
+    try tokens.appendSlice(allocator, try encoder.encode("你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。"));
+    try tokens.appendSlice(allocator, &.{ end, newline });
+
+    try tokens.appendSlice(allocator, &.{ start, user, newline });
     try tokens.appendSlice(allocator, try encoder.encode(prompt));
-    try tokens.appendSlice(allocator, &.{ eot, newline });
+    try tokens.appendSlice(allocator, &.{ end, newline });
 
-    try tokens.appendSlice(allocator, &.{ start_header, assistant, end_header, newline });
+    try tokens.appendSlice(allocator, &.{ start, assistant, newline });
 
     return tokens.toOwnedSlice(allocator);
 }
@@ -486,6 +491,8 @@ pub fn generateText(
         const out = try tokenizer_decoder.decode(prefill_tokens_slice.constItems(u32)[0..prompt_tok.len]);
         std.log.info("\n\ngenerated: {s}\n\n", .{out});
     }
+
+    std.log.info("\n\n-- Decode step --\n\n", .{});
 
     // Prepare for token-by-token generation,
 
