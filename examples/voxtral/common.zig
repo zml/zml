@@ -68,9 +68,12 @@ pub fn loadModel(
     });
 }
 
-/// Unified self-attention with KV cache, parameterized on whether to reorder
-/// the circular KV buffer for correct causal masking (encoder needs this, decoder does not).
-pub fn SelfAttention(comptime reorder_kv_cache: bool) type {
+/// Unified self-attention with KV cache.
+/// When `circular_buffer` is true, the KV cache uses modular indexing for an unbounded
+/// sliding window and reorders K/V to temporal order for correct causal masking
+/// (needed for the encoder's multi-token prefill).
+/// When false, the cache uses sequential indexing (matching the reference implementation).
+pub fn SelfAttention(comptime circular_buffer: bool) type {
     return struct {
         wq: zml.nn.Linear,
         wk: zml.nn.Linear,
@@ -123,15 +126,16 @@ pub fn SelfAttention(comptime reorder_kv_cache: bool) type {
             k = k.rename(.{ .s = .k });
             v = v.rename(.{ .s = .k });
 
-            // Update KV cache with modular indexing for sliding window circular buffer
             const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
-            const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
-            const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
-            k = new_kv_cache.keys().convert(dtype);
-            v = new_kv_cache.values().convert(dtype);
 
-            if (reorder_kv_cache) {
-                // EXPERIMENTAL
+            if (circular_buffer) { // Experimental
+                // Circular buffer: modular indexing for unbounded sliding window.
+                // Write positions wrap around using pos_index % cache_size.
+                const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
+                const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
+                k = new_kv_cache.keys().convert(dtype);
+                v = new_kv_cache.values().convert(dtype);
+
                 // Reorder K/V from circular buffer to temporal order for correct causal masking.
                 // When the cache wraps, physical order != temporal order, which breaks FA2's
                 // position-based causal mask for multi-token (q_len > 1) attention.
@@ -144,17 +148,30 @@ pub fn SelfAttention(comptime reorder_kv_cache: bool) type {
                     .remainder(cache_size.broad(reorder_arange.shape()));
                 k = k.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
                 v = v.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+
+                // Cap token_index so seqused_k doesn't exceed cache bounds
+                const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
+                const attn_token_index = token_index.minimum(max_token_index);
+                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
+                    .sliding_window = @intCast(attn_config.sliding_window),
+                });
+
+                const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+                return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
+            } else {
+                // Sequential: write at pos_index directly (matching reference implementation).
+                const new_kv_cache = kv_cache.update(k, v, pos_index.rename(.{ .s = .k }));
+                k = new_kv_cache.keys().convert(dtype);
+                v = new_kv_cache.values().convert(dtype);
+
+                const attn_token_index = token_index;
+                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
+                    .sliding_window = @intCast(attn_config.sliding_window),
+                });
+
+                const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+                return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
             }
-
-            // Cap token_index so seqused_k doesn't exceed cache bounds
-            const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
-            const attn_token_index = token_index.minimum(max_token_index);
-            const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
-                .sliding_window = @intCast(attn_config.sliding_window),
-            });
-
-            const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-            return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
         }
     };
 }
