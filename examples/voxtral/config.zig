@@ -1,5 +1,13 @@
 const std = @import("std");
 
+pub const AttentionConfig = struct {
+    n_heads: u32,
+    n_kv_heads: u32,
+    head_dim: u32,
+    rope_theta: f32,
+    sliding_window: u32,
+};
+
 pub const Config = struct {
     dim: u32,
     n_layers: u32,
@@ -43,6 +51,16 @@ pub const Config = struct {
         rope_theta: f32,
         norm_eps: f32,
         sliding_window: u32,
+
+        pub fn attentionConfig(self: EncoderArgs) AttentionConfig {
+            return .{
+                .n_heads = self.n_heads,
+                .n_kv_heads = self.n_kv_heads,
+                .head_dim = self.head_dim,
+                .rope_theta = self.rope_theta,
+                .sliding_window = self.sliding_window,
+            };
+        }
     };
 
     pub const AudioEncodingArgs = struct {
@@ -55,6 +73,16 @@ pub const Config = struct {
     };
 
     // -- Shortcuts
+
+    pub fn attentionConfig(self: Config) AttentionConfig {
+        return .{
+            .n_heads = self.n_heads,
+            .n_kv_heads = self.n_kv_heads,
+            .head_dim = self.head_dim,
+            .rope_theta = self.rope_theta,
+            .sliding_window = self.sliding_window,
+        };
+    }
 
     pub fn encoder(self: Config) EncoderArgs {
         return self.multimodal.whisper_model_args.encoder_args;

@@ -30,6 +30,8 @@ const CliArgs = struct {
     model: []const u8,
     transcription_delay_ms: f32 = 480.0,
     backend: ?zml.attention.Backend = null,
+    enc_kv_size: ?u32 = null,
+    dec_kv_size: ?u32 = null,
 };
 
 const n_left_pad_tokens: u32 = 32;
@@ -108,12 +110,15 @@ pub fn main(init: std.process.Init) !void {
     var decoder_model: Decoder = .init(allocator, model_store.view(), config);
     defer decoder_model.deinit(allocator);
 
-    // KV cache shapes for encoder and decoder, sized to sliding_window for memory efficiency
     const enc_cfg = config.encoder();
+    const enc_kv_size = args.enc_kv_size orelse enc_cfg.sliding_window;
+    const dec_kv_size = args.dec_kv_size orelse config.sliding_window;
+
+    // KV cache shapes for encoder and decoder, sized to sliding_window for memory efficiency
     const enc_dtype = encoder_model.norm.dtype();
     const enc_kv_cache: KvCache = .init(.init(.{
         .layer = enc_cfg.n_layers,
-        .k = enc_cfg.sliding_window,
+        .k = enc_kv_size,
         .h = enc_cfg.n_kv_heads,
         .hd = enc_cfg.head_dim,
     }, enc_dtype));
@@ -121,13 +126,13 @@ pub fn main(init: std.process.Init) !void {
     const dec_dtype = decoder_model.tok_embeddings.dtype();
     const dec_kv_cache: KvCache = .init(.init(.{
         .layer = decoder_model.layers.len,
-        .k = config.sliding_window,
+        .k = dec_kv_size,
         .h = config.n_kv_heads,
         .hd = config.head_dim,
     }, dec_dtype));
 
-    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_cfg.sliding_window)));
-    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(config.sliding_window)));
+    const enc_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(enc_kv_size)));
+    const dec_attention_metadata: zml.attention.Metadata = .init(.fromBackend(backend, @intCast(dec_kv_size)));
     const attention_parameters: zml.attention.Parameters = .init(.fromBackend(backend));
 
     // Launch concurrent compilation and buffer loading
@@ -210,19 +215,19 @@ pub fn main(init: std.process.Init) !void {
         platform,
         config,
         &tokenizer,
-        // padded_wav,
-        // audio_len,
         tokens,
         sp,
-        &compiled_mel_step,
-        &compiled_conv_stem,
-        &compiled_conv_stem_step,
-        &compiled_encoder_prefill,
-        &compiled_encoder_step,
-        &compiled_adapter,
-        &compiled_adapter_step,
-        &compiled_decoder_prefill,
-        &compiled_decoder_decode,
+        .{
+            .mel_step = &compiled_mel_step,
+            .conv_stem = &compiled_conv_stem,
+            .conv_stem_step = &compiled_conv_stem_step,
+            .encoder_prefill = &compiled_encoder_prefill,
+            .encoder_step = &compiled_encoder_step,
+            .adapter = &compiled_adapter,
+            .adapter_step = &compiled_adapter_step,
+            .decoder_prefill = &compiled_decoder_prefill,
+            .decoder_decode = &compiled_decoder_decode,
+        },
         &mel_spectrum_buffers,
         &encoder_buffers,
         &adapter_buffers,
