@@ -157,7 +157,7 @@ pub const AdaRmsNorm = struct {
 
 pub const KvCache = common.KvCache;
 
-pub const SelfAttention = common.SelfAttention(false);
+pub const SelfAttention = common.SelfAttention(true);
 
 /// Single decoder transformer layer with AdaRmsNorm time conditioning.
 pub const DecoderLayer = struct {
