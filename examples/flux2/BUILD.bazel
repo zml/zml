@@ -49,6 +49,7 @@ zig_binary(
         "utils.zig",
         "config.zig",
         "interactive.zig",
+        "pipeline.zig",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],

@@ -36,7 +36,7 @@ pub const Qwen2TokenizerFast = struct {
         self.tokenizer.deinit();
     }
 
-    fn applyChatTemplate(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
+    pub fn applyChatTemplate(self: Qwen2TokenizerFast, messages: []const ChatMessage, options: struct {
         add_generation_prompt: bool = true,
     }) ![]const u8 {
         const im_start = "<|im_start|>";
