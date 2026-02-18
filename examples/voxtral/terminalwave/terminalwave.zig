@@ -1,5 +1,39 @@
 const std = @import("std");
 
+// ── ANSI escape sequences & Unicode block characters ────────
+
+pub const esc = struct {
+    // Cursor control
+    pub const hide_cursor = "\x1b[?25l";
+    pub const show_cursor = "\x1b[?25h";
+    pub const save_cursor = "\x1b7";
+    pub const restore_cursor = "\x1b8";
+    pub const cursor_home = "\x1b[H";
+
+    // Screen control
+    pub const clear_screen = "\x1b[2J";
+    pub const clear_to_end = "\x1b[J";
+    pub const reset_scroll_region = "\x1b[r";
+
+    // Text style
+    pub const reset = "\x1b[0m";
+    pub const bold = "\x1b[1m";
+    pub const dim_gray = "\x1b[0;90m";
+    pub const bright_white = "\x1b[97m";
+
+    // Unicode box drawing / block elements
+    pub const horizontal_line = "\xe2\x94\x80"; // ─
+    pub const upper_half_block = "\xe2\x96\x80"; // ▀
+    pub const lower_half_block = "\xe2\x96\x84"; // ▄
+
+    // Parameterized format strings (for use with fmt)
+    pub const fg_rgb_fmt = "\x1b[38;2;{d};{d};{d}m";
+    pub const bold_fg_rgb_fmt = "\x1b[1;38;2;{d};{d};{d}m";
+    pub const fg_bg_rgb_fmt = "\x1b[38;2;{d};{d};{d};48;2;{d};{d};{d}m";
+    pub const set_scroll_region_fmt = "\x1b[{d};999r";
+    pub const move_cursor_fmt = "\x1b[{d};{d}H";
+};
+
 // ── Public types ─────────────────────────────────────────────
 
 pub const Color = struct { r: u8, g: u8, b: u8 };
@@ -18,7 +52,7 @@ pub const Config = struct {
     decay: f32 = 0.12,
     gradient: Gradient = .{},
     padding_left: u16 = 4,
-    title: []const u8 = "Voxtral Realtime",
+    title: []const u8,
     show_title: bool = true,
 };
 
@@ -30,6 +64,7 @@ pub const FrameResult = struct {
 
 pub const State = struct {
     config: Config,
+    writer: *std.Io.Writer,
     smoothed: f32,
     frame_count: u32,
     buf: [BUF_SIZE]u8,
@@ -41,9 +76,10 @@ pub const State = struct {
     const MAX_HALF_HEIGHT = 256;
     const Half = enum { upper, lower };
 
-    pub fn init(config: Config) State {
+    pub fn init(config: Config, writer: *std.Io.Writer) State {
         var state = State{
             .config = config,
+            .writer = writer,
             .smoothed = 0,
             .frame_count = 0,
             .gradient_lut = undefined,
@@ -53,16 +89,13 @@ pub const State = struct {
 
         state.buildGradientLut();
 
-        // Hide cursor, clear screen
-        std.debug.print("\x1b[?25l\x1b[2J", .{});
+        writer.writeAll(esc.hide_cursor ++ esc.clear_screen) catch {};
 
         return state;
     }
 
     pub fn deinit(self: *State) void {
-        _ = self;
-        // Show cursor, reset scroll region
-        std.debug.print("\x1b[r\x1b[?25h", .{});
+        self.writer.writeAll(esc.reset_scroll_region ++ esc.show_cursor) catch {};
     }
 
     pub fn render(self: *State, rms: f32) FrameResult {
@@ -73,14 +106,14 @@ pub const State = struct {
 
         // Render
         self.pos = 0;
-        self.put("\x1b[H");
+        self.put(esc.cursor_home);
 
         if (self.config.show_title) {
-            self.put("\n\x1b[1;38;2;230;120;5m");
+            self.put("\n");
+            self.fmt(esc.bold_fg_rgb_fmt, .{ 230, 120, 5 });
             self.putPadding();
             self.put(self.config.title);
-            self.put(" ");
-            self.put("\x1b[0;90m\xe2\x94\x80 live transcription\x1b[0m\n\n");
+            self.put(" " ++ esc.dim_gray ++ esc.horizontal_line ++ " live transcription" ++ esc.reset ++ "\n\n");
         }
 
         const num_bars = self.config.num_bars;
@@ -113,6 +146,17 @@ pub const State = struct {
         self.frame_count +%= 1;
 
         return .{ .level = level };
+    }
+
+    /// Render a horizontal separator line below the wave visualization.
+    pub fn renderSeparator(self: *State) void {
+        self.put("\n");
+        self.fmt(esc.fg_rgb_fmt, .{ 60, 60, 60 });
+        self.putPadding();
+        for (0..self.config.num_bars) |_| {
+            self.put(esc.horizontal_line);
+        }
+        self.put(esc.reset ++ "\n\n");
     }
 
     // ── Private helpers ──────────────────────────────────────
@@ -188,22 +232,23 @@ pub const State = struct {
     }
 
     pub fn flush(self: *State) void {
-        std.debug.print("{s}", .{self.buf[0..self.pos]});
+        self.writer.writeAll(self.buf[0..self.pos]) catch {};
         self.pos = 0;
     }
 
     fn cellBoth(self: *State, upper: Color, lower: Color) void {
-        self.fmt("\x1b[38;2;{d};{d};{d};48;2;{d};{d};{d}m\xe2\x96\x80\x1b[0m", .{
-            upper.r, upper.g, upper.b, lower.r, lower.g, lower.b,
-        });
+        self.fmt(esc.fg_bg_rgb_fmt, .{ upper.r, upper.g, upper.b, lower.r, lower.g, lower.b });
+        self.put(esc.upper_half_block ++ esc.reset);
     }
 
     fn cellUpper(self: *State, col: Color) void {
-        self.fmt("\x1b[38;2;{d};{d};{d}m\xe2\x96\x80\x1b[0m", .{ col.r, col.g, col.b });
+        self.fmt(esc.fg_rgb_fmt, .{ col.r, col.g, col.b });
+        self.put(esc.upper_half_block ++ esc.reset);
     }
 
     fn cellLower(self: *State, col: Color) void {
-        self.fmt("\x1b[38;2;{d};{d};{d}m\xe2\x96\x84\x1b[0m", .{ col.r, col.g, col.b });
+        self.fmt(esc.fg_rgb_fmt, .{ col.r, col.g, col.b });
+        self.put(esc.lower_half_block ++ esc.reset);
     }
 };
 
@@ -211,4 +256,14 @@ pub const State = struct {
 
 fn lerpU8(a: f32, b: f32, t: f32) u8 {
     return @intFromFloat(@max(0.0, @min(255.0, a + (b - a) * t)));
+}
+
+/// Compute RMS (root mean square) of audio samples for level metering.
+pub fn computeRms(samples: []const f32) f32 {
+    if (samples.len == 0) return 0;
+    var sum: f32 = 0;
+    for (samples) |s| {
+        sum += s * s;
+    }
+    return @sqrt(sum / @as(f32, @floatFromInt(samples.len)));
 }
