@@ -26,7 +26,7 @@ const tesc = terminalwave.esc;
 
 pub const CompiledExes = struct {
     mel_step: *zml.Exe,
-    conv_stem: *zml.Exe,
+    conv_stem_prefill: *zml.Exe,
     conv_stem_step: *zml.Exe,
     encoder_prefill: *zml.Exe,
     encoder_step: *zml.Exe,
@@ -43,6 +43,7 @@ pub const ModelBuffers = struct {
     decoder: *zml.Bufferized(Decoder),
     enc_kv: *zml.Bufferized(KvCache),
     dec_kv: *zml.Bufferized(KvCache),
+    conv_state: *zml.Bufferized(Encoder.ConvState),
     t_cond: zml.Buffer,
     rng: *zml.Bufferized(Tensor.Rng),
     enc_attention_metadata: *zml.Bufferized(zml.attention.Metadata),
@@ -70,15 +71,21 @@ pub fn compileMelStep(allocator: std.mem.Allocator, io: std.Io, platform: *const
     return compileStep(allocator, io, platform, model, .melStep, .{Tensor.init(.{sp.chunk_audio}, .f32).withTags(.{.samples})}, progress, "mel step");
 }
 
-pub fn compileConvStem(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, num_mel_frames: u32, progress: *std.Progress.Node) !zml.Exe {
-    return compileStep(allocator, io, platform, model, .convStem, .{
+pub fn compileConvStemPrefill(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, num_mel_frames: u32, progress: *std.Progress.Node) !zml.Exe {
+    return compileStep(allocator, io, platform, model, .convStemPrefill, .{
         Tensor.init(.{ .channels = 128, .time = num_mel_frames }, .f32),
-    }, progress, "conv stem");
+    }, progress, "conv stem prefill");
 }
 
 pub fn compileConvStemStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
+    const dtype = model.conv0_weight.dtype();
+    const enc_dim = model.config.encoder().dim;
     return compileStep(allocator, io, platform, model, .convStemStep, .{
-        Tensor.init(.{ .channels = 128, .time = sp.chunk_mel }, .f32),
+        Tensor.init(.{ .channels = 128, .time = sp.mel_per_step }, .f32),
+        Encoder.ConvState{
+            .conv1 = Tensor.init(.{ .batch = 1, .channels = 128, .time = 2 }, dtype),
+            .conv2 = Tensor.init(.{ .batch = 1, .channels = enc_dim, .time = 2 }, dtype),
+        },
     }, progress, "conv stem step");
 }
 
@@ -298,6 +305,7 @@ fn runPrefill(ctx: *PipelineContext, mel_host: []const u8, tokens: []const u32, 
     const f32_bytes: usize = @sizeOf(f32);
 
     // Conv stem prefill: mel_host is already [128][prompt_len*mel_per_step]
+    // Also extracts conv states (last 2 frames of each intermediate) for streaming
     log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * sp.mel_per_step});
     var conv_prefill_output: zml.Buffer = undefined;
     {
@@ -312,14 +320,14 @@ fn runPrefill(ctx: *PipelineContext, mel_host: []const u8, tokens: []const u32, 
         const prefill_enc_frames = prompt_len * sp.dsf;
         conv_prefill_output = try .uninitialized(io, platform, .init(.{ .s = prefill_enc_frames, .d = enc_dim }, .bf16), .{});
 
-        var args = try ctx.exes.conv_stem.args(allocator);
+        var args = try ctx.exes.conv_stem_prefill.args(allocator);
         defer args.deinit(allocator);
-        var results = try ctx.exes.conv_stem.results(allocator);
+        var results = try ctx.exes.conv_stem_prefill.results(allocator);
         defer results.deinit(allocator);
 
         args.set(.{ ctx.buffers.encoder, mel_buffer });
-        ctx.exes.conv_stem.call(args, &results);
-        results.fill(.{&conv_prefill_output});
+        ctx.exes.conv_stem_prefill.call(args, &results);
+        results.fill(.{ &conv_prefill_output, ctx.buffers.conv_state });
     }
     defer conv_prefill_output.deinit();
     log.info("Conv stem prefill done.", .{});
@@ -475,7 +483,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var wave = terminalwave.State.init(.{
         .title = "Voxtral Realtime",
-        .sensitivity = 2.0,
+        .sensitivity = 5.0,
         .num_bars = 50,
         .half_height = 20,
     }, &stdout.interface);
@@ -551,10 +559,10 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
         ctx.exes.mel_step.call(mel_step_args, &mel_step_results);
         mel_step_results.fill(.{&mel_step_output});
 
-        // Conv stem step: mel step output stays on device → conv stem
-        conv_step_args.set(.{ ctx.buffers.encoder, mel_step_output });
+        // Conv stem step: mel + conv states → output + updated conv states
+        conv_step_args.set(.{ ctx.buffers.encoder, mel_step_output, ctx.buffers.conv_state });
         ctx.exes.conv_stem_step.call(conv_step_args, &conv_step_results);
-        conv_step_results.fill(.{&conv_step_output});
+        conv_step_results.fill(.{ &conv_step_output, ctx.buffers.conv_state });
 
         // Encoder step: conv stem output -> encoded chunk
         var enc_token_index: zml.Buffer = try .scalar(io, platform, @as(u32, @intCast(t)) * sp.dsf, .u32);
@@ -607,6 +615,7 @@ pub fn runPipeline(
     decoder_buffers: *zml.Bufferized(Decoder),
     enc_kv_cache: KvCache,
     dec_kv_cache: KvCache,
+    conv_state: Encoder.ConvState,
     enc_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     dec_attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
 ) !void {
@@ -642,6 +651,9 @@ pub fn runPipeline(
     var dec_kv_buffers = try dec_kv_cache.initBuffer(io, platform);
     defer KvCache.deinitBuffer(&dec_kv_buffers);
 
+    var conv_state_buffers = try conv_state.initBuffer(io, platform);
+    defer Encoder.ConvState.deinitBuffer(&conv_state_buffers);
+
     const t_cond_data = computeTimeEmbedding(allocator, @as(f32, @floatFromInt(sp.n_delay_tokens)), config.dim);
     defer allocator.free(t_cond_data);
     const t_cond_slice: zml.Slice = .init(
@@ -669,6 +681,7 @@ pub fn runPipeline(
             .decoder = decoder_buffers,
             .enc_kv = &enc_kv_buffers,
             .dec_kv = &dec_kv_buffers,
+            .conv_state = &conv_state_buffers,
             .t_cond = t_cond_buffer,
             .rng = &rng_buffers,
             .enc_attention_metadata = enc_attention_metadata_buffers,

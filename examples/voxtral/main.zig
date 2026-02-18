@@ -121,7 +121,7 @@ pub fn main(init: std.process.Init) !void {
 
     var compiled_mel_step_future = try io.concurrent(voxtral.compileMelStep, .{ allocator, io, platform, melspectro_model, sp, &progress });
 
-    var compiled_conv_stem_future = try io.concurrent(voxtral.compileConvStem, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
+    var compiled_conv_stem_prefill_future = try io.concurrent(voxtral.compileConvStemPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
     var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, sp, &progress });
     var compiled_encoder_prefill_future = try io.concurrent(voxtral.compileEncoderPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
     var compiled_encoder_step_future = try io.concurrent(voxtral.compileEncoderStep, .{ allocator, io, platform, encoder_model, enc_kv_cache, enc_attention_metadata, attention_parameters, &progress });
@@ -147,8 +147,8 @@ pub fn main(init: std.process.Init) !void {
     var compiled_mel_step = try compiled_mel_step_future.await(io);
     defer compiled_mel_step.deinit();
 
-    var compiled_conv_stem = try compiled_conv_stem_future.await(io);
-    defer compiled_conv_stem.deinit();
+    var compiled_conv_stem_prefill = try compiled_conv_stem_prefill_future.await(io);
+    defer compiled_conv_stem_prefill.deinit();
 
     var compiled_conv_stem_step = try compiled_conv_stem_step_future.await(io);
     defer compiled_conv_stem_step.deinit();
@@ -190,6 +190,11 @@ pub fn main(init: std.process.Init) !void {
 
     progress.end();
 
+    const conv_state: enc.Encoder.ConvState = .{
+        .conv1 = Tensor.init(.{ .batch = 1, .channels = config.audio().num_mel_bins, .time = 2 }, enc_dtype),
+        .conv2 = Tensor.init(.{ .batch = 1, .channels = enc_cfg.dim, .time = 2 }, enc_dtype),
+    };
+
     try voxtral.runPipeline(
         allocator,
         io,
@@ -200,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
         sp,
         .{
             .mel_step = &compiled_mel_step,
-            .conv_stem = &compiled_conv_stem,
+            .conv_stem_prefill = &compiled_conv_stem_prefill,
             .conv_stem_step = &compiled_conv_stem_step,
             .encoder_prefill = &compiled_encoder_prefill,
             .encoder_step = &compiled_encoder_step,
@@ -215,6 +220,7 @@ pub fn main(init: std.process.Init) !void {
         &decoder_buffers,
         enc_kv_cache,
         dec_kv_cache,
+        conv_state,
         &enc_attention_metadata_buffers,
         &dec_attention_metadata_buffers,
     );
