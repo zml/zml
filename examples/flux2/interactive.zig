@@ -72,10 +72,12 @@ pub fn interactive(allocator: std.mem.Allocator, pipeline: *FluxPipeline) !void 
         const line_slice = std.mem.span(line);
 
         if (line_slice.len > 0) {
-            std.debug.print("Generating for: '{s}'\n", .{line_slice});
             _ = c_interface.linenoiseHistoryAdd(line);
             _ = c_interface.linenoiseHistorySave("history.txt");
+        }
 
+        if (line_slice.len > 0 and line_slice[0] != '/') {
+            std.debug.print("Generating for: '{s}'\n", .{line_slice});
             var options = pipeline.config;
             options.prompt = line_slice;
             pipeline.generate(options) catch |err| {
