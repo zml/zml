@@ -73,6 +73,7 @@ pub const HTTP = struct {
         return .{
             .userdata = &self.base,
             .vtable = &comptime VFSBase.vtable(.{
+                .operate = operate,
                 .dirOpenDir = dirOpenDir,
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
@@ -85,7 +86,6 @@ pub const HTTP = struct {
                 .fileStat = fileStat,
                 .fileLength = fileLength,
                 .fileClose = fileClose,
-                .fileReadStreaming = fileReadStreaming,
                 .fileReadPositional = fileReadPositional,
                 .fileSeekBy = fileSeekBy,
                 .fileSeekTo = fileSeekTo,
@@ -139,6 +139,29 @@ pub const HTTP = struct {
         return try std.fmt.bufPrint(out_buffer, "{s}/{s}", .{ trimmed_uri, trimmed_sub_path });
     }
 
+    fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
+        switch (operation) {
+            .file_read_streaming => |o| {
+                const handle = self.getFileHandle(o.file);
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
+                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                };
+
+                if (total == 0) {
+                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                }
+
+                handle.pos += @intCast(total);
+                return .{ .file_read_streaming = total };
+            },
+            .file_write_streaming, .device_io_control => {
+                return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
+            },
+        }
+    }
+
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
         const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
 
@@ -164,6 +187,7 @@ pub const HTTP = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 0,
         };
     }
 
@@ -180,6 +204,7 @@ pub const HTTP = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 1,
         };
     }
 
@@ -196,7 +221,7 @@ pub const HTTP = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, path, size) catch return std.Io.File.OpenError.Unexpected;
 
-        return .{ .handle = @intCast(idx) };
+        return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
@@ -238,6 +263,7 @@ pub const HTTP = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 1,
         };
     }
 
@@ -251,17 +277,6 @@ pub const HTTP = struct {
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
-    }
-
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
-        const self: *HTTP = @fieldParentPtr("base", VFSBase.as(userdata));
-        const handle = self.getFileHandle(file);
-        const total = self.performRead(handle, data, handle.pos) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-        handle.pos += @intCast(total);
-        return total;
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {

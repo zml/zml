@@ -63,7 +63,7 @@ pub const TensorStore = struct {
     pub fn getReaderById(self: *const TensorStore, id: usize, io: std.Io, buffer: []u8) !safetensors.TensorReader {
         const tensor_desc = self.id_map.get(id) orelse return error.NotFound;
 
-        return safetensors.TensorReader.init(io, tensor_desc.*, buffer);
+        return safetensors.TensorReader.init(io, tensor_desc.*, buffer, .{});
     }
 
     pub fn view(self: *TensorStore) View {

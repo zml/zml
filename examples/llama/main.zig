@@ -58,33 +58,32 @@ pub fn main(init: std.process.Init) !void {
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    // var vfs: zml.io.VFS = try .init(allocator, init.io);
-    // defer vfs.deinit();
+    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
 
-    // var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
-    // defer vfs_file.deinit();
-    // try vfs.register("file", vfs_file.io());
+    try http_client.initDefaultProxies(allocator, init.environ_map);
+    defer http_client.deinit();
 
-    // var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
-    // defer vfs_https.deinit();
-    // try vfs.register("https", vfs_https.io());
+    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
+    defer vfs_file.deinit();
 
-    // var http_client: std.http.Client = .{
-    //     .allocator = allocator,
-    //     .io = init.io,
-    // };
-    // try http_client.initDefaultProxies(arena.allocator(), init.environ_map);
-    // defer http_client.deinit();
+    var vfs_https: zml.io.VFS.HTTP = try .init(allocator, init.io, &http_client, .https);
+    defer vfs_https.deinit();
 
-    // var hf_vfs: zml.io.VFS.HF = try .auto(
-    //     allocator,
-    //     init.io,
-    //     &http_client,
-    // );
-    // defer hf_vfs.deinit();
-    // try vfs.register("hf", hf_vfs.io());
+    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer hf_vfs.deinit();
 
-    const io = init.io;
+    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer s3_vfs.deinit();
+
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("https", vfs_https.io());
+    try vfs.register("hf", hf_vfs.io());
+    try vfs.register("s3", s3_vfs.io());
+
+    const io = vfs.io();
 
     log.info("Resolving model repo", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
@@ -111,10 +110,6 @@ pub fn main(init: std.process.Init) !void {
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
     log.info("\n{f}", .{platform.fmtVerbose()});
-    // log.info("Devices:", .{});
-    // for (platform.devices) |device| {
-    //     log.info("\t- {f}", .{device});
-    // }
 
     // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
     var llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
@@ -330,73 +325,6 @@ fn compileModel(
     const decode_exe = try decode_future.await(io);
 
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
-}
-
-fn loadModelBuffers(
-    allocator: std.mem.Allocator,
-    buffers_allocator: std.mem.Allocator,
-    io: std.Io,
-    progress: *std.Progress.Node,
-    platform: *const zml.Platform,
-    store: *zml.io.TensorStore,
-    llama_model: llama.LlamaLM,
-    pool: *zml.mem.DynamicBufferPool,
-    async_limit: usize,
-) !zml.Bufferized(llama.LlamaLM) {
-    var transferred_bytes: usize = 0;
-
-    const now: std.Io.Timestamp = .now(io, .awake);
-    defer {
-        const duration = now.untilNow(io, .awake);
-        const seconds = @as(f64, @floatFromInt(duration.ns)) / 1e9;
-        const gb_per_sec = @as(f64, @floatFromInt(transferred_bytes)) / (1024.0 * 1024.0 * 1024.0) / seconds;
-        const gbps = gb_per_sec * 8.0;
-        log.info("Loaded model [{D} {d:.3} GB/s {d:.3} gbps]", .{ stdx.fmt.fmtDuration(duration), gb_per_sec, gbps });
-    }
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
-
-    var group: stdx.Io.LimitedGroup = .init(async_limit);
-    defer group.cancel(io);
-
-    const bufferize_ctx: zml.io.BufferizeContext(llama.TransferCtx) = .{
-        .allocator = allocator,
-        .arena = &arena,
-        .io = io,
-        .platform = platform,
-        .cb_ctx = .{
-            .allocator = buffers_allocator,
-            .pool = pool,
-            .transferred_bytes = &transferred_bytes,
-            .progress = progress,
-        },
-    };
-
-    const bufferized = llama_model.loadBuffers(bufferize_ctx, &group, store.view(), transferBuffer);
-    try group.await(io);
-
-    return bufferized;
-}
-
-fn transferBuffer(ctx: zml.io.TensorBufferTransfer(llama.TransferCtx)) !void {
-    var transfer_progress = ctx.cb_ctx.progress.start(ctx.tensor.name, ctx.tensor.byteSize());
-
-    var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, &.{}) catch unreachable;
-    defer reader.deinit();
-
-    var writer = zml.io.DeviceWriter2.init(ctx.cb_ctx.allocator, ctx.io, ctx.platform, ctx.cb_ctx.pool, ctx.tensor.shape, ctx.buffer, .device) catch unreachable;
-    defer {
-        writer.interface.flush() catch unreachable;
-        writer.deinit();
-    }
-
-    _ = reader.interface.streamRemaining(&writer.interface) catch unreachable;
-    writer.interface.flush() catch unreachable;
-
-    transfer_progress.end();
-
-    ctx.cb_ctx.transferred_bytes.* += ctx.tensor.byteSize();
 }
 
 pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, config: LlamaLM.Config, prompt: []const u8, skip_llama3_encoding: bool) ![]u32 {

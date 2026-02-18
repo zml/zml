@@ -5,6 +5,7 @@ zig_library(
     srcs = [
         "Io.zig",
         "bounded_array.zig",
+        "crypto.zig",
         "debug.zig",
         "flags.zig",
         "fmt.zig",
