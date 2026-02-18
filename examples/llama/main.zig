@@ -419,7 +419,7 @@ pub fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     try tokens.appendSlice(allocator, &.{config.bos_token_id});
 
     try tokens.appendSlice(allocator, &.{ start, system, newline });
-    try tokens.appendSlice(allocator, try encoder.encode("你是南北阁，一款由BOSS直聘自主研发并训练的专业大语言模型。"));
+    try tokens.appendSlice(allocator, try encoder.encode("You are Nanbeige, a professional large language model independently developed and trained by BOSS Zhipin."));
     try tokens.appendSlice(allocator, &.{ end, newline });
 
     try tokens.appendSlice(allocator, &.{ start, user, newline });
