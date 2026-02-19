@@ -237,10 +237,6 @@ pub const Context = opaque {
         return @intCast(c.mlirContextGetNumRegisteredDialects(self.ptr()));
     }
 
-    pub fn allowUnregisteredDialects(self: *Context, allow: bool) void {
-        c.mlirContextSetAllowUnregisteredDialects(self.ptr(), allow);
-    }
-
     pub fn numLoadedDialects(self: *const Context) usize {
         return @intCast(c.mlirContextGetNumLoadedDialects(self.ptr()));
     }

@@ -76,9 +76,7 @@ pub const CompilationContext = struct {
         }
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
-        mlir_ctx.allowUnregisteredDialects(true);
 
-        //const loc = mlir.Location.fromSrc(mlir_ctx, @src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(.unknown(mlir_ctx));
         module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
 

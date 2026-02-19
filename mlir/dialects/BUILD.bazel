@@ -11,8 +11,8 @@ zig_library(
     deps = [
         "//mlir",
         "//mlir/dialects/stablehlo",
-        "//mlir/dialects/shardy",
         "//stdx",
+        "@shardy//shardy/integrations/c:sdy_capi",
     ],
 )
 
