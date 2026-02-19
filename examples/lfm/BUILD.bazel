@@ -1,0 +1,10 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "lfm",
+    srcs = ["model.zig", "config.zig", "inference.zig", "discussion.zig", "test_runner.zig"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml", "@linenoise"],
+)

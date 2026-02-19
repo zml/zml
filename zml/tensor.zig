@@ -187,6 +187,12 @@ pub const Tensor = struct {
         return res;
     }
 
+    pub fn renameTag(self: Tensor, old: anytype, new: anytype) Tensor {
+        var res = self;
+        res._shape = self._shape.setTag(old, new);
+        return res;
+    }
+
     pub fn renameAxis(self: Tensor, ax: i8, name: @EnumLiteral()) Tensor {
         var res = self;
         res._shape._tags.set(self.axis(ax), @tagName(name).ptr);
@@ -3888,6 +3894,17 @@ pub const Tensor = struct {
             },
             try ys.getValue([6][4]i32, std.testing.io),
         );
+    }
+
+    pub fn rollRight1d(self: Tensor, axis_: anytype, shift: i64) Tensor {
+        const a = self.axis(axis_);
+        const n = self.dim(a);
+        const k = @mod(shift, n); // normalize shift to [0, n)
+        if (k == 0) return self;
+        return Tensor.concatenate(&.{
+            self.slice1d(a, .{ .start = n - k, .end = n }),
+            self.slice1d(a, .{ .start = 0, .end = n - k }),
+        }, a);
     }
 
     /// Given a set of N vectors of lengths A, B, C, D,
