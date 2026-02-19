@@ -13,6 +13,7 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
 
+// todo: move to zml/module.zig
 pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
@@ -408,6 +409,7 @@ pub const Platform = struct {
         args: stdx.meta.Tail(
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
+        opts: zml.module.CompilationOpts,
     ) !Exe {
         return self.compileFn(
             allocator,
@@ -425,8 +427,9 @@ pub const Platform = struct {
         comptime func: anytype,
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
+        opts: zml.module.CompilationOpts,
     ) !Exe {
-        return self.compileFn(allocator, io, func, .{model} ++ args);
+        return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
 
     pub fn compileFn(
@@ -435,8 +438,9 @@ pub const Platform = struct {
         io: std.Io,
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
+        opts: zml.module.CompilationOpts,
     ) !Exe {
-        return zml.module.compile(allocator, io, func, args, self);
+        return zml.module.compile(allocator, io, func, args, self, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {

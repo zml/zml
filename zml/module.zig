@@ -146,19 +146,15 @@ pub const CompilationContext = struct {
     }
 };
 
-<<<<<<< HEAD
 pub fn compile(
     allocator: std.mem.Allocator,
     io: std.Io,
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
     platform: *const Platform,
+    opts: CompilationOpts,
 ) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, io, platform);
-=======
-pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype, args: stdx.meta.FnArgs(func), platform: *const Platform, opts: CompilationOpts) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, platform, opts);
->>>>>>> 1350314 (sharding)
+    var compilation_context: CompilationContext = .init(allocator, io, platform, opts);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;
@@ -192,9 +188,9 @@ pub fn compile(allocator: std.mem.Allocator, io: std.Io, comptime func: anytype,
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning) catch unreachable;
+    log.warn("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    log.info("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning) catch unreachable;
 
     const exe = try Exe.init(
         allocator,

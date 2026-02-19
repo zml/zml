@@ -228,29 +228,18 @@ fn runAdditionExample(
 
     log.info(" sum_ac[0]={any} sum_bd[0]={any}", .{ sum_ac[0..32], sum_bd[0..32] });
 
-    // var stdout = std.Io.File.stdout().writer(io, &.{});
-    // try sum_bd_slice.prettyPrint(&stdout.interface, .{});
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    try sum_bd_slice.prettyPrint(&stdout.interface, .{});
 
     log.info("\n\n{f}", .{out.sum_bd});
 }
 
-pub fn main() !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(debug_allocator.deinit() == .ok);
-
-    const allocator = debug_allocator.allocator();
-    // const allocator = std.heap.smp_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
-
-    var env_map = try std.process.getEnvMap(allocator);
-    defer env_map.deinit();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
     const device_count = blk: {
-        if (env_map.get("DEVICE_COUNT")) |v| {
+        if (init.environ_map.get("DEVICE_COUNT")) |v| {
             break :blk std.fmt.parseInt(usize, v, 10) catch unreachable;
         }
 
@@ -263,20 +252,21 @@ pub fn main() !void {
     log.info("{f}\n\n", .{platform.fmtVerbose()});
 
     var profiler = try platform.profiler(allocator);
+    _ = &profiler;
 
-    try profiler.?.start();
+    if (profiler) |*p| try p.start();
+
     defer {
-        profiler.?.stop() catch unreachable;
-        const data = profiler.?.collectData(allocator) catch unreachable;
-        log.warn("data: {any}", .{data});
-        var file = std.Io.Dir.createFile(.cwd(), io, "/home/hugo/zml/proto.pb", .{ .read = true }) catch unreachable;
-        defer file.close(io);
-        file.writeStreamingAll(io, data) catch unreachable;
-        allocator.free(data);
-    }
+        if (profiler) |*p| {
+            p.stop() catch unreachable;
+            const data = p.collectData(allocator) catch unreachable;
+            var file = std.Io.Dir.createFile(.cwd(), io, "/home/hugo/zml/proto.pb", .{ .read = true }) catch unreachable;
+            defer file.close(io);
 
-    // var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-    // defer physical_mesh.deinit();
+            file.writeStreamingAll(io, data) catch unreachable;
+            allocator.free(data);
+        }
+    }
 
     var physical_mesh: zml.sharding.PhysicalMesh = blk: {
         if (device_count == 9) {

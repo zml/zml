@@ -297,31 +297,32 @@ pub const ProgressWriter = struct {
     }
 };
 
-// pub const MemoryWriter = union(enum) {
-//     direct: DirectMemoryWriter,
-//     buffered: BufferedMemoryWriter,
+pub const MemoryWriter = union(enum) {
+    direct: DirectMemoryWriter,
+    buffered: BufferedMemoryWriter,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !MemoryWriter {
-        return switch (memory.platform.target) {
-            .cuda => .{ .direct = try .init(allocator, io, memory, pool, shape, buffer) },
-            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try .init(allocator, io, memory, shape, buffer) },
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, _: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !MemoryWriter {
+        return switch (platform.target) {
+            // todo: reenable DirectMemoryWriter with proper initialization
+            // .cuda => .{ .direct = try .init(allocator, io, platform, pool, shape, buffer) },
+            .cuda, .rocm, .tpu, .neuron, .cpu => .{ .buffered = try .init(allocator, io, platform, shape, buffer) },
         };
     }
 
-//     pub fn interface(self: *MemoryWriter) *std.Io.Writer {
-//         return switch (self.*) {
-//             .direct => &self.direct.interface,
-//             .buffered => &self.buffered.interface,
-//         };
-//     }
+    pub fn interface(self: *MemoryWriter) *std.Io.Writer {
+        return switch (self.*) {
+            .direct => &self.direct.interface,
+            .buffered => &self.buffered.interface,
+        };
+    }
 
-//     pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
-//         switch (self.*) {
-//             .direct => self.direct.deinit(),
-//             .buffered => self.buffered.deinit(allocator),
-//         }
-//     }
-// };
+    pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .direct => self.direct.deinit(),
+            .buffered => self.buffered.deinit(allocator),
+        }
+    }
+};
 
 pub const BufferedMemoryWriter = struct {
     io: std.Io,
@@ -392,7 +393,7 @@ pub const DirectMemoryWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, sharding: Sharding, buffer: *Buffer) !DirectMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !DirectMemoryWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -403,7 +404,7 @@ pub const DirectMemoryWriter = struct {
         );
 
         const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
-        buffer.* = Buffer.fromPjrtBuffers(memory.platform, shape, sharding, &.{pjrt_buffer});
+        buffer.* = Buffer.fromPjrtBuffers(memory.platform, shape, &.{pjrt_buffer});
 
         return .{
             .allocator = allocator,
@@ -512,6 +513,105 @@ pub const DirectMemoryWriter = struct {
     }
 };
 
+// pub const LoadOpts = struct {
+//     parallelism: usize,
+//     store: *const TensorStore,
+//     progress: ?*std.Progress.Node = null,
+//     dma_chunks: usize,
+//     dma_chunk_size: usize,
+//     total_bytes: ?*usize = null,
+// };
+
+// pub fn load(
+//     comptime ModelType: type,
+//     model: *const ModelType,
+//     allocator: std.mem.Allocator,
+//     io: std.Io,
+//     platform: *const Platform,
+//     opts: LoadOpts,
+// ) !Bufferized(ModelType) {
+//     var bufferized = try mem.bufferize(allocator, ModelType, model);
+
+//     const first_device = platform.devices[0]; // Temporary until sharding is re-exposed
+//     const dma_alloc: mem.DmaAllocator = .init(allocator, &first_device);
+//     var buffer_pool: mem.DynamicBufferPool = .init(opts.dma_chunks, opts.dma_chunk_size);
+//     defer buffer_pool.deinit(dma_alloc.allocator());
+
+//     const Ctx = struct {
+//         allocator: std.mem.Allocator,
+//         dma_allocator: std.mem.Allocator,
+//         pinned_buffer_pool: *mem.DynamicBufferPool,
+//         io: std.Io,
+//         buffers: []*Buffer,
+//         store: *const TensorStore,
+//         memory: *const Memory,
+//         group: stdx.Io.LimitedGroup,
+//         total: std.atomic.Value(usize) = .init(0),
+//         progress: ?*std.Progress.Node,
+//     };
+//     var walk_ctx: Ctx = .{
+//         .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
+//         .store = opts.store,
+//         .allocator = allocator,
+//         .dma_allocator = dma_alloc.allocator(),
+//         .pinned_buffer_pool = &buffer_pool,
+//         .io = io,
+//         .memory = first_device.memory(.default),
+//         .progress = opts.progress,
+//         .group = .init(opts.parallelism),
+//     };
+//     defer allocator.free(walk_ctx.buffers);
+
+//     defer if (opts.total_bytes) |total_bytes_ptr| {
+//         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
+//     };
+
+//     meta.forEachVisit(&bufferized, *Buffer, struct {
+//         fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
+//             ctx.buffers[i] = buffer;
+//         }
+//     }.call, .{&walk_ctx});
+
+//     meta.forEachVisit(model, *const Tensor, struct {
+//         fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
+//             ctx.group.concurrent(ctx.io, struct {
+//                 fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+//                     var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
+//                     defer reader.deinit();
+
+//                     var memory_writer = MemoryWriter.init(
+//                         ctx_.dma_allocator,
+//                         ctx_.io,
+//                         ctx_.memory,
+//                         ctx_.pinned_buffer_pool,
+//                         reader.tensor.shape,
+//                         ctx_.buffers[i_],
+//                     ) catch unreachable;
+//                     defer memory_writer.deinit(ctx_.dma_allocator);
+
+//                     const scale = 1024;
+
+//                     if (ctx_.progress) |progress| {
+//                         var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+//                         defer node.end();
+//                         var progress_writer: ProgressWriter = .init(memory_writer.interface(), &node, .{ .scale = scale });
+//                         const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+//                         progress_writer.interface.flush() catch unreachable;
+//                         _ = ctx_.total.fetchAdd(total, .monotonic);
+//                     } else {
+//                         const total = reader.interface.streamRemaining(memory_writer.interface()) catch unreachable;
+//                         memory_writer.interface().flush() catch unreachable;
+//                         _ = ctx_.total.fetchAdd(total, .monotonic);
+//                     }
+//                 }
+//             }.call, .{ i, tensor, ctx }) catch unreachable;
+//         }
+//     }.call, .{&walk_ctx});
+//     walk_ctx.group.await(io) catch unreachable;
+
+//     return bufferized;
+// }
+
 pub const LoadOpts = struct {
     parallelism: usize,
     store: *const TensorStore,
@@ -567,7 +667,6 @@ pub fn load(
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
-    defer allocator.free(walk_ctx.buffers);
 
     defer if (opts.total_bytes) |total_bytes_ptr| {
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);

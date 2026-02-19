@@ -656,8 +656,8 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 //         var input_3d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_basic.shape(), std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}));
 //         defer input_3d_basic_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_basic_buffer});
-        defer result.deinit();
+// var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_basic_buffer});
+// defer result.deinit();
 
 //         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.shape().dims());
 //         const expected: Slice = .init(Shape.init(.{ 1, 1, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6]i32{.{.{ 1, 1, 1, 2, 2, 2 }}}));
@@ -676,8 +676,8 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 //         }));
 //         defer input_3d_advanced_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_advanced_buffer});
-        defer result.deinit();
+// var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_3d_advanced_buffer});
+// defer result.deinit();
 
 //         try std.testing.expectEqualSlices(i64, &.{ 2, 3, 8 }, result.shape().dims());
 //         const expected: Slice = .init(Shape.init(.{ 2, 3, 8 }, .i32), std.mem.sliceAsBytes(&[2][3][8]i32{
@@ -704,8 +704,8 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 //         var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
 //         defer input_4d_basic_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
-        defer result.deinit();
+// var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
+// defer result.deinit();
 
 //         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6, 6 }, result.shape().dims());
 //         const expected: Slice = .init(Shape.init(.{ 1, 1, 6, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6][6]i32{.{.{
@@ -733,8 +733,8 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 //         } }));
 //         defer input_4d_advanced_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_advanced_buffer});
-        defer result.deinit();
+// var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_advanced_buffer});
+// defer result.deinit();
 
 //         try std.testing.expectEqualSlices(i64, &.{ 2, 2, 4, 4 }, result.shape().dims());
 //         const expected: Slice = .init(Shape.init(.{ 2, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[2][2][4][4]i32{
@@ -778,8 +778,8 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 //         var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
 //         defer input_5d_buffer.deinit();
 
-        var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
-        defer result.deinit();
+// var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
+// defer result.deinit();
 
 //         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 2, 4, 4 }, result.shape().dims());
 //         const expected: Slice = .init(Shape.init(.{ 1, 1, 2, 4, 4 }, .i32), std.mem.sliceAsBytes(&[1][1][2][4][4]i32{
@@ -1131,8 +1131,8 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 //     }) |logits_expected| {
 //         const logits, const expected: i32 = logits_expected;
 
-        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
-        defer activations_buffer.deinit();
+// var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
+// defer activations_buffer.deinit();
 
 //         var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
 //         defer sampled.deinit();

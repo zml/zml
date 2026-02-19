@@ -85,10 +85,6 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("hf", hf_vfs.io());
     try vfs.register("s3", s3_vfs.io());
 
-    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, threaded.io(), &http_client);
-    defer s3_vfs.deinit();
-    try vfs.register("s3", s3_vfs.io());
-
     const io = vfs.io();
 
     log.info("Resolving model repo", .{});
@@ -146,7 +142,8 @@ pub fn main(init: std.process.Init) !void {
         .attention_parameters = .init(.fromBackend(backend)),
     };
 
-    const physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
+    var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
+    defer physical_mesh.deinit();
 
     const embeddings_mesh: zml.sharding.LogicalMesh = try .init("embeddings_mesh", .{ .voc = .high_bandwidth });
     const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth, .replicated = .low_bandwidth });
@@ -218,9 +215,9 @@ pub fn main(init: std.process.Init) !void {
     defer {
         profiler.?.stop() catch unreachable;
         const data = profiler.?.collectData(allocator) catch unreachable;
-        var file = std.Io.Dir.createFile(.cwd(), threaded.io(), "/home/hugo/zml/proto9.pb", .{ .read = true }) catch unreachable;
-        defer file.close(threaded.io());
-        file.writeStreamingAll(threaded.io(), data) catch unreachable;
+        var file = std.Io.Dir.createFile(.cwd(), init.io, "/home/hugo/zml/proto9.pb", .{ .read = true }) catch unreachable;
+        defer file.close(init.io);
+        file.writeStreamingAll(init.io, data) catch unreachable;
         allocator.free(data);
     }
 
@@ -353,7 +350,7 @@ fn compileModel(
                 parameters_.attention_parameters,
             }, .{ .partitioner = partitioner, .shardings = shardings_ });
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters,shardings, progress });
+    }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
     errdefer if (decode_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
