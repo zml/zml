@@ -28,6 +28,7 @@ zig_library(
 py_binary(
     name = "generate_expected_py",
     srcs = ["test_cases/generate_expected.py"],
+    main = "test_cases/generate_expected.py",
     deps = [
         requirement("jinja2"),
         requirement("transformers"),
@@ -45,6 +46,7 @@ uv_lock(
     name = "requirements",
     srcs = ["requirements.in"],
     out = "requirements.lock.txt",
+    generate_hashes = False,
     args = ["--upgrade"],
     tags = ["manual"],
 )

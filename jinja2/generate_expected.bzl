@@ -11,7 +11,7 @@ def _generate_expected_directory_impl(ctx):
         ],
         inputs = depset(ctx.files.srcs),
         outputs = [out_dir],
-        tools = [ctx.attr.tool],
+        tools = [ctx.executable.tool],
         mnemonic = "RenderExpectedFixtures",
         progress_message = "Rendering generated Jinja fixture outputs",
     )

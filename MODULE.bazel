@@ -81,6 +81,7 @@ pip.parse(
     hub_name = "neuron_py_deps",
     python_version = "3.12",
     requirements_lock = "//platforms/neuron:requirements.lock.txt",
+    target_platforms = ["linux_x86_64"],
 )
 use_repo(pip, "neuron_py_deps")
 
@@ -95,17 +96,6 @@ use_repo(pip, "huggingface_hub")
 
 pip.parse(
     download_only = True,
-    extra_pip_args = [
-        "--abi=cp312",
-        "--implementation=cp",
-        "--python-version=312",
-        "--platform=linux_x86_64",
-        "--platform=manylinux2014_x86_64",
-        "--platform=manylinux_2_27_x86_64",
-        "--platform=manylinux_2_28_x86_64",
-        "--platform=manylinux_2_29_x86_64",
-        "--platform=macosx_11_0_arm64",
-    ],
     hub_name = "jinja2_py_deps",
     python_version = "3.12",
     requirements_lock = "//jinja2:requirements.lock.txt",
