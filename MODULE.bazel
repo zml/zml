@@ -129,6 +129,7 @@ use_repo(
     "python_version_repo",
     "rules_ml_toolchain",
     "stablehlo",
+    "shardy",
     "sycl_configure",
     "sycl_configure_ext",
     "triton",

@@ -18,6 +18,7 @@ const FuncOpArgs = struct {
     location: *const mlir.Location,
     no_inline: bool = false,
     visibility: Visibility = .public,
+    verify: bool = true,
 };
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
@@ -62,8 +63,10 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
         .blocks = &.{args.block},
         .attributes = attr_tuples_buffer.constSlice(),
         .location = args.location,
+        .verify = args.verify,
     });
 }
+
 
 pub fn call(ctx: *mlir.Context, name: []const u8, values: []const *const mlir.Value, results: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.call", .{

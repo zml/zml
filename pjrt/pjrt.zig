@@ -254,7 +254,7 @@ pub const Api = struct {
         if (state.str) |str| {
             return str;
         }
-        if (self.getPluginAttribute("stablehlo_current_version")) |nv| {
+        if (self.pluginAttribute("stablehlo_current_version")) |nv| {
             switch (nv.value()) {
                 .int64list => |v| {
                     state.str = std.fmt.bufPrintZ(&state.buf, "{d}.{d}.{d}", .{ v[0], v[1], v[2] }) catch unreachable;
@@ -277,8 +277,16 @@ pub const Api = struct {
         return null;
     }
 
-    fn getPluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
-        const attributes = api.getPluginAttributes();
+    pub fn profiler(self: *const Api, options_pb: []const u8) ApiError!?Profiler {
+        if (self.extension(.profiler)) |ext| {
+            return try Profiler.init(self, ext.profiler, options_pb);
+        }
+
+        return null;
+    }
+
+    pub fn pluginAttribute(api: *const Api, key: []const u8) ?NamedValue {
+        const attributes = api.pluginAttributes();
         for (attributes) |attr| {
             if (std.mem.eql(u8, attr.name(), key)) {
                 return attr;
@@ -287,7 +295,7 @@ pub const Api = struct {
         return null;
     }
 
-    fn getPluginAttributes(api: *const Api) []const NamedValue {
+    pub fn pluginAttributes(api: *const Api) []const NamedValue {
         const ret = api.call(.PJRT_Plugin_Attributes, .{
             .extension_start = null,
         }) catch unreachable;
@@ -741,6 +749,9 @@ pub const DeviceDescription = opaque {
         const ret = api.call(.PJRT_DeviceDescription_Attributes, .{
             .device_description = self.inner(),
         }) catch unreachable;
+
+        if (ret.attributes == null) return &.{};
+
         return @ptrCast(ret.attributes[0..ret.num_attributes]);
     }
 
@@ -1510,5 +1521,100 @@ pub const Ffi = extern struct {
             log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
         }
+    }
+};
+
+pub const Profiler = struct {
+    pjrt_api: *const Api,
+    api: *const c.PLUGIN_Profiler_Api,
+    inner: *c.PLUGIN_Profiler,
+
+    pub fn init(api_: *const Api, prof_ext: *const c.PJRT_Profiler_Extension, options_pb: []const u8) ApiError!Profiler {
+        var args: c.PLUGIN_Profiler_Create_Args = .{
+            .struct_size = meta.structSize(c.PLUGIN_Profiler_Create_Args),
+            .options = options_pb.ptr,
+            .options_size = options_pb.len,
+            .profiler = null,
+        };
+
+        const profiler_api: *const c.PLUGIN_Profiler_Api = @ptrCast(prof_ext.profiler_api);
+        if (profiler_api.create.?(&args)) |err| {
+            const pjrt_err: *Error = @ptrCast(err);
+            return pjrt_err.getCode(api_).toApiError();
+        }
+
+        return .{
+            .pjrt_api = api_,
+            .api = profiler_api,
+            .inner = args.profiler.?,
+        };
+    }
+
+    pub fn start(self: *Profiler) ApiError!void {
+        var args: c.PLUGIN_Profiler_Start_Args = .{
+            .struct_size = meta.structSize(c.PLUGIN_Profiler_Start_Args),
+            .profiler = self.inner,
+        };
+
+        if (self.api.start.?(&args)) |err| {
+            const pjrt_err: *Error = @ptrCast(err);
+            return pjrt_err.getCode(self.pjrt_api).toApiError();
+        }
+    }
+
+    pub fn stop(self: *Profiler) ApiError!void {
+        var args: c.PLUGIN_Profiler_Stop_Args = .{
+            .struct_size = meta.structSize(c.PLUGIN_Profiler_Stop_Args),
+            .profiler = self.inner,
+        };
+
+        if (self.api.stop.?(&args)) |err| {
+            const pjrt_err: *Error = @ptrCast(err);
+            return pjrt_err.getCode(self.pjrt_api).toApiError();
+        }
+    }
+
+    pub fn collectData(self: *Profiler, allocator: std.mem.Allocator) ![]u8 {
+        var args: c.PLUGIN_Profiler_CollectData_Args = .{
+            .struct_size = meta.structSize(c.PLUGIN_Profiler_CollectData_Args),
+            .profiler = self.inner,
+            .buffer = null,
+            .buffer_size_in_bytes = 0,
+        };
+
+        if (self.api.collect_data.?(&args)) |err| {
+            const pjrt_err: *Error = @ptrCast(err);
+            return pjrt_err.getCode(self.pjrt_api).toApiError();
+        }
+
+        if (args.buffer != null) {
+            var data = args.buffer[0..args.buffer_size_in_bytes];
+            if (data.len > 0 and data[data.len - 1] == 0) {
+                data = data[0 .. data.len - 1];
+            }
+            return allocator.dupe(u8, data);
+        }
+
+        if (args.buffer_size_in_bytes == 0) return &[_]u8{};
+
+        const buffer = try allocator.alloc(u8, args.buffer_size_in_bytes);
+        errdefer allocator.free(buffer);
+
+        args.buffer = buffer.ptr;
+        if (self.api.collect_data.?(&args)) |err| {
+            const pjrt_err: *Error = @ptrCast(err);
+            return pjrt_err.getCode(self.pjrt_api).toApiError();
+        }
+
+        // Trim trailing null byte logic
+        var data = buffer[0..args.buffer_size_in_bytes];
+        if (data.len > 0 and data[data.len - 1] == 0) {
+            data = data[0 .. data.len - 1];
+        }
+
+        const pb = try allocator.dupe(u8, data);
+        allocator.free(buffer);
+
+        return pb;
     }
 };

@@ -7,6 +7,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("sharding.zig").Sharding;
 
 pub const Exe = struct {
     platform: *const Platform,
@@ -17,7 +18,11 @@ pub const Exe = struct {
     input_shapes: []const Shape,
     output_shapes: []const Shape,
 
-    num_devices: u8,
+    input_shardings: []const Sharding,
+    output_shardings: []const Sharding,
+
+    num_devices: usize,
+    num_partitions: i32,
 
     arena: std.heap.ArenaAllocator,
 
@@ -25,9 +30,12 @@ pub const Exe = struct {
         allocator: std.mem.Allocator,
         platform: *const Platform,
         exe: *pjrt.LoadedExecutable,
+        num_devices: usize,
+        num_partitions: i32,
         input_shapes: []const Shape,
         output_shapes: []const Shape,
-        num_devices: u8,
+        input_shardings: []const Sharding,
+        output_shardings: []const Sharding,
     ) !Exe {
         var arena = std.heap.ArenaAllocator.init(allocator);
         errdefer arena.deinit();
@@ -35,12 +43,18 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
+        const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
+        const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
+
         return .{
             .platform = platform,
             .exe = exe,
             .input_shapes = input_shapes_copy,
             .output_shapes = output_shapes_copy,
+            .input_shardings = input_shardings_copy,
+            .output_shardings = output_shardings_copy,
             .num_devices = num_devices,
+            .num_partitions = num_partitions,
             .arena = arena,
         };
     }
@@ -50,11 +64,11 @@ pub const Exe = struct {
     }
 
     pub fn args(self: *const Exe, allocator: std.mem.Allocator) !Arguments {
-        return Arguments.init(allocator, self.input_shapes, self.num_devices);
+        return Arguments.init(allocator, self.input_shapes, self.input_shardings, self.num_devices);
     }
 
     pub fn results(self: *const Exe, allocator: std.mem.Allocator) !Results {
-        return Results.init(allocator, self.output_shapes, self.num_devices, self.platform);
+        return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform, self.num_devices);
     }
 
     pub const FlatBuffers = struct {
@@ -91,8 +105,9 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
         expected_shapes: []const Shape,
         baked_count: usize = 0,
+        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize) !Arguments {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, num_devices: usize) !Arguments {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -102,6 +117,7 @@ pub const Exe = struct {
             return .{
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
+                .shardings = shardings,
             };
         }
 
@@ -122,9 +138,24 @@ pub const Exe = struct {
             var context: LocalContext = .{ .self = self, .current_index = offset + self.baked_count };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *const Buffer) void {
-                    stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected argument {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
-                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
-                        context_.self.flat_buffers.buffers[device_index][context_.current_index] = buffer._shards.get(device_index);
+                    stdx.debug.assert(
+                        context_.self.expected_shapes[context_.current_index].eql(buffer.shape()),
+                        "Expected argument {} to have shape {f}, got {f}",
+                        .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() },
+                    );
+
+                    const expected = context_.self.flat_buffers.num_devices;
+                    const shard_count = buffer._shards.len;
+
+                    stdx.debug.assert(
+                        shard_count == expected,
+                        "Argument {} has {d} shards but executable expects {d}",
+                        .{ context_.current_index, shard_count, expected },
+                    );
+
+                    for (0..expected) |device_index| {
+                        context_.self.flat_buffers.buffers[device_index][context_.current_index] =
+                            buffer._shards.get(device_index);
                     }
 
                     context_.current_index += 1;
@@ -162,8 +193,9 @@ pub const Exe = struct {
         flat_buffers: FlatBuffers,
 
         expected_shapes: []const Shape,
+        shardings: []const Sharding,
 
-        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, num_devices: usize, platform: *const Platform) !Results {
+        pub fn init(allocator: std.mem.Allocator, shapes: []const Shape, shardings: []const Sharding, platform: *const Platform, num_devices: usize) !Results {
             const flat_buffers = try FlatBuffers.init(allocator, shapes.len, num_devices);
             errdefer flat_buffers.deinit(allocator);
 
@@ -174,6 +206,7 @@ pub const Exe = struct {
                 .platform = platform,
                 .flat_buffers = flat_buffers,
                 .expected_shapes = expected_shapes,
+                .shardings = shardings,
             };
         }
 
@@ -195,7 +228,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &result);
@@ -215,7 +248,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &v);
@@ -225,8 +258,8 @@ pub const Exe = struct {
     pub fn internalCall(self: *const Exe, io: ?std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
-        const sharding = self.platform.sharding();
-        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..sharding.num_partitions] else null;
+
+        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_partitions)] else null;
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,

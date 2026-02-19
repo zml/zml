@@ -9,10 +9,14 @@ const Bufferized = @import("zml.zig").Bufferized;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
+const Partitioner = @import("sharding.zig").Partitioner;
+const Partitioning = @import("sharding.zig").Partitioning;
 const pjrtx = @import("pjrtx.zig");
+const Placement = @import("sharding.zig").Placement;
 const Platform = @import("platform.zig").Platform;
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
+const Sharding = @import("sharding.zig").Sharding;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
@@ -157,8 +161,26 @@ pub const TensorStore = struct {
             return tensor;
         }
 
+        pub fn maybeCreateTensorWithTags2(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
+            var buffer: [256]u8 = undefined;
+            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+
+            const ptr = self.store.getPtrFromKey(key) orelse return null;
+            ptr.shape = ptr.shape.withTags(tagz);
+            ptr.shape = ptr.shape.withPartitioning(partitioning);
+
+            const tensor: Tensor = .fromShape(ptr.shape);
+            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+
+            return tensor;
+        }
+
         pub fn createTensorWithTags(self: View, subkey: []const u8, tagz: anytype) Tensor {
             return self.maybeCreateTensorWithTags(subkey, tagz).?;
+        }
+
+        pub fn createTensorWithTags2(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensorWithTags2(subkey, tagz, partitioning).?;
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
@@ -275,9 +297,9 @@ pub const ProgressWriter = struct {
     }
 };
 
-pub const MemoryWriter = union(enum) {
-    direct: DirectMemoryWriter,
-    buffered: BufferedMemoryWriter,
+// pub const MemoryWriter = union(enum) {
+//     direct: DirectMemoryWriter,
+//     buffered: BufferedMemoryWriter,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !MemoryWriter {
         return switch (memory.platform.target) {
@@ -286,33 +308,35 @@ pub const MemoryWriter = union(enum) {
         };
     }
 
-    pub fn interface(self: *MemoryWriter) *std.Io.Writer {
-        return switch (self.*) {
-            .direct => &self.direct.interface,
-            .buffered => &self.buffered.interface,
-        };
-    }
+//     pub fn interface(self: *MemoryWriter) *std.Io.Writer {
+//         return switch (self.*) {
+//             .direct => &self.direct.interface,
+//             .buffered => &self.buffered.interface,
+//         };
+//     }
 
-    pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .direct => self.direct.deinit(),
-            .buffered => self.buffered.deinit(allocator),
-        }
-    }
-};
+//     pub fn deinit(self: *MemoryWriter, allocator: std.mem.Allocator) void {
+//         switch (self.*) {
+//             .direct => self.direct.deinit(),
+//             .buffered => self.buffered.deinit(allocator),
+//         }
+//     }
+// };
 
 pub const BufferedMemoryWriter = struct {
     io: std.Io,
-    memory: *const Memory,
+    platform: *const Platform,
     shape: Shape,
+    sharding: Sharding,
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, shape: Shape, buffer: *Buffer) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
+            .platform = platform,
             .shape = shape,
-            .memory = memory,
+            .sharding = sharding,
             .buffer = buffer,
             .interface = .{
                 .buffer = try allocator.alloc(u8, shape.byteSize()),
@@ -331,30 +355,17 @@ pub const BufferedMemoryWriter = struct {
         }
     }
 
-    fn flush_(w: *std.Io.Writer) !void {
-        const self: *BufferedMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        const pjrt_api = self.memory.platform.pjrt_api;
-
-        const args: pjrt.Client.BufferFromHostBufferArgs = .{
-            .data = @ptrCast(self.interface.buffer),
-            .buffer_type = pjrtx.bufferTypeFromDtype(self.shape.dtype()),
-            .dims = self.shape.dims(),
-            .byte_strides = self.shape.computeByteStrides().constSlice(),
-            .host_buffer_semantics = .ImmutableUntilTransferCompletes,
-            .dst = .{ .memory = self.memory.pjrt_memory },
-        };
-        const pjrt_buffer, const event = try self.memory.platform.pjrt_client.bufferFromHostBuffer(pjrt_api, args);
-        self.buffer.* = Buffer.fromPjrtBuffers(self.memory.platform, self.shape, &.{pjrt_buffer});
-        if (event) |ev| {
-            defer ev.deinit(pjrt_api);
-            try ev.await(pjrt_api, self.io);
-        } else {
-            try self.buffer.await(self.io);
-        }
-    }
-
     pub fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        flush_(w) catch return std.Io.Writer.Error.WriteFailed;
+        const self: *BufferedMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
+
+        self.buffer.* = Buffer.from(
+            self.io,
+            self.platform,
+            self.shape,
+            self.sharding,
+            @ptrCast(self.interface.buffer),
+            .{ .wait = true },
+        ) catch return std.Io.Writer.Error.WriteFailed;
     }
 };
 
@@ -381,7 +392,7 @@ pub const DirectMemoryWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, buffer: *Buffer) !DirectMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape, sharding: Sharding, buffer: *Buffer) !DirectMemoryWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -392,7 +403,7 @@ pub const DirectMemoryWriter = struct {
         );
 
         const pjrt_buffer = transfer_manager.retrieveBuffer(memory.platform.pjrt_api, 0) catch unreachable;
-        buffer.* = Buffer.fromPjrtBuffers(memory.platform, shape, &.{pjrt_buffer});
+        buffer.* = Buffer.fromPjrtBuffers(memory.platform, shape, sharding, &.{pjrt_buffer});
 
         return .{
             .allocator = allocator,
@@ -504,6 +515,8 @@ pub const DirectMemoryWriter = struct {
 pub const LoadOpts = struct {
     parallelism: usize,
     store: *const TensorStore,
+    shardings: []Sharding,
+    replicated_sharding: Sharding,
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
     dma_chunk_size: usize,
@@ -530,7 +543,10 @@ pub fn load(
         dma_allocator: std.mem.Allocator,
         pinned_buffer_pool: *mem.DynamicBufferPool,
         io: std.Io,
+        platform: *const Platform,
         buffers: []*Buffer,
+        shardings: []Sharding,
+        replicated_sharding: Sharding,
         store: *const TensorStore,
         memory: *const Memory,
         group: stdx.Io.LimitedGroup,
@@ -538,12 +554,15 @@ pub fn load(
         progress: ?*std.Progress.Node,
     };
     var walk_ctx: Ctx = .{
+        .platform = platform,
         .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
         .store = opts.store,
         .allocator = allocator,
         .dma_allocator = dma_alloc.allocator(),
         .pinned_buffer_pool = &buffer_pool,
         .io = io,
+        .shardings = opts.shardings,
+        .replicated_sharding = opts.replicated_sharding,
         .memory = first_device.memory(.default),
         .progress = opts.progress,
         .group = .init(opts.parallelism),
@@ -567,28 +586,35 @@ pub fn load(
                     var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
                     defer reader.deinit();
 
-                    var memory_writer = MemoryWriter.init(
+                    const shape = reader.tensor.shape;
+                    const sharding_opt = selectSharding(ctx_.shardings, shape);
+                    const sharding = if (sharding_opt) |s| s else blk: {
+                        log.err("no sharding strategy found for tensor {s} with shape {f}", .{ reader.tensor.name, shape });
+                        break :blk ctx_.replicated_sharding;
+                    };
+
+                    var writer = BufferedMemoryWriter.init(
                         ctx_.dma_allocator,
                         ctx_.io,
-                        ctx_.memory,
-                        ctx_.pinned_buffer_pool,
-                        reader.tensor.shape,
+                        ctx_.platform,
+                        shape,
+                        sharding,
                         ctx_.buffers[i_],
                     ) catch unreachable;
-                    defer memory_writer.deinit(ctx_.dma_allocator);
+                    defer writer.deinit(ctx_.dma_allocator);
 
                     const scale = 1024;
 
                     if (ctx_.progress) |progress| {
                         var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
                         defer node.end();
-                        var progress_writer: ProgressWriter = .init(memory_writer.interface(), &node, .{ .scale = scale });
+                        var progress_writer: ProgressWriter = .init(&writer.interface, &node, .{ .scale = scale });
                         const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
                         progress_writer.interface.flush() catch unreachable;
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     } else {
-                        const total = reader.interface.streamRemaining(memory_writer.interface()) catch unreachable;
-                        memory_writer.interface().flush() catch unreachable;
+                        const total = reader.interface.streamRemaining(&writer.interface) catch unreachable;
+                        writer.interface.flush() catch unreachable;
                         _ = ctx_.total.fetchAdd(total, .monotonic);
                     }
                 }
@@ -598,4 +624,24 @@ pub fn load(
     walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
+}
+
+// todo: move
+pub fn selectSharding(shardings: []const Sharding, shape: Shape) ?Sharding {
+    for (shardings) |s| {
+        var match = false;
+        for (0..shape.rank()) |i| {
+            const spec = shape.partition(i);
+            if (spec == .axis) {
+                if (s.binding(spec.axis)) |_| {
+                    match = true;
+                } else {
+                    match = false;
+                    break;
+                }
+            }
+        }
+        if (match) return s;
+    }
+    return null;
 }

@@ -12,6 +12,11 @@ upb_c_proto_library(
     deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
 )
 
+upb_c_proto_library(
+    name = "profiler_options",
+    deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
+)
+
 cc_library(
     name = "posix",
     hdrs = ["posix.h"],
@@ -35,6 +40,7 @@ zig_library(
         "mlirx.zig",
         "module.zig",
         "nn.zig",
+        "sharding.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
@@ -57,6 +63,7 @@ zig_library(
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",
+        ":profiler_options",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",

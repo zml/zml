@@ -3,13 +3,15 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const Platform = @import("platform.zig").Platform;
+const sharding = @import("sharding.zig");
+const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/testing");
 
 var _platform: ?*const Platform = null;
+var _replicated_sharding: ?sharding.Sharding = null;
 
 pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
@@ -20,6 +22,14 @@ pub fn env() *const Platform {
     }
 
     return _platform.?;
+}
+
+pub fn replicatedSharding() sharding.Sharding {
+    if (_replicated_sharding == null) {
+        const physical_mesh = sharding.PhysicalMesh.auto(std.testing.allocator, env()) catch unreachable;
+        _replicated_sharding = sharding.replicatedSharding(physical_mesh) catch unreachable;
+    }
+    return _replicated_sharding.?;
 }
 
 /// In neural network we generally care about the relative precision,

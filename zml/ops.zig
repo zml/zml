@@ -366,12 +366,12 @@ test "triton" {
     const a: zml.Tensor = .init(.{}, .f32);
     const b: zml.Tensor = .init(.{}, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform);
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), std.mem.sliceAsBytes(&[1]f32{1}));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{1}));
     defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), std.mem.sliceAsBytes(&[1]f32{3}));
+    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
     var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
@@ -631,7 +631,7 @@ test scatterConfig {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1040,7 +1040,7 @@ test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
