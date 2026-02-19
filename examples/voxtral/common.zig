@@ -64,11 +64,12 @@ pub fn loadModel(
 }
 
 /// Unified self-attention with KV cache.
-/// When `circular_buffer` is true, the KV cache uses modular indexing for an unbounded
-/// sliding window and reorders K/V to temporal order for correct causal masking
-/// (needed for the encoder's multi-token prefill).
+/// When `shift_buffer` is true, the KV cache uses shift-based overflow handling for
+/// unbounded sliding window support. Both paths (normal write vs shifted cache write)
+/// are computed and the correct one is selected via cmp/select. The cache stays in
+/// temporal order — no reordering needed.
 /// When false, the cache uses sequential indexing (matching the reference implementation).
-pub fn SelfAttention(comptime circular_buffer: bool) type {
+pub fn SelfAttention(comptime shift_buffer: bool) type {
     return struct {
         wq: zml.nn.Linear,
         wk: zml.nn.Linear,
@@ -121,33 +122,20 @@ pub fn SelfAttention(comptime circular_buffer: bool) type {
             k = k.rename(.{ .s = .k });
             v = v.rename(.{ .s = .k });
 
-            const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
+            if (shift_buffer) {
+                const shifted_cache, const clamped_token_index = kv_cache.shiftIfNeeded(token_index, @intCast(x.dim(.s)));
 
-            if (circular_buffer) { // Experimental
-                // Circular buffer: modular indexing for unbounded sliding window.
-                // Write positions wrap around using pos_index % cache_size.
-                const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
-                const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
+                const write_pos = b: {
+                    const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
+                        .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+                    break :b temp.add(clamped_token_index.broad(temp.shape()));
+                };
+
+                const new_kv_cache = shifted_cache.update(k, v, write_pos.rename(.{ .s = .k }));
                 k = new_kv_cache.keys().convert(dtype);
                 v = new_kv_cache.values().convert(dtype);
 
-                // Reorder K/V from circular buffer to temporal order for correct causal masking.
-                // When the cache wraps, physical order != temporal order, which breaks FA2's
-                // position-based causal mask for multi-token (q_len > 1) attention.
-                const pos_end = token_index.addConstant(x.dim(.s));
-                const is_full = pos_end.cmp(.GE, cache_size);
-                const rotation_start = pos_end.remainder(cache_size);
-                const safe_start = is_full.select(rotation_start, Tensor.scalar(@as(u32, 0), token_index.dtype()));
-                const reorder_arange = Tensor.arange(.{ .end = kv_cache.k.dim(.k) }, token_index.dtype()).withTags(.{.kk});
-                const reorder_idx = reorder_arange.add(safe_start.broad(reorder_arange.shape()))
-                    .remainder(cache_size.broad(reorder_arange.shape()));
-                k = k.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
-                v = v.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
-
-                // Cap token_index so seqused_k doesn't exceed cache bounds
-                const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
-                const attn_token_index = token_index.minimum(max_token_index);
-                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
+                const attn_out = zml.attention.attention(q, k, v, clamped_token_index, attention_metadata, attention_parameters, .{
                     .sliding_window = @intCast(attn_config.sliding_window),
                 });
 
@@ -233,6 +221,31 @@ pub const KvCache = struct {
             cache.scatterSlices(.{ .layer = layer_index.broad(idx.shape()), .k = idx }, converted, scatter_opts).reuseBuffer(cache)
         else
             cache.scatterSlices(.{ .layer = layer_index }, converted, scatter_opts).reuseBuffer(cache);
+    }
+
+    pub fn shiftIfNeeded(self: KvCache, token_index: Tensor, seq_len: u32) struct { KvCache, Tensor } {
+        const cache_k_size = self.k.dim(.k);
+        const max_pos = Tensor.scalar(@as(u32, @intCast(cache_k_size - seq_len)), token_index.dtype());
+        const would_overflow = token_index.cmp(.GT, max_pos);
+
+        const shift_arange = Tensor.arange(.{ .end = cache_k_size }, token_index.dtype()).withTags(.{.kk});
+        const shifted_indices = shift_arange.addConstant(seq_len);
+        const max_idx = Tensor.scalar(@as(u32, @intCast(cache_k_size - 1)), token_index.dtype());
+        const clamped_indices = shifted_indices.minimum(max_idx.broad(shifted_indices.shape()));
+
+        const shifted_k = self.k.gather(.{ .k = clamped_indices }, .{}).rename(.{ .kk = .k });
+        const shifted_v = self.v.gather(.{ .k = clamped_indices }, .{}).rename(.{ .kk = .k });
+
+        const overflow_k = would_overflow.broad(shifted_k.shape());
+        const new_k = overflow_k.select(shifted_k, self.k);
+        const overflow_v = would_overflow.broad(shifted_v.shape());
+        const new_v = overflow_v.select(shifted_v, self.v);
+
+        return .{ .{
+            .k = new_k.reuseBuffer(self.k),
+            .v = new_v.reuseBuffer(self.v),
+            .layer_index = self.layer_index,
+        }, token_index.minimum(max_pos) };
     }
 
     pub fn atLayer(self: KvCache, layer_index: usize) KvCache {
