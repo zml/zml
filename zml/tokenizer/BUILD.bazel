@@ -35,7 +35,8 @@ zig_test(
     ],
 )
 
-zig_srcs(
-    name = "sources",
-    zig_lib = ":tokenizer",
-)
+# todo: reenable after fix
+# zig_srcs(
+#     name = "sources",
+#     zig_lib = ":tokenizer",
+# )

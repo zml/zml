@@ -8,6 +8,7 @@ zls_completion(
         "//examples/transfer-benchmark",
         "//examples/llama",
         "//examples/mnist",
+        "//examples/sharding",
         "//stdx",
         "//zml",
     ],

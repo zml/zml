@@ -4,10 +4,12 @@ const flashattn = @import("platforms/cuda/flashattn");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
+const CompilationContext = @import("../module.zig").CompilationContext;
 const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
-
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+
+const log = std.log.scoped(.@"zml/attention/flashattn");
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     if (comptime platforms.isEnabled(.cuda)) {
@@ -37,7 +39,7 @@ fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
     };
 }
 
-fn tensorFromBuffer(buffer: zml.Buffer, platform: zml.Platform) !flashattn.Tensor {
+fn tensorFromBuffer(buffer: zml.Buffer, platform: *const zml.Platform) !flashattn.Tensor {
     return .init(
         try buffer._shards.get(0).getOpaqueDeviceMemoryDataPointer(platform.pjrt_api),
         buffer.shape().dims(),
@@ -135,7 +137,12 @@ fn fixupKvCacheBuffer(buffer: Buffer, layer_index: i64) Buffer {
 pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
         pub fn register(platform: *const zml.Platform) !void {
-            try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "cuda", T.run, .{ .command_buffer_compatible = true });
+            try platform.registerFfi(.{
+                .name = T.custom_call_name,
+                .platform_name = "cuda",
+                .handler = T.run,
+                .traits = .{ .command_buffer_compatible = true },
+            });
         }
 
         pub fn run(call_frame: *ffi.CallFrame) callconv(.c) ?*ffi.Error {
@@ -214,8 +221,7 @@ pub const fa2 = struct {
     pub const Parameters = struct {
         pub const InitOptions = struct {};
 
-        pub fn init(opts: InitOptions) fa2.Parameters {
-            _ = opts; // autofix
+        pub fn init(_: InitOptions) fa2.Parameters {
             return .{};
         }
     };
@@ -227,21 +233,30 @@ pub const fa2 = struct {
 
         pub const InitOptions = struct {
             seqlen: i64,
+            num_heads: i64,
         };
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = .init(.{1 * 32 * opts.seqlen * 4}, .i8),
-                .softmax_lse_accum = .init(.{32 * 1 * 32 * 4 * 4}, .i8),
-                .out_accum = .init(.{32 * 1 * 32 * 4 * 128 * 4}, .i8),
+                .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
+                    .withTags(.{ .s, .h, .dummy })
+                    .withPartitioning(.{ .h = .model })),
+
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
+                    .withTags(.{ .dummy, .h, .hd })
+                    .withPartitioning(.{ .h = .model })),
+
+                .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
+                    .withTags(.{ .s, .h, .hd })
+                    .withPartitioning(.{ .h = .model })),
             };
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
             return .{
-                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), .{}),
-                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), .{}),
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
+                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding, .{}),
             };
         }
 
@@ -252,8 +267,9 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        _ = parameters; // autofix
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+        const ctx = CompilationContext.current();
+
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -271,7 +287,8 @@ pub const fa2 = struct {
             break :b [_]zml.Tensor{ q_.rename(.{ .q = .tot }), k_.rename(.{ .k = .tot }), v_.rename(.{ .k = .tot }) };
         };
         // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }));
+        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
+            .withPartitioning(.{ ._0 = .replicated });
 
         const original_tot = q.dim(.tot);
         const num_heads = q_.dim(.h);
@@ -283,32 +300,42 @@ pub const fa2 = struct {
             q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
-        var o = zml.ops.customCall(
-            custom_call_name,
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const model_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
+
+        const output_shape = q_sharded.shape();
+        var o = zml.ops.manualComputation(
             .{
-                q,
+                q_sharded,
                 k,
                 v,
                 cu_seqlens_q,
-                cu_seqlens_k,
-                metadata.softmax_lse,
-                metadata.softmax_lse_accum,
-                metadata.out_accum,
+                cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
+                metadata.softmax_lse.withPartitioning(.{ .h = .model }),
+                metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
+                metadata.out_accum.withPartitioning(.{ .h = .model }),
             },
-            .{q.shape()},
+            output_shape,
             .{
-                //.softmax_scale = @as(f32, 1.0),
-                .is_causal = true,
-                .window_size_left = @as(i32, -1),
-                .window_size_right = @as(i32, -1),
-                .max_seqlen_q = max_seqlen_q,
-                .max_seqlen_k = max_seqlen_k,
-                .num_heads = @as(i32, @intCast(num_heads)),
+                .metadata = .{
+                    //.softmax_scale = @as(f32, 1.0),
+                    .is_causal = true,
+                    .window_size_left = @as(i32, -1),
+                    .window_size_right = @as(i32, -1),
+                    .max_seqlen_q = max_seqlen_q,
+                    .max_seqlen_k = max_seqlen_k,
+                    .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
+                },
+                .opts = zml.ops.CustomCallOptions{
+                    .output_operand_aliases = &.{0},
+                    .has_side_effect = false,
+                },
             },
-            .{
-                .output_operand_aliases = &.{0},
-                .has_side_effect = true,
-            },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                    return zml.ops.customCall(custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                }
+            }).body,
         );
 
         if (seqlenq_ngroups_swapped) {
@@ -411,23 +438,28 @@ pub const fa3 = struct {
 
         pub const InitOptions = struct {
             seqlen: i64,
+            num_heads: i64,
         };
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
-                .softmax_lse = .init(.{1 * 32 * opts.seqlen * 4}, .i8),
-                .softmax_lse_accum = .init(.{32 * 1 * 32 * 4 * 4}, .i8),
-                .out_accum = .init(.{32 * 1 * 32 * 4 * 128 * 4}, .i8),
-                .scheduler_metadata = .init(.{2}, .i32),
+                .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
+                    .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
             };
         }
 
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
             return .{
-                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), .{}),
-                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), .{}),
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
-                .scheduler_metadata = try zml.Buffer.uninitialized(io, platform, self.scheduler_metadata.shape(), .{}),
+                .softmax_lse = try zml.Buffer.uninitialized(io, platform, self.softmax_lse.shape(), sharding, .{}),
+                .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding, .{}),
+                .scheduler_metadata = try zml.Buffer.uninitialized(io, platform, self.scheduler_metadata.shape(), sharding, .{}),
             };
         }
 
@@ -439,8 +471,7 @@ pub const fa3 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        _ = parameters; // autofix
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -454,7 +485,8 @@ pub const fa3 = struct {
         const k = k_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         const v = v_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }));
+        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
+            .withPartitioning(.{ ._0 = .replicated });
 
         var o = zml.ops.customCall(
             custom_call_name,
@@ -479,7 +511,7 @@ pub const fa3 = struct {
             },
             .{
                 .output_operand_aliases = &.{0},
-                .has_side_effect = true,
+                .has_side_effect = false,
             },
         );
 

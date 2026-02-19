@@ -3,13 +3,15 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
-const Slice = @import("slice.zig").Slice;
 const Platform = @import("platform.zig").Platform;
+const sharding = @import("sharding.zig");
+const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.@"zml/testing");
 
 var _platform: ?*const Platform = null;
+var _replicated_sharding: ?sharding.Sharding = null;
 
 pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
@@ -20,6 +22,17 @@ pub fn env() *const Platform {
     }
 
     return _platform.?;
+}
+
+pub fn physicalMesh() sharding.PhysicalMesh {
+    return env().physical_mesh;
+}
+
+pub fn replicatedSharding() sharding.Sharding {
+    if (_replicated_sharding == null) {
+        _replicated_sharding = sharding.replicatedSharding(env()) catch unreachable;
+    }
+    return _replicated_sharding.?;
 }
 
 /// In neural network we generally care about the relative precision,
@@ -289,6 +302,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
+    shardings: []const zml.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -323,7 +337,7 @@ pub fn testLayer(
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args);
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = shardings });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
@@ -340,7 +354,13 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{ .dma_chunks = 1, .dma_chunk_size = 4096, .store = activation_store.store, .parallelism = 1 });
+    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{
+        .dma_chunks = 1,
+        .dma_chunk_size = 4096,
+        .store = activation_store.store,
+        .parallelism = 1,
+        .shardings = shardings,
+    });
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();
