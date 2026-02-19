@@ -7,7 +7,6 @@ zig_binary(
     srcs = [
         "voxtral.zig",
         "mel_spectrogram.zig",
-        "wav.zig",
         "config.zig",
         "encoder.zig",
         "decoder.zig",
@@ -26,7 +25,6 @@ zig_binary(
     srcs = [
         "voxtral.zig",
         "mel_spectrogram.zig",
-        "wav.zig",
         "config.zig",
         "encoder.zig",
         "decoder.zig",

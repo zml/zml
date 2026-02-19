@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const log = std.log;
-const wav_utils = @import("wav.zig");
 const cfg = @import("config.zig");
 const Config = cfg.Config;
 const StreamParams = cfg.StreamParams;

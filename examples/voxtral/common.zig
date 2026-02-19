@@ -18,11 +18,6 @@ pub fn deinitBufferized(bufferized: anytype) void {
     }).cb, {}, bufferized);
 }
 
-pub fn deinitLinear(l: *zml.Bufferized(zml.nn.Linear)) void {
-    l.weight.deinit();
-    if (l.bias) |*b| b.deinit();
-}
-
 pub fn linear(store: zml.io.TensorStore.View) zml.nn.Linear {
     return .init(
         store.createTensorWithTags("weight", .{ .dout, .d }),
