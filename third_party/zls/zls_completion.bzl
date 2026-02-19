@@ -6,7 +6,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 load(":zls_write_build_config.bzl", "zls_write_build_config")
 load(":zls_write_runner_zig_src.bzl", "zls_write_runner_zig_src")
 
-def zls_completion(name, deps, **kwargs):
+def zls_completion(name, deps, testonly = False, **kwargs):
     """Entry point for ZLS completion.
 
     Args:
@@ -22,6 +22,7 @@ def zls_completion(name, deps, **kwargs):
         name = build_config,
         out = name + ".build_config.json",
         deps = deps,
+        testonly = testonly,
     )
 
     # Create a target that will be invoked by ZLS using our customer build_runner.
@@ -36,6 +37,7 @@ def zls_completion(name, deps, **kwargs):
             "$(location :{})".format(build_config),
         ],
         visibility = ["//visibility:private"],
+        testonly = testonly,
     )
 
     # Generate the Zig build runner that will be used by ZLS to query the build config.
@@ -46,6 +48,7 @@ def zls_completion(name, deps, **kwargs):
             "@@__TARGET__@@": str(utils.to_label(build_config_printer)),
         },
         template = Label(":zls_build_runner.zig"),
+        testonly = testonly,
     )
 
     # Generate the Zig source file for the ZLS runner binary which embeds the
@@ -54,6 +57,7 @@ def zls_completion(name, deps, **kwargs):
         name = name + ".runner",
         out = name + ".runner.zig",
         build_runner = ":" + name + ".build_runner.zig",
+        testonly = testonly,
     )
 
     zig_binary(
@@ -67,5 +71,6 @@ def zls_completion(name, deps, **kwargs):
         deps = [
             "@rules_zig//zig/runfiles",
         ],
+        testonly = testonly,
         **kwargs
     )
