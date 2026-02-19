@@ -1,0 +1,10 @@
+{
+  "template": "{% if a %}A{% elif b %}B{% elif c == d %}C{% else %}D{% endif %}",
+  "data": {
+    "a": 0,
+    "b": false,
+    "c": 42,
+    "d": 42.0
+  },
+  "expected": "C"
+}

@@ -1,0 +1,21 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a concise assistant.",
+      "from": "system",
+      "value": "You are a concise assistant."
+    },
+    {
+      "role": "user",
+      "content": "List 3 template engines.",
+      "from": "human",
+      "value": "List 3 template engines."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

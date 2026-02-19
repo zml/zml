@@ -1,0 +1,63 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Tool arguments may be objects or JSON strings.",
+      "from": "system",
+      "value": "Tool arguments may be objects or JSON strings."
+    },
+    {
+      "role": "user",
+      "content": "Book a flight to SFO for Friday.",
+      "from": "human",
+      "value": "Book a flight to SFO for Friday."
+    },
+    {
+      "role": "assistant",
+      "content": "Attempting booking.",
+      "tool_calls": [
+        {
+          "id": "flight01a",
+          "type": "function",
+          "function": {
+            "name": "book_flight",
+            "arguments": {
+              "destination": "SFO",
+              "day": "Friday"
+            }
+          }
+        }
+      ],
+      "from": "gpt",
+      "value": "Attempting booking."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "book_flight",
+        "description": "Book a flight",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "destination": {
+              "type": "string"
+            },
+            "day": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "destination",
+            "day"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "add_generation_prompt": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

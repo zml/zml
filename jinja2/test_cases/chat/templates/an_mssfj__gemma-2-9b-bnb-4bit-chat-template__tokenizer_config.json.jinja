@@ -1,0 +1,4 @@
+<bos>{%- for message in messages %}
+<start_of_turn>{{ message.role }}: {{ message.content }}<end_of_turn>
+{%- endfor %}{% if add_generation_prompt %}
+<start_of_turn>assistant: {% endif %}<eos>

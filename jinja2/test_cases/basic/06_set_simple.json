@@ -1,0 +1,5 @@
+{
+  "template": "{% set foo = 1 %}{{ foo }}",
+  "data": {},
+  "expected": "1"
+}

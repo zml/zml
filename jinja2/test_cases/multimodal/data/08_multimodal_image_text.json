@@ -1,0 +1,36 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "You can reason about images."
+        }
+      ],
+      "from": "system",
+      "value": "You can reason about images."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "image",
+          "url": "https://example.com/cat.png"
+        },
+        {
+          "type": "text",
+          "text": "What is in this image?"
+        }
+      ],
+      "from": "human",
+      "value": "What is in this image?"
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_vision_id": true,
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

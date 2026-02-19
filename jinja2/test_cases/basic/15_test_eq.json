@@ -1,0 +1,8 @@
+{
+  "template": "{{ foo is eq 12 }}|{{ bar is eq 'baz' }}|{{ bar is eq foo }}",
+  "data": {
+    "foo": 12,
+    "bar": "baz"
+  },
+  "expected": "True|True|False"
+}

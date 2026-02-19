@@ -1,0 +1,68 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You may call multiple tools in sequence.",
+      "from": "system",
+      "value": "You may call multiple tools in sequence."
+    },
+    {
+      "role": "user",
+      "content": "Compare weather in Paris and Tokyo.",
+      "from": "human",
+      "value": "Compare weather in Paris and Tokyo."
+    },
+    {
+      "role": "assistant",
+      "content": "Checking both cities.",
+      "tool_calls": [
+        {
+          "id": "paris123a",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris"
+            }
+          }
+        },
+        {
+          "id": "tokyo456b",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Tokyo"
+            }
+          }
+        }
+      ],
+      "from": "gpt",
+      "value": "Checking both cities."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather by city",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "add_generation_prompt": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

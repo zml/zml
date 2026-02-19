@@ -1,0 +1,7 @@
+{
+  "template": "{{ 42 + foo }}",
+  "data": {
+    "foo": 42
+  },
+  "expected": "84"
+}

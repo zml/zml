@@ -1,0 +1,35 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": [
+        {
+          "type": "text",
+          "text": "You can reason about short videos."
+        }
+      ],
+      "from": "system",
+      "value": "You can reason about short videos."
+    },
+    {
+      "role": "user",
+      "content": [
+        {
+          "type": "video",
+          "url": "https://example.com/clip.mp4"
+        },
+        {
+          "type": "text",
+          "text": "Describe the motion in one sentence."
+        }
+      ],
+      "from": "human",
+      "value": "Describe the motion in one sentence."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

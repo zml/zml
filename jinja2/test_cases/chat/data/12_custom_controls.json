@@ -1,0 +1,70 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Follow tool and date metadata.",
+      "from": "system",
+      "value": "Follow tool and date metadata."
+    },
+    {
+      "role": "user",
+      "content": "What can you do today?",
+      "from": "human",
+      "value": "What can you do today?"
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search docs by query",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "custom_tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "search_docs",
+        "description": "Search docs by query",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "query"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "builtin_tools": [
+    "browser",
+    "python"
+  ],
+  "model_identity": "Helpful assistant v1",
+  "reasoning_effort": "medium",
+  "date_string": "18 Feb 2026",
+  "tools_in_user_message": false,
+  "enable_thinking": true,
+  "clear_thinking": false,
+  "add_generation_prompt": true,
+  "bos_token": "<BOS>",
+  "eos_token": "<EOS>"
+}

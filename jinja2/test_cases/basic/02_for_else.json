@@ -1,0 +1,7 @@
+{
+  "template": "{% for item in seq %}XXX{% else %}...{% endfor %}",
+  "data": {
+    "seq": []
+  },
+  "expected": "..."
+}

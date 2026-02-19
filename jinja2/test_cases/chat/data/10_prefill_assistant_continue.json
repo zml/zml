@@ -1,0 +1,28 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Return strict JSON.",
+      "from": "system",
+      "value": "Return strict JSON."
+    },
+    {
+      "role": "user",
+      "content": "Give me a JSON object with status and value.",
+      "from": "human",
+      "value": "Give me a JSON object with status and value."
+    },
+    {
+      "role": "assistant",
+      "content": "{\"status\": \"ok\", \"value\": ",
+      "from": "gpt",
+      "value": "{\"status\": \"ok\", \"value\": "
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "continue_final_message": true,
+  "add_generation_prompt": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

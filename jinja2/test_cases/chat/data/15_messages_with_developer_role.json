@@ -1,0 +1,33 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "You are a general-purpose assistant. Always answer in markdown with one heading.",
+      "from": "system",
+      "value": "You are a general-purpose assistant. Always answer in markdown with one heading."
+    },
+    {
+      "role": "user",
+      "content": "Explain template inheritance in one short paragraph.",
+      "from": "human",
+      "value": "Explain template inheritance in one short paragraph."
+    },
+    {
+      "role": "assistant",
+      "content": "## Template Inheritance\nTemplate inheritance lets child templates reuse and override parts of a base layout, which keeps shared structure centralized and page-specific content isolated.",
+      "from": "gpt",
+      "value": "## Template Inheritance\nTemplate inheritance lets child templates reuse and override parts of a base layout, which keeps shared structure centralized and page-specific content isolated."
+    },
+    {
+      "role": "user",
+      "content": "Now give a tiny example with a base and child block.",
+      "from": "human",
+      "value": "Now give a tiny example with a base and child block."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

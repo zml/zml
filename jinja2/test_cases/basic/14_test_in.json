@@ -1,0 +1,5 @@
+{
+  "template": "{{ 'o' is in 'foo' }}|{{ 3 is in [1, 2] }}|{{ 'foo' is in {'foo': 1} }}",
+  "data": {},
+  "expected": "True|False|True"
+}

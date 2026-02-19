@@ -1,0 +1,10 @@
+{
+  "template": "{% for item in seq %}[{{ loop.index }}|{{ loop.index0 }}|{{ loop.revindex }}|{{ loop.revindex0 }}|{{ loop.first }}|{{ loop.last }}|{{ loop.length }}]{% endfor %}",
+  "data": {
+    "seq": [
+      42,
+      24
+    ]
+  },
+  "expected": "[1|0|2|1|True|False|2][2|1|1|0|False|True|2]"
+}

@@ -1,0 +1,63 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Use tools and then provide the final answer.",
+      "from": "system",
+      "value": "Use tools and then provide the final answer."
+    },
+    {
+      "role": "user",
+      "content": "What is 23 * 19?",
+      "from": "human",
+      "value": "What is 23 * 19?"
+    },
+    {
+      "role": "assistant",
+      "content": "Calling calculator.",
+      "tool_calls": [
+        {
+          "id": "mulcall01",
+          "type": "function",
+          "function": {
+            "name": "multiply",
+            "arguments": {
+              "a": 23,
+              "b": 19
+            }
+          }
+        }
+      ],
+      "from": "gpt",
+      "value": "Calling calculator."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "multiply",
+        "description": "Multiply two numbers",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "a": {
+              "type": "number"
+            },
+            "b": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "a",
+            "b"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

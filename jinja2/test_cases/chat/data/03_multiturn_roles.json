@@ -1,0 +1,33 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Answer with short bullets.",
+      "from": "system",
+      "value": "Answer with short bullets."
+    },
+    {
+      "role": "user",
+      "content": "What is Jinja?",
+      "from": "human",
+      "value": "What is Jinja?"
+    },
+    {
+      "role": "assistant",
+      "content": "Jinja is a text templating engine used in Python ecosystems.",
+      "from": "gpt",
+      "value": "Jinja is a text templating engine used in Python ecosystems."
+    },
+    {
+      "role": "user",
+      "content": "Name one advantage.",
+      "from": "human",
+      "value": "Name one advantage."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

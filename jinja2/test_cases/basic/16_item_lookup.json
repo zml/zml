@@ -1,0 +1,9 @@
+{
+  "template": "{{ foo['items'] }}",
+  "data": {
+    "foo": {
+      "items": 42
+    }
+  },
+  "expected": "42"
+}

@@ -1,0 +1,10 @@
+{
+  "source_tests": [
+    "tests/test_filters.py::TestFilter::test_length",
+    "tests/test_filters.py::TestFilter::test_lower",
+    "tests/test_filters.py::TestFilter::test_upper"
+  ],
+  "template": "{{ 'hello world'|length }}|{{ 'FOO'|lower }}|{{ 'foo'|upper }}",
+  "data": {},
+  "expected": "11|foo|FOO"
+}

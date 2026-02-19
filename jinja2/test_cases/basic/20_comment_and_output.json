@@ -1,0 +1,7 @@
+{
+  "template": "{# hidden comment #}Hello {{ name }}",
+  "data": {
+    "name": "Jinja"
+  },
+  "expected": "Hello Jinja"
+}

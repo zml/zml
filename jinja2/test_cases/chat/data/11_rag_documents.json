@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Use provided documents when relevant.",
+      "from": "system",
+      "value": "Use provided documents when relevant."
+    },
+    {
+      "role": "user",
+      "content": "Summarize retrieval-augmented generation in one line.",
+      "from": "human",
+      "value": "Summarize retrieval-augmented generation in one line."
+    }
+  ],
+  "tools": [],
+  "documents": [
+    {
+      "title": "RAG",
+      "text": "RAG combines retrieval of external knowledge with generation."
+    },
+    {
+      "title": "Jinja",
+      "text": "Jinja templates can format prompts before tokenization."
+    }
+  ],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

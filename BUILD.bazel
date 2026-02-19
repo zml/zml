@@ -6,6 +6,7 @@ zls_completion(
     deps = [
         "//examples/llama",
         "//examples/mnist",
+        "//jinja2",
         "//stdx",
         "//zml",
     ],

@@ -1,0 +1,56 @@
+load("@jinja2_py_deps//:requirements.bzl", "requirement")
+load("@rules_python//python:defs.bzl", "py_binary")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load(":generate_expected.bzl", "generate_expected_directory")
+
+FIXTURE_INPUTS = glob([
+    "test_cases/basic/*.json",
+    "test_cases/chat/data/*.json",
+    "test_cases/chat/templates/*.jinja",
+    "test_cases/multimodal/data/*.json",
+    "test_cases/multimodal/templates/*.jinja",
+])
+
+zig_library(
+    name = "jinja2",
+    srcs = [
+        "environment.zig",
+        "expr.zig",
+        "lib.zig",
+        "template.zig",
+        "value.zig",
+    ],
+    main = "lib.zig",
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "generate_expected_py",
+    srcs = ["test_cases/generate_expected.py"],
+    deps = [
+        requirement("jinja2"),
+        requirement("transformers"),
+    ],
+)
+
+generate_expected_directory(
+    name = "generate_expected",
+    srcs = FIXTURE_INPUTS,
+    input_root = "jinja2/test_cases",
+    tool = ":generate_expected_py",
+)
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = ["--upgrade"],
+    tags = ["manual"],
+)
+
+zig_test(
+    name = "test",
+    deps = [":jinja2"],
+    data = FIXTURE_INPUTS + [":generate_expected"],
+)

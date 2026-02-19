@@ -1,0 +1,5 @@
+{
+  "template": "{% if false %}XXX{% else %}...{% endif %}",
+  "data": {},
+  "expected": "..."
+}

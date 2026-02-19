@@ -1,0 +1,58 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Support legacy function-role traces.",
+      "from": "system",
+      "value": "Support legacy function-role traces."
+    },
+    {
+      "role": "user",
+      "content": "Get stock price for ACME.",
+      "from": "human",
+      "value": "Get stock price for ACME."
+    },
+    {
+      "role": "assistant",
+      "content": "Calling a function.",
+      "tool_calls": [
+        {
+          "id": "stock001a",
+          "type": "function",
+          "function": {
+            "name": "get_stock",
+            "arguments": {
+              "ticker": "ACME"
+            }
+          }
+        }
+      ],
+      "from": "gpt",
+      "value": "Calling a function."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_stock",
+        "description": "Get latest stock price",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "ticker": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "ticker"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

@@ -1,0 +1,13 @@
+{
+  "template": "{% for item in seq %}{{ item }}{% endfor %}",
+  "data": {
+    "seq": [
+      0,
+      1,
+      2,
+      3,
+      4
+    ]
+  },
+  "expected": "01234"
+}

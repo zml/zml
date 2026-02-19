@@ -1,0 +1,30 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Think step-by-step, then answer.",
+      "from": "system",
+      "value": "Think step-by-step, then answer."
+    },
+    {
+      "role": "user",
+      "content": "What is the next prime after 17?",
+      "from": "human",
+      "value": "What is the next prime after 17?"
+    },
+    {
+      "role": "assistant",
+      "content": "The next prime after 17 is 19.",
+      "reasoning_content": "18 is divisible by 2, 19 is prime.",
+      "from": "gpt",
+      "value": "The next prime after 17 is 19."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "enable_thinking": true,
+  "clear_thinking": false,
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

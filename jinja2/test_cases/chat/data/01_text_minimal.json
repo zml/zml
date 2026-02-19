@@ -1,0 +1,15 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Hello! Give me a one-line summary of Jinja templates.",
+      "from": "human",
+      "value": "Hello! Give me a one-line summary of Jinja templates."
+    }
+  ],
+  "tools": [],
+  "documents": [],
+  "add_generation_prompt": true,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

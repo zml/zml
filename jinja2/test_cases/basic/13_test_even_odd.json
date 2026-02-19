@@ -1,0 +1,9 @@
+{
+  "source_tests": [
+    "tests/test_tests.py::TestTestsCase::test_even",
+    "tests/test_tests.py::TestTestsCase::test_odd"
+  ],
+  "template": "{{ 1 is even }}|{{ 2 is even }}|{{ 1 is odd }}|{{ 2 is odd }}",
+  "data": {},
+  "expected": "False|True|True|False"
+}

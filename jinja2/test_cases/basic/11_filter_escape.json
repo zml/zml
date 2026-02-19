@@ -1,0 +1,5 @@
+{
+  "template": "{{ '<\">&'|escape }}",
+  "data": {},
+  "expected": "&lt;&#34;&gt;&amp;"
+}

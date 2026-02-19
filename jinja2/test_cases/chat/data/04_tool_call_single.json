@@ -1,0 +1,62 @@
+{
+  "messages": [
+    {
+      "role": "system",
+      "content": "Use tools when needed.",
+      "from": "system",
+      "value": "Use tools when needed."
+    },
+    {
+      "role": "user",
+      "content": "What is the weather in Paris?",
+      "from": "human",
+      "value": "What is the weather in Paris?"
+    },
+    {
+      "role": "assistant",
+      "content": "I will check that.",
+      "tool_calls": [
+        {
+          "id": "wxparis01",
+          "type": "function",
+          "function": {
+            "name": "get_weather",
+            "arguments": {
+              "city": "Paris",
+              "units": "c"
+            }
+          }
+        }
+      ],
+      "from": "gpt",
+      "value": "I will check that."
+    }
+  ],
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "get_weather",
+        "description": "Get weather by city",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "city": {
+              "type": "string"
+            },
+            "units": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "city"
+          ]
+        }
+      }
+    }
+  ],
+  "documents": [],
+  "add_generation_prompt": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>"
+}

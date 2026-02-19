@@ -1,0 +1,8 @@
+{
+  "template": "{{ missing|default('no') }}|{{ false|default('no') }}|{{ false|default('no', true) }}|{{ given|default('no') }}",
+  "data": {
+    "given": "yes",
+    "false": false
+  },
+  "expected": "no|False|no|yes"
+}

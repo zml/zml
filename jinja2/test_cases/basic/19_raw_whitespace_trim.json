@@ -1,0 +1,5 @@
+{
+  "template": "1  {%- raw -%}   2   {%- endraw -%}   3",
+  "data": {},
+  "expected": "123"
+}

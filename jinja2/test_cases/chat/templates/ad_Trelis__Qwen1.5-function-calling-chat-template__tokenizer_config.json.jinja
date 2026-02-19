@@ -1,0 +1,21 @@
+{% for message in messages %}{% if loop.first and messages[0]['role'] != 'system' %}<|im_start|>system
+You are a helpful assistant<|im_end|>
+{% endif %}{% if message['role'] == 'function_metadata' %}<|im_start|>tools
+You have access to the following functions. Use them only if required:
+
+{{ message['content'] }}
+
+To call a function, respond with a JSON object in this format:
+{
+    "name": "function_name",
+    "arguments": {
+        "argument1": "value1",
+        "argument2": "value2"
+    }
+}
+Respond with a JSON object only if you wish to make a function call. Any other response will be treated as a regular query.When making a function call, provide only the JSON object, nothing else. Make one function call at a time. After the function call, wait for the response.
+Only make use of the functions if they assist in providing the user with an answer. Otherwise, answer without making a function call.{% elif message['role'] == 'function_response' %}<|im_start|>function_response
+Here is the response to the function call. If helpful, use it to respond to the user's question:{{ message['content'] }}{% else %}{{'<|im_start|>' + message['role'] + '
+' + message['content']}}{% endif %}{% if (loop.last and add_generation_prompt) or not loop.last %}{{ '<|im_end|>' + '
+'}}{% endif %}{% endfor %}{% if add_generation_prompt and messages[-1]['role'] != 'assistant' %}{{ '<|im_start|>assistant
+' }}{% endif %}

@@ -1,0 +1,7 @@
+{
+  "template": "{% raw %}foo{% endraw %}|{%raw%}{{ bar }}|{% baz %}{% endraw %}",
+  "data": {
+    "bar": "SHOULD_NOT_RENDER"
+  },
+  "expected": "foo|{{ bar }}|{% baz %}"
+}
