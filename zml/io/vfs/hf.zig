@@ -711,7 +711,10 @@ pub const HF = struct {
 
         const uri: std.Uri = try .parse(url);
         var req = try self.client.request(.GET, uri, .{
-            .headers = .{ .authorization = self.authorization },
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = self.authorization,
+            },
             .extra_headers = &.{.{ .name = "Range", .value = range_header }},
         });
         defer req.deinit();
@@ -721,7 +724,7 @@ pub const HF = struct {
         var redirect_buffer: [8 * 1024]u8 = undefined;
         var res = try req.receiveHead(&redirect_buffer);
 
-        if (res.head.status != .partial_content) {
+        if (res.head.status != .partial_content and res.head.status != .ok) {
             log.err("Failed to perform read for {s}", .{url});
             log.err("{s}", .{res.head.bytes});
             return error.RequestFailed;
