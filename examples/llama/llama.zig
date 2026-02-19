@@ -81,11 +81,8 @@ pub const LlamaLM = struct {
         var total_bytes: usize = 0;
         defer {
             const took = now.untilNow(io, .awake);
-            log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
-                total_bytes,
-                stdx.fmt.fmtDuration(took),
-                total_bytes / (@as(usize, @intCast(took.toNanoseconds())) * std.time.ns_per_s),
-            });
+            const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+            log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{ total_bytes, stdx.fmt.fmtDuration(took), bytes_per_sec });
         }
         return zml.io.load(LlamaLM, self, allocator, io, platform, .{
             .dma_chunks = 32,
@@ -178,37 +175,6 @@ pub const Llama = struct {
 
     pub fn deinit(self: Llama, allocator: std.mem.Allocator) void {
         allocator.free(self.layers);
-    }
-
-    pub fn loadBuffers(
-        self: *const Llama,
-        bufferize_ctx: zml.io.BufferizeContext(TransferCtx),
-        group: *stdx.Io.LimitedGroup,
-        store: zml.io.TensorStore.View,
-        cb: zml.io.CallbackTensorBufferTransfer(TransferCtx),
-    ) !zml.Bufferized(Llama) {
-        const bufferized_layers = try bufferize_ctx.allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
-
-        var bufferized: zml.Bufferized(Llama) = .{ .embed_tokens = undefined, .norm = undefined, .layers = bufferized_layers };
-
-        const transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.embed_tokens, &bufferized.embed_tokens, store.withPrefix("embed_tokens"));
-        for (transfers) |t| {
-            try group.concurrent(bufferize_ctx.io, cb, .{t});
-        }
-
-        const norm_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &self.norm, &bufferized.norm, store.withPrefix("norm"));
-        for (norm_transfers) |t| {
-            try group.concurrent(bufferize_ctx.io, cb, .{t});
-        }
-
-        for (self.layers, bufferized_layers, 0..) |layer, *buf_layer, i| {
-            const layer_transfers = try zml.io.bufferize(TransferCtx, bufferize_ctx, &layer, buf_layer, store.withPrefix("layers").withLayer(i));
-            for (layer_transfers) |t| {
-                try group.concurrent(bufferize_ctx.io, cb, .{t});
-            }
-        }
-
-        return bufferized;
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Llama), allocator: std.mem.Allocator) void {

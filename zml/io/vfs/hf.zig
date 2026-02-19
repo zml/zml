@@ -123,12 +123,11 @@ pub const HF = struct {
         };
     }
 
-    pub fn auto(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client) !HF {
-        const hf_token = if (std.process.getEnvVarOwned(allocator, "HF_TOKEN")) |token| blk: {
+    pub fn auto(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, environ_map: *std.process.Environ.Map) !HF {
+        const hf_token = if (environ_map.get("HF_TOKEN")) |token| blk: {
             break :blk token;
-        } else |_| blk: {
-            const home_path = std.process.getEnvVarOwned(allocator, "HOME") catch break :blk null;
-            defer allocator.free(home_path);
+        } else blk: {
+            const home_path = environ_map.get("HOME") orelse break :blk null;
 
             var path_buf: [256]u8 = undefined;
             const token_path = std.fmt.bufPrint(&path_buf, "{s}/.cache/huggingface/token", .{home_path}) catch break :blk null;
@@ -142,7 +141,6 @@ pub const HF = struct {
 
             break :blk token;
         };
-        defer if (hf_token) |token| allocator.free(token);
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 
@@ -184,6 +182,7 @@ pub const HF = struct {
         return .{
             .userdata = &self.base,
             .vtable = &comptime VFSBase.vtable(.{
+                .operate = operate,
                 .dirOpenDir = dirOpenDir,
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
@@ -196,7 +195,6 @@ pub const HF = struct {
                 .fileStat = fileStat,
                 .fileLength = fileLength,
                 .fileClose = fileClose,
-                .fileReadStreaming = fileReadStreaming,
                 .fileReadPositional = fileReadPositional,
                 .fileSeekBy = fileSeekBy,
                 .fileSeekTo = fileSeekTo,
@@ -453,6 +451,29 @@ pub const HF = struct {
         }
     }
 
+    fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
+        switch (operation) {
+            .file_read_streaming => |o| {
+                const handle = self.getFileHandle(o.file);
+                const total = self.performRead(handle, o.data, handle.pos) catch |err| {
+                    log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
+                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                };
+
+                if (total == 0) {
+                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                }
+
+                handle.pos += @intCast(total);
+                return .{ .file_read_streaming = total };
+            },
+            .file_write_streaming, .device_io_control => {
+                return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
+            },
+        }
+    }
+
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
         const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
 
@@ -482,6 +503,7 @@ pub const HF = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 1,
         };
     }
 
@@ -507,6 +529,7 @@ pub const HF = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 1,
         };
     }
 
@@ -538,7 +561,7 @@ pub const HF = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = Handle.init(self.allocator, .file, full_path, size) catch return std.Io.File.OpenError.Unexpected;
 
-        return .{ .handle = @intCast(idx) };
+        return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
@@ -619,6 +642,7 @@ pub const HF = struct {
             .atime = null,
             .mtime = std.Io.Timestamp.zero,
             .ctime = std.Io.Timestamp.zero,
+            .block_size = 1,
         };
     }
 
@@ -632,17 +656,6 @@ pub const HF = struct {
         for (files) |file| {
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
-    }
-
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
-        const self: *HF = @fieldParentPtr("base", VFSBase.as(userdata));
-        const handle = self.getFileHandle(file);
-        const total = self.performRead(handle, data, handle.pos) catch |err| {
-            log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-            return std.Io.File.Reader.Error.Unexpected;
-        };
-        handle.pos += @intCast(total);
-        return total;
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {

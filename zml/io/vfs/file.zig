@@ -12,7 +12,7 @@ pub const DirectIoError = error{
     MisalignedBuffer,
     BufferTooSmall,
     UnexpectedFcntlResult,
-} || std.posix.FcntlError;
+};
 
 fn canUseDirectIO() bool {
     if (builtin.target.os.tag == .linux) {
@@ -23,7 +23,7 @@ fn canUseDirectIO() bool {
 
 fn useDirectIO(file: std.Io.File) DirectIoError!bool {
     if (comptime canUseDirectIO()) {
-        const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
+        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         return (flags & direct_flag) != 0;
     } else {
@@ -33,7 +33,7 @@ fn useDirectIO(file: std.Io.File) DirectIoError!bool {
 
 fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
     if (comptime canUseDirectIO()) {
-        const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
+        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
         if ((flags & direct_flag) == 0) return;
 
@@ -46,10 +46,10 @@ fn switchToBufferedIO(file: std.fs.File) DirectIoError!void {
 
 fn switchToDirectIO(file: std.Io.File) DirectIoError!void {
     if (builtin.os.tag == .linux and canUseDirectIO()) {
-        const flags = try std.posix.fcntl(file.handle, std.posix.F.GETFL, 0);
+        const flags = std.posix.system.fcntl(file.handle, std.posix.F.GETFL);
         const direct_flag: c_int = @bitCast(std.posix.O{ .DIRECT = true });
 
-        const result = try std.posix.fcntl(file.handle, std.posix.F.SETFL, flags | direct_flag);
+        const result = std.posix.system.fcntl(file.handle, std.posix.F.SETFL, flags | direct_flag);
         if (result != 0) return DirectIoError.UnexpectedFcntlResult;
     } else {
         return DirectIoError.UnsupportedPlatform;
@@ -62,7 +62,25 @@ pub const File = struct {
         direct_io_alignment: std.mem.Alignment = .fromByteUnits(4 * 1024),
     };
 
-    const Handle = struct { inner_handle: std.Io.File.Handle, direct_io_handle: ?std.Io.File.Handle };
+    const Handle = struct {
+        inner_handle: std.Io.File.Handle,
+        inner_flags: std.Io.File.Flags,
+        direct_io_handle: ?std.Io.File.Handle,
+
+        pub fn innerFile(self: *Handle) std.Io.File {
+            return .{
+                .handle = self.inner_handle,
+                .flags = self.inner_flags,
+            };
+        }
+
+        pub fn directIoFile(self: *Handle) std.Io.File {
+            return .{
+                .handle = self.direct_io_handle.?,
+                .flags = self.inner_flags,
+            };
+        }
+    };
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
@@ -88,6 +106,7 @@ pub const File = struct {
         return .{
             .userdata = &self.base,
             .vtable = &comptime VFSBase.vtable(.{
+                .operate = operate,
                 .dirOpenDir = dirOpenDir,
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
@@ -100,7 +119,6 @@ pub const File = struct {
                 .fileStat = fileStat,
                 .fileLength = fileLength,
                 .fileClose = fileClose,
-                .fileReadStreaming = fileReadStreaming,
                 .fileReadPositional = fileReadPositional,
                 .fileSeekBy = fileSeekBy,
                 .fileSeekTo = fileSeekTo,
@@ -143,27 +161,50 @@ pub const File = struct {
 
     fn innerFile(self: *File, file: std.Io.File, data: []const []u8, position: u64) std.Io.File {
         const handle = self.getFileHandle(file);
-        const direct_io_handle = handle.direct_io_handle orelse return .{ .handle = handle.inner_handle };
+
+        if (handle.direct_io_handle == null) {
+            return handle.innerFile();
+        }
 
         const alignment_bytes: usize = self.config.direct_io_alignment.toByteUnits();
 
         if (!std.mem.isAligned(@as(usize, position), alignment_bytes)) {
-            return .{ .handle = handle.inner_handle };
+            return handle.innerFile();
         }
 
         var total_size: usize = 0;
         for (data) |buf| {
             if (!std.mem.isAligned(@intFromPtr(buf.ptr), alignment_bytes)) {
-                return .{ .handle = handle.inner_handle };
+                return handle.innerFile();
             }
             total_size += buf.len;
         }
 
         if (!std.mem.isAligned(total_size, alignment_bytes)) {
-            return .{ .handle = handle.inner_handle };
+            return handle.innerFile();
         }
 
-        return .{ .handle = direct_io_handle };
+        return handle.directIoFile();
+    }
+
+    fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
+        switch (operation) {
+            .file_read_streaming => |o| {
+                const handle = self.getFileHandle(o.file);
+                const position: u64 = @intCast(std.posix.system.lseek(handle.inner_handle, 0, std.posix.SEEK.CUR));
+                const inner_file = self.innerFile(o.file, o.data, position);
+                return self.base.inner.vtable.operate(self.base.inner.userdata, .{
+                    .file_read_streaming = .{
+                        .file = inner_file,
+                        .data = o.data,
+                    },
+                });
+            },
+            .file_write_streaming, .device_io_control => {
+                return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
+            },
+        }
     }
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
@@ -216,10 +257,11 @@ pub const File = struct {
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = .{
             .inner_handle = inner_file.handle,
+            .inner_flags = inner_file.flags,
             .direct_io_handle = direct_io_handle,
         };
 
-        return .{ .handle = @intCast(idx) };
+        return .{ .handle = @intCast(idx), .flags = inner_file.flags };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
@@ -245,15 +287,13 @@ pub const File = struct {
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-        return self.base.inner.vtable.fileStat(self.base.inner.userdata, inner_file);
+        return self.base.inner.vtable.fileStat(self.base.inner.userdata, handle.innerFile());
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-        return self.base.inner.vtable.fileLength(self.base.inner.userdata, inner_file);
+        return self.base.inner.vtable.fileLength(self.base.inner.userdata, handle.innerFile());
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
@@ -261,24 +301,14 @@ pub const File = struct {
         for (files) |file| {
             const handle = self.getFileHandle(file);
 
-            if (handle.direct_io_handle) |dio_handle| {
-                const direct_io_file: std.Io.File = .{ .handle = dio_handle };
-                self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{direct_io_file});
+            if (handle.direct_io_handle) |_| {
+                self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{handle.directIoFile()});
             }
 
-            const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-            self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{inner_file});
+            self.base.inner.vtable.fileClose(self.base.inner.userdata, &.{handle.innerFile()});
 
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
-    }
-
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
-        const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
-        const handle = self.getFileHandle(file);
-        const position: u64 = @intCast(std.posix.system.lseek(handle.inner_handle, 0, std.posix.SEEK.CUR));
-        const inner_file = self.innerFile(file, data, position);
-        return self.base.inner.vtable.fileReadStreaming(self.base.inner.userdata, inner_file, data);
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
@@ -290,21 +320,18 @@ pub const File = struct {
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-        return self.base.inner.vtable.fileSeekBy(self.base.inner.userdata, inner_file, relative_offset);
+        return self.base.inner.vtable.fileSeekBy(self.base.inner.userdata, handle.innerFile(), relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-        return self.base.inner.vtable.fileSeekTo(self.base.inner.userdata, inner_file, absolute_offset);
+        return self.base.inner.vtable.fileSeekTo(self.base.inner.userdata, handle.innerFile(), absolute_offset);
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
         const self: *File = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle = self.getFileHandle(file);
-        const inner_file: std.Io.File = .{ .handle = handle.inner_handle };
-        return self.base.inner.vtable.fileRealPath(self.base.inner.userdata, inner_file, out_buffer);
+        return self.base.inner.vtable.fileRealPath(self.base.inner.userdata, handle.innerFile(), out_buffer);
     }
 };

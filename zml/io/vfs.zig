@@ -16,7 +16,7 @@ pub const VFS = struct {
 
     const CWD_HANDLE: u32 = 0;
 
-    const Handle = struct { handle: u32, backend_idx: ?usize };
+    const Handle = struct { handle: u32, backend_idx: ?usize, flags: std.Io.File.Flags = .{ .nonblocking = false } };
 
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
@@ -32,6 +32,9 @@ pub const VFS = struct {
 
         var handles: Handles = .{};
         try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
+        try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
+        try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
+        try handles.append(allocator, .{ .handle = std.posix.STDERR_FILENO, .backend_idx = null });
 
         return .{
             .allocator = allocator,
@@ -64,10 +67,12 @@ pub const VFS = struct {
         return .{
             .userdata = &self.base,
             .vtable = &comptime VFSBase.vtable(.{
+                .operate = operate,
                 .dirOpenDir = dirOpenDir,
                 .dirStat = dirStat,
                 .dirStatFile = dirStatFile,
                 .dirAccess = dirAccess,
+                .dirCreateFile = dirCreateFile,
                 .dirOpenFile = dirOpenFile,
                 .dirClose = dirClose,
                 .dirRead = dirRead,
@@ -76,7 +81,9 @@ pub const VFS = struct {
                 .fileStat = fileStat,
                 .fileLength = fileLength,
                 .fileClose = fileClose,
-                .fileReadStreaming = fileReadStreaming,
+                .fileWritePositional = fileWritePositional,
+                .fileWriteFileStreaming = fileWriteFileStreaming,
+                .fileWriteFilePositional = fileWriteFilePositional,
                 .fileReadPositional = fileReadPositional,
                 .fileSeekBy = fileSeekBy,
                 .fileSeekTo = fileSeekTo,
@@ -158,6 +165,22 @@ pub const VFS = struct {
         return path[uri.scheme.len + 3 ..];
     }
 
+    fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+        switch (operation) {
+            .file_read_streaming => |o| {
+                const handle, const backend = self.getFileHandle(o.file);
+                return backend.vtable.operate(backend.userdata, .{ .file_read_streaming = .{
+                    .file = .{ .handle = @intCast(handle.handle), .flags = handle.flags },
+                    .data = o.data,
+                } });
+            },
+            .device_io_control, .file_write_streaming => {
+                return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
+            },
+        }
+    }
+
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
@@ -200,6 +223,22 @@ pub const VFS = struct {
         return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
     }
 
+    pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+        const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+            log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
+            return std.Io.Dir.AccessError.Unexpected;
+        };
+
+        const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+        const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
+        handle.* = .{
+            .handle = @intCast(file.handle),
+            .backend_idx = backend_idx,
+        };
+        return .{ .handle = @intCast(idx), .flags = .{ .nonblocking = false } };
+    }
+
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
@@ -212,7 +251,7 @@ pub const VFS = struct {
             .handle = @intCast(file.handle),
             .backend_idx = backend_idx,
         };
-        return .{ .handle = @intCast(idx) };
+        return .{ .handle = @intCast(idx), .flags = handle.flags };
     }
 
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
@@ -276,46 +315,72 @@ pub const VFS = struct {
     fn fileStat(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.StatError!std.Io.File.Stat {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileStat(backend.userdata, .{ .handle = @intCast(handle.handle) });
+        return backend.vtable.fileStat(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags });
     }
 
     fn fileLength(userdata: ?*anyopaque, file: std.Io.File) std.Io.File.LengthError!u64 {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileLength(backend.userdata, .{ .handle = @intCast(handle.handle) });
+        return backend.vtable.fileLength(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags });
     }
 
     fn fileClose(userdata: ?*anyopaque, files: []const std.Io.File) void {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         for (files) |file| {
             const handle, const backend = self.getFileHandle(file);
-            backend.vtable.fileClose(backend.userdata, &.{.{ .handle = @intCast(handle.handle) }});
+            backend.vtable.fileClose(backend.userdata, &.{.{ .handle = @intCast(handle.handle), .flags = handle.flags }});
             self.closeHandle(@intCast(file.handle)) catch unreachable;
         }
     }
 
-    fn fileReadStreaming(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8) std.Io.File.Reader.Error!usize {
+    fn fileWritePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, data: []const []const u8, splat: usize, offset: u64) std.Io.File.WritePositionalError!usize {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileReadStreaming(backend.userdata, .{ .handle = @intCast(handle.handle) }, data);
+        return backend.vtable.fileWritePositional(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, header, data, splat, offset);
+    }
+
+    fn fileWriteFileStreaming(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit) std.Io.File.Writer.WriteFileError!usize {
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        const dst_handle, const dst_backend = self.getFileHandle(file);
+        const src_handle, _ = self.getFileHandle(reader.file);
+
+        const original_src_handle = reader.file;
+        reader.file = .{ .handle = @intCast(src_handle.handle), .flags = src_handle.flags };
+        defer reader.file = original_src_handle;
+
+        return dst_backend.vtable.fileWriteFileStreaming(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit);
+    }
+
+    fn fileWriteFilePositional(userdata: ?*anyopaque, file: std.Io.File, header: []const u8, reader: *std.Io.File.Reader, limit: std.Io.Limit, offset: u64) std.Io.File.WriteFilePositionalError!usize {
+        const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
+
+        const dst_handle, const dst_backend = self.getFileHandle(file);
+        const src_handle, _ = self.getFileHandle(reader.file);
+
+        const original_src_handle = reader.file;
+        reader.file = .{ .handle = @intCast(src_handle.handle), .flags = src_handle.flags };
+        defer reader.file = original_src_handle;
+
+        return dst_backend.vtable.fileWriteFilePositional(dst_backend.userdata, .{ .handle = @intCast(dst_handle.handle), .flags = dst_handle.flags }, header, reader, limit, offset);
     }
 
     fn fileReadPositional(userdata: ?*anyopaque, file: std.Io.File, data: []const []u8, offset: u64) std.Io.File.ReadPositionalError!usize {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileReadPositional(backend.userdata, .{ .handle = @intCast(handle.handle) }, data, offset);
+        return backend.vtable.fileReadPositional(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, data, offset);
     }
 
     fn fileSeekBy(userdata: ?*anyopaque, file: std.Io.File, relative_offset: i64) std.Io.File.SeekError!void {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileSeekBy(backend.userdata, .{ .handle = @intCast(handle.handle) }, relative_offset);
+        return backend.vtable.fileSeekBy(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, relative_offset);
     }
 
     fn fileSeekTo(userdata: ?*anyopaque, file: std.Io.File, absolute_offset: u64) std.Io.File.SeekError!void {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const handle, const backend = self.getFileHandle(file);
-        return backend.vtable.fileSeekTo(backend.userdata, .{ .handle = @intCast(handle.handle) }, absolute_offset);
+        return backend.vtable.fileSeekTo(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, absolute_offset);
     }
 
     fn fileRealPath(userdata: ?*anyopaque, file: std.Io.File, out_buffer: []u8) std.Io.File.RealPathError!usize {
@@ -324,10 +389,10 @@ pub const VFS = struct {
 
         if (self.getScheme(handle.backend_idx)) |s| {
             const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
-            const path_len = try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle) }, out_buffer[prefix.len..]);
+            const path_len = try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer[prefix.len..]);
             return prefix.len + path_len;
         } else {
-            return try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle) }, out_buffer);
+            return try backend.vtable.fileRealPath(backend.userdata, .{ .handle = @intCast(handle.handle), .flags = handle.flags }, out_buffer);
         }
     }
 };
