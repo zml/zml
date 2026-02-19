@@ -55,13 +55,13 @@ const CliArgs = struct {
 pub fn main() !void {
     log.info("LLama was compiled with {}", .{@import("builtin").mode});
 
-    var debug_allocator: ?std.heap.DebugAllocator(.{}) = null;
-    const allocator = if (@import("builtin").mode == .Debug) blk: {
-        debug_allocator = .init;
-        break :blk debug_allocator.?.allocator();
-    } else std.heap.c_allocator;
-    defer if (debug_allocator) |*da| std.debug.assert(da.deinit() == .ok);
-    // const allocator = std.heap.c_allocator;
+    // var debug_allocator: ?std.heap.DebugAllocator(.{}) = null;
+    // const allocator = if (@import("builtin").mode == .Debug) blk: {
+    //     debug_allocator = .init;
+    //     break :blk debug_allocator.?.allocator();
+    // } else std.heap.c_allocator;
+    // defer if (debug_allocator) |*da| std.debug.assert(da.deinit() == .ok);
+    const allocator = std.heap.c_allocator;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
@@ -142,8 +142,8 @@ pub fn main() !void {
     // Specify shapes of input arguments
     const dtype = llama_model.model.embed_tokens.weight.dtype();
     const llama_parameters: LlamaParameters = .{
-        .prefill_tokens = .init(.{ .s = llama_options.max_seq_len }, .i32),
-        .decode_tokens = .init(.{ .s = 1 }, .i32),
+        .prefill_tokens = .init(.{ .s = llama_options.max_seq_len }, .u32),
+        .decode_tokens = .init(.{ .s = 1 }, .u32),
         .token_index = .init(.{}, .u32),
         .kv_cache = .init(.init(.{
             .layer = llama_model.model.layers.len,
@@ -179,15 +179,10 @@ pub fn main() !void {
         v.deinit();
     }
 
-    var compiled_model_result_future = try io.concurrent(compile, .{ allocator, io, platform, llama_model, llama_parameters, shardings, &progress });
+    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, shardings, &progress });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
-        _ = v; // autofix
-        // defer v.embedding_prefill_exe.deinit();
-        // defer v.embedding_decode_exe.deinit();
-        // defer v.layer_prefill_exe.deinit();
-        // defer v.layer_decode_exe.deinit();
-        // defer v.sampling_prefill_exe.deinit();
-        // defer v.sampling_decode_exe.deinit();
+        defer v.prefill_exe.deinit();
+        defer v.decode_exe.deinit();
     } else |_| {};
 
     var load_group: stdx.Io.LimitedGroup = .init(16);
@@ -210,12 +205,8 @@ pub fn main() !void {
     }
 
     const compiled_model_result = try compiled_model_result_future.await(io);
-    defer compiled_model_result.embedding_prefill_exe.deinit();
-    defer compiled_model_result.embedding_decode_exe.deinit();
-    defer compiled_model_result.layer_prefill_exe.deinit();
-    defer compiled_model_result.layer_decode_exe.deinit();
-    defer compiled_model_result.sampling_prefill_exe.deinit();
-    defer compiled_model_result.sampling_decode_exe.deinit();
+    defer compiled_model_result.prefill_exe.deinit();
+    defer compiled_model_result.decode_exe.deinit();
 
     var llama_buffers = try llama_buffers_future.await(io);
     llama_buffers = llama_buffers; // autofix
@@ -243,8 +234,7 @@ pub fn main() !void {
     defer {
         profiler.?.stop() catch unreachable;
         const data = profiler.?.collectData(allocator) catch unreachable;
-        // log.warn("data: {any}", .{data});
-        var file = std.Io.Dir.createFile(.cwd(), threaded.io(), "/home/hugo/zml/proto8.pb", .{ .read = true }) catch unreachable;
+        var file = std.Io.Dir.createFile(.cwd(), threaded.io(), "/home/hugo/zml/proto9.pb", .{ .read = true }) catch unreachable;
         defer file.close(threaded.io());
         file.writeStreamingAll(threaded.io(), data) catch unreachable;
         allocator.free(data);
@@ -257,14 +247,8 @@ pub fn main() !void {
         allocator,
         io,
         &llama_buffers,
-        compiled_model_result.embedding_prefill_exe,
-        compiled_model_result.embedding_decode_exe,
-        compiled_model_result.layer_prefill_exe,
-        compiled_model_result.layer_decode_exe,
-        compiled_model_result.norm_prefill_exe,
-        compiled_model_result.norm_decode_exe,
-        compiled_model_result.sampling_prefill_exe,
-        compiled_model_result.sampling_decode_exe,
+        compiled_model_result.prefill_exe,
+        compiled_model_result.decode_exe,
         &kv_cache_buffers,
         &attention_metadata_buffers,
         tokenizer,
@@ -276,7 +260,6 @@ pub fn main() !void {
         &stdout.interface,
         platform,
         sharding_replicated,
-        sharding_tp,
     );
 }
 
@@ -328,126 +311,65 @@ const LlamaParameters = struct {
 };
 
 const CompileModelResult = struct {
-    embedding_prefill_exe: zml.Exe,
-    embedding_decode_exe: zml.Exe,
-    layer_prefill_exe: zml.Exe,
-    layer_decode_exe: zml.Exe,
-    norm_prefill_exe: zml.Exe,
-    norm_decode_exe: zml.Exe,
-    sampling_prefill_exe: zml.Exe,
-    sampling_decode_exe: zml.Exe,
+    prefill_exe: zml.Exe,
+    decode_exe: zml.Exe,
 };
 
-pub fn compile(
+fn compileModel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
     llama_model: llama.LlamaLM,
     parameters: LlamaParameters,
     shardings: []zml.sharding.Sharding,
-    _: *std.Progress.Node,
+    progress: *std.Progress.Node,
 ) !CompileModelResult {
     var timer = try std.time.Timer.start();
-    log.info("Compiling model components", .{});
-    defer log.info("Compiled all components [{D}]", .{timer.read()});
+    defer log.info("Compiled model [{D}]", .{timer.read()});
 
-    const dtype = llama_model.model.embed_tokens.weight.dtype();
-    const hidden_dim = llama_model.config.hidden_size;
-
-    // Build hidden states tensors for prefill and decode compilation
-    const hidden_shape_prefill = zml.Shape.init(.{ .s = parameters.prefill_tokens.dim(.s), .d = hidden_dim }, dtype)
-        .withTags(.{ .s, .d })
-        .withPartitioning(.{ .d = .model });
-    const hidden_states_prefill: zml.Tensor = .fromShape(hidden_shape_prefill);
-
-    const hidden_shape_decode = zml.Shape.init(.{ .s = parameters.decode_tokens.dim(.s), .d = hidden_dim }, dtype)
-        .withTags(.{ .s, .d })
-        .withPartitioning(.{ .d = .model });
-    const hidden_states_decode: zml.Tensor = .fromShape(hidden_shape_decode);
-
-    // embedding
-    var embed_prefill_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: zml.nn.TokenEmbedding, input: zml.Tensor, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, mod, .forward, .{input}, .{ .partitioner = partitioner, .shardings = shardings_ });
+    // Compile the model twice, one for prefill, one for generation.
+    var prefill_future = try io.concurrent(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node_ = progress_.start("Compiling prefill...", 1);
+            defer node_.end();
+            var timer_ = try std.time.Timer.start();
+            defer log.info("Compiled prefill [{D}]", .{timer_.read()});
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{
+                parameters_.prefill_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                parameters_.attention_metadata,
+                parameters_.attention_parameters,
+            }, .{ .partitioner = partitioner, .shardings = shardings_ });
         }
-    }.call, .{ allocator, io, platform, llama_model.model.embed_tokens, parameters.prefill_tokens, shardings });
-    errdefer if (embed_prefill_future.cancel(io)) |v| v.deinit() else |_| {};
+    }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
+    errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    var embed_decode_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: zml.nn.TokenEmbedding, input: zml.Tensor, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, mod, .forward, .{input}, .{ .partitioner = partitioner, .shardings = shardings_ });
+    var decode_future = try io.concurrent(struct {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node_ = progress_.start("Compiling decode...", 1);
+            defer node_.end();
+            var timer_ = try std.time.Timer.start();
+            defer log.info("Compiled decode [{D}]", .{timer_.read()});
+            return platform_.compile(allocator_, io_, llama_model_, .forward, .{
+                parameters_.decode_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                parameters_.attention_metadata,
+                parameters_.attention_parameters,
+            }, .{ .partitioner = partitioner, .shardings = shardings_ });
         }
-    }.call, .{ allocator, io, platform, llama_model.model.embed_tokens, parameters.decode_tokens, shardings });
-    errdefer if (embed_decode_future.cancel(io)) |v| v.deinit() else |_| {};
+    }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
+    errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
-    // layer
-    const layer_module = llama_model.model.layers[0];
+    const prefill_exe = try prefill_future.await(io);
+    const decode_exe = try decode_future.await(io);
 
-    var layer_prefill_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: llama.TransformerLayer, hidden: zml.Tensor, idx: zml.Tensor, kv: llama.KvCache, param: LlamaParameters, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            log.info(">>>>>>>>>>>>>>>>> hidden: {f}", .{hidden});
-            return plt.compile(alloc, io_, mod, .forward, .{ hidden, idx, kv, param.attention_metadata, param.attention_parameters }, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, layer_module, hidden_states_prefill, parameters.token_index, parameters.kv_cache, parameters, shardings });
-    errdefer if (layer_prefill_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var layer_decode_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: llama.TransformerLayer, hidden: zml.Tensor, idx: zml.Tensor, kv: llama.KvCache, param: LlamaParameters, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, mod, .forward, .{ hidden, idx, kv, param.attention_metadata, param.attention_parameters }, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, layer_module, hidden_states_decode, parameters.token_index, parameters.kv_cache, parameters, shardings });
-    errdefer if (layer_decode_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    // norm
-    var norm_prefill_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: llama.RmsNorm, hidden: zml.Tensor, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, mod, .forward, .{hidden}, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, llama_model.model.norm, hidden_states_prefill, shardings });
-    errdefer if (norm_prefill_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var norm_decode_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, mod: llama.RmsNorm, hidden: zml.Tensor, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, mod, .forward, .{hidden}, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, llama_model.model.norm, hidden_states_decode, shardings });
-    errdefer if (norm_decode_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    // sampling
-    var sampling_prefill_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, model: llama.LlamaLM, head: zml.nn.Linear, hidden: zml.Tensor, rng: zml.Tensor.Rng, opts: zml.nn.SamplingStrategy, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, model, .sampleTokens, .{ head, hidden, rng, opts }, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, llama_model, llama_model.lm_head.?, hidden_states_prefill, parameters.rng, llama_model.gen_opts, shardings });
-    errdefer if (sampling_prefill_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    var sampling_decode_future = io.async(struct {
-        fn call(alloc: std.mem.Allocator, io_: std.Io, plt: *const zml.Platform, model: llama.LlamaLM, head: zml.nn.Linear, hidden: zml.Tensor, rng: zml.Tensor.Rng, opts: zml.nn.SamplingStrategy, shardings_: []zml.sharding.Sharding) !zml.Exe {
-            return plt.compile(alloc, io_, model, .sampleTokens, .{ head, hidden, rng, opts }, .{ .partitioner = partitioner, .shardings = shardings_ });
-        }
-    }.call, .{ allocator, io, platform, llama_model, llama_model.lm_head.?, hidden_states_decode, parameters.rng, llama_model.gen_opts, shardings });
-    errdefer if (sampling_decode_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    // Wait for execs compiled
-    const embedding_prefill_exe = try embed_prefill_future.await(io);
-    const embedding_decode_exe = try embed_decode_future.await(io);
-    const layer_prefill_exe = try layer_prefill_future.await(io);
-    const layer_decode_exe = try layer_decode_future.await(io);
-    const norm_prefill_exe = try norm_prefill_future.await(io);
-    const norm_decode_exe = try norm_decode_future.await(io);
-    const sampling_prefill_exe = try sampling_prefill_future.await(io);
-    const sampling_decode_exe = try sampling_decode_future.await(io);
-
-    return .{
-        .embedding_prefill_exe = embedding_prefill_exe,
-        .embedding_decode_exe = embedding_decode_exe,
-        .layer_prefill_exe = layer_prefill_exe,
-        .layer_decode_exe = layer_decode_exe,
-        .norm_prefill_exe = norm_prefill_exe,
-        .norm_decode_exe = norm_decode_exe,
-        .sampling_prefill_exe = sampling_prefill_exe,
-        .sampling_decode_exe = sampling_decode_exe,
-    };
+    return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
 }
 
 fn loadModelBuffers(
@@ -548,14 +470,8 @@ pub fn generateText(
     allocator: std.mem.Allocator,
     io: std.Io,
     llama_buffers: *zml.Bufferized(LlamaLM),
-    embedding_prefill_exe: zml.Exe,
-    embedding_decode_exe: zml.Exe,
-    layer_prefill_exe: zml.Exe,
-    layer_decode_exe: zml.Exe,
-    norm_prefill_exe: zml.Exe,
-    norm_decode_exe: zml.Exe,
-    sampling_prefill_exe: zml.Exe,
-    sampling_decode_exe: zml.Exe,
+    prefill_exe: zml.exe.Exe,
+    decode_exe: zml.exe.Exe,
     kv_cache_buffers: *zml.Bufferized(llama.KvCache),
     attention_metadata_buffers: *zml.Bufferized(zml.attention.Metadata),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -567,13 +483,9 @@ pub fn generateText(
     writer: *std.Io.Writer,
     platform: *const zml.Platform,
     replicated_sharding: zml.sharding.Sharding,
-    tp_sharding: zml.sharding.Sharding,
 ) !void {
     const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
     defer allocator.free(prompt_tok);
-
-    const hidden_dim = config.hidden_size;
-    const dtype = .bf16; // todo
 
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
@@ -583,154 +495,63 @@ pub fn generateText(
     // init RNG and buffers
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, replicated_sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .i32));
+    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
 
-    const KvCacheLayerBuffer = struct {
-        k: zml.Buffer,
-        v: zml.Buffer,
-        layer_index: zml.Buffer,
-    };
-
-    const num_layers = config.num_hidden_layers;
-    var kv_layer_buffers = try allocator.alloc(KvCacheLayerBuffer, num_layers);
-    defer {
-        for (kv_layer_buffers) |input| {
-            var idx = input.layer_index;
-            idx.deinit();
-        }
-        allocator.free(kv_layer_buffers);
-    }
-    for (kv_layer_buffers, 0..) |*kv_layer, j| {
-        const idx_buf = try zml.Buffer.scalar(io, platform, @as(i32, @intCast(j)), .u32, replicated_sharding);
-        kv_layer.* = .{
-            .k = kv_cache_buffers.k,
-            .v = kv_cache_buffers.v,
-            .layer_index = idx_buf,
-        };
-    }
-
-    // Prepare args and results for decode steps
-    var embedding_decode_args = try embedding_decode_exe.args(allocator);
-    defer embedding_decode_args.deinit(allocator);
-    var embedding_decode_results = try embedding_decode_exe.results(allocator);
-    defer embedding_decode_results.deinit(allocator);
-
-    var layer_decode_args = try layer_decode_exe.args(allocator);
-    defer layer_decode_args.deinit(allocator);
-    var layer_decode_results = try layer_decode_exe.results(allocator);
-    defer layer_decode_results.deinit(allocator);
-
-    var norm_decode_args = try norm_decode_exe.args(allocator);
-    defer norm_decode_args.deinit(allocator);
-    var norm_decode_results = try norm_decode_exe.results(allocator);
-    defer norm_decode_results.deinit(allocator);
-
-    var sampling_decode_args = try sampling_decode_exe.args(allocator);
-    defer sampling_decode_args.deinit(allocator);
-    var sampling_decode_results = try sampling_decode_exe.results(allocator);
-    defer sampling_decode_results.deinit(allocator);
-
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, replicated_sharding);
-    defer current_token_buffer.deinit();
-
-    const decode_hidden_shape = zml.Shape.init(.{ .s = 1, .d = hidden_dim }, dtype)
-        .withTags(.{ .s, .d })
-        .withPartitioning(.{ .d = .model });
-    var decode_hidden_buffer = try zml.Buffer.uninitialized(io, platform, decode_hidden_shape, tp_sharding, .{});
-    defer decode_hidden_buffer.deinit();
-
     {
-        const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{max_seq_len}, .i32));
+        var prefill_args = try prefill_exe.args(allocator);
+        defer prefill_args.deinit(allocator);
+
+        var prefill_results = try prefill_exe.results(allocator);
+        defer prefill_results.deinit(allocator);
+
+        // prepare device buffers for the prefill tokens and their positions
+        const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{max_seq_len}, .u32));
         defer prefill_tokens_slice.free(allocator);
+        @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
 
-        // Secure copy with cast to i32 because sampling output is i32
-        @memset(prefill_tokens_slice.items(i32), 0);
-        const prompt_i32 = std.mem.bytesAsSlice(i32, std.mem.sliceAsBytes(prompt_tok));
-        @memcpy(prefill_tokens_slice.items(i32)[0..prompt_tok.len], prompt_i32);
-
-        // Prepare buffers
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
         var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, replicated_sharding);
         defer prefill_token_pos_buffer.deinit();
 
-        const prefill_hidden_shape = zml.Shape.init(.{ .s = max_seq_len, .d = hidden_dim }, dtype)
-            .withTags(.{ .s, .d })
-            .withPartitioning(.{ .d = .model });
-        var prefill_hidden_buffer = try zml.Buffer.uninitialized(io, platform, prefill_hidden_shape, tp_sharding, .{});
-        defer prefill_hidden_buffer.deinit();
+        prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
 
-        log.info("prefill_hidden_buffer before: {f}", .{prefill_hidden_buffer});
+        prefill_exe.call(prefill_args, &prefill_results);
 
-        // Execute embedding, layers, norm and sampling
-        var embedding_args = try embedding_prefill_exe.args(allocator);
-        defer embedding_args.deinit(allocator);
-        var embedding_results = try embedding_prefill_exe.results(allocator);
-        defer embedding_results.deinit(allocator);
-
-        embedding_args.set(.{ llama_buffers.model.embed_tokens, prefill_tokens_buffer });
-        embedding_prefill_exe.callOpts(io, embedding_args, &embedding_results, .{ .wait = true });
-        embedding_results.fill(.{&prefill_hidden_buffer});
-
-        var layer_args = try layer_prefill_exe.args(allocator);
-        defer layer_args.deinit(allocator);
-        var layer_results = try layer_prefill_exe.results(allocator);
-        defer layer_results.deinit(allocator);
-
-        for (llama_buffers.model.layers, 0..) |layer_weights, i| {
-            kv_layer_buffers[i].k = kv_cache_buffers.k;
-            kv_layer_buffers[i].v = kv_cache_buffers.v;
-            log.info("prefill_hidden_shape: {f}", .{prefill_hidden_shape});
-            log.info("prefill_hidden_buffer: {f}", .{prefill_hidden_buffer});
-            layer_args.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_pos_buffer, kv_layer_buffers[i], attention_metadata_buffers });
-            log.info("Running layer {d}/{d}", .{ i + 1, config.num_hidden_layers });
-            layer_prefill_exe.callOpts(io, layer_args, &layer_results, .{ .wait = true });
-            log.info("Completed layer {d}/{d}", .{ i + 1, config.num_hidden_layers });
-            layer_results.fill(.{ &prefill_hidden_buffer, kv_cache_buffers });
-            log.info("Updated prefill_hidden_buffer: {f}", .{prefill_hidden_buffer});
-        }
-
-        var norm_args = try norm_prefill_exe.args(allocator);
-        defer norm_args.deinit(allocator);
-        var norm_results = try norm_prefill_exe.results(allocator);
-        defer norm_results.deinit(allocator);
-
-        norm_args.set(.{ llama_buffers.model.norm, prefill_hidden_buffer });
-        norm_prefill_exe.callOpts(io, norm_args, &norm_results, .{ .wait = true });
-        norm_results.fill(.{&prefill_hidden_buffer});
-
-        var sampling_args = try sampling_prefill_exe.args(allocator);
-        defer sampling_args.deinit(allocator);
-        var sampling_results = try sampling_prefill_exe.results(allocator);
-        defer sampling_results.deinit(allocator);
-
-        var full_sequence_output_buffer = try zml.Buffer.uninitialized(io, platform, zml.Shape.init(.{ .s = max_seq_len }, .u32), replicated_sharding, .{});
-        defer full_sequence_output_buffer.deinit();
-
-        sampling_args.set(.{ llama_buffers, llama_buffers.lm_head, prefill_hidden_buffer, rng_buffers });
-        sampling_prefill_exe.callOpts(io, sampling_args, &sampling_results, .{ .wait = true });
-        sampling_results.fill(.{ &full_sequence_output_buffer, &rng_buffers });
-
-        try full_sequence_output_buffer.toSlice(io, prefill_tokens_slice);
-
-        generated_token_slice.items(i32)[0] = prefill_tokens_slice.items(i32)[prompt_tok.len - 1];
+        prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
+        try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
+        generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
     }
+
+    // Prepare for token-by-token generation,
+
+    var decode_args = try decode_exe.args(allocator);
+    defer decode_args.deinit(allocator);
+
+    var decode_results = try decode_exe.results(allocator);
+    defer decode_results.deinit(allocator);
+
+    // start with the token generated based on the full prompt.
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, replicated_sharding);
+    defer current_token_buffer.deinit();
 
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
     var timer = try stdx.time.Timer.start();
+
+    // One token has alreadyh been generated by the prefill.
     var num_tokens_generated: usize = 1;
 
-    // Decode
     generation: for (0..output_tokens_len + 1) |i| {
+        // collect and print generated sequence
         num_tokens_generated += 1;
         const generated_token = generated_token_slice.items(u32)[0];
-
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try writer.writeAll(chunk);
             try writer.flush();
         }
 
+        // check for eos
         if (i == output_tokens_len) break :generation;
         switch (config.eos_token_id.value) {
             .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
@@ -741,33 +562,21 @@ pub fn generateText(
             },
         }
 
+        // current token pos needs to go into a zml.Buffer
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
         var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice, replicated_sharding);
         defer token_pos_buffer.deinit();
 
-        embedding_decode_args.set(.{ llama_buffers.model.embed_tokens, current_token_buffer });
-        embedding_decode_exe.callOpts(io, embedding_decode_args, &embedding_decode_results, .{ .wait = true });
-        embedding_decode_results.fill(.{&decode_hidden_buffer});
+        // call to generate the next token
+        decode_args.set(.{ llama_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
 
-        for (llama_buffers.model.layers, 0..) |layer_weights, j| {
-            kv_layer_buffers[j].k = kv_cache_buffers.k;
-            kv_layer_buffers[j].v = kv_cache_buffers.v;
-            layer_decode_args.set(.{ layer_weights, decode_hidden_buffer, token_pos_buffer, kv_layer_buffers[j], attention_metadata_buffers });
-            layer_decode_exe.callOpts(io, layer_decode_args, &layer_decode_results, .{ .wait = true });
-            layer_decode_results.fill(.{ &decode_hidden_buffer, kv_cache_buffers });
-        }
+        decode_exe.call(decode_args, &decode_results);
 
-        norm_decode_args.set(.{ llama_buffers.model.norm, decode_hidden_buffer });
-        norm_decode_exe.callOpts(io, norm_decode_args, &norm_decode_results, .{ .wait = true });
-        norm_decode_results.fill(.{&decode_hidden_buffer});
+        decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
 
-        sampling_decode_args.set(.{ llama_buffers, llama_buffers.lm_head, decode_hidden_buffer, rng_buffers });
-        sampling_decode_exe.callOpts(io, sampling_decode_args, &sampling_decode_results, .{ .wait = true });
-        sampling_decode_results.fill(.{ &current_token_buffer, &rng_buffers });
-
+        // extract the generated token from the buffer
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
-
     const duration = timer.read();
     std.debug.print("\n", .{});
     log.info("✅ Generated {} tokens in {D}: {:.3}tok/s", .{ num_tokens_generated, duration, duration.div(num_tokens_generated).hzFloat() });

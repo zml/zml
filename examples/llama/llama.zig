@@ -51,7 +51,7 @@ pub const LlamaLM = struct {
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, options: Options) !LlamaLM {
-        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensorWithTags2("weight", .{ .dout, .d }, .{ .dout = .model })) |weight|
+        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensorWithTags2("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated })) |weight|
             .init(weight, null, .d)
         else
             null;
@@ -174,7 +174,7 @@ pub const Llama = struct {
         }
 
         return .{
-            .embed_tokens = .{ .weight = store.createTensorWithTags2("embed_tokens.weight", .{ .voc, .d }, .{ .d = .model }) },
+            .embed_tokens = .{ .weight = store.createTensorWithTags2("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) },
             .norm = .{ .weight = store.withPrefix("norm").createTensorWithTags2("weight", .{.d}, .{ .d = .voc }), .eps = config.rms_norm_eps },
             .layers = layers,
         };
@@ -247,7 +247,7 @@ pub const Llama = struct {
     }
 
     pub fn embed(embed_tokens_: zml.nn.TokenEmbedding, tokens_: Tensor) Tensor {
-        return embed_tokens_.forward(tokens_).withPartialTags(.{.d}); // .withPartitioning(.{ .d = .model });
+        return embed_tokens_.forward(tokens_).withPartialTags(.{.d});
     }
 };
 
@@ -287,19 +287,17 @@ pub const TransformerLayer = struct {
 
         const x0_normalized = self.input_layernorm.forward(x0);
         const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache, attention_metadata, attention_parameters);
-        const x1 = x0.add(delta0); // .withPartitioning(.{ .d = .model });
+        const x1 = x0.add(delta0);
 
         // Fully Connected
         const x1_normalized = self.post_attention_layernorm.forward(x1);
         const x2 = self.mlp.forward(x1_normalized).add(x1).rename(.{ .dout = .d });
 
-        const output = x2.reuseBuffer(x0); // .withPartitioning(.{ .d = .model });
-
-        return .{ output, updated_kv_cache };
+        return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
 };
 
-pub const RmsNorm = struct {
+const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-5,
 
