@@ -4,6 +4,7 @@ const stdx = @import("stdx");
 
 pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
     const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
+        .{ "libcuda.so.1", "libcuda.so.1" },
         .{ "libcublas.so", "libcublas.so.13" },
         .{ "libcublasLt.so", "libcublasLt.so.13" },
         .{ "libcudart.so", "libcudart.so.13" },

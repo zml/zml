@@ -14,6 +14,7 @@ ARCH = "linux-x86_64"
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
 CUDA_VERSION = "13.1.1"
+CUDA_VARIANT = "cuda13.1"
 CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a9ecb1f0d422"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
@@ -50,6 +51,21 @@ CUDA_PACKAGES = {
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
+        ),
+    ]),
+    "cuda_compat": "\n".join([
+        packages.filegroup(
+            name = "cuda_compat",
+            srcs = [
+                "compat/libcuda.so.1",
+                "compat/libcudadebugger.so.1",
+                "compat/libnvidia-gpucomp.so.590.48.01",
+                "compat/libnvidia-nvvm.so.4",
+                "compat/libnvidia-nvvm70.so.4",
+                "compat/libnvidia-pkcs11-openssl3.so.590.48.01",
+                "compat/libnvidia-ptxjitcompiler.so.1",
+                "compat/libnvidia-tileiras.so.590.48.01",
+            ],
         ),
     ]),
     "libcufft": packages.filegroup(
@@ -188,6 +204,7 @@ def _cuda_impl(mctx):
         arch_data = pkg_data.get(ARCH)
         if not arch_data:
             continue
+        arch_data = arch_data.get(CUDA_VARIANT, None) or arch_data
         http_archive(
             name = pkg,
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,

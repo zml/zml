@@ -24,6 +24,7 @@ copy_to_directory(
         ":libpjrt_cuda_so",
         "@cuda_cudart",
         "@cuda_cupti",
+        "@cuda_compat",
         "@cuda_nvcc",
         "@libnvvm",
         "@cuda_nvrtc",
@@ -40,6 +41,7 @@ copy_to_directory(
         "@zml//platforms/cuda:zmlxcuda",
     ],
     replace_prefixes = {
+        "compat": "lib",
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
         "libpjrt_cuda_so": "lib",
