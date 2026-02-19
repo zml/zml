@@ -25,10 +25,11 @@ zig_library(
     ],
 )
 
-zig_srcs(
-    name = "sources",
-    zig_lib = ":sentencepiece",
-)
+# todo: reenable after fix
+# zig_srcs(
+#     name = "sources",
+#     zig_lib = ":sentencepiece",
+# )
 
 cc_static_library(
     name="sentencepiece_static",
