@@ -601,8 +601,11 @@ pub fn runPipeline(
     const reflect_pad: usize = n_fft / 2;
 
     const n_prefill_stdin: usize = @as(usize, sp.n_delay_tokens + 1) * sp.raw_audio_length_per_tok;
-    const stdin_audio = try readStdinSamples(allocator, stdin_reader_interface, n_prefill_stdin);
+    const prefill_raw_buf = try allocator.alloc(u8, n_prefill_stdin * 2);
+    defer allocator.free(prefill_raw_buf);
+    const stdin_audio = try allocator.alloc(f32, n_prefill_stdin);
     defer allocator.free(stdin_audio);
+    try readStdinSamplesInto(stdin_reader_interface, prefill_raw_buf, stdin_audio);
 
     // Pad: [left_pad zeros][stdin audio][right_pad zeros]
     const right_pad: usize = @as(usize, sp.n_right_pad_tokens) * sp.raw_audio_length_per_tok;
@@ -677,20 +680,6 @@ pub fn runPipeline(
     const initial_audio_history = reflect_padded_audio[history_start .. history_start + audio_overlap];
 
     try runGenerationLoop(&ctx, tokenizer, initial_audio_history, stdin_reader_interface, generated_token_slice);
-}
-
-fn readStdinSamples(allocator: std.mem.Allocator, reader: *std.Io.Reader, n_samples: usize) ![]f32 {
-    const byte_count = n_samples * 2;
-    const raw = try allocator.alloc(u8, byte_count);
-    defer allocator.free(raw);
-    try reader.readSliceAll(raw);
-
-    const samples = try allocator.alloc(f32, n_samples);
-    for (0..n_samples) |i| {
-        const offset = i * 2;
-        samples[i] = @as(f32, @floatFromInt(std.mem.bytesToValue(i16, raw[offset..][0..2]))) / 32768.0;
-    }
-    return samples;
 }
 
 fn readStdinSamplesInto(reader: *std.Io.Reader, raw_buf: []u8, samples: []f32) !void {
