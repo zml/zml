@@ -1,18 +1,19 @@
-import torch
-import transformers
+import time
 import sys
 import os
-# from diffusers import Flux2KleinPipeline
+
+import torch
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__))))
+# from diffusers import Flux2KleinPipeline
+# uv pip install git+https://github.com/huggingface/diffusers.git
+# uv pip install torch pils accelerate transformers
+
+# export CUDA_VISIBLE_DEVICES=0
 from flux2.pipeline_flux2_klein import Flux2KleinPipeline
-import time
 
 
 
 def run_pipeline():
-    # uv pip install git+https://github.com/huggingface/diffusers.git
-    # uv pip install torch pils accelerate transformers
-    # export CUDA_VISIBLE_DEVICES=0
 
     dtype = torch.bfloat16
     torch.set_default_dtype(dtype)

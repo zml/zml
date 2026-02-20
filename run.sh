@@ -17,14 +17,14 @@ export CUDA_VISIBLE_DEVICES=0
     # --config=release \
 
     # --run_under="lldb --batch -o run -k bt -k exit --" \
+    # --kitty-output \
+    # --interactive \
 bazel run //examples/flux2 \
     --//platforms:cuda=false -- \
-    --kitty-output \
-    --interactive \
     --model=/Users/kevin/FLUX.2-klein-4B \
     --prompt="A photo of a cat on a bed" \
-    --resolution=LD \
-    --num-inference-steps=2 \
+    --resolution=HLD \
+    --num-inference-steps=1 \
     --random-seed=0 \
     --output-image-path=/Users/kevin/zml/flux_klein_zml_result.png \
     --generator-type=torch
