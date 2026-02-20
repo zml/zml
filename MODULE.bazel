@@ -68,16 +68,16 @@ use_repo(python, "python_versions")
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip.parse(
     download_only = True,
-    extra_pip_args = [
-        "--abi=cp312",
-        "--implementation=cp",
-        "--python-version=312",
-        "--platform=linux_x86_64",
-        "--platform=manylinux2014_x86_64",
-        "--platform=manylinux_2_27_x86_64",
-        "--platform=manylinux_2_28_x86_64",
-        "--platform=manylinux_2_29_x86_64",
-    ],
+    # extra_pip_args = [
+    #     "--abi=cp312",
+    #     "--implementation=cp",
+    #     "--python-version=312",
+    #     "--platform=linux_x86_64",
+    #     "--platform=manylinux2014_x86_64",
+    #     "--platform=manylinux_2_27_x86_64",
+    #     "--platform=manylinux_2_28_x86_64",
+    #     "--platform=manylinux_2_29_x86_64",
+    # ],
     hub_name = "neuron_py_deps",
     python_version = "3.12",
     requirements_lock = "//platforms/neuron:requirements.lock.txt",
@@ -104,6 +104,14 @@ use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
+
+pip.parse(
+    download_only = True,
+    hub_name = "tpu_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//platforms/tpu:requirements.lock.txt",
+)
+use_repo(pip, "tpu_py_deps")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")

@@ -37,7 +37,7 @@ def extract_backend_config(op) -> str | None:
     return None
 
 
-def flash_attention_on_tpu(kernel_params:str) -> str:
+def flash_attention_on_tpu(kernel_params:str) -> str | None:
 
     _kernel_params: dict = json.loads(kernel_params)
     batch_size: int = _kernel_params["batch_size"]

@@ -1,5 +1,9 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 
 cc_library(
     name = "empty",
@@ -28,4 +32,83 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
+)
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = [
+        "--emit-index-url",
+        "--emit-find-links",
+        "--index-strategy=unsafe-best-match",
+        "--upgrade",
+        "--python-platform=x86_64-unknown-linux-gnu",
+    ],
+    python_version = "3.12",
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "gen_ir",
+    srcs = ["gen_ir.py"],
+    deps = ["@tpu_py_deps//jax"],
+)
+
+runfiles_to_default(
+    name = "gen_ir_files",
+    deps = [":gen_ir"],
+)
+
+zig_binary(
+    name = "gen_ir_zig",
+    data = [":gen_ir_files"],
+    visibility = ["//visibility:public"],
+    linkopts = select({
+        "@platforms//os:macos": ["-Wl,-rpath,@executable_path/../lib"],
+        "//conditions:default": ["-Wl,-rpath,$$ORIGIN/../lib"],
+    }),
+    main = "gen_ir.zig",
+    deps = [
+        ":libpython",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+cc_library(
+    name = "libpython",
+    hdrs = ["libpython.h"],
+    deps = [
+        "@rules_python//python/cc:current_py_cc_headers",
+        "@rules_python//python/cc:current_py_cc_libs",
+    ],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":gen_ir_zig",
+        ":gen_ir_files",
+        ":gen_ir",
+    ],
+    replace_prefixes = {
+        "gen_ir.py": "site-packages/gen_ir.py",
+        "gen_ir_zig": "bin/gen_ir_zig",
+    },
+    exclude_srcs_patterns = [
+        "**/tests/**",
+        # "**/include/**",
+        "**/_solib_*/**",
+    ],
+    include_srcs_patterns = [
+        "**gen_ir**",
+        "gen_ir_zig",
+        "**/lib**",
+        "lib/python*/**",
+        "site-packages/**",
+    ],
+    allow_overwrites = True,
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+    hardlink = "on",
 )

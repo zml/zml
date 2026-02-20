@@ -7,6 +7,7 @@ zls_completion(
         "//examples/lfm",
         "//examples/llama",
         "//examples/mnist",
+        "//platforms/tpu:gen_ir_zig",
         "//stdx",
         "//zml",
     ],
