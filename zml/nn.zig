@@ -872,30 +872,31 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
     return out;
 }
 
-// test resizeBilinear {
-//     const platform = zml.testing.env();
-//     // Only test shapes
-//     var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
-//     defer comp.deinit();
-//     comp.activate();
-//     defer comp.deactivate();
+test resizeBilinear {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
+    // Only test shapes
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
 
-//     const block = @import("mlir").Block.init(&.{}, &.{});
-//     comp.pushBlock(block);
-//     defer comp.popBlock();
+    const block = @import("mlir").Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
 
-//     inline for (.{
-//         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
-//         .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
-//         .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
-//     }) |testcase| {
-//         const x_shape, const resizing, const res_shape = testcase;
-//         const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
-//         const y = resizeBilinear(x, resizing, .{});
-//         try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
-//         try std.testing.expect(y.value().owner().verify());
-//     }
-// }
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+        const y = resizeBilinear(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
 
 pub fn resizeLinear1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
     const ax = image.axis(axis);
@@ -938,30 +939,31 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
     return out;
 }
 
-// test resizeBicubic {
-//     const platform = zml.testing.env();
-//     // Only test shapes
-//     var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
-//     defer comp.deinit();
-//     comp.activate();
-//     defer comp.deactivate();
+test resizeBicubic {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
+    // Only test shapes
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
 
-//     const block = @import("mlir").Block.init(&.{}, &.{});
-//     comp.pushBlock(block);
-//     defer comp.popBlock();
+    const block = @import("mlir").Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
 
-//     inline for (.{
-//         .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
-//         .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
-//         .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
-//     }) |testcase| {
-//         const x_shape, const resizing, const res_shape = testcase;
-//         const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
-//         const y = resizeBicubic(x, resizing, .{});
-//         try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
-//         try std.testing.expect(y.value().owner().verify());
-//     }
-// }
+    inline for (.{
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20 }, .{ .a = 20, .b = 10 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .b = 5 }, .{ .a = 10, .b = 5 } },
+        .{ .{ .a = 10, .b = 10 }, .{ .a = 20, .b = 5 }, .{ .a = 20, .b = 5 } },
+    }) |testcase| {
+        const x_shape, const resizing, const res_shape = testcase;
+        const x = Tensor.constant(.{ .f16 = 0 }).broad(Shape.init(x_shape, .f16));
+        const y = resizeBicubic(x, resizing, .{});
+        try zml.testing.expectEqualShapes(Shape.init(res_shape, .f16), y.shape());
+        try std.testing.expect(y.value().owner().verify());
+    }
+}
 
 pub fn resizeCubic1d(image: Tensor, axis: i8, new_len: u63, opt: ResizeOpts) Tensor {
     // Extract neighboring pixels from the image.
