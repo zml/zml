@@ -148,18 +148,4 @@ pub const StreamParams = struct {
             .prompt_len = 1 + n_left_pad_tokens + n_delay_tokens,
         };
     }
-
-    pub fn numFrames(self: StreamParams, audio_len: usize) u32 {
-        return @intCast(audio_len / self._hop_length);
-    }
-
-    pub fn totalSteps(self: StreamParams, audio_len: usize) u32 {
-        const nf = self.numFrames(audio_len);
-        const encoder_seq_len = (nf + 1) / 2;
-        return (encoder_seq_len + self.dsf - 1) / self.dsf;
-    }
-
-    pub fn paddedMelFrames(self: StreamParams, audio_len: usize) u32 {
-        return self.totalSteps(audio_len) * self.mel_per_step;
-    }
 };
