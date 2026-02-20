@@ -13,7 +13,6 @@ from jax._src.pallas import pallas_call
 
 
 # Monkey patch pallas_call to register a lowering rule for CPU
-
 def cpu_lowering_tpu_wrapper(ctx, *in_nodes, **params):
     params.pop('backend', None)
     params.pop('which_linear', None)
@@ -24,23 +23,21 @@ def cpu_lowering_tpu_wrapper(ctx, *in_nodes, **params):
 mlir.register_lowering(pallas_call.pallas_call_p, cpu_lowering_tpu_wrapper, platform='cpu')
 
 
-# from kernel import diffuse_on
-# def diffuse_on_cpu():
-#     nx = 10
-#     ny = 10
-#     nu = .05  # the value of viscosity
-#     sigma = .25  # coef conduction thermique
-#     dx = 2 / (nx - 1)
-#     dy = 2 / (ny - 1)
-#     dt = sigma * (dx * dy) / nu
-#     u = jnp.ones([ny, nx])
-#     u = u.at[int(.5 / dy):int(1 / dy + 1), int(.5 / dx):int(1 / dx + 1)].set(10)
-#     u = diffuse_on(u, 10, nu, dt, dx, dy, nx, ny)
-#     print("--- JAX Intermediate Representation (HLO) ---")
-#     lowered = diffuse_on.lower(u, 10, nu, dt, dx, dy, nx, ny)
-#     print(lowered.as_text())
+def extract_backend_config(op) -> str | None:
+    if 'backend_config' in op.attributes:
+        attr = op.attributes['backend_config']
+        return attr.value if hasattr(attr, 'value') else str(attr)
 
-def flash_attention_on_tpu(kernel_params:str) -> None:
+    for region in op.regions:
+        for block in region.blocks:
+            for sub_op in block.operations:
+                result = extract_backend_config(sub_op)
+                if result is not None:
+                    return result
+    return None
+
+
+def flash_attention_on_tpu(kernel_params:str) -> str:
 
     _kernel_params: dict = json.loads(kernel_params)
     batch_size: int = _kernel_params["batch_size"]
@@ -49,20 +46,19 @@ def flash_attention_on_tpu(kernel_params:str) -> None:
     kv_seq_len: int = _kernel_params["kv_seq_len"]
     d_model: int = _kernel_params["d_model"]
 
-    # Create dummy shape representations to trace the IR without executing
     q = jax.ShapeDtypeStruct((batch_size, num_heads, q_seq_len, d_model), jnp.float32)
     k = jax.ShapeDtypeStruct((batch_size, num_heads, kv_seq_len, d_model), jnp.float32)
     v = jax.ShapeDtypeStruct((batch_size, num_heads, kv_seq_len, d_model), jnp.float32)
 
-    # We use jax.make_jaxpr to get the symbolic execution without running it
     comp_target = jax.jit(flash_attention)
 
-    print("--- Flash Attention Pallas Execution Trace (JAXPR) ---")
-    # print(pallas_call_jaxpr)
-    print(comp_target.lower(q, k, v).as_text())
+    mlir_ast: jax._src.stages.Lowered = comp_target.lower(q, k, v)
+    # print(mlir_ast.as_text())
+    
+    backend_config = extract_backend_config(mlir_ast.compiler_ir().operation)
+    return backend_config
 
-
-def paged_attention_on_tpu(kernel_params:str) -> None:
+def paged_attention_on_tpu(kernel_params:str) -> str | None:
     
     _kernel_params: dict = json.loads(kernel_params)
     batch_size: int = _kernel_params["batch_size"]
@@ -81,24 +77,23 @@ def paged_attention_on_tpu(kernel_params:str) -> None:
     page_indices = jnp.zeros((batch_size, pages_per_sequence), jnp.int32)
 
     comp_target = jax.jit(paged_attention, static_argnames=["pages_per_compute_block"])
-    print("--- Paged Attention Pallas Execution Trace (MLIR) ---")
-    print(comp_target.lower(
+    mlir_ast: jax._src.stages.Lowered = comp_target.lower(
         q, k, v, lengths, page_indices, 
         pages_per_compute_block=pages_per_compute_block
-    ).as_text())
+    )
+    # print(mlir_ast.as_text())
+    
+    backend_config = extract_backend_config(mlir_ast.compiler_ir().operation)
+    return backend_config
 
 def main():
     print("Hello from jax!")
-    # print("================= diffuse_on_cpu =================")
-    # diffuse_on_cpu()
     print("================= flash_attention_on_tpu =================")
     flash_attention_params_json: str = '{"batch_size": 1, "num_heads": 8, "q_seq_len": 128, "kv_seq_len": 128, "d_model": 64}'
-    flash_attention_on_tpu(flash_attention_params_json)
-    # print("================= paged_attention_on_tpu =================")
-    # paged_attention_params_json: str = '{"batch_size": 1, "num_q_heads": 8, "num_kv_heads": 1, "head_dim": 128, "pages_per_sequence": 128, "total_num_pages": 8, "page_size": 16, "pages_per_compute_block": 2}'
-    # paged_attention_on_tpu(paged_attention_params_json)
-
-
+    print("Flash Attention Backend Config:", flash_attention_on_tpu(flash_attention_params_json))
+    print("================= paged_attention_on_tpu =================")
+    paged_attention_params_json: str = '{"batch_size": 1, "num_q_heads": 8, "num_kv_heads": 1, "head_dim": 128, "pages_per_sequence": 128, "total_num_pages": 8, "page_size": 16, "pages_per_compute_block": 2}'
+    print("Paged Attention Backend Config:", paged_attention_on_tpu(paged_attention_params_json))
 
 
 if __name__ == "__main__":
