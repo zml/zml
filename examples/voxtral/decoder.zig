@@ -6,11 +6,9 @@ const Tensor = zml.Tensor;
 const cfg = @import("config.zig");
 const Config = cfg.Config;
 
-const enc = @import("encoder.zig");
-const SwiGluFfn = enc.SwiGluFfn;
-
 const common = @import("common.zig");
 const rmsNorm = common.rmsNorm;
+const SwiGluFfn = common.SwiGluFfn;
 
 /// Adapter: encoder→decoder projection.
 /// Reshapes encoder output [s, d] → [s/dsf, d*dsf] (concatenate `downsample_factor` consecutive timesteps),

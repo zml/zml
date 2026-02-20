@@ -211,28 +211,4 @@ pub const TransformerLayer = struct {
 
 pub const SelfAttention = common.SelfAttention(true);
 
-pub const SwiGluFfn = struct {
-    w1: zml.nn.Linear,
-    w2: zml.nn.Linear,
-    w3: zml.nn.Linear,
-
-    pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
-        return .{
-            .w1 = common.linear(store.withPrefix("w1")),
-            .w2 = common.linear(store.withPrefix("w2")),
-            .w3 = common.linear(store.withPrefix("w3")),
-        };
-    }
-
-    pub fn unload(self: *zml.Bufferized(SwiGluFfn)) void {
-        common.deinitBufferized(self);
-    }
-
-    /// x: [s, d] -> [s, d]
-    pub fn forward(self: SwiGluFfn, x: Tensor) Tensor {
-        const gate = self.w1.forward(x).silu();
-        const up = self.w3.forward(x);
-
-        return self.w2.forward(gate.mul(up).rename(.{ .dout = .d })).rename(.{ .dout = .d });
-    }
-};
+pub const SwiGluFfn = common.SwiGluFfn;

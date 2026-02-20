@@ -251,8 +251,7 @@ fn runMelPrefill(ctx: *PipelineContext, padded_audio: []const f32) !zml.Buffer {
     var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
     defer audio_buffer.deinit();
 
-    var mel_output: zml.Buffer = try .uninitialized(io, platform,
-        .init(.{ .channels = 128, .time = sp.prompt_len * sp.mel_per_step }, .f32), .{});
+    var mel_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.prompt_len * sp.mel_per_step }, .f32), .{});
 
     var args = try ctx.exes.mel_prefill.args(ctx.allocator);
     defer args.deinit(ctx.allocator);
