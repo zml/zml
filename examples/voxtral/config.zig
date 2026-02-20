@@ -112,12 +112,10 @@ pub fn parseConfig(allocator: std.mem.Allocator, io: std.Io, model_dir: std.Io.D
 pub const StreamParams = struct {
     dsf: u32,
     mel_per_step: u32,
-    chunk_mel: u32,
     chunk_audio: u32,
     raw_audio_length_per_tok: u32,
     _hop_length: u32,
     n_delay_tokens: u32,
-    n_right_pad_tokens: u32,
     left_pad: u32,
     prompt_len: u32,
 
@@ -138,12 +136,10 @@ pub const StreamParams = struct {
         return .{
             .dsf = dsf,
             .mel_per_step = mel_per_step,
-            .chunk_mel = mel_per_step,
             .chunk_audio = (mel_per_step - 1) * hop_length + window_size,
             .raw_audio_length_per_tok = raw_audio_length_per_tok,
             ._hop_length = hop_length,
             .n_delay_tokens = n_delay_tokens,
-            .n_right_pad_tokens = (n_delay_tokens + 1) + 10,
             .left_pad = n_left_pad_tokens * raw_audio_length_per_tok,
             .prompt_len = 1 + n_left_pad_tokens + n_delay_tokens,
         };

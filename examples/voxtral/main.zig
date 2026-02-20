@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(prompt_tokens);
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
-        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.45 } } },
+        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.75 } } },
     });
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
