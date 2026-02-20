@@ -43,13 +43,6 @@ pub const Adapter = struct {
         var h = encoder_out;
         const dsf = self.downsample_factor;
 
-        // Pad encoder output to next multiple of downsample_factor
-        const seq_len: usize = @intCast(h.dim(.s));
-        const remainder = seq_len % dsf;
-        if (remainder > 0) {
-            h = h.pad(0, .{ .s = Tensor.Pad{ .high = @as(i64, @intCast(dsf - remainder)) } });
-        }
-
         // Reshape [s, d] → [s/dsf, d*dsf] by concatenating consecutive timesteps.
         h = h.splitAxis(.s, .{ .s = .auto, .group = dsf })
             .merge(.{ .d = .{ .group, .d } });
@@ -121,7 +114,7 @@ pub const Decoder = struct {
         h = rmsNorm(h, self.norm, self.norm_eps);
 
         // Compute logits in f32 for precision
-        const logits = h.convert(.f32).dot(self.tok_embeddings.convert(.f32), .d);
+        const logits = h.dot(self.tok_embeddings, .d).convert(.f32);
         const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{ .temperature = 0 }, rng);
 
         return .{ output_tokens.convert(.u32), cache, new_rng };
