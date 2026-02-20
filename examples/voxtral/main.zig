@@ -65,6 +65,11 @@ pub fn main(init: std.process.Init) !void {
 
     const sp: StreamParams = .init(config, args.transcription_delay_ms, n_left_pad_tokens);
 
+    const delay_ms: u32 = @intFromFloat(args.transcription_delay_ms);
+    if (delay_ms < 80 or delay_ms > 2400 or delay_ms % 80 != 0) {
+        std.debug.panic("transcription_delay_ms must be a multiple of 80 in range [80, 2400], got {}", .{delay_ms});
+    }
+
     // Build tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
     const tokens = try allocator.alloc(u32, sp.prompt_len);
     defer allocator.free(tokens);
@@ -119,6 +124,7 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer_future = try io.concurrent(voxtral.loadTokenizer, .{ allocator, io, model_dir, &progress });
 
     var compiled_mel_step_future = try io.concurrent(voxtral.compileMelStep, .{ allocator, io, platform, melspectro_model, sp, &progress });
+    var compiled_mel_prefill_future = try io.concurrent(voxtral.compileMelPrefill, .{ allocator, io, platform, melspectro_model, sp, &progress });
 
     var compiled_conv_stem_prefill_future = try io.concurrent(voxtral.compileConvStemPrefill, .{ allocator, io, platform, encoder_model, sp.prompt_len * sp.mel_per_step, &progress });
     var compiled_conv_stem_step_future = try io.concurrent(voxtral.compileConvStemStep, .{ allocator, io, platform, encoder_model, sp, &progress });
@@ -145,6 +151,9 @@ pub fn main(init: std.process.Init) !void {
     // -- Compiled models
     var compiled_mel_step = try compiled_mel_step_future.await(io);
     defer compiled_mel_step.deinit();
+
+    var compiled_mel_prefill = try compiled_mel_prefill_future.await(io);
+    defer compiled_mel_prefill.deinit();
 
     var compiled_conv_stem_prefill = try compiled_conv_stem_prefill_future.await(io);
     defer compiled_conv_stem_prefill.deinit();
@@ -204,6 +213,7 @@ pub fn main(init: std.process.Init) !void {
         sp,
         .{
             .mel_step = &compiled_mel_step,
+            .mel_prefill = &compiled_mel_prefill,
             .conv_stem_prefill = &compiled_conv_stem_prefill,
             .conv_stem_step = &compiled_conv_stem_step,
             .encoder_prefill = &compiled_encoder_prefill,

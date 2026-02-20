@@ -126,6 +126,13 @@ pub const Decoder = struct {
 
         return .{ output_tokens.convert(.u32), cache, new_rng };
     }
+
+    /// Like forward, but also returns the incremented token index (on-device).
+    pub fn forwardStep(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng, Tensor } {
+        const output_tokens, const cache, const new_rng = self.forward(text_tokens, audio_embed, token_index, kv_cache, t_cond, rng, attention_metadata, attention_parameters);
+        const next_index = token_index.addConstant(1).reuseBuffer(token_index);
+        return .{ output_tokens, cache, new_rng, next_index };
+    }
 };
 
 /// AdaRmsNorm: per-layer time conditioning.
@@ -149,7 +156,7 @@ pub const AdaRmsNorm = struct {
     /// h: [s, d], t_cond: [d] → [s, d]
     pub fn forward(self: AdaRmsNorm, h: Tensor, t_cond: Tensor) Tensor {
         const ada_scale = self.up.forward(self.down.forward(t_cond).gelu().rename(.{ .dout = .d })).rename(.{ .dout = .d });
-        const one_plus_scale = ada_scale.broad(h.shape()).add(Tensor.scalar(1.0, h.dtype()).broad(h.shape()));
+        const one_plus_scale = ada_scale.addConstant(1.0).broad(h.shape());
 
         return h.mul(one_plus_scale);
     }
