@@ -122,24 +122,61 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
             k = k.rename(.{ .s = .k });
             v = v.rename(.{ .s = .k });
 
+            const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
+
             if (shift_buffer) {
-                const shifted_cache, const clamped_token_index = kv_cache.shiftIfNeeded(token_index, @intCast(x.dim(.s)));
 
-                const write_pos = b: {
-                    const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
-                        .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
-                    break :b temp.add(clamped_token_index.broad(temp.shape()));
-                };
+                // -- Circular implementation
 
-                const new_kv_cache = shifted_cache.update(k, v, write_pos.rename(.{ .s = .k }));
+                const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
+                const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
                 k = new_kv_cache.keys().convert(dtype);
                 v = new_kv_cache.values().convert(dtype);
 
-                const attn_out = zml.attention.attention(q, k, v, clamped_token_index, attention_metadata, attention_parameters, .{
+                // Reorder K/V from circular buffer to temporal order for correct causal masking.
+                // When the cache wraps, physical order != temporal order, which breaks FA2's
+                // position-based causal mask for multi-token (q_len > 1) attention.
+                const pos_end = token_index.addConstant(x.dim(.s));
+                const is_full = pos_end.cmp(.GE, cache_size);
+                const rotation_start = pos_end.remainder(cache_size);
+                const safe_start = is_full.select(rotation_start, Tensor.scalar(@as(u32, 0), token_index.dtype()));
+                const reorder_arange = Tensor.arange(.{ .end = kv_cache.k.dim(.k) }, token_index.dtype()).withTags(.{.kk});
+                const reorder_idx = reorder_arange.add(safe_start.broad(reorder_arange.shape()))
+                    .remainder(cache_size.broad(reorder_arange.shape()));
+                k = k.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+                v = v.gather(.{ .k = reorder_idx }, .{}).rename(.{ .kk = .k });
+
+                // Cap token_index so seqused_k doesn't exceed cache bounds
+                const max_token_index = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k) - x.dim(.s))), token_index.dtype());
+                const attn_token_index = token_index.minimum(max_token_index);
+                const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
                     .sliding_window = @intCast(attn_config.sliding_window),
                 });
 
+                // -- END Cicrular implem
+
+                // -- Shift implem
+
+                // const shifted_cache, const clamped_token_index = kv_cache.shiftIfNeeded(token_index, @intCast(x.dim(.s)));
+
+                // const write_pos = b: {
+                //     const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
+                //         .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
+                //     break :b temp.add(clamped_token_index.broad(temp.shape()));
+                // };
+
+                // const new_kv_cache = shifted_cache.update(k, v, write_pos.rename(.{ .s = .k }));
+                // k = new_kv_cache.keys().convert(dtype);
+                // v = new_kv_cache.values().convert(dtype);
+
+                // const attn_out = zml.attention.attention(q, k, v, clamped_token_index, attention_metadata, attention_parameters, .{
+                //     .sliding_window = @intCast(attn_config.sliding_window),
+                // });
+
+                // -- END Shift implem
+
                 const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+
                 return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
             } else {
                 // Sequential: write at pos_index directly (matching reference implementation).
