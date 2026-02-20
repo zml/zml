@@ -4,7 +4,6 @@ const stdx = @import("stdx");
 
 pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque {
     const replacements: std.StaticStringMap([:0]const u8) = .initComptime(.{
-        .{ "libcuda.so.1", "libcuda.so.1" },
         .{ "libcublas.so", "libcublas.so.13" },
         .{ "libcublasLt.so", "libcublasLt.so.13" },
         .{ "libcudart.so", "libcudart.so.13" },
@@ -14,6 +13,9 @@ pub export fn zmlxcuda_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque 
         .{ "libcusolver.so", "libcusolver.so.12" },
         .{ "libcusparse.so", "libcusparse.so.12" },
         .{ "libnccl.so", "libnccl.so.2" },
+
+        // CUDA Compat
+        .{ "libcuda.so.1", "libcuda.so.1" },
     });
 
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;

@@ -8,6 +8,7 @@ package(default_visibility = ["//visibility:public"])
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_import.bzl", "cc_import")
+load("@zml//bazel:patchelf.bzl", "patchelf")
 """
 
 ARCH = "linux-x86_64"
@@ -24,6 +25,14 @@ CUDNN_REDIST_JSON_SHA256 = "6ad4f2c047ee03131d1efb95db56f78c24953cb30880a2edcf99
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
 NVSHMEM_VERSION = "3.5.19"
 NVSHMEM_REDIST_JSON_SHA256 = "6dced4193eb728542504b346cfb768da6e3de2abca0cded95fda3a69729994d2"
+
+CUDA_COMPAT_FILES = [
+    "libcuda.so.1",
+    "libcudadebugger.so.1",
+    "libnvidia-nvvm.so.4",
+    "libnvidia-nvvm70.so.4",
+    "libnvidia-ptxjitcompiler.so.1",
+]
 
 _UBUNTU_PACKAGES = {
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
@@ -54,17 +63,23 @@ CUDA_PACKAGES = {
         ),
     ]),
     "cuda_compat": "\n".join([
+        packages.patchelf(
+            name = "{}.patchelf".format(file),
+            set_rpath = "$ORIGIN",
+            src = "compat/{}".format(file),
+            soname = file,
+        )
+        for file in CUDA_COMPAT_FILES
+    ] + [
         packages.filegroup(
             name = "cuda_compat",
             srcs = [
-                "compat/libcuda.so.1",
-                "compat/libcudadebugger.so.1",
                 "compat/libnvidia-gpucomp.so.590.48.01",
-                "compat/libnvidia-nvvm.so.4",
-                "compat/libnvidia-nvvm70.so.4",
                 "compat/libnvidia-pkcs11-openssl3.so.590.48.01",
-                "compat/libnvidia-ptxjitcompiler.so.1",
                 "compat/libnvidia-tileiras.so.590.48.01",
+            ] + [
+                ":{}.patchelf".format(file)
+                for file in CUDA_COMPAT_FILES
             ],
         ),
     ]),
