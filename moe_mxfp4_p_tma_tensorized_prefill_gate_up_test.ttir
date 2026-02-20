@@ -135,7 +135,6 @@ module {
     %WMxScale_48 = arith.trunci %WMxScale__shape_2_26 : i64 to i32 loc(#loc228)
     %WMxScale_49 = tt.make_tensor_descriptor %WMxScale__base, [%WMxScale, %WMxScale_47, %WMxScale_48], [%WMxScale__stride_0_27, %WMxScale__stride_1_28, %c1_i64] : <i8>, <tensor<1x2x64xui8>> loc(#loc228)
     %Y_50 = tt.make_tensor_descriptor %Y__base, [%Y, %Y_35, %Y_36, %Y_37, %Y_38], [%Y__stride_0_6, %Y__stride_1_7, %Y__stride_2_8, %Y__stride_3_9, %c1_i64] : <bf16>, <tensor<1x1x1x32x64xbf16>> loc(#loc301)
-    tt.print " >>>>> Yes W IS MICROSCALED uint8" {hex = false, isSigned = array<i32>} loc(#loc230)
     %useful_grid_m = tt.addptr %XBlockOffs, %c32_i32 : !tt.ptr<i32>, i32 loc(#loc302)
     %useful_grid_m_51 = tt.load %useful_grid_m : !tt.ptr<i32> loc(#loc303)
     %num_blocks = arith.muli %batch_size_32, %useful_grid_m_51 : i32 loc(#loc304)

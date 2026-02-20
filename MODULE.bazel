@@ -116,7 +116,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "linenoise", "mnist", "org_swig_swig", "translate-c", "xla")
+use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "fused_moe", "linenoise", "mnist", "org_swig_swig", "translate-c", "xla")
 
 
 

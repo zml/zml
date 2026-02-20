@@ -1,0 +1,24 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //examples/moe_test:moe_test (0 packages loaded, 0 targets configured)
+Analyzing: target //examples/moe_test:moe_test (0 packages loaded, 0 targets configured)
+
+INFO: Analyzed target //examples/moe_test:moe_test (0 packages loaded, 0 targets configured).
+[1 / 4] zig build-lib //examples/moe_test:moe_test; 1s processwrapper-sandbox
+INFO: From zig build-lib //examples/moe_test:moe_test:
+warning: add 'external/+non_module_deps+com_google_sentencepiece' to header searchlist '-isystem' conflicts with '-I'
+warning: add 'bazel-out/linux_amd64-dbg/bin/external/+non_module_deps+com_google_sentencepiece' to header searchlist '-isystem' conflicts with '-I'
+[2 / 4] [Prepa] Linking examples/moe_test/moe_test
+INFO: From Linking examples/moe_test/moe_test:
+clang++: warning: argument unused during compilation: '-static-libgcc' [-Wunused-command-line-argument]
+INFO: Found 1 target...
+Target //examples/moe_test:moe_test up-to-date:
+  bazel-bin/examples/moe_test/moe_test
+INFO: Elapsed time: 4.555s, Critical Path: 4.33s
+INFO: 3 processes: 1 internal, 2 processwrapper-sandbox.
+INFO: Build completed successfully, 3 total actions
+INFO: Running command line: bazel-bin/examples/moe_test/moe_test <args omitted>
+warning(zml/platforms/cuda): Detected /cuda/ in LD_LIBRARY_PATH. This can lead to undefined behaviors and crashes
+info(pjrt): Loading: libpjrt_cuda.so...
+info(pjrt): Loaded: libpjrt_cuda.so [53.577ms]

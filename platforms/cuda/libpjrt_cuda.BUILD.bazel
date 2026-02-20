@@ -19,6 +19,7 @@ copy_to_directory(
     srcs = [
         ":libpjrt_cuda_so",
         "@cuda_cudart",
+        "@cuda_crt",
         "@cuda_cupti",
         "@cuda_nvcc",
         "@libnvvm",

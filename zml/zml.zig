@@ -25,6 +25,7 @@ pub const floats = @import("floats.zig");
 pub const grouped_gemm = @import("grouped_gemm/cublas.zig");
 pub const grouped_gemm_LT = @import("grouped_gemm_LT/cublas.zig");
 pub const io = @import("io.zig");
+pub const marlin_moe = @import("marlin_moe/marlin_moe.zig");
 pub const mem = @import("mem.zig");
 pub const Bufferized = mem.Bufferized;
 pub const meta = @import("meta.zig");
