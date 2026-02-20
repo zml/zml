@@ -19,8 +19,8 @@ const Mnist = struct {
 
         pub fn init(store: zml.io.TensorStore.View) Layer {
             return .{
-                .weight = store.createTensorWithTags("weight", .{ .d_out, .d }),
-                .bias = store.createTensorWithTags("bias", .{.d_out}),
+                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
+                .bias = store.createTensor("bias", .{.d_out}, null),
             };
         }
 
@@ -42,9 +42,11 @@ const Mnist = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
+        shardings: []const zml.sharding.Sharding,
     ) !zml.Bufferized(Mnist) {
         return zml.io.load(Mnist, self, allocator, io, platform, .{
             .store = store,
+            .shardings = shardings,
             .parallelism = 1,
             .dma_chunks = 1,
             .dma_chunk_size = 16 * 1024 * 1024,
@@ -92,13 +94,18 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
+    var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
+    defer physical_mesh.deinit();
+
+    const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
+
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
     var exe = blk: {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled model [{D}]", .{stdx.fmt.fmtDuration(start.untilNow(io, .awake))});
-        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input});
+        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{ .shardings = &.{replicated_sharding} });
     };
     defer exe.deinit();
 
@@ -109,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
         defer log.info("✅ Transferred weights [{D}]", .{
             stdx.fmt.fmtDuration(start.untilNow(io, .awake)),
         });
-        break :blk try mnist_model.load(allocator, io, platform, &store);
+        break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store, &.{replicated_sharding});
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 
@@ -133,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     var sample: [28 * 28]u8 align(16) = undefined;
     _ = try dataset.readPositionalAll(io, &sample, 16 + (idx * 28 * 28));
 
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample));
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(input.shape(), &sample), replicated_sharding);
     defer input_buffer.deinit();
 
     printDigit(sample);

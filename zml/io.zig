@@ -9,14 +9,15 @@ const Bufferized = @import("zml.zig").Bufferized;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
-const Partitioner = @import("sharding.zig").Partitioner;
-const Partitioning = @import("sharding.zig").Partitioning;
 const pjrtx = @import("pjrtx.zig");
-const Placement = @import("sharding.zig").Placement;
 const Platform = @import("platform.zig").Platform;
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("sharding.zig").Sharding;
+const sharding_ = @import("sharding.zig");
+const Partitioner = sharding_.Partitioner;
+const Partitioning = sharding_.Partitioning;
+const Placement = sharding_.Placement;
+const Sharding = sharding_.Sharding;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/io");
@@ -132,11 +133,28 @@ pub const TensorStore = struct {
             } else false;
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8) ?Tensor {
+        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
             var buffer: [256]u8 = undefined;
             const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
 
             const ptr = self.store.getPtrFromKey(key) orelse return null;
+            if (@TypeOf(tagz) != @TypeOf(null)) {
+                switch (@typeInfo(@TypeOf(tagz))) {
+                    .optional => if (tagz) |t| {
+                        ptr.shape = ptr.shape.withTags(t);
+                    },
+                    else => ptr.shape = ptr.shape.withTags(tagz),
+                }
+            }
+
+            if (@TypeOf(partitioning) != @TypeOf(null)) {
+                switch (@typeInfo(@TypeOf(partitioning))) {
+                    .optional => if (partitioning) |p| {
+                        ptr.shape = ptr.shape.withPartitioning(p);
+                    },
+                    else => ptr.shape = ptr.shape.withPartitioning(partitioning),
+                }
+            }
 
             const tensor: Tensor = .fromShape(ptr.shape);
             self.store.bindIdToKey(key, tensor.id) catch unreachable;
@@ -144,43 +162,8 @@ pub const TensorStore = struct {
             return tensor;
         }
 
-        pub fn createTensor(self: View, subkey: []const u8) Tensor {
-            return self.maybeCreateTensor(subkey).?;
-        }
-
-        pub fn maybeCreateTensorWithTags(self: View, subkey: []const u8, tagz: anytype) ?Tensor {
-            var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
-
-            const ptr = self.store.getPtrFromKey(key) orelse return null;
-            ptr.shape = ptr.shape.withTags(tagz);
-
-            const tensor: Tensor = .fromShape(ptr.shape);
-            self.store.bindIdToKey(key, tensor.id) catch unreachable;
-
-            return tensor;
-        }
-
-        pub fn maybeCreateTensorWithTags2(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
-
-            const ptr = self.store.getPtrFromKey(key) orelse return null;
-            ptr.shape = ptr.shape.withTags(tagz);
-            ptr.shape = ptr.shape.withPartitioning(partitioning);
-
-            const tensor: Tensor = .fromShape(ptr.shape);
-            self.store.bindIdToKey(key, tensor.id) catch unreachable;
-
-            return tensor;
-        }
-
-        pub fn createTensorWithTags(self: View, subkey: []const u8, tagz: anytype) Tensor {
-            return self.maybeCreateTensorWithTags(subkey, tagz).?;
-        }
-
-        pub fn createTensorWithTags2(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensorWithTags2(subkey, tagz, partitioning).?;
+        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
+            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {
@@ -615,8 +598,7 @@ pub const DirectMemoryWriter = struct {
 pub const LoadOpts = struct {
     parallelism: usize,
     store: *const TensorStore,
-    shardings: []Sharding,
-    replicated_sharding: Sharding,
+    shardings: []const Sharding,
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
     dma_chunk_size: usize,
@@ -638,6 +620,8 @@ pub fn load(
     var buffer_pool: mem.DynamicBufferPool = .init(opts.dma_chunks, opts.dma_chunk_size);
     defer buffer_pool.deinit(dma_alloc.allocator());
 
+    const replicated_sharding = try sharding_.replicatedSharding(opts.shardings[0].physical);
+
     const Ctx = struct {
         allocator: std.mem.Allocator,
         dma_allocator: std.mem.Allocator,
@@ -645,7 +629,7 @@ pub fn load(
         io: std.Io,
         platform: *const Platform,
         buffers: []*Buffer,
-        shardings: []Sharding,
+        shardings: []const Sharding,
         replicated_sharding: Sharding,
         store: *const TensorStore,
         memory: *const Memory,
@@ -662,7 +646,7 @@ pub fn load(
         .pinned_buffer_pool = &buffer_pool,
         .io = io,
         .shardings = opts.shardings,
-        .replicated_sharding = opts.replicated_sharding,
+        .replicated_sharding = replicated_sharding,
         .memory = first_device.memory(.default),
         .progress = opts.progress,
         .group = .init(opts.parallelism),
@@ -686,9 +670,9 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
-                    const sharding_opt = selectSharding(ctx_.shardings, shape);
-                    const sharding = if (sharding_opt) |s| s else blk: {
-                        log.err("no sharding strategy found for tensor {s} with shape {f}", .{ reader.tensor.name, shape });
+                    const select_sharding = selectSharding(ctx_.shardings, shape);
+                    const sharding = if (select_sharding) |s| s else blk: {
+                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
                         break :blk ctx_.replicated_sharding;
                     };
 

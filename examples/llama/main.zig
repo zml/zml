@@ -153,7 +153,7 @@ pub fn main(init: std.process.Init) !void {
 
     const sharding_embeddings: zml.sharding.Sharding = try .initFromStrategy(embeddings_mesh, physical_mesh, embeddings_strategy);
     const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(tp_mesh, physical_mesh, tp_strategy);
-    const sharding_replicated: zml.sharding.Sharding = try .initFromStrategy(try .init("replica_mesh", .{ .replica = .low_bandwidth }), physical_mesh, .init);
+    const sharding_replicated = try zml.sharding.replicatedSharding(physical_mesh);
 
     var shardings_array = [_]zml.sharding.Sharding{ sharding_embeddings, sharding_tp };
     const shardings: []zml.sharding.Sharding = shardings_array[0..];
@@ -182,7 +182,6 @@ pub fn main(init: std.process.Init) !void {
         platform,
         &store,
         shardings,
-        sharding_replicated,
         &progress,
     });
     defer blk: {

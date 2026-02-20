@@ -306,6 +306,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
+    shardings: []const zml.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -340,7 +341,7 @@ pub fn testLayer(
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args);
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = shardings });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
@@ -357,7 +358,14 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{ .dma_chunks = 1, .dma_chunk_size = 4096, .store = activation_store.store, .parallelism = 1 });
+    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{
+        .dma_chunks = 1,
+        .dma_chunk_size = 4096,
+        .store = activation_store.store,
+        .parallelism = 1,
+        .shardings = shardings,
+        .replicated_sharding = replicatedSharding(),
+    });
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();

@@ -218,7 +218,6 @@ pub const Buffer = struct {
 
     /// Copies the content of the Buffer to the provided slice.
     /// The returned slice owns the memory.
-    /// (This path supports non-contiguous shard views.)
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
