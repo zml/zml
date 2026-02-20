@@ -196,6 +196,32 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
     };
 }
 
+pub const SwiGluFfn = struct {
+    w1: zml.nn.Linear,
+    w2: zml.nn.Linear,
+    w3: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View) SwiGluFfn {
+        return .{
+            .w1 = linear(store.withPrefix("w1")),
+            .w2 = linear(store.withPrefix("w2")),
+            .w3 = linear(store.withPrefix("w3")),
+        };
+    }
+
+    pub fn unload(self: *zml.Bufferized(SwiGluFfn)) void {
+        deinitBufferized(self);
+    }
+
+    /// x: [s, d] -> [s, d]
+    pub fn forward(self: SwiGluFfn, x: Tensor) Tensor {
+        const gate = self.w1.forward(x).silu();
+        const up = self.w3.forward(x);
+
+        return self.w2.forward(gate.mul(up).rename(.{ .dout = .d })).rename(.{ .dout = .d });
+    }
+};
+
 /// KV cache for all layers of a transformer.
 /// Stores K/V tensors with shape {layer, k=max_seq_len, h, hd}.
 pub const KvCache = struct {

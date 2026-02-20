@@ -43,7 +43,7 @@ pub fn main(init: std.process.Init) !void {
 
     const allocator = switch (builtin.mode) {
         .Debug => dbg.allocator(),
-        else => std.heap.c_allocator,
+        else => std.heap.smp_allocator,
     };
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(tokens);
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
-        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.90 } } },
+        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.80 } } },
     });
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
