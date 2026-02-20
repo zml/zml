@@ -81,20 +81,8 @@ zig_library(
     }),
 )
 
-# All ZML Tests
 
 zig_test(
     name = "test",
-    data = [
-        #"aio/torch/simple.pt",
-        #"aio/torch/simple_test_4.pickle",
-    ],
-    test_runner = ":test_runner",
     deps = ["//zml"],
-)
-
-filegroup(
-    name = "test_runner",
-    srcs = ["test_runner.zig"],
-    visibility = ["//visibility:public"],
 )

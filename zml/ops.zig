@@ -631,7 +631,7 @@ test scatterConfig {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1040,7 +1040,7 @@ test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

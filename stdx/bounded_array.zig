@@ -393,9 +393,8 @@ test BoundedArray {
     try testing.expectEqual(a.len, 36);
 
     while (a.pop()) |_| {}
-    const w = a.writer();
     const s = "hello, this is a test string";
-    try w.writeAll(s);
+    _ = try a.appendWrite(s);
     try testing.expectEqualStrings(s, a.constSlice());
 }
 

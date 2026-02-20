@@ -11,6 +11,7 @@ const zml = @import("zml.zig");
 const log = std.log.scoped(.@"zml/testing");
 
 var _platform: ?*const Platform = null;
+var _physical_mesh: ?sharding.PhysicalMesh = null;
 var _replicated_sharding: ?sharding.Sharding = null;
 
 pub fn env() *const Platform {
@@ -24,10 +25,16 @@ pub fn env() *const Platform {
     return _platform.?;
 }
 
+pub fn physicalMesh() sharding.PhysicalMesh {
+    if (_physical_mesh == null) {
+        _physical_mesh = sharding.PhysicalMesh.auto(std.heap.c_allocator, env()) catch unreachable;
+    }
+    return _physical_mesh.?;
+}
+
 pub fn replicatedSharding() sharding.Sharding {
     if (_replicated_sharding == null) {
-        const physical_mesh = sharding.PhysicalMesh.auto(std.testing.allocator, env()) catch unreachable;
-        _replicated_sharding = sharding.replicatedSharding(physical_mesh) catch unreachable;
+        _replicated_sharding = sharding.replicatedSharding(physicalMesh()) catch unreachable;
     }
     return _replicated_sharding.?;
 }

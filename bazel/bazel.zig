@@ -21,7 +21,7 @@ export const _ linksection(init_array_section) = &struct {
             .allocator = std.heap.c_allocator,
             .io = threaded.io(),
             .argv0 = std.mem.span(argv[0]),
-            .directory = if (std.c.getenv("RUNFILES_DIRECTORY")) |directory| std.mem.span(directory) else null,
+            .directory = if (std.c.getenv("RUNFILES_DIR")) |directory| std.mem.span(directory) else null,
             .manifest = if (std.c.getenv("RUNFILES_MANIFEST_FILE")) |manifest| std.mem.span(manifest) else null,
         }) catch {
             std.debug.panic("Unable to find runfiles", .{});
@@ -32,8 +32,7 @@ export const _ linksection(init_array_section) = &struct {
 }.call;
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io, argv: std.process.Args, environ_map: *std.process.Environ.Map) !void {
-    runfiles_global = try allocator.create(bazel_runfiles.Runfiles);
-    runfiles_global.* = try bazel_runfiles.Runfiles.create(.{
+    runfiles_global = try bazel_runfiles.Runfiles.create(.{
         .allocator = allocator,
         .io = io,
         .argv = argv,
