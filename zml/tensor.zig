@@ -640,11 +640,12 @@ pub const Tensor = struct {
             };
 
             const platform = zml.testing.env();
+            const replicated_sharding = zml.testing.replicatedSharding();
             // Compute stats over a uniform distribution on [-2, 10].
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform);
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform, .{ .shardings = &.{replicated_sharding} });
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io, replicated_sharding);
             defer rng_buffer._state.deinit();
 
             var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
@@ -745,15 +746,17 @@ pub const Tensor = struct {
             };
 
             const platform = zml.testing.env();
+            const replicated_sharding = zml.testing.replicatedSharding();
+
             const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
             const tgt_dist: Tensor = .init(.{tgt_dist_data.len}, .f32);
 
-            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform);
+            var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform, .{ .shardings = &.{replicated_sharding} });
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io);
+            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io, replicated_sharding);
             defer rng_buffer._state.deinit();
-            var tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), std.mem.sliceAsBytes(&tgt_dist_data));
+            var tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, std.mem.sliceAsBytes(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
             var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });

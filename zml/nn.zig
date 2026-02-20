@@ -1154,36 +1154,37 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
     return .{ next_tokens, next_rng };
 }
 
-// test sampleTokens {
-//     const platform = zml.testing.env();
+test sampleTokens {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
 
-//     const rng: zml.Tensor.Rng = .init();
-//     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
+    const rng: zml.Tensor.Rng = .init();
+    const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
 
-//     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform);
-//     defer exe.deinit();
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{ .shardings = &.{replicated_sharding} });
+    defer exe.deinit();
 
-//     var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, 0xdeadbeef, std.testing.io);
-//     defer rng_buffer._state.deinit();
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, 0xdeadbeef, std.testing.io, replicated_sharding);
+    defer rng_buffer._state.deinit();
 
-//     const inf = std.math.inf(f32);
+    const inf = std.math.inf(f32);
 
-//     inline for (.{
-//         .{ [_]f32{ inf, 3.0, 2.0, 1.0 }, 0 },
-//         .{ [_]f32{ -inf, 3.0, -inf, -inf }, 1 },
-//         .{ [_]f32{ 3.0, 2, inf, inf }, 2 },
-//     }) |logits_expected| {
-//         const logits, const expected: i32 = logits_expected;
+    inline for (.{
+        .{ [_]f32{ inf, 3.0, 2.0, 1.0 }, 0 },
+        .{ [_]f32{ -inf, 3.0, -inf, -inf }, 1 },
+        .{ [_]f32{ 3.0, 2, inf, inf }, 2 },
+    }) |logits_expected| {
+        const logits, const expected: i32 = logits_expected;
 
-// var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), std.mem.sliceAsBytes(&logits));
-// defer activations_buffer.deinit();
+        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), replicated_sharding, std.mem.sliceAsBytes(&logits));
+        defer activations_buffer.deinit();
 
-//         var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
-//         defer sampled.deinit();
+        var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
+        defer sampled.deinit();
 
-//         try zml.testing.expectEqual(expected, try sampled.getValue(i32, std.testing.io));
-//     }
-// }
+        try zml.testing.expectEqual(expected, try sampled.getValue(i32, std.testing.io));
+    }
+}
 
 pub const DynamicSamplingStrategy = struct {
     max_top_k: u32,
@@ -1214,14 +1215,15 @@ pub const DynamicSamplingStrategy = struct {
     pub fn makeBuffers(
         io: std.Io,
         platform: *const zml.Platform,
+        sharding: zml.sharding.Sharding,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
-            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32),
-            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype),
-            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype),
-            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype),
+            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32, sharding),
+            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype, sharding),
+            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype, sharding),
+            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype, sharding),
         };
     }
 
@@ -1290,70 +1292,71 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
     return .{ x, full_topk.indices };
 }
 
-// test sampleTokensDynamic {
-//     const platform = zml.testing.env();
+test sampleTokensDynamic {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
 
-//     const ___ = -std.math.inf(f32);
-//     const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
-//     const top_k_indices = [_]i32{ 2, 3, 0, 1 };
+    const ___ = -std.math.inf(f32);
+    const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
+    const top_k_indices = [_]i32{ 2, 3, 0, 1 };
 
-//     const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
-//     const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
+    const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
+    const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
 
-//     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform);
-//     defer exe.deinit();
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{ .shardings = &.{replicated_sharding} });
+    defer exe.deinit();
 
-//     var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), std.mem.sliceAsBytes(&logits_data));
-//     defer logits_buffer.deinit();
+    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), replicated_sharding, std.mem.sliceAsBytes(&logits_data));
+    defer logits_buffer.deinit();
 
-//     const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
-//     inline for ([_]Args{
-//         // top_k == logits.len -> just sort the input
-//         .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
-//         .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
-//         .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) * 0.1, @log(3.0) * 0.1, ___, ___ } },
-//         // top_k == logits.len and small top_p  -> make sure at least one is returned
-//         .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
-//         .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
-//         .{ .{ .top_k = 4, .top_p = 0.901 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), ___ } },
-//         // Here top_p is computed on the top 3 items, so 0.701 isn't enougth anymore to allow @log(3.0)
-//         .{ .{ .top_k = 3, .top_p = 0.701 }, [_]f32{ @log(4.0), ___, ___, ___ } },
-//         // Here top_p allows the first 3 results, but min_p only accepts the first two.
-//         .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
-//     }) |args_expected| {
-//         const args, const expected = args_expected;
-//         var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .f32, args);
-//         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
-//         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
-//         defer new_logits.deinit();
-//         defer indices.deinit();
-//         try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices), std.testing.io));
-//         try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected), std.testing.io));
-//     }
+    const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
+    inline for ([_]Args{
+        // top_k == logits.len -> just sort the input
+        .{ .{ .top_k = 4 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), @log(1.0) } },
+        .{ .{ .top_k = 2 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 2, .temperature = 0.1 }, [_]f32{ @log(4.0) * 0.1, @log(3.0) * 0.1, ___, ___ } },
+        // top_k == logits.len and small top_p  -> make sure at least one is returned
+        .{ .{ .top_k = 4, .top_p = 0.1 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.701 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+        .{ .{ .top_k = 4, .top_p = 0.901 }, [_]f32{ @log(4.0), @log(3.0), @log(2.0), ___ } },
+        // Here top_p is computed on the top 3 items, so 0.701 isn't enougth anymore to allow @log(3.0)
+        .{ .{ .top_k = 3, .top_p = 0.701 }, [_]f32{ @log(4.0), ___, ___, ___ } },
+        // Here top_p allows the first 3 results, but min_p only accepts the first two.
+        .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
+    }) |args_expected| {
+        const args, const expected = args_expected;
+        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, replicated_sharding, .f32, args);
+        defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
+        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
+        defer new_logits.deinit();
+        defer indices.deinit();
+        try std.testing.expectEqual(top_k_indices, try indices.getValue(@TypeOf(top_k_indices), std.testing.io));
+        try zml.testing.expectEqual(expected, try new_logits.getValue(@TypeOf(expected), std.testing.io));
+    }
 
-//     {
-//         // Similar but use bf16, and uses infinity to trigger nans after the softmax.
-//         const bf16 = zml.floats.BFloat16;
+    {
+        // Similar but use bf16, and uses infinity to trigger nans after the softmax.
+        const bf16 = zml.floats.BFloat16;
 
-//         const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
-//         const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
-//         var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform);
-//         defer exe_bf16.deinit();
+        const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
+        const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
+        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{ .shardings = &.{replicated_sharding} });
+        defer exe_bf16.deinit();
 
-//         const boost = bf16.inf;
-//         const nerf = bf16.minus_inf;
+        const boost = bf16.inf;
+        const nerf = bf16.minus_inf;
 
-//         var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
-//         defer logits_bf16_buffer.deinit();
-//         var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
-//         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
+        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), replicated_sharding, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
+        defer logits_bf16_buffer.deinit();
+        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, replicated_sharding, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
+        defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
 
-//         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });
+        var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });
 
-//         try std.testing.expectEqual([_]i32{ 0, 1, 2, 3 }, try indices.getValue([4]i32, std.testing.io));
-//         try zml.testing.expectEqual([_]bf16{ boost, nerf, nerf, nerf }, try new_logits.getValue([4]bf16, std.testing.io));
-//     }
-// }
+        try std.testing.expectEqual([_]i32{ 0, 1, 2, 3 }, try indices.getValue([4]i32, std.testing.io));
+        try zml.testing.expectEqual([_]bf16{ boost, nerf, nerf, nerf }, try new_logits.getValue([4]bf16, std.testing.io));
+    }
+}
 
 const ShapeError = error{ DimMismatch, NotFound };
 const NOT_SET: i64 = -2;
