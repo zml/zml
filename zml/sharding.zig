@@ -12,10 +12,6 @@ const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/sharding");
 
-// todo: check for disagregated prefill (compile on device #1)
-// todo: default compilation opts 1 device, no logical mesh, no sharding, etc.
-// todo: migrate tests
-
 pub const Partitioning = struct {
     pub const Partitioner = union(enum) {
         shardy,
