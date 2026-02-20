@@ -218,21 +218,6 @@ pub fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32
     return result;
 }
 
-/// Prepend n_fft/2 reflected samples at the start and append n_fft/2 zeros at the end.
-/// Left reflect skips boundary sample (index 0) to match Tensor reflect padding in forward().
-/// Right zero-padding ensures STFT windows at the tail have enough samples.
-pub fn reflectPadAudio(allocator: std.mem.Allocator, audio: []const f32, pad: usize) ![]f32 {
-    const result = try allocator.alloc(f32, pad + audio.len + pad);
-    // Reflect: result[i] = audio[pad - i] for i in 0..pad
-    // i=0 → audio[pad], i=1 → audio[pad-1], ..., i=pad-1 → audio[1]
-    for (0..pad) |i| {
-        result[i] = audio[pad - i];
-    }
-    @memcpy(result[pad..][0..audio.len], audio);
-    @memset(result[pad + audio.len ..], 0);
-    return result;
-}
-
 /// Run the prefill phase: mel -> conv stem -> encoder -> adapter -> decoder prefill.
 /// Populates KV caches and produces the first generated token into generated_token_slice.
 fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: []const u32, generated_token_slice: zml.Slice) !void {
@@ -368,7 +353,7 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 }
 
 /// Run the streaming decode loop: step-by-step conv_stem -> encoder -> adapter -> decoder.
-fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer, initial_audio_history: []const f32, stdin_reader: *std.Io.Reader, generated_token_slice: zml.Slice) !void {
+fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer, initial_overlap: []const f32, stdin_reader: *std.Io.Reader, generated_token_slice: zml.Slice) !void {
     // --
     const allocator = ctx.allocator;
     const io = ctx.io;
@@ -385,7 +370,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     // Sliding audio buffer: [overlap from previous step | new samples]
     const audio_buf = try allocator.alloc(f32, sp.chunk_audio);
     defer allocator.free(audio_buf);
-    @memcpy(audio_buf[0..audio_overlap], initial_audio_history);
+    @memcpy(audio_buf[0..audio_overlap], initial_overlap);
     @memset(audio_buf[audio_overlap..], 0);
 
     var tokenizer_decoder = try tokenizer.decoder();
@@ -395,7 +380,6 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     const streaming_pad_token = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
     const streaming_word_token = tokenizer.tokenToId("[STREAMING_WORD]");
 
-    // log.info("Running decode loop (steps {}..{})...", .{ prompt_len, total_steps });
     const decode_start: std.Io.Timestamp = .now(io, .awake);
 
     var mel_step_args = try ctx.exes.mel_step.args(allocator);
@@ -423,7 +407,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     var decode_results = try ctx.exes.decoder_decode.results(allocator);
     defer decode_results.deinit(allocator);
 
-    var mel_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.chunk_mel }, .f32), .{});
+    var mel_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.mel_per_step }, .f32), .{});
     defer mel_step_output.deinit();
 
     var conv_step_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .s = sp.dsf, .d = enc_dim }, .bf16), .{});
@@ -588,27 +572,22 @@ pub fn runPipeline(
     var stdin_reader = std.Io.File.stdin().reader(io, &stdin_buff);
     const stdin_reader_interface = &stdin_reader.interface;
 
-    // 0. Read initial audio from stdin and build padded buffer for prefill (like loadAndPadWav)
-    const n_fft: usize = config.audio().window_size;
-    const reflect_pad: usize = n_fft / 2;
-
-    const n_prefill_stdin: usize = @as(usize, sp.n_delay_tokens + 1) * sp.raw_audio_length_per_tok;
+    // 0. Read initial audio from stdin and build padded buffer for prefill
+    // We read the full mel buffer's worth of audio (minus left_pad) so the STFT
+    // overlap region at the tail has real audio instead of silence.
+    const full_audio_len: usize = @as(usize, sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
+    const n_prefill_stdin: usize = full_audio_len - sp.left_pad;
     const prefill_raw_buf = try allocator.alloc(u8, n_prefill_stdin * 2);
     defer allocator.free(prefill_raw_buf);
     const stdin_audio = try allocator.alloc(f32, n_prefill_stdin);
     defer allocator.free(stdin_audio);
     try readStdinSamplesInto(stdin_reader_interface, prefill_raw_buf, stdin_audio);
 
-    // Pad: [left_pad zeros][stdin audio][right_pad zeros]
-    const right_pad: usize = @as(usize, sp.n_right_pad_tokens) * sp.raw_audio_length_per_tok;
-    const prefill_audio_len: usize = @as(usize, sp.left_pad) + stdin_audio.len + right_pad;
-    const prefill_audio = try allocator.alloc(f32, prefill_audio_len);
+    // Pad: [left_pad zeros | stdin audio]
+    const prefill_audio = try allocator.alloc(f32, full_audio_len);
     defer allocator.free(prefill_audio);
-    @memset(prefill_audio, 0);
-    @memcpy(prefill_audio[@as(usize, sp.left_pad)..][0..stdin_audio.len], stdin_audio);
-
-    const reflect_padded_audio = try reflectPadAudio(allocator, prefill_audio, reflect_pad);
-    defer allocator.free(reflect_padded_audio);
+    @memset(prefill_audio[0..@as(usize, sp.left_pad)], 0);
+    @memcpy(prefill_audio[@as(usize, sp.left_pad)..], stdin_audio);
 
     // 1. Init KV caches + t_cond + RNG
     var enc_kv_buffers = try enc_kv_cache.initBuffer(io, platform);
@@ -659,15 +638,11 @@ pub fn runPipeline(
     var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
     defer generated_token_slice.free(allocator);
 
-    try runPrefill(&ctx, reflect_padded_audio, prompt_tokens, generated_token_slice);
+    try runPrefill(&ctx, prefill_audio, prompt_tokens, generated_token_slice);
 
-    // 4. Generation loop — extract audio history for sliding buffer
-    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp._hop_length;
-    const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
-    const history_start: usize = @as(usize, sp.prompt_len) * sp.mel_per_step * sp._hop_length;
-    const initial_audio_history = reflect_padded_audio[history_start .. history_start + audio_overlap];
-
-    try runGenerationLoop(&ctx, tokenizer, initial_audio_history, stdin_reader_interface, generated_token_slice);
+    // 4. Generation loop — seed the overlap with the tail of the prefill audio
+    const audio_overlap: usize = sp.chunk_audio - @as(usize, sp.mel_per_step) * sp._hop_length;
+    try runGenerationLoop(&ctx, tokenizer, prefill_audio[full_audio_len - audio_overlap ..], stdin_reader_interface, generated_token_slice);
 }
 
 fn readStdinSamplesInto(reader: *std.Io.Reader, raw_buf: []u8, samples: []f32) !void {
