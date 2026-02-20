@@ -350,13 +350,13 @@ pub const TensorRegistry = struct {
         io: std.Io,
         tensor_name: []const u8,
         buffer: []u8,
-    ) TensorReader.Error!TensorReader {
+    ) !TensorReader {
         const tensor = self.tensors.get(tensor_name) orelse {
             log.err("Tensor {s} not found in registry", .{tensor_name});
-            return TensorReader.Error.TensorNotFound;
+            return error.TensorNotFound;
         };
 
-        return try .init(io, tensor, buffer);
+        return try .init(io, tensor, buffer, .{});
     }
 
     pub fn iterator(self: *TensorRegistry) Tensors.Iterator {
