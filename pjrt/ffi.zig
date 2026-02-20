@@ -252,6 +252,7 @@ pub const DataType = enum(c.XLA_FFI_DataType) {
     f8e4m3b11fnuz = c.XLA_FFI_DataType_F8E4M3B11FNUZ,
     f8e5m2fnuz = c.XLA_FFI_DataType_F8E5M2FNUZ,
     f8e4m3fnuz = c.XLA_FFI_DataType_F8E4M3FNUZ,
+    f8e8m0fnu = c.XLA_FFI_DataType_F8E8M0FNU,
 
     pub fn bitSizeOf(self: DataType) usize {
         return switch (self) {

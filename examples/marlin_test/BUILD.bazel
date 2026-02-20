@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "marlin_test",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@rules_zig//zig/runfiles",
+        "@zml//stdx",
+        "@zml//zml",
+    ],
+)

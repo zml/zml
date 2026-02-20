@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+
+zig_binary(
+    name = "gpt_oss_marlin",
+    srcs = ["gpt_oss_marlin.zig"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "//platforms/cuda/marlin_moe:marlin_moe",
+    ],
+)

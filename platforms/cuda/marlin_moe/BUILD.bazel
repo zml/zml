@@ -1,0 +1,16 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "marlin_moe",
+    data = [
+        "@fused_moe//:libmarlin_moe",
+    ],
+    import_name = "platforms/cuda/marlin_moe",
+    main = "marlin_moe.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "@fused_moe//:c",
+        "@rules_zig//zig/runfiles",
+    ],
+)

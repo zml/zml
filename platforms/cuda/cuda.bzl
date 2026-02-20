@@ -33,13 +33,20 @@ CUDA_PACKAGES = {
         # Driver API only
         packages.cc_library(
             name = "cuda",
-            hdrs = ["include/cuda.h"],
+            hdrs = ["include/cuda.h", "include/cuda_runtime_api.h"],
             includes = ["include"],
         ),
         #TODO: Remove me as soon we use the Driver API in tracer.zig
         packages.filegroup(
             name = "cuda_cudart",
             srcs = ["lib/libcudart.so.13"],
+        ),
+    ]),
+    "cuda_crt": "\n".join([
+        packages.cc_library(
+            name = "cuda_crt",
+            hdrs = ["include/crt/host_defines.h"],
+            includes = ["include"],
         ),
     ]),
     "cuda_cupti": packages.filegroup(

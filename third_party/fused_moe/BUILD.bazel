@@ -1,0 +1,22 @@
+load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
+
+filegroup(
+    name = "libmarlin_moe",
+    srcs = ["marlin_moe_c/build/libmarlin_moe_c.so"],
+    visibility = ["//visibility:public"],
+)
+
+cc_import(
+    name = "libmarlin_moe_c",
+    shared_library = "marlin_moe_c/build/libmarlin_moe_c.so",
+    hdrs = ["marlin_moe_c/include/marlin_moe_c_api.h"],
+    includes = ["marlin_moe_c/include"],
+)
+
+cc_library(
+    name = "c",
+    hdrs = ["marlin_moe_c/include/marlin_moe_c_api.h"],
+    includes = ["marlin_moe_c/include"],
+    deps = [":libmarlin_moe_c"],
+    visibility = ["//visibility:public"],
+)

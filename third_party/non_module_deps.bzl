@@ -1,5 +1,6 @@
 load("//third_party/arocc:repo.bzl", arocc = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
+load("//third_party/fused_moe:repo.bzl", fused_moe = "repo")
 load("//third_party/mnist:repo.bzl", mnist = "repo")
 load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
@@ -16,6 +17,7 @@ def _non_module_deps_impl(mctx):
     translate_c()
     flashattn()
     linenoise()
+    fused_moe()
 
     return mctx.extension_metadata(
         reproducible = True,

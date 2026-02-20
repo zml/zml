@@ -34,6 +34,7 @@ zig_library(
 >>>>>>> 3ae98c5 (Triton moe kernel gpt oss)
         "grouped_gemm/cublas.zig",
         "grouped_gemm_LT/cublas.zig",
+        "marlin_moe/marlin_moe.zig",
         "buffer.zig",
         "constants.zig",
         "cublas_grouped_gemm.zig",
@@ -82,6 +83,7 @@ zig_library(
             "//platforms/cuda/flashattn",
             "//platforms/cuda/grouped_gemm",
             "//platforms/cuda/grouped_gemm_LT",
+            "//platforms/cuda/marlin_moe",
         ],
         "//conditions:default": [],
     }),

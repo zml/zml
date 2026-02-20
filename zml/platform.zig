@@ -116,11 +116,25 @@ pub const Device = struct {
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
 
-    fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform, all_addressable_memories: []const Memory) !Device {
+    fn init(
+        allocator: std.mem.Allocator,
+        pjrt_device_: *const pjrt.Device,
+        platform: *const Platform,
+        all_addressable_memories: []const Memory,
+        all_pjrt_memories: []const *const pjrt.Memory,
+    ) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
         const addressable_memories = try allocator.alloc(*const Memory, pjrt_addressable_memories.len);
         for (pjrt_addressable_memories, addressable_memories) |pjrt_memory, *addressable_memory| {
-            addressable_memory.* = &all_addressable_memories[pjrt_memory.id(platform.pjrt_api)];
+            var idx: ?usize = null;
+            for (all_pjrt_memories, 0..) |candidate, i| {
+                if (candidate == pjrt_memory) {
+                    idx = i;
+                    break;
+                }
+            }
+            const mem_index = idx orelse return error.MemoryNotFound;
+            addressable_memory.* = &all_addressable_memories[mem_index];
         }
 
         return .{
@@ -232,7 +246,7 @@ pub const Platform = struct {
 
         {
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(arena.allocator(), pjrt_device, platform, memories);
+                platform_device.* = try .init(arena.allocator(), pjrt_device, platform, memories, pjrt_memories);
             }
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
                 platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
