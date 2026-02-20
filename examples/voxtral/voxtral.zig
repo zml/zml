@@ -233,43 +233,9 @@ pub fn reflectPadAudio(allocator: std.mem.Allocator, audio: []const f32, pad: us
     return result;
 }
 
-/// Run mel spectrogram on the full prefill audio in a single kernel call.
-/// Returns mel output as a device buffer [channels=128, time=prompt_len*mel_per_step].
-fn runMelPrefill(ctx: *PipelineContext, padded_audio: []const f32) !zml.Buffer {
-    const io = ctx.io;
-    const platform = ctx.platform;
-    const sp = ctx.sp;
-
-    const full_audio_len: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
-
-    log.info("Running mel prefill ({} audio samples -> {} mel frames)...", .{ full_audio_len, sp.prompt_len * sp.mel_per_step });
-
-    const audio_slice: zml.Slice = .init(
-        .init(.{full_audio_len}, .f32),
-        std.mem.sliceAsBytes(padded_audio[0..full_audio_len]),
-    );
-    var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
-    defer audio_buffer.deinit();
-
-    var mel_output: zml.Buffer = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.prompt_len * sp.mel_per_step }, .f32), .{});
-
-    var args = try ctx.exes.mel_prefill.args(ctx.allocator);
-    defer args.deinit(ctx.allocator);
-    var results = try ctx.exes.mel_prefill.results(ctx.allocator);
-    defer results.deinit(ctx.allocator);
-
-    args.set(.{ ctx.buffers.mel_spectrum, audio_buffer });
-    ctx.exes.mel_prefill.call(args, &results);
-    results.fill(.{&mel_output});
-
-    log.info("Mel prefill done ({} frames).", .{sp.prompt_len * sp.mel_per_step});
-
-    return mel_output;
-}
-
-/// Run the prefill phase: conv stem -> encoder -> adapter -> decoder prefill.
+/// Run the prefill phase: mel -> conv stem -> encoder -> adapter -> decoder prefill.
 /// Populates KV caches and produces the first generated token into generated_token_slice.
-fn runPrefill(ctx: *PipelineContext, mel_device: zml.Buffer, tokens: []const u32, generated_token_slice: zml.Slice) !void {
+fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: []const u32, generated_token_slice: zml.Slice) !void {
     // --
     const allocator = ctx.allocator;
     const io = ctx.io;
@@ -281,7 +247,33 @@ fn runPrefill(ctx: *PipelineContext, mel_device: zml.Buffer, tokens: []const u32
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
 
-    // Conv stem prefill: mel_device is already [128][prompt_len*mel_per_step] on device
+    // Mel prefill: single kernel, produces [channels=128, time=prompt_len*mel_per_step] on device
+    const full_audio_len: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
+    log.info("Running mel prefill ({} audio samples -> {} mel frames)...", .{ full_audio_len, sp.prompt_len * sp.mel_per_step });
+    var mel_prefill_output: zml.Buffer = undefined;
+    {
+        const audio_slice: zml.Slice = .init(
+            .init(.{full_audio_len}, .f32),
+            std.mem.sliceAsBytes(padded_audio[0..full_audio_len]),
+        );
+        var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice);
+        defer audio_buffer.deinit();
+
+        mel_prefill_output = try .uninitialized(io, platform, .init(.{ .channels = 128, .time = sp.prompt_len * sp.mel_per_step }, .f32), .{});
+
+        var args = try ctx.exes.mel_prefill.args(allocator);
+        defer args.deinit(allocator);
+        var results = try ctx.exes.mel_prefill.results(allocator);
+        defer results.deinit(allocator);
+
+        args.set(.{ ctx.buffers.mel_spectrum, audio_buffer });
+        ctx.exes.mel_prefill.call(args, &results);
+        results.fill(.{&mel_prefill_output});
+    }
+    defer mel_prefill_output.deinit();
+    log.info("Mel prefill done ({} frames).", .{sp.prompt_len * sp.mel_per_step});
+
+    // Conv stem prefill: mel output [128][prompt_len*mel_per_step] -> encoder frames
     // Also extracts conv states (last 2 frames of each intermediate) for streaming
     log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * sp.mel_per_step});
     var conv_prefill_output: zml.Buffer = undefined;
@@ -294,7 +286,7 @@ fn runPrefill(ctx: *PipelineContext, mel_device: zml.Buffer, tokens: []const u32
         var results = try ctx.exes.conv_stem_prefill.results(allocator);
         defer results.deinit(allocator);
 
-        args.set(.{ ctx.buffers.encoder, mel_device });
+        args.set(.{ ctx.buffers.encoder, mel_prefill_output });
         ctx.exes.conv_stem_prefill.call(args, &results);
         results.fill(.{ &conv_prefill_output, ctx.buffers.conv_state });
     }
@@ -351,7 +343,7 @@ fn runPrefill(ctx: *PipelineContext, mel_device: zml.Buffer, tokens: []const u32
 
         const token_data_slice: zml.Slice = .init(
             .init(.{prompt_len}, .u32),
-            std.mem.sliceAsBytes(tokens),
+            std.mem.sliceAsBytes(prompt_tokens),
         );
         var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_data_slice);
         defer token_buffer.deinit();
@@ -577,7 +569,7 @@ pub fn runPipeline(
     platform: *zml.Platform,
     config: Config,
     tokenizer: *zml.tokenizer.Tokenizer,
-    tokens: []const u32,
+    prompt_tokens: []const u32,
     sp: StreamParams,
     exes: CompiledExes,
     mel_spectrum_buffers: *zml.Bufferized(LogMelSpectrogram),
@@ -663,17 +655,13 @@ pub fn runPipeline(
         },
     };
 
-    // 3. Mel prefill (single kernel, stays on device)
-    var mel_device = try runMelPrefill(&ctx, reflect_padded_audio);
-
-    // 4. Prefill
+    // 3. Prefill (mel -> conv stem -> encoder -> adapter -> decoder)
     var generated_token_slice: zml.Slice = try .alloc(allocator, .init(.{@as(u32, 1)}, .u32));
     defer generated_token_slice.free(allocator);
 
-    try runPrefill(&ctx, mel_device, tokens, generated_token_slice);
-    mel_device.deinit();
+    try runPrefill(&ctx, reflect_padded_audio, prompt_tokens, generated_token_slice);
 
-    // 5. Generation loop — extract audio history for sliding buffer
+    // 4. Generation loop — extract audio history for sliding buffer
     const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp._hop_length;
     const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
     const history_start: usize = @as(usize, sp.prompt_len) * sp.mel_per_step * sp._hop_length;

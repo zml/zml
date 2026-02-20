@@ -70,12 +70,12 @@ pub fn main(init: std.process.Init) !void {
         std.debug.panic("transcription_delay_ms must be a multiple of 80 in range [80, 2400], got {}", .{delay_ms});
     }
 
-    // Build tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
-    const tokens = try allocator.alloc(u32, sp.prompt_len);
-    defer allocator.free(tokens);
+    // Build prompt_tokens: [BOS] ++ [STREAMING_PAD] * (n_left_pad_tokens + n_delay_tokens)
+    const prompt_tokens = try allocator.alloc(u32, sp.prompt_len);
+    defer allocator.free(prompt_tokens);
 
     var platform: *zml.Platform = try .auto(allocator, io, .{
-        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.80 } } },
+        .cuda = .{ .allocator = .{ .bfc = .{ .memory_fraction = 0.45 } } },
     });
     defer platform.deinit(allocator);
     log.info("Selected platform {f}\n", .{platform.fmtVerbose()});
@@ -86,7 +86,10 @@ pub fn main(init: std.process.Init) !void {
         break :b selected;
     };
 
+    // -- Models
+
     var melspectro_model: LogMelSpectrogram = .init(config);
+
     var encoder_model: Encoder = .init(allocator, model_store.view(), config);
     defer encoder_model.deinit(allocator);
 
@@ -94,6 +97,8 @@ pub fn main(init: std.process.Init) !void {
 
     var decoder_model: Decoder = .init(allocator, model_store.view(), config);
     defer decoder_model.deinit(allocator);
+
+    // -- END Models
 
     const enc_cfg = config.encoder();
     const enc_kv_size = args.enc_kv_size orelse enc_cfg.sliding_window;
@@ -145,8 +150,8 @@ pub fn main(init: std.process.Init) !void {
 
     const token_bos = tokenizer.tokenToId("<s>") orelse @panic("tokenizer missing <s> token");
     const token_streaming_pad = tokenizer.tokenToId("[STREAMING_PAD]") orelse @panic("tokenizer missing [STREAMING_PAD] token");
-    tokens[0] = token_bos;
-    @memset(tokens[1..], token_streaming_pad);
+    prompt_tokens[0] = token_bos;
+    @memset(prompt_tokens[1..], token_streaming_pad);
 
     // -- Compiled models
     var compiled_mel_step = try compiled_mel_step_future.await(io);
@@ -209,7 +214,7 @@ pub fn main(init: std.process.Init) !void {
         platform,
         config,
         &tokenizer,
-        tokens,
+        prompt_tokens,
         sp,
         .{
             .mel_step = &compiled_mel_step,
