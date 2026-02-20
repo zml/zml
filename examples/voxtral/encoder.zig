@@ -159,6 +159,13 @@ pub const Encoder = struct {
 
         return .{ rmsNorm(h, self.norm, self.norm_eps), cache };
     }
+
+    /// Like transformer, but also returns the incremented token index (on-device).
+    pub fn transformerStep(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor } {
+        const output, const cache = self.transformer(x, token_index, kv_cache, attention_metadata, attention_parameters);
+        const next_index = token_index.addConstant(self.config.downsample_factor()).reuseBuffer(token_index);
+        return .{ output, cache, next_index };
+    }
 };
 
 pub const TransformerLayer = struct {
