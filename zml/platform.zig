@@ -13,14 +13,6 @@ const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
 
-// todo: move to zml/module.zig
-pub const CompilationOptions = struct {
-    xla_dump_to: ?[]const u8 = null,
-    xla_dump_fusion_visualization: bool = false,
-    xla_dump_hlo_pass_re: ?[]const u8 = null,
-    device_memory_size: u64 = 0,
-};
-
 fn StaticPlatformMap(comptime E: type, comptime T: type) type {
     const tag_count = @typeInfo(E).@"enum".fields.len;
     var struct_field_names: [tag_count][]const u8 = undefined;
@@ -193,12 +185,6 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
 
-    // This make the pjrt struct quite fat, but is only used during compilation.
-    // TODO: Reconsider having it here, and maybe pass explicitly to compile,
-    // or create an intermediary struct:
-    // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
-    compilation_options: CompilationOptions = .{},
-
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 512 else 256;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
@@ -224,7 +210,6 @@ pub const Platform = struct {
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
-            .compilation_options = .{},
             .devices = devices,
             .memories = memories,
         };
@@ -409,7 +394,7 @@ pub const Platform = struct {
         args: stdx.meta.Tail(
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
-        opts: zml.module.CompilationOpts,
+        opts: zml.module.CompilationOptions,
     ) !Exe {
         return self.compileFn(
             allocator,
@@ -427,7 +412,7 @@ pub const Platform = struct {
         comptime func: anytype,
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
-        opts: zml.module.CompilationOpts,
+        opts: zml.module.CompilationOptions,
     ) !Exe {
         return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
@@ -438,7 +423,7 @@ pub const Platform = struct {
         io: std.Io,
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
-        opts: zml.module.CompilationOpts,
+        opts: zml.module.CompilationOptions,
     ) !Exe {
         return zml.module.compile(allocator, io, func, args, self, opts);
     }

@@ -12,19 +12,24 @@ const Exe = @import("exe.zig").Exe;
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
-const Partitioning = @import("sharding.zig").Partitioning;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("sharding.zig").Sharding;
+const sharding_ = @import("sharding.zig");
+const Sharding = sharding_.Sharding;
+const Partitioning = sharding_.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");
 
-pub const CompilationOpts = struct {
-    shardings: []const Sharding = &.{},
+pub const CompilationOptions = struct {
+    shardings: []const Sharding,
     // If null, will be initialized from the target
     partitioner: ?Partitioning.Partitioner = null,
+    // Debugging options
+    xla_dump_to: ?[]const u8 = null,
+    xla_dump_fusion_visualization: bool = false,
+    xla_dump_hlo_pass_re: ?[]const u8 = null,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -67,8 +72,7 @@ pub const CompilationContext = struct {
 
     threadlocal var _current: ?*CompilationContext = null;
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOpts) CompilationContext {
-        _ = io; // autofix
+    pub fn init(allocator: std.mem.Allocator, _: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
         mlir.registerPasses("Transforms");
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
         inline for (.{ "func", "stablehlo", "sdy" }) |d| {
@@ -93,6 +97,8 @@ pub const CompilationContext = struct {
             }
         }
 
+        const partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable;
+
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -101,7 +107,7 @@ pub const CompilationContext = struct {
             .mlir_pass_manager = pass_manager,
             .module = module,
             .platform = platform,
-            .partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable,
+            .partitioning = partitioning,
         };
     }
 
@@ -150,7 +156,7 @@ pub fn compile(
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
     platform: *const Platform,
-    opts: CompilationOpts,
+    opts: CompilationOptions,
 ) !Exe {
     var compilation_context: CompilationContext = .init(allocator, io, platform, opts);
     defer compilation_context.deinit();
@@ -188,7 +194,7 @@ pub fn compile(
 
     log.warn("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
 
     const exe = try Exe.init(
         allocator,
@@ -487,7 +493,7 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning) !*pjrt.LoadedExecutable {
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: CompilationOptions) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
@@ -575,13 +581,13 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             else => {},
         }
 
-        if (platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        if (opts.xla_dump_to) |xla_dump_to| {
             try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
             try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
-            if (platform.compilation_options.xla_dump_fusion_visualization) {
+            if (opts.xla_dump_fusion_visualization) {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
             }
-            if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+            if (opts.xla_dump_hlo_pass_re) |re| {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
             }
         }

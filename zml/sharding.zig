@@ -86,19 +86,6 @@ pub const Partitioning = struct {
         };
     }
 
-    pub fn tensorShardingAttr2(_: Partitioning, partitioner: Partitioner, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?struct { name: []const u8, attr: []const u8 } {
-        return switch (partitioner) {
-            .shardy => if (try sharding.sdyShardingAttrForShape(allocator, shape)) |attr| .{
-                .name = "sdy.sharding",
-                .attr = attr,
-            } else null,
-            .gspmd => if (try sharding.gspmdShardingAttrForShape(allocator, shape)) |attr| .{
-                .name = "mhlo.sharding",
-                .attr = attr,
-            } else null,
-        };
-    }
-
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
         for (self.shardings) |sharding| {
             if (shardingCoversShape(sharding, shape)) return sharding;
