@@ -1608,8 +1608,8 @@ pub const MemRefType = opaque {
             element_type.ptr(),
             @intCast(shape.len),
             @ptrCast(shape),
-            if (layout) |l| l.ptr() else .{},
-            if (memory_space) |m| m.ptr() else .{},
+            if (layout) |l| l.ptr() else .{ .ptr = null },
+            if (memory_space) |m| m.ptr() else .{ .ptr = null },
         ).ptr);
     }
 
