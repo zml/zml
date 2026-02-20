@@ -11,5 +11,5 @@ zig_binary(
 
 build_test(
     name = "test",
-    targets = [":mnist"],
+    targets = [":playground"],
 )
