@@ -115,7 +115,7 @@ pub fn compileConvStemStep(allocator: std.mem.Allocator, io: std.Io, platform: *
 pub fn compileEncoderPrefill(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, prompt_len: u32, enc_kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters, progress: *std.Progress.Node) !zml.Exe {
     const enc_cfg = model.config.encoder();
     const dsf = model.config.downsample_factor();
-    return compileStep(allocator, io, platform, model, .transformer, .{
+    return compileStep(allocator, io, platform, model, .transformerStep, .{
         Tensor.init(.{ .s = prompt_len * dsf, .d = enc_cfg.dim }, .bf16),
         Tensor.init(.{}, .u32),
         enc_kv_cache,
@@ -167,7 +167,7 @@ pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const
 
     const compilePrefill = struct {
         fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, model_: Decoder, s: u32, kv_cache_: KvCache, dim_: u32, attention_metadata_: zml.attention.Metadata, attention_parameters_: zml.attention.Parameters, progress_: *std.Progress.Node) !zml.Exe {
-            return compileStep(allocator_, io_, platform_, model_, .forward, .{
+            return compileStep(allocator_, io_, platform_, model_, .forwardStep, .{
                 Tensor.init(.{ .s = s }, .u32),
                 Tensor.init(.{ .s = s, .d = dim_ }, .bf16),
                 Tensor.init(.{}, .u32),

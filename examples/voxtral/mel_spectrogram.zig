@@ -29,8 +29,7 @@ pub const LogMelSpectrogram = struct {
         };
     }
 
-    /// Computes the log mel spectrogram for a fixed-size audio chunk (reflect padding done on host).
-    /// Produces exactly (audio_len - n_fft) / hop_len + 1 mel frames.
+    /// Computes the log mel spectrogram for a fixed-size audio chunk.
     /// Prefill: audio_chunk [samples=(prompt_len-1)*mel_per_step*hop_length + chunk_audio] → [channels=128, time=prompt_len*mel_per_step] f32
     /// Step:    audio_chunk [samples=chunk_audio]                                          → [channels=128, time=mel_per_step] f32
     pub fn melStep(self: LogMelSpectrogram, audio_chunk: Tensor) Tensor {
