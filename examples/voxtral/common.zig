@@ -64,11 +64,11 @@ pub fn loadModel(
 }
 
 /// Unified self-attention with KV cache.
-/// When `shift_buffer` is true, the KV cache uses a circular (ring) buffer for unbounded
+/// When `circular_buffer` is true, the KV cache uses a circular (ring) buffer for unbounded
 /// sliding window support: keys/values are written at position `pos_index % cache_size`,
 /// then reordered into temporal order before attention.
-/// When false, the cache uses sequential indexing (matching the reference implementation).
-pub fn SelfAttention(comptime shift_buffer: bool) type {
+/// When false, the cache uses sequential indexing.
+pub fn SelfAttention(comptime circular_buffer: bool) type {
     return struct {
         wq: zml.nn.Linear,
         wk: zml.nn.Linear,
@@ -123,16 +123,15 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
 
             const cache_size = Tensor.scalar(@as(u32, @intCast(kv_cache.k.dim(.k))), token_index.dtype());
 
-            if (shift_buffer) {
-
+            if (circular_buffer) {
                 const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
                 const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
                 k = new_kv_cache.keys().convert(dtype);
                 v = new_kv_cache.values().convert(dtype);
 
                 // Reorder K/V from circular buffer to temporal order for correct causal masking.
-                // When the cache wraps, physical order != temporal order, which breaks FA2's
-                // position-based causal mask for multi-token (q_len > 1) attention.
+                // When the cache wraps, physical order != temporal order, which breaks FA's
+                // position-based causal mask.
                 const pos_end = token_index.addConstant(x.dim(.s));
                 const is_full = pos_end.cmp(.GE, cache_size);
                 const rotation_start = pos_end.remainder(cache_size);
@@ -154,7 +153,7 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
 
                 return .{ self.wo.forward(merged).rename(.{ .dout = .d }), new_kv_cache };
             } else {
-                // Sequential: write at pos_index directly (matching reference implementation).
+                // Sequential: write at pos_index directly.
                 const new_kv_cache = kv_cache.update(k, v, pos_index.rename(.{ .s = .k }));
                 k = new_kv_cache.keys().convert(dtype);
                 v = new_kv_cache.values().convert(dtype);
@@ -261,6 +260,7 @@ pub const KvCache = struct {
             cache.scatterSlices(.{ .layer = layer_index }, converted, scatter_opts).reuseBuffer(cache);
     }
 
+    // Unused but works for shifted kv cache
     pub fn shiftIfNeeded(self: KvCache, token_index: Tensor, seq_len: u32) struct { KvCache, Tensor } {
         const cache_k_size = self.k.dim(.k);
         const max_pos = Tensor.scalar(@as(u32, @intCast(cache_k_size - seq_len)), token_index.dtype());
