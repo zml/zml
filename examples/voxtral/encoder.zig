@@ -79,7 +79,7 @@ pub const Encoder = struct {
     /// Prefill conv stem: runs conv on all prefill mel frames and extracts
     /// conv states (last kernel_size-1=2 frames of each intermediate) for subsequent streaming.
     /// Uses padding={2,0} to match reference zero-initialized state (kernel_size-1=2).
-    /// Prefill: mel [channels=128, time=prompt_len*mel_per_step] → ([s=prompt_len*dsf, d=enc_dim] bf16, ConvState)
+    /// Prefill: mel [channels=128, time=prompt_len*mel_per_step=prompt_len*(dsf*2)] → ([s=prompt_len*dsf, d=enc_dim] bf16, ConvState)
     pub fn convStemPrefill(self: Encoder, mel: Tensor) struct { Tensor, ConvState } {
         const dtype = self.conv0_weight.dtype();
         const h = mel.convert(dtype).insertAxes(.channels, .{.batch});
@@ -109,7 +109,7 @@ pub const Encoder = struct {
 
     /// Streaming conv stem: processes mel_per_step mel frames with explicit conv states.
     /// Concatenates state (2 frames of left context) with new input, runs conv1d (no padding),
-    /// then saves the tail as new state. Matches the reference ExecuTorch implementation.
+    /// then saves the tail as new state.
     /// mel_chunk: [channels=128, time=mel_per_step], conv_state: ConvState
     /// Returns: ([s=dsf, d=enc_dim], new ConvState)
     pub fn convStemStep(self: Encoder, mel_chunk: Tensor, conv_state: ConvState) struct { Tensor, ConvState } {
@@ -142,9 +142,9 @@ pub const Encoder = struct {
     }
 
     /// Runs all encoder transformer layers on conv stem output with KV cache.
-    /// Prefill: x [s=prompt_len*dsf, d=enc_dim] → ([s=prompt_len*dsf, d=enc_dim], KvCache)
-    /// Step:    x [s=dsf, d=enc_dim]            → ([s=dsf, d=enc_dim], KvCache)
-    pub fn transformer(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
+    /// Prefill: x [s=prompt_len*dsf, d=enc_dim] → ([s=prompt_len*dsf, d=enc_dim], KvCache, next_token_index)
+    /// Step:    x [s=dsf, d=enc_dim]            → ([s=dsf, d=enc_dim], KvCache, next_token_index)
+    pub fn transformerStep(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor } {
         var h = x;
         var cache = kv_cache;
         const attn_config = self.config.encoder().attentionConfig();
@@ -157,12 +157,7 @@ pub const Encoder = struct {
             cache = updated_layer_cache.reuseBuffer(layer_cache);
         }
 
-        return .{ rmsNorm(h, self.norm, self.norm_eps), cache };
-    }
-
-    /// Like transformer, but also returns the incremented token index (on-device).
-    pub fn transformerStep(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor } {
-        const output, const cache = self.transformer(x, token_index, kv_cache, attention_metadata, attention_parameters);
+        const output = rmsNorm(h, self.norm, self.norm_eps);
         const next_index = token_index.addConstant(self.config.downsample_factor()).reuseBuffer(token_index);
         return .{ output, cache, next_index };
     }

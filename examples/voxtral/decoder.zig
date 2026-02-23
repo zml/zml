@@ -88,10 +88,10 @@ pub const Decoder = struct {
         allocator.free(self.layers);
     }
 
-    /// Runs all decoder layers on input embeddings, samples next tokens and returns updated KV cache + RNG.
-    /// Prefill: text_tokens [s=prompt_len] u32, audio_embed [s=prompt_len, d=dim] → (tokens [s=prompt_len] u32, KvCache, Rng)
-    /// Step:    text_tokens [s=1] u32,           audio_embed [s=1, d=dim]         → (tokens [s=1] u32, KvCache, Rng)
-    pub fn forward(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng } {
+    /// Runs all decoder layers on input embeddings, samples next tokens and returns updated KV cache + RNG + incremented token index.
+    /// Prefill: text_tokens [s=prompt_len] u32, audio_embed [s=prompt_len, d=dim] → (tokens [s=prompt_len] u32, KvCache, Rng, next_token_index)
+    /// Step:    text_tokens [s=1] u32,           audio_embed [s=1, d=dim]         → (tokens [s=1] u32, KvCache, Rng, next_token_index)
+    pub fn forwardStep(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng, Tensor } {
         const text_embeds = self.tok_embeddings.gather(.{ .voc = text_tokens }, .{});
         const input_embeds = text_embeds.add(audio_embed);
 
@@ -115,16 +115,9 @@ pub const Decoder = struct {
         // Compute logits in f32 for precision
         const logits = h.dot(self.tok_embeddings, .d).convert(.f32);
         const output_tokens, const new_rng = zml.nn.sampleTokens(logits, .{ .temperature = 0 }, rng);
-
-        return .{ output_tokens.convert(.u32), cache, new_rng };
-    }
-
-    /// Like forward (step: text_tokens [s=1], audio_embed [s=1, d=dim]), but also returns the incremented token index.
-    /// Returns: (tokens [s=1] u32, KvCache, Rng, token_index scalar u32)
-    pub fn forwardStep(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng, Tensor } {
-        const output_tokens, const cache, const new_rng = self.forward(text_tokens, audio_embed, token_index, kv_cache, t_cond, rng, attention_metadata, attention_parameters);
         const next_index = token_index.addConstant(1).reuseBuffer(token_index);
-        return .{ output_tokens, cache, new_rng, next_index };
+
+        return .{ output_tokens.convert(.u32), cache, new_rng, next_index };
     }
 };
 
