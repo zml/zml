@@ -113,11 +113,15 @@ pub const StreamParams = struct {
     dsf: u32,
     mel_per_step: u32,
     chunk_audio: u32,
+    new_audio_per_step: u32, // mel_per_step * hop_length: new samples consumed per streaming step
+    audio_overlap: u32,      // chunk_audio - new_audio_per_step: STFT tail reused between steps
+    prefill_audio_len: u32,  // (prompt_len-1)*new_audio_per_step + chunk_audio: total prefill samples
     raw_audio_length_per_tok: u32,
     hop_length: u32,
     n_delay_tokens: u32,
     left_pad: u32,
     prompt_len: u32,
+    enc_dim: u32,
 
     pub fn init(config: Config, transcription_delay_ms: f32, n_left_pad_tokens: u32) StreamParams {
         const sample_rate: f32 = @floatFromInt(config.audio().sampling_rate);
@@ -132,16 +136,23 @@ pub const StreamParams = struct {
         const dsf = config.downsample_factor();
         const mel_per_step = dsf * 2;
         const window_size = config.audio().window_size;
+        const chunk_audio = (mel_per_step - 1) * hop_length + window_size;
+        const new_audio_per_step = mel_per_step * hop_length;
+        const prompt_len = 1 + n_left_pad_tokens + n_delay_tokens;
 
         return .{
             .dsf = dsf,
             .mel_per_step = mel_per_step,
-            .chunk_audio = (mel_per_step - 1) * hop_length + window_size,
+            .chunk_audio = chunk_audio,
+            .new_audio_per_step = new_audio_per_step,
+            .audio_overlap = chunk_audio - new_audio_per_step,
+            .prefill_audio_len = (prompt_len - 1) * new_audio_per_step + chunk_audio,
             .raw_audio_length_per_tok = raw_audio_length_per_tok,
             .hop_length = hop_length,
             .n_delay_tokens = n_delay_tokens,
             .left_pad = n_left_pad_tokens * raw_audio_length_per_tok,
-            .prompt_len = 1 + n_left_pad_tokens + n_delay_tokens,
+            .prompt_len = prompt_len,
+            .enc_dim = config.encoder().dim,
         };
     }
 };

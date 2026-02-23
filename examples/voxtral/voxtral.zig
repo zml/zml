@@ -249,11 +249,11 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
     const config = ctx.config;
     const sp = ctx.sp;
 
-    const enc_dim: u32 = config.encoder().dim;
+    const enc_dim = sp.enc_dim;
     const prompt_len = sp.prompt_len;
 
     // Mel prefill: single kernel, produces [channels=128, time=prompt_len*mel_per_step] on device
-    const full_audio_len: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp.hop_length + sp.chunk_audio;
+    const full_audio_len = sp.prefill_audio_len;
     log.info("Running mel prefill ({} audio samples -> {} mel frames)...", .{ full_audio_len, sp.prompt_len * sp.mel_per_step });
     var mel_prefill_output: zml.Buffer = undefined;
     {
@@ -380,10 +380,10 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
     const config = ctx.config;
     const sp = ctx.sp;
 
-    const enc_dim: u32 = config.encoder().dim;
+    const enc_dim = sp.enc_dim;
     const prompt_len = sp.prompt_len;
-    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp.hop_length;
-    const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
+    const new_audio_per_step = sp.new_audio_per_step;
+    const audio_overlap = sp.audio_overlap;
 
     // Sliding audio buffer: [overlap from previous step | new samples]
     const audio_buf = try allocator.alloc(f32, sp.chunk_audio);
@@ -593,7 +593,7 @@ pub fn runPipeline(
     // 0. Read initial audio from stdin and build padded buffer for prefill
     // We read the full mel buffer's worth of audio (minus left_pad) so the STFT
     // overlap region at the tail has real audio instead of silence.
-    const full_audio_len: usize = @as(usize, sp.prompt_len - 1) * sp.mel_per_step * sp.hop_length + sp.chunk_audio;
+    const full_audio_len = sp.prefill_audio_len;
     const n_prefill_stdin: usize = full_audio_len - sp.left_pad;
     const prefill_raw_buf = try allocator.alloc(u8, n_prefill_stdin * 2);
     defer allocator.free(prefill_raw_buf);
@@ -661,7 +661,7 @@ pub fn runPipeline(
     try runPrefill(&ctx, prefill_audio, prompt_tokens, generated_token_slice);
 
     // 4. Generation loop — seed the overlap with the tail of the prefill audio
-    const audio_overlap: usize = sp.chunk_audio - @as(usize, sp.mel_per_step) * sp.hop_length;
+    const audio_overlap = sp.audio_overlap;
     try runGenerationLoop(&ctx, tokenizer, prefill_audio[full_audio_len - audio_overlap ..], stdin_reader_interface, generated_token_slice);
 }
 
