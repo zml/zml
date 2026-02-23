@@ -23,12 +23,8 @@ zig_library(
         "attention.zig",
         "attention/attention.zig",
         "attention/flashattn.zig",
-<<<<<<< HEAD
-<<<<<<< HEAD
-<<<<<<< HEAD
         "attention/paged_attention.zig",
         "fused_moe/fused_moe.zig",
-=======
         "moe_triton/moe_triton.zig",
 >>>>>>> 3aa1dc1 (changes to rebase)
 =======
