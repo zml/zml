@@ -249,7 +249,7 @@ pub const Slice = struct {
         _ = try writer.write("}");
     }
 
-    pub fn copyFromContiguous(destination: Slice, source: []const u8) void {
+    pub fn copy(destination: Slice, source: []const u8) void {
         const total_bytes = destination.shape.byteSize();
         stdx.debug.assert(source.len >= total_bytes, "Source buffer size ({}) smaller than destination shape ({})", .{ source.len, total_bytes });
 
@@ -273,7 +273,7 @@ pub const Slice = struct {
             const destination_outer = destination.subSlice(0, @intCast(i), 1).dropAxis(0);
             const source_outer_start = i * outer_span_bytes;
             const source_outer_end = source_outer_start + outer_span_bytes;
-            destination_outer.copyFromContiguous(source[source_outer_start..source_outer_end]);
+            destination_outer.copy(source[source_outer_start..source_outer_end]);
         }
     }
 };

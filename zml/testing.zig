@@ -364,7 +364,6 @@ pub fn testLayer(
         .store = activation_store.store,
         .parallelism = 1,
         .shardings = shardings,
-        .replicated_sharding = replicatedSharding(),
     });
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {

@@ -146,9 +146,6 @@ pub fn main(init: std.process.Init) !void {
     const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(tp_mesh, physical_mesh, tp_strategy);
     const sharding_replicated = try zml.sharding.replicatedSharding(physical_mesh);
 
-    var shardings_array = [_]zml.sharding.Sharding{sharding_tp};
-    const shardings: []zml.sharding.Sharding = shardings_array[0..];
-
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
     var tokenizer_future = try io.concurrent(loadTokenizer, .{ allocator, io, repo, &progress });
@@ -157,7 +154,7 @@ pub fn main(init: std.process.Init) !void {
         v.deinit();
     }
 
-    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, shardings, &progress });
+    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, &.{sharding_tp}, &progress });
     defer if (compiled_model_result_future.cancel(io)) |v| {
         v.prefill_exe.deinit();
         v.decode_exe.deinit();
@@ -172,7 +169,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         &store,
-        shardings,
+        &.{sharding_tp},
         &progress,
     });
     defer blk: {
@@ -286,7 +283,7 @@ fn compileModel(
     platform: *const zml.Platform,
     llama_model: llama.LlamaLM,
     parameters: LlamaParameters,
-    shardings: []zml.sharding.Sharding,
+    shardings: []const zml.sharding.Sharding,
     progress: *std.Progress.Node,
 ) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -294,7 +291,7 @@ fn compileModel(
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = try io.concurrent(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []const zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling prefill...", 1);
             defer node_.end();
@@ -315,7 +312,7 @@ fn compileModel(
     } else |_| {};
 
     var decode_future = try io.concurrent(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []const zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling decode...", 1);
             defer node_.end();

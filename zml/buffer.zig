@@ -194,7 +194,6 @@ pub const Buffer = struct {
     }
 
     /// Copies the content of the Buffer to the provided slice.
-    /// No allocations; only supports contiguous shard views.
     pub fn toSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         stdx.debug.assert(self._shape.eql(slice.shape), "Buffer shape {f} doesn't match destination slice {f}", .{ self._shape, slice.shape });
 
@@ -233,7 +232,7 @@ pub const Buffer = struct {
                 try event.await(self._platform.pjrt_api, io);
             }
 
-            sub_slice.copyFromContiguous(shard_slice.constData());
+            sub_slice.copy(shard_slice.constData());
         }
 
         return slice;

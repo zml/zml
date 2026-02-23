@@ -74,7 +74,7 @@ pub const LlamaLM = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
-        shardings: []zml.sharding.Sharding,
+        shardings: []const zml.sharding.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(LlamaLM) {
         progress.increaseEstimatedTotalItems(store.view().count());
