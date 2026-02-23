@@ -18,8 +18,6 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-const partitioner: zml.sharding.Partitioning.Partitioner = .shardy;
-
 const CliArgs = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -113,8 +111,6 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var profiler = try platform.profiler(allocator);
-
     // Initialize the Llama struct and map the content of the .safetensors to the model tensors.
     var llama_model: llama.LlamaLM = try .init(allocator, store.view(), config, llama_options);
     defer llama_model.deinit(allocator);
@@ -145,17 +141,12 @@ pub fn main(init: std.process.Init) !void {
     var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
     defer physical_mesh.deinit();
 
-    const embeddings_mesh: zml.sharding.LogicalMesh = try .init("embeddings_mesh", .{ .voc = .high_bandwidth });
-    const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth, .replicated = .low_bandwidth });
-
-    const embeddings_strategy: zml.sharding.Strategy = try .suggest(embeddings_mesh, physical_mesh);
+    const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
     const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, physical_mesh);
-
-    const sharding_embeddings: zml.sharding.Sharding = try .initFromStrategy(embeddings_mesh, physical_mesh, embeddings_strategy);
     const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(tp_mesh, physical_mesh, tp_strategy);
     const sharding_replicated = try zml.sharding.replicatedSharding(physical_mesh);
 
-    var shardings_array = [_]zml.sharding.Sharding{ sharding_embeddings, sharding_tp };
+    var shardings_array = [_]zml.sharding.Sharding{sharding_tp};
     const shardings: []zml.sharding.Sharding = shardings_array[0..];
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
@@ -209,16 +200,6 @@ pub fn main(init: std.process.Init) !void {
     };
 
     log.info("✅ Prompt: {s}", .{prompt});
-
-    try profiler.?.start();
-    defer {
-        profiler.?.stop() catch unreachable;
-        const data = profiler.?.collectData(allocator) catch unreachable;
-        var file = std.Io.Dir.createFile(.cwd(), init.io, "/home/hugo/zml/proto9.pb", .{ .read = true }) catch unreachable;
-        defer file.close(init.io);
-        file.writeStreamingAll(init.io, data) catch unreachable;
-        allocator.free(data);
-    }
 
     // Unbuffered writing of the tokens to stdout.
     var stdout = std.Io.File.stdout().writer(io, &.{});
@@ -326,7 +307,7 @@ fn compileModel(
                 parameters_.rng,
                 parameters_.attention_metadata,
                 parameters_.attention_parameters,
-            }, .{ .partitioner = partitioner, .shardings = shardings_ });
+            }, .{ .shardings = shardings_ });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
@@ -347,7 +328,7 @@ fn compileModel(
                 parameters_.rng,
                 parameters_.attention_metadata,
                 parameters_.attention_parameters,
-            }, .{ .partitioner = partitioner, .shardings = shardings_ });
+            }, .{ .shardings = shardings_ });
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
     errdefer if (decode_future.cancel(io)) |v| {

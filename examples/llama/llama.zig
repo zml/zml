@@ -170,7 +170,7 @@ pub const Llama = struct {
 
         return .{
             .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) },
-            .norm = .{ .weight = store.withPrefix("norm").createTensor("weight", .{.d}, .{ .d = .voc }), .eps = config.rms_norm_eps },
+            .norm = .{ .weight = store.withPrefix("norm").createTensor("weight", .{.d}, .{ .d = .replicated }), .eps = config.rms_norm_eps },
             .layers = layers,
         };
     }
@@ -376,6 +376,9 @@ pub const SelfAttn = struct {
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
         var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        k = k.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
 
         // In self-attention, .s axis is used both for keys and queries.
         const pos_index = b: {
@@ -390,13 +393,19 @@ pub const SelfAttn = struct {
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
+        q = q.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
         const dtype = q.dtype();
         const new_kv_cache = kv_cache.update(k, v, token_index);
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
+        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
-        const attn_output = zml.attention.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
+        const attn_output = zml.attention.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters)
+            .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         return .{ self.o_proj.forward(attn), new_kv_cache };

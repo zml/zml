@@ -984,7 +984,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    log.info("{s}[device={d}]: {d}", .{ name, device_ordinal, slice });
+    log.info("{s} {f} [device={d}]: {d}", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
 }

@@ -6,8 +6,8 @@ const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
-
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+
 const log = std.log.scoped(.@"zml/attention/flashattn");
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
@@ -236,22 +236,15 @@ pub const fa2 = struct {
         };
 
         pub fn init(opts: InitOptions) Metadata {
-            // We must match the RANK of the Query tensor: [SeqLen, Heads, HeadDim]
-            // Q is tagged as {.s, .h, .hd}.
-            // We tag metadata similarly and shard on .h (the .model axis).
-
             return .{
-                // LSE is [SeqLen, Heads]. We add a dummy 3rd dim to match Q's rank (3).
                 .softmax_lse = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 1 }, .f32)
                     .withTags(.{ .s, .h, .dummy })
                     .withPartitioning(.{ .h = .model })),
 
-                // LSE Accum is used for split-K, usually [Heads, Splits]
                 .softmax_lse_accum = .fromShape(zml.Shape.init(.{ 1, opts.num_heads, 128 }, .f32)
                     .withTags(.{ .dummy, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
 
-                // Out Accum is [SeqLen, Heads, HeadDim]
                 .out_accum = .fromShape(zml.Shape.init(.{ opts.seqlen, opts.num_heads, 128 }, .f32)
                     .withTags(.{ .s, .h, .hd })
                     .withPartitioning(.{ .h = .model })),
@@ -273,8 +266,7 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-        _ = parameters; // autofix
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -292,7 +284,8 @@ pub const fa2 = struct {
             break :b [_]zml.Tensor{ q_.rename(.{ .q = .tot }), k_.rename(.{ .k = .tot }), v_.rename(.{ .k = .tot }) };
         };
         // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }));
+        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
+            .withPartitioning(.{ ._0 = .replicated });
 
         const original_tot = q.dim(.tot);
         const num_heads = q_.dim(.h);
@@ -443,7 +436,8 @@ pub const fa3 = struct {
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
                 .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .scheduler_metadata = .init(.{2}, .i32),
+                .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
+                    .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
             };
         }
 
@@ -478,7 +472,8 @@ pub const fa3 = struct {
         const k = k_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         const v = v_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         // TODO(Corendos): replace with cumsum
-        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }));
+        const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
+            .withPartitioning(.{ ._0 = .replicated });
 
         var o = zml.ops.customCall(
             custom_call_name,
