@@ -86,8 +86,6 @@ pub fn main(init: std.process.Init) !void {
         break :b selected;
     };
 
-    // -- Models
-
     var melspectro_model: LogMelSpectrogram = .init(config);
 
     var encoder_model: Encoder = .init(allocator, model_store.view(), config);
@@ -97,8 +95,6 @@ pub fn main(init: std.process.Init) !void {
 
     var decoder_model: Decoder = .init(allocator, model_store.view(), config);
     defer decoder_model.deinit(allocator);
-
-    // -- END Models
 
     const enc_cfg = config.encoder();
     const enc_kv_size = args.enc_kv_size orelse enc_cfg.sliding_window;
@@ -153,7 +149,6 @@ pub fn main(init: std.process.Init) !void {
     prompt_tokens[0] = token_bos;
     @memset(prompt_tokens[1..], token_streaming_pad);
 
-    // -- Compiled models
     var compiled_mel_step = try compiled_mel_step_future.await(io);
     defer compiled_mel_step.deinit();
 
@@ -182,7 +177,6 @@ pub fn main(init: std.process.Init) !void {
     defer compiled_decoder_prefill.deinit();
     defer compiled_decoder_decode.deinit();
 
-    // -- Buffers
     var mel_spectrum_buffers = try mel_spectrum_buffers_future.await(io);
     defer LogMelSpectrogram.unload(&mel_spectrum_buffers);
 

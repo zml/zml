@@ -64,10 +64,9 @@ pub fn loadModel(
 }
 
 /// Unified self-attention with KV cache.
-/// When `shift_buffer` is true, the KV cache uses shift-based overflow handling for
-/// unbounded sliding window support. Both paths (normal write vs shifted cache write)
-/// are computed and the correct one is selected via cmp/select. The cache stays in
-/// temporal order — no reordering needed.
+/// When `shift_buffer` is true, the KV cache uses a circular (ring) buffer for unbounded
+/// sliding window support: keys/values are written at position `pos_index % cache_size`,
+/// then reordered into temporal order before attention.
 /// When false, the cache uses sequential indexing (matching the reference implementation).
 pub fn SelfAttention(comptime shift_buffer: bool) type {
     return struct {
@@ -126,8 +125,6 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
 
             if (shift_buffer) {
 
-                // -- Circular implementation
-
                 const cache_pos = pos_index.remainder(cache_size.broad(pos_index.shape()));
                 const new_kv_cache = kv_cache.update(k, v, cache_pos.rename(.{ .s = .k }));
                 k = new_kv_cache.keys().convert(dtype);
@@ -152,28 +149,6 @@ pub fn SelfAttention(comptime shift_buffer: bool) type {
                 const attn_out = zml.attention.attention(q, k, v, attn_token_index, attention_metadata, attention_parameters, .{
                     .sliding_window = @intCast(attn_config.sliding_window),
                 });
-
-                // -- END Cicrular implem
-
-                // -- Shift implem
-
-                // const shifted_cache, const clamped_token_index = kv_cache.shiftIfNeeded(token_index, @intCast(x.dim(.s)));
-
-                // const write_pos = b: {
-                //     const temp = Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype())
-                //         .withTags(.{.s}).broad(Shape.init(.{ .s = x.dim(.s) }, token_index.dtype()));
-                //     break :b temp.add(clamped_token_index.broad(temp.shape()));
-                // };
-
-                // const new_kv_cache = shifted_cache.update(k, v, write_pos.rename(.{ .s = .k }));
-                // k = new_kv_cache.keys().convert(dtype);
-                // v = new_kv_cache.values().convert(dtype);
-
-                // const attn_out = zml.attention.attention(q, k, v, clamped_token_index, attention_metadata, attention_parameters, .{
-                //     .sliding_window = @intCast(attn_config.sliding_window),
-                // });
-
-                // -- END Shift implem
 
                 const merged = attn_out.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 

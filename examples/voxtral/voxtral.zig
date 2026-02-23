@@ -68,23 +68,35 @@ fn compileStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pl
     return try platform.compile(allocator, io, model, method, inputs);
 }
 
+/// Compiles LogMelSpectrogram.melStep for streaming (one chunk at a time).
+/// Input:  [samples=chunk_audio] f32
+/// Output: [channels=128, time=mel_per_step] f32
 pub fn compileMelStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
     return compileStep(allocator, io, platform, model, .melStep, .{Tensor.init(.{sp.chunk_audio}, .f32).withTags(.{.samples})}, progress, "mel step");
 }
 
+/// Compiles LogMelSpectrogram.melStep for the full prefill audio.
+/// Input:  [samples=(prompt_len-1)*mel_per_step*hop_length + chunk_audio] f32
+/// Output: [channels=128, time=prompt_len*mel_per_step] f32
 pub fn compileMelPrefill(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: LogMelSpectrogram, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
-    const full_audio: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
+    const full_audio: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp.hop_length + sp.chunk_audio;
     return compileStep(allocator, io, platform, model, .melStep, .{
         Tensor.init(.{full_audio}, .f32).withTags(.{.samples}),
     }, progress, "mel prefill");
 }
 
+/// Compiles Encoder.convStemPrefill for the full prefill mel spectrogram.
+/// Input:  [channels=128, time=num_mel_frames] f32  (num_mel_frames = prompt_len*mel_per_step)
+/// Output: ([s=num_mel_frames/2=prompt_len*dsf, d=enc_dim] bf16, ConvState)
 pub fn compileConvStemPrefill(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, num_mel_frames: u32, progress: *std.Progress.Node) !zml.Exe {
     return compileStep(allocator, io, platform, model, .convStemPrefill, .{
         Tensor.init(.{ .channels = 128, .time = num_mel_frames }, .f32),
     }, progress, "conv stem prefill");
 }
 
+/// Compiles Encoder.convStemStep for one streaming step.
+/// Input:  [channels=128, time=mel_per_step] f32, ConvState
+/// Output: ([s=dsf, d=enc_dim] bf16, ConvState)
 pub fn compileConvStemStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, sp: StreamParams, progress: *std.Progress.Node) !zml.Exe {
     const dtype = model.conv0_weight.dtype();
     const enc_dim = model.config.encoder().dim;
@@ -97,7 +109,9 @@ pub fn compileConvStemStep(allocator: std.mem.Allocator, io: std.Io, platform: *
     }, progress, "conv stem step");
 }
 
-/// Encoder prefill: processes prompt_len * dsf frames at once, populating the KV cache.
+/// Compiles Encoder.transformer for prefill: processes prompt_len*dsf frames, populating the KV cache.
+/// Input:  x [s=prompt_len*dsf, d=enc_dim] bf16, token_index scalar u32
+/// Output: ([s=prompt_len*dsf, d=enc_dim] bf16, KvCache)
 pub fn compileEncoderPrefill(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, prompt_len: u32, enc_kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters, progress: *std.Progress.Node) !zml.Exe {
     const enc_cfg = model.config.encoder();
     const dsf = model.config.downsample_factor();
@@ -110,7 +124,9 @@ pub fn compileEncoderPrefill(allocator: std.mem.Allocator, io: std.Io, platform:
     }, progress, "encoder prefill");
 }
 
-/// Encoder step: processes dsf frames with KV cache (for streaming decode).
+/// Compiles Encoder.transformerStep for streaming: processes dsf frames using the KV cache.
+/// Input:  x [s=dsf, d=enc_dim] bf16, token_index scalar u32
+/// Output: ([s=dsf, d=enc_dim] bf16, KvCache, token_index scalar u32)
 pub fn compileEncoderStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Encoder, enc_kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters, progress: *std.Progress.Node) !zml.Exe {
     const enc_cfg = model.config.encoder();
     const dsf = model.config.downsample_factor();
@@ -123,7 +139,9 @@ pub fn compileEncoderStep(allocator: std.mem.Allocator, io: std.Io, platform: *c
     }, progress, "encoder step");
 }
 
-/// Adapter batch: processes prompt_len * dsf encoder frames -> prompt_len embeddings.
+/// Compiles Adapter.forward for prefill: maps prompt_len*dsf encoder frames to prompt_len decoder embeddings.
+/// Input:  [s=prompt_len*dsf, d=enc_dim] bf16
+/// Output: [s=prompt_len, d=dim] bf16
 pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, prompt_len: u32, config: Config, progress: *std.Progress.Node) !zml.Exe {
     const dsf = config.downsample_factor();
     return compileStep(allocator, io, platform, model, .forward, .{
@@ -131,7 +149,9 @@ pub fn compileAdapter(allocator: std.mem.Allocator, io: std.Io, platform: *const
     }, progress, "adapter");
 }
 
-/// Adapter step: processes dsf encoder frames -> 1 embedding (for streaming decode).
+/// Compiles Adapter.forward for streaming: maps dsf encoder frames to 1 decoder embedding.
+/// Input:  [s=dsf, d=enc_dim] bf16
+/// Output: [s=1, d=dim] bf16
 pub fn compileAdapterStep(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Adapter, config: Config, progress: *std.Progress.Node) !zml.Exe {
     const dsf = config.downsample_factor();
     return compileStep(allocator, io, platform, model, .forward, .{
@@ -139,7 +159,9 @@ pub fn compileAdapterStep(allocator: std.mem.Allocator, io: std.Io, platform: *c
     }, progress, "adapter step");
 }
 
-/// Decoder prefill (s=prompt_len) + decode (s=1), compiled concurrently.
+/// Compiles Decoder.forward (prefill) and Decoder.forwardStep (decode step) concurrently.
+/// Prefill: text_tokens [s=prompt_len] u32, audio_embed [s=prompt_len, d=dim] → (tokens [s=prompt_len] u32, KvCache, Rng)
+/// Decode:  text_tokens [s=1] u32,          audio_embed [s=1, d=dim]          → (token [s=1] u32, KvCache, Rng, token_index scalar u32)
 pub fn compileDecoder(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, model: Decoder, prompt_len: u32, dec_kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters, progress: *std.Progress.Node) !struct { zml.Exe, zml.Exe } {
     const dim = model.config.dim;
 
@@ -221,19 +243,17 @@ pub fn computeTimeEmbedding(allocator: std.mem.Allocator, t_value: f32, dim: u32
 /// Run the prefill phase: mel -> conv stem -> encoder -> adapter -> decoder prefill.
 /// Populates KV caches and produces the first generated token into generated_token_slice.
 fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: []const u32, generated_token_slice: zml.Slice) !void {
-    // --
     const allocator = ctx.allocator;
     const io = ctx.io;
     const platform = ctx.platform;
     const config = ctx.config;
     const sp = ctx.sp;
-    // --
 
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
 
     // Mel prefill: single kernel, produces [channels=128, time=prompt_len*mel_per_step] on device
-    const full_audio_len: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
+    const full_audio_len: u32 = (sp.prompt_len - 1) * sp.mel_per_step * sp.hop_length + sp.chunk_audio;
     log.info("Running mel prefill ({} audio samples -> {} mel frames)...", .{ full_audio_len, sp.prompt_len * sp.mel_per_step });
     var mel_prefill_output: zml.Buffer = undefined;
     {
@@ -258,7 +278,7 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
     defer mel_prefill_output.deinit();
     log.info("Mel prefill done ({} frames).", .{sp.prompt_len * sp.mel_per_step});
 
-    // Conv stem prefill: mel output [128][prompt_len*mel_per_step] -> encoder frames
+    // Conv stem prefill: [channels=128, time=prompt_len*mel_per_step=prompt_len*(dsf*2)] -> [s=prompt_len*dsf, d=enc_dim]
     // Also extracts conv states (last 2 frames of each intermediate) for streaming
     log.info("Running conv stem prefill ({} mel frames)...", .{prompt_len * sp.mel_per_step});
     var conv_prefill_output: zml.Buffer = undefined;
@@ -354,17 +374,15 @@ fn runPrefill(ctx: *PipelineContext, padded_audio: []const f32, prompt_tokens: [
 
 /// Run the streaming decode loop: step-by-step conv_stem -> encoder -> adapter -> decoder.
 fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer, initial_overlap: []const f32, stdin_reader: *std.Io.Reader, generated_token_slice: zml.Slice) !void {
-    // --
     const allocator = ctx.allocator;
     const io = ctx.io;
     const platform = ctx.platform;
     const config = ctx.config;
     const sp = ctx.sp;
-    // --
 
     const enc_dim: u32 = config.encoder().dim;
     const prompt_len = sp.prompt_len;
-    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp._hop_length;
+    const new_audio_per_step: usize = @as(usize, sp.mel_per_step) * sp.hop_length;
     const audio_overlap: usize = sp.chunk_audio - new_audio_per_step;
 
     // Sliding audio buffer: [overlap from previous step | new samples]
@@ -473,7 +491,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
 
         if (generated_token == eos_token) break;
 
-        // Mel step: read new audio, slide history buffer, upload full chunk
+        // Read new audio from stdin
         readStdinSamplesInto(stdin_reader, raw_buf, sample_buf) catch |err| switch (err) {
             error.EndOfStream => break,
             else => return err,
@@ -575,7 +593,7 @@ pub fn runPipeline(
     // 0. Read initial audio from stdin and build padded buffer for prefill
     // We read the full mel buffer's worth of audio (minus left_pad) so the STFT
     // overlap region at the tail has real audio instead of silence.
-    const full_audio_len: usize = @as(usize, sp.prompt_len - 1) * sp.mel_per_step * sp._hop_length + sp.chunk_audio;
+    const full_audio_len: usize = @as(usize, sp.prompt_len - 1) * sp.mel_per_step * sp.hop_length + sp.chunk_audio;
     const n_prefill_stdin: usize = full_audio_len - sp.left_pad;
     const prefill_raw_buf = try allocator.alloc(u8, n_prefill_stdin * 2);
     defer allocator.free(prefill_raw_buf);
@@ -588,6 +606,8 @@ pub fn runPipeline(
     defer allocator.free(prefill_audio);
     @memset(prefill_audio[0..@as(usize, sp.left_pad)], 0);
     @memcpy(prefill_audio[@as(usize, sp.left_pad)..], stdin_audio);
+
+    // full_audio_len: 50160 | n_prefill_stdin: 9200
 
     // 1. Init KV caches + t_cond + RNG
     var enc_kv_buffers = try enc_kv_cache.initBuffer(io, platform);
@@ -641,7 +661,7 @@ pub fn runPipeline(
     try runPrefill(&ctx, prefill_audio, prompt_tokens, generated_token_slice);
 
     // 4. Generation loop — seed the overlap with the tail of the prefill audio
-    const audio_overlap: usize = sp.chunk_audio - @as(usize, sp.mel_per_step) * sp._hop_length;
+    const audio_overlap: usize = sp.chunk_audio - @as(usize, sp.mel_per_step) * sp.hop_length;
     try runGenerationLoop(&ctx, tokenizer, prefill_audio[full_audio_len - audio_overlap ..], stdin_reader_interface, generated_token_slice);
 }
 
