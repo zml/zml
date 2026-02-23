@@ -1013,6 +1013,23 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
+    const is_print = std.mem.startsWith(u8, target_name, "zml$print");
+    const disable_side_effect = is_print and (ctx.partitioning.partitioner == .gspmd or ctx.partitioning.partitioner == .shardy);
+    const has_side_effect_opt: ?bool = if (disable_side_effect)
+        null
+    else
+        opts.has_side_effect;
+
+    var additional_attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .{};
+    if (has_side_effect_opt == true and ctx.partitioning.partitioner == .gspmd) {
+        // Side-effect ops must have a unique-device sharding under GSPMD.
+        additional_attrs.appendAssumeCapacity(.named(
+            ctx.mlir_ctx,
+            "mhlo.sharding",
+            mlir.stringAttribute(ctx.mlir_ctx, "{devices=[1]0}"),
+        ));
+    }
+
     const op = dialects.stablehlo.custom_call(
         ctx.mlir_ctx,
         values,
@@ -1020,10 +1037,11 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         .{
             .call_target_name = target_name,
             .backend_config = .{ .typed_ffi = backend_config },
-            .has_side_effect = opts.has_side_effect,
+            .has_side_effect = has_side_effect_opt,
             .operand_layouts = operands_layouts,
             .result_layouts = results_layouts,
             .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+            .additional_attributes = additional_attrs.constSlice(),
         },
         .unknown(ctx.mlir_ctx),
     ).appendTo(CompilationContext.current().currentScope().block);
