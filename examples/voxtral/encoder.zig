@@ -79,7 +79,7 @@ pub const Encoder = struct {
     /// Prefill conv stem: runs conv on all prefill mel frames and extracts
     /// conv states (last kernel_size-1=2 frames of each intermediate) for subsequent streaming.
     /// Uses padding={2,0} to match reference zero-initialized state (kernel_size-1=2).
-    /// mel: [channels=128, time=frames] → ([s=(frames+1)/2, d=enc_dim], ConvState)
+    /// Prefill: mel [channels=128, time=prompt_len*mel_per_step] → ([s=prompt_len*dsf, d=enc_dim] bf16, ConvState)
     pub fn convStemPrefill(self: Encoder, mel: Tensor) struct { Tensor, ConvState } {
         const dtype = self.conv0_weight.dtype();
         const h = mel.convert(dtype).insertAxes(.channels, .{.batch});
@@ -141,9 +141,9 @@ pub const Encoder = struct {
         } };
     }
 
-    /// Process a chunk of conv stem output through all transformer layers with KV cache.
-    /// x: [s=dsf, d=1280], token_index: scalar, kv_cache: KvCache
-    /// Returns: ([s=dsf, d=1280], KvCache)
+    /// Runs all encoder transformer layers on conv stem output with KV cache.
+    /// Prefill: x [s=prompt_len*dsf, d=enc_dim] → ([s=prompt_len*dsf, d=enc_dim], KvCache)
+    /// Step:    x [s=dsf, d=enc_dim]            → ([s=dsf, d=enc_dim], KvCache)
     pub fn transformer(self: Encoder, x: Tensor, token_index: Tensor, kv_cache: KvCache, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache } {
         var h = x;
         var cache = kv_cache;

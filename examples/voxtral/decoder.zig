@@ -36,7 +36,8 @@ pub const Adapter = struct {
         common.deinitBufferized(self);
     }
 
-    /// encoder_out: [s, d] → [s/dsf, dim]
+    /// Prefill: encoder_out [s=prompt_len*dsf, d=enc_dim] → [s=prompt_len, d=dim]
+    /// Step:    encoder_out [s=dsf, d=enc_dim]            → [s=1, d=dim]
     pub fn forward(self: Adapter, encoder_out: Tensor) Tensor {
         var h = encoder_out;
         const dsf = self.downsample_factor;
@@ -87,9 +88,9 @@ pub const Decoder = struct {
         allocator.free(self.layers);
     }
 
-    /// Run all decoder layers on input embeddings, sample next tokens and return updated KV cache + RNG.
-    /// text_tokens: [s] u32, audio_embed: [s, d], token_index: scalar, kv_cache: KvCache, t_cond: [d], rng: Rng
-    /// Returns: (tokens [s] u32, KvCache, Rng)
+    /// Runs all decoder layers on input embeddings, samples next tokens and returns updated KV cache + RNG.
+    /// Prefill: text_tokens [s=prompt_len] u32, audio_embed [s=prompt_len, d=dim] → (tokens [s=prompt_len] u32, KvCache, Rng)
+    /// Step:    text_tokens [s=1] u32,           audio_embed [s=1, d=dim]         → (tokens [s=1] u32, KvCache, Rng)
     pub fn forward(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng } {
         const text_embeds = self.tok_embeddings.gather(.{ .voc = text_tokens }, .{});
         const input_embeds = text_embeds.add(audio_embed);
@@ -118,7 +119,8 @@ pub const Decoder = struct {
         return .{ output_tokens.convert(.u32), cache, new_rng };
     }
 
-    /// Like forward, but also returns the incremented token index (on-device).
+    /// Like forward (step: text_tokens [s=1], audio_embed [s=1, d=dim]), but also returns the incremented token index.
+    /// Returns: (tokens [s=1] u32, KvCache, Rng, token_index scalar u32)
     pub fn forwardStep(self: Decoder, text_tokens: Tensor, audio_embed: Tensor, token_index: Tensor, kv_cache: KvCache, t_cond: Tensor, rng: Tensor.Rng, attention_metadata: zml.attention.Metadata, attention_parameters: zml.attention.Parameters) struct { Tensor, KvCache, Tensor.Rng, Tensor } {
         const output_tokens, const cache, const new_rng = self.forward(text_tokens, audio_embed, token_index, kv_cache, t_cond, rng, attention_metadata, attention_parameters);
         const next_index = token_index.addConstant(1).reuseBuffer(token_index);
