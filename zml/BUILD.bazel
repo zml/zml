@@ -25,6 +25,7 @@ zig_library(
         "attention/flashattn.zig",
 <<<<<<< HEAD
 <<<<<<< HEAD
+<<<<<<< HEAD
         "attention/paged_attention.zig",
         "fused_moe/fused_moe.zig",
 =======
@@ -32,6 +33,9 @@ zig_library(
 >>>>>>> 3aa1dc1 (changes to rebase)
 =======
 >>>>>>> 3ae98c5 (Triton moe kernel gpt oss)
+=======
+        "flashinfer_moe/flashinfer_moe.zig",
+>>>>>>> 9939e4e (commit before rebase)
         "grouped_gemm/cublas.zig",
         "grouped_gemm_LT/cublas.zig",
         "marlin_moe/marlin_moe.zig",
@@ -80,10 +84,11 @@ zig_library(
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:cuda.enabled": [
+            "//platforms/cuda/flashinfer_moe_kernel",
             "//platforms/cuda/flashattn",
             "//platforms/cuda/grouped_gemm",
             "//platforms/cuda/grouped_gemm_LT",
-            "//platforms/cuda/marlin_moe",
+            # "//platforms/cuda/marlin_moe",
         ],
         "//conditions:default": [],
     }),
