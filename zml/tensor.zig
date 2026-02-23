@@ -4125,7 +4125,6 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
         const shardy_without_custom_partitioner = ctx.partitioning.partitioner == .shardy and
-            ctx.partitioning.numPartitions() > 1 and
             !has_custom_partitioner;
 
         // On partitioned shardy backends without custom partitioner support

@@ -230,9 +230,23 @@ fn runAdditionExample(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
-    sharding_data: zml.sharding.Sharding,
-    sharding_model: zml.sharding.Sharding,
+    partitioner: zml.sharding.Partitioning.Partitioner,
+    physical_mesh: zml.sharding.PhysicalMesh,
 ) !void {
+    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{ .batch = .low_bandwidth, .context = .balanced });
+    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{ .model = .high_bandwidth, .head = .balanced, .expert = .low_bandwidth });
+
+    const strategy_data: zml.sharding.Strategy = try .suggest(mesh_data, physical_mesh);
+    const strategy_model: zml.sharding.Strategy = try .suggest(mesh_model, physical_mesh);
+
+    const sharding_data: zml.sharding.Sharding = try .initFromStrategy(mesh_data, physical_mesh, strategy_data);
+    const sharding_model: zml.sharding.Sharding = try .initFromStrategy(mesh_model, physical_mesh, strategy_model);
+
+    log.info("{f}", .{mesh_data});
+    log.info("{f}", .{mesh_model});
+    log.info("{f}", .{sharding_data});
+    log.info("{f}", .{sharding_model});
+
     const add_shape_data = zml.Shape.init(.{ .x = 16, .y = 24 }, .f32)
         .withPartitioning(.{ .x = .batch, .y = .context });
 
@@ -246,7 +260,7 @@ fn runAdditionExample(
 
     const model: AddModel = .init();
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{ .partitioner = .shardy, .shardings = &.{ sharding_data, sharding_model } });
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c, d }, .{ .partitioner = partitioner, .shardings = &.{ sharding_data, sharding_model } });
     defer exe.deinit();
 
     var a_buf = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_data, 0.0);
@@ -371,21 +385,7 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("{f}", .{physical_mesh});
 
-    const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{ .batch = .low_bandwidth, .context = .balanced });
-    const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{ .model = .high_bandwidth, .head = .balanced, .expert = .low_bandwidth });
-
-    const strategy_data: zml.sharding.Strategy = try .suggest(mesh_data, physical_mesh);
-    const strategy_model: zml.sharding.Strategy = try .suggest(mesh_model, physical_mesh);
-
-    const sharding_data: zml.sharding.Sharding = try .initFromStrategy(mesh_data, physical_mesh, strategy_data);
-    const sharding_model: zml.sharding.Sharding = try .initFromStrategy(mesh_model, physical_mesh, strategy_model);
-
-    log.info("{f}", .{mesh_data});
-    log.info("{f}", .{mesh_model});
-    log.info("{f}", .{sharding_data});
-    log.info("{f}", .{sharding_model});
-
-    // try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
+    try runAdditionExample(allocator, io, platform, partitioner, physical_mesh);
     try runWithPartitioningModel(allocator, io, platform, partitioner, physical_mesh);
 }
 
