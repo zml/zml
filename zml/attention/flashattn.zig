@@ -136,12 +136,17 @@ fn fixupKvCacheBuffer(buffer: Buffer, layer_index: i64) Buffer {
 pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
         pub fn register(platform: *const zml.Platform) !void {
-            try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "cuda", T.run, .{ .command_buffer_compatible = true });
-            if (platform.pjrt_api.customPartitioner()) |partitioner| {
-                partitioner.registerBatchPartitionable(platform.pjrt_api, T.custom_call_name) catch |err| {
-                    log.warn("Failed to register batch partitionable custom call \"{s}\": {}", .{ T.custom_call_name, err });
-                };
-            }
+            zml.ffi.register(platform.pjrt_api, platform.pjrt_client, .{
+                .name = T.custom_call_name,
+                .ffi = .{
+                    .handler = T.run,
+                    .traits = .{ .command_buffer_compatible = true },
+                    .platform_name = "cuda",
+                },
+                .partitioner = .{
+                    .batch_partitionable = true,
+                },
+            });
         }
 
         pub fn run(call_frame: *ffi.CallFrame) callconv(.c) ?*ffi.Error {

@@ -4127,23 +4127,9 @@ pub const Tensor = struct {
         const shardy_without_custom_partitioner = ctx.partitioning.partitioner == .shardy and
             !has_custom_partitioner;
 
-        // On partitioned shardy backends without custom partitioner support
-        // (CPU), force replicated partitioning before printing.
         var print_input = input;
         if (shardy_without_custom_partitioner) {
-            for (input.shape().tags(), 0..) |_, ax| {
-                print_input = switch (ax) {
-                    0 => print_input.withPartitioning(.{ ._0 = .replicated }),
-                    1 => print_input.withPartitioning(.{ ._1 = .replicated }),
-                    2 => print_input.withPartitioning(.{ ._2 = .replicated }),
-                    3 => print_input.withPartitioning(.{ ._3 = .replicated }),
-                    4 => print_input.withPartitioning(.{ ._4 = .replicated }),
-                    5 => print_input.withPartitioning(.{ ._5 = .replicated }),
-                    6 => print_input.withPartitioning(.{ ._6 = .replicated }),
-                    7 => print_input.withPartitioning(.{ ._7 = .replicated }),
-                    else => unreachable,
-                };
-            }
+            print_input._shape = print_input.shape().withReplicatedPartitioning();
         }
 
         const print_tensor = ops.customCall(
