@@ -516,7 +516,7 @@ fn runGenerationLoop(ctx: *PipelineContext, tokenizer: *zml.tokenizer.Tokenizer,
         wave.flush();
 
         // Shift history left, append new samples
-        std.mem.copyForwards(f32, audio_buf[0..audio_overlap], audio_buf[new_audio_per_step..]);
+        @memmove(audio_buf[0..audio_overlap], audio_buf[new_audio_per_step..]);
         @memcpy(audio_buf[audio_overlap..], sample_buf);
 
         const audio_slice: zml.Slice = .init(
