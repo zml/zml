@@ -4121,11 +4121,43 @@ pub const Tensor = struct {
     /// Use the name parameter to differentiate different print calls in the output.
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
-    pub fn print(input: Tensor, name: []const u8) Tensor {
-        // Keep the operation side-effecting by default.
-        // ops.customCall() will automatically drop side-effect semantics for
-        // partitioned backends that don't expose a custom partitioner extension.
-        return ops.customCall("zml$print", .{input}, .{input.shape()}, .{ .name = name }, .{ .has_side_effect = true });
+    pub fn print(input: Tensor, name: []const u8) void {
+        const ctx = CompilationContext.current();
+        const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
+        const shardy_without_custom_partitioner = ctx.partitioning.partitioner == .shardy and
+            ctx.partitioning.numPartitions() > 1 and
+            !has_custom_partitioner;
+
+        // On partitioned shardy backends without custom partitioner support
+        // (CPU), force replicated partitioning before printing.
+        var print_input = input;
+        if (shardy_without_custom_partitioner) {
+            for (input.shape().tags(), 0..) |_, ax| {
+                print_input = switch (ax) {
+                    0 => print_input.withPartitioning(.{ ._0 = .replicated }),
+                    1 => print_input.withPartitioning(.{ ._1 = .replicated }),
+                    2 => print_input.withPartitioning(.{ ._2 = .replicated }),
+                    3 => print_input.withPartitioning(.{ ._3 = .replicated }),
+                    4 => print_input.withPartitioning(.{ ._4 = .replicated }),
+                    5 => print_input.withPartitioning(.{ ._5 = .replicated }),
+                    6 => print_input.withPartitioning(.{ ._6 = .replicated }),
+                    7 => print_input.withPartitioning(.{ ._7 = .replicated }),
+                    else => unreachable,
+                };
+            }
+        }
+
+        const print_tensor = ops.customCall(
+            "zml$print",
+            .{print_input},
+            .{print_input.shape()},
+            .{ .name = name },
+            .{ .has_side_effect = !shardy_without_custom_partitioner },
+        );
+
+        if (shardy_without_custom_partitioner) {
+            ctx.currentScope().keepalive_values.appendAssumeCapacity(print_tensor.value());
+        }
     }
 
     fn mlirCtx() *mlir.Context {

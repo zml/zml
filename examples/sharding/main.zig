@@ -79,9 +79,9 @@ const WithPartitioningModel = struct {
     pub fn forward(_: WithPartitioningModel, a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
         const sum_ac = a.add(c);
         const ac_split = sum_ac.withPartitioning(.{ .x = .model_x, .y = .model_y });
-        const ac_split_dbg = ac_split.print("ac_split");
+        ac_split.print("ac_split");
         const b_split = b.withPartitioning(.{ .x = .model_x, .y = .model_y });
-        return ac_split_dbg.add(b_split);
+        return ac_split.add(b_split);
     }
 };
 
@@ -107,7 +107,7 @@ fn runWithPartitioningModel(
 
     const model: WithPartitioningModel = .init();
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c }, .{ .partitioner = .shardy, .shardings = &.{ sharding_replicated, sharding_split } });
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c }, .{ .partitioner = .gspmd, .shardings = &.{ sharding_replicated, sharding_split } });
     defer exe.deinit();
 
     var a_buffer = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_replicated, 0.0);

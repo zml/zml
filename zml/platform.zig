@@ -236,13 +236,8 @@ pub const Platform = struct {
             else => {},
         }
 
-        if (platform.pjrt_api.ffi()) |ffi| b: {
-            const platform_name = switch (target) {
-                .cuda => "cuda",
-                .rocm => "rocm",
-                .cpu => "host",
-                else => break :b,
-            };
+        if (platform.pjrt_api.ffi()) |ffi| {
+            const platform_name = platform.pjrt_client.platformName(platform.pjrt_api);
             ffi.register(platform.pjrt_api, "zml$print", platform_name, printCallback, .{ .command_buffer_compatible = false }) catch |e| {
                 log.warn("Failed to register \"print\" callback, error: {}", .{e});
             };

@@ -1016,20 +1016,22 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     const is_print = std.mem.startsWith(u8, target_name, "zml$print");
     const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
     const disable_side_effect = is_print and
-        (ctx.partitioning.partitioner == .gspmd or ctx.partitioning.partitioner == .shardy) and
+        ctx.partitioning.partitioner == .shardy and
         !has_custom_partitioner;
     const has_side_effect_opt: ?bool = if (disable_side_effect)
-        null
+        false
     else
         opts.has_side_effect;
 
     var additional_attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .{};
-    if (has_side_effect_opt == true and ctx.partitioning.partitioner == .gspmd) {
+    const require_unique_device_side_effect = has_side_effect_opt == true and
+        ctx.partitioning.partitioner == .gspmd;
+    if (require_unique_device_side_effect) {
         // Side-effect ops must have a unique-device sharding under GSPMD.
         additional_attrs.appendAssumeCapacity(.named(
             ctx.mlir_ctx,
             "mhlo.sharding",
-            mlir.stringAttribute(ctx.mlir_ctx, "{devices=[1]0}"),
+            mlir.stringAttribute(ctx.mlir_ctx, "{maximal device=0}"),
         ));
     }
 

@@ -40,6 +40,7 @@ pub const CompilationContext = struct {
         id_to_argument: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_donation: std.AutoArrayHashMapUnmanaged(usize, usize),
         id_to_output_memory_kind: std.AutoArrayHashMapUnmanaged(usize, Memory.Kind),
+        keepalive_values: stdx.BoundedArray(*const mlir.Value, 32),
         arena: std.heap.ArenaAllocator,
 
         pub fn initFromBlock(allocator: std.mem.Allocator, block: *mlir.Block) Scope {
@@ -49,6 +50,7 @@ pub const CompilationContext = struct {
                 .id_to_argument = .empty,
                 .id_to_donation = .empty,
                 .id_to_output_memory_kind = .empty,
+                .keepalive_values = .{},
                 .arena = arena,
             };
         }
@@ -431,7 +433,27 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
             ),
         ));
     }
-    _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
+    const return_values = blk: {
+        const keepalive_values = compilation_context.currentScope().keepalive_values.constSlice();
+        if (keepalive_values.len == 0) break :blk output_info.values;
+
+        const values = try arena.allocator().alloc(*const mlir.Value, output_info.values.len + keepalive_values.len);
+        @memcpy(values[0..output_info.values.len], output_info.values);
+        @memcpy(values[output_info.values.len..], keepalive_values);
+
+        const result_types = try arena.allocator().alloc(*const mlir.Type, values.len);
+        for (values, 0..) |v, i| result_types[i] = v.type_();
+
+        const barrier = mlir.Operation.make(compilation_context.mlir_ctx, "stablehlo.optimization_barrier", .{
+            .operands = .{ .flat = values },
+            .results = .{ .flat = result_types },
+        }).appendTo(compilation_context.currentScope().block);
+
+        const res = try arena.allocator().alloc(*const mlir.Value, output_info.values.len);
+        for (res, 0..) |*v, i| v.* = barrier.result(i);
+        break :blk res;
+    };
+    _ = dialects.func.returns(compilation_context.mlir_ctx, return_values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
         if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr| {
