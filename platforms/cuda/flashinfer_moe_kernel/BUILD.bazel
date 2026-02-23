@@ -1,4 +1,4 @@
-modulload("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "flashinfer_moe_kernel",
