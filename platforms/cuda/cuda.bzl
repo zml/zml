@@ -8,14 +8,12 @@ package(default_visibility = ["//visibility:public"])
 
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_cc//cc:cc_import.bzl", "cc_import")
-load("@zml//bazel:patchelf.bzl", "patchelf")
 """
 
 ARCH = "linux-x86_64"
 
 CUDA_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cuda/redist/"
 CUDA_VERSION = "13.1.1"
-CUDA_VARIANT = "cuda13.1"
 CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a9ecb1f0d422"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
@@ -25,14 +23,6 @@ CUDNN_REDIST_JSON_SHA256 = "6ad4f2c047ee03131d1efb95db56f78c24953cb30880a2edcf99
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
 NVSHMEM_VERSION = "3.5.19"
 NVSHMEM_REDIST_JSON_SHA256 = "6dced4193eb728542504b346cfb768da6e3de2abca0cded95fda3a69729994d2"
-
-CUDA_COMPAT_FILES = [
-    "libcuda.so.1",
-    "libcudadebugger.so.1",
-    "libnvidia-nvvm.so.4",
-    "libnvidia-nvvm70.so.4",
-    "libnvidia-ptxjitcompiler.so.1",
-]
 
 _UBUNTU_PACKAGES = {
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
@@ -60,27 +50,6 @@ CUDA_PACKAGES = {
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
-        ),
-    ]),
-    "cuda_compat": "\n".join([
-        packages.patchelf(
-            name = "{}.patchelf".format(file),
-            set_rpath = "$ORIGIN",
-            src = "compat/{}".format(file),
-            soname = file,
-        )
-        for file in CUDA_COMPAT_FILES
-    ] + [
-        packages.filegroup(
-            name = "cuda_compat",
-            srcs = [
-                "compat/libnvidia-gpucomp.so.590.48.01",
-                "compat/libnvidia-pkcs11-openssl3.so.590.48.01",
-                "compat/libnvidia-tileiras.so.590.48.01",
-            ] + [
-                ":{}.patchelf".format(file)
-                for file in CUDA_COMPAT_FILES
-            ],
         ),
     ]),
     "libcufft": packages.filegroup(
@@ -219,7 +188,6 @@ def _cuda_impl(mctx):
         arch_data = pkg_data.get(ARCH)
         if not arch_data:
             continue
-        arch_data = arch_data.get(CUDA_VARIANT, None) or arch_data
         http_archive(
             name = pkg,
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
