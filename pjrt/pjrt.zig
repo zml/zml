@@ -277,6 +277,13 @@ pub const Api = struct {
         return null;
     }
 
+    pub fn customPartitioner(api: *const Api) ?CustomPartitioner {
+        if (api.extension(.custom_partitioner)) |ext| {
+            return .{ .inner = ext.custom_partitioner };
+        }
+        return null;
+    }
+
     pub fn profiler(self: *const Api, options_pb: []const u8) ApiError!?Profiler {
         if (self.extension(.profiler)) |ext| {
             return try Profiler.init(self, ext.profiler, options_pb);
@@ -1519,6 +1526,76 @@ pub const Ffi = extern struct {
         if (result) |pjrt_c_error| {
             const pjrt_error: *Error = @ptrCast(pjrt_c_error);
             log.err("addUserData error: {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+    }
+};
+
+pub const CustomPartitioner = extern struct {
+    inner: *const c.PJRT_Custom_Partitioner_Extension,
+
+    pub const api_version = c.PJRT_API_CUSTOM_PARTITIONER_EXTENSION_VERSION;
+    pub const String = c.JAX_CustomCallPartitioner_string;
+    pub const Aval = c.JAX_CustomCallPartitioner_aval;
+    pub const VersionAndError = c.JAX_CustomCallPartitioner_version_and_error;
+    pub const PartitionArgs = c.JAX_CustomCallPartitioner_Partition_Args;
+    pub const InferShardingFromOperandsArgs = c.JAX_CustomCallPartitioner_InferShardingFromOperands_Args;
+    pub const PropagateUserShardingArgs = c.JAX_CustomCallPartitioner_PropagateUserSharding_Args;
+    pub const Callbacks = c.JAX_CustomCallPartitioner_Callbacks;
+
+    pub fn toString(value: []const u8) String {
+        return .{
+            .data = value.ptr,
+            .size = value.len,
+        };
+    }
+
+    pub fn fromString(value: String) []const u8 {
+        return value.data[0..value.size];
+    }
+
+    pub fn initCallbacks(
+        private_data: ?*anyopaque,
+        dtor: @FieldType(Callbacks, "dtor"),
+        partition: @FieldType(Callbacks, "partition"),
+        infer_sharding: @FieldType(Callbacks, "infer_sharding"),
+        propagate_user_sharding: @FieldType(Callbacks, "propagate_user_sharding"),
+        can_side_effecting_have_replicated_sharding: bool,
+    ) Callbacks {
+        return .{
+            .version = api_version,
+            .private_data = private_data,
+            .dtor = dtor,
+            .partition = partition,
+            .infer_sharding = infer_sharding,
+            .propagate_user_sharding = propagate_user_sharding,
+            .can_side_effecting_have_replicated_sharding = can_side_effecting_have_replicated_sharding,
+        };
+    }
+
+    pub fn register(self: *const CustomPartitioner, api: *const Api, target_name: []const u8, callbacks: *Callbacks) ApiError!void {
+        var ret: meta.Struct(c.PJRT_Register_Custom_Partitioner_Args) = .{
+            .name = target_name.ptr,
+            .name_size = target_name.len,
+            .callbacks = callbacks,
+        };
+        const result = self.inner.register_custom_partitioner.?(@ptrCast(&ret));
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("registerCustomPartitioner error: {s}", .{pjrt_error.getMessage(api)});
+            return pjrt_error.getCode(api).toApiError();
+        }
+    }
+
+    pub fn registerBatchPartitionable(self: *const CustomPartitioner, api: *const Api, target_name: []const u8) ApiError!void {
+        var ret: meta.Struct(c.PJRT_Register_Batch_Partitionable_Args) = .{
+            .name = target_name.ptr,
+            .name_size = target_name.len,
+        };
+        const result = self.inner.register_batch_partitionable.?(@ptrCast(&ret));
+        if (result) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            log.err("registerBatchPartitionable error: {s}", .{pjrt_error.getMessage(api)});
             return pjrt_error.getCode(api).toApiError();
         }
     }

@@ -246,6 +246,13 @@ pub const Platform = struct {
             ffi.register(platform.pjrt_api, "zml$print", platform_name, printCallback, .{ .command_buffer_compatible = false }) catch |e| {
                 log.warn("Failed to register \"print\" callback, error: {}", .{e});
             };
+            if (platform.pjrt_api.customPartitioner()) |partitioner| {
+                partitioner.register(platform.pjrt_api, "zml$print", ensurePrintCustomPartitionerCallbacks()) catch |err| {
+                    if (err != error.AlreadyExists) {
+                        log.warn("Failed to register custom partitioner for \"print\", error: {}", .{err});
+                    }
+                };
+            }
         }
 
         return platform;
@@ -599,6 +606,341 @@ fn getScalarAttributeAs(comptime T: type, call_frame: *pjrt.ffi.CallFrame, attri
     return attribute.get(T);
 }
 
+const PrintPartitionerResult = struct {
+    arena: std.heap.ArenaAllocator,
+
+    fn init() !*PrintPartitionerResult {
+        const self = try std.heap.c_allocator.create(PrintPartitionerResult);
+        self.* = .{
+            .arena = std.heap.ArenaAllocator.init(std.heap.c_allocator),
+        };
+        return self;
+    }
+
+    fn allocator(self: *PrintPartitionerResult) std.mem.Allocator {
+        return self.arena.allocator();
+    }
+
+    fn cleanup(data: ?*anyopaque) callconv(.c) void {
+        if (data) |ptr| {
+            const self: *PrintPartitionerResult = @ptrCast(@alignCast(ptr));
+            self.arena.deinit();
+            std.heap.c_allocator.destroy(self);
+        }
+    }
+};
+
+fn noopCleanup(_: ?*anyopaque) callconv(.c) void {}
+
+fn initPartitionerHeader(header: *pjrt.CustomPartitioner.VersionAndError) void {
+    header.* = .{
+        .api_version = pjrt.CustomPartitioner.api_version,
+        .data = null,
+        .cleanup_fn = &noopCleanup,
+        .has_error = false,
+        .code = c.PJRT_Error_Code_OK,
+        .error_msg = .{ .data = null, .size = 0 },
+    };
+}
+
+fn setPartitionerError(
+    header: *pjrt.CustomPartitioner.VersionAndError,
+    code: pjrt.ErrorCode,
+    comptime fmt: []const u8,
+    args: anytype,
+) void {
+    initPartitionerHeader(header);
+
+    const res = PrintPartitionerResult.init() catch {
+        header.has_error = true;
+        header.code = c.PJRT_Error_Code_INTERNAL;
+        header.error_msg = .{ .data = "OOM", .size = 3 };
+        return;
+    };
+    const allocator = res.allocator();
+    const msg = std.fmt.allocPrint(allocator, fmt, args) catch {
+        res.arena.deinit();
+        std.heap.c_allocator.destroy(res);
+        header.has_error = true;
+        header.code = c.PJRT_Error_Code_INTERNAL;
+        header.error_msg = .{ .data = "OOM", .size = 3 };
+        return;
+    };
+
+    header.has_error = true;
+    header.code = @intFromEnum(code);
+    header.error_msg = .{ .data = msg.ptr, .size = msg.len };
+    header.data = res;
+    header.cleanup_fn = @ptrCast(&PrintPartitionerResult.cleanup);
+}
+
+fn xlaPrimitiveTypeToMlirType(element_type: i32) ?[]const u8 {
+    return switch (element_type) {
+        c.xla_PRED => "i1",
+        c.xla_S8 => "i8",
+        c.xla_S16 => "i16",
+        c.xla_S32 => "i32",
+        c.xla_S64 => "i64",
+        c.xla_U8 => "ui8",
+        c.xla_U16 => "ui16",
+        c.xla_U32 => "ui32",
+        c.xla_U64 => "ui64",
+        c.xla_F16 => "f16",
+        c.xla_F32 => "f32",
+        c.xla_F64 => "f64",
+        c.xla_BF16 => "bf16",
+        c.xla_C64 => "complex<f32>",
+        c.xla_C128 => "complex<f64>",
+        c.xla_F8E5M2 => "f8E5M2",
+        c.xla_F8E4M3FN => "f8E4M3FN",
+        c.xla_F8E4M3B11FNUZ => "f8E4M3B11FNUZ",
+        c.xla_F8E5M2FNUZ => "f8E5M2FNUZ",
+        c.xla_F8E4M3FNUZ => "f8E4M3FNUZ",
+        c.xla_F8E4M3 => "f8E4M3",
+        c.xla_F8E3M4 => "f8E3M4",
+        c.xla_F8E8M0FNU => "f8E8M0FNU",
+        c.xla_F4E2M1FN => "f4E2M1FN",
+        else => null,
+    };
+}
+
+fn shardCountForAxis(op_sharding: ?*const c.xla_OpSharding, axis: usize, rank: usize) i64 {
+    const sharding = op_sharding orelse return 1;
+
+    const sharding_type = c.xla_OpSharding_type(sharding);
+    if (sharding_type == c.xla_OpSharding_REPLICATED or sharding_type == c.xla_OpSharding_MAXIMAL) {
+        return 1;
+    }
+    if (sharding_type != c.xla_OpSharding_OTHER) {
+        return 1;
+    }
+
+    var tile_dims_len: usize = 0;
+    const tile_dims = c.xla_OpSharding_tile_assignment_dimensions(sharding, &tile_dims_len) orelse return 1;
+    if (tile_dims_len == 0) return 1;
+
+    var logical_tile_dims_len = tile_dims_len;
+    if (c.xla_OpSharding_replicate_on_last_tile_dim(sharding) and logical_tile_dims_len > rank) {
+        logical_tile_dims_len -= 1;
+    }
+    if (axis >= logical_tile_dims_len) return 1;
+
+    const parts = tile_dims[axis];
+    return if (parts > 0) parts else 1;
+}
+
+fn tensorTypeFromShapeProto(allocator: std.mem.Allocator, shape: *const c.xla_ShapeProto, op_sharding: ?*const c.xla_OpSharding) ![]u8 {
+    if (c.xla_ShapeProto_element_type(shape) == c.xla_TUPLE) return error.UnsupportedTupleShape;
+
+    const element_type = xlaPrimitiveTypeToMlirType(c.xla_ShapeProto_element_type(shape)) orelse return error.UnsupportedElementType;
+
+    var dims_len: usize = 0;
+    const dims = c.xla_ShapeProto_dimensions(shape, &dims_len);
+
+    var dyn_len: usize = 0;
+    const dynamic_dims = c.xla_ShapeProto_is_dynamic_dimension(shape, &dyn_len);
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+
+    try out.writer.writeAll("tensor<");
+    for (0..dims_len) |i| {
+        const is_dynamic = if (i < dyn_len and dynamic_dims != null) dynamic_dims[i] else false;
+        const global_dim = if (dims != null) dims[i] else 0;
+        const local_dim = blk: {
+            const parts = shardCountForAxis(op_sharding, i, dims_len);
+            if (parts <= 1) break :blk global_dim;
+            break :blk std.math.divCeil(i64, global_dim, parts) catch return error.UnsupportedSharding;
+        };
+        if (is_dynamic) {
+            try out.writer.writeAll("?x");
+        } else {
+            try out.writer.print("{d}x", .{local_dim});
+        }
+    }
+    try out.writer.writeAll(element_type);
+    try out.writer.writeAll(">");
+
+    return out.toOwnedSlice();
+}
+
+fn printCustomPartitionerPartition(
+    _: [*c]pjrt.CustomPartitioner.Callbacks,
+    args_: [*c]pjrt.CustomPartitioner.PartitionArgs,
+) callconv(.c) void {
+    if (args_ == null) return;
+    const args = &args_[0];
+    initPartitionerHeader(&args.header);
+
+    const result_sharding = if (args.op_result.has_sharding)
+        args.op_result.sharding.data[0..args.op_result.sharding.size]
+    else {
+        setPartitionerError(&args.header, .invalid_argument, "zml$print partition callback requires result sharding", .{});
+        return;
+    };
+
+    var arena_alloc: upb.Allocator = .init(std.heap.c_allocator);
+    const upb_arena = c.upb_Arena_Init(null, 0, arena_alloc.inner()) orelse {
+        setPartitionerError(&args.header, .internal, "Failed to create upb arena", .{});
+        return;
+    };
+    defer c.upb_Arena_Free(upb_arena);
+
+    const shape_proto = c.xla_ShapeProto_parse(args.op_result.shape.data, args.op_result.shape.size, upb_arena) orelse {
+        setPartitionerError(&args.header, .invalid_argument, "Failed to parse result ShapeProto", .{});
+        return;
+    };
+    const op_sharding = c.xla_OpSharding_parse(args.op_result.sharding.data, args.op_result.sharding.size, upb_arena) orelse {
+        setPartitionerError(&args.header, .invalid_argument, "Failed to parse result OpSharding", .{});
+        return;
+    };
+
+    const res = PrintPartitionerResult.init() catch {
+        setPartitionerError(&args.header, .internal, "Out of memory creating partition result", .{});
+        return;
+    };
+    const allocator = res.allocator();
+
+    const tensor_type = tensorTypeFromShapeProto(allocator, shape_proto, op_sharding) catch |err| {
+        setPartitionerError(&args.header, .invalid_argument, "Unsupported print shape for partitioning: {}", .{err});
+        return;
+    };
+    const backend_config = if (args.backend_config.data) |ptr|
+        ptr[0..args.backend_config.size]
+    else
+        "{}";
+
+    var mlir_module_buf = std.Io.Writer.Allocating.init(allocator);
+    defer mlir_module_buf.deinit();
+    mlir_module_buf.writer.writeAll("module @zml_print_partitioner {\n") catch {
+        setPartitionerError(&args.header, .internal, "Failed to build print partitioner mlir module", .{});
+        return;
+    };
+    mlir_module_buf.writer.print("  func.func public @main(%arg0: {s}) -> ({s}) {{\n", .{ tensor_type, tensor_type }) catch {
+        setPartitionerError(&args.header, .internal, "Failed to build print partitioner mlir module", .{});
+        return;
+    };
+    mlir_module_buf.writer.print(
+        "    %0 = stablehlo.custom_call @zml$print(%arg0) {{api_version = 4 : i32, backend_config = {s}, has_side_effect = true}} : ({s}) -> {s}\n",
+        .{ backend_config, tensor_type, tensor_type },
+    ) catch {
+        setPartitionerError(&args.header, .internal, "Failed to build print partitioner mlir module", .{});
+        return;
+    };
+    mlir_module_buf.writer.print("    return %0 : {s}\n", .{tensor_type}) catch {
+        setPartitionerError(&args.header, .internal, "Failed to build print partitioner mlir module", .{});
+        return;
+    };
+    mlir_module_buf.writer.writeAll("  }\n}\n") catch {
+        setPartitionerError(&args.header, .internal, "Failed to build print partitioner mlir module", .{});
+        return;
+    };
+    const mlir_module = mlir_module_buf.toOwnedSlice() catch {
+        setPartitionerError(&args.header, .internal, "Failed to finalize print partitioner mlir module", .{});
+        return;
+    };
+
+    const out_arg_shardings = allocator.alloc(pjrt.CustomPartitioner.String, args.num_args) catch {
+        setPartitionerError(&args.header, .internal, "Failed allocating args_sharding", .{});
+        return;
+    };
+    for (0..args.num_args) |i| {
+        const op_arg = args.op_args[i];
+        if (!op_arg.has_sharding) {
+            setPartitionerError(&args.header, .invalid_argument, "zml$print partition callback requires all operand shardings", .{});
+            return;
+        }
+        const sharding = op_arg.sharding.data[0..op_arg.sharding.size];
+        const sharding_copy = allocator.dupe(u8, sharding) catch {
+            setPartitionerError(&args.header, .internal, "Failed duplicating operand sharding", .{});
+            return;
+        };
+        out_arg_shardings[i] = .{
+            .data = sharding_copy.ptr,
+            .size = sharding_copy.len,
+        };
+    }
+
+    const result_sharding_copy = allocator.dupe(u8, result_sharding) catch {
+        setPartitionerError(&args.header, .internal, "Failed duplicating result sharding", .{});
+        return;
+    };
+
+    args.mlir_module = .{
+        .data = mlir_module.ptr,
+        .size = mlir_module.len,
+    };
+    args.args_sharding = out_arg_shardings.ptr;
+    args.result_sharding = .{
+        .data = result_sharding_copy.ptr,
+        .size = result_sharding_copy.len,
+    };
+
+    args.header.data = res;
+    args.header.cleanup_fn = @ptrCast(&PrintPartitionerResult.cleanup);
+}
+
+fn printCustomPartitionerInferSharding(
+    _: [*c]pjrt.CustomPartitioner.Callbacks,
+    args_: [*c]pjrt.CustomPartitioner.InferShardingFromOperandsArgs,
+) callconv(.c) void {
+    if (args_ == null) return;
+    const args = &args_[0];
+    initPartitionerHeader(&args.header);
+    if (args.num_args == 0 or !args.op_args[0].has_sharding) {
+        args.has_result_sharding = false;
+        args.result_sharding = .{ .data = null, .size = 0 };
+        return;
+    }
+
+    const sharding = args.op_args[0].sharding.data[0..args.op_args[0].sharding.size];
+    const res = PrintPartitionerResult.init() catch {
+        setPartitionerError(&args.header, .internal, "Out of memory in infer_sharding callback", .{});
+        return;
+    };
+    const sharding_copy = res.allocator().dupe(u8, sharding) catch {
+        setPartitionerError(&args.header, .internal, "Failed duplicating infer_sharding result", .{});
+        return;
+    };
+
+    args.has_result_sharding = true;
+    args.result_sharding = .{
+        .data = sharding_copy.ptr,
+        .size = sharding_copy.len,
+    };
+    args.header.data = res;
+    args.header.cleanup_fn = @ptrCast(&PrintPartitionerResult.cleanup);
+}
+
+fn printCustomPartitionerPropagateUserSharding(
+    _: [*c]pjrt.CustomPartitioner.Callbacks,
+    args_: [*c]pjrt.CustomPartitioner.PropagateUserShardingArgs,
+) callconv(.c) void {
+    if (args_ == null) return;
+    const args = &args_[0];
+    initPartitionerHeader(&args.header);
+}
+
+fn printCustomPartitionerDtor(_: [*c]pjrt.CustomPartitioner.Callbacks) callconv(.c) void {}
+
+var print_custom_partitioner_callbacks: pjrt.CustomPartitioner.Callbacks = undefined;
+var print_custom_partitioner_callbacks_initialized = false;
+
+fn ensurePrintCustomPartitionerCallbacks() *pjrt.CustomPartitioner.Callbacks {
+    if (!print_custom_partitioner_callbacks_initialized) {
+        print_custom_partitioner_callbacks = pjrt.CustomPartitioner.initCallbacks(
+            null,
+            &printCustomPartitionerDtor,
+            &printCustomPartitionerPartition,
+            &printCustomPartitionerInferSharding,
+            &printCustomPartitionerPropagateUserSharding,
+            true,
+        );
+        print_custom_partitioner_callbacks_initialized = true;
+    }
+    return &print_custom_partitioner_callbacks;
+}
+
 fn printCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
     return printCallbackInner(call_frame) catch |e| b: {
         log.err("Error in print callback: {}", .{e});
@@ -647,7 +989,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    log.info("{s}: {d}", .{ name, slice });
+    log.info("{s}[device={d}]: {d}", .{ name, device_ordinal, slice });
 
     return null;
 }

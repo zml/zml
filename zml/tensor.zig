@@ -4122,9 +4122,10 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) Tensor {
-        // Keep print as a pure identity custom-call in partitioned modes.
-        // XLA SPMD rejects replicated side-effect custom-calls.
-        return ops.customCall("zml$print", .{input}, .{input.shape()}, .{ .name = name }, .{ .has_side_effect = false });
+        // Keep the operation side-effecting by default.
+        // ops.customCall() will automatically drop side-effect semantics for
+        // partitioned backends that don't expose a custom partitioner extension.
+        return ops.customCall("zml$print", .{input}, .{input.shape()}, .{ .name = name }, .{ .has_side_effect = true });
     }
 
     fn mlirCtx() *mlir.Context {

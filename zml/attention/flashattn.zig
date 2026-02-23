@@ -8,6 +8,7 @@ const zml = @import("../zml.zig");
 const ffi = zml.pjrt.ffi;
 
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+const log = std.log.scoped(.@"zml/attention/flashattn");
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     if (comptime platforms.isEnabled(.cuda)) {
@@ -136,6 +137,11 @@ pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
         pub fn register(platform: *const zml.Platform) !void {
             try platform.pjrt_api.ffi().?.register(platform.pjrt_api, T.custom_call_name, "cuda", T.run, .{ .command_buffer_compatible = true });
+            if (platform.pjrt_api.customPartitioner()) |partitioner| {
+                partitioner.registerBatchPartitionable(platform.pjrt_api, T.custom_call_name) catch |err| {
+                    log.warn("Failed to register batch partitionable custom call \"{s}\": {}", .{ T.custom_call_name, err });
+                };
+            }
         }
 
         pub fn run(call_frame: *ffi.CallFrame) callconv(.c) ?*ffi.Error {

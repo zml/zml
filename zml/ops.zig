@@ -1014,7 +1014,10 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     }
 
     const is_print = std.mem.startsWith(u8, target_name, "zml$print");
-    const disable_side_effect = is_print and (ctx.partitioning.partitioner == .gspmd or ctx.partitioning.partitioner == .shardy);
+    const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
+    const disable_side_effect = is_print and
+        (ctx.partitioning.partitioner == .gspmd or ctx.partitioning.partitioner == .shardy) and
+        !has_custom_partitioner;
     const has_side_effect_opt: ?bool = if (disable_side_effect)
         null
     else
