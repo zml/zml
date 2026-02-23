@@ -437,6 +437,8 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         const keepalive_values = compilation_context.currentScope().keepalive_values.constSlice();
         if (keepalive_values.len == 0) break :blk output_info.values;
 
+        // Keep non-side-effect debug custom calls (CPU + shardy fallback) live by
+        // threading them through a barrier that is data-dependent on function returns.
         const values = try arena.allocator().alloc(*const mlir.Value, output_info.values.len + keepalive_values.len);
         @memcpy(values[0..output_info.values.len], output_info.values);
         @memcpy(values[output_info.values.len..], keepalive_values);

@@ -89,6 +89,7 @@ fn runWithPartitioningModel(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
+    partitioner: zml.sharding.Partitioning.Partitioner,
     physical_mesh: zml.sharding.PhysicalMesh,
 ) !void {
     const mesh_replicated: zml.sharding.LogicalMesh = try .init("mesh_replicated", .{ .x = .high_bandwidth });
@@ -107,7 +108,7 @@ fn runWithPartitioningModel(
 
     const model: WithPartitioningModel = .init();
 
-    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c }, .{ .partitioner = .gspmd, .shardings = &.{ sharding_replicated, sharding_split } });
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c }, .{ .partitioner = partitioner, .shardings = &.{ sharding_replicated, sharding_split } });
     defer exe.deinit();
 
     var a_buffer = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_replicated, 0.0);
@@ -330,6 +331,16 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const partitioner: zml.sharding.Partitioning.Partitioner = p: {
+        const raw = init.environ_map.get("PARTITIONER") orelse break :p .shardy;
+
+        if (std.mem.eql(u8, raw, "gspmd")) break :p .gspmd;
+        if (std.mem.eql(u8, raw, "shardy")) break :p .shardy;
+
+        log.warn("Unknown PARTITIONER '{s}', defaulting to 'shardy'", .{raw});
+        break :p .shardy;
+    };
+
     var physical_mesh: zml.sharding.PhysicalMesh = blk: {
         if (device_count == 9) {
             const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
@@ -375,7 +386,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{sharding_model});
 
     // try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
-    try runWithPartitioningModel(allocator, io, platform, physical_mesh);
+    try runWithPartitioningModel(allocator, io, platform, partitioner, physical_mesh);
 }
 
 fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.sharding.Sharding, random: std.Random) !zml.Buffer {
