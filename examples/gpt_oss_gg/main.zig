@@ -1,16 +1,19 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const cublas_gg = zml.cublas_grouped_gemm;
+const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
-const cublas_gg = zml.cublas_grouped_gemm;
-const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 
 const gpt_oss = @import("gpt_oss_gg.zig");
 const GptOss = gpt_oss.GptOss;
 const KvCache = gpt_oss.KvCache;
+
+// const cublas_gg = zml.cublas_grouped_gemm;
+// const GemmGroupedBatched = cublas_gg.GemmGroupedBatched;
 
 const log = std.log.scoped(.gpt_oss);
 
@@ -107,7 +110,7 @@ pub fn main() !void {
         v.deinit();
     }
 
-    var platform: zml.Platform = try .auto(io, .{});
+    var platform: zml.Platform = try .auto(allocator, io, .{});
     platform = platform.withCompilationOptions(.{ .xla_dump_to = "/tmp/zml/gpt_oss/" });
     defer platform.deinit();
     var it = platform.devicesIterator();
@@ -121,8 +124,9 @@ pub fn main() !void {
         return;
     }
 
-    try GemmGroupedBatched.register(platform);
     try cublas_gg.load(allocator);
+
+    try GemmGroupedBatched.register(platform);
 
     var compiled_model_result_future = io.async(compileModel, .{ allocator, io, platform, gpt_model, gpt_parameters });
     errdefer if (compiled_model_result_future.cancel(io)) |v| {
@@ -270,7 +274,13 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling prefill", .{});
             defer log.info("Compiled prefill [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.prefill_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng, parameters_.tokens_mask });
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{
+                parameters_.prefill_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                parameters_.tokens_mask,
+            });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -280,7 +290,13 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: zml.Platform
             var timer_ = try std.time.Timer.start();
             log.info("Compiling decode", .{});
             defer log.info("Compiled decode [{D}]", .{timer_.read()});
-            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{ parameters_.decode_tokens, parameters_.token_index, parameters_.kv_cache, parameters_.rng, null });
+            return platform_.compile(allocator_, io_, gpt_model_, .forward, .{
+                parameters_.decode_tokens,
+                parameters_.token_index,
+                parameters_.kv_cache,
+                parameters_.rng,
+                null,
+            });
         }
     }.call, .{ allocator, io, platform, gpt_model, parameters });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -352,7 +368,7 @@ fn transferBuffer(ctx: zml.io.TensorBufferTransfer(gpt_oss.TransferCtx)) !void {
     var reader = zml.safetensors.TensorReader.init(ctx.io, ctx.tensor, read_buffer) catch unreachable;
     defer reader.deinit();
 
-    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.buffer, .device, write_buffer) catch unreachable;
+    var writer = zml.io.DeviceWriter.init(ctx.io, &transfer_progress, ctx.platform, ctx.tensor.shape, ctx.buffer, .device, write_buffer) catch unreachable;
     defer {
         writer.interface.flush() catch unreachable;
         writer.deinit();
@@ -455,7 +471,14 @@ pub fn generateText(
         var tokens_mask_buffer: zml.Buffer = try .fromSlice(io, platform, tokens_mask);
         defer tokens_mask_buffer.deinit();
 
-        prefill_args.set(.{ gpt_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, tokens_mask_buffer });
+        prefill_args.set(.{
+            gpt_buffers,
+            prefill_tokens_buffer,
+            prefill_token_pos_buffer,
+            kv_cache_buffers,
+            rng_buffers,
+            tokens_mask_buffer,
+        });
 
         prefill_exe.call(prefill_args, &prefill_results);
 
@@ -503,12 +526,18 @@ pub fn generateText(
         }
 
         // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.ConstSlice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
+        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
         const token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
         defer token_pos_buffer.deinit();
 
         // call to generate the next token
-        decode_args.set(.{ gpt_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{
+            gpt_buffers,
+            current_token_buffer,
+            token_pos_buffer,
+            kv_cache_buffers,
+            rng_buffers,
+        });
 
         decode_exe.call(decode_args, &decode_results);
 
