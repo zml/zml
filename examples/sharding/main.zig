@@ -71,6 +71,67 @@ const AddModel = struct {
     }
 };
 
+const WithPartitioningModel = struct {
+    pub fn init() WithPartitioningModel {
+        return .{};
+    }
+
+    pub fn forward(_: WithPartitioningModel, a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
+        const sum_ac = a.add(c);
+        const ac_split = sum_ac.withPartitioning(.{ .x = .model_x, .y = .model_y });
+        const b_split = b.withPartitioning(.{ .x = .model_x, .y = .model_y });
+        return ac_split.add(b_split);
+    }
+};
+
+fn runWithPartitioningModel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    physical_mesh: zml.sharding.PhysicalMesh,
+) !void {
+    const mesh_replicated: zml.sharding.LogicalMesh = try .init("mesh_replicated", .{ .x = .high_bandwidth });
+    const strategy_replicated: zml.sharding.Strategy = try .suggest(mesh_replicated, physical_mesh);
+    const sharding_replicated: zml.sharding.Sharding = try .initFromStrategy(mesh_replicated, physical_mesh, strategy_replicated);
+
+    const mesh_split: zml.sharding.LogicalMesh = try .init("mesh_split", .{ .model_x = .high_bandwidth, .model_y = .balanced });
+    const strategy_split: zml.sharding.Strategy = try .suggest(mesh_split, physical_mesh);
+    const sharding_split: zml.sharding.Sharding = try .initFromStrategy(mesh_split, physical_mesh, strategy_split);
+
+    const replicated_shape = zml.Shape.init(.{ .x = 16, .y = 24 }, .f32).withPartitioning(.{ .x = .replicated, .y = .replicated });
+
+    const a: zml.Tensor = .fromShape(replicated_shape);
+    const b: zml.Tensor = .fromShape(replicated_shape);
+    const c: zml.Tensor = .fromShape(replicated_shape);
+
+    const model: WithPartitioningModel = .init();
+
+    var exe = try platform.compile(allocator, io, model, .forward, .{ a, b, c }, .{ .partitioner = .gspmd, .shardings = &.{ sharding_replicated, sharding_split } });
+    defer exe.deinit();
+
+    var a_buffer = try createSequenceBuffer(allocator, io, platform, a.shape(), sharding_replicated, 0.0);
+    defer a_buffer.deinit();
+    var b_buffer = try createSequenceBuffer(allocator, io, platform, b.shape(), sharding_replicated, 1.0);
+    defer b_buffer.deinit();
+    var c_buffer = try createSequenceBuffer(allocator, io, platform, b.shape(), sharding_replicated, 2.0);
+    defer c_buffer.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+
+    var exe_results = try exe.results(allocator);
+    defer exe_results.deinit(allocator);
+
+    exe_args.set(.{ a_buffer, b_buffer, c_buffer });
+
+    exe.call(exe_args, &exe_results);
+    var result = exe_results.get(zml.Buffer);
+    _ = try result.await(io);
+    defer result.deinit();
+
+    log.warn("result: {f}", .{result});
+}
+
 fn runComplexModel(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -312,7 +373,8 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{sharding_data});
     log.info("{f}", .{sharding_model});
 
-    try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
+    // try runAdditionExample(allocator, io, platform, sharding_data, sharding_model);
+    try runWithPartitioningModel(allocator, io, platform, physical_mesh);
 }
 
 fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.sharding.Sharding, random: std.Random) !zml.Buffer {

@@ -144,8 +144,8 @@ pub const Tensor = struct {
     }
 
     pub fn withPartitioning(self: Tensor, axes_: anytype) Tensor {
-        const partitioned_shape = self._shape.withPartitioning(axes_);
         const ctx = CompilationContext.current();
+        const partitioned_shape = self._shape.withPartitioning(axes_);
 
         const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch unreachable;
         const attr_info = ctx.partitioning.tensorShardingAttr(ctx.allocator, partitioned_shape, sharding) catch unreachable;
@@ -155,30 +155,22 @@ pub const Tensor = struct {
             .shardy => blk: {
                 const sdy_attr = mlir.Attribute.parse(ctx.mlir_ctx, attr_info.?.attr) catch unreachable;
 
-                const op = dialects.stablehlo.custom_call(
-                    ctx.mlir_ctx,
-                    &.{self.value()},
-                    &.{self.value().type_()},
-                    .{
-                        .call_target_name = "sdy.sharding_constraint",
-                        .has_side_effect = false,
-                        .backend_config = .{ .original = "" },
-                        .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "sharding", sdy_attr),
-                        },
+                const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
+                    .operands = .{ .flat = &.{self.value()} },
+                    .results = .{ .flat = &.{self.value().type_()} },
+                    .attributes = &.{
+                        .named(ctx.mlir_ctx, "sharding", sdy_attr), // todo: move "sharding" string
                     },
-                    .unknown(ctx.mlir_ctx),
-                ).appendTo(currentBlock());
+                }).appendTo(currentBlock());
                 break :blk op.result(0);
             },
             .gspmd => blk: {
-                // todo: implement correctly
                 const op = dialects.stablehlo.custom_call(
                     ctx.mlir_ctx,
                     &.{self.value()},
                     &.{self.value().type_()},
                     .{
-                        .call_target_name = "sharding_constraint",
+                        .call_target_name = "Sharding",
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
@@ -191,9 +183,6 @@ pub const Tensor = struct {
             },
         };
 
-        std.log.warn(">>>>>>>>>> Applied partitioning on tensor {d} with sharding {s}", .{ self.id, attr_info.?.attr });
-        std.log.warn(">>>>>>>>>> Partitioned shape: {f}", .{partitioned_shape});
-        // std.log.warn(">>>>>>>>>> MLIR op: {f}", .{op_result.*});
         return _result(partitioned_shape, op_result);
     }
 
