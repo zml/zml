@@ -1107,31 +1107,26 @@ pub const Sharding = struct {
                 break;
             }
         }
-        // If the tensor is fully replicated, GSPMD usually prefers no attribute
-        // or the explicit "{replicated}" string.
-        if (!has_sharding) return null;
+        if (!has_sharding) return try allocator.dupe(u8, "{replicated}");
 
         const mapping = self.getDimMapping(shape);
         var tile_shape = stdx.BoundedArray(i64, Shape.MAX_RANK + 1).init(0) catch unreachable;
-        var permutation = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
 
         //  Calculate tile sizes per tensor dimension
         for (mapping.axes_per_dim.constSlice()) |dim_axes| {
             var combined: i64 = 1;
             for (dim_axes.constSlice()) |idx| {
                 combined *= mapping.view.axes.get(idx).size;
-                permutation.appendAssumeCapacity(idx);
             }
             tile_shape.appendAssumeCapacity(combined);
         }
 
-        // Add replication dimension if physical axes are left over
+        // Add replication dimension if physical axes are left over.
         const has_replication = mapping.replicated_axes.len > 0;
         if (has_replication) {
             var repl_size: i64 = 1;
             for (mapping.replicated_axes.constSlice()) |idx| {
                 repl_size *= mapping.view.axes.get(idx).size;
-                permutation.appendAssumeCapacity(idx);
             }
             tile_shape.appendAssumeCapacity(repl_size);
         }
@@ -1139,39 +1134,24 @@ pub const Sharding = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
-        try out.writer.writeByte('"');
+        // Emit explicit device assignment list to avoid XLA requiring
+        // a sharding attribute on the custom-call instruction.
+        const ids = try self.deviceAssignment(allocator);
+        defer allocator.free(ids);
 
         try out.writer.writeAll("{devices=[");
         for (tile_shape.constSlice(), 0..) |s, i| {
             if (i > 0) try out.writer.writeAll(",");
             try out.writer.print("{d}", .{s});
         }
-        try out.writer.writeAll("]<=[");
-        for (mapping.view.axes.constSlice(), 0..) |ax, i| {
-            if (i > 0) try out.writer.writeAll(",");
-            try out.writer.print("{d}", .{ax.size});
-        }
         try out.writer.writeAll("]");
 
-        // Permutation T(...)
-        // Only emit T if it's not the identity permutation to keep the string clean.
-        var is_identity = (permutation.len == mapping.view.axes.len);
-        if (is_identity) {
-            for (permutation.constSlice(), 0..) |p, i| {
-                if (p != i) {
-                    is_identity = false;
-                    break;
-                }
+        for (ids, 0..) |id, i| {
+            if (i == 0) {
+                try out.writer.print("{d}", .{id});
+            } else {
+                try out.writer.print(",{d}", .{id});
             }
-        }
-
-        if (!is_identity and permutation.len > 0) {
-            try out.writer.writeAll("T(");
-            for (permutation.constSlice(), 0..) |p, i| {
-                if (i > 0) try out.writer.writeAll(",");
-                try out.writer.print("{d}", .{p});
-            }
-            try out.writer.writeAll(")");
         }
 
         if (has_replication) {
@@ -1179,7 +1159,6 @@ pub const Sharding = struct {
         }
 
         try out.writer.writeAll("}");
-        try out.writer.writeByte('"');
 
         return try out.toOwnedSlice();
     }

@@ -174,7 +174,7 @@ pub const Tensor = struct {
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, attr_info.?.attr)),
+                            .named(ctx.mlir_ctx, attr_info.?.name, mlir.stringAttribute(ctx.mlir_ctx, attr_info.?.attr)),
                         },
                     },
                     .unknown(ctx.mlir_ctx),

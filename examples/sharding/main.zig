@@ -79,6 +79,7 @@ const WithPartitioningModel = struct {
     pub fn forward(_: WithPartitioningModel, a: zml.Tensor, b: zml.Tensor, c: zml.Tensor) zml.Tensor {
         const sum_ac = a.add(c);
         const ac_split = sum_ac.withPartitioning(.{ .x = .model_x, .y = .model_y });
+        ac_split.print("ac_split");
         const b_split = b.withPartitioning(.{ .x = .model_x, .y = .model_y });
         return ac_split.add(b_split);
     }

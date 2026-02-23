@@ -435,22 +435,28 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
     for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
         if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr| {
-            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
+            const attr_value = if (std.mem.eql(u8, attr.name, "mhlo.sharding"))
+                mlir.stringAttribute(compilation_context.mlir_ctx, attr.attr)
+            else
+                try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
             input_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
                 attr.name,
-                @ptrCast(parsed),
+                attr_value,
             ));
         }
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
         if (try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding)) |attr| {
-            const parsed = try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
+            const attr_value = if (std.mem.eql(u8, attr.name, "mhlo.sharding"))
+                mlir.stringAttribute(compilation_context.mlir_ctx, attr.attr)
+            else
+                try mlir.Attribute.parse(compilation_context.mlir_ctx, attr.attr);
             output_attributes[i].appendAssumeCapacity(.named(
                 compilation_context.mlir_ctx,
                 attr.name,
-                @ptrCast(parsed),
+                attr_value,
             ));
         }
     }
