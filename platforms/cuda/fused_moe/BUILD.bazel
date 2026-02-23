@@ -1,0 +1,36 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+# Compile CUDA kernel
+cc_library(
+    name = "fused_moe_kernel",
+    srcs = ["fused_moe_kernel.cu"],
+    hdrs = [],
+    deps = [
+        "@cuda_cudart//:cuda",
+    ],
+    copts = [
+        "-arch=sm_80",  # Adjust for your GPU architecture
+        "-std=c++17",
+        "-I/usr/local/cuda/include",
+    ],
+    linkopts = [
+        "-lcudart",
+        "-lcublas",
+    ],
+    linkstatic = True,
+    alwayslink = True,
+)
+
+zig_library(
+    name = "fused_moe",
+    import_name = "platforms/cuda/fused_moe",
+    main = "fused_moe.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        ":fused_moe_kernel",
+        "@rules_zig//zig/runfiles",
+        "//stdx",
+    ],
+)

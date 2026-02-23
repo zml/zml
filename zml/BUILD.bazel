@@ -24,6 +24,7 @@ zig_library(
         "attention/attention.zig",
         "attention/flashattn.zig",
         "attention/paged_attention.zig",
+        "fused_moe/fused_moe.zig",
         "grouped_gemm/cublas.zig",
         "grouped_gemm_LT/cublas.zig",
         "buffer.zig",
@@ -72,6 +73,7 @@ zig_library(
     ] + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",
+            "//platforms/cuda/fused_moe",
             "//platforms/cuda/grouped_gemm",
             "//platforms/cuda/grouped_gemm_LT",
         ],
