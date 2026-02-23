@@ -4122,27 +4122,20 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
-        const ctx = CompilationContext.current();
-        const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
-        const shardy_without_custom_partitioner = ctx.partitioning.partitioner == .shardy and
-            !has_custom_partitioner;
+        const side_effect_policy = ops.customCallSideEffectPolicy("zml$print", true);
 
         var print_input = input;
-        if (shardy_without_custom_partitioner) {
+        if (side_effect_policy.needs_keepalive) {
             print_input._shape = print_input.shape().withReplicatedPartitioning();
         }
 
-        const print_tensor = ops.customCall(
+        _ = ops.customCall(
             "zml$print",
             .{print_input},
             .{print_input.shape()},
             .{ .name = name },
-            .{ .has_side_effect = !shardy_without_custom_partitioner },
+            .{ .has_side_effect = side_effect_policy.effective_has_side_effect },
         );
-
-        if (shardy_without_custom_partitioner) {
-            ctx.currentScope().keepalive_values.appendAssumeCapacity(print_tensor.value());
-        }
     }
 
     fn mlirCtx() *mlir.Context {

@@ -870,6 +870,40 @@ pub const CustomCallOptions = struct {
     output_operand_aliases: ?[]const i64 = null,
 };
 
+pub const CustomCallSideEffectPolicy = struct {
+    effective_has_side_effect: bool,
+    needs_keepalive: bool,
+    requires_unique_device_sharding: bool,
+};
+
+const shardy_side_effect_fallback_targets = [_][]const u8{
+    "zml$print",
+};
+
+fn shardyNeedsSideEffectFallback(target_name: []const u8) bool {
+    for (shardy_side_effect_fallback_targets) |candidate| {
+        if (std.mem.eql(u8, target_name, candidate)) return true;
+    }
+    return false;
+}
+
+pub fn customCallSideEffectPolicy(target_name: []const u8, requested_has_side_effect: bool) CustomCallSideEffectPolicy {
+    const ctx = CompilationContext.current();
+    const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
+    const shardy_without_custom_partitioner = ctx.partitioning.partitioner == .shardy and
+        !has_custom_partitioner;
+    const disable_side_effect = requested_has_side_effect and
+        shardyNeedsSideEffectFallback(target_name) and
+        shardy_without_custom_partitioner;
+    const effective_has_side_effect = requested_has_side_effect and !disable_side_effect;
+    return .{
+        .effective_has_side_effect = effective_has_side_effect,
+        .needs_keepalive = requested_has_side_effect and !effective_has_side_effect,
+        .requires_unique_device_sharding = effective_has_side_effect and
+            ctx.partitioning.partitioner == .gspmd,
+    };
+}
+
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) TensorOrTensorArray(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
     const inputs_: []const Tensor = switch (@typeInfo(@TypeOf(inputs))) {
@@ -1013,20 +1047,10 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
-    const is_print = std.mem.startsWith(u8, target_name, "zml$print");
-    const has_custom_partitioner = ctx.platform.pjrt_api.customPartitioner() != null;
-    const disable_side_effect = is_print and
-        ctx.partitioning.partitioner == .shardy and
-        !has_custom_partitioner;
-    const has_side_effect_opt: ?bool = if (disable_side_effect)
-        false
-    else
-        opts.has_side_effect;
+    const side_effect_policy = customCallSideEffectPolicy(target_name, opts.has_side_effect);
 
     var additional_attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .{};
-    const require_unique_device_side_effect = has_side_effect_opt == true and
-        ctx.partitioning.partitioner == .gspmd;
-    if (require_unique_device_side_effect) {
+    if (side_effect_policy.requires_unique_device_sharding) {
         // Side-effect ops must have a unique-device sharding under GSPMD.
         additional_attrs.appendAssumeCapacity(.named(
             ctx.mlir_ctx,
@@ -1042,7 +1066,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         .{
             .call_target_name = target_name,
             .backend_config = .{ .typed_ffi = backend_config },
-            .has_side_effect = has_side_effect_opt,
+            .has_side_effect = side_effect_policy.effective_has_side_effect,
             .operand_layouts = operands_layouts,
             .result_layouts = results_layouts,
             .output_operand_aliases = opts.output_operand_aliases orelse &.{},
@@ -1054,6 +1078,12 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     const outputs_ = ctx.arena.allocator().alloc(Tensor, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
         outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    if (side_effect_policy.needs_keepalive and outputs_.len > 0) {
+        // Keep one result alive when side effects are lowered away (e.g. Shardy
+        // CPU print), so DCE does not drop the custom call.
+        ctx.currentScope().keepalive_values.append(outputs_[0].value()) catch unreachable;
     }
 
     return outputs_;

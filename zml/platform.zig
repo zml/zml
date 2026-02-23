@@ -237,7 +237,7 @@ pub const Platform = struct {
             else => {},
         }
 
-        const print_partitioner_callbacks = initPrintCustomPartitionerCallbacks(arena.allocator()) catch |err| b: {
+        const print_partitioner_callbacks = initPrintCustomPartitionerCallbacks(arena.allocator(), allocator, &platform.arena_state, io) catch |err| b: {
             log.warn("Failed to initialize print custom partitioner callbacks: {}", .{err});
             break :b null;
         };
@@ -614,10 +614,15 @@ fn printCustomPartitionerPartition(
 ) callconv(.c) void {
     if (args_ == null) return;
     const args: *pjrt.CustomPartitioner.PartitionArgs = @ptrCast(&args_[0]);
-    const allocator = getCustomPartitionerAllocator(callbacks) orelse {
+    const context = getCustomPartitionerContext(callbacks) orelse {
         zml_ffi.setStaticError(&args.header, .internal, "zml$print: missing callback allocator");
         return;
     };
+    context.mutex.lockUncancelable(context.io);
+    defer context.mutex.unlock(context.io);
+    var arena = context.arena_state.promote(context.arena_backing_allocator);
+    defer context.arena_state.* = arena.state;
+    const allocator = arena.allocator();
     zml_ffi.partitionAsPassthroughCustomCall(allocator, args, .{
         .module_name = "zml_print_partitioner",
         .custom_call_target = "zml$print",
@@ -631,31 +636,49 @@ fn printCustomPartitionerInferSharding(
 ) callconv(.c) void {
     if (args_ == null) return;
     const infer_args: *pjrt.CustomPartitioner.InferShardingFromOperandsArgs = @ptrCast(&args_[0]);
-    const allocator = getCustomPartitionerAllocator(callbacks) orelse {
+    const context = getCustomPartitionerContext(callbacks) orelse {
         zml_ffi.setStaticError(&infer_args.header, .internal, "zml$print: missing callback allocator");
         infer_args.has_result_sharding = false;
         infer_args.result_sharding = .{ .data = null, .size = 0 };
         return;
     };
+    context.mutex.lockUncancelable(context.io);
+    defer context.mutex.unlock(context.io);
+    var arena = context.arena_state.promote(context.arena_backing_allocator);
+    defer context.arena_state.* = arena.state;
+    const allocator = arena.allocator();
     zml_ffi.inferResultShardingFromOperand(allocator, infer_args, 0, "zml$print");
 }
 
 const CustomPartitionerContext = struct {
-    allocator: std.mem.Allocator,
+    callback_state_allocator: std.mem.Allocator,
+    arena_backing_allocator: std.mem.Allocator,
+    arena_state: *std.heap.ArenaAllocator.State,
+    io: std.Io,
+    mutex: std.Io.Mutex = .init,
 };
 
-fn getCustomPartitionerAllocator(callbacks: [*c]pjrt.CustomPartitioner.Callbacks) ?std.mem.Allocator {
+fn getCustomPartitionerContext(callbacks: [*c]pjrt.CustomPartitioner.Callbacks) ?*CustomPartitionerContext {
     if (callbacks == null) return null;
     const private_data = callbacks[0].private_data orelse return null;
-    const context: *const CustomPartitionerContext = @ptrCast(@alignCast(private_data));
-    return context.allocator;
+    return @ptrCast(@alignCast(private_data));
 }
 
-fn initPrintCustomPartitionerCallbacks(allocator: std.mem.Allocator) !*pjrt.CustomPartitioner.Callbacks {
-    const context = try allocator.create(CustomPartitionerContext);
-    context.* = .{ .allocator = allocator };
+fn initPrintCustomPartitionerCallbacks(
+    callback_state_allocator: std.mem.Allocator,
+    arena_backing_allocator: std.mem.Allocator,
+    arena_state: *std.heap.ArenaAllocator.State,
+    io: std.Io,
+) !*pjrt.CustomPartitioner.Callbacks {
+    const context = try callback_state_allocator.create(CustomPartitionerContext);
+    context.* = .{
+        .callback_state_allocator = callback_state_allocator,
+        .arena_backing_allocator = arena_backing_allocator,
+        .arena_state = arena_state,
+        .io = io,
+    };
 
-    const callbacks = try allocator.create(pjrt.CustomPartitioner.Callbacks);
+    const callbacks = try callback_state_allocator.create(pjrt.CustomPartitioner.Callbacks);
     callbacks.* = pjrt.CustomPartitioner.initCallbacks(
         context,
         &zml_ffi.noopDtor,
