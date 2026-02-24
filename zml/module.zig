@@ -195,7 +195,7 @@ pub fn compile(
     defer arena.deinit();
 
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    log.warn("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
     const exe = try Exe.init(
         allocator,

@@ -16,7 +16,7 @@ pub const std_options: std.Options = .{
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const Command = enum { cat, ls, cp, stat, realpath, safetensors };
+    const Command = enum { cat, ls, cp, stat, realpath, safetensors, load };
 
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
@@ -149,7 +149,252 @@ pub fn main(init: std.process.Init) !void {
             try printTensorTree(&stdout_writer.interface, root, "", true, true);
             try stdout_writer.interface.flush();
         },
+        .load => {
+            const LoadSharding = enum {
+                replicated,
+                model_axis0,
+            };
+
+            var load_sharding: LoadSharding = .replicated;
+            var verify_shards = false;
+
+            while (it.next()) |arg| {
+                if (std.mem.eql(u8, arg, "--sharding")) {
+                    const value = it.next() orelse {
+                        try stdout_writer.interface.print("Missing value for --sharding\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{});
+                        return error.InvalidArgument;
+                    };
+                    if (std.mem.eql(u8, value, "replicated")) {
+                        load_sharding = .replicated;
+                    } else if (std.mem.eql(u8, value, "model-axis0")) {
+                        load_sharding = .model_axis0;
+                    } else {
+                        try stdout_writer.interface.print("Invalid --sharding value: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{value});
+                        return error.InvalidArgument;
+                    }
+                } else if (std.mem.startsWith(u8, arg, "--sharding=")) {
+                    const value = arg["--sharding=".len..];
+                    if (std.mem.eql(u8, value, "replicated")) {
+                        load_sharding = .replicated;
+                    } else if (std.mem.eql(u8, value, "model-axis0")) {
+                        load_sharding = .model_axis0;
+                    } else {
+                        try stdout_writer.interface.print("Invalid --sharding value: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{value});
+                        return error.InvalidArgument;
+                    }
+                } else if (std.mem.eql(u8, arg, "--verify-shards")) {
+                    verify_shards = true;
+                } else {
+                    try stdout_writer.interface.print("Unknown load option: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{arg});
+                    return error.InvalidArgument;
+                }
+            }
+
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator);
+
+            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            defer registry.deinit();
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+            defer store.deinit();
+
+            const AllTensorsModel = struct {
+                tensors: []zml.Tensor,
+            };
+
+            const tensor_count = registry.tensors.count();
+            if (tensor_count == 0) return error.NoTensorInRegistry;
+            const tensors = try allocator.alloc(zml.Tensor, tensor_count);
+            defer allocator.free(tensors);
+            const tensor_names = try allocator.alloc([]const u8, tensor_count);
+            defer allocator.free(tensor_names);
+
+            var registry_it = registry.iterator();
+            var i: usize = 0;
+            while (registry_it.next()) |entry| : (i += 1) {
+                tensor_names[i] = entry.key_ptr.*;
+                tensors[i] = switch (load_sharding) {
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, null),
+                    .model_axis0 => if (entry.value_ptr.shape.rank() > 0)
+                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                    else
+                        store.view().createTensor(entry.key_ptr.*, null, null),
+                };
+            }
+
+            const model: AllTensorsModel = .{ .tensors = tensors };
+
+            var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
+            defer physical_mesh.deinit();
+
+            const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
+            var sharding_buffer: [2]zml.sharding.Sharding = undefined;
+            const shardings: []const zml.sharding.Sharding = switch (load_sharding) {
+                .replicated => blk: {
+                    sharding_buffer[0] = replicated_sharding;
+                    break :blk sharding_buffer[0..1];
+                },
+                .model_axis0 => blk: {
+                    const model_logical_mesh: zml.sharding.LogicalMesh = try .init("playground_model", .{ .model = .high_bandwidth });
+                    const model_strategy: zml.sharding.Strategy = try .suggest(model_logical_mesh, physical_mesh);
+                    const model_sharding = try zml.sharding.Sharding.initFromStrategy(model_logical_mesh, physical_mesh, model_strategy);
+                    sharding_buffer[0] = model_sharding;
+                    sharding_buffer[1] = replicated_sharding;
+                    break :blk sharding_buffer[0..2];
+                },
+            };
+
+            var progress = std.Progress.start(io, .{ .root_name = "zml.io.load" });
+            progress.increaseEstimatedTotalItems(tensor_count);
+            defer progress.end();
+
+            const now: std.Io.Timestamp = .now(io, .awake);
+            var total_bytes: usize = 0;
+            defer {
+                const took = now.untilNow(io, .awake);
+                const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+                log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{ total_bytes, stdx.fmt.fmtDuration(took), bytes_per_sec });
+            }
+
+            var model_buffers = try zml.io.load(AllTensorsModel, &model, allocator, io, platform, .{
+                .store = &store,
+                .shardings = shardings,
+                .parallelism = 32,
+                .dma_chunks = 16,
+                .dma_chunk_size = 32 * zml.MiB,
+                .progress = &progress,
+                .total_bytes = &total_bytes,
+            });
+            defer {
+                for (model_buffers.tensors) |*buffer_| {
+                    buffer_.deinit();
+                }
+                allocator.free(model_buffers.tensors);
+            }
+
+            if (verify_shards) {
+                const verify_now: std.Io.Timestamp = .now(io, .awake);
+                const stats = try verifyLoadedShardData(allocator, io, &store, tensor_names, tensors, model_buffers.tensors);
+                const took = verify_now.untilNow(io, .awake);
+                const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(stats.bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+                log.info("Verified shards [{Bi:.2}, {D}, {Bi:.2}/s, tensors={d}, shards={d}]", .{
+                    stats.bytes,
+                    stdx.fmt.fmtDuration(took),
+                    bytes_per_sec,
+                    stats.tensors,
+                    stats.shards,
+                });
+            }
+
+            try stdout_writer.interface.print(
+                "Loaded {d} tensors ({B:.2}) with zml.io.load\n",
+                .{ tensor_count, total_bytes },
+            );
+        },
     }
+}
+
+const VerifyStats = struct {
+    tensors: usize = 0,
+    shards: usize = 0,
+    bytes: usize = 0,
+};
+
+fn verifyLoadedShardData(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: *zml.io.TensorStore,
+    tensor_names: []const []const u8,
+    tensors: []const zml.Tensor,
+    buffers: []zml.Buffer,
+) !VerifyStats {
+    stdx.debug.assert(tensor_names.len == tensors.len, "Expected same len for tensor names ({}) and tensors ({})", .{ tensor_names.len, tensors.len });
+    stdx.debug.assert(tensor_names.len == buffers.len, "Expected same len for tensor names ({}) and buffers ({})", .{ tensor_names.len, buffers.len });
+
+    var reader_buffer: [64 * 1024]u8 = undefined;
+    var stats: VerifyStats = .{};
+    const tensor_total = tensor_names.len;
+
+    for (buffers, tensor_names, tensors, 0..) |buffer, tensor_name, tensor, tensor_index| {
+        var reader = try store.getReaderById(tensor.id, io, &reader_buffer);
+        defer reader.deinit();
+
+        const expected_shape = reader.tensor.shape;
+        const actual_shape = buffer.shape();
+        stdx.debug.assert(expected_shape.eql(actual_shape), "Shape mismatch for tensor {s}: expected {f}, actual {f}", .{ tensor_name, expected_shape, actual_shape });
+
+        const expected_data = try allocator.alloc(u8, expected_shape.byteSize());
+        defer allocator.free(expected_data);
+        try reader.interface.readSliceAll(expected_data);
+
+        const expected_slice = zml.Slice.init(expected_shape, expected_data);
+        const placement = buffer.placement();
+        const shard_total = placement.shards.len;
+        log.info(
+            "[verify {d}/{d}] tensor={s} shape={f} shards={d}",
+            .{ tensor_index + 1, tensor_total, tensor_name, expected_shape, shard_total },
+        );
+
+        stdx.debug.assert(placement.shards.len == buffer._shards.len, "Placement shard count mismatch for tensor {s}: expected {}, actual {}", .{ tensor_name, placement.shards.len, buffer._shards.len });
+
+        for (placement.shards.constSlice(), 0..) |shard, shard_index| {
+            log.info(
+                "[verify {d}/{d}] tensor={s} shard={d}/{d} dev={d} size={Bi:.2}",
+                .{ tensor_index + 1, tensor_total, tensor_name, shard_index + 1, shard_total, shard.device_id, shard.shape.byteSize() },
+            );
+            const expected_shard_slice = shard.shardSlice(expected_slice);
+            if (!expected_shard_slice.isContiguous()) {
+                return error.NonContiguousShardRead;
+            }
+
+            const shard_size = shard.shape.byteSize();
+            const expected_start = expected_shard_slice.offset_bytes;
+            const expected_end = expected_start + shard_size;
+            const expected_shard_data = expected_slice.constData()[expected_start..expected_end];
+
+            const actual_shard_data = try allocator.alloc(u8, shard_size);
+            defer allocator.free(actual_shard_data);
+
+            const maybe_event = try buffer._shards.get(shard_index).toHostBuffer(buffer._platform.pjrt_api, actual_shard_data);
+            if (maybe_event) |event| {
+                try event.await(buffer._platform.pjrt_api, io);
+            }
+
+            if (findFirstMismatch(expected_shard_data, actual_shard_data)) |mismatch| {
+                log.err(
+                    "Shard verification failed tensor={s} shard={d} device={d} offset={d} expected=0x{x} actual=0x{x}",
+                    .{
+                        tensor_name,
+                        shard_index,
+                        shard.device_id,
+                        mismatch,
+                        expected_shard_data[mismatch],
+                        actual_shard_data[mismatch],
+                    },
+                );
+                return error.ShardDataMismatch;
+            }
+
+            stats.shards += 1;
+            stats.bytes += shard_size;
+        }
+
+        stats.tensors += 1;
+    }
+
+    return stats;
+}
+
+fn findFirstMismatch(expected: []const u8, actual: []const u8) ?usize {
+    if (expected.len != actual.len) {
+        return @min(expected.len, actual.len);
+    }
+
+    for (expected, actual, 0..) |expected_byte, actual_byte, i| {
+        if (expected_byte != actual_byte) return i;
+    }
+    return null;
 }
 
 const TreeCounts = struct {
