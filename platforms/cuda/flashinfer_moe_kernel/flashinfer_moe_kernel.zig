@@ -34,7 +34,7 @@ fn openLibrary(path: []const u8) !void {
     flashinfer_lib = lib;
 }
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
+pub fn load(allocator: std.mem.Allocator) !void {
     _ = allocator;
 
     if (flashinfer_lib != null) return;
@@ -48,7 +48,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
         return;
     }
 
-    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
     if (try r.rlocation("flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_device/libgptoss_moe_cutlass_sm90.so", &buffer)) |so_path| {
         if (openLibrary(so_path)) |_| {

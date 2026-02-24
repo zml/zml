@@ -21,6 +21,9 @@ pub const meta = struct {
     //
     // 1. https://github.com/openxla/xla/issues/10032
     pub fn structSize(comptime T: type) usize {
+        comptime {
+            @setEvalBranchQuota(20_000);
+        }
         // unsafe on purpose, we want this to fail if that ever changes
         const typedef_name = comptime blk: {
             const needle = ".struct_";

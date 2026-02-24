@@ -179,7 +179,7 @@ pub const RopeOpts = struct {
             mscale_all_dim: ?f32 = null,
             truncate: bool = true,
             original_max_position_embeddings: u32,
-            rope_theta: f32,
+            rope_theta: f32 = 10000,
             llama_4_scaling_beta: ?f32 = null,
             attention_factor: ?f32 = null,
         };

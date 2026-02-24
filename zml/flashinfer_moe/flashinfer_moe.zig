@@ -9,9 +9,9 @@ const Tensor = zml.Tensor;
 
 const log = std.log.scoped(.@"zml/flashinfer_moe");
 
-pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
+pub fn load(allocator: std.mem.Allocator) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        try flashinfer_moe_kernel.load(allocator, io);
+        try flashinfer_moe_kernel.load(allocator);
     }
 }
 
@@ -113,6 +113,42 @@ fn getScalarAttributeAs(comptime T: type, call_frame: *ffi.CallFrame, attribute_
     return attribute.get(T);
 }
 
+pub const Metadata = struct {
+        host_buffer: zml.Tensor,
+        device_buffer: zml.Tensor,
+
+        pub const InitOptions = struct {
+            group_count: usize,
+        };
+
+        pub fn init(opts: InitOptions) Metadata {
+            _ = opts; // autofix
+            // const ptr_bytes = opts.group_count * @sizeOf(?*anyopaque);
+            // device: 3 arrays of  p oint e rs
+            const device_bytes = 24 * 1024 * 1024;
+
+            // host datas
+            const host_bytes = 10 * 1024 * 1024;
+
+            return .{
+                .host_buffer = .init(.{host_bytes}, .i8),
+                .device_buffer = .init(.{device_bytes}, .i8),
+            };
+        }
+
+        pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
+            return .{
+                .host_buffer = try zml.Buffer.uninitialized(io, platform, self.host_buffer.shape(), .{ .memory = .host_pinned }),
+                .device_buffer = try zml.Buffer.uninitialized(io, platform, self.device_buffer.shape(), .{ .memory = .device }),
+            };
+        }
+
+        pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
+            self.host_buffer.deinit();
+            self.device_buffer.deinit();
+        }
+    };
+
 pub fn flashinferMoeForward(
     activations_bf16: Tensor,
     weights_fp4_e2m1_packed: Tensor,
@@ -125,14 +161,15 @@ pub fn flashinferMoeForward(
         output_shape: zml.Shape,
     },
 ) Tensor {
+    const inputs = [_]Tensor{
+        activations_bf16,
+        weights_fp4_e2m1_packed,
+        scales_ue8m0,
+        expert_first_token_offset_device,
+    };
     return zml.ops.customCall(
         FlashinferMoeKernel.custom_call_name,
-        &[_]Tensor{
-            activations_bf16,
-            weights_fp4_e2m1_packed,
-            scales_ue8m0,
-            expert_first_token_offset_device,
-        },
+        @as([]const Tensor, inputs[0..]),
         .{opts.output_shape},
         .{
             .num_experts = opts.num_experts,

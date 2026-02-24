@@ -43,7 +43,7 @@ pub fn main() !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     if (platform.target != .cuda) return error.RequiresCuda;
 
-    try flashinfer_moe.load(allocator, io);
+    try flashinfer_moe.load(allocator);
     try flashinfer_moe.register(platform);
 
     const groups_per_n: usize = HIDDEN_SIZE / 32;
