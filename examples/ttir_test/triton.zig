@@ -55,7 +55,6 @@ pub fn wrappedUnifiedAttention(
     };
 
     return zml.ops.triton(.{
-        out,
         q,
         k,
         v,
@@ -80,6 +79,7 @@ pub fn wrappedUnifiedAttention(
         Tensor.scalar(v_strides.get(2), .i64),
         cu_seqlens_q,
         num_seqs,
+        out,
     }, .{out.shape()}, .{
         .name = "wrapped_kernel_unified_attention_2d",
         .ir = @embedFile("2d_unified_attention.ttir"),
@@ -87,7 +87,7 @@ pub fn wrappedUnifiedAttention(
         .num_stages = 1,
         .num_warps = num_warps,
         .debug = true,
-        .output_operand_aliases = &.{0},
+        .output_operand_aliases = &.{24},
     })[0];
 }
 
@@ -152,10 +152,10 @@ pub fn main(init: std.process.Init) !void {
         query,
         key_cache,
         value_cache,
-        out,
         start_loc,
         context_seq_lens,
         block_tables,
+        out,
     });
 
     exe.call(exe_args, &exe_results);
