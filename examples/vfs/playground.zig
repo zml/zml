@@ -154,14 +154,18 @@ pub fn main(init: std.process.Init) !void {
                 replicated,
                 model_axis0,
             };
+            const load_usage =
+                \\Usage: load <path> [tensor_name] [--sharding replicated|model-axis0] [--verify-shards]
+            ;
 
             var load_sharding: LoadSharding = .replicated;
             var verify_shards = false;
+            var tensor_filter: ?[]const u8 = null;
 
             while (it.next()) |arg| {
                 if (std.mem.eql(u8, arg, "--sharding")) {
                     const value = it.next() orelse {
-                        try stdout_writer.interface.print("Missing value for --sharding\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{});
+                        try stdout_writer.interface.print("Missing value for --sharding\n{s}\n", .{load_usage});
                         return error.InvalidArgument;
                     };
                     if (std.mem.eql(u8, value, "replicated")) {
@@ -169,7 +173,7 @@ pub fn main(init: std.process.Init) !void {
                     } else if (std.mem.eql(u8, value, "model-axis0")) {
                         load_sharding = .model_axis0;
                     } else {
-                        try stdout_writer.interface.print("Invalid --sharding value: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{value});
+                        try stdout_writer.interface.print("Invalid --sharding value: {s}\n{s}\n", .{ value, load_usage });
                         return error.InvalidArgument;
                     }
                 } else if (std.mem.startsWith(u8, arg, "--sharding=")) {
@@ -179,14 +183,20 @@ pub fn main(init: std.process.Init) !void {
                     } else if (std.mem.eql(u8, value, "model-axis0")) {
                         load_sharding = .model_axis0;
                     } else {
-                        try stdout_writer.interface.print("Invalid --sharding value: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{value});
+                        try stdout_writer.interface.print("Invalid --sharding value: {s}\n{s}\n", .{ value, load_usage });
                         return error.InvalidArgument;
                     }
                 } else if (std.mem.eql(u8, arg, "--verify-shards")) {
                     verify_shards = true;
-                } else {
-                    try stdout_writer.interface.print("Unknown load option: {s}\nUsage: load <path> [--sharding replicated|model-axis0] [--verify-shards]\n", .{arg});
+                } else if (std.mem.startsWith(u8, arg, "--")) {
+                    try stdout_writer.interface.print("Unknown load option: {s}\n{s}\n", .{ arg, load_usage });
                     return error.InvalidArgument;
+                } else {
+                    if (tensor_filter != null) {
+                        try stdout_writer.interface.print("Only one tensor name is supported, got extra argument: {s}\n{s}\n", .{ arg, load_usage });
+                        return error.InvalidArgument;
+                    }
+                    tensor_filter = arg;
                 }
             }
 
@@ -205,24 +215,39 @@ pub fn main(init: std.process.Init) !void {
 
             const tensor_count = registry.tensors.count();
             if (tensor_count == 0) return error.NoTensorInRegistry;
-            const tensors = try allocator.alloc(zml.Tensor, tensor_count);
-            defer allocator.free(tensors);
-            const tensor_names = try allocator.alloc([]const u8, tensor_count);
-            defer allocator.free(tensor_names);
+            const tensors_all = try allocator.alloc(zml.Tensor, tensor_count);
+            defer allocator.free(tensors_all);
+            const tensor_names_all = try allocator.alloc([]const u8, tensor_count);
+            defer allocator.free(tensor_names_all);
 
             var registry_it = registry.iterator();
-            var i: usize = 0;
-            while (registry_it.next()) |entry| : (i += 1) {
-                tensor_names[i] = entry.key_ptr.*;
-                tensors[i] = switch (load_sharding) {
+            var load_count: usize = 0;
+            while (registry_it.next()) |entry| {
+                if (tensor_filter) |name| {
+                    if (!std.mem.eql(u8, entry.key_ptr.*, name)) continue;
+                }
+
+                tensor_names_all[load_count] = entry.key_ptr.*;
+                tensors_all[load_count] = switch (load_sharding) {
                     .replicated => store.view().createTensor(entry.key_ptr.*, null, null),
                     .model_axis0 => if (entry.value_ptr.shape.rank() > 0)
                         store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
                     else
                         store.view().createTensor(entry.key_ptr.*, null, null),
                 };
+                load_count += 1;
             }
 
+            if (load_count == 0) {
+                if (tensor_filter) |name| {
+                    try stdout_writer.interface.print("Tensor not found: {s}\n", .{name});
+                    return error.TensorNotFound;
+                }
+                return error.NoTensorInRegistry;
+            }
+
+            const tensors = tensors_all[0..load_count];
+            const tensor_names = tensor_names_all[0..load_count];
             const model: AllTensorsModel = .{ .tensors = tensors };
 
             var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
@@ -246,7 +271,7 @@ pub fn main(init: std.process.Init) !void {
             };
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.io.load" });
-            progress.increaseEstimatedTotalItems(tensor_count);
+            progress.increaseEstimatedTotalItems(load_count);
             defer progress.end();
 
             const now: std.Io.Timestamp = .now(io, .awake);
@@ -289,7 +314,7 @@ pub fn main(init: std.process.Init) !void {
 
             try stdout_writer.interface.print(
                 "Loaded {d} tensors ({B:.2}) with zml.io.load\n",
-                .{ tensor_count, total_bytes },
+                .{ load_count, total_bytes },
             );
         },
     }
