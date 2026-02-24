@@ -42,6 +42,12 @@ pub fn wrappedUnifiedAttention(
 
     const num_seqs = Tensor.scalar(block_table.dim(0), .i32);
     const grid: [3]i32 = .{ @intCast(test_cfg.batch_size), @intCast(test_cfg.num_kv_heads), 1 };
+    const target = zml.module.CompilationContext.current().target();
+    const num_warps: i32 = switch (target) {
+        .rocm => 2,
+        .cuda => 4,
+        else => 4,
+    };
 
     return zml.ops.triton(.{
         out,
@@ -74,7 +80,7 @@ pub fn wrappedUnifiedAttention(
         .ir = @embedFile("2d_unified_attention.ttir"),
         .grid = grid,
         .num_stages = 1,
-        .num_warps = 4,
+        .num_warps = num_warps,
         .debug = true,
         .output_operand_aliases = &.{0},
     })[0];
