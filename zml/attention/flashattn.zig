@@ -68,18 +68,6 @@ const Buffer = struct {
     }
 };
 
-fn getPlatform(call_frame: *ffi.CallFrame) zml.Platform {
-    const pjrt_api_ptr = call_frame.attrs.getByName(.scalar, "pjrt_api") orelse unreachable;
-    std.debug.assert(pjrt_api_ptr.dtype == .u64);
-    const pjrt_api: ?*zml.pjrt.Api = @ptrFromInt(pjrt_api_ptr.get(usize));
-
-    const pjrt_client_ptr = call_frame.attrs.getByName(.scalar, "pjrt_client") orelse unreachable;
-    std.debug.assert(pjrt_client_ptr.dtype == .u64);
-    const pjrt_client: ?*zml.pjrt.Client = @ptrFromInt(pjrt_client_ptr.get(usize));
-
-    return .{ .target = .cuda, .pjrt_api = pjrt_api.?, .pjrt_client = pjrt_client.? };
-}
-
 fn dataTypeFromFfiDataType(ffi_dt: ffi.DataType) zml.DataType {
     return switch (ffi_dt) {
         .bool => .bool,

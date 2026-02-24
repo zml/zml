@@ -334,7 +334,7 @@ pub const PhysicalMesh = struct {
     };
 
     allocator: std.mem.Allocator,
-    target: Target,
+    shardable_axes: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK),
     root: PhysicalNode,
     axis_traversal: AxisTraversal,
 
@@ -343,7 +343,7 @@ pub const PhysicalMesh = struct {
     /// - validate geometry invariants
     /// - assign coordinates to leaves
     /// - compute axis traversal
-    pub fn fromTree(allocator: std.mem.Allocator, target: Target, root: PhysicalNode) !PhysicalMesh {
+    pub fn fromTree(allocator: std.mem.Allocator, shardable_axes: []const PhysicalAxisTag, root: PhysicalNode) !PhysicalMesh {
         var cloned = try cloneNode(allocator, root);
         errdefer cloned.deinit(allocator);
 
@@ -352,9 +352,14 @@ pub const PhysicalMesh = struct {
         var path = [_]usize{0} ** Shape.MAX_RANK;
         try assignCoords(&cloned, &path, 0);
 
+        var shardable_axes_: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = try .init(0);
+        for (shardable_axes) |tag| {
+            shardable_axes_.appendAssumeCapacity(tag);
+        }
+
         return .{
             .allocator = allocator,
-            .target = target,
+            .shardable_axes = shardable_axes_,
             .root = cloned,
             .axis_traversal = try .init(cloned),
         };
@@ -550,12 +555,7 @@ pub const PhysicalMesh = struct {
     /// Preferred axis ordering by speed: fastest -> slowest.
     /// This is used by Strategy.suggest to match intent to bandwidth.
     pub fn shardableAxes(self: PhysicalMesh) []const PhysicalAxisTag {
-        return switch (self.target) {
-            .tpu => &.{ .link_x, .link_y, .link_z, .bus },
-            .neuron => &.{ .link_x, .link_y, .link_z, .link, .bus },
-            .cuda, .rocm => &.{ .link, .bus },
-            .cpu => &.{.bus},
-        };
+        return self.shardable_axes.constSlice();
     }
 
     pub fn isShardable(self: PhysicalMesh, tag: PhysicalAxisTag) bool {
@@ -567,7 +567,7 @@ pub const PhysicalMesh = struct {
     }
 
     pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("\nPhysicalMesh(platform={s} num_devices={d})\n", .{ @tagName(self.target), self.countDevices() });
+        try writer.print("\nPhysicalMesh(num_devices={d} shardable_axes={any})\n", .{ self.countDevices(), self.shardable_axes.constSlice() });
         try writer.print("├── {f}\n", .{self.axis_traversal});
         try writer.print("│  \n", .{});
 
@@ -595,20 +595,25 @@ pub const PhysicalMesh = struct {
         }
     }
 
-    pub fn auto(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalMesh {
-        var root = try switch (platform.target) {
-            .cpu => cpu(allocator, platform),
-            .cuda, .rocm => gpu(allocator, platform),
-            .tpu => tpu(allocator, platform),
-            .neuron => neuron(allocator, platform),
+    pub fn auto(allocator: std.mem.Allocator, target: Target, platform_devices: []const PlatformDevice) !PhysicalMesh {
+        var root = try switch (target) {
+            .cpu => cpu(allocator, platform_devices),
+            .cuda, .rocm => gpu(allocator, platform_devices),
+            .tpu => tpu(allocator, platform_devices),
+            .neuron => neuron(allocator, platform_devices),
         };
         defer root.deinit(allocator);
 
-        return try fromTree(allocator, platform.target, root);
+        const shardable_axes: []const PhysicalAxisTag = switch (target) {
+            .tpu => &.{ .link_x, .link_y, .link_z, .bus },
+            .neuron => &.{ .link_x, .link_y, .link_z, .link, .bus },
+            .cuda, .rocm => &.{ .link, .bus },
+            .cpu => &.{.bus},
+        };
+        return try fromTree(allocator, shardable_axes, root);
     }
 
-    pub fn cpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
 
         for (nodes, platform_devices) |*n, d| n.* = .device(d);
@@ -623,8 +628,7 @@ pub const PhysicalMesh = struct {
         };
     }
 
-    pub fn gpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn gpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
 
         // todo: this is simplified I treat all GPUs as one P2P group for this example
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
@@ -641,8 +645,7 @@ pub const PhysicalMesh = struct {
         };
     }
 
-    pub fn tpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn tpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
 
         // Example: TPU v3-8 is 2x2x2 (8 devices)
         var z_branches = try allocator.alloc(PhysicalNode, 4);
@@ -693,8 +696,7 @@ pub const PhysicalMesh = struct {
         };
     }
 
-    pub fn neuron(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
-        const platform_devices = platform.devices;
+    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !PhysicalNode {
 
         // AWS Inf2.48xlarge: 2 islands of 12 chips (24 devices)
         const islands = try allocator.alloc(PhysicalNode, 2);
@@ -1643,7 +1645,7 @@ const ShardingTest = struct {
         var next_id: usize = 0;
         var root = try self.buildNode(tags.constSlice(), sizes.constSlice(), 0, &next_id, geometry);
         defer root.deinit(self.allocator);
-        return try .fromTree(self.allocator, .tpu, root);
+        return try .fromTree(self.allocator, PhysicalMesh.defaultShardableAxes(.tpu), root);
     }
 
     fn buildNode(self: ShardingTest, tags: []const PhysicalAxisTag, sizes: []const usize, depth: usize, next_id: *usize, geometry: AxisGeometry) !PhysicalNode {

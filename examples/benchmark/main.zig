@@ -24,10 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
-    var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-    defer physical_mesh.deinit();
-
-    const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
+    const replicated_sharding = try zml.sharding.replicatedSharding(platform.mesh);
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 

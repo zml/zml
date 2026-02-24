@@ -9,6 +9,7 @@ const upb = @import("upb");
 
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
+const sharding = @import("sharding.zig");
 const zml = @import("zml.zig");
 const zml_ffi = @import("ffi.zig");
 
@@ -185,6 +186,7 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
+    physical_mesh: sharding.PhysicalMesh,
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 512 else 256;
 
@@ -213,6 +215,7 @@ pub const Platform = struct {
             .pjrt_client = pjrt_client,
             .devices = devices,
             .memories = memories,
+            .physical_mesh = undefined,
         };
         defer platform.arena_state = arena.state;
 
@@ -224,6 +227,8 @@ pub const Platform = struct {
                 platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
             }
         }
+
+        platform.physical_mesh = if (options.mesh) |mesh| mesh else try sharding.PhysicalMesh.auto(arena.allocator(), target, platform.devices);
 
         switch (target) {
             .cuda => {
@@ -391,6 +396,7 @@ pub const Platform = struct {
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
         self.pjrt_client.deinit(self.pjrt_api);
+        self.physical_mesh.deinit();
         self.arena_state.promote(allocator).deinit();
     }
 
@@ -477,6 +483,8 @@ pub const Platform = struct {
 };
 
 pub const CreateOptions = struct {
+    mesh: ?sharding.PhysicalMesh = null,
+
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.

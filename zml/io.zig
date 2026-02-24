@@ -1162,7 +1162,7 @@ pub fn load(
         pool_.deinit(dma_alloc.allocator());
     };
 
-    const replicated_sharding = try sharding_.replicatedSharding(opts.shardings[0].physical);
+    const replicated_sharding = try sharding_.replicatedSharding(platform.physical_mesh);
 
     const Ctx = struct {
         allocator: std.mem.Allocator,

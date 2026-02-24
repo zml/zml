@@ -225,8 +225,7 @@ pub fn main(init: std.process.Init) !void {
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-            defer physical_mesh.deinit();
+            const physical_mesh: zml.sharding.PhysicalMesh = platform.mesh;
 
             const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
             var sharding_buffer: [2]zml.sharding.Sharding = undefined;
