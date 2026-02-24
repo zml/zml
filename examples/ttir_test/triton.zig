@@ -44,7 +44,7 @@ pub fn wrappedUnifiedAttention(
     const grid: [3]i32 = .{ @intCast(test_cfg.batch_size), @intCast(test_cfg.num_kv_heads), 1 };
     const target = zml.module.CompilationContext.current().target();
     const num_warps: i32 = switch (target) {
-        .rocm => 2,
+        .rocm => 1,
         .cuda => 4,
         else => 4,
     };
