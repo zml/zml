@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "triton_test",
+    main = "triton.zig",
+    deps = [
+        "//zml",
+    ],
+)

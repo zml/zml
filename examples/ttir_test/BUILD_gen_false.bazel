@@ -1,0 +1,14 @@
+genrule(
+    name = "triton_zig_bin_rule",
+    srcs = [
+        "triton.zig",
+        "2d_unified_attention.ttir",
+    ],
+    outs = ["triton_zig_bin"],
+    cmd = "/home/tristan/tmp/zig-x86_64-linux-0.16.0-dev.2565+684032671/zig build-exe triton.zig -O ReleaseFast -o $@",
+)
+
+sh_binary(
+    name = "run_triton_zig",
+    srcs = ["triton_zig_bin"],
+)
