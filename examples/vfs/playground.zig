@@ -215,11 +215,11 @@ pub fn main(init: std.process.Init) !void {
             while (registry_it.next()) |entry| : (i += 1) {
                 tensor_names[i] = entry.key_ptr.*;
                 tensors[i] = switch (load_sharding) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, null),
+                    .replicated => store.view().load(entry.key_ptr.*).toTensor(),
                     .model_axis0 => if (entry.value_ptr.shape.rank() > 0)
-                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                        store.view().load(entry.key_ptr.*).withPartitioning(.{ ._0 = .model }).toTensor()
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, null),
+                        store.view().load(entry.key_ptr.*).toTensor(),
                 };
             }
 

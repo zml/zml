@@ -51,7 +51,7 @@ pub const LlamaLM = struct {
     config: Config,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, options: Options) !LlamaLM {
-        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").maybeCreateTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated })) |weight|
+        const lm_head: ?zml.nn.Linear = if (store.withPrefix("lm_head").load("weight").optional().withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model, .d = .replicated }).toTensor()) |weight|
             .init(weight, null, .d)
         else
             null;
@@ -169,8 +169,8 @@ pub const Llama = struct {
         }
 
         return .{
-            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) },
-            .norm = .{ .weight = store.withPrefix("norm").createTensor("weight", .{.d}, .{ .d = .replicated }), .eps = config.rms_norm_eps },
+            .embed_tokens = .{ .weight = store.load("embed_tokens.weight").withTags(.{ .voc, .d }).withPartitioning(.{ .voc = .replicated, .d = .model }).toTensor() },
+            .norm = .{ .weight = store.withPrefix("norm").load("weight").withTags(.{.d}).withPartitioning(.{ .d = .replicated }).toTensor(), .eps = config.rms_norm_eps },
             .layers = layers,
         };
     }
@@ -266,7 +266,7 @@ const RmsNorm = struct {
     eps: f32 = 1e-5,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }), .eps = eps };
+        return .{ .weight = store.load("weight").withTags(.{.d}).withPartitioning(.{ .d = .replicated }).toTensor(), .eps = eps };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
@@ -288,9 +288,9 @@ const Mlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .up_proj = .init(store.load("up_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model }).toTensor(), null, .d),
+            .gate_proj = .init(store.load("gate_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model }).toTensor(), null, .d),
+            .down_proj = .init(store.load("down_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .d = .model }).toTensor(), null, .d),
         };
     }
 
@@ -326,10 +326,10 @@ pub const SelfAttn = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config) !SelfAttn {
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .k_proj = .init(store.createTensor("k_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .v_proj = .init(store.createTensor("v_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .o_proj = .init(store.createTensor("o_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .q_proj = .init(store.load("q_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model }).toTensor(), null, .d),
+            .k_proj = .init(store.load("k_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model }).toTensor(), null, .d),
+            .v_proj = .init(store.load("v_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .dout = .model }).toTensor(), null, .d),
+            .o_proj = .init(store.load("o_proj.weight").withTags(.{ .dout, .d }).withPartitioning(.{ .d = .model }).toTensor(), null, .d),
             // TODO(Corentin): fix that
             .q_norm = null,
             .k_norm = null,

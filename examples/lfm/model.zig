@@ -123,7 +123,7 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
-        return .{ .weight = store.createTensor("weight").withTags(.{ .voc, .d }) };
+        return .{ .weight = store.load("weight").withTags(.{ .voc, .d }).toTensor() };
     }
 
     pub fn forward(self: TokenEmbedding, tokens: Tensor) Tensor {
@@ -267,7 +267,7 @@ pub const ShortConv = struct {
 
     pub fn init(config: Config, store: zml.io.TensorStore.View) ShortConv {
         stdx.debug.assert(!config.conv_bias, "conv_bias is not supported.", .{});
-        return ShortConv{ .in_proj = initLinear(store.withPrefix("in_proj"), .d), .out_proj = initLinear(store.withPrefix("out_proj"), .d), .kernel = store.createTensorWithTags("conv.weight", .{ .out, .in, .kernel_size }), .config = config };
+        return ShortConv{ .in_proj = initLinear(store.withPrefix("in_proj"), .d), .out_proj = initLinear(store.withPrefix("out_proj"), .d), .kernel = store.load("conv.weight").withTags(.{ .out, .in, .kernel_size }).toTensor(), .config = config };
     }
 
     pub fn forward(
@@ -555,7 +555,7 @@ pub const KvCache = struct {
 };
 
 fn initLinear(store: zml.io.TensorStore.View, tag: anytype) Linear {
-    return .init(store.createTensorWithTags("weight", .{ .out, tag }), null, tag);
+    return .init(store.load("weight").withTags(.{ .out, tag }).toTensor(), null, tag);
 }
 
 pub const Linear = struct {
@@ -619,7 +619,7 @@ const RmsNorm = struct {
     tag: Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensorWithTags("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
+        return .{ .weight = store.load("weight").withTags(.{tag}).toTensor(), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {

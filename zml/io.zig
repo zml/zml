@@ -133,37 +133,81 @@ pub const TensorStore = struct {
             } else false;
         }
 
-        pub fn maybeCreateTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) ?Tensor {
-            var buffer: [256]u8 = undefined;
-            const key = std.fmt.bufPrint(&buffer, "{s}{s}", .{ self.prefix() orelse "", subkey }) catch unreachable;
+        pub fn TensorLoader(comptime is_optional: bool) type {
+            return struct {
+                const Self = @This();
 
-            const ptr = self.store.getPtrFromKey(key) orelse return null;
-            if (@TypeOf(tagz) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(tagz))) {
-                    .optional => if (tagz) |t| {
-                        ptr.shape = ptr.shape.withTags(t);
-                    },
-                    else => ptr.shape = ptr.shape.withTags(tagz),
+                store: *TensorStore,
+                key_buffer: [256]u8,
+                key_len: usize,
+                ptr: ?*safetensors.Tensor,
+
+                fn init(view_: View, subkey: []const u8) Self {
+                    var key_buffer: [256]u8 = undefined;
+                    const key = std.fmt.bufPrint(&key_buffer, "{s}{s}", .{ view_.prefix() orelse "", subkey }) catch unreachable;
+                    return .{
+                        .store = view_.store,
+                        .key_buffer = key_buffer,
+                        .key_len = key.len,
+                        .ptr = view_.store.getPtrFromKey(key),
+                    };
                 }
-            }
 
-            if (@TypeOf(partitioning) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(partitioning))) {
-                    .optional => if (partitioning) |p| {
-                        ptr.shape = ptr.shape.withPartitioning(p);
-                    },
-                    else => ptr.shape = ptr.shape.withPartitioning(partitioning),
+                pub fn optional(self: Self) TensorLoader(true) {
+                    return .{
+                        .store = self.store,
+                        .key_buffer = self.key_buffer,
+                        .key_len = self.key_len,
+                        .ptr = self.ptr,
+                    };
                 }
-            }
 
-            const tensor: Tensor = .fromShape(ptr.shape);
-            self.store.bindIdToKey(key, tensor.id) catch unreachable;
+                pub fn withTags(self: Self, tags_: anytype) Self {
+                    if (self.ptr) |ptr| {
+                        if (@TypeOf(tags_) == @TypeOf(null)) return;
+                        switch (@typeInfo(@TypeOf(tags_))) {
+                            .optional => if (tags_) |t| {
+                                ptr.shape = ptr.shape.withTags(t);
+                            },
+                            else => ptr.shape = ptr.shape.withTags(tags_),
+                        }
+                    }
+                    return self;
+                }
 
-            return tensor;
+                pub fn withPartitioning(self: Self, partitioning_: anytype) Self {
+                    if (self.ptr) |ptr| {
+                        if (@TypeOf(partitioning_) == @TypeOf(null)) return;
+                        switch (@typeInfo(@TypeOf(partitioning_))) {
+                            .optional => if (partitioning_) |p| {
+                                ptr.shape = ptr.shape.withPartitioning(p);
+                            },
+                            else => ptr.shape = ptr.shape.withPartitioning(partitioning_),
+                        }
+                    }
+                    return self;
+                }
+
+                pub fn toTensor(self: Self) if (is_optional) ?Tensor else Tensor {
+                    const ptr = self.ptr orelse {
+                        if (comptime is_optional) return null;
+                        unreachable;
+                    };
+
+                    const key = self.key_buffer[0..self.key_len];
+                    const result: Tensor = .fromShape(ptr.shape);
+                    self.store.bindIdToKey(key, result.id) catch unreachable;
+
+                    if (comptime is_optional) {
+                        return result;
+                    }
+                    return result;
+                }
+            };
         }
 
-        pub fn createTensor(self: View, subkey: []const u8, tagz: anytype, partitioning: anytype) Tensor {
-            return self.maybeCreateTensor(subkey, tagz, partitioning).?;
+        pub fn load(self: View, subkey: []const u8) TensorLoader(false) {
+            return TensorLoader(false).init(self, subkey);
         }
 
         pub fn getShape(self: View, subkey: []const u8) ?Shape {

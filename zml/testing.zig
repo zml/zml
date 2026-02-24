@@ -336,7 +336,7 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey);
+            tensor.* = ctx_.activation_store.load(subkey).toTensor();
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
