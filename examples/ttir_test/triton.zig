@@ -79,8 +79,7 @@ pub fn wrappedUnifiedAttention(
         Tensor.scalar(v_strides.get(2), .i64),
         cu_seqlens_q,
         num_seqs,
-        out,
-    }, .{ out.shape(), zml.Shape.init(.{ .x = 32768 }, .u8) }, .{
+    }, .{out.shape()}, .{
         .name = "wrapped_kernel_unified_attention_2d",
         .ir = @embedFile("2d_unified_attention.ttir"),
         .grid = grid,
