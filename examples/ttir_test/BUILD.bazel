@@ -7,7 +7,6 @@ zig_binary(
     ],
     main = "triton.zig",
     deps = [
-        "//async",
         "//zml",
     ],
 )
