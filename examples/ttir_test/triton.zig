@@ -80,14 +80,14 @@ pub fn wrappedUnifiedAttention(
         cu_seqlens_q,
         num_seqs,
         out,
-    }, .{out.shape()}, .{
+    }, .{ out.shape(), zml.Shape.init(.{ .x = 32768 }, .u8) }, .{
         .name = "wrapped_kernel_unified_attention_2d",
         .ir = @embedFile("2d_unified_attention.ttir"),
         .grid = grid,
         .num_stages = 1,
         .num_warps = num_warps,
         .debug = true,
-        .output_operand_aliases = &.{24},
+        .output_operand_aliases = &.{},
     })[0];
 }
 
