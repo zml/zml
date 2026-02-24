@@ -28,6 +28,7 @@ pub const CompilationOptions = struct {
     partitioner: ?Partitioning.Partitioner = null,
     // Debugging options
     xla_dump_to: ?[]const u8 = null,
+    name: []const u8 = "ZML",
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
 };
@@ -195,7 +196,7 @@ pub fn compile(
     defer arena.deinit();
 
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
-    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    log.warn("\n******** {s} generated MLIR ********\n{f}", .{ opts.name, compilation_context.module.operation() });
 
     const exe = try Exe.init(
         allocator,
@@ -222,7 +223,13 @@ fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
     switch (partitioning.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (partitioning.shardings) |sharding| {
+            shardings: for (partitioning.shardings, 0..) |sharding, i| {
+                for (partitioning.shardings[0..i]) |existing_sharding| {
+                    if (std.mem.eql(u8, existing_sharding.name(), sharding.name())) {
+                        continue :shardings;
+                    }
+                }
+
                 const attr_str = try sharding.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 

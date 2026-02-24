@@ -1223,7 +1223,6 @@ pub fn load(
         .group = .init(opts.parallelism),
     };
     defer allocator.free(walk_ctx.buffers);
-
     defer if (opts.total_bytes) |total_bytes_ptr| {
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
     };
