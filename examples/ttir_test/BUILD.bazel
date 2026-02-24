@@ -2,6 +2,9 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "triton_test",
+    extra_srcs = [
+        "2d_unified_attention.ttir",
+    ],
     main = "triton.zig",
     deps = [
         "//zml",
