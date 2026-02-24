@@ -146,13 +146,13 @@ pub fn asyncMain() !void {
     var out = try zml.Buffer.constant(platform, out_shape, 0, .{});
     defer out.deinit();
 
-    var start_loc_h = try allocator.alloc(i32, test_cfg.batch_size + 1);
+    const start_loc_h = try allocator.alloc(i32, test_cfg.batch_size + 1);
     defer allocator.free(start_loc_h);
     for (start_loc_h, 0..) |*x, i| x.* = @intCast(i);
     var start_loc = try zml.Buffer.fromSlice(platform, .{test_cfg.batch_size + 1}, start_loc_h);
     defer start_loc.deinit();
 
-    var context_seq_lens_h = try allocator.alloc(i32, test_cfg.batch_size);
+    const context_seq_lens_h = try allocator.alloc(i32, test_cfg.batch_size);
     defer allocator.free(context_seq_lens_h);
     @memset(context_seq_lens_h, 1);
     var context_seq_lens = try zml.Buffer.fromSlice(platform, .{test_cfg.batch_size}, context_seq_lens_h);
@@ -186,7 +186,7 @@ pub fn asyncMain() !void {
     std.debug.print("Output shape: {f}\n", .{result.shape()});
     std.debug.print("Output sample (first {d} bf16 lanes as u16):", .{n});
     for (0..n) |i| {
-        const lane = std.mem.readInt(u16, out_bytes[i * 2 .. i * 2 + 2], .little);
+        const lane = @as(u16, out_bytes[i * 2]) | (@as(u16, out_bytes[i * 2 + 1]) << 8);
         std.debug.print(" 0x{x:0>4}", .{lane});
     }
     std.debug.print("\n", .{});
