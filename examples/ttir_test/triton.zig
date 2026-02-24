@@ -27,10 +27,10 @@ pub fn wrappedUnifiedAttention(
     q: Tensor,
     k: Tensor,
     v: Tensor,
-    out: Tensor,
     cu_seqlens_q: Tensor,
     seqused_k: Tensor,
     block_table: Tensor,
+    out: Tensor,
 ) Tensor {
     const q_strides = q.shape().computeByteStrides();
     const k_strides = k.shape().computeByteStrides();
@@ -117,10 +117,10 @@ pub fn main(init: std.process.Init) !void {
         query_shape,
         key_cache_shape,
         value_cache_shape,
-        out_shape,
         start_loc_shape,
         context_seq_lens_shape,
         block_tables_shape,
+        out_shape,
     });
     defer exe.deinit();
 
