@@ -67,3 +67,26 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "prefill_attention_trivial_init",
+    extra_srcs = [
+        "prefill_attention/prefill_attention.ttir",
+    ],
+    main = "prefill_attention/prefill_attention_trivial_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "prefill_attention_fixed_init",
+    extra_srcs = [
+        "prefill_attention/prefill_attention.ttir",
+        "prefill_attention/safetensors/prefill_attention_inputs.safetensors",
+    ],
+    main = "prefill_attention/prefill_attention_fixed_init.zig",
+    deps = [
+        "//zml",
+    ],
+)

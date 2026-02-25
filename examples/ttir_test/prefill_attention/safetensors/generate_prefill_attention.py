@@ -7,19 +7,18 @@ from safetensors.torch import save_file
 torch.manual_seed(0)
 
 batch_size = 8
+token_count = 8
 num_heads = 32
 num_kv_heads = 8
 head_size = 128
+max_input_len = 1
 
 
 def main() -> None:
-    # Random valid sequence lengths per batch element.
-    b_seq_len = torch.randint(1, 9, (batch_size,), dtype=torch.int32, device="cuda")
-    b_start_loc = torch.zeros((batch_size,), dtype=torch.int32, device="cuda")
-    b_start_loc[1:] = torch.cumsum(b_seq_len[:-1], dim=0)
-
-    token_count = int(b_seq_len.sum().item())
-    max_input_len = int(b_seq_len.max().item())
+    # Fixed metadata shape for the fixed-init Zig runner.
+    # q/k/v values remain random.
+    b_seq_len = torch.ones((batch_size,), dtype=torch.int32, device="cuda")
+    b_start_loc = torch.arange(batch_size, dtype=torch.int32, device="cuda")
 
     query = torch.randn(
         token_count,
