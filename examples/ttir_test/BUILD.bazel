@@ -90,3 +90,26 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "decode_attention_trivial_init",
+    extra_srcs = [
+        "decode_attention/decode_attention.ttir",
+    ],
+    main = "decode_attention/decode_attention_trivial_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "decode_attention_fixed_init",
+    extra_srcs = [
+        "decode_attention/decode_attention.ttir",
+        "decode_attention/safetensors/decode_attention_inputs.safetensors",
+    ],
+    main = "decode_attention/decode_attention_fixed_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
