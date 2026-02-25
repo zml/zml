@@ -1,5 +1,8 @@
 import os
+import sys
 import torch
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from new_triton_unified_attention_kernel import wrapped_unified_attention
 
 
