@@ -1,7 +1,7 @@
 import os
 import torch
 
-from new_triton_unified_attention_kernel import wrapped_unified_attention
+from wrap_2d_unified_attention import wrapped_unified_attention
 
 
 torch.set_printoptions(threshold=torch.inf)
