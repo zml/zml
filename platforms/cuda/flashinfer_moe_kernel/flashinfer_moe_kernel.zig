@@ -19,9 +19,9 @@ pub var moe_cutlass_sm90_bf16_mxfp4_launch_device: LaunchDeviceFn = undefined;
 var flashinfer_lib: ?std.DynLib = null;
 
 const default_candidates = [_][]const u8{
-    "/home/louis/flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_device/libgptoss_moe_cutlass_sm90.so",
-    "/home/louis/flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build/libgptoss_moe_cutlass_sm90.so",
-
+    "/home/louis/flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_gptoss/libgptoss_moe_cutlass_sm90.so",
+    // "/home/louis/flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_device/libgptoss_moe_cutlass_sm90.so",
+    // "/home/louis/flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build/libgptoss_moe_cutlass_sm90.so",
 };
 
 fn openLibrary(path: []const u8) !void {
@@ -50,7 +50,7 @@ pub fn load(allocator: std.mem.Allocator) !void {
 
     const r = try bazel.runfiles(bazel_builtin.current_repository);
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    if (try r.rlocation("flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_device/libgptoss_moe_cutlass_sm90.so", &buffer)) |so_path| {
+    if (try r.rlocation("flashinfer-gptoss-sm90-bf16-mxfp4-standalone/build_gptoss/libgptoss_moe_cutlass_sm90.so", &buffer)) |so_path| {
         if (openLibrary(so_path)) |_| {
             return;
         } else |_| {}

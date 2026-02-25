@@ -114,40 +114,40 @@ fn getScalarAttributeAs(comptime T: type, call_frame: *ffi.CallFrame, attribute_
 }
 
 pub const Metadata = struct {
-        host_buffer: zml.Tensor,
-        device_buffer: zml.Tensor,
+    host_buffer: zml.Tensor,
+    device_buffer: zml.Tensor,
 
-        pub const InitOptions = struct {
-            group_count: usize,
-        };
-
-        pub fn init(opts: InitOptions) Metadata {
-            _ = opts; // autofix
-            // const ptr_bytes = opts.group_count * @sizeOf(?*anyopaque);
-            // device: 3 arrays of  p oint e rs
-            const device_bytes = 24 * 1024 * 1024;
-
-            // host datas
-            const host_bytes = 10 * 1024 * 1024;
-
-            return .{
-                .host_buffer = .init(.{host_bytes}, .i8),
-                .device_buffer = .init(.{device_bytes}, .i8),
-            };
-        }
-
-        pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
-            return .{
-                .host_buffer = try zml.Buffer.uninitialized(io, platform, self.host_buffer.shape(), .{ .memory = .host_pinned }),
-                .device_buffer = try zml.Buffer.uninitialized(io, platform, self.device_buffer.shape(), .{ .memory = .device }),
-            };
-        }
-
-        pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-            self.host_buffer.deinit();
-            self.device_buffer.deinit();
-        }
+    pub const InitOptions = struct {
+        group_count: usize,
     };
+
+    pub fn init(opts: InitOptions) Metadata {
+        _ = opts; // autofix
+        // const ptr_bytes = opts.group_count * @sizeOf(?*anyopaque);
+        // device: 3 arrays of  p oint e rs
+        const device_bytes = 24 * 1024 * 1024;
+
+        // host datas
+        const host_bytes = 10 * 1024 * 1024;
+
+        return .{
+            .host_buffer = .init(.{host_bytes}, .i8),
+            .device_buffer = .init(.{device_bytes}, .i8),
+        };
+    }
+
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(Metadata) {
+        return .{
+            .host_buffer = try zml.Buffer.uninitialized(io, platform, self.host_buffer.shape(), .{ .memory = .host_pinned }),
+            .device_buffer = try zml.Buffer.uninitialized(io, platform, self.device_buffer.shape(), .{ .memory = .device }),
+        };
+    }
+
+    pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
+        self.host_buffer.deinit();
+        self.device_buffer.deinit();
+    }
+};
 
 pub fn flashinferMoeForward(
     activations_bf16: Tensor,
