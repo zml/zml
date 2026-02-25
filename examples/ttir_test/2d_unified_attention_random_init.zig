@@ -81,7 +81,7 @@ pub fn wrappedUnifiedAttention(
         num_seqs,
     }, .{out.shape()}, .{
         .name = "wrapped_kernel_unified_attention_2d",
-        .ir = @embedFile("2d_unified_attention.ttir"),
+        .ir = @embedFile("2d_unified_attention_kernel.ttir"),
         .grid = grid,
         .num_stages = 1,
         .num_warps = num_warps,
