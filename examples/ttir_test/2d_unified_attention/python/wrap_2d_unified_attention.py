@@ -20,7 +20,7 @@ _VLLM_KERNELS_DIR = _ROOT / "vllm_kernels"
 if str(_VLLM_KERNELS_DIR) not in sys.path:
     sys.path.insert(0, str(_VLLM_KERNELS_DIR))
 
-from new_triton_unified_attention_kernel import _get_tile_size, kernel_unified_attention_2d
+from triton_unified_attention import _get_tile_size, kernel_unified_attention_2d
 
 float8_info = torch.finfo(torch.float8_e4m3fn)  # potentially not adapted
 
