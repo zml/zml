@@ -140,7 +140,7 @@ def run_prefill_attention_kernel(
         num_warps=num_warps,
         num_stages=1,
         Lk=Lk,
-        out,
+        out_ptr=out,
     )
 
     print(f"kernel_wrapped_prefill: {compiled_kernel.src.constants}")
