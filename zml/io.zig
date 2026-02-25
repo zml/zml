@@ -289,28 +289,13 @@ pub const MemoryWriter = union(enum) {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
-        pool: *mem.DynamicBufferPool,
+        pools: DirectMemoryWriter.Pools,
         shape: Shape,
         sharding: Sharding,
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, .{ .single = pool }, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
-        };
-    }
-
-    pub fn initWithDevicePools(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const Platform,
-        pools: []mem.DynamicBufferPool,
-        shape: Shape,
-        sharding: Sharding,
-        buffer: *Buffer,
-    ) !MemoryWriter {
-        return switch (platform.target) {
-            .cuda => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, .{ .per_device = pools }, shape, sharding, buffer) },
+            .cuda => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, shape, sharding, buffer) },
             .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
         };
     }
@@ -601,19 +586,23 @@ const DirectShardWriter = struct {
 
 pub const DirectMemoryWriter = struct {
     const StreamSegment = struct {
+        start: usize,
+        len: usize,
+        primary_writer: usize,
+        mirror_start: usize,
+        mirror_len: usize,
+    };
+    const RawSegment = struct {
         writer_index: usize,
         start: usize,
         len: usize,
     };
 
-    const Layout = union(enum) {
-        partitioned: []StreamSegment,
-        replicated,
-    };
-
     const SegmentBuildError = error{
         NegativeStart,
         InvalidSliceSize,
+        InvalidRank,
+        InvalidWriterIndex,
     } || std.mem.Allocator.Error;
 
     pub const Pools = union(enum) {
@@ -623,10 +612,11 @@ pub const DirectMemoryWriter = struct {
 
     allocator: std.mem.Allocator,
     shard_writers: []DirectShardWriter,
-    stream_segments: ?[]StreamSegment = null,
-    active_writer_index: usize = 0,
-    stream_index: usize = 0,
-    stream_offset: usize = 0,
+    stream_segments: []StreamSegment,
+    segment_mirrors: []usize,
+    segment_index: usize = 0,
+    segment_offset: usize = 0,
+    active_writer_index: ?usize = null,
     interface: std.Io.Writer,
 
     pub fn init(
@@ -668,75 +658,51 @@ pub const DirectMemoryWriter = struct {
         buffer.* = Buffer.fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
         stdx.debug.assert(shard_writers.len > 0, "DirectMemoryWriter requires at least one shard writer", .{});
 
-        const layout = try chooseLayout(allocator, shape, placement);
+        const layout = try buildLayout(allocator, shape, placement);
 
-        // Intentionally omit vtable.sendFile on direct writers to keep a single
-        // transfer path through drain/rebase.
-        return switch (layout) {
-            .replicated => blk: {
-                const first_shard_remaining = shard_writers[0].total;
-                const first_visible_len = @min(shard_writers[0].interface.buffer.len, first_shard_remaining);
-                break :blk .{
-                    .allocator = allocator,
-                    .shard_writers = shard_writers,
-                    .stream_segments = null,
-                    .active_writer_index = 0,
-                    .stream_index = 0,
-                    .stream_offset = 0,
-                    .interface = .{
-                        .buffer = shard_writers[0].interface.buffer[0..first_visible_len],
-                        .end = shard_writers[0].interface.end,
-                        .vtable = &.{
-                            .drain = replicatedDrain,
-                            .flush = replicatedFlush,
-                            .rebase = replicatedRebase,
-                        },
-                    },
-                };
-            },
-            .partitioned => |segments| blk: {
-                const first = segments[0].writer_index;
-                const first_shard_remaining = shard_writers[first].total;
-                const first_segment_remaining = segments[0].len;
-                const first_visible_len = @min(shard_writers[first].interface.buffer.len, @min(first_shard_remaining, first_segment_remaining));
-                break :blk .{
-                    .allocator = allocator,
-                    .shard_writers = shard_writers,
-                    .stream_segments = segments,
-                    .active_writer_index = first,
-                    .stream_index = 0,
-                    .stream_offset = 0,
-                    .interface = .{
-                        .buffer = shard_writers[first].interface.buffer[0..first_visible_len],
-                        .end = shard_writers[first].interface.end,
-                        .vtable = &.{
-                            .drain = partitionedDrain,
-                            .flush = partitionedFlush,
-                            .rebase = partitionedRebase,
-                        },
-                    },
-                };
+        const initial_writer_index = if (layout.segments.len > 0)
+            layout.segments[0].primary_writer
+        else
+            0;
+        const initial_writer = &shard_writers[initial_writer_index];
+        const initial_visible_len: usize = if (layout.segments.len == 0)
+            0
+        else blk: {
+            const segment = layout.segments[0];
+            const shard_remaining = initial_writer.total - (initial_writer.offset + initial_writer.interface.end);
+            break :blk @min(
+                initial_writer.interface.buffer.len,
+                initial_writer.interface.end + @min(segment.len, shard_remaining),
+            );
+        };
+
+        return .{
+            .allocator = allocator,
+            .shard_writers = shard_writers,
+            .stream_segments = layout.segments,
+            .segment_mirrors = layout.mirrors,
+            .active_writer_index = if (layout.segments.len > 0) initial_writer_index else null,
+            .interface = .{
+                .buffer = initial_writer.interface.buffer[0..initial_visible_len],
+                .end = initial_writer.interface.end,
+                .vtable = &.{
+                    .drain = partitionedDrain,
+                    .flush = partitionedFlush,
+                    .rebase = partitionedRebase,
+                },
             },
         };
     }
 
-    fn chooseLayout(allocator: std.mem.Allocator, shape: Shape, placement: Placement) !Layout {
-        var all_replicated = true;
-        for (placement.shards.constSlice()) |shard| {
-            if (!isFullShard(shape, shard)) {
-                all_replicated = false;
-                break;
-            }
-        }
-        if (all_replicated) return .replicated;
-
-        // Build an explicit stream schedule: each entry maps one contiguous byte run
-        // in safetensors file order to a shard writer.
-        var segments_builder: std.ArrayListUnmanaged(StreamSegment) = .{};
-        defer segments_builder.deinit(allocator);
-
+    fn buildLayout(
+        allocator: std.mem.Allocator,
+        shape: Shape,
+        placement: Placement,
+    ) !struct { segments: []StreamSegment, mirrors: []usize } {
+        var raw_segments_builder: std.ArrayListUnmanaged(RawSegment) = .{};
+        defer raw_segments_builder.deinit(allocator);
         for (placement.shards.constSlice(), 0..) |shard, i| {
-            appendShardSegments(allocator, &segments_builder, shape, shard, i) catch |err| {
+            appendShardSegments(allocator, &raw_segments_builder, shape, shard, i, placement.shards.len) catch |err| {
                 log.warn(
                     "DirectMemoryWriter.chooseLayout: segment build failure shard_index={d} reason={s} global_shape={f} shard_shape={f} shard={f}",
                     .{ i, @errorName(err), shape, shard.shape, shard },
@@ -744,40 +710,54 @@ pub const DirectMemoryWriter = struct {
                 return error.NonContiguousShardPlacement;
             };
         }
+        const raw_segments = try raw_segments_builder.toOwnedSlice(allocator);
+        defer allocator.free(raw_segments);
 
-        const segments = try segments_builder.toOwnedSlice(allocator);
-        errdefer allocator.free(segments);
-
-        std.mem.sort(StreamSegment, segments, {}, struct {
-            fn lessThan(_: void, lhs: StreamSegment, rhs: StreamSegment) bool {
-                return lhs.start < rhs.start;
+        var filtered_len: usize = 0;
+        for (raw_segments, 0..) |segment, segment_index| {
+            if (segment.len == 0) {
+                // Defensive: zero-length segments are never meaningful for the
+                // stream plan and can appear if upstream placement metadata is noisy.
+                if (segment.writer_index >= placement.shards.len) {
+                    log.warn(
+                        "DirectMemoryWriter.chooseLayout: dropping empty segment with invalid writer index raw_segment_index={d} writer_index={d} shards_len={d} start={d} global_shape={f}",
+                        .{ segment_index, segment.writer_index, placement.shards.len, segment.start, shape },
+                    );
+                }
+                continue;
             }
-        }.lessThan);
-
-        var covered: usize = 0;
-        for (segments, 0..) |segment, i| {
-            if (segment.start != covered) {
+            if (segment.writer_index >= placement.shards.len) {
                 log.warn(
-                    "DirectMemoryWriter.chooseLayout: non-contiguous coverage at sorted_segment_index={d} expected_start={d} got_start={d} len={d} writer_index={d} global_size={d}",
-                    .{ i, covered, segment.start, segment.len, segment.writer_index, shape.byteSize() },
+                    "DirectMemoryWriter.chooseLayout: invalid writer index at raw_segment_index={d} writer_index={d} shards_len={d} start={d} len={d} global_shape={f}",
+                    .{ segment_index, segment.writer_index, placement.shards.len, segment.start, segment.len, shape },
                 );
                 return error.NonContiguousShardPlacement;
             }
-            covered += segment.len;
+            if (segment.start + segment.len > shape.byteSize()) {
+                log.warn(
+                    "DirectMemoryWriter.chooseLayout: raw segment out of range at raw_segment_index={d} start={d} len={d} global_size={d} writer_index={d} global_shape={f}",
+                    .{ segment_index, segment.start, segment.len, shape.byteSize(), segment.writer_index, shape },
+                );
+                return error.NonContiguousShardPlacement;
+            }
+            raw_segments[filtered_len] = segment;
+            filtered_len += 1;
         }
-        if (covered != shape.byteSize()) {
-            log.warn(
-                "DirectMemoryWriter.chooseLayout: coverage mismatch covered={d} global_size={d}",
-                .{ covered, shape.byteSize() },
-            );
-            return error.NonContiguousShardPlacement;
-        }
+        const planned_segments = raw_segments[0..filtered_len];
 
-        // Validate that each writer receives exactly its shard payload bytes.
+        std.mem.sort(RawSegment, planned_segments, {}, struct {
+            fn lessThan(_: void, lhs: RawSegment, rhs: RawSegment) bool {
+                if (lhs.start != rhs.start) return lhs.start < rhs.start;
+                if (lhs.len != rhs.len) return lhs.len < rhs.len;
+                return lhs.writer_index < rhs.writer_index;
+            }
+        }.lessThan);
+
+        // Validate that each shard writer receives exactly its shard payload.
         var writer_totals = try allocator.alloc(usize, placement.shards.len);
         defer allocator.free(writer_totals);
         @memset(writer_totals, 0);
-        for (segments) |segment| {
+        for (planned_segments) |segment| {
             writer_totals[segment.writer_index] += segment.len;
         }
         for (placement.shards.constSlice(), 0..) |shard, i| {
@@ -790,75 +770,187 @@ pub const DirectMemoryWriter = struct {
             }
         }
 
-        return .{ .partitioned = segments };
-    }
+        var stream_segments_builder: std.ArrayListUnmanaged(StreamSegment) = .{};
+        defer stream_segments_builder.deinit(allocator);
+        var mirrors_builder: std.ArrayListUnmanaged(usize) = .{};
+        defer mirrors_builder.deinit(allocator);
 
-    fn isFullShard(shape: Shape, shard: Placement.Shard) bool {
-        for (shard.slices.constSlice()) |s| {
-            if (s.start != 0 or s.size != shape.dim(s.axis)) return false;
+        var i: usize = 0;
+        var cursor: usize = 0;
+        while (i < planned_segments.len) {
+            const seg_start = planned_segments[i].start;
+            const seg_len = planned_segments[i].len;
+
+            if (seg_start != cursor) {
+                log.warn(
+                    "DirectMemoryWriter.chooseLayout: non-contiguous coverage at sorted_segment_index={d} expected_start={d} got_start={d} len={d} writer_index={d} global_size={d}",
+                    .{ i, cursor, seg_start, seg_len, planned_segments[i].writer_index, shape.byteSize() },
+                );
+                return error.NonContiguousShardPlacement;
+            }
+
+            const mirror_start = mirrors_builder.items.len;
+            var j = i + 1;
+            while (j < planned_segments.len and planned_segments[j].start == seg_start and planned_segments[j].len == seg_len) : (j += 1) {
+                try mirrors_builder.append(allocator, planned_segments[j].writer_index);
+            }
+
+            try stream_segments_builder.append(allocator, .{
+                .start = seg_start,
+                .len = seg_len,
+                .primary_writer = planned_segments[i].writer_index,
+                .mirror_start = mirror_start,
+                .mirror_len = j - i - 1,
+            });
+            cursor += seg_len;
+            i = j;
         }
-        return true;
+
+        if (cursor != shape.byteSize()) {
+            log.warn(
+                "DirectMemoryWriter.chooseLayout: coverage mismatch covered={d} global_size={d}",
+                .{ cursor, shape.byteSize() },
+            );
+            return error.NonContiguousShardPlacement;
+        }
+
+        const segments = try stream_segments_builder.toOwnedSlice(allocator);
+        errdefer allocator.free(segments);
+        const mirrors = try mirrors_builder.toOwnedSlice(allocator);
+
+        return .{
+            .segments = segments,
+            .mirrors = mirrors,
+        };
     }
 
     fn appendShardSegments(
         allocator: std.mem.Allocator,
-        out: *std.ArrayListUnmanaged(StreamSegment),
+        out: *std.ArrayListUnmanaged(RawSegment),
         shape: Shape,
         shard: Placement.Shard,
         writer_index: usize,
+        writer_count: usize,
     ) SegmentBuildError!void {
-        const slices = shard.slices.constSlice();
         const strides = shape.computeByteStrides();
-        var split_axis: ?usize = null;
-        var base_start: i64 = 0;
-        for (slices) |s| {
-            if (s.size < 0 or s.start < 0) return error.InvalidSliceSize;
-            base_start += s.start * strides.get(s.axis);
-            if (s.size != shape.dim(s.axis)) split_axis = s.axis;
-        }
-        if (base_start < 0) return error.NegativeStart;
+        const rank: usize = shape.rank();
+        if (rank > Shape.MAX_RANK) return error.InvalidRank;
+        if (writer_index >= writer_count) return error.InvalidWriterIndex;
 
-        if (split_axis == null) {
-            try out.append(allocator, .{
-                .writer_index = writer_index,
-                .start = @intCast(base_start),
-                .len = shape.byteSize(),
-            });
+        // Canonicalize per-axis [start, size] regardless of shard.slices order.
+        var starts: [Shape.MAX_RANK]i64 = [_]i64{0} ** Shape.MAX_RANK;
+        var sizes: [Shape.MAX_RANK]i64 = [_]i64{0} ** Shape.MAX_RANK;
+        for (0..rank) |ax| {
+            sizes[ax] = shape.dim(ax);
+        }
+        for (shard.slices.constSlice()) |s| {
+            if (s.size < 0 or s.start < 0) return error.InvalidSliceSize;
+            const ax: usize = @intCast(s.axis);
+            starts[ax] = s.start;
+            sizes[ax] = s.size;
+        }
+
+        for (0..rank) |ax| {
+            const dim = shape.dim(ax);
+            if (sizes[ax] > dim) return error.InvalidSliceSize;
+            if (starts[ax] + sizes[ax] > dim) return error.InvalidSliceSize;
+            // A full dimension cannot have a non-zero start.
+            if (sizes[ax] == dim and starts[ax] != 0) return error.InvalidSliceSize;
+        }
+
+        if (rank == 0) {
+            try appendMergedRawSegment(allocator, out, writer_index, writer_count, 0, shape.byteSize());
             return;
         }
 
-        const axis = split_axis.?;
-        const chunk_len_i64 = slices[axis].size * strides.get(axis);
-        const chunk_len: usize = @intCast(chunk_len_i64);
+        try appendAxisSegments(
+            allocator,
+            out,
+            writer_index,
+            writer_count,
+            0,
+            0,
+            rank,
+            &starts,
+            &sizes,
+            strides.constSlice(),
+        );
+    }
 
-        // Each segment is one contiguous run in global stream order.
-        // We iterate all prefix coordinates before `axis`; `axis` and inner dims
-        // stay fixed/implicit for the chunk length.
-        var prefix_count: usize = 1;
-        for (0..axis) |ax| {
-            prefix_count *= @intCast(slices[ax].size);
+    fn appendAxisSegments(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayListUnmanaged(RawSegment),
+        writer_index: usize,
+        writer_count: usize,
+        axis: usize,
+        base_start: i64,
+        rank: usize,
+        starts: *const [Shape.MAX_RANK]i64,
+        sizes: *const [Shape.MAX_RANK]i64,
+        strides: []const i64,
+    ) SegmentBuildError!void {
+        if (writer_index >= writer_count) return error.InvalidWriterIndex;
+        const axis_start = starts[axis];
+        const axis_size = sizes[axis];
+        if (axis_size == 0) return;
+
+        if (axis + 1 == rank) {
+            const segment_start = base_start + axis_start * strides[axis];
+            if (segment_start < 0) return error.NegativeStart;
+            const segment_len_i64 = axis_size * strides[axis];
+            if (segment_len_i64 < 0) return error.InvalidSliceSize;
+            try appendMergedRawSegment(
+                allocator,
+                out,
+                writer_index,
+                writer_count,
+                @intCast(segment_start),
+                @intCast(segment_len_i64),
+            );
+            return;
         }
 
-        for (0..prefix_count) |prefix| {
-            var rem = prefix;
-            var start = base_start;
+        var i: i64 = 0;
+        while (i < axis_size) : (i += 1) {
+            const child_start = base_start + (axis_start + i) * strides[axis];
+            if (child_start < 0) return error.NegativeStart;
+            try appendAxisSegments(
+                allocator,
+                out,
+                writer_index,
+                writer_count,
+                axis + 1,
+                child_start,
+                rank,
+                starts,
+                sizes,
+                strides,
+            );
+        }
+    }
 
-            var ax = axis;
-            while (ax > 0) {
-                ax -= 1;
-                const dim_size: usize = @intCast(slices[ax].size);
-                const rel: usize = if (dim_size == 0) 0 else rem % dim_size;
-                if (dim_size != 0) rem /= dim_size;
-                start += @as(i64, @intCast(rel)) * strides.get(ax);
+    fn appendMergedRawSegment(
+        allocator: std.mem.Allocator,
+        out: *std.ArrayListUnmanaged(RawSegment),
+        writer_index: usize,
+        writer_count: usize,
+        start: usize,
+        len: usize,
+    ) SegmentBuildError!void {
+        if (writer_index >= writer_count) return error.InvalidWriterIndex;
+        if (len == 0) return;
+        if (out.items.len > 0) {
+            const last = &out.items[out.items.len - 1];
+            if (last.writer_index == writer_index and last.start + last.len == start) {
+                last.len += len;
+                return;
             }
-            if (start < 0) return error.NegativeStart;
-
-            try out.append(allocator, .{
-                .writer_index = writer_index,
-                .start = @intCast(start),
-                .len = chunk_len,
-            });
         }
+        try out.append(allocator, .{
+            .writer_index = writer_index,
+            .start = start,
+            .len = len,
+        });
     }
 
     fn poolForDevice(platform: *const Platform, pools: []mem.DynamicBufferPool, device_id: usize) *mem.DynamicBufferPool {
@@ -874,9 +966,8 @@ pub const DirectMemoryWriter = struct {
             writer.deinit();
         }
         self.allocator.free(self.shard_writers);
-        if (self.stream_segments) |segments| {
-            self.allocator.free(segments);
-        }
+        self.allocator.free(self.stream_segments);
+        self.allocator.free(self.segment_mirrors);
     }
 
     pub fn setProgress(_: *DirectMemoryWriter, _: ?*std.Progress.Node) void {}
@@ -890,52 +981,21 @@ pub const DirectMemoryWriter = struct {
                 var remaining = chunk;
                 while (remaining.len > 0) {
                     try self_.partitionedEnsureWritable(1);
-                    const segment = self_.currentSegment() orelse return std.Io.Writer.Error.WriteFailed;
-
-                    self_.partitionedSyncIntoShard(segment.writer_index);
-                    const shard_writer = &self_.shard_writers[segment.writer_index];
-
                     const segment_remaining = self_.currentSegmentRemaining();
-                    const shard_remaining = shard_writer.total - (shard_writer.offset + shard_writer.interface.end);
-                    if (segment_remaining == 0) {
-                        try self_.partitionedAdvance();
-                        continue;
-                    }
+                    if (segment_remaining == 0) return std.Io.Writer.Error.WriteFailed;
+                    const writable = self_.interface.buffer.len - self_.interface.end;
+                    if (writable == 0) return std.Io.Writer.Error.WriteFailed;
 
-                    if (shard_remaining == 0) {
-                        log.warn(
-                            "partitionedDrain: shard exhausted with segment remaining stream_index={d} stream_offset={d} segment_start={d} segment_len={d} writer_index={d} shard_offset={d} shard_end={d} shard_total={d}",
-                            .{
-                                self_.stream_index,
-                                self_.stream_offset,
-                                segment.start,
-                                segment.len,
-                                segment.writer_index,
-                                shard_writer.offset,
-                                shard_writer.interface.end,
-                                shard_writer.total,
-                            },
-                        );
-                        return std.Io.Writer.Error.WriteFailed;
-                    }
-
-                    const to_write = @min(remaining.len, @min(segment_remaining, shard_remaining));
-                    const wrote = try shard_writer.interface.vtable.drain(
-                        &shard_writer.interface,
-                        &.{remaining[0..to_write]},
-                        1,
+                    const to_write = @min(remaining.len, @min(segment_remaining, writable));
+                    @memcpy(
+                        self_.interface.buffer[self_.interface.end .. self_.interface.end + to_write],
+                        remaining[0..to_write],
                     );
-                    if (wrote != to_write) return std.Io.Writer.Error.WriteFailed;
+                    self_.interface.end += to_write;
+                    try self_.partitionedSyncIntoActive();
 
-                    self_.stream_offset += wrote;
-                    consumed_.* += wrote;
-                    remaining = remaining[wrote..];
-
-                    if (self_.currentSegmentRemaining() == 0) {
-                        try self_.partitionedAdvance();
-                    } else {
-                        self_.partitionedSyncFromShard(segment.writer_index, self_.currentSegmentRemaining());
-                    }
+                    consumed_.* += to_write;
+                    remaining = remaining[to_write..];
                 }
             }
         }.call;
@@ -953,18 +1013,11 @@ pub const DirectMemoryWriter = struct {
         return consumed;
     }
 
-
     fn partitionedFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        if (self.currentSegment()) |segment| {
-            self.partitionedSyncIntoShard(segment.writer_index);
-        }
-
-        while (self.currentSegmentRemaining() == 0 and self.currentSegment() != null) {
-            self.stream_index += 1;
-            self.stream_offset = 0;
-        }
+        try self.partitionedSyncIntoActive();
+        self.partitionedAdvanceCompleted();
 
         if (self.currentSegment() != null) return std.Io.Writer.Error.WriteFailed;
 
@@ -987,89 +1040,86 @@ pub const DirectMemoryWriter = struct {
     fn partitionedEnsureWritable(self: *DirectMemoryWriter, capacity: usize) std.Io.Writer.Error!void {
         if (capacity == 0) return;
         while (self.interface.buffer.len - self.interface.end < capacity) {
+            try self.partitionedSyncIntoActive();
+            self.partitionedAdvanceCompleted();
+
+            const segment = self.currentSegment() orelse {
+                self.interface = .failing;
+                return std.Io.Writer.Error.WriteFailed;
+            };
+
+            self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+            if (self.interface.buffer.len - self.interface.end >= capacity) return;
             if (capacity > self.interface.buffer.len and self.interface.buffer.len != 0) {
                 return std.Io.Writer.Error.WriteFailed;
             }
-            try self.partitionedAdvance();
-            if (self.interface.buffer.len == 0) return std.Io.Writer.Error.WriteFailed;
-            if (capacity > self.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
-        }
-    }
 
-    fn partitionedAdvance(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        while (self.currentSegment()) |segment| {
-            self.partitionedSyncIntoShard(segment.writer_index);
-            const shard_writer = &self.shard_writers[segment.writer_index];
-
-            if (self.currentSegmentRemaining() == 0) {
-                self.stream_index += 1;
-                self.stream_offset = 0;
-                continue;
-            }
-
-            const shard_remaining = shard_writer.total - (shard_writer.offset + shard_writer.interface.end);
-            if (shard_remaining == 0) {
-                log.warn(
-                    "partitionedAdvance: shard exhausted with segment remaining stream_index={d} stream_offset={d} segment_start={d} segment_len={d} writer_index={d} shard_offset={d} shard_end={d} shard_total={d}",
-                    .{
-                        self.stream_index,
-                        self.stream_offset,
-                        segment.start,
-                        segment.len,
-                        segment.writer_index,
-                        shard_writer.offset,
-                        shard_writer.interface.end,
-                        shard_writer.total,
-                    },
-                );
-                return std.Io.Writer.Error.WriteFailed;
-            }
-
-            self.partitionedSyncFromShard(segment.writer_index, self.currentSegmentRemaining());
-            if (self.interface.end < self.interface.buffer.len) {
-                return;
-            }
-
+            const shard_writer = &self.shard_writers[segment.primary_writer];
             if (shard_writer.interface.end > 0) {
                 try shard_writer.flushBuffered();
-                self.partitionedSyncFromShard(segment.writer_index, self.currentSegmentRemaining());
-                if (self.interface.end < self.interface.buffer.len) return;
+                self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+                if (self.interface.buffer.len - self.interface.end >= capacity) return;
             }
+
+            if (self.currentSegmentRemaining() == 0) continue;
             return std.Io.Writer.Error.WriteFailed;
         }
-
-        self.interface = .failing;
     }
 
     fn currentSegment(self: *const DirectMemoryWriter) ?StreamSegment {
-        const segments = self.stream_segments orelse return null;
-        if (self.stream_index >= segments.len) return null;
-        return segments[self.stream_index];
+        if (self.segment_index >= self.stream_segments.len) return null;
+        return self.stream_segments[self.segment_index];
     }
 
     fn currentSegmentRemaining(self: *const DirectMemoryWriter) usize {
         const segment = self.currentSegment() orelse return 0;
-        return segment.len -| self.stream_offset;
+        return segment.len -| self.segment_offset;
     }
 
-    fn partitionedSyncIntoShard(self: *DirectMemoryWriter, writer_index: usize) void {
+    fn segmentMirrors(self: *const DirectMemoryWriter, segment: StreamSegment) []const usize {
+        return self.segment_mirrors[segment.mirror_start .. segment.mirror_start + segment.mirror_len];
+    }
+
+    fn partitionedAdvanceCompleted(self: *DirectMemoryWriter) void {
+        while (self.currentSegment()) |segment| {
+            if (self.currentSegmentRemaining() != 0) {
+                self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+                return;
+            }
+            self.segment_index += 1;
+            self.segment_offset = 0;
+        }
+        if (self.shard_writers.len > 0) {
+            self.active_writer_index = null;
+            self.interface.buffer = self.shard_writers[0].interface.buffer[0..0];
+            self.interface.end = 0;
+        } else {
+            self.interface = .failing;
+        }
+    }
+
+    fn partitionedSyncIntoActive(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+        const writer_index = self.active_writer_index orelse return;
+        const segment = self.currentSegment() orelse return;
+        if (segment.primary_writer != writer_index) return;
+
         const shard_writer = &self.shard_writers[writer_index];
-        if (self.active_writer_index != writer_index) {
-            // Buffer pointers are not a stable writer identity because the DMA
-            // pool can recycle pages across different shard writers.
-            self.active_writer_index = writer_index;
-            self.interface.buffer = shard_writer.interface.buffer;
+        if (self.interface.end > shard_writer.interface.end) {
+            // writableSlice APIs write directly into the exposed shard buffer;
+            // mirror those bytes and advance stream progress when end increases.
+            const old_end = shard_writer.interface.end;
+            const new_end = self.interface.end;
+            if (new_end > shard_writer.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
+            const chunk = shard_writer.interface.buffer[old_end..new_end];
+            shard_writer.interface.end = new_end;
+            self.segment_offset += chunk.len;
+            try self.mirrorChunk(segment, chunk);
+            return;
+        }
+
+        if (self.interface.end < shard_writer.interface.end) {
             self.interface.end = shard_writer.interface.end;
-            return;
         }
-        if (self.interface.end >= shard_writer.interface.end) {
-            // Account for bytes appended through writableSlice APIs where data
-            // bypasses drain and only grows the proxy writer end pointer.
-            self.stream_offset += self.interface.end - shard_writer.interface.end;
-            shard_writer.interface.end = self.interface.end;
-            return;
-        }
-        self.interface.end = shard_writer.interface.end;
     }
 
     fn partitionedSyncFromShard(self: *DirectMemoryWriter, writer_index: usize, segment_remaining: usize) void {
@@ -1082,125 +1132,15 @@ pub const DirectMemoryWriter = struct {
         self.interface.end = shard_writer.interface.end;
     }
 
-    fn replicatedDrain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        var consumed: usize = 0;
+    fn mirrorChunk(self: *DirectMemoryWriter, segment: StreamSegment, chunk: []const u8) std.Io.Writer.Error!void {
+        if (chunk.len == 0) return;
+        if (segment.mirror_len == 0) return;
 
-        const writeChunk = struct {
-            fn call(self_: *DirectMemoryWriter, chunk: []const u8, consumed_: *usize) std.Io.Writer.Error!void {
-                var remaining = chunk;
-                while (remaining.len > 0) {
-                    try self_.replicatedEnsureWritable(1);
-                    const tensor_remaining = self_.replicatedRemaining();
-                    if (tensor_remaining == 0) return std.Io.Writer.Error.WriteFailed;
-                    const to_write = @min(remaining.len, tensor_remaining);
-                    try self_.replicatedBroadcast(remaining[0..to_write]);
-                    consumed_.* += to_write;
-                    remaining = remaining[to_write..];
-                }
-            }
-        }.call;
-
-        for (data) |chunk| {
-            try writeChunk(self, chunk, &consumed);
-        }
-        if (data.len > 0 and splat > 1) {
-            const last = data[data.len - 1];
-            for (0..splat - 1) |_| {
-                try writeChunk(self, last, &consumed);
-            }
-        }
-
-        return consumed;
-    }
-
-    fn replicatedFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        try self.replicatedSyncFromInterface();
-        for (self.shard_writers) |*shard_writer| {
-            try shard_writer.interface.vtable.flush(&shard_writer.interface);
-        }
-        self.replicatedSyncFromFirst();
-        self.interface = .failing;
-    }
-
-    fn replicatedRebase(w: *std.Io.Writer, preserve: usize, capacity: usize) std.Io.Writer.Error!void {
-        const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
-        if (preserve != 0) return std.Io.Writer.Error.WriteFailed;
-        try self.replicatedEnsureWritable(capacity);
-    }
-
-    fn replicatedEnsureWritable(self: *DirectMemoryWriter, capacity: usize) std.Io.Writer.Error!void {
-        if (capacity == 0) return;
-        while (self.interface.buffer.len - self.interface.end < capacity) {
-            if (capacity > self.interface.buffer.len and self.interface.buffer.len != 0) {
-                return std.Io.Writer.Error.WriteFailed;
-            }
-            try self.replicatedAdvance();
-            if (self.interface.buffer.len == 0) return std.Io.Writer.Error.WriteFailed;
-            if (capacity > self.interface.buffer.len) return std.Io.Writer.Error.WriteFailed;
-        }
-    }
-
-    fn replicatedAdvance(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        try self.replicatedSyncFromInterface();
-        if (self.replicatedRemaining() == 0) {
-            self.interface = .failing;
-            return;
-        }
-
-        const first = &self.shard_writers[0];
-        if (first.interface.end > 0) {
-            for (self.shard_writers) |*shard_writer| {
-                try shard_writer.flushBuffered();
-            }
-        }
-        self.replicatedSyncFromFirst();
-    }
-
-    fn replicatedBroadcast(self: *DirectMemoryWriter, chunk: []const u8) std.Io.Writer.Error!void {
-        for (self.shard_writers) |*shard_writer| {
+        for (self.segmentMirrors(segment)) |writer_index| {
+            const shard_writer = &self.shard_writers[writer_index];
             const wrote = try shard_writer.interface.vtable.drain(&shard_writer.interface, &.{chunk}, 1);
             if (wrote != chunk.len) return std.Io.Writer.Error.WriteFailed;
         }
-        self.replicatedSyncFromFirst();
-    }
-
-    fn replicatedSyncFromInterface(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
-        const first = &self.shard_writers[0];
-        if (self.interface.end > first.interface.end) {
-            const chunk = first.interface.buffer[first.interface.end..self.interface.end];
-            first.interface.end = self.interface.end;
-            for (self.shard_writers[1..]) |*shard_writer| {
-                const wrote = try shard_writer.interface.vtable.drain(&shard_writer.interface, &.{chunk}, 1);
-                if (wrote != chunk.len) return std.Io.Writer.Error.WriteFailed;
-            }
-            return;
-        }
-        if (self.interface.end < first.interface.end) {
-            self.interface.end = first.interface.end;
-        }
-    }
-
-    fn replicatedRemaining(self: *const DirectMemoryWriter) usize {
-        const first = &self.shard_writers[0];
-        const first_written = first.offset + first.interface.end;
-        for (self.shard_writers[1..]) |*shard_writer| {
-            stdx.debug.assert(
-                shard_writer.offset + shard_writer.interface.end == first_written,
-                "replicated writers out of sync: expected written={}, got {}",
-                .{ first_written, shard_writer.offset + shard_writer.interface.end },
-            );
-        }
-        return first.total - first_written;
-    }
-
-    fn replicatedSyncFromFirst(self: *DirectMemoryWriter) void {
-        const first = &self.shard_writers[0];
-        const remaining = first.total - (first.offset + first.interface.end);
-        const visible_len = @min(first.interface.buffer.len, first.interface.end + remaining);
-        self.interface.buffer = first.interface.buffer[0..visible_len];
-        self.interface.end = first.interface.end;
     }
 };
 
@@ -1294,11 +1234,11 @@ pub fn load(
                         break :blk ctx_.replicated_sharding;
                     };
 
-                    var writer = MemoryWriter.initWithDevicePools(
+                    var writer = MemoryWriter.init(
                         ctx_.dma_allocator,
                         ctx_.io,
                         ctx_.platform,
-                        ctx_.pinned_buffer_pools,
+                        .{ .per_device = ctx_.pinned_buffer_pools },
                         shape,
                         sharding,
                         ctx_.buffers[i_],
