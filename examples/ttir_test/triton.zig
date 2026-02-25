@@ -125,13 +125,16 @@ pub fn main(init: std.process.Init) !void {
 
     const block_table_width: usize = @intCast(block_tables_shape.dim(1));
 
-    var query = try zeroBuffer(allocator, io, platform, query_shape.shape());
+    var prng = std.Random.DefaultPrng.init(0);
+    const random = prng.random();
+
+    var query = try randomNormalBuffer(allocator, io, platform, query_shape.shape(), random);
     defer query.deinit();
-    var key_cache = try zeroBuffer(allocator, io, platform, key_cache_shape.shape());
+    var key_cache = try randomNormalBuffer(allocator, io, platform, key_cache_shape.shape(), random);
     defer key_cache.deinit();
-    var value_cache = try zeroBuffer(allocator, io, platform, value_cache_shape.shape());
+    var value_cache = try randomNormalBuffer(allocator, io, platform, value_cache_shape.shape(), random);
     defer value_cache.deinit();
-    var out = try zeroBuffer(allocator, io, platform, out_shape.shape());
+    var out = try uninitBuffer(allocator, io, platform, out_shape.shape());
     defer out.deinit();
 
     var start_loc = try startLocBuffer(allocator, io, platform);
@@ -203,6 +206,51 @@ fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Pla
     return zml.Buffer.fromSlice(io, platform, slice);
 }
 
+fn uninitBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
+    const slice = try zml.Slice.alloc(allocator, shape);
+    defer slice.free(allocator);
+    return zml.Buffer.fromSlice(io, platform, slice);
+}
+
+fn randomNormalBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, random: std.Random) !zml.Buffer {
+    const slice = try zml.Slice.alloc(allocator, shape);
+    defer slice.free(allocator);
+
+    switch (shape.dtype()) {
+        inline else => |v| {
+            const ZigType = v.toZigType();
+            switch (comptime v.class()) {
+                .bool => unreachable,
+                .integer => {
+                    for (slice.items(ZigType)) |*e| e.* = random.int(ZigType);
+                },
+                .float => {
+                    for (slice.items(ZigType)) |*e| {
+                        const value = randomNormal(random);
+                        e.* = switch (ZigType) {
+                            f64, f32 => @floatCast(value),
+                            f16 => @floatCast(value),
+                            inline else => |T| if (@hasDecl(T, "fromF32")) T.fromF32(value) else unreachable,
+                        };
+                    }
+                },
+                .complex => unreachable,
+            }
+        },
+    }
+
+    return zml.Buffer.fromSlice(io, platform, slice);
+}
+
+fn randomNormal(random: std.Random) f32 {
+    const u1_raw = random.float(f32);
+    const u1f = if (u1_raw == 0) std.math.floatEps(f32) else u1_raw;
+    const u2f = random.float(f32);
+    const r = @sqrt(-2.0 * @log(u1f));
+    const theta = @as(f32, @floatCast(std.math.pi)) * 2.0 * u2f;
+    return r * @cos(theta);
+}
+
 fn startLocBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
     var slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{test_cfg.batch_size + 1}, .i32));
     defer slice.free(allocator);
@@ -223,8 +271,8 @@ fn blockTablesBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const 
     var slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ test_cfg.batch_size, width }, .i32));
     defer slice.free(allocator);
 
-    @memset(slice.items(i32), 0);
     const bt = slice.items(i32);
+    for (bt) |*v| v.* = 65535;
     for (0..test_cfg.batch_size) |b| {
         bt[b * width] = @intCast(b);
     }
