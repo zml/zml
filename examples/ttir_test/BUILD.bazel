@@ -32,3 +32,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "hello_world_trivial_init",
+    extra_srcs = [
+        "hello_world_kernel.ttir",
+    ],
+    main = "hello_world_trivial_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
