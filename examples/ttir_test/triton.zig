@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
-    log.info("\\n{f}", .{platform.fmtVerbose()});
+    log.info("\n{f}", .{platform.fmtVerbose()});
 
     if (platform.target != .cuda and platform.target != .rocm) {
         log.err("ttir_test requires CUDA/ROCm target, got {s}", .{@tagName(platform.target)});
@@ -172,7 +172,27 @@ pub fn main(init: std.process.Init) !void {
         const lane = @as(u16, output_bytes[i * 2]) | (@as(u16, output_bytes[i * 2 + 1]) << 8);
         std.debug.print(" 0x{x:0>4}", .{lane});
     }
-    std.debug.print("\\n", .{});
+    std.debug.print("\n", .{});
+
+    const d0: usize = @intCast(result.shape().dim(0));
+    const d1: usize = @intCast(result.shape().dim(1));
+    const d2: usize = @intCast(result.shape().dim(2));
+    const stride0 = d1 * d2;
+    std.debug.print("Output o[:,0,0] (bf16->f32):", .{});
+    for (0..d0) |i| {
+        const idx = i * stride0;
+        const byte_index = idx * 2;
+        if (byte_index + 1 >= output_bytes.len) break;
+        const lane = @as(u16, output_bytes[byte_index]) | (@as(u16, output_bytes[byte_index + 1]) << 8);
+        const f = bf16ToF32(lane);
+        std.debug.print(" {d}", .{f});
+    }
+    std.debug.print("\n", .{});
+}
+
+fn bf16ToF32(bits: u16) f32 {
+    const word = @as(u32, bits) << 16;
+    return @bitCast(word);
 }
 
 fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
