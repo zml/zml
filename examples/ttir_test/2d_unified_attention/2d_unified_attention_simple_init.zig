@@ -315,6 +315,11 @@ fn loadOutBF16(items: []const bf16, strides: anytype, i: usize, j: usize, k: usi
     return items[base].toF32();
 }
 
+fn bf16ToF32(bits: u16) f32 {
+    const word = @as(u32, bits) << 16;
+    return @bitCast(word);
+}
+
 fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
     var slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
