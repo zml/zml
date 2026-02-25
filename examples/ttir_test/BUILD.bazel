@@ -21,3 +21,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "2d_unified_attention_simple_init",
+    extra_srcs = [
+        "2d_unified_attention_kernel.ttir",
+    ],
+    main = "2d_unified_attention_simple_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
