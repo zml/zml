@@ -32,23 +32,11 @@ Memory-efficient attention for decoding.
 It supports page size >= 1.
 """
 
-import logging
+import torch
+import triton
+import triton.language as tl
 
-from packaging import version
-from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
-
-is_hip_ = current_platform.is_rocm()
-
-logger = logging.getLogger(__name__)
-
-# Only print the following warnings when triton version < 3.2.0.
-# The issue won't affect performance or accuracy.
-if version.parse(triton.__version__) < version.parse("3.2.0"):
-    logger.warning(
-        "The following error message 'operation scheduled before its operands' "
-        "can be ignored."
-    )
+is_hip_ = True  # platform dependent
 
 
 @triton.jit
