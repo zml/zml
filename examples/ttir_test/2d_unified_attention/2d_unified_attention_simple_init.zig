@@ -3,6 +3,7 @@ const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+const bf16 = zml.floats.BFloat16;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -32,10 +33,10 @@ pub fn wrappedUnifiedAttention(
     block_table: Tensor,
     out: Tensor,
 ) Tensor {
-    const q_strides = q.shape().computeByteStrides();
-    const k_strides = k.shape().computeByteStrides();
-    const v_strides = v.shape().computeByteStrides();
-    const bt_strides = block_table.shape().computeByteStrides();
+    const q_strides = q.shape().computeElementStrides();
+    const k_strides = k.shape().computeElementStrides();
+    const v_strides = v.shape().computeElementStrides();
+    const bt_strides = block_table.shape().computeElementStrides();
 
     // Kept for API parity with the torch-side call.
     const max_seqlen_q = test_cfg.max_input_len;
@@ -46,7 +47,15 @@ pub fn wrappedUnifiedAttention(
     _ = .{ max_seqlen_q, max_seqlen_k, causal, window_size, q_descale };
 
     const num_seqs = Tensor.scalar(block_table.dim(0), .i32);
-    const grid: [3]i32 = .{ @intCast(test_cfg.batch_size), @intCast(test_cfg.num_kv_heads), 1 };
+    const num_query_heads: i32 = @intCast(test_cfg.num_heads);
+    const num_kv_heads: i32 = @intCast(test_cfg.num_kv_heads);
+    const num_queries_per_kv: i32 = @divExact(num_query_heads, num_kv_heads);
+    const block_m: i32 = if (num_queries_per_kv <= 16) 16 else @intCast(std.math.ceilPowerOfTwo(i32, num_queries_per_kv));
+    const block_q: i32 = @divExact(block_m, num_queries_per_kv);
+    const q_len: i64 = @intCast(q.dim(0));
+    const num_seqs_i64: i64 = @intCast(block_table.dim(0));
+    const total_num_q_blocks: i64 = @divFloor(q_len, @as(i64, block_q)) + num_seqs_i64;
+    const grid: [3]i32 = .{ @intCast(total_num_q_blocks), num_kv_heads, 1 };
     const target = zml.module.CompilationContext.current().platform.target;
     const num_warps: i32 = switch (target) {
         .rocm => 1,
@@ -257,20 +266,19 @@ pub fn main(init: std.process.Init) !void {
     var output = try result.toSliceAlloc(allocator, io);
     defer output.free(allocator);
 
-    const output_bytes = output.constData();
-    const n = @min(output_bytes.len / 2, 8);
+    const output_items = output.constItems(bf16);
+    const n = @min(output_items.len, 8);
     log.info("Output shape: {f}", .{result.shape()});
     std.debug.print("Output sample (first {d} bf16 lanes as u16):", .{n});
     for (0..n) |i| {
-        const lane = @as(u16, output_bytes[i * 2]) | (@as(u16, output_bytes[i * 2 + 1]) << 8);
-        std.debug.print(" 0x{x:0>4}", .{lane});
+        std.debug.print(" 0x{x:0>4}", .{@as(u16, @bitCast(output_items[i]))});
     }
     std.debug.print("\n", .{});
 
     const d0: usize = @intCast(result.shape().dim(0));
     const d1: usize = @intCast(result.shape().dim(1));
     const d2: usize = @intCast(result.shape().dim(2));
-    const out_strides = result.shape().computeByteStrides();
+    const out_strides = result.shape().computeElementStrides();
     std.debug.print("Output strides (bytes): {d} {d} {d}\n", .{
         out_strides.get(0),
         out_strides.get(1),
@@ -279,14 +287,14 @@ pub fn main(init: std.process.Init) !void {
 
     std.debug.print("Output o[:,0,0] (bf16->f32):", .{});
     for (0..d0) |i| {
-        const f = loadOutBF16(output_bytes, out_strides, i, 0, 0);
+        const f = loadOutBF16(output_items, out_strides, i, 0, 0);
         std.debug.print(" {d}", .{f});
     }
     std.debug.print("\n", .{});
 
     std.debug.print("Output o[0,:,0] (bf16->f32):", .{});
     for (0..d1) |j| {
-        const f = loadOutBF16(output_bytes, out_strides, 0, j, 0);
+        const f = loadOutBF16(output_items, out_strides, 0, j, 0);
         std.debug.print(" {d}", .{f});
     }
     std.debug.print("\n", .{});
@@ -294,23 +302,17 @@ pub fn main(init: std.process.Init) !void {
     std.debug.print("Output o[0,0,:8] (bf16->f32):", .{});
     const n_d2 = @min(@as(usize, 8), d2);
     for (0..n_d2) |k| {
-        const f = loadOutBF16(output_bytes, out_strides, 0, 0, k);
+        const f = loadOutBF16(output_items, out_strides, 0, 0, k);
         std.debug.print(" {d}", .{f});
     }
     std.debug.print("\n", .{});
 }
 
-fn bf16ToF32(bits: u16) f32 {
-    const word = @as(u32, bits) << 16;
-    return @bitCast(word);
-}
-
-fn loadOutBF16(bytes: []const u8, strides: anytype, i: usize, j: usize, k: usize) f32 {
+fn loadOutBF16(items: []const bf16, strides: anytype, i: usize, j: usize, k: usize) f32 {
     const base = @as(usize, @intCast(strides.get(0))) * i +
         @as(usize, @intCast(strides.get(1))) * j +
         @as(usize, @intCast(strides.get(2))) * k;
-    const lane = @as(u16, bytes[base]) | (@as(u16, bytes[base + 1]) << 8);
-    return bf16ToF32(lane);
+    return items[base].toF32();
 }
 
 fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {

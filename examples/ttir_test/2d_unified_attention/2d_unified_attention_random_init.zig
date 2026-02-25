@@ -32,10 +32,10 @@ pub fn wrappedUnifiedAttention(
     block_table: Tensor,
     out: Tensor,
 ) Tensor {
-    const q_strides = q.shape().computeByteStrides();
-    const k_strides = k.shape().computeByteStrides();
-    const v_strides = v.shape().computeByteStrides();
-    const bt_strides = block_table.shape().computeByteStrides();
+    const q_strides = q.shape().computeElementStrides();
+    const k_strides = k.shape().computeElementStrides();
+    const v_strides = v.shape().computeElementStrides();
+    const bt_strides = block_table.shape().computeElementStrides();
 
     // Kept for API parity with the torch-side call.
     const max_seqlen_q = test_cfg.max_input_len;
@@ -46,7 +46,15 @@ pub fn wrappedUnifiedAttention(
     _ = .{ max_seqlen_q, max_seqlen_k, causal, window_size, q_descale };
 
     const num_seqs = Tensor.scalar(block_table.dim(0), .i32);
-    const grid: [3]i32 = .{ @intCast(test_cfg.batch_size), @intCast(test_cfg.num_kv_heads), 1 };
+    const num_query_heads: i32 = @intCast(test_cfg.num_heads);
+    const num_kv_heads: i32 = @intCast(test_cfg.num_kv_heads);
+    const num_queries_per_kv: i32 = @divExact(num_query_heads, num_kv_heads);
+    const block_m: i32 = if (num_queries_per_kv <= 16) 16 else @intCast(std.math.ceilPowerOfTwo(i32, num_queries_per_kv));
+    const block_q: i32 = @divExact(block_m, num_queries_per_kv);
+    const q_len: i64 = @intCast(q.dim(0));
+    const num_seqs_i64: i64 = @intCast(block_table.dim(0));
+    const total_num_q_blocks: i64 = @divFloor(q_len, @as(i64, block_q)) + num_seqs_i64;
+    const grid: [3]i32 = .{ @intCast(total_num_q_blocks), num_kv_heads, 1 };
     const target = zml.module.CompilationContext.current().platform.target;
     const num_warps: i32 = switch (target) {
         .rocm => 1,

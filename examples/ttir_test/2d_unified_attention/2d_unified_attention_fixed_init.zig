@@ -3,10 +3,13 @@ const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+const bf16 = zml.floats.BFloat16;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
+
+const inputs_bytes = @embedFile("safetensors/2d_unified_attention_inputs.safetensors");
 
 const test_cfg = struct {
     const token_count = 8;
@@ -131,23 +134,33 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    const block_table_width: usize = @intCast(block_tables_shape.dim(1));
+    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes);
+    defer allocator.free(inputs_path);
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, inputs_path);
+    defer registry.deinit();
 
-    var query = try zeroBuffer(allocator, io, platform, query_shape.shape());
+    var query = try loadBufferFromRegistry(allocator, io, platform, &registry, "query");
     defer query.deinit();
-    var key_cache = try zeroBuffer(allocator, io, platform, key_cache_shape.shape());
+    var key_cache = try loadBufferFromRegistry(allocator, io, platform, &registry, "key_cache");
     defer key_cache.deinit();
-    var value_cache = try zeroBuffer(allocator, io, platform, value_cache_shape.shape());
+    var value_cache = try loadBufferFromRegistry(allocator, io, platform, &registry, "value_cache");
     defer value_cache.deinit();
+    var block_tables = try loadBufferFromRegistry(allocator, io, platform, &registry, "block_tables");
+    defer block_tables.deinit();
+    var context_seq_lens = try loadBufferFromRegistry(allocator, io, platform, &registry, "context_seq_lens");
+    defer context_seq_lens.deinit();
+    var start_loc = try loadBufferFromRegistry(allocator, io, platform, &registry, "start_loc");
+    defer start_loc.deinit();
     var out = try uninitBuffer(allocator, io, platform, out_shape.shape());
     defer out.deinit();
 
-    var start_loc = try startLocBuffer(allocator, io, platform);
-    defer start_loc.deinit();
-    var context_seq_lens = try contextSeqLensBuffer(allocator, io, platform);
-    defer context_seq_lens.deinit();
-    var block_tables = try blockTablesBuffer(allocator, io, platform, block_table_width);
-    defer block_tables.deinit();
+    log.info("query shape: {f}", .{query.shape()});
+    log.info("key_cache shape: {f}", .{key_cache.shape()});
+    log.info("value_cache shape: {f}", .{value_cache.shape()});
+    log.info("block_tables shape: {f}", .{block_tables.shape()});
+    log.info("context_seq_lens shape: {f}", .{context_seq_lens.shape()});
+    log.info("start_loc shape: {f}", .{start_loc.shape()});
+
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
@@ -172,43 +185,53 @@ pub fn main(init: std.process.Init) !void {
     var output = try result.toSliceAlloc(allocator, io);
     defer output.free(allocator);
 
-    const output_bytes = output.constData();
-    const n = @min(output_bytes.len / 2, 8);
+    const out_items = output.constItems(bf16);
+    const out_strides = result.shape().computeElementStrides();
     log.info("Output shape: {f}", .{result.shape()});
-    std.debug.print("Output sample (first {d} bf16 lanes as u16):", .{n});
-    for (0..n) |i| {
-        const lane = @as(u16, output_bytes[i * 2]) | (@as(u16, output_bytes[i * 2 + 1]) << 8);
-        std.debug.print(" 0x{x:0>4}", .{lane});
-    }
-    std.debug.print("\n", .{});
-
+    std.debug.print("Output o[:,0,0] first 8 (bf16->f32):", .{});
     const d0: usize = @intCast(result.shape().dim(0));
-    const d1: usize = @intCast(result.shape().dim(1));
-    const d2: usize = @intCast(result.shape().dim(2));
-    const stride0 = d1 * d2;
-    std.debug.print("Output o[:,0,0] (bf16->f32):", .{});
-    for (0..d0) |i| {
-        const idx = i * stride0;
-        const byte_index = idx * 2;
-        if (byte_index + 1 >= output_bytes.len) break;
-        const lane = @as(u16, output_bytes[byte_index]) | (@as(u16, output_bytes[byte_index + 1]) << 8);
-        const f = bf16ToF32(lane);
-        std.debug.print(" {d}", .{f});
+    const n = @min(@as(usize, 8), d0);
+    for (0..n) |i| {
+        const f = loadOutBF16(out_items, out_strides, i, 0, 0);
+        std.debug.print(" {d:.5}", .{f});
     }
     std.debug.print("\n", .{});
+
 }
 
-fn bf16ToF32(bits: u16) f32 {
-    const word = @as(u32, bits) << 16;
-    return @bitCast(word);
+fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8) ![]const u8 {
+    const path = "2d_unified_attention_inputs.safetensors";
+    const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
+    defer file.close(io);
+
+    var writer = file.writer(io, &.{});
+    try writer.interface.writeAll(bytes);
+    try writer.interface.flush();
+
+    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const real_len = try file.realPath(io, &real_buf);
+    return try allocator.dupe(u8, real_buf[0..real_len]);
 }
 
-fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, shape);
-    defer slice.free(allocator);
+fn loadBufferFromRegistry(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    registry: *zml.safetensors.TensorRegistry,
+    key: []const u8,
+) !zml.Buffer {
+    const tensor_desc = registry.tensors.get(key) orelse return error.NotFound;
+    const shape = tensor_desc.shape;
 
-    @memset(slice.data(), 0);
-    return zml.Buffer.fromSlice(io, platform, slice);
+    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(host_bytes);
+
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try registry.reader(io, key, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(host_bytes);
+
+    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
 }
 
 fn uninitBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
@@ -217,27 +240,9 @@ fn uninitBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     return zml.Buffer.fromSlice(io, platform, slice);
 }
 
-fn startLocBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{test_cfg.batch_size + 1}, .i32));
-    defer slice.free(allocator);
-
-    @memset(slice.items(i32), 0);
-    return zml.Buffer.fromSlice(io, platform, slice);
-}
-
-fn contextSeqLensBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{test_cfg.batch_size}, .i32));
-    defer slice.free(allocator);
-
-    @memset(slice.items(i32), 0);
-    return zml.Buffer.fromSlice(io, platform, slice);
-}
-
-fn blockTablesBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, width: usize) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ test_cfg.batch_size, width }, .i32));
-    defer slice.free(allocator);
-
-    @memset(slice.items(i32), 0);
-
-    return zml.Buffer.fromSlice(io, platform, slice);
+fn loadOutBF16(items: []const bf16, strides: anytype, i: usize, j: usize, k: usize) f32 {
+    const base = @as(usize, @intCast(strides.get(0))) * i +
+        @as(usize, @intCast(strides.get(1))) * j +
+        @as(usize, @intCast(strides.get(2))) * k;
+    return items[base].toF32();
 }
