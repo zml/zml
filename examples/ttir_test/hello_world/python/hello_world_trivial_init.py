@@ -17,7 +17,7 @@ def run():
     grid = c_cpu[:10, :10]
     print("c[0:10,0:10] after matmul:")
     for row in grid:
-        print(" ".join(f"{v.item():.6g}" for v in row))
+        print(" ".join(f"{v.item():.5f}" for v in row))
 
 
 if __name__ == "__main__":

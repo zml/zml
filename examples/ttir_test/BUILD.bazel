@@ -3,9 +3,9 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 zig_binary(
     name = "2d_unified_attention_random_init",
     extra_srcs = [
-        "2d_unified_attention_kernel.ttir",
+        "2d_unified_attention/2d_unified_attention_kernel.ttir",
     ],
-    main = "2d_unified_attention_random_init.zig",
+    main = "2d_unified_attention/2d_unified_attention_random_init.zig",
     deps = [
         "//zml",
     ],
@@ -14,9 +14,9 @@ zig_binary(
 zig_binary(
     name = "2d_unified_attention_trivial_init",
     extra_srcs = [
-        "2d_unified_attention_kernel.ttir",
+        "2d_unified_attention/2d_unified_attention_kernel.ttir",
     ],
-    main = "2d_unified_attention_trivial_init.zig",
+    main = "2d_unified_attention/2d_unified_attention_trivial_init.zig",
     deps = [
         "//zml",
     ],
@@ -25,9 +25,9 @@ zig_binary(
 zig_binary(
     name = "2d_unified_attention_simple_init",
     extra_srcs = [
-        "2d_unified_attention_kernel.ttir",
+        "2d_unified_attention/2d_unified_attention_kernel.ttir",
     ],
-    main = "2d_unified_attention_simple_init.zig",
+    main = "2d_unified_attention/2d_unified_attention_simple_init.zig",
     deps = [
         "//zml",
     ],
@@ -36,9 +36,21 @@ zig_binary(
 zig_binary(
     name = "hello_world_trivial_init",
     extra_srcs = [
-        "hello_world_kernel.ttir",
+        "hello_world/hello_world_kernel.ttir",
     ],
-    main = "hello_world_trivial_init.zig",
+    main = "hello_world/hello_world_trivial_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "hello_world_fixed_input",
+    extra_srcs = [
+        "hello_world/hello_world_kernel.ttir",
+        "hello_world/safetensors/hello_world_inputs.safetensors",
+    ],
+    main = "hello_world/hello_world_fixed_input.zig",
     deps = [
         "//zml",
     ],

@@ -116,9 +116,9 @@ pub fn main(init: std.process.Init) !void {
         for (0..cmax) |col| {
             const v = output_items[row_start + col];
             if (col == 0) {
-                std.debug.print("{d}", .{v});
+                std.debug.print("{d:.5}", .{v});
             } else {
-                std.debug.print(" {d}", .{v});
+                std.debug.print(" {d:.5}", .{v});
             }
         }
         std.debug.print("\n", .{});
