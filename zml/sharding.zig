@@ -115,9 +115,6 @@ pub const Device = struct {
     /// Coordinates in the physical mesh
     coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .{},
 
-    /// Compute capacity local to this device (cores, SMs, etc.).
-    compute_units: usize,
-
     /// Placeholder
     pjrt_device: ?*const pjrt.Device = null,
 
@@ -128,8 +125,8 @@ pub const Device = struct {
 
     pub fn format(self: Device, writer: *std.Io.Writer) !void {
         try writer.print(
-            "Device(id={d} compute_units={d} coords={any})",
-            .{ self.id, self.compute_units, self.coords.constSlice() },
+            "Device(id={d} coords={any})",
+            .{ self.id, self.coords.constSlice() },
         );
     }
 };
@@ -203,7 +200,6 @@ pub const PhysicalNode = union(enum) {
         return .{
             .leaf = .{
                 .id = @intCast(device_.id()),
-                .compute_units = 1,
                 .coords = .{},
                 .pjrt_device = device_.pjrt_device,
             },
@@ -365,7 +361,6 @@ pub const PhysicalMesh = struct {
             .leaf => |d| .{
                 .leaf = .{
                     .id = d.id,
-                    .compute_units = d.compute_units,
                     .coords = d.coords,
                     .pjrt_device = d.pjrt_device,
                 },
@@ -439,6 +434,9 @@ pub const PhysicalMesh = struct {
     fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]usize, depth: usize) !void {
         switch (node.*) {
             .leaf => |*d| {
+                // Coords can already been set by caller
+                if (d.coords.len > 0) return;
+
                 var coords = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
                 for (path[0..depth]) |c| coords.appendAssumeCapacity(c);
                 d.coords = coords;
@@ -595,6 +593,188 @@ pub const PhysicalMesh = struct {
         }
     }
 
+    /// CoordsTopology builds a mesh from PJRT `coords` attributes.
+    const CoordsTopology = struct {
+        const CoordPlacement = struct {
+            device_id: usize,
+            pjrt_device: ?*const pjrt.Device,
+            coords: stdx.BoundedArray(usize, Shape.MAX_RANK),
+        };
+
+        const CoordLayout = struct {
+            rank: usize,
+            axis_sizes: [Shape.MAX_RANK]usize,
+        };
+
+        const IndexedCoord = struct {
+            placement: CoordPlacement,
+            linear: usize,
+        };
+
+        fn parseDevice(device: PlatformDevice) !CoordPlacement {
+            const api = device.platform.pjrt_api;
+            const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
+            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
+
+            switch (coords_attr) {
+                .int64list => |values| {
+                    if (values.len == 0 or values.len > Shape.MAX_RANK) return error.InvalidDeviceCoords;
+                    for (values) |value| {
+                        if (value < 0) return error.InvalidDeviceCoords;
+                        coords.appendAssumeCapacity(@intCast(value));
+                    }
+                },
+                else => return error.InvalidDeviceCoords,
+            }
+
+            return .{
+                .device_id = device.id(),
+                .pjrt_device = device.pjrt_device,
+                .coords = coords,
+            };
+        }
+
+        pub fn collect(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) ![]CoordPlacement {
+            const placements = try allocator.alloc(CoordPlacement, platform_devices.len);
+            for (platform_devices, 0..) |device, i| {
+                placements[i] = try parseDevice(device);
+            }
+            return placements;
+        }
+
+        pub fn layout(placements: []const CoordPlacement, max_rank: usize) !CoordLayout {
+            if (placements.len == 0) return error.InvalidPhysicalMesh;
+
+            const rank = placements[0].coords.len;
+            if (rank == 0) return error.InvalidDeviceCoords;
+            if (rank > max_rank) return error.UnsupportedDeviceCoordsRank;
+
+            for (placements[1..]) |placement| {
+                if (placement.coords.len != rank) return error.InvalidDeviceCoordsRank;
+            }
+
+            var axis_sizes = [_]usize{1} ** Shape.MAX_RANK;
+            for (0..rank) |ax_i| {
+                var max_coord: usize = 0;
+                for (placements) |placement| {
+                    max_coord = @max(max_coord, placement.coords.constSlice()[ax_i]);
+                }
+                axis_sizes[ax_i] = max_coord + 1;
+            }
+
+            return .{
+                .rank = rank,
+                .axis_sizes = axis_sizes,
+            };
+        }
+
+        fn linearIndex(coords: []const usize, rank: usize, axis_sizes: []const usize) usize {
+            var linear: usize = 0;
+            var stride: usize = 1;
+            var ax = rank;
+            while (ax > 0) {
+                ax -= 1;
+                linear += coords[ax] * stride;
+                stride *= axis_sizes[ax];
+            }
+            return linear;
+        }
+
+        pub fn sorted(allocator: std.mem.Allocator, placements: []const CoordPlacement, rank: usize, axis_sizes: []const usize) ![]IndexedCoord {
+            const indexed = try allocator.alloc(IndexedCoord, placements.len);
+            for (placements, indexed) |placement, *out| {
+                out.* = .{
+                    .placement = placement,
+                    .linear = linearIndex(placement.coords.constSlice(), rank, axis_sizes),
+                };
+            }
+
+            const SortCtx = struct {
+                fn lessThan(_: @This(), a: IndexedCoord, b: IndexedCoord) bool {
+                    return a.linear < b.linear;
+                }
+            };
+            std.mem.sort(IndexedCoord, indexed, SortCtx{}, SortCtx.lessThan);
+
+            for (indexed[1..], 1..) |entry, i| {
+                if (entry.linear == indexed[i - 1].linear) return error.InvalidDeviceTopology;
+            }
+
+            return indexed;
+        }
+
+        pub fn leaf(placement: *const CoordPlacement, coords_slice: []const usize) !PhysicalNode {
+            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
+            for (coords_slice) |coord| coords.appendAssumeCapacity(coord);
+
+            return .{
+                .leaf = .{
+                    .id = placement.device_id,
+                    .coords = coords,
+                    .pjrt_device = placement.pjrt_device,
+                },
+            };
+        }
+
+        pub fn axisStrides(axis_sizes: []const usize) ![Shape.MAX_RANK]usize {
+            var strides = [_]usize{0} ** Shape.MAX_RANK;
+            var stride: usize = 1;
+
+            var i = axis_sizes.len;
+            while (i > 0) {
+                i -= 1;
+                strides[i] = stride;
+                stride = std.math.mul(usize, stride, axis_sizes[i]) catch return error.InvalidDeviceTopology;
+            }
+
+            return strides;
+        }
+
+        pub fn buildMeshNode(
+            allocator: std.mem.Allocator,
+            indexed: []const IndexedCoord,
+            axis_sizes: []const usize,
+            axis_tags: []const PhysicalAxisTag,
+            axis_strides: []const usize,
+            depth: usize,
+            base_offset: usize,
+        ) !PhysicalNode {
+            if (depth == axis_sizes.len) {
+                const placement = &indexed[base_offset].placement;
+                return leaf(placement, placement.coords.constSlice()[0..axis_sizes.len]);
+            }
+
+            const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
+            var built: usize = 0;
+            errdefer {
+                for (children[0..built]) |child| child.deinit(allocator);
+                allocator.free(children);
+            }
+
+            for (children, 0..) |*child, i| {
+                child.* = try buildMeshNode(
+                    allocator,
+                    indexed,
+                    axis_sizes,
+                    axis_tags,
+                    axis_strides,
+                    depth + 1,
+                    base_offset + i * axis_strides[depth],
+                );
+                built += 1;
+            }
+
+            return .{
+                .branch = .{
+                    .tag = axis_tags[depth],
+                    .geometry = .{ .mesh = .torus },
+                    .children = children,
+                    .owned_children = true,
+                },
+            };
+        }
+    };
+
     pub fn auto(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalMesh {
         var root = try switch (platform.target) {
             .cpu => cpu(allocator, platform),
@@ -625,11 +805,18 @@ pub const PhysicalMesh = struct {
 
     pub fn gpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
         const platform_devices = platform.devices;
+        const placements = try CoordsTopology.collect(allocator, platform_devices);
+        defer allocator.free(placements);
 
-        // todo: this is simplified I treat all GPUs as one P2P group for this example
+        const layout = try CoordsTopology.layout(placements, Shape.MAX_RANK);
+        const indexed = try CoordsTopology.sorted(allocator, placements, layout.rank, layout.axis_sizes[0..layout.rank]);
+        defer allocator.free(indexed);
+
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
-
-        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+        for (nodes, indexed, 0..) |*n, entry, i| {
+            const linear_coord: [1]usize = .{i};
+            n.* = try CoordsTopology.leaf(&entry.placement, linear_coord[0..]);
+        }
 
         return .{
             .branch = .{
@@ -643,54 +830,40 @@ pub const PhysicalMesh = struct {
 
     pub fn tpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
         const platform_devices = platform.devices;
+        if (platform_devices.len == 0) return error.InvalidPhysicalMesh;
 
-        // Example: TPU v3-8 is 2x2x2 (8 devices)
-        var z_branches = try allocator.alloc(PhysicalNode, 4);
+        const placements = try CoordsTopology.collect(allocator, platform_devices);
+        defer allocator.free(placements);
 
-        for (z_branches, 0..) |*z_branch, i| {
-            const z_leaves = try allocator.alloc(PhysicalNode, 2);
+        const layout = try CoordsTopology.layout(placements, 3);
+        var rank = layout.rank;
+        var axis_sizes = layout.axis_sizes;
 
-            z_leaves[0] = .device(platform_devices[i * 2]);
-            z_leaves[1] = .device(platform_devices[i * 2 + 1]);
+        while (rank > 1 and axis_sizes[rank - 1] == 1) : (rank -= 1) {}
+        const indexed = try CoordsTopology.sorted(allocator, placements, rank, axis_sizes[0..rank]);
+        defer allocator.free(indexed);
 
-            z_branch.* = .{
-                .branch = .{
-                    .tag = .link_z,
-                    .geometry = .{ .mesh = .torus },
-                    .children = z_leaves,
-                    .owned_children = true,
-                },
-            };
+        var total_devices: usize = 1;
+        for (axis_sizes[0..rank]) |axis_size| {
+            total_devices = std.math.mul(usize, total_devices, axis_size) catch return error.InvalidDeviceTopology;
+        }
+        if (total_devices != indexed.len) return error.InvalidDeviceTopology;
+        for (indexed, 0..) |entry, i| {
+            if (entry.linear != i) return error.InvalidDeviceTopology;
         }
 
-        var y_branches = try allocator.alloc(PhysicalNode, 2);
+        const axis_tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };
+        const axis_strides = try CoordsTopology.axisStrides(axis_sizes[0..rank]);
 
-        y_branches[0] = .{
-            .branch = .{
-                .tag = .link_y,
-                .geometry = .{ .mesh = .torus },
-                .children = z_branches[0..2],
-                .owned_children = true,
-            },
-        };
-
-        y_branches[1] = .{
-            .branch = .{
-                .tag = .link_y,
-                .geometry = .{ .mesh = .torus },
-                .children = z_branches[2..4],
-                .owned_children = true,
-            },
-        };
-
-        return .{
-            .branch = .{
-                .tag = .link_x,
-                .geometry = .{ .mesh = .torus },
-                .children = y_branches,
-                .owned_children = true,
-            },
-        };
+        return CoordsTopology.buildMeshNode(
+            allocator,
+            indexed,
+            axis_sizes[0..rank],
+            axis_tags[0..rank],
+            axis_strides[0..rank],
+            0,
+            0,
+        );
     }
 
     pub fn neuron(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
@@ -1650,7 +1823,7 @@ const ShardingTest = struct {
         if (depth == tags.len) {
             const id = next_id.*;
             next_id.* += 1;
-            return .{ .leaf = .{ .id = id, .compute_units = 1 } };
+            return .{ .leaf = .{ .id = id } };
         }
         const count = sizes[depth];
         const children = try self.allocator.alloc(PhysicalNode, count);

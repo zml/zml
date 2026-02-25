@@ -186,7 +186,7 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
 
-    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 512 else 256;
+    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
