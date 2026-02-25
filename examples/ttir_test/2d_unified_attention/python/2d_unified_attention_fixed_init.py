@@ -1,7 +1,7 @@
 import os
 
 import torch
-from wrap_2d_unified_attention import wrapped_unified_attention
+from wrap_2d_unified_attention import run_2d_unified_attention_kernel
 from safetensors.torch import load_file
 
 torch.set_printoptions(threshold=torch.inf)
@@ -55,7 +55,7 @@ def main() -> None:
     print(f"alibi_slopes: {alibi_slopes}")
     print(f"scale: {scale}")
 
-    wrapped_unified_attention(
+    run_2d_unified_attention_kernel(
         q=query,
         k=key_cache,
         v=value_cache,

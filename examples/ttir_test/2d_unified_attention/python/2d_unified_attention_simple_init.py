@@ -1,7 +1,7 @@
 import os
 import torch
 
-from wrap_2d_unified_attention import wrapped_unified_attention
+from wrap_2d_unified_attention import run_2d_unified_attention_kernel
 
 
 torch.set_printoptions(threshold=torch.inf)
@@ -67,7 +67,7 @@ def generate_2D():
     print("context_seq_lens[0..8]:", context_seq_lens[:8])
     print("block_tables[:,0] first 8:", block_tables[:8, 0])
 
-    wrapped_unified_attention(
+    run_2d_unified_attention_kernel(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -149,7 +149,7 @@ def generate_3D():
     print("context_seq_lens[0..8]:", context_seq_lens[:8])
     print("block_tables[:,0] first 8:", block_tables[:8, 0])
 
-    wrapped_unified_attention(
+    run_2d_unified_attention_kernel(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -166,11 +166,6 @@ def generate_3D():
         q_descale=None,
         k_descale=k_scale,
         v_descale=v_scale,
-        seq_threshold_3D=seq_threshold_3D,
-        num_par_softmax_segments=num_par_softmax_segments,
-        softmax_segm_output=softmax_segm_output,
-        softmax_segm_max=softmax_segm_max,
-        softmax_segm_expsum=softmax_segm_expsum,
     )
 
     print(o[:,0,0])
