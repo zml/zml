@@ -1,23 +1,61 @@
 import json
-import sys
+import importlib.util
+import os
 from pathlib import Path
 
 import torch
 import triton
 import triton.language as tl
 
-_WRAPPED_KERNELS_DIR = Path(__file__).resolve().parent / "wrapped_kernels"
-if str(_WRAPPED_KERNELS_DIR) not in sys.path:
-    sys.path.insert(0, str(_WRAPPED_KERNELS_DIR))
+def _resolve_wrapper_file(file_name: str) -> Path:
+    script_path = Path(__file__).resolve()
+    candidates: list[Path] = []
 
-from wrap_2d_unified_attention import compile_ttir_2d_unified_attention_kernel
-from wrap_3d_unified_attention import compile_ttir_3d_unified_attention_kernels
-from wrap_decode_attention import compile_ttir_decode_attention_stage1_kernel
-from wrap_prefill_attention import compile_ttir_prefill_attention_kernel
+    for base in (script_path.parent, *script_path.parents):
+        candidates.append(base / "wrapped_kernels" / file_name)
+        candidates.append(base / "examples" / "ttir_sandbox" / "wrapped_kernels" / file_name)
+
+    for env_key in ("RUNFILES_DIR", "RUNFILES_DIRECTORY"):
+        runfiles = os.environ.get(env_key)
+        if runfiles:
+            runfiles_root = Path(runfiles)
+            candidates.append(runfiles_root / "_main" / "examples" / "ttir_sandbox" / "wrapped_kernels" / file_name)
+            candidates.append(runfiles_root / "examples" / "ttir_sandbox" / "wrapped_kernels" / file_name)
+
+    seen: set[str] = set()
+    for path in candidates:
+        key = str(path)
+        if key in seen:
+            continue
+        seen.add(key)
+        if path.is_file():
+            return path
+
+    raise FileNotFoundError(f"Unable to locate {file_name}; tried: {', '.join(sorted(seen))}")
+
+
+def _load_module(module_name: str, module_path: Path):
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load module spec: {module_name} from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_wrap_2d = _load_module("wrap_2d_unified_attention", _resolve_wrapper_file("wrap_2d_unified_attention.py"))
+_wrap_3d = _load_module("wrap_3d_unified_attention", _resolve_wrapper_file("wrap_3d_unified_attention.py"))
+_wrap_decode = _load_module("wrap_decode_attention", _resolve_wrapper_file("wrap_decode_attention.py"))
+_wrap_prefill = _load_module("wrap_prefill_attention", _resolve_wrapper_file("wrap_prefill_attention.py"))
+
+compile_ttir_2d_unified_attention_kernel = _wrap_2d.compile_ttir_2d_unified_attention_kernel
+compile_ttir_3d_unified_attention_kernels = _wrap_3d.compile_ttir_3d_unified_attention_kernels
+compile_ttir_decode_attention_stage1_kernel = _wrap_decode.compile_ttir_decode_attention_stage1_kernel
+compile_ttir_prefill_attention_kernel = _wrap_prefill.compile_ttir_prefill_attention_kernel
 
 
 @triton.jit
-def _hello_world_matmul_kernel(
+def matmul_fixed_kernel(
     A_ptr,
     B_ptr,
     C_ptr,
@@ -282,7 +320,7 @@ def compile_hello_world_matmul_ttir(args_json: str) -> str:
     c = torch.zeros((m, n), dtype=torch.float32, device=dev)
 
     grid = (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
-    compiled_kernel = _hello_world_matmul_kernel[grid](
+    compiled_kernel = matmul_fixed_kernel[grid](
         a,
         b,
         c,

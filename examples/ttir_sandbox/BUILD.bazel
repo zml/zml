@@ -53,10 +53,6 @@ zig_library(
     name = "ttir_compile_sandbox",
     main = "ttir_compile_sandbox.zig",
     data = [":ttir_compile_files"],
-    linkopts = select({
-        "@platforms//os:macos": ["-Wl,-rpath,@executable_path/../lib"],
-        "//conditions:default": ["-Wl,-rpath,$$ORIGIN/../lib"],
-    }),
     deps = [
         "//zml",
         ":libpython",

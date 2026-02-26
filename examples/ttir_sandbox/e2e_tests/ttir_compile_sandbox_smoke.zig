@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const ttir_compile_sandbox = @import("../ttir_compile_sandbox.zig");
+const ttir_compile_sandbox = @import("ttir_compile_sandbox");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
