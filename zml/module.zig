@@ -27,6 +27,7 @@ pub const CompilationOptions = struct {
     // If null, will be initialized from the target
     partitioner: ?Partitioning.Partitioner = null,
     // Debugging options
+    program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
@@ -84,7 +85,7 @@ pub const CompilationContext = struct {
         mlir_ctx.loadAllAvailableDialects();
 
         const module = mlir.Module.init(.unknown(mlir_ctx));
-        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
+        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, opts.program_name));
 
         const pass_manager = mlir.PassManager.init(mlir_ctx);
         {

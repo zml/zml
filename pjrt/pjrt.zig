@@ -481,6 +481,7 @@ pub const Client = opaque {
         buffer_type: BufferType,
         dims: []const i64,
         byte_strides: ?[]const i64,
+        layout: ?MemoryLayout = null,
         host_buffer_semantics: HostBufferSemantics,
         dst: union(enum) {
             device: *const Device,
@@ -489,6 +490,7 @@ pub const Client = opaque {
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
+        var c_layout: ?c.PJRT_Buffer_MemoryLayout = if (args.layout) |layout| layout.toCStruct() else null;
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @constCast(args.data),
@@ -497,6 +499,7 @@ pub const Client = opaque {
             .num_dims = args.dims.len,
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
+            .device_layout = if (c_layout) |*layout| @ptrCast(layout) else null,
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,
@@ -588,6 +591,63 @@ pub const Client = opaque {
             .memory = @ptrCast(@constCast(args.memory)),
         });
         return @ptrCast(ret.transfer_manager.?);
+    }
+
+    pub fn defaultMemoryLayout(
+        self: *const Client,
+        api: *const Api,
+        element_type: BufferType,
+        dims: []const i64,
+    ) !DefaultMemoryLayout {
+        const ext = if (api.extension(.layouts)) |e| e.layouts else return error.LayoutsExtensionUnavailable;
+
+        var get_args: c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args = .{
+            .struct_size = c.PJRT_Layouts_PJRT_Client_GetDefaultLayout_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .client = self.inner(),
+            .type = @intFromEnum(element_type),
+            .dims = dims.ptr,
+            .num_dims = dims.len,
+            .layout = null,
+        };
+        if (ext.PJRT_Layouts_PJRT_Client_GetDefaultLayout.?(&get_args)) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            defer pjrt_error.deinit(api);
+            return pjrt_error.getCode(api).toApiError();
+        }
+        defer {
+            var destroy_args: c.PJRT_Layouts_MemoryLayout_Destroy_Args = .{
+                .struct_size = c.PJRT_Layouts_MemoryLayout_Destroy_Args_STRUCT_SIZE,
+                .extension_start = null,
+                .layout = get_args.layout,
+            };
+            if (ext.PJRT_Layouts_MemoryLayout_Destroy.?(&destroy_args)) |pjrt_c_error| {
+                const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+                defer pjrt_error.deinit(api);
+                log.err("[PJRT_Layouts_MemoryLayout_Destroy] {s}", .{pjrt_error.getMessage(api)});
+            }
+        }
+
+        var serialize_args: c.PJRT_Layouts_MemoryLayout_Serialize_Args = .{
+            .struct_size = c.PJRT_Layouts_MemoryLayout_Serialize_Args_STRUCT_SIZE,
+            .extension_start = null,
+            .layout = get_args.layout,
+            .serialized_bytes = null,
+            .serialized_bytes_size = 0,
+            .serialized_layout = null,
+            .serialized_layout_deleter = null,
+        };
+        if (ext.PJRT_Layouts_MemoryLayout_Serialize.?(&serialize_args)) |pjrt_c_error| {
+            const pjrt_error: *Error = @ptrCast(pjrt_c_error);
+            defer pjrt_error.deinit(api);
+            return pjrt_error.getCode(api).toApiError();
+        }
+        defer if (serialize_args.serialized_layout_deleter) |deleter| {
+            deleter(serialize_args.serialized_layout);
+        };
+
+        const serialized = serialize_args.serialized_bytes[0..serialize_args.serialized_bytes_size];
+        return try DefaultMemoryLayout.parseSerialized(serialized);
     }
 
     pub const CreateUninitializedBufferArgs = struct {
@@ -1008,6 +1068,99 @@ pub const MemoryLayout = union(MemoryLayoutType) {
                 },
             },
         };
+    }
+};
+
+pub const DefaultMemoryLayout = struct {
+    pub const MAX_MINOR_TO_MAJOR: usize = 16;
+    pub const MAX_TILE_DIMS: usize = 128;
+    pub const MAX_NUM_TILES: usize = 16;
+
+    minor_to_major_storage: [MAX_MINOR_TO_MAJOR]i64 = undefined,
+    minor_to_major_len: usize = 0,
+
+    tile_dims_storage: [MAX_TILE_DIMS]i64 = undefined,
+    tile_dims_len: usize = 0,
+
+    tile_dims_sizes_storage: [MAX_NUM_TILES]usize = undefined,
+    tile_dims_sizes_len: usize = 0,
+
+    pub fn toMemoryLayout(self: *const DefaultMemoryLayout) MemoryLayout {
+        return .{
+            .tiled = .{
+                .minor_to_major = self.minor_to_major_storage[0..self.minor_to_major_len],
+                .tile_dims = self.tile_dims_storage[0..self.tile_dims_len],
+                .tile_dims_sizes = self.tile_dims_sizes_storage[0..self.tile_dims_sizes_len],
+            },
+        };
+    }
+
+    pub fn parseSerialized(serialized: []const u8) !DefaultMemoryLayout {
+        var parsed: DefaultMemoryLayout = .{};
+        try parseSerializedInto(serialized, &parsed);
+        return parsed;
+    }
+
+    fn parseSerializedInto(serialized: []const u8, out: *DefaultMemoryLayout) !void {
+        out.* = .{};
+        const raw = std.mem.trim(u8, serialized, " \t\n\r\x00");
+
+        if (raw.len < 2 or raw[0] != '{' or raw[raw.len - 1] != '}') {
+            return error.InvalidLayoutString;
+        }
+
+        const body = raw[1 .. raw.len - 1];
+        const first_colon = std.mem.indexOfScalar(u8, body, ':');
+
+        const minor_to_major_str = std.mem.trim(u8, if (first_colon) |index| body[0..index] else body, " \t\n\r");
+
+        if (minor_to_major_str.len > 0) {
+            var mtm_iter = std.mem.splitScalar(u8, minor_to_major_str, ',');
+            while (mtm_iter.next()) |part_raw| {
+                if (out.minor_to_major_len >= MAX_MINOR_TO_MAJOR) return error.LayoutTooLarge;
+                out.minor_to_major_storage[out.minor_to_major_len] = try parseI64Token(part_raw);
+                out.minor_to_major_len += 1;
+            }
+        }
+
+        if (first_colon) |index| {
+            const attrs = body[index + 1 ..];
+            var cursor: usize = 0;
+            while (cursor < attrs.len) {
+                const t_pos = std.mem.indexOfScalarPos(u8, attrs, cursor, 'T') orelse break;
+                cursor = t_pos + 1;
+                while (cursor < attrs.len and std.ascii.isWhitespace(attrs[cursor])) : (cursor += 1) {}
+                if (cursor >= attrs.len or attrs[cursor] != '(') continue;
+
+                while (cursor < attrs.len and attrs[cursor] == '(') {
+                    const tuple_start = cursor + 1;
+                    const tuple_end = std.mem.indexOfScalarPos(u8, attrs, tuple_start, ')') orelse return error.InvalidLayoutString;
+                    const tuple = attrs[tuple_start..tuple_end];
+
+                    var dims_in_tile: usize = 0;
+                    var tuple_iter = std.mem.splitScalar(u8, tuple, ',');
+                    while (tuple_iter.next()) |dim_raw| {
+                        if (out.tile_dims_len >= MAX_TILE_DIMS) return error.LayoutTooLarge;
+                        out.tile_dims_storage[out.tile_dims_len] = try parseI64Token(dim_raw);
+                        out.tile_dims_len += 1;
+                        dims_in_tile += 1;
+                    }
+                    if (dims_in_tile == 0) return error.InvalidLayoutString;
+
+                    if (out.tile_dims_sizes_len >= MAX_NUM_TILES) return error.LayoutTooLarge;
+                    out.tile_dims_sizes_storage[out.tile_dims_sizes_len] = dims_in_tile;
+                    out.tile_dims_sizes_len += 1;
+
+                    cursor = tuple_end + 1;
+                }
+            }
+        }
+    }
+
+    fn parseI64Token(token_raw: []const u8) !i64 {
+        const token = std.mem.trim(u8, token_raw, " \t\n\r");
+        if (token.len == 0) return error.InvalidLayoutString;
+        return std.fmt.parseInt(i64, token, 10);
     }
 };
 

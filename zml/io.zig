@@ -296,8 +296,8 @@ pub const MemoryWriter = union(enum) {
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
-            .cuda, .tpu => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, shape, sharding, buffer) },
-            .rocm, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(dma_allocator, io, platform, shape, sharding, buffer) },
+            .cuda => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, shape, sharding, buffer) },
+            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(dma_allocator, io, platform, shape, sharding, buffer) },
         };
     }
 

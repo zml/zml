@@ -73,11 +73,24 @@ pub const Buffer = struct {
 
         for (res.placement().shards.constSlice()) |shard| {
             const sub_slice = shard.shardSlice(slice);
+            var default_layout: ?pjrt.DefaultMemoryLayout = null;
+            const layout: ?pjrt.MemoryLayout = switch (platform.target) {
+                .tpu => blk: {
+                    default_layout = try platform.pjrt_client.defaultMemoryLayout(
+                        platform.pjrt_api,
+                        pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
+                        shard.shape.dims(),
+                    );
+                    break :blk default_layout.?.toMemoryLayout();
+                },
+                else => null,
+            };
             const args = pjrt.Client.BufferFromHostBufferArgs{
                 .data = sub_slice.constData().ptr,
                 .buffer_type = buffer_type,
                 .dims = shard.shape.dims(),
                 .byte_strides = sub_slice.byte_strides.constSlice(),
+                .layout = layout,
                 .host_buffer_semantics = .ImmutableUntilTransferCompletes,
                 .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
             };
@@ -145,16 +158,28 @@ pub const Buffer = struct {
         };
 
         for (res.placement().shards.constSlice()) |shard| {
-            const args = pjrt.Client.CreateUninitializedBufferArgs{
-                .dims = shard.shape.dims(),
-                .element_type = pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
-                .layout = .{
+            var default_layout: ?pjrt.DefaultMemoryLayout = null;
+            const layout: pjrt.MemoryLayout = switch (platform.target) {
+                .tpu => blk: {
+                    default_layout = try platform.pjrt_client.defaultMemoryLayout(
+                        platform.pjrt_api,
+                        pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
+                        shard.shape.dims(),
+                    );
+                    break :blk default_layout.?.toMemoryLayout();
+                },
+                else => .{
                     .tiled = .{
                         .minor_to_major = constants.minorToMajor(shard.shape.rank()),
                         .tile_dims = &.{},
                         .tile_dims_sizes = &.{},
                     },
                 },
+            };
+            const args = pjrt.Client.CreateUninitializedBufferArgs{
+                .dims = shard.shape.dims(),
+                .element_type = pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
+                .layout = layout,
                 .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
             };
 
