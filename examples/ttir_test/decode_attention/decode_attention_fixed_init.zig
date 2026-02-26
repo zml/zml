@@ -3,7 +3,7 @@ const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
-const testing = zml.testing;
+const common = @import("ttir_test_common");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -110,29 +110,29 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes, "decode_attention_inputs.safetensors");
+    const inputs_path = try common.writeEmbeddedSafetensors(allocator, io, inputs_bytes, "decode_attention_inputs.safetensors");
     defer allocator.free(inputs_path);
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, inputs_path);
     defer registry.deinit();
 
-    const outputs_path = try writeEmbeddedSafetensors(allocator, io, outputs_bytes, "decode_attention_output.safetensors");
+    const outputs_path = try common.writeEmbeddedSafetensors(allocator, io, outputs_bytes, "decode_attention_output.safetensors");
     defer allocator.free(outputs_path);
     var outputs_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, outputs_path);
     defer outputs_registry.deinit();
 
-    var q = try loadBufferFromRegistry(allocator, io, platform, &registry, "q");
+    var q = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "q");
     defer q.deinit();
-    var k = try loadBufferFromRegistry(allocator, io, platform, &registry, "k_buffer");
+    var k = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "k_buffer");
     defer k.deinit();
-    var v = try loadBufferFromRegistry(allocator, io, platform, &registry, "v_buffer");
+    var v = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "v_buffer");
     defer v.deinit();
-    var req_to_tokens = try loadBufferFromRegistry(allocator, io, platform, &registry, "req_to_tokens");
+    var req_to_tokens = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "req_to_tokens");
     defer req_to_tokens.deinit();
-    var b_seqlen = try loadBufferFromRegistry(allocator, io, platform, &registry, "b_seqlen");
+    var b_seqlen = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "b_seqlen");
     defer b_seqlen.deinit();
-    var out = try uninitBuffer(allocator, io, platform, out_shape.shape());
+    var out = try common.uninitBuffer(allocator, io, platform, out_shape.shape());
     defer out.deinit();
-    var expected = try loadBufferFromRegistry(allocator, io, platform, &outputs_registry, "att_out");
+    var expected = try common.loadBufferFromRegistry(allocator, io, platform, &outputs_registry, "att_out");
     defer expected.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -162,57 +162,7 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("\n", .{});
 
-    var matches = true;
-    testing.expectClose(io, result, expected, .{}) catch {
-        matches = false;
-    };
-    std.debug.print("\n\n", .{});
-    if (matches) {
-        std.debug.print("Output matches expected tensor\n", .{});
-    } else {
-        std.debug.print("Output does not match expected tensor\n", .{});
-    }
-}
-
-fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8, filename: []const u8) ![]const u8 {
-    const path = filename;
-    const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
-    defer file.close(io);
-
-    var writer = file.writer(io, &.{});
-    try writer.interface.writeAll(bytes);
-    try writer.interface.flush();
-
-    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const real_len = try file.realPath(io, &real_buf);
-    return try allocator.dupe(u8, real_buf[0..real_len]);
-}
-
-fn loadBufferFromRegistry(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    registry: *zml.safetensors.TensorRegistry,
-    key: []const u8,
-) !zml.Buffer {
-    const tensor_desc = registry.tensors.get(key) orelse return error.NotFound;
-    const shape = tensor_desc.shape;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try registry.reader(io, key, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
-}
-
-fn uninitBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
-    const slice = try zml.Slice.alloc(allocator, shape);
-    defer slice.free(allocator);
-    return zml.Buffer.fromSlice(io, platform, slice);
+    common.printExpectedMatch(io, result, expected);
 }
 
 fn loadOutF32(items: []const f32, strides: anytype, i: usize, j: usize, k: usize, l: usize) f32 {

@@ -3,7 +3,7 @@ const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
-const testing = zml.testing;
+const common = @import("ttir_test_common");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -73,16 +73,16 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes, "hello_world_inputs.safetensors");
+    const inputs_path = try common.writeEmbeddedSafetensors(allocator, io, inputs_bytes, "hello_world_inputs.safetensors");
     defer allocator.free(inputs_path);
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, inputs_path);
     defer registry.deinit();
 
-    var a = try loadBufferFromRegistry(allocator, io, platform, &registry, "a");
+    var a = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "a");
     defer a.deinit();
-    var b = try loadBufferFromRegistry(allocator, io, platform, &registry, "b");
+    var b = try common.loadBufferFromRegistry(allocator, io, platform, &registry, "b");
     defer b.deinit();
-    var c = try zeroBuffer(allocator, io, platform, c_shape.shape());
+    var c = try common.zeroBuffer(allocator, io, platform, c_shape.shape());
     defer c.deinit();
 
     log.info("a shape: {f}, device: {s}", .{ a.shape(), @tagName(platform.target) });
@@ -105,11 +105,11 @@ pub fn main(init: std.process.Init) !void {
     var result: zml.Buffer = exe_results.get(zml.Buffer);
     defer result.deinit();
 
-    const expected_path = try writeEmbeddedSafetensors(allocator, io, outputs_bytes, "hello_world_output.safetensors");
+    const expected_path = try common.writeEmbeddedSafetensors(allocator, io, outputs_bytes, "hello_world_output.safetensors");
     defer allocator.free(expected_path);
     var expected_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, expected_path);
     defer expected_registry.deinit();
-    var expected = try loadBufferFromRegistry(allocator, io, platform, &expected_registry, "c");
+    var expected = try common.loadBufferFromRegistry(allocator, io, platform, &expected_registry, "c");
     defer expected.deinit();
 
     var output = try result.toSliceAlloc(allocator, io);
@@ -140,57 +140,5 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n", .{});
     }
 
-    var matches = true;
-    testing.expectClose(io, result, expected, .{}) catch {
-        matches = false;
-    };
-    std.debug.print("\n\n", .{});
-    if (matches) {
-        std.debug.print("Output matches expected tensor\n", .{});
-    } else {
-        std.debug.print("Output does not match expected tensor\n", .{});
-    }
-}
-
-fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8, filename: []const u8) ![]const u8 {
-    const path = filename;
-    const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
-    defer file.close(io);
-
-    var writer = file.writer(io, &.{});
-    try writer.interface.writeAll(bytes);
-    try writer.interface.flush();
-
-    var real_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const real_len = try file.realPath(io, &real_buf);
-    return try allocator.dupe(u8, real_buf[0..real_len]);
-}
-
-fn loadBufferFromRegistry(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *const zml.Platform,
-    registry: *zml.safetensors.TensorRegistry,
-    key: []const u8,
-) !zml.Buffer {
-    const tensor_desc = registry.tensors.get(key) orelse return error.NotFound;
-    const shape = tensor_desc.shape;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try registry.reader(io, key, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
-}
-
-fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, shape);
-    defer slice.free(allocator);
-
-    @memset(slice.data(), 0);
-    return zml.Buffer.fromSlice(io, platform, slice);
+    common.printExpectedMatch(io, result, expected);
 }

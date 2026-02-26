@@ -1,4 +1,16 @@
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "ttir_test_common",
+    srcs = [
+        "ttir_test_common.zig",
+    ],
+    main = "ttir_test_common.zig",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//zml",
+    ],
+)
 
 zig_binary(
     name = "2d_unified_attention_random_init",
@@ -43,6 +55,7 @@ zig_binary(
     main = "2d_unified_attention/2d_unified_attention_fixed_init.zig",
     deps = [
         "//zml",
+        ":ttir_test_common",
     ],
 )
 
@@ -67,6 +80,7 @@ zig_binary(
     main = "hello_world/hello_world_fixed_init.zig",
     deps = [
         "//zml",
+        ":ttir_test_common",
     ],
 )
 
@@ -91,6 +105,7 @@ zig_binary(
     main = "prefill_attention/prefill_attention_fixed_init.zig",
     deps = [
         "//zml",
+        ":ttir_test_common",
     ],
 )
 
@@ -115,6 +130,7 @@ zig_binary(
     main = "decode_attention/decode_attention_fixed_init.zig",
     deps = [
         "//zml",
+        ":ttir_test_common",
     ],
 )
 
@@ -141,5 +157,6 @@ zig_binary(
     main = "3d_unified_attention/3d_unified_attention_fixed_init.zig",
     deps = [
         "//zml",
+        ":ttir_test_common",
     ],
 )
