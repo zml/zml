@@ -32,7 +32,6 @@ def _env_flag_enabled(name: str) -> bool:
 
 @triton.jit
 def wrapped_kernel_unified_attention_2d(
-    output_ptr,
     query_ptr,
     key_cache_ptr,
     value_cache_ptr,
@@ -80,8 +79,9 @@ def wrapped_kernel_unified_attention_2d(
     num_seqs_ptr,
     BLOCK_M: tl.constexpr,  # int
     USE_FP8: tl.constexpr,  # bool
-    FP8_MIN: tl.constexpr = float8_info.min,
-    FP8_MAX: tl.constexpr = float8_info.max,
+    FP8_MIN: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    output_ptr,
 ):
     # Load all scalars from pointers
     scale = tl.load(scale_ptr)
@@ -248,7 +248,6 @@ def run_2d_unified_attention_kernel(
             num_kv_heads,
         )
     ](
-        out,  # output_ptr
         q,  # query_ptr
         k,  # key_cache_ptr
         v,  # value_cache_ptr
@@ -306,6 +305,7 @@ def run_2d_unified_attention_kernel(
         int(output_scale is not None),  # USE_FP8 (constexpr)
         -448.0,  # FP8_MIN (constexpr, replace if needed)
         448.0,  # FP8_MAX (constexpr, replace if needed)
+        out,  # output_ptr
     )
 
     if should_log:
