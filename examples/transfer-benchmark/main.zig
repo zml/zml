@@ -73,10 +73,16 @@ pub fn transfer(
     const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
 
     var memory_writer = zml.io.MemoryWriter.init(
+        allocator,
         dma_allocator.allocator(),
         io,
         platform,
-        .{ .single = &buffer_pool },
+        .{
+            .single = .{
+                .pool = &buffer_pool,
+                .allocator = dma_allocator.allocator(),
+            },
+        },
         shape,
         replicated_sharding,
         buffer,

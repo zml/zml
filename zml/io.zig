@@ -287,6 +287,7 @@ pub const MemoryWriter = union(enum) {
 
     pub fn init(
         allocator: std.mem.Allocator,
+        dma_allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const Platform,
         pools: DirectMemoryWriter.Pools,
@@ -296,7 +297,7 @@ pub const MemoryWriter = union(enum) {
     ) !MemoryWriter {
         return switch (platform.target) {
             .cuda => .{ .direct = try DirectMemoryWriter.init(allocator, io, platform, pools, shape, sharding, buffer) },
-            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(allocator, io, platform, shape, sharding, buffer) },
+            .rocm, .tpu, .neuron, .cpu => .{ .buffered = try BufferedMemoryWriter.init(dma_allocator, io, platform, shape, sharding, buffer) },
         };
     }
 
@@ -606,8 +607,14 @@ pub const DirectMemoryWriter = struct {
     } || std.mem.Allocator.Error;
 
     pub const Pools = union(enum) {
-        single: *mem.DynamicBufferPool,
-        per_device: []mem.DynamicBufferPool,
+        single: struct {
+            pool: *mem.DynamicBufferPool,
+            allocator: std.mem.Allocator,
+        },
+        per_device: struct {
+            pools: []mem.DynamicBufferPool,
+            allocators: []const std.mem.Allocator,
+        },
     };
 
     allocator: std.mem.Allocator,
@@ -640,12 +647,15 @@ pub const DirectMemoryWriter = struct {
 
         var pjrt_buffers: Buffer.Shards = .{};
         for (placement.shards.constSlice(), 0..) |shard, i| {
-            const pool = switch (pools) {
-                .single => |p| p,
-                .per_device => |ps| poolForDevice(platform, ps, shard.device_id),
+            const pool, const shard_dma_allocator = switch (pools) {
+                .single => |single| .{ single.pool, single.allocator },
+                .per_device => |per_device| .{
+                    poolForDevice(platform, per_device.pools, shard.device_id),
+                    allocatorForDevice(platform, per_device.allocators, shard.device_id),
+                },
             };
             shard_writers[i] = try DirectShardWriter.init(
-                allocator,
+                shard_dma_allocator,
                 io,
                 shard.memory(platform, .default),
                 pool,
@@ -961,6 +971,14 @@ pub const DirectMemoryWriter = struct {
         unreachable;
     }
 
+    fn allocatorForDevice(platform: *const Platform, allocators: []const std.mem.Allocator, device_id: usize) std.mem.Allocator {
+        stdx.debug.assert(allocators.len == platform.devices.len, "Expected one DMA allocator per device, got allocators={} devices={}", .{ allocators.len, platform.devices.len });
+        for (platform.devices, 0..) |d, i| {
+            if (d.id() == device_id) return allocators[i];
+        }
+        unreachable;
+    }
+
     pub fn deinit(self: *DirectMemoryWriter) void {
         for (self.shard_writers) |*writer| {
             writer.deinit();
@@ -1164,9 +1182,25 @@ pub fn load(
 ) !Bufferized(ModelType) {
     var bufferized = try mem.bufferize(allocator, ModelType, model);
 
-    const first_device = platform.devices[0]; // Temporary until sharding is re-exposed
-    const dma_alloc: mem.DmaAllocator = .init(allocator, &first_device);
+    // `load` can run per-tensor work concurrently. Callers may pass allocators
+    // that are not thread-safe (for example arena allocators in examples/llama),
+    // so serialize allocator access for writer/layout temporary allocations.
+    var thread_safe_allocator: std.heap.ThreadSafeAllocator = .{
+        .child_allocator = allocator,
+        .io = io,
+    };
+    const concurrent_allocator = thread_safe_allocator.allocator();
+
     const pool_count = platform.devices.len;
+    const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
+    defer allocator.free(dma_allocators);
+    const dma_allocator_views = try allocator.alloc(std.mem.Allocator, pool_count);
+    defer allocator.free(dma_allocator_views);
+    for (platform.devices, 0..) |*device, i| {
+        dma_allocators[i] = .init(concurrent_allocator, device);
+        dma_allocator_views[i] = dma_allocators[i].allocator();
+    }
+
     // One DirectShardWriter reserves one chunk from its device pool at init time.
     // Keep per-device capacity at least equal to loader parallelism to avoid
     // blocking all workers during writer initialization.
@@ -1176,15 +1210,16 @@ pub fn load(
     for (buffer_pools) |*pool_| {
         pool_.* = .init(chunks_per_pool, opts.dma_chunk_size);
     }
-    defer for (buffer_pools) |*pool_| {
-        pool_.deinit(dma_alloc.allocator());
+    defer for (buffer_pools, 0..) |*pool_, i| {
+        pool_.deinit(dma_allocator_views[i]);
     };
 
     const replicated_sharding = try sharding_.replicatedSharding(opts.shardings[0].physical);
 
     const Ctx = struct {
         allocator: std.mem.Allocator,
-        dma_allocator: std.mem.Allocator,
+        buffered_allocator: std.mem.Allocator,
+        dma_allocators: []const std.mem.Allocator,
         pinned_buffer_pools: []mem.DynamicBufferPool,
         io: std.Io,
         platform: *const Platform,
@@ -1200,8 +1235,9 @@ pub fn load(
         .platform = platform,
         .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
         .store = opts.store,
-        .allocator = allocator,
-        .dma_allocator = dma_alloc.allocator(),
+        .allocator = concurrent_allocator,
+        .buffered_allocator = concurrent_allocator,
+        .dma_allocators = dma_allocator_views,
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
@@ -1209,6 +1245,7 @@ pub fn load(
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
+    // defer allocator.free(walk_ctx.buffers);
 
     defer if (opts.total_bytes) |total_bytes_ptr| {
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
@@ -1235,15 +1272,21 @@ pub fn load(
                     };
 
                     var writer = MemoryWriter.init(
-                        ctx_.dma_allocator,
+                        ctx_.allocator,
+                        ctx_.buffered_allocator,
                         ctx_.io,
                         ctx_.platform,
-                        .{ .per_device = ctx_.pinned_buffer_pools },
+                        .{
+                            .per_device = .{
+                                .pools = ctx_.pinned_buffer_pools,
+                                .allocators = ctx_.dma_allocators,
+                            },
+                        },
                         shape,
                         sharding,
                         ctx_.buffers[i_],
                     ) catch unreachable;
-                    defer writer.deinit(ctx_.dma_allocator);
+                    defer writer.deinit(ctx_.buffered_allocator);
 
                     const scale = 1024;
 
