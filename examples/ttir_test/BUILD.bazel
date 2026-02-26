@@ -113,3 +113,15 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "3d_unified_attention_trivial_init",
+    extra_srcs = [
+        "3d_unified_attention/3d_unified_attention_kernel.ttir",
+        "3d_unified_attention/reduce_segments_kernel.ttir",
+    ],
+    main = "3d_unified_attention/3d_unified_attention_trivial_init.zig",
+    deps = [
+        "//zml",
+    ],
+)
