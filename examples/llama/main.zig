@@ -138,13 +138,10 @@ pub fn main(init: std.process.Init) !void {
         .attention_parameters = .init(.fromBackend(backend)),
     };
 
-    var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-    defer physical_mesh.deinit();
-
     const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
-    const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, physical_mesh);
-    const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(tp_mesh, physical_mesh, tp_strategy);
-    const sharding_replicated = try zml.sharding.replicatedSharding(physical_mesh);
+    const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
+    const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(platform, tp_mesh, tp_strategy);
+    const sharding_replicated = try zml.sharding.replicatedSharding(platform);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 

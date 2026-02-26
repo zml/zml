@@ -68,9 +68,7 @@ pub fn transfer(
     const dma_allocator: zml.mem.DmaAllocator = .init(allocator, &first_device);
     var buffer_pool: zml.mem.DynamicBufferPool = .init(dma_chunks, dma_chunk_size);
     defer buffer_pool.deinit(dma_allocator.allocator());
-    var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-    defer physical_mesh.deinit();
-    const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
+    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
 
     var memory_writer = zml.io.MemoryWriter.init(
         allocator,

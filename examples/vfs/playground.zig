@@ -250,10 +250,8 @@ pub fn main(init: std.process.Init) !void {
             const tensor_names = tensor_names_all[0..load_count];
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            var physical_mesh: zml.sharding.PhysicalMesh = try .auto(allocator, platform);
-            defer physical_mesh.deinit();
-
-            const replicated_sharding = try zml.sharding.replicatedSharding(physical_mesh);
+            const physical_mesh = platform.physical_mesh;
+            const replicated_sharding = try zml.sharding.replicatedSharding(platform);
             var sharding_buffer: [2]zml.sharding.Sharding = undefined;
             const shardings: []const zml.sharding.Sharding = switch (load_sharding) {
                 .replicated => blk: {
@@ -263,7 +261,7 @@ pub fn main(init: std.process.Init) !void {
                 .model_axis0 => blk: {
                     const model_logical_mesh: zml.sharding.LogicalMesh = try .init("playground_model", .{ .model = .high_bandwidth });
                     const model_strategy: zml.sharding.Strategy = try .suggest(model_logical_mesh, physical_mesh);
-                    const model_sharding = try zml.sharding.Sharding.initFromStrategy(model_logical_mesh, physical_mesh, model_strategy);
+                    const model_sharding = try zml.sharding.Sharding.initFromStrategy(platform, model_logical_mesh, model_strategy);
                     sharding_buffer[0] = model_sharding;
                     sharding_buffer[1] = replicated_sharding;
                     break :blk sharding_buffer[0..2];

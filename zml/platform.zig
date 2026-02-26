@@ -185,6 +185,7 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
+    physical_mesh: zml.sharding.PhysicalMesh,
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -213,6 +214,7 @@ pub const Platform = struct {
             .pjrt_client = pjrt_client,
             .devices = devices,
             .memories = memories,
+            .physical_mesh = undefined,
         };
         defer platform.arena_state = arena.state;
 
@@ -223,6 +225,11 @@ pub const Platform = struct {
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
                 platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
             }
+
+            platform.physical_mesh = try switch (options.physical_mesh) {
+                .auto => zml.sharding.PhysicalMesh.auto(arena.allocator(), target, devices),
+                .custom => |builder| builder(arena.allocator(), target, devices),
+            };
         }
 
         switch (target) {
@@ -477,6 +484,18 @@ pub const Platform = struct {
 };
 
 pub const CreateOptions = struct {
+    pub const CreatePhysicalMeshFn = *const fn (
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const Device,
+    ) anyerror!zml.sharding.PhysicalMesh;
+
+    pub const PhysicalMesh = union(enum) {
+        auto,
+        custom: CreatePhysicalMeshFn,
+    };
+
+    physical_mesh: PhysicalMesh = .auto,
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.

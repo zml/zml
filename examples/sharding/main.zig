@@ -90,15 +90,15 @@ fn runWithPartitioningModel(
     io: std.Io,
     platform: *const zml.Platform,
     partitioner: zml.sharding.Partitioning.Partitioner,
-    physical_mesh: zml.sharding.PhysicalMesh,
 ) !void {
+    const physical_mesh = platform.physical_mesh;
     const mesh_replicated: zml.sharding.LogicalMesh = try .init("mesh_replicated", .{ .x = .high_bandwidth });
     const strategy_replicated: zml.sharding.Strategy = try .suggest(mesh_replicated, physical_mesh);
-    const sharding_replicated: zml.sharding.Sharding = try .initFromStrategy(mesh_replicated, physical_mesh, strategy_replicated);
+    const sharding_replicated: zml.sharding.Sharding = try .initFromStrategy(platform, mesh_replicated, strategy_replicated);
 
     const mesh_split: zml.sharding.LogicalMesh = try .init("mesh_split", .{ .model_x = .high_bandwidth, .model_y = .balanced });
     const strategy_split: zml.sharding.Strategy = try .suggest(mesh_split, physical_mesh);
-    const sharding_split: zml.sharding.Sharding = try .initFromStrategy(mesh_split, physical_mesh, strategy_split);
+    const sharding_split: zml.sharding.Sharding = try .initFromStrategy(platform, mesh_split, strategy_split);
 
     const replicated_shape = zml.Shape.init(.{ .x = 16, .y = 24 }, .f32).withPartitioning(.{ .x = .replicated, .y = .replicated });
 
@@ -231,16 +231,16 @@ fn runAdditionExample(
     io: std.Io,
     platform: *const zml.Platform,
     partitioner: zml.sharding.Partitioning.Partitioner,
-    physical_mesh: zml.sharding.PhysicalMesh,
 ) !void {
+    const physical_mesh = platform.physical_mesh;
     const mesh_data: zml.sharding.LogicalMesh = try .init("data_mesh", .{ .batch = .low_bandwidth, .context = .balanced });
     const mesh_model: zml.sharding.LogicalMesh = try .init("model_mesh_3d", .{ .model = .high_bandwidth, .head = .balanced, .expert = .low_bandwidth });
 
     const strategy_data: zml.sharding.Strategy = try .suggest(mesh_data, physical_mesh);
     const strategy_model: zml.sharding.Strategy = try .suggest(mesh_model, physical_mesh);
 
-    const sharding_data: zml.sharding.Sharding = try .initFromStrategy(mesh_data, physical_mesh, strategy_data);
-    const sharding_model: zml.sharding.Sharding = try .initFromStrategy(mesh_model, physical_mesh, strategy_model);
+    const sharding_data: zml.sharding.Sharding = try .initFromStrategy(platform, mesh_data, strategy_data);
+    const sharding_model: zml.sharding.Sharding = try .initFromStrategy(platform, mesh_model, strategy_model);
 
     log.info("{f}", .{mesh_data});
     log.info("{f}", .{mesh_model});
@@ -311,6 +311,34 @@ fn runAdditionExample(
     log.info("\n\n{f}", .{out.sum_bd});
 }
 
+fn buildDeviceCount9Mesh(
+    allocator: std.mem.Allocator,
+    target: zml.Target,
+    devices: []const zml.platform.Device,
+) !zml.sharding.PhysicalMesh {
+    stdx.debug.assert(devices.len >= 8, "Need at least 8 devices for custom 2x2x2 mesh", .{});
+
+    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[3]), .device(devices[1]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[2]), .device(devices[0]),
+            }),
+        }),
+        .axis(.link_y, .{ .mesh = .torus }, &.{
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[4]), .device(devices[5]),
+            }),
+            .axis(.link_z, .{ .mesh = .torus }, &.{
+                .device(devices[6]), .device(devices[7]),
+            }),
+        }),
+    });
+    return zml.sharding.PhysicalMesh.fromTree(allocator, target, topology);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -323,7 +351,17 @@ pub fn main(init: std.process.Init) !void {
         break :blk 8;
     };
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{ .cpu = .{ .device_count = @intCast(device_count) } });
+    const create_options: zml.platform.CreateOptions = if (device_count == 9)
+        .{
+            .cpu = .{ .device_count = @intCast(device_count) },
+            .physical_mesh = .{ .custom = buildDeviceCount9Mesh },
+        }
+    else
+        .{
+            .cpu = .{ .device_count = @intCast(device_count) },
+        };
+
+    var platform: *zml.Platform = try .auto(allocator, io, create_options);
     defer platform.deinit(allocator);
 
     log.info("{f}\n\n", .{platform.fmtVerbose()});
@@ -355,38 +393,10 @@ pub fn main(init: std.process.Init) !void {
         break :p .shardy;
     };
 
-    var physical_mesh: zml.sharding.PhysicalMesh = blk: {
-        if (device_count == 9) {
-            const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
-                .axis(.link_y, .{ .mesh = .torus }, &.{
-                    .axis(.link_z, .{ .mesh = .torus }, &.{
-                        .device(platform.devices[3]), .device(platform.devices[1]),
-                    }),
-                    .axis(.link_z, .{ .mesh = .torus }, &.{
-                        .device(platform.devices[2]), .device(platform.devices[0]),
-                    }),
-                }),
-                .axis(.link_y, .{ .mesh = .torus }, &.{
-                    .axis(.link_z, .{ .mesh = .torus }, &.{
-                        .device(platform.devices[4]), .device(platform.devices[5]),
-                    }),
-                    .axis(.link_z, .{ .mesh = .torus }, &.{
-                        .device(platform.devices[6]), .device(platform.devices[7]),
-                    }),
-                }),
-            });
+    log.info("{f}", .{platform.physical_mesh});
 
-            break :blk try .fromTree(allocator, platform.target, topology);
-        } else {
-            break :blk try .auto(allocator, platform);
-        }
-    };
-    defer physical_mesh.deinit();
-
-    log.info("{f}", .{physical_mesh});
-
-    try runAdditionExample(allocator, io, platform, partitioner, physical_mesh);
-    try runWithPartitioningModel(allocator, io, platform, partitioner, physical_mesh);
+    try runAdditionExample(allocator, io, platform, partitioner);
+    try runWithPartitioningModel(allocator, io, platform, partitioner);
 }
 
 fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.sharding.Sharding, random: std.Random) !zml.Buffer {

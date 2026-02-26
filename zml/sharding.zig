@@ -180,7 +180,6 @@ pub const PhysicalNode = union(enum) {
         tag: PhysicalAxisTag,
         geometry: AxisGeometry,
         children: []PhysicalNode,
-        owned_children: bool,
     },
     /// A leaf represents the actual hardware device
     leaf: Device,
@@ -191,7 +190,6 @@ pub const PhysicalNode = union(enum) {
                 .tag = tag,
                 .geometry = geometry_,
                 .children = @constCast(children),
-                .owned_children = false,
             },
         };
     }
@@ -204,16 +202,6 @@ pub const PhysicalNode = union(enum) {
                 .pjrt_device = device_.pjrt_device,
             },
         };
-    }
-
-    pub fn deinit(self: PhysicalNode, allocator: std.mem.Allocator) void {
-        switch (self) {
-            .branch => |b| {
-                for (b.children) |child| child.deinit(allocator);
-                allocator.free(b.children);
-            },
-            .leaf => {},
-        }
     }
 
     pub fn countDevices(self: PhysicalNode) usize {
@@ -329,30 +317,34 @@ pub const PhysicalMesh = struct {
         geometry: AxisGeometry,
     };
 
-    allocator: std.mem.Allocator,
     target: Target,
     root: PhysicalNode,
     axis_traversal: AxisTraversal,
 
     /// Build a PhysicalMesh from a tree:
-    /// - clone the tree (owning children)
+    /// - clone the tree into `allocator`
     /// - validate geometry invariants
     /// - assign coordinates to leaves
     /// - compute axis traversal
     pub fn fromTree(allocator: std.mem.Allocator, target: Target, root: PhysicalNode) !PhysicalMesh {
-        var cloned = try cloneNode(allocator, root);
-        errdefer cloned.deinit(allocator);
+        const cloned = try cloneNode(allocator, root);
+        errdefer freeNode(allocator, cloned);
 
-        try validateGeometry(cloned);
+        return try fromOwnedTree(target, cloned);
+    }
+
+    fn fromOwnedTree(target: Target, root: PhysicalNode) !PhysicalMesh {
+        var owned_root = root;
+
+        try validateGeometry(owned_root);
 
         var path = [_]usize{0} ** Shape.MAX_RANK;
-        try assignCoords(&cloned, &path, 0);
+        try assignCoords(&owned_root, &path, 0);
 
         return .{
-            .allocator = allocator,
             .target = target,
-            .root = cloned,
-            .axis_traversal = try .init(cloned),
+            .root = owned_root,
+            .axis_traversal = try .init(owned_root),
         };
     }
 
@@ -376,11 +368,20 @@ pub const PhysicalMesh = struct {
                         .tag = b.tag,
                         .geometry = b.geometry,
                         .children = children,
-                        .owned_children = true,
                     },
                 };
             },
         };
+    }
+
+    fn freeNode(allocator: std.mem.Allocator, node: PhysicalNode) void {
+        switch (node) {
+            .leaf => {},
+            .branch => |b| {
+                for (b.children) |child| freeNode(allocator, child);
+                allocator.free(b.children);
+            },
+        }
     }
 
     fn validateGeometry(node: PhysicalNode) !void {
@@ -448,10 +449,6 @@ pub const PhysicalMesh = struct {
                 }
             },
         }
-    }
-
-    pub fn deinit(self: *PhysicalMesh) void {
-        self.root.deinit(self.allocator);
     }
 
     pub fn countDevices(self: PhysicalMesh) usize {
@@ -549,9 +546,9 @@ pub const PhysicalMesh = struct {
     /// This is used by Strategy.suggest to match intent to bandwidth.
     pub fn shardableAxes(self: PhysicalMesh) []const PhysicalAxisTag {
         return switch (self.target) {
-            .tpu => &.{ .link_x, .link_y, .link_z, .bus },
-            .neuron => &.{ .link_x, .link_y, .link_z, .link, .bus },
-            .cuda, .rocm => &.{ .link, .bus },
+            .tpu => &.{ .link_x, .link_y, .link_z },
+            .neuron => &.{ .link_x, .link_y, .link_z, .link },
+            .cuda, .rocm => &.{.link},
             .cpu => &.{.bus},
         };
     }
@@ -565,7 +562,7 @@ pub const PhysicalMesh = struct {
     }
 
     pub fn format(self: *const PhysicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("\nPhysicalMesh(platform={s} num_devices={d})\n", .{ @tagName(self.target), self.countDevices() });
+        try writer.print("\nPhysicalMesh(platform={s} shardable_axes={any} num_devices={d})\n", .{ @tagName(self.target), self.shardableAxes(), self.countDevices() });
         try writer.print("├── {f}\n", .{self.axis_traversal});
         try writer.print("│  \n", .{});
 
@@ -747,7 +744,7 @@ pub const PhysicalMesh = struct {
             const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
             var built: usize = 0;
             errdefer {
-                for (children[0..built]) |child| child.deinit(allocator);
+                for (children[0..built]) |child| freeNode(allocator, child);
                 allocator.free(children);
             }
 
@@ -769,26 +766,24 @@ pub const PhysicalMesh = struct {
                     .tag = axis_tags[depth],
                     .geometry = .{ .mesh = .torus },
                     .children = children,
-                    .owned_children = true,
                 },
             };
         }
     };
 
-    pub fn auto(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalMesh {
-        var root = try switch (platform.target) {
-            .cpu => cpu(allocator, platform),
-            .cuda, .rocm => gpu(allocator, platform),
-            .tpu => tpu(allocator, platform),
-            .neuron => neuron(allocator, platform),
+    pub fn auto(allocator: std.mem.Allocator, target: Target, platform_devices: []const PlatformDevice) !PhysicalMesh {
+        const root = try switch (target) {
+            .cpu => cpu(allocator, platform_devices),
+            .cuda, .rocm => gpu(allocator, platform_devices),
+            .tpu => tpu(allocator, platform_devices),
+            .neuron => neuron(allocator, platform_devices),
         };
-        defer root.deinit(allocator);
+        errdefer freeNode(allocator, root);
 
-        return try fromTree(allocator, platform.target, root);
+        return try fromOwnedTree(target, root);
     }
 
-    pub fn cpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn cpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
 
         for (nodes, platform_devices) |*n, d| n.* = .device(d);
@@ -798,13 +793,11 @@ pub const PhysicalMesh = struct {
                 .tag = .bus,
                 .geometry = .tree,
                 .children = nodes,
-                .owned_children = true,
             },
         };
     }
 
-    pub fn gpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn gpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         const placements = try CoordsTopology.collect(allocator, platform_devices);
         defer allocator.free(placements);
 
@@ -823,13 +816,11 @@ pub const PhysicalMesh = struct {
                 .tag = .link,
                 .geometry = .point_to_point,
                 .children = nodes,
-                .owned_children = true,
             },
         };
     }
 
-    pub fn tpu(allocator: std.mem.Allocator, platform: *const Platform) !Tree {
-        const platform_devices = platform.devices;
+    pub fn tpu(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         if (platform_devices.len == 0) return error.InvalidPhysicalMesh;
 
         const placements = try CoordsTopology.collect(allocator, platform_devices);
@@ -866,9 +857,7 @@ pub const PhysicalMesh = struct {
         );
     }
 
-    pub fn neuron(allocator: std.mem.Allocator, platform: *const Platform) !PhysicalNode {
-        const platform_devices = platform.devices;
-
+    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !PhysicalNode {
         // AWS Inf2.48xlarge: 2 islands of 12 chips (24 devices)
         const islands = try allocator.alloc(PhysicalNode, 2);
 
@@ -883,7 +872,6 @@ pub const PhysicalMesh = struct {
                     .tag = .link,
                     .geometry = .{ .ring = .closed_ring },
                     .children = ring_nodes,
-                    .owned_children = true,
                 },
             };
         }
@@ -893,7 +881,6 @@ pub const PhysicalMesh = struct {
                 .tag = .bus,
                 .geometry = .isolated,
                 .children = islands,
-                .owned_children = true,
             },
         };
     }
@@ -1036,8 +1023,8 @@ pub const Sharding = struct {
         }
     };
 
+    platform: *const Platform,
     logical: LogicalMesh,
-    physical: PhysicalMesh,
 
     /// Compact binding table: logical axis -> physical axes
     bindings: Bindings,
@@ -1055,10 +1042,11 @@ pub const Sharding = struct {
     }
 
     pub fn initFromStrategy(
+        platform: *const Platform,
         logical: LogicalMesh,
-        physical: PhysicalMesh,
         strategy: Strategy,
     ) !Sharding {
+        const physical = platform.physical_mesh;
         const axis_order = physical.axisOrder().constSlice();
         if (axis_order.len == 0) return error.InvalidPhysicalMesh;
 
@@ -1083,7 +1071,7 @@ pub const Sharding = struct {
 
         return .{
             .logical = logical,
-            .physical = physical,
+            .platform = platform,
             .bindings = bindings,
             .folds = folds,
             .folds_consumed = folds_consumed,
@@ -1098,15 +1086,16 @@ pub const Sharding = struct {
     }
 
     pub fn physicalView(self: Sharding) PhysicalView {
+        const physical = self.platform.physical_mesh;
         var view: PhysicalView = .{
             .axes = stdx.BoundedArray(Axis, Shape.MAX_RANK).init(0) catch unreachable,
             .total_devices = 1,
         };
 
-        const axis_order = self.physical.axisOrder().constSlice();
+        const axis_order = physical.axisOrder().constSlice();
 
         for (axis_order) |tag| {
-            if (!self.physical.hasAxis(tag)) continue;
+            if (!physical.hasAxis(tag)) continue;
             if (self.folds_consumed.contains(tag) and self.foldSources(tag) == null) continue;
 
             var folded = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
@@ -1115,18 +1104,18 @@ pub const Sharding = struct {
             if (self.foldSources(tag)) |sources| {
                 for (sources) |src| {
                     folded.appendAssumeCapacity(src);
-                    size *= self.physical.axis(src);
+                    size *= physical.axis(src);
                 }
             } else {
                 folded.appendAssumeCapacity(tag);
-                size = self.physical.axis(tag);
+                size = physical.axis(tag);
             }
 
             view.total_devices *= size;
             view.axes.appendAssumeCapacity(.{
                 .tag = tag,
                 .size = size,
-                .geometry = self.physical.geometry(tag),
+                .geometry = physical.geometry(tag),
                 .folded = folded,
             });
         }
@@ -1139,7 +1128,7 @@ pub const Sharding = struct {
     }
 
     pub fn logicalIndexFromCoords(self: Sharding, coords: []const usize) usize {
-        return self.physical.linearIndexFromCoords(coords);
+        return self.platform.physical_mesh.linearIndexFromCoords(coords);
     }
 
     pub fn numPartitions(self: Sharding) i32 {
@@ -1346,7 +1335,7 @@ pub const Sharding = struct {
         const ordered_devices = try self.devicesInCanonicalOrder();
         for (ordered_devices.constSlice()) |d| {
             const coords = d.coordsSlice() orelse return error.MissingDeviceCoords;
-            const idx = self.physical.linearIndexFromCoords(coords);
+            const idx = self.platform.physical_mesh.linearIndexFromCoords(coords);
             ids[idx] = d.id;
         }
 
@@ -1358,8 +1347,9 @@ pub const Sharding = struct {
     }
 
     fn devicesInCanonicalOrder(self: Sharding) !Devices {
+        const physical = self.platform.physical_mesh;
         var devices: Devices = try .init(0);
-        try self.physical.devicesInto(&devices);
+        try physical.devicesInto(&devices);
 
         const Order = struct {
             mesh: PhysicalMesh,
@@ -1372,7 +1362,7 @@ pub const Sharding = struct {
             }
         };
 
-        std.mem.sort(Device, devices.slice(), Order{ .mesh = self.physical }, Order.lessThan);
+        std.mem.sort(Device, devices.slice(), Order{ .mesh = physical }, Order.lessThan);
         return devices;
     }
 
@@ -1429,10 +1419,11 @@ pub const Sharding = struct {
     }
 };
 
-pub fn replicatedSharding(physical_mesh: PhysicalMesh) !Sharding {
+pub fn replicatedSharding(platform: *const Platform) !Sharding {
+    const physical_mesh = platform.physical_mesh;
     const logical_mesh: LogicalMesh = try .init("replicated", .{ .x = .high_bandwidth });
     const strategy: Strategy = try .suggest(logical_mesh, physical_mesh);
-    return try .initFromStrategy(logical_mesh, physical_mesh, strategy);
+    return try .initFromStrategy(platform, logical_mesh, strategy);
 }
 
 pub const Strategy = struct {
@@ -1726,8 +1717,9 @@ pub const Placement = struct {
 
     /// Extract coordinate data from the physical mesh for a specific axis.
     fn addPhysicalToSplit(self: *Placement, plan: *AxisSplit, tag: PhysicalAxisTag, device_coords: []const usize) !void {
-        const info = self.sharding.physical.axisInfo(tag) orelse return;
-        const depth = self.sharding.physical.axis_traversal.depth(tag) orelse return;
+        const physical = self.sharding.platform.physical_mesh;
+        const info = physical.axisInfo(tag) orelse return;
+        const depth = physical.axis_traversal.depth(tag) orelse return;
         const coord = device_coords[depth];
 
         plan.counts.appendAssumeCapacity(@intCast(info.size));
@@ -1779,7 +1771,7 @@ const ShardingTest = struct {
     };
 
     pub const Scenario = struct {
-        physical: PhysicalMesh,
+        platform: Platform,
         logical: LogicalMesh,
         strategy: Strategy,
         shape: Shape,
@@ -1789,10 +1781,6 @@ const ShardingTest = struct {
 
         expect_error: ?anyerror = null,
         expect_sdy_null: bool = false,
-
-        pub fn deinit(self: *Scenario) void {
-            self.physical.deinit();
-        }
     };
 
     allocator: std.mem.Allocator,
@@ -1814,8 +1802,7 @@ const ShardingTest = struct {
         }
 
         var next_id: usize = 0;
-        var root = try self.buildNode(tags.constSlice(), sizes.constSlice(), 0, &next_id, geometry);
-        defer root.deinit(self.allocator);
+        const root = try self.buildNode(tags.constSlice(), sizes.constSlice(), 0, &next_id, geometry);
         return try .fromTree(self.allocator, .tpu, root);
     }
 
@@ -1830,11 +1817,24 @@ const ShardingTest = struct {
         for (children) |*child| {
             child.* = try self.buildNode(tags, sizes, depth + 1, next_id, geometry);
         }
-        return .{ .branch = .{ .tag = tags[depth], .geometry = geometry, .children = children, .owned_children = true } };
+        return .{ .branch = .{ .tag = tags[depth], .geometry = geometry, .children = children } };
+    }
+
+    fn platformForMesh(self: ShardingTest, mesh: PhysicalMesh) Platform {
+        _ = self;
+        return .{
+            .arena_state = .{},
+            .target = mesh.target,
+            .pjrt_api = undefined,
+            .pjrt_client = undefined,
+            .devices = &.{},
+            .memories = &.{},
+            .physical_mesh = mesh,
+        };
     }
 
     pub fn run(self: ShardingTest, s: Scenario) !void {
-        const sharding = try Sharding.initFromStrategy(s.logical, s.physical, s.strategy);
+        const sharding = try Sharding.initFromStrategy(&s.platform, s.logical, s.strategy);
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
@@ -1873,8 +1873,9 @@ const ShardingTest = struct {
 };
 
 test "sharding: unknown partitioning implies replication" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = try .init("folded_mesh", .{ .batch = .low_bandwidth });
@@ -1882,8 +1883,8 @@ test "sharding: unknown partitioning implies replication" {
     var strategy: Strategy = .init;
     try strategy.addBinding(.batch, .link_x);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .batch = 8 }, .f32),
@@ -1895,13 +1896,13 @@ test "sharding: unknown partitioning implies replication" {
             .{ .device_id = 3, .slices = &.{.{ 0, 8 }} },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: suggest strategy realization" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
 
@@ -1912,8 +1913,8 @@ test "sharding: suggest strategy realization" {
 
     const strategy: Strategy = try .suggest(logical, physical);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
@@ -1930,13 +1931,13 @@ test "sharding: suggest strategy realization" {
             .{ .device_id = 7, .slices = &.{ .{ 2, 2 }, .{ 2, 2 } } },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: suggest folds logical axes with same intent" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical = try runner.physical(.{4}, .point_to_point);
 
@@ -1947,8 +1948,8 @@ test "sharding: suggest folds logical axes with same intent" {
 
     const strategy: Strategy = try .suggest(logical, physical);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .model = 4, .experts = 4 }, .f32)
@@ -1961,13 +1962,13 @@ test "sharding: suggest folds logical axes with same intent" {
             .{ .device_id = 3, .slices = &.{ .{ 3, 1 }, .{ 0, 4 } } },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: multiple physical axes on one logical dimension (folding)" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = try .init("folded_mesh", .{ .model = .high_bandwidth });
@@ -1976,8 +1977,8 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
     try strategy.addBinding(.model, .link_x);
     try strategy.addBinding(.model, .link_y);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
@@ -1989,13 +1990,13 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
             .{ .device_id = 3, .slices = &.{.{ 12, 4 }} },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: explicit strategy folding" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = try .init("strategy_fold", .{ .model = .high_bandwidth });
@@ -2004,8 +2005,8 @@ test "sharding: explicit strategy folding" {
     try strategy.addBinding(.model, .link_x);
     try strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
@@ -2021,13 +2022,13 @@ test "sharding: explicit strategy folding" {
             .{ .device_id = 7, .slices = &.{.{ 12, 4 }} },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: open and replicated dimension mix" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = try .init("mix_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth });
@@ -2036,8 +2037,8 @@ test "sharding: open and replicated dimension mix" {
     try strategy.addBinding(.batch, .link_x);
     try strategy.addBinding(.model, .link_y);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(.{ .batch = .open, .model = .replicated }),
@@ -2049,13 +2050,13 @@ test "sharding: open and replicated dimension mix" {
             .{ .device_id = 3, .slices = &.{ .{ 0, 8 }, .{ 0, 8 } } },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }
 
 test "sharding: full 3D cluster sharding" {
-    const allocator = std.testing.allocator;
-    const runner: ShardingTest = .init(allocator);
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
     const logical: LogicalMesh = try .init("3d_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth, .context = .balanced });
@@ -2065,8 +2066,8 @@ test "sharding: full 3D cluster sharding" {
     try strategy.addBinding(.model, .link_y);
     try strategy.addBinding(.context, .link_z);
 
-    var scenario: ShardingTest.Scenario = .{
-        .physical = physical,
+    const scenario: ShardingTest.Scenario = .{
+        .platform = runner.platformForMesh(physical),
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .batch = 4, .model = 4, .context = 4 }, .f32)
@@ -2083,6 +2084,5 @@ test "sharding: full 3D cluster sharding" {
             .{ .device_id = 7, .slices = &.{ .{ 2, 2 }, .{ 2, 2 }, .{ 2, 2 } } },
         },
     };
-    defer scenario.deinit();
     try runner.run(scenario);
 }

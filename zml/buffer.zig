@@ -180,7 +180,7 @@ pub const Buffer = struct {
     }
 
     pub fn shardDevicePtr(self: Buffer, shard_index: usize) *anyopaque {
-        return self._shards.get(shard_index).opaqueDeviceMemoryDataPointer(self._api) catch unreachable;
+        return self._shards.get(shard_index).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
