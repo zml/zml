@@ -148,7 +148,7 @@ def scalar_ptr(val, dtype=torch.float32):
     return torch.tensor([val], dtype=dtype).cuda()
 
 
-def run_2d_unified_attention_kernel(
+def compile_ttir_2d_unified_attention_kernel(
     q,
     k,
     v,

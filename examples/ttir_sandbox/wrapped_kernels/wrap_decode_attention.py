@@ -91,7 +91,7 @@ def scalar_ptr(val: int | float, dtype: torch.dtype, device: torch.device) -> to
     return torch.tensor([val], dtype=dtype, device=device)
 
 
-def run_decode_attention_stage1_kernel(
+def compile_ttir_decode_attention_stage1_kernel(
     q: torch.Tensor,
     k_buffer: torch.Tensor,
     v_buffer: torch.Tensor,

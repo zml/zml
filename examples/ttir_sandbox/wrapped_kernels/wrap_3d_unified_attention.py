@@ -192,7 +192,7 @@ def scalar_ptr(val: int | float, dtype: torch.dtype, device: torch.device) -> to
     return torch.tensor([val], dtype=dtype, device=device)
 
 
-def run_3d_unified_attention_kernels(
+def compile_ttir_3d_unified_attention_kernels(
     q,
     k,
     v,

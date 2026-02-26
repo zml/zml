@@ -2,7 +2,7 @@ load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
 uv_lock(
@@ -21,7 +21,12 @@ uv_lock(
 
 py_binary(
     name = "ttir_compile",
-    srcs = ["ttir_compile.py"],
+    srcs = [
+        "ttir_compile.py",
+    ] + glob([
+        "wrapped_kernels/*.py",
+        "vllm_kernels/*.py",
+    ]),
     deps = [
         "@ttir_sandbox_py_deps//torch",
         "@ttir_sandbox_py_deps//torchaudio",
@@ -44,7 +49,7 @@ cc_library(
     ],
 )
 
-zig_binary(
+zig_library(
     name = "ttir_compile_sandbox",
     main = "ttir_compile_sandbox.zig",
     data = [":ttir_compile_files"],
@@ -77,6 +82,8 @@ copy_to_directory(
     include_srcs_patterns = [
         "**ttir_compile**",
         "ttir_compile_sandbox",
+        "wrapped_kernels/**",
+        "vllm_kernels/**",
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",

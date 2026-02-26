@@ -85,7 +85,7 @@ def scalar_ptr(
     return torch.tensor([val], dtype=dtype, device=device)
 
 
-def run_prefill_attention_kernel(
+def compile_ttir_prefill_attention_kernel(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,

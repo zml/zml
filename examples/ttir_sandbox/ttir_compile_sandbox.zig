@@ -1,20 +1,9 @@
 const std = @import("std");
 
 const c_interface = @import("c");
-const zml = @import("zml");
-const Tensor = zml.Tensor;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
-};
-
-const cfg = struct {
-    const M = 256;
-    const N = 256;
-    const K = 256;
-    const BLOCK_M = 128;
-    const BLOCK_N = 128;
-    const BLOCK_K = 32;
 };
 
 var python_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
@@ -34,7 +23,7 @@ fn checkPythonError() void {
     }
 }
 
-pub fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MAX - 1:0]c_interface.wchar_t {
+fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MAX - 1:0]c_interface.wchar_t {
     if (file_path.len >= std.posix.PATH_MAX) return error.NameTooLong;
 
     var path_with_null: [std.posix.PATH_MAX - 1:0]c_interface.wchar_t = undefined;
@@ -213,7 +202,7 @@ fn ensurePythonInitialized(io: anytype) !void {
     }
 }
 
-fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_params: []const u8) ![:0]u8 {
+fn callCompileFunction(allocator: std.mem.Allocator, io: anytype, function_name: []const u8, args_json: []const u8) ![:0]u8 {
     try ensurePythonInitialized(io);
 
     const module = c_interface.PyImport_ImportModule("ttir_compile");
@@ -223,14 +212,14 @@ fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_p
     }
     defer c_interface.Py_DecRef(module);
 
-    const compile_func = c_interface.PyObject_GetAttrString(module, "compile_hello_world_ttir");
+    const compile_func = c_interface.PyObject_GetAttrString(module, function_name.ptr);
     if (compile_func == null) {
         checkPythonError();
         return error.PythonAttributeNotFound;
     }
     defer c_interface.Py_DecRef(compile_func);
 
-    const py_params = c_interface.PyUnicode_FromStringAndSize(kernel_params.ptr, @intCast(kernel_params.len));
+    const py_params = c_interface.PyUnicode_FromStringAndSize(args_json.ptr, @intCast(args_json.len));
     if (py_params == null) {
         checkPythonError();
         return error.PythonObjectCreationFailed;
@@ -259,124 +248,22 @@ fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_p
     return allocator.dupeZ(u8, result_slice);
 }
 
-pub fn wrappedHelloWorld(kernel_ttir: [:0]const u8, a: Tensor, b: Tensor, out: Tensor) Tensor {
-    const grid: [3]i32 = .{
-        @intCast(@divExact(cfg.M, cfg.BLOCK_M)),
-        @intCast(@divExact(cfg.N, cfg.BLOCK_N)),
-        1,
-    };
-
-    const num_warps: i32 = 8;
-
-    return zml.ops.triton(.{ a, b }, .{out.shape()}, .{
-        .name = "matmul_fixed_kernel",
-        .ir = kernel_ttir,
-        .grid = grid,
-        .num_stages = 1,
-        .num_warps = num_warps,
-        .debug = true,
-        .output_operand_aliases = &.{},
-    })[0];
+pub fn get2dUnifiedAttentionTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_2d_unified_attention_ttir", args_json);
 }
 
-pub fn main(init: std.process.Init) !void {
-    const allocator = init.gpa;
-    const io = init.io;
-
-    const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
-
-    std.log.info("\n{f}", .{platform.fmtVerbose()});
-
-    if (platform.target != .cuda and platform.target != .rocm) {
-        std.log.err("ttir_sandbox requires CUDA/ROCm target, got {s}", .{@tagName(platform.target)});
-        return;
-    }
-
-    const kernel_params =
-        "{" ++
-        "\"M\":256," ++
-        "\"N\":256," ++
-        "\"K\":256," ++
-        "\"BLOCK_M\":128," ++
-        "\"BLOCK_N\":128," ++
-        "\"BLOCK_K\":32," ++
-        "\"num_warps\":8" ++
-        "}";
-
-    const ttir = try callCompileHelloWorldTtir(allocator, io, kernel_params);
-    defer allocator.free(ttir);
-
-    const a_shape: zml.Tensor = .init(.{ cfg.M, cfg.K }, .f32);
-    const b_shape: zml.Tensor = .init(.{ cfg.K, cfg.N }, .f32);
-    const c_shape: zml.Tensor = .init(.{ cfg.M, cfg.N }, .f32);
-
-    var exe = try platform.compileFn(allocator, io, wrappedHelloWorld, .{
-        ttir,
-        a_shape,
-        b_shape,
-        c_shape,
-    });
-    defer exe.deinit();
-
-    var a = try zeroBuffer(allocator, io, platform, a_shape.shape());
-    defer a.deinit();
-    var b = try zeroBuffer(allocator, io, platform, b_shape.shape());
-    defer b.deinit();
-    var c = try zeroBuffer(allocator, io, platform, c_shape.shape());
-    defer c.deinit();
-
-    std.log.info("a shape: {f}, device: {s}", .{ a.shape(), @tagName(platform.target) });
-    std.log.info("b shape: {f}, device: {s}", .{ b.shape(), @tagName(platform.target) });
-    std.log.info("c shape: {f}, device: {s}", .{ c.shape(), @tagName(platform.target) });
-
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-
-    exe_args.set(.{ a, b, c });
-    exe.call(exe_args, &exe_results);
-
-    var result: zml.Buffer = exe_results.get(zml.Buffer);
-    defer result.deinit();
-
-    var output = try result.toSliceAlloc(allocator, io);
-    defer output.free(allocator);
-
-    const output_items = output.constItems(f32);
-    if (output_items.len == 0) {
-        std.debug.print("c[0:10,0:10] after matmul: <empty>\n", .{});
-        return;
-    }
-
-    const rows: usize = @intCast(result.shape().dim(0));
-    const cols: usize = @intCast(result.shape().dim(1));
-    const rmax = @min(rows, 10);
-    const cmax = @min(cols, 10);
-
-    std.debug.print("c[0:10,0:10] after matmul:\n", .{});
-    for (0..rmax) |r| {
-        const row_start = r * cols;
-        for (0..cmax) |col| {
-            const v = output_items[row_start + col];
-            if (col == 0) {
-                std.debug.print("{d:.5}", .{v});
-            } else {
-                std.debug.print(" {d:.5}", .{v});
-            }
-        }
-        std.debug.print("\n", .{});
-    }
-
-    return;
+pub fn get3dUnifiedAttentionTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_3d_unified_attention_ttir", args_json);
 }
 
-fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
-    var slice = try zml.Slice.alloc(allocator, shape);
-    defer slice.free(allocator);
+pub fn get3dReduceSegmentsTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_3d_reduce_segments_ttir", args_json);
+}
 
-    @memset(slice.data(), 0);
-    return zml.Buffer.fromSlice(io, platform, slice);
+pub fn getDecodeAttentionStage1Ttir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_decode_attention_stage1_ttir", args_json);
+}
+
+pub fn getPrefillAttentionTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_prefill_attention_ttir", args_json);
 }
