@@ -186,16 +186,12 @@ pub fn main(init: std.process.Init) !void {
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            var sharding_buffer: [2]zml.sharding.Sharding = undefined;
-            const shardings: []const zml.sharding.Sharding = blk: {
+            const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+
+            const sharded_sharding: zml.sharding.Sharding = blk: {
                 const model_logical_mesh: zml.sharding.LogicalMesh = try .init("playground_model", .{ .model = .high_bandwidth });
                 const model_strategy: zml.sharding.Strategy = try .suggest(model_logical_mesh, platform.physical_mesh);
-                const model_sharding: zml.sharding.Sharding = try .initFromStrategy(platform, model_logical_mesh, model_strategy);
-
-                sharding_buffer[0] = model_sharding;
-                sharding_buffer[1] = try zml.sharding.replicatedSharding(platform);
-
-                break :blk sharding_buffer[0..2];
+                break :blk try .initFromStrategy(platform, model_logical_mesh, model_strategy);
             };
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
@@ -212,7 +208,7 @@ pub fn main(init: std.process.Init) !void {
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, .{
                 .store = &store,
-                .shardings = shardings,
+                .shardings = &.{ replicated_sharding, sharded_sharding },
                 .parallelism = 32,
                 .dma_chunks = 16,
                 .dma_chunk_size = 32 * zml.MiB,
