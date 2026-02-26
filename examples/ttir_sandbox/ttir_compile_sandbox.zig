@@ -62,25 +62,54 @@ fn findPythonPrefixFromKnownPaths(io: anytype) ?[]u8 {
         "../bazel-out/linux_amd64-dbg/bin",
         "/mnt/workspace/zml/bazel-bin",
     };
+    const env_base_keys = [_][:0]const u8{
+        "RUNFILES_DIR",
+        "RUNFILES_DIRECTORY",
+    };
     const libpython_paths = [_][]const u8{
         "_solib_k8/_U_A_Arules_Upython++python+python_U3_U12_Ux86_U64-unknown-linux-gnu_S_S_Clibpython___Ulib/libpython3.12.so",
         "_solib_k8/_U_A_Arules_Upython++python+python_U3_U12_Uaarch64-unknown-linux-gnu_S_S_Clibpython___Ulib/libpython3.12.so",
     };
 
-    for (base_paths) |base| {
-        for (libpython_paths) |libpython_rel| {
-            var candidate_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const candidate = std.fmt.bufPrint(&candidate_buf, "{s}/{s}", .{ base, libpython_rel }) catch continue;
+    const SearchState = struct {
+        fn probe(io_inner: anytype, base: []const u8, libpython_paths_inner: []const []const u8) ?[]u8 {
+            for (libpython_paths_inner) |libpython_rel| {
+                var candidate_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const candidate = std.fmt.bufPrint(&candidate_buf, "{s}/{s}", .{ base, libpython_rel }) catch continue;
 
-            var file = std.Io.Dir.openFile(.cwd(), io, candidate, .{}) catch continue;
-            defer file.close(io);
+                var file = std.Io.Dir.openFile(.cwd(), io_inner, candidate, .{}) catch continue;
+                defer file.close(io_inner);
 
-            var real_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            const real_path_len = file.realPath(io, &real_path_buf) catch continue;
-            const real_path = real_path_buf[0..real_path_len];
-            const lib_dir_idx = std.mem.lastIndexOf(u8, real_path, "/lib/") orelse continue;
-            return std.heap.c_allocator.dupe(u8, real_path[0..lib_dir_idx]) catch null;
+                var real_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+                const real_path_len = file.realPath(io_inner, &real_path_buf) catch continue;
+                const real_path = real_path_buf[0..real_path_len];
+                const lib_dir_idx = std.mem.lastIndexOf(u8, real_path, "/lib/") orelse continue;
+                return std.heap.c_allocator.dupe(u8, real_path[0..lib_dir_idx]) catch null;
+            }
+            return null;
         }
+    };
+
+    for (env_base_keys) |key| {
+        const env_base_c = std.c.getenv(key) orelse continue;
+        const env_base = std.mem.span(env_base_c);
+        if (SearchState.probe(io, env_base, &libpython_paths)) |p| return p;
+
+        var base_buf1: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const base1 = std.fmt.bufPrint(&base_buf1, "{s}/_main", .{env_base}) catch continue;
+        if (SearchState.probe(io, base1, &libpython_paths)) |p| return p;
+
+        var base_buf2: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const base2 = std.fmt.bufPrint(&base_buf2, "{s}/_main/bazel-out/linux_amd64-dbg/bin", .{env_base}) catch continue;
+        if (SearchState.probe(io, base2, &libpython_paths)) |p| return p;
+
+        var base_buf3: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const base3 = std.fmt.bufPrint(&base_buf3, "{s}/bazel-out/linux_amd64-dbg/bin", .{env_base}) catch continue;
+        if (SearchState.probe(io, base3, &libpython_paths)) |p| return p;
+    }
+
+    for (base_paths) |base| {
+        if (SearchState.probe(io, base, &libpython_paths)) |p| return p;
     }
 
     return null;
@@ -162,7 +191,7 @@ fn initializePython(io: anytype) !void {
     }
 
     var config: c_interface.PyConfig = undefined;
-    c_interface.PyConfig_InitPythonConfig(&config);
+    c_interface.PyConfig_InitIsolatedConfig(&config);
     defer c_interface.PyConfig_Clear(&config);
 
     config.optimization_level = 2;

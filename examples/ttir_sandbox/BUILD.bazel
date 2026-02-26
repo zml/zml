@@ -79,6 +79,46 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "2d_unified_attention_e2e",
+    main = "e2e_tests/2d_unified_attention.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
+
+zig_binary(
+    name = "3d_unified_attention_e2e",
+    main = "e2e_tests/3d_unified_attention.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
+
+zig_binary(
+    name = "decode_attention_e2e",
+    main = "e2e_tests/decode_attention.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
+
+zig_binary(
+    name = "prefill_attention_e2e",
+    main = "e2e_tests/prefill_attention.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
