@@ -128,7 +128,7 @@ fn bootstrapPythonPath() !void {
         \\exe_dir = os.path.dirname(exe_path) if exe_path else ""
         \\if exe_dir:
         \\    roots.append(exe_dir + ".runfiles")
-        \\    roots.append(os.path.realpath(os.path.join(exe_dir, "..", "hello_world_sandbox.runfiles")))
+        \\    roots.append(os.path.realpath(os.path.join(exe_dir, "..", "ttir_compile_sandbox.runfiles")))
         \\    roots.append(os.path.realpath(os.path.join(exe_dir, "..")))
         \\
         \\cands = []

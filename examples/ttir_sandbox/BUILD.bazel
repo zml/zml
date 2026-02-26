@@ -45,8 +45,8 @@ cc_library(
 )
 
 zig_binary(
-    name = "hello_world_sandbox",
-    main = "hello_world_sandbox.zig",
+    name = "ttir_compile_sandbox",
+    main = "ttir_compile_sandbox.zig",
     data = [":ttir_compile_files"],
     linkopts = select({
         "@platforms//os:macos": ["-Wl,-rpath,@executable_path/../lib"],
@@ -62,12 +62,12 @@ zig_binary(
 copy_to_directory(
     name = "sandbox",
     srcs = [
-        ":hello_world_sandbox",
+        ":ttir_compile_sandbox",
         ":ttir_compile",
         ":ttir_compile_files",
     ],
     replace_prefixes = {
-        "hello_world_sandbox": "bin/hello_world_sandbox",
+        "ttir_compile_sandbox": "bin/ttir_compile_sandbox",
         "ttir_compile.py": "site-packages/ttir_compile.py",
     },
     exclude_srcs_patterns = [
@@ -76,7 +76,7 @@ copy_to_directory(
     ],
     include_srcs_patterns = [
         "**ttir_compile**",
-        "hello_world_sandbox",
+        "ttir_compile_sandbox",
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",
