@@ -1,0 +1,88 @@
+load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = [
+        "--emit-index-url",
+        "--index-strategy=unsafe-best-match",
+        "--upgrade",
+        "--universal",
+    ],
+    python_version = "3.12",
+    tags = ["manual"],
+)
+
+py_binary(
+    name = "ttir_compile",
+    srcs = ["ttir_compile.py"],
+    deps = [
+        "@ttir_sandbox_py_deps//torch",
+        "@ttir_sandbox_py_deps//torchaudio",
+        "@ttir_sandbox_py_deps//torchvision",
+        "@ttir_sandbox_py_deps//triton",
+    ],
+)
+
+runfiles_to_default(
+    name = "ttir_compile_files",
+    deps = [":ttir_compile"],
+)
+
+cc_library(
+    name = "libpython",
+    hdrs = ["libpython.h"],
+    deps = [
+        "@rules_python//python/cc:current_py_cc_headers",
+        "@rules_python//python/cc:current_py_cc_libs",
+    ],
+)
+
+zig_binary(
+    name = "hello_world_sandbox",
+    main = "hello_world_sandbox.zig",
+    data = [":ttir_compile_files"],
+    linkopts = select({
+        "@platforms//os:macos": ["-Wl,-rpath,@executable_path/../lib"],
+        "//conditions:default": ["-Wl,-rpath,$$ORIGIN/../lib"],
+    }),
+    deps = [
+        "//zml",
+        ":libpython",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":hello_world_sandbox",
+        ":ttir_compile",
+        ":ttir_compile_files",
+    ],
+    replace_prefixes = {
+        "hello_world_sandbox": "bin/hello_world_sandbox",
+        "ttir_compile.py": "site-packages/ttir_compile.py",
+    },
+    exclude_srcs_patterns = [
+        "**/tests/**",
+        "**/_solib_*/**",
+    ],
+    include_srcs_patterns = [
+        "**ttir_compile**",
+        "hello_world_sandbox",
+        "**/lib**",
+        "lib/python*/**",
+        "site-packages/**",
+    ],
+    allow_overwrites = True,
+    add_directory_to_runfiles = False,
+    include_external_repositories = ["**"],
+    hardlink = "on",
+)
