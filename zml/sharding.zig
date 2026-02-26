@@ -12,6 +12,11 @@ const Target = @import("platform.zig").Target;
 
 const log = std.log.scoped(.@"zml/sharding");
 
+pub const SelectShardingMode = enum {
+    any_covering,
+    explicit_axis_binding,
+};
+
 pub const Partitioning = struct {
     pub const Partitioner = union(enum) {
         shardy,
@@ -83,28 +88,39 @@ pub const Partitioning = struct {
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
-        for (self.shardings) |sharding| {
-            if (shardingCoversShape(sharding, shape)) return sharding;
-        }
-
-        return error.NoSuitableSharding;
+        return pickSharding(self.shardings, shape, .any_covering) orelse error.NoSuitableSharding;
     }
 
     fn primarySharding(self: Partitioning) Sharding {
         return self.shardings[0];
     }
-
-    fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
-        for (0..shape.rank()) |ax| {
-            switch (shape.partition(ax)) {
-                .axis => |tag| if (sharding.binding(tag) == null) return false,
-                else => {},
-            }
-        }
-
-        return true;
-    }
 };
+
+pub fn pickSharding(shardings: []const Sharding, shape: Shape, mode: SelectShardingMode) ?Sharding {
+    if (mode == .explicit_axis_binding and !shapeHasAxisPartition(shape)) return null;
+
+    for (shardings) |sharding| {
+        if (shardingCoversShape(sharding, shape)) return sharding;
+    }
+    return null;
+}
+
+fn shapeHasAxisPartition(shape: Shape) bool {
+    for (0..shape.rank()) |ax| {
+        if (shape.partition(ax) == .axis) return true;
+    }
+    return false;
+}
+
+fn shardingCoversShape(sharding: Sharding, shape: Shape) bool {
+    for (0..shape.rank()) |ax| {
+        switch (shape.partition(ax)) {
+            .axis => |tag| if (sharding.binding(tag) == null) return false,
+            else => {},
+        }
+    }
+    return true;
+}
 
 /// Device is the leaf representation in a PhysicalMesh.
 /// It carries identity, optional coordinates, and PJRT handle.

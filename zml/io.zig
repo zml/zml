@@ -392,13 +392,7 @@ const DirectShardWriter = struct {
     flip_flop: u1 = 0,
     events_contexts: [2]?EventContext = @splat(null),
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        memory: *const Memory,
-        pool: *mem.DynamicBufferPool,
-        shape: Shape,
-    ) !DirectShardWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, memory: *const Memory, pool: *mem.DynamicBufferPool, shape: Shape) !DirectShardWriter {
         const shape_spec: pjrt.ShapeSpec = .init(shape.dims(), pjrtx.bufferTypeFromDtype(shape.dtype()));
         const transfer_manager = try memory.platform.pjrt_client.createBuffersForAsyncHostToDevice(
             memory.platform.pjrt_api,
@@ -593,6 +587,7 @@ pub const DirectMemoryWriter = struct {
         mirror_start: usize,
         mirror_len: usize,
     };
+
     const RawSegment = struct {
         writer_index: usize,
         start: usize,
@@ -636,7 +631,6 @@ pub const DirectMemoryWriter = struct {
         buffer: *Buffer,
     ) !DirectMemoryWriter {
         const placement = try Placement.init(sharding, shape);
-
         var shard_writers = try allocator.alloc(DirectShardWriter, placement.shards.len);
         errdefer allocator.free(shard_writers);
 
@@ -649,9 +643,16 @@ pub const DirectMemoryWriter = struct {
         for (placement.shards.constSlice(), 0..) |shard, i| {
             const pool, const shard_dma_allocator = switch (pools) {
                 .single => |single| .{ single.pool, single.allocator },
-                .per_device => |per_device| .{
-                    poolForDevice(platform, per_device.pools, shard.device_id),
-                    allocatorForDevice(platform, per_device.allocators, shard.device_id),
+                .per_device => |per_device| blk: {
+                    var found_index: ?usize = null;
+                    for (platform.devices, 0..) |d, device_index| {
+                        if (d.id() == shard.device_id) {
+                            found_index = device_index;
+                            break;
+                        }
+                    }
+                    const device_index = found_index orelse unreachable;
+                    break :blk .{ &per_device.pools[device_index], per_device.allocators[device_index] };
                 },
             };
             shard_writers[i] = try DirectShardWriter.init(
@@ -664,11 +665,15 @@ pub const DirectMemoryWriter = struct {
             initialized += 1;
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
+        if (shard_writers.len == 0) return error.NonContiguousShardPlacement;
 
         buffer.* = Buffer.fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
-        stdx.debug.assert(shard_writers.len > 0, "DirectMemoryWriter requires at least one shard writer", .{});
 
         const layout = try buildLayout(allocator, shape, placement);
+        errdefer {
+            allocator.free(layout.segments);
+            allocator.free(layout.mirrors);
+        }
 
         const initial_writer_index = if (layout.segments.len > 0)
             layout.segments[0].primary_writer
@@ -726,8 +731,6 @@ pub const DirectMemoryWriter = struct {
         var filtered_len: usize = 0;
         for (raw_segments, 0..) |segment, segment_index| {
             if (segment.len == 0) {
-                // Defensive: zero-length segments are never meaningful for the
-                // stream plan and can appear if upstream placement metadata is noisy.
                 if (segment.writer_index >= placement.shards.len) {
                     log.warn(
                         "DirectMemoryWriter.chooseLayout: dropping empty segment with invalid writer index raw_segment_index={d} writer_index={d} shards_len={d} start={d} global_shape={f}",
@@ -763,7 +766,6 @@ pub const DirectMemoryWriter = struct {
             }
         }.lessThan);
 
-        // Validate that each shard writer receives exactly its shard payload.
         var writer_totals = try allocator.alloc(usize, placement.shards.len);
         defer allocator.free(writer_totals);
         @memset(writer_totals, 0);
@@ -847,7 +849,6 @@ pub const DirectMemoryWriter = struct {
         if (rank > Shape.MAX_RANK) return error.InvalidRank;
         if (writer_index >= writer_count) return error.InvalidWriterIndex;
 
-        // Canonicalize per-axis [start, size] regardless of shard.slices order.
         var starts: [Shape.MAX_RANK]i64 = [_]i64{0} ** Shape.MAX_RANK;
         var sizes: [Shape.MAX_RANK]i64 = [_]i64{0} ** Shape.MAX_RANK;
         for (0..rank) |ax| {
@@ -873,18 +874,7 @@ pub const DirectMemoryWriter = struct {
             return;
         }
 
-        try appendAxisSegments(
-            allocator,
-            out,
-            writer_index,
-            writer_count,
-            0,
-            0,
-            rank,
-            &starts,
-            &sizes,
-            strides.constSlice(),
-        );
+        try appendAxisSegments(allocator, out, writer_index, writer_count, 0, 0, rank, &starts, &sizes, strides.constSlice());
     }
 
     fn appendAxisSegments(
@@ -963,22 +953,6 @@ pub const DirectMemoryWriter = struct {
         });
     }
 
-    fn poolForDevice(platform: *const Platform, pools: []mem.DynamicBufferPool, device_id: usize) *mem.DynamicBufferPool {
-        stdx.debug.assert(pools.len == platform.devices.len, "Expected one DMA pool per device, got pools={} devices={}", .{ pools.len, platform.devices.len });
-        for (platform.devices, 0..) |d, i| {
-            if (d.id() == device_id) return &pools[i];
-        }
-        unreachable;
-    }
-
-    fn allocatorForDevice(platform: *const Platform, allocators: []const std.mem.Allocator, device_id: usize) std.mem.Allocator {
-        stdx.debug.assert(allocators.len == platform.devices.len, "Expected one DMA allocator per device, got allocators={} devices={}", .{ allocators.len, platform.devices.len });
-        for (platform.devices, 0..) |d, i| {
-            if (d.id() == device_id) return allocators[i];
-        }
-        unreachable;
-    }
-
     pub fn deinit(self: *DirectMemoryWriter) void {
         for (self.shard_writers) |*writer| {
             writer.deinit();
@@ -1010,7 +984,7 @@ pub const DirectMemoryWriter = struct {
                         remaining[0..to_write],
                     );
                     self_.interface.end += to_write;
-                    try self_.partitionedSyncIntoActive();
+                    try self_.syncProxyIntoActive();
 
                     consumed_.* += to_write;
                     remaining = remaining[to_write..];
@@ -1034,8 +1008,7 @@ pub const DirectMemoryWriter = struct {
     fn partitionedFlush(w: *std.Io.Writer) std.Io.Writer.Error!void {
         const self: *DirectMemoryWriter = @alignCast(@fieldParentPtr("interface", w));
 
-        try self.partitionedSyncIntoActive();
-        self.partitionedAdvanceCompleted();
+        try self.syncAndAdvance();
 
         if (self.currentSegment() != null) return std.Io.Writer.Error.WriteFailed;
 
@@ -1058,15 +1031,14 @@ pub const DirectMemoryWriter = struct {
     fn partitionedEnsureWritable(self: *DirectMemoryWriter, capacity: usize) std.Io.Writer.Error!void {
         if (capacity == 0) return;
         while (self.interface.buffer.len - self.interface.end < capacity) {
-            try self.partitionedSyncIntoActive();
-            self.partitionedAdvanceCompleted();
+            try self.syncAndAdvance();
 
             const segment = self.currentSegment() orelse {
                 self.interface = .failing;
                 return std.Io.Writer.Error.WriteFailed;
             };
 
-            self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+            self.exposeShardWindow(segment.primary_writer, self.currentSegmentRemaining());
             if (self.interface.buffer.len - self.interface.end >= capacity) return;
             if (capacity > self.interface.buffer.len and self.interface.buffer.len != 0) {
                 return std.Io.Writer.Error.WriteFailed;
@@ -1075,7 +1047,7 @@ pub const DirectMemoryWriter = struct {
             const shard_writer = &self.shard_writers[segment.primary_writer];
             if (shard_writer.interface.end > 0) {
                 try shard_writer.flushBuffered();
-                self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+                self.exposeShardWindow(segment.primary_writer, self.currentSegmentRemaining());
                 if (self.interface.buffer.len - self.interface.end >= capacity) return;
             }
 
@@ -1098,10 +1070,15 @@ pub const DirectMemoryWriter = struct {
         return self.segment_mirrors[segment.mirror_start .. segment.mirror_start + segment.mirror_len];
     }
 
-    fn partitionedAdvanceCompleted(self: *DirectMemoryWriter) void {
+    fn syncAndAdvance(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+        try self.syncProxyIntoActive();
+        self.advanceCompletedSegments();
+    }
+
+    fn advanceCompletedSegments(self: *DirectMemoryWriter) void {
         while (self.currentSegment()) |segment| {
             if (self.currentSegmentRemaining() != 0) {
-                self.partitionedSyncFromShard(segment.primary_writer, self.currentSegmentRemaining());
+                self.exposeShardWindow(segment.primary_writer, self.currentSegmentRemaining());
                 return;
             }
             self.segment_index += 1;
@@ -1116,7 +1093,7 @@ pub const DirectMemoryWriter = struct {
         }
     }
 
-    fn partitionedSyncIntoActive(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
+    fn syncProxyIntoActive(self: *DirectMemoryWriter) std.Io.Writer.Error!void {
         const writer_index = self.active_writer_index orelse return;
         const segment = self.currentSegment() orelse return;
         if (segment.primary_writer != writer_index) return;
@@ -1140,7 +1117,7 @@ pub const DirectMemoryWriter = struct {
         }
     }
 
-    fn partitionedSyncFromShard(self: *DirectMemoryWriter, writer_index: usize, segment_remaining: usize) void {
+    fn exposeShardWindow(self: *DirectMemoryWriter, writer_index: usize, segment_remaining: usize) void {
         const shard_writer = &self.shard_writers[writer_index];
         self.active_writer_index = writer_index;
         const shard_remaining = shard_writer.total - (shard_writer.offset + shard_writer.interface.end);
@@ -1245,7 +1222,7 @@ pub fn load(
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
-    // defer allocator.free(walk_ctx.buffers);
+    defer allocator.free(walk_ctx.buffers);
 
     defer if (opts.total_bytes) |total_bytes_ptr| {
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
@@ -1265,7 +1242,7 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
-                    const select_sharding = selectSharding(ctx_.shardings, shape);
+                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
                     const sharding = if (select_sharding) |s| s else blk: {
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
                         break :blk ctx_.replicated_sharding;
@@ -1310,24 +1287,4 @@ pub fn load(
     walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
-}
-
-// todo: move
-pub fn selectSharding(shardings: []const Sharding, shape: Shape) ?Sharding {
-    for (shardings) |s| {
-        var match = false;
-        for (0..shape.rank()) |i| {
-            const spec = shape.partition(i);
-            if (spec == .axis) {
-                if (s.binding(spec.axis)) |_| {
-                    match = true;
-                } else {
-                    match = false;
-                    break;
-                }
-            }
-        }
-        if (match) return s;
-    }
-    return null;
 }
