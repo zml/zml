@@ -2,7 +2,7 @@ load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
 uv_lock(
@@ -61,6 +61,15 @@ zig_library(
         "//zml",
         ":libpython",
         "@rules_zig//zig/runfiles",
+    ],
+)
+
+zig_binary(
+    name = "ttir_compile_sandbox_smoke",
+    main = "e2e_tests/ttir_compile_sandbox_smoke.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        ":ttir_compile_sandbox",
     ],
 )
 

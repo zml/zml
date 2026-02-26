@@ -3,6 +3,8 @@ import sys
 from pathlib import Path
 
 import torch
+import triton
+import triton.language as tl
 
 _WRAPPED_KERNELS_DIR = Path(__file__).resolve().parent / "wrapped_kernels"
 if str(_WRAPPED_KERNELS_DIR) not in sys.path:
@@ -12,6 +14,56 @@ from wrap_2d_unified_attention import compile_ttir_2d_unified_attention_kernel
 from wrap_3d_unified_attention import compile_ttir_3d_unified_attention_kernels
 from wrap_decode_attention import compile_ttir_decode_attention_stage1_kernel
 from wrap_prefill_attention import compile_ttir_prefill_attention_kernel
+
+
+@triton.jit
+def _hello_world_matmul_kernel(
+    A_ptr,
+    B_ptr,
+    C_ptr,
+    M_C: tl.constexpr,
+    N_C: tl.constexpr,
+    K_C: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    A = tl.make_block_ptr(
+        base=A_ptr,
+        shape=(M_C, K_C),
+        strides=(K_C, 1),
+        offsets=(pid_m * BLOCK_M, 0),
+        block_shape=(BLOCK_M, BLOCK_K),
+        order=(1, 0),
+    )
+    B = tl.make_block_ptr(
+        base=B_ptr,
+        shape=(K_C, N_C),
+        strides=(N_C, 1),
+        offsets=(0, pid_n * BLOCK_N),
+        block_shape=(BLOCK_K, BLOCK_N),
+        order=(0, 1),
+    )
+    C = tl.make_block_ptr(
+        base=C_ptr,
+        shape=(M_C, N_C),
+        strides=(N_C, 1),
+        offsets=(pid_m * BLOCK_M, pid_n * BLOCK_N),
+        block_shape=(BLOCK_M, BLOCK_N),
+        order=(1, 0),
+    )
+
+    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+    for _ in range(0, K_C, BLOCK_K):
+        a = tl.load(A, boundary_check=(0, 1), padding_option="zero")
+        b = tl.load(B, boundary_check=(0, 1), padding_option="zero")
+        acc += tl.dot(a, b)
+        A = tl.advance(A, (0, BLOCK_K))
+        B = tl.advance(B, (BLOCK_K, 0))
+    tl.store(C, acc, boundary_check=(0, 1))
 
 
 def _params(args_json: str) -> dict:
@@ -211,4 +263,36 @@ def compile_prefill_attention_ttir(args_json: str) -> str:
         sliding_window_q=_int(params, "sliding_window_q", 0),
         sliding_window_k=_int(params, "sliding_window_k", 0),
     )
+
+
+def compile_hello_world_matmul_ttir(args_json: str) -> str:
+    params = _params(args_json)
+    dev = _device()
+
+    m = _int(params, "M", 256)
+    n = _int(params, "N", 256)
+    k = _int(params, "K", 256)
+    block_m = _int(params, "BLOCK_M", 128)
+    block_n = _int(params, "BLOCK_N", 128)
+    block_k = _int(params, "BLOCK_K", 32)
+    num_warps = _int(params, "num_warps", 8)
+
+    a = torch.zeros((m, k), dtype=torch.float32, device=dev)
+    b = torch.zeros((k, n), dtype=torch.float32, device=dev)
+    c = torch.zeros((m, n), dtype=torch.float32, device=dev)
+
+    grid = (triton.cdiv(m, block_m), triton.cdiv(n, block_n))
+    compiled_kernel = _hello_world_matmul_kernel[grid](
+        a,
+        b,
+        c,
+        M_C=m,
+        N_C=n,
+        K_C=k,
+        BLOCK_M=block_m,
+        BLOCK_N=block_n,
+        BLOCK_K=block_k,
+        num_warps=num_warps,
+    )
+    return str(compiled_kernel.asm["ttir"])
  
