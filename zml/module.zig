@@ -85,7 +85,7 @@ pub const CompilationContext = struct {
         mlir_ctx.loadAllAvailableDialects();
 
         const module = mlir.Module.init(.unknown(mlir_ctx));
-        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
+        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, opts.name));
 
         const pass_manager = mlir.PassManager.init(mlir_ctx);
         {
