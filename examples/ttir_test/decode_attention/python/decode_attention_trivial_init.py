@@ -8,8 +8,8 @@ from wrap_decode_attention import run_decode_attention_stage1_kernel
 torch.set_printoptions(threshold=torch.inf)
 torch.manual_seed(0)
 
-os.environ["TRITON_BACKEND_DEBUG"] = "1"
-os.environ["SHOULD_LOG"] = "1"
+os.environ["TRITON_BACKEND_DEBUG"] = "0"
+os.environ["SHOULD_LOG"] = "0"
 
 batch_size = 8
 num_heads = 32

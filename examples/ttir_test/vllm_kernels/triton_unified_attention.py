@@ -20,6 +20,11 @@ is_batch_invariant = False
 float8_info = torch.finfo(torch.float8_e4m3fn)  # potentially not adapted
 
 
+def _env_flag_enabled(name: str) -> bool:
+    val = os.environ.get(name)
+    return val is not None and val.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
@@ -916,7 +921,7 @@ def unified_attention(
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
 
-    SHOULD_LOG = os.environ.get("SHOULD_LOG", None) is not None
+    SHOULD_LOG = _env_flag_enabled("SHOULD_LOG")
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"

@@ -19,6 +19,11 @@ from triton_unified_attention import _get_tile_size, kernel_unified_attention_3d
 float8_info = torch.finfo(torch.float8_e4m3fn)  # potentially not adapted
 
 
+def _env_flag_enabled(name: str) -> bool:
+    val = os.environ.get(name)
+    return val is not None and val.strip().lower() in {"1", "true", "yes", "on"}
+
+
 @triton.jit
 def wrapped_kernel_unified_attention_3d(
     query_ptr,
@@ -223,7 +228,7 @@ def run_3d_unified_attention_kernels(
 ):
     assert causal, "Only causal attention is supported"
     assert q_descale is None, "Q scales not supported"
-    should_log = os.environ.get("SHOULD_LOG", None) is not None
+    should_log = _env_flag_enabled("SHOULD_LOG")
 
     if sinks is not None:
         assert sinks.shape[0] == q.shape[1], "Sinks must be num_query_heads size"

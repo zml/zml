@@ -8,8 +8,8 @@ from wrap_prefill_attention import run_prefill_attention_kernel
 torch.set_printoptions(threshold=torch.inf)
 torch.manual_seed(0)
 
-os.environ["TRITON_BACKEND_DEBUG"] = "1"
-os.environ["SHOULD_LOG"] = "1"
+os.environ["TRITON_BACKEND_DEBUG"] = "0"
+os.environ["SHOULD_LOG"] = "0"
 
 batch_size = 8
 token_count = 8

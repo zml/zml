@@ -109,6 +109,6 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    os.environ["TRITON_BACKEND_DEBUG"] = "1"
-    # os.environ["SHOULD_LOG"] = "1"
+    os.environ["TRITON_BACKEND_DEBUG"] = "0"
+    # os.environ["SHOULD_LOG"] = "0"
     main()

@@ -8,8 +8,8 @@ torch.set_printoptions(threshold=torch.inf)
 torch.manual_seed(0)
 
 os.environ["SHOULD_RUN_3D"] = "0"
-os.environ["TRITON_BACKEND_DEBUG"] = "1"
-os.environ["SHOULD_LOG"] = "1"
+os.environ["TRITON_BACKEND_DEBUG"] = "0"
+os.environ["SHOULD_LOG"] = "0"
 
 token_count = 8
 batch_size = 8
