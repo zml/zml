@@ -267,3 +267,7 @@ pub fn getDecodeAttentionStage1Ttir(allocator: std.mem.Allocator, io: anytype, a
 pub fn getPrefillAttentionTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
     return callCompileFunction(allocator, io, "compile_prefill_attention_ttir", args_json);
 }
+
+pub fn getHelloWorldMatmulTtir(allocator: std.mem.Allocator, io: anytype, args_json: []const u8) ![:0]u8 {
+    return callCompileFunction(allocator, io, "compile_hello_world_matmul_ttir", args_json);
+}

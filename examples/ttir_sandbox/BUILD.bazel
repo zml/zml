@@ -73,6 +73,16 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "hello_world_e2e",
+    main = "e2e_tests/hello_world.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [

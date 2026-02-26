@@ -27,9 +27,13 @@ pub fn main(init: std.process.Init) !void {
     const ttir_prefill = try ttir_compile_sandbox.getPrefillAttentionTtir(allocator, io, args_json);
     defer allocator.free(ttir_prefill);
 
+    const ttir_hello_world = try ttir_compile_sandbox.getHelloWorldMatmulTtir(allocator, io, args_json);
+    defer allocator.free(ttir_hello_world);
+
     std.debug.print("2d unified attention TTIR bytes: {d}\n", .{ttir_2d.len});
     std.debug.print("3d unified attention TTIR bytes: {d}\n", .{ttir_3d.len});
     std.debug.print("3d reduce segments TTIR bytes: {d}\n", .{ttir_reduce.len});
     std.debug.print("decode stage1 TTIR bytes: {d}\n", .{ttir_decode.len});
     std.debug.print("prefill TTIR bytes: {d}\n", .{ttir_prefill.len});
+    std.debug.print("hello_world matmul TTIR bytes: {d}\n", .{ttir_hello_world.len});
 }
