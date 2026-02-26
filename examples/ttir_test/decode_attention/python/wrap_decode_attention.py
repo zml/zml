@@ -149,3 +149,4 @@ def run_decode_attention_stage1_kernel(
 
     print(f"kernel_wrapped_decode_stage1: {compiled_kernel.src.constants}")
     print(f"kernel_wrapped_decode_stage1: {compiled_kernel.asm['ttir']}")
+    return compiled_kernel

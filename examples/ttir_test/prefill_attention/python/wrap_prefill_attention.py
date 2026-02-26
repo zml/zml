@@ -145,3 +145,4 @@ def run_prefill_attention_kernel(
 
     print(f"kernel_wrapped_prefill: {compiled_kernel.src.constants}")
     print(f"kernel_wrapped_prefill: {compiled_kernel.asm['ttir']}")
+    return compiled_kernel

@@ -103,3 +103,4 @@ def hello_world(a: torch.Tensor, b: torch.Tensor, c: torch.Tensor) -> torch.Tens
     print(
         f"---------------------\n ttir:\n\n{compiled_kernel.asm['ttir']}\n\n---------------------\n"
     )
+    return compiled_kernel

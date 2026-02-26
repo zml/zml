@@ -311,3 +311,5 @@ def run_2d_unified_attention_kernel(
     if should_log:
         print(f"kernel_wrapped_2d: {compiled_kernel.src.constants}")
         print(f"kernel_wrapped_2d: {compiled_kernel.asm['ttir']}")
+
+    return compiled_kernel

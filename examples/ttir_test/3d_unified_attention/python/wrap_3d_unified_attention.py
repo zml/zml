@@ -362,3 +362,5 @@ def run_3d_unified_attention_kernels(
     if should_log:
         print(f"kernel_wrapped_reduce: {compiled_reduce.src.constants}")
         print(f"kernel_wrapped_reduce: {compiled_reduce.asm['ttir']}")
+
+    return compiled_kernel, compiled_reduce
