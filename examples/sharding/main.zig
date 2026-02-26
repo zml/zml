@@ -328,22 +328,22 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("{f}\n\n", .{platform.fmtVerbose()});
 
-    var profiler = try platform.profiler(allocator);
-    _ = &profiler;
+    // var profiler = try platform.profiler(allocator);
+    // _ = &profiler;
 
-    if (profiler) |*p| try p.start();
+    // if (profiler) |*p| try p.start();
 
-    defer {
-        if (profiler) |*p| {
-            p.stop() catch unreachable;
-            const data = p.collectData(allocator) catch unreachable;
-            var file = std.Io.Dir.createFile(.cwd(), io, "/home/hugo/zml/proto.pb", .{ .read = true }) catch unreachable;
-            defer file.close(io);
+    // defer {
+    //     if (profiler) |*p| {
+    //         p.stop() catch unreachable;
+    //         const data = p.collectData(allocator) catch unreachable;
+    //         var file = std.Io.Dir.createFile(.cwd(), io, "/home/hugo/zml/proto.pb", .{ .read = true }) catch unreachable;
+    //         defer file.close(io);
 
-            file.writeStreamingAll(io, data) catch unreachable;
-            allocator.free(data);
-        }
-    }
+    //         file.writeStreamingAll(io, data) catch unreachable;
+    //         allocator.free(data);
+    //     }
+    // }
 
     const partitioner: zml.sharding.Partitioning.Partitioner = p: {
         const raw = init.environ_map.get("PARTITIONER") orelse break :p .shardy;
