@@ -4,12 +4,14 @@ const log = std.log;
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 const bf16 = zml.floats.BFloat16;
+const testing = zml.testing;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
 const inputs_bytes = @embedFile("safetensors/2d_unified_attention_inputs.safetensors");
+const outputs_bytes = @embedFile("safetensors/2d_unified_attention_output.safetensors");
 
 const test_cfg = struct {
     const token_count = 8;
@@ -134,10 +136,15 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes);
+    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes, "2d_unified_attention_inputs.safetensors");
     defer allocator.free(inputs_path);
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, inputs_path);
     defer registry.deinit();
+
+    const outputs_path = try writeEmbeddedSafetensors(allocator, io, outputs_bytes, "2d_unified_attention_output.safetensors");
+    defer allocator.free(outputs_path);
+    var outputs_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, outputs_path);
+    defer outputs_registry.deinit();
 
     var query = try loadBufferFromRegistry(allocator, io, platform, &registry, "query");
     defer query.deinit();
@@ -153,6 +160,8 @@ pub fn main(init: std.process.Init) !void {
     defer start_loc.deinit();
     var out = try uninitBuffer(allocator, io, platform, out_shape.shape());
     defer out.deinit();
+    var expected = try loadBufferFromRegistry(allocator, io, platform, &outputs_registry, "out");
+    defer expected.deinit();
 
     log.info("query shape: {f}", .{query.shape()});
     log.info("key_cache shape: {f}", .{key_cache.shape()});
@@ -197,10 +206,20 @@ pub fn main(init: std.process.Init) !void {
     }
     std.debug.print("\n", .{});
 
+    var matches = true;
+    testing.expectClose(io, result, expected, .{}) catch {
+        matches = false;
+    };
+    std.debug.print("\n\n", .{});
+    if (matches) {
+        std.debug.print("Output matches expected tensor\n", .{});
+    } else {
+        std.debug.print("Output does not match expected tensor\n", .{});
+    }
 }
 
-fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8) ![]const u8 {
-    const path = "2d_unified_attention_inputs.safetensors";
+fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8, filename: []const u8) ![]const u8 {
+    const path = filename;
     const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
     defer file.close(io);
 

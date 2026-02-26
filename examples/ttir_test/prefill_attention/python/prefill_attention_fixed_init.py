@@ -1,7 +1,7 @@
 import os
 
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from wrap_prefill_attention import run_prefill_attention_kernel
 
@@ -47,8 +47,17 @@ def main() -> None:
         is_causal=True,
     )
 
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "safetensors",
+        "prefill_attention_output.safetensors",
+    )
+    save_file({"out": out.detach().cpu()}, out_path)
+
     sample = out[:, 0, 0].float().cpu()[:8]
     print("Output out[:,0,0] first 8:", " ".join(f"{v.item():.5f}" for v in sample))
+    print(f"Wrote: {out_path}")
 
 
 if __name__ == "__main__":

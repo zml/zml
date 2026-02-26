@@ -38,6 +38,7 @@ zig_binary(
     extra_srcs = [
         "2d_unified_attention/2d_unified_attention_kernel.ttir",
         "2d_unified_attention/safetensors/2d_unified_attention_inputs.safetensors",
+        "2d_unified_attention/safetensors/2d_unified_attention_output.safetensors",
     ],
     main = "2d_unified_attention/2d_unified_attention_fixed_init.zig",
     deps = [
@@ -85,6 +86,7 @@ zig_binary(
     extra_srcs = [
         "prefill_attention/prefill_attention.ttir",
         "prefill_attention/safetensors/prefill_attention_inputs.safetensors",
+        "prefill_attention/safetensors/prefill_attention_output.safetensors",
     ],
     main = "prefill_attention/prefill_attention_fixed_init.zig",
     deps = [
@@ -108,6 +110,7 @@ zig_binary(
     extra_srcs = [
         "decode_attention/decode_attention.ttir",
         "decode_attention/safetensors/decode_attention_inputs.safetensors",
+        "decode_attention/safetensors/decode_attention_output.safetensors",
     ],
     main = "decode_attention/decode_attention_fixed_init.zig",
     deps = [
@@ -133,6 +136,7 @@ zig_binary(
         "3d_unified_attention/3d_unified_attention_kernel.ttir",
         "3d_unified_attention/reduce_segments_kernel.ttir",
         "3d_unified_attention/safetensors/3d_unified_attention_inputs.safetensors",
+        "3d_unified_attention/safetensors/3d_unified_attention_output.safetensors",
     ],
     main = "3d_unified_attention/3d_unified_attention_fixed_init.zig",
     deps = [

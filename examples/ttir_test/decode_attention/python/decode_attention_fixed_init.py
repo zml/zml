@@ -1,7 +1,7 @@
 import os
 
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from wrap_decode_attention import run_decode_attention_stage1_kernel
 
@@ -55,8 +55,17 @@ def main() -> None:
         logit_cap=0.0,
     )
 
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "safetensors",
+        "decode_attention_output.safetensors",
+    )
+    save_file({"att_out": att_out.detach().cpu()}, out_path)
+
     sample = att_out[:, 0, 0, 0].float().cpu()[:8]
     print("Output att_out[:,0,0,0] first 8:", " ".join(f"{v.item():.5f}" for v in sample))
+    print(f"Wrote: {out_path}")
 
 
 if __name__ == "__main__":

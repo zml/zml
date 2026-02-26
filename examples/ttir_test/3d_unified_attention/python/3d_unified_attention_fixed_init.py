@@ -1,7 +1,7 @@
 import os
 
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 from wrap_3d_unified_attention import run_3d_unified_attention_kernels
 
 torch.set_printoptions(threshold=torch.inf)
@@ -95,8 +95,17 @@ def main() -> None:
         softmax_segm_expsum=softmax_segm_expsum,
     )
 
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "safetensors",
+        "3d_unified_attention_output.safetensors",
+    )
+    save_file({"out": o.detach().cpu()}, out_path)
+
     sample = o[:, 0, 0].float().cpu()[:8]
     print("Output o[:,0,0] first 8:", " ".join(f"{v.item():.5f}" for v in sample))
+    print(f"Wrote: {out_path}")
 
 
 if __name__ == "__main__":

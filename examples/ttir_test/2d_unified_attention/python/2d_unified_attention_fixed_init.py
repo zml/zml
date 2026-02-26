@@ -2,7 +2,7 @@ import os
 
 import torch
 from wrap_2d_unified_attention import run_2d_unified_attention_kernel
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 torch.set_printoptions(threshold=torch.inf)
 
@@ -74,8 +74,17 @@ def main() -> None:
         v_descale=v_scale,
     )
 
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "safetensors",
+        "2d_unified_attention_output.safetensors",
+    )
+    save_file({"out": o.detach().cpu()}, out_path)
+
     sample = o[:, 0, 0].float().cpu()[:8]
     print("Output o[:,0,0] first 8:", " ".join(f"{v.item():.5f}" for v in sample))
+    print(f"Wrote: {out_path}")
 
 
 if __name__ == "__main__":
