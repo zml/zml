@@ -18,83 +18,6 @@ const cfg = struct {
 };
 
 var python_initialized: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var kernel_ttir: [:0]const u8 = "";
-
-fn pathExists(io: anytype, path: []const u8) bool {
-    if (std.fs.path.isAbsolute(path)) {
-        std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
-        return true;
-    }
-
-    std.Io.Dir.access(.cwd(), io, path, .{ .read = true }) catch return false;
-    return true;
-}
-
-fn resolveRunfilePath(buf: []u8, relative_path: []const u8, io: anytype) ![]const u8 {
-    if (std.c.getenv("RUNFILES_DIR")) |runfiles_dir_c| {
-        const runfiles_dir = std.mem.span(runfiles_dir_c);
-
-        const runfiles_path = try std.fmt.bufPrint(buf, "{s}/{s}", .{ runfiles_dir, relative_path });
-        if (pathExists(io, runfiles_path)) return runfiles_path;
-
-        const runfiles_main_path = try std.fmt.bufPrint(buf, "{s}/_main/{s}", .{ runfiles_dir, relative_path });
-        if (pathExists(io, runfiles_main_path)) return runfiles_main_path;
-    }
-
-    if (std.c.getenv("RUNFILES_DIRECTORY")) |runfiles_dir_c| {
-        const runfiles_dir = std.mem.span(runfiles_dir_c);
-
-        const runfiles_path = try std.fmt.bufPrint(buf, "{s}/{s}", .{ runfiles_dir, relative_path });
-        if (pathExists(io, runfiles_path)) return runfiles_path;
-
-        const runfiles_main_path = try std.fmt.bufPrint(buf, "{s}/_main/{s}", .{ runfiles_dir, relative_path });
-        if (pathExists(io, runfiles_main_path)) return runfiles_main_path;
-    }
-
-    if (std.c.getenv("RUNFILES_MANIFEST_FILE")) |manifest_path_c| {
-        const manifest_path = std.mem.span(manifest_path_c);
-        const manifest = std.Io.Dir.cwd().readFileAlloc(io, manifest_path, std.heap.c_allocator, .unlimited) catch null;
-        if (manifest) |content| {
-            defer std.heap.c_allocator.free(content);
-
-            var lines = std.mem.splitScalar(u8, content, '\n');
-            while (lines.next()) |line_raw| {
-                const line = std.mem.trim(u8, line_raw, "\r");
-                if (line.len == 0) continue;
-                const sep_idx = std.mem.indexOfScalar(u8, line, ' ') orelse continue;
-
-                const key = line[0..sep_idx];
-                const value = line[sep_idx + 1 ..];
-
-                var key_match = std.mem.eql(u8, key, relative_path) or
-                    (std.mem.startsWith(u8, relative_path, "_main/") and std.mem.eql(u8, key, relative_path[6..]));
-                if (!key_match and !std.mem.startsWith(u8, relative_path, "_main/")) {
-                    var main_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-                    const main_relative = std.fmt.bufPrint(&main_buf, "_main/{s}", .{relative_path}) catch null;
-                    if (main_relative) |k| {
-                        key_match = std.mem.eql(u8, key, k);
-                    }
-                }
-                if (key_match) {
-                    return try std.fmt.bufPrint(buf, "{s}", .{value});
-                }
-            }
-        }
-    }
-
-    if (pathExists(io, relative_path)) return try std.fmt.bufPrint(buf, "{s}", .{relative_path});
-
-    const external_path = try std.fmt.bufPrint(buf, "external/{s}", .{relative_path});
-    if (pathExists(io, external_path)) return external_path;
-
-    const bazel_bin_path = try std.fmt.bufPrint(buf, "bazel-bin/{s}", .{relative_path});
-    if (pathExists(io, bazel_bin_path)) return bazel_bin_path;
-
-    const bazel_out_path = try std.fmt.bufPrint(buf, "bazel-out/linux_amd64-dbg/bin/{s}", .{relative_path});
-    if (pathExists(io, bazel_out_path)) return bazel_out_path;
-
-    return error.RunfilesNotFound;
-}
 
 fn pyStatusCheck(status: c_interface.PyStatus) void {
     if (c_interface.PyStatus_Exception(status) != 0) {
@@ -233,7 +156,7 @@ fn bootstrapPythonPath() !void {
         \\    if os.path.isdir(rp) and rp not in sys.path:
         \\        sys.path.insert(0, rp)
         \\
-        ++ "\x00";
+    ++ "\x00";
 
     if (c_interface.PyRun_SimpleStringFlags(code.ptr, null) != 0) {
         checkPythonError();
@@ -290,7 +213,7 @@ fn ensurePythonInitialized(io: anytype) !void {
     }
 }
 
-fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_params: []const u8) ![]u8 {
+fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_params: []const u8) ![:0]u8 {
     try ensurePythonInitialized(io);
 
     const module = c_interface.PyImport_ImportModule("ttir_compile");
@@ -333,25 +256,17 @@ fn callCompileHelloWorldTtir(allocator: std.mem.Allocator, io: anytype, kernel_p
     }
 
     const result_slice = std.mem.span(@as([*:0]const u8, @ptrCast(result_cstr)));
-    const result_data = try allocator.alloc(u8, result_slice.len);
-    @memcpy(result_data, result_slice);
-
-    return result_data;
+    return allocator.dupeZ(u8, result_slice);
 }
 
-pub fn wrappedHelloWorld(a: Tensor, b: Tensor, out: Tensor) Tensor {
+pub fn wrappedHelloWorld(kernel_ttir: [:0]const u8, a: Tensor, b: Tensor, out: Tensor) Tensor {
     const grid: [3]i32 = .{
         @intCast(@divExact(cfg.M, cfg.BLOCK_M)),
         @intCast(@divExact(cfg.N, cfg.BLOCK_N)),
         1,
     };
 
-    const target = zml.module.CompilationContext.current().platform.target;
-    const num_warps: i32 = switch (target) {
-        .rocm => 8,
-        .cuda => 8,
-        else => 8,
-    };
+    const num_warps: i32 = 8;
 
     return zml.ops.triton(.{ a, b }, .{out.shape()}, .{
         .name = "matmul_fixed_kernel",
@@ -392,15 +307,12 @@ pub fn main(init: std.process.Init) !void {
     const ttir = try callCompileHelloWorldTtir(allocator, io, kernel_params);
     defer allocator.free(ttir);
 
-    const owned_ttir = try allocator.dupeZ(u8, ttir);
-    defer allocator.free(owned_ttir);
-    kernel_ttir = owned_ttir;
-
     const a_shape: zml.Tensor = .init(.{ cfg.M, cfg.K }, .f32);
     const b_shape: zml.Tensor = .init(.{ cfg.K, cfg.N }, .f32);
     const c_shape: zml.Tensor = .init(.{ cfg.M, cfg.N }, .f32);
 
     var exe = try platform.compileFn(allocator, io, wrappedHelloWorld, .{
+        ttir,
         a_shape,
         b_shape,
         c_shape,
@@ -458,7 +370,7 @@ pub fn main(init: std.process.Init) !void {
         std.debug.print("\n", .{});
     }
 
-    std.process.exit(0);
+    return;
 }
 
 fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape) !zml.Buffer {
