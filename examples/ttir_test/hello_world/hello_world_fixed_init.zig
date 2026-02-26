@@ -3,12 +3,14 @@ const log = std.log;
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+const testing = zml.testing;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
 const inputs_bytes = @embedFile("safetensors/hello_world_inputs.safetensors");
+const outputs_bytes = @embedFile("safetensors/hello_world_output.safetensors");
 
 const cfg = struct {
     const M = 256;
@@ -71,7 +73,7 @@ pub fn main(init: std.process.Init) !void {
     });
     defer exe.deinit();
 
-    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes);
+    const inputs_path = try writeEmbeddedSafetensors(allocator, io, inputs_bytes, "hello_world_inputs.safetensors");
     defer allocator.free(inputs_path);
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, inputs_path);
     defer registry.deinit();
@@ -103,6 +105,13 @@ pub fn main(init: std.process.Init) !void {
     var result: zml.Buffer = exe_results.get(zml.Buffer);
     defer result.deinit();
 
+    const expected_path = try writeEmbeddedSafetensors(allocator, io, outputs_bytes, "hello_world_output.safetensors");
+    defer allocator.free(expected_path);
+    var expected_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, expected_path);
+    defer expected_registry.deinit();
+    var expected = try loadBufferFromRegistry(allocator, io, platform, &expected_registry, "c");
+    defer expected.deinit();
+
     var output = try result.toSliceAlloc(allocator, io);
     defer output.free(allocator);
 
@@ -130,10 +139,21 @@ pub fn main(init: std.process.Init) !void {
         }
         std.debug.print("\n", .{});
     }
+
+    var matches = true;
+    testing.expectClose(io, result, expected, .{}) catch {
+        matches = false;
+    };
+    std.debug.print("\n\n", .{});
+    if (matches) {
+        std.debug.print("Output matches expected tensor\n", .{});
+    } else {
+        std.debug.print("Output does not match expected tensor\n", .{});
+    }
 }
 
-fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8) ![]const u8 {
-    const path = "hello_world_inputs.safetensors";
+fn writeEmbeddedSafetensors(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8, filename: []const u8) ![]const u8 {
+    const path = filename;
     const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
     defer file.close(io);
 

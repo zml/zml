@@ -1,6 +1,6 @@
 import os
 import torch
-from safetensors.torch import load_file
+from safetensors.torch import load_file, save_file
 
 from hello_world_kernel import M, N, K, hello_world
 
@@ -22,10 +22,19 @@ def main() -> None:
     hello_world(a, b, c)
 
     c_cpu = c.detach().cpu()
+    out_path = os.path.join(
+        os.path.dirname(__file__),
+        "..",
+        "safetensors",
+        "hello_world_output.safetensors",
+    )
+    save_file({"c": c_cpu}, out_path)
+
     grid = c_cpu[:10, :10]
     print("c[0:10,0:10] after matmul:")
     for row in grid:
         print(" ".join(f"{v.item():.5f}" for v in row))
+    print(f"Wrote: {out_path}")
 
 
 if __name__ == "__main__":

@@ -57,12 +57,13 @@ zig_binary(
 )
 
 zig_binary(
-    name = "hello_world_fixed_input",
+    name = "hello_world_fixed_init",
     extra_srcs = [
         "hello_world/hello_world_kernel.ttir",
         "hello_world/safetensors/hello_world_inputs.safetensors",
+        "hello_world/safetensors/hello_world_output.safetensors",
     ],
-    main = "hello_world/hello_world_fixed_input.zig",
+    main = "hello_world/hello_world_fixed_init.zig",
     deps = [
         "//zml",
     ],
