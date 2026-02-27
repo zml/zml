@@ -1,6 +1,8 @@
 load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
+load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
 upb_c_proto_library(
     name = "xla_data_upb",
@@ -17,6 +19,36 @@ cc_library(
     hdrs = ["posix.h"],
 )
 
+cc_library(
+    name = "libpython",
+    hdrs = ["attention/libpython.h"],
+    deps = [
+        "@rules_python//python/cc:current_py_cc_headers",
+        "@rules_python//python/cc:current_py_cc_libs",
+    ],
+)
+
+py_binary(
+    name = "triton_prefill_ttir_compile",
+    main = "attention/triton_prefill_py/ttir_compile.py",
+    srcs = [
+        "attention/triton_prefill_py/ttir_compile.py",
+        "attention/triton_prefill_py/wrap_prefill_attention.py",
+        "attention/triton_prefill_py/triton_prefill_attention.py",
+    ],
+    deps = [
+        "@ttir_sandbox_py_deps//torch",
+        "@ttir_sandbox_py_deps//torchaudio",
+        "@ttir_sandbox_py_deps//torchvision",
+        "@ttir_sandbox_py_deps//triton",
+    ],
+)
+
+runfiles_to_default(
+    name = "triton_prefill_ttir_compile_files",
+    deps = [":triton_prefill_ttir_compile"],
+)
+
 zig_library(
     name = "zml",
     srcs = [
@@ -24,6 +56,8 @@ zig_library(
         "attention/attention.zig",
         "attention/flashattn.zig",
         "attention/paged_attention.zig",
+        "attention/triton.zig",
+        "attention/triton_ttir_compile_sandbox.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
@@ -48,12 +82,14 @@ zig_library(
     ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
+    data = [":triton_prefill_ttir_compile_files"],
     zigopts = [
         "-lc",
         "-freference-trace=20",
     ],
     deps = [
         ":posix",
+        ":libpython",
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",

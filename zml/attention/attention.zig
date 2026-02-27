@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
+const triton = @import("triton.zig");
 
 const Attention = @This();
 
@@ -9,6 +10,7 @@ pub const Backend = enum {
     vanilla,
     cuda_fa2,
     cuda_fa3,
+    triton,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -33,17 +35,20 @@ pub const Parameters = union(Backend) {
     vanilla: void,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
+    triton: triton.Parameters,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
+        triton: triton.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
+                .triton => .{ .triton = .{} },
             };
         }
     };
@@ -53,6 +58,7 @@ pub const Parameters = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
+            .triton => |v| .{ .triton = .init(v) },
         };
     }
 };
@@ -61,17 +67,20 @@ pub const Metadata = union(Backend) {
     vanilla: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
+    triton: triton.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
+        triton: triton.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend, seqlen: i64) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen } },
+                .triton => .{ .triton = .{} },
             };
         }
     };
@@ -81,6 +90,7 @@ pub const Metadata = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
+            .triton => |o| .{ .triton = triton.Metadata.init(o) },
         };
     }
 
@@ -89,6 +99,7 @@ pub const Metadata = union(Backend) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform) },
+            .triton => .{ .triton = {} },
         };
     }
 
@@ -97,6 +108,7 @@ pub const Metadata = union(Backend) {
             .vanilla => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
+            .triton => {},
         }
     }
 };
@@ -116,5 +128,6 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
         },
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
+        .triton => triton.attention(q, k, v, token_index, metadata.triton, parameters.triton),
     };
 }
