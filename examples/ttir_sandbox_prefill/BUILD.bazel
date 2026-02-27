@@ -1,0 +1,54 @@
+load("@python_versions//3.12:defs.bzl", py_binary = "py_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+py_binary(
+    name = "ttir_compile",
+    srcs = [
+        "ttir_compile.py",
+        "wrap_prefill_attention.py",
+        "triton_prefill_attention.py",
+    ],
+    deps = [
+        "@ttir_sandbox_py_deps//torch",
+        "@ttir_sandbox_py_deps//torchaudio",
+        "@ttir_sandbox_py_deps//torchvision",
+        "@ttir_sandbox_py_deps//triton",
+    ],
+)
+
+runfiles_to_default(
+    name = "ttir_compile_files",
+    deps = [":ttir_compile"],
+)
+
+cc_library(
+    name = "libpython",
+    hdrs = ["libpython.h"],
+    deps = [
+        "@rules_python//python/cc:current_py_cc_headers",
+        "@rules_python//python/cc:current_py_cc_libs",
+    ],
+)
+
+zig_library(
+    name = "ttir_compile_sandbox",
+    main = "ttir_compile_sandbox.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":libpython",
+        "@rules_zig//zig/runfiles",
+    ],
+)
+
+zig_binary(
+    name = "prefill_attention_e2e",
+    main = "prefill_attention.zig",
+    data = [":ttir_compile_files"],
+    deps = [
+        "//zml",
+        ":ttir_compile_sandbox",
+    ],
+)
