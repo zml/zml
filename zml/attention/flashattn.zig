@@ -570,10 +570,11 @@ pub const paged_fa2 = struct {
         options: DecodeOptions,
 
         pub fn init(options: DecodeOptions) DecodeParameters {
+            const block_table_shape = zml.Shape.init(.{ .b = options.batch_size, .p = options.max_num_pages }, .i32);
             return .{
-                .block_table = .init(.{ options.batch_size, options.max_num_pages }, .i32),
-                .cu_seqlens_q = .init(.{options.batch_size + 1}, .i32),
-                .seqused_k = .init(.{options.batch_size}, .i32),
+                .block_table = .fromShape(block_table_shape),
+                .cu_seqlens_q = zml.Tensor.init(.{ .x = options.batch_size + 1 }, .i32),
+                .seqused_k = zml.Tensor.init(.{ .x = options.batch_size }, .i32),
                 .metadata = DecodeMetadata.init(options.max_token_count, options.num_heads, options.head_dim),
                 .options = options,
             };
@@ -596,7 +597,7 @@ pub const paged_fa2 = struct {
 
         pub fn init(max_token_count: usize, num_heads: usize, head_dim: usize) DecodeMetadata {
             return .{
-                .out_accum = .init(.{8 * max_token_count * num_heads * head_dim * 4}, .i8),
+                .out_accum = zml.Tensor.init(.{8 * max_token_count * num_heads * head_dim * 4}, .i8),
             };
         }
 
@@ -640,13 +641,15 @@ pub const paged_fa2 = struct {
         options: MixedOptions,
 
         pub fn init(options: MixedOptions) MixedParameters {
+            const block_table_prefill_shape = zml.Shape.init(.{ .b = options.batch_size_prefill, .p = options.max_num_pages }, .i32);
+            const block_table_decode_shape = zml.Shape.init(.{ .b = options.batch_size_decode, .p = options.max_num_pages }, .i32);
             return .{
-                .block_table_prefill = .init(.{ options.batch_size_prefill, options.max_num_pages }, .i32),
-                .cu_seqlens_q_prefill = .init(.{options.batch_size_prefill + 1}, .i32),
-                .seqused_k_prefill = .init(.{options.batch_size_prefill}, .i32),
-                .block_table_decode = .init(.{ options.batch_size_decode, options.max_num_pages }, .i32),
-                .cu_seqlens_q_decode = .init(.{options.batch_size_decode + 1}, .i32),
-                .seqused_k_decode = .init(.{options.batch_size_decode}, .i32),
+                .block_table_prefill = .fromShape(block_table_prefill_shape),
+                .cu_seqlens_q_prefill = zml.Tensor.init(.{ .x = options.batch_size_prefill + 1 }, .i32),
+                .seqused_k_prefill = zml.Tensor.init(.{ .x = options.batch_size_prefill }, .i32),
+                .block_table_decode = .fromShape(block_table_decode_shape),
+                .cu_seqlens_q_decode = zml.Tensor.init(.{ .x = options.batch_size_decode + 1 }, .i32),
+                .seqused_k_decode = zml.Tensor.init(.{ .x = options.batch_size_decode }, .i32),
                 .metadata = MixedMetadata.init(options.max_token_count, options.num_heads, options.head_dim),
                 .options = options,
             };
@@ -673,8 +676,8 @@ pub const paged_fa2 = struct {
 
         pub fn init(max_token_count: usize, num_heads: usize, head_dim: usize) MixedMetadata {
             return .{
-                .out_accum = .init(.{8 * max_token_count * num_heads * head_dim * 4}, .i8),
-                .host_metadata = .init(.{2}, .i32),
+                .out_accum = zml.Tensor.init(.{8 * max_token_count * num_heads * head_dim * 4}, .i8),
+                .host_metadata = zml.Tensor.init(.{2}, .i32),
             };
         }
 
@@ -859,16 +862,33 @@ pub const paged_fa2 = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index_: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .h, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .h, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .h, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
 
+        const layer_index = layer_index_.reshape(.{1}).withPartitioning(.{ ._0 = .replicated });
+
         const o = switch (parameters) {
             .decode => |decode_parameters| b: {
-                const softmax_lse = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.dim(.h), .q = q.dim(.b) }, .f32));
-                const softmax_lse_accum = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{64 * decode_parameters.block_table.dim(0) * q.dim(.h) * 4}, .i8));
-                const dummy_cu_seqlens_k = zml.Tensor.constant(zml.DataType.i32.zero()).broad(decode_parameters.cu_seqlens_q.shape());
+                const block_table = decode_parameters.block_table.withPartitioning(.{ .b = .replicated, .p = .replicated });
+                const cu_seqlens_q = decode_parameters.cu_seqlens_q.withPartitioning(.{ .x = .replicated });
+                const seqused_k = decode_parameters.seqused_k.withPartitioning(.{ .x = .replicated });
+                const out_accum = decode_parameters.metadata.out_accum.withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const softmax_lse = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.dim(.h), .q = q.dim(.b) }, .f32)).withPartitioning(.{ .h = .model });
+                const softmax_lse_accum = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{ .x = 64 * block_table.dim(0) * q.dim(.h) * 4 }, .i8)).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const dummy_cu_seqlens_k = zml.Tensor.constant(zml.DataType.i32.zero()).broad(cu_seqlens_q.shape()).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                log.err("decode/q={f}", .{q.shape()});
+                log.err("decode/k_cache={f}", .{k_cache.shape()});
+                log.err("decode/v_cache={f}", .{v_cache.shape()});
+                log.err("decode/cu_seqlens_q={f}", .{cu_seqlens_q.shape()});
+                log.err("decode/dummy_cu_seqlens_k={f}", .{dummy_cu_seqlens_k.shape()});
+                log.err("decode/seqused_k={f}", .{seqused_k.shape()});
+                log.err("decode/block_table={f}", .{block_table.shape()});
+                log.err("decode/softmax_lse={f}", .{softmax_lse.shape()});
+                log.err("decode/softmax_lse_accum={f}", .{softmax_lse_accum.shape()});
+                log.err("decode/out_accum={f}", .{out_accum.shape()});
+                log.err("decode/layer_index={f}", .{layer_index.shape()});
 
                 const original_tot = q.dim(.b);
                 const num_heads = q.dim(.h);
@@ -887,13 +907,13 @@ pub const paged_fa2 = struct {
                         q2,
                         k_cache,
                         v_cache,
-                        decode_parameters.cu_seqlens_q,
+                        cu_seqlens_q,
                         dummy_cu_seqlens_k,
-                        decode_parameters.seqused_k,
-                        decode_parameters.block_table,
+                        seqused_k,
+                        block_table,
                         softmax_lse,
                         softmax_lse_accum,
-                        decode_parameters.metadata.out_accum,
+                        out_accum,
                         layer_index,
                     },
                     .{q2.shape()},
@@ -903,7 +923,10 @@ pub const paged_fa2 = struct {
                         .num_heads = num_heads,
                         .window_size_left = opts.sliding_window,
                     },
-                    .{ .has_side_effect = false },
+                    .{
+                        .has_side_effect = false,
+                        .shardy_manual_computation = true,
+                    },
                 );
 
                 if (seqlenq_ngroups_swapped) {
@@ -913,23 +936,43 @@ pub const paged_fa2 = struct {
                 break :b o;
             },
             .mixed => |mixed_parameters| b: {
-                const softmax_lse_prefill = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = q.dim(.b) }, .f32));
-                const softmax_lse_accum_prefill = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{64 * q.dim(.b) * q.dim(.h) * 4}, .i8));
-                const dummy_cu_seqlens_k_prefill = zml.Tensor.constant(zml.DataType.i32.zero()).broad(mixed_parameters.cu_seqlens_q_prefill.shape());
+                const block_table_prefill = mixed_parameters.block_table_prefill.withPartitioning(.{ .b = .replicated, .p = .replicated });
+                const cu_seqlens_q_prefill = mixed_parameters.cu_seqlens_q_prefill.withPartitioning(.{ .x = .replicated });
+                const seqused_k_prefill = mixed_parameters.seqused_k_prefill.withPartitioning(.{ .x = .replicated });
+                const block_table_decode = mixed_parameters.block_table_decode.withPartitioning(.{ .b = .replicated, .p = .replicated });
+                const cu_seqlens_q_decode = mixed_parameters.cu_seqlens_q_decode.withPartitioning(.{ .x = .replicated });
+                const seqused_k_decode = mixed_parameters.seqused_k_decode.withPartitioning(.{ .x = .replicated });
+                const out_accum = mixed_parameters.metadata.out_accum.withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const host_metadata = mixed_parameters.metadata.host_metadata.withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const softmax_lse_prefill = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = q.dim(.b) }, .f32)).withPartitioning(.{ .h = .model });
+                const softmax_lse_accum_prefill = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{ .x = 64 * q.dim(.b) * q.dim(.h) * 4 }, .i8)).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const dummy_cu_seqlens_k_prefill = zml.Tensor.constant(zml.DataType.i32.zero()).broad(cu_seqlens_q_prefill.shape()).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                log.err("mixed_prefill/q={f}", .{q.shape()});
+                log.err("mixed_prefill/k_cache={f}", .{k_cache.shape()});
+                log.err("mixed_prefill/v_cache={f}", .{v_cache.shape()});
+                log.err("mixed_prefill/cu_seqlens_q={f}", .{cu_seqlens_q_prefill.shape()});
+                log.err("mixed_prefill/dummy_cu_seqlens_k={f}", .{dummy_cu_seqlens_k_prefill.shape()});
+                log.err("mixed_prefill/seqused_k={f}", .{seqused_k_prefill.shape()});
+                log.err("mixed_prefill/block_table={f}", .{block_table_prefill.shape()});
+                log.err("mixed_prefill/softmax_lse={f}", .{softmax_lse_prefill.shape()});
+                log.err("mixed_prefill/softmax_lse_accum={f}", .{softmax_lse_accum_prefill.shape()});
+                log.err("mixed_prefill/out_accum={f}", .{out_accum.shape()});
+                log.err("mixed_prefill/host_metadata={f}", .{host_metadata.shape()});
+                log.err("mixed_prefill/layer_index={f}", .{layer_index.shape()});
                 var o = zml.ops.customCall(
                     Prefill.custom_call_name,
                     .{
                         q,
                         k_cache,
                         v_cache,
-                        mixed_parameters.cu_seqlens_q_prefill,
+                        cu_seqlens_q_prefill,
                         dummy_cu_seqlens_k_prefill,
-                        mixed_parameters.seqused_k_prefill,
-                        mixed_parameters.block_table_prefill,
+                        seqused_k_prefill,
+                        block_table_prefill,
                         softmax_lse_prefill,
                         softmax_lse_accum_prefill,
-                        mixed_parameters.metadata.out_accum,
-                        mixed_parameters.metadata.host_metadata,
+                        out_accum,
+                        host_metadata,
                         layer_index,
                     },
                     .{q.shape()},
@@ -939,14 +982,28 @@ pub const paged_fa2 = struct {
                         .num_heads = q.dim(.h),
                         .window_size_left = opts.sliding_window,
                     },
-                    .{ .has_side_effect = false },
+                    .{
+                        .has_side_effect = false,
+                        .shardy_manual_computation = true,
+                    },
                 );
 
-                const batch_size_decode = mixed_parameters.block_table_prefill.dim(0);
-                const softmax_lse_decode = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = batch_size_decode }, .f32));
-                const softmax_lse_accum_decode = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{64 * mixed_parameters.block_table_decode.dim(0) * q.dim(.h) * 4}, .i8));
-                const dummy_cu_seqlens_k_decode = zml.Tensor.constant(zml.DataType.i32.zero()).broad(mixed_parameters.cu_seqlens_q_decode.shape());
+                const batch_size_decode = block_table_prefill.dim(0);
+                const softmax_lse_decode = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{ .h = q.shape().dim(.h), .q = batch_size_decode }, .f32)).withPartitioning(.{ .h = .model });
+                const softmax_lse_accum_decode = zml.Tensor.constant(zml.DataType.i8.zero()).broad(.init(.{ .x = 64 * block_table_decode.dim(0) * q.dim(.h) * 4 }, .i8)).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
+                const dummy_cu_seqlens_k_decode = zml.Tensor.constant(zml.DataType.i32.zero()).broad(cu_seqlens_q_decode.shape()).withTags(.{.x}).withPartitioning(.{ .x = .replicated });
                 var q_decode = q.dynamicSlice1d(0, .{ .start = context.decode_offset.?, .len = batch_size_decode });
+                log.err("mixed_decode/q={f}", .{q_decode.shape()});
+                log.err("mixed_decode/k_cache={f}", .{k_cache.shape()});
+                log.err("mixed_decode/v_cache={f}", .{v_cache.shape()});
+                log.err("mixed_decode/cu_seqlens_q={f}", .{cu_seqlens_q_decode.shape()});
+                log.err("mixed_decode/dummy_cu_seqlens_k={f}", .{dummy_cu_seqlens_k_decode.shape()});
+                log.err("mixed_decode/seqused_k={f}", .{seqused_k_decode.shape()});
+                log.err("mixed_decode/block_table={f}", .{block_table_decode.shape()});
+                log.err("mixed_decode/softmax_lse={f}", .{softmax_lse_decode.shape()});
+                log.err("mixed_decode/softmax_lse_accum={f}", .{softmax_lse_accum_decode.shape()});
+                log.err("mixed_decode/out_accum={f}", .{out_accum.shape()});
+                log.err("mixed_decode/layer_index={f}", .{layer_index.shape()});
 
                 const original_tot = q_decode.dim(.b);
                 const num_heads = q_decode.dim(.h);
@@ -964,13 +1021,13 @@ pub const paged_fa2 = struct {
                         q_decode,
                         k_cache,
                         v_cache,
-                        mixed_parameters.cu_seqlens_q_decode,
+                        cu_seqlens_q_decode,
                         dummy_cu_seqlens_k_decode,
-                        mixed_parameters.seqused_k_decode,
-                        mixed_parameters.block_table_decode,
+                        seqused_k_decode,
+                        block_table_decode,
                         softmax_lse_decode,
                         softmax_lse_accum_decode,
-                        mixed_parameters.metadata.out_accum,
+                        out_accum,
                         layer_index,
                     },
                     .{q_decode.shape()},
@@ -980,7 +1037,10 @@ pub const paged_fa2 = struct {
                         .num_heads = q.dim(.h),
                         .window_size_left = opts.sliding_window,
                     },
-                    .{ .has_side_effect = false },
+                    .{
+                        .has_side_effect = false,
+                        .shardy_manual_computation = true,
+                    },
                 );
 
                 if (seqlenq_ngroups_swapped) {

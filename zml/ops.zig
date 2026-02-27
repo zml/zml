@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log;
 
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
@@ -9,6 +10,7 @@ const constants = @import("constants.zig");
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const Shape = @import("shape.zig").Shape;
+const sharding_ = @import("sharding.zig");
 const Tensor = @import("tensor.zig").Tensor;
 
 pub const ReduceArgs = struct {
@@ -868,6 +870,7 @@ fn TensorOrTensorArray(comptime T: type) type {
 pub const CustomCallOptions = struct {
     has_side_effect: bool,
     output_operand_aliases: ?[]const i64 = null,
+    shardy_manual_computation: bool = false,
 };
 
 pub const CustomCallSideEffectPolicy = struct {
@@ -977,17 +980,41 @@ pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, 
     };
 }
 
-fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
-    const ctx = CompilationContext.current();
-    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
-    defer arena.deinit();
+fn customCallShardyInfo(
+    allocator: std.mem.Allocator,
+    ctx: *CompilationContext,
+    shape: Shape,
+) struct {
+    local_shape: Shape,
+    sharding_attr: *const mlir.Attribute,
+} {
+    log.err("SHARDY SHAPE: {f}", .{shape});
+    const sharding = ctx.partitioning.selectSharding(shape) catch unreachable;
+    log.err("SHARDY SHARDINg: {f}", .{sharding});
+    const attr_info = ctx.partitioning.tensorShardingAttr(allocator, shape, sharding) catch unreachable;
+    stdx.debug.assert(attr_info != null and std.mem.eql(u8, attr_info.?.name, "sdy.sharding"), "customCall with shardy_manual_computation expects explicit sdy sharding for shape {f}", .{shape});
 
-    const values = arena.allocator().alloc(*const mlir.Value, inputs.len) catch unreachable;
-    for (0..inputs.len) |i| {
-        values[i] = inputs[i].value();
-    }
+    const placement = sharding_.Placement.init(sharding, shape) catch unreachable;
+    const local_shape = placement.shards.get(0).shape;
+    const sharding_attr = mlir.Attribute.parse(ctx.mlir_ctx, attr_info.?.attr) catch unreachable;
+    return .{
+        .local_shape = local_shape,
+        .sharding_attr = sharding_attr,
+    };
+}
 
-    const res_types = arena.allocator().alloc(*const mlir.Type, outputs.len) catch unreachable;
+fn appendStablehloCustomCall(
+    arena_allocator: std.mem.Allocator,
+    ctx: *CompilationContext,
+    target_name: [:0]const u8,
+    values: []const *const mlir.Value,
+    input_shapes: []const Shape,
+    outputs: []const Shape,
+    metadata: anytype,
+    opts: CustomCallOptions,
+    side_effect_policy: CustomCallSideEffectPolicy,
+) *mlir.Operation {
+    const res_types = arena_allocator.alloc(*const mlir.Type, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
         res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, output.dtype()));
     }
@@ -1037,17 +1064,15 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
     }));
 
-    const operands_layouts = arena.allocator().alloc([]const usize, inputs.len) catch unreachable;
-    for (inputs, 0..) |input, i| {
-        operands_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    const operands_layouts = arena_allocator.alloc([]const usize, input_shapes.len) catch unreachable;
+    for (input_shapes, 0..) |input, i| {
+        operands_layouts[i] = arena_allocator.dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
     }
 
-    const results_layouts = arena.allocator().alloc([]const usize, outputs.len) catch unreachable;
+    const results_layouts = arena_allocator.alloc([]const usize, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
-        results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+        results_layouts[i] = arena_allocator.dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
-
-    const side_effect_policy = customCallSideEffectPolicy(target_name, opts.has_side_effect);
 
     var additional_attrs: stdx.BoundedArray(mlir.NamedAttribute, 4) = .{};
     if (side_effect_policy.requires_unique_device_sharding) {
@@ -1059,7 +1084,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         ));
     }
 
-    const op = dialects.stablehlo.custom_call(
+    return dialects.stablehlo.custom_call(
         ctx.mlir_ctx,
         values,
         res_types,
@@ -1074,6 +1099,108 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
         },
         .unknown(ctx.mlir_ctx),
     ).appendTo(CompilationContext.current().currentScope().block);
+}
+
+fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
+    const ctx = CompilationContext.current();
+    var arena = std.heap.ArenaAllocator.init(ctx.allocator);
+    defer arena.deinit();
+
+    const input_shapes = arena.allocator().alloc(Shape, inputs.len) catch unreachable;
+    const values = arena.allocator().alloc(*const mlir.Value, inputs.len) catch unreachable;
+    for (0..inputs.len) |i| {
+        input_shapes[i] = inputs[i].shape();
+        values[i] = inputs[i].value();
+    }
+
+    const side_effect_policy = customCallSideEffectPolicy(target_name, opts.has_side_effect);
+
+    const op = if (opts.shardy_manual_computation and ctx.partitioning.partitioner == .shardy) blk: {
+        const input_shardings = arena.allocator().alloc(*const mlir.Attribute, inputs.len) catch unreachable;
+        const output_shardings = arena.allocator().alloc(*const mlir.Attribute, outputs.len) catch unreachable;
+        const local_input_shapes = arena.allocator().alloc(Shape, inputs.len) catch unreachable;
+        const local_output_shapes = arena.allocator().alloc(Shape, outputs.len) catch unreachable;
+
+        for (input_shapes, 0..) |input_shape, i| {
+            const info = customCallShardyInfo(arena.allocator(), ctx, input_shape);
+            local_input_shapes[i] = info.local_shape;
+            input_shardings[i] = info.sharding_attr;
+        }
+        for (outputs, 0..) |output_shape, i| {
+            const info = customCallShardyInfo(arena.allocator(), ctx, output_shape);
+            local_output_shapes[i] = info.local_shape;
+            output_shardings[i] = info.sharding_attr;
+        }
+
+        const block_types = arena.allocator().alloc(*const mlir.Type, inputs.len) catch unreachable;
+        const block_locs = arena.allocator().alloc(*const mlir.Location, inputs.len) catch unreachable;
+        for (local_input_shapes, 0..) |input_shape, i| {
+            block_types[i] = mlir.rankedTensorType(input_shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, input_shape.dtype()));
+            block_locs[i] = mlir.Location.unknown(ctx.mlir_ctx);
+        }
+
+        const manual_block = mlir.Block.init(block_types, block_locs);
+        errdefer manual_block.deinit();
+
+        CompilationContext.current().pushBlock(manual_block);
+        defer CompilationContext.current().popBlock();
+
+        const local_values = arena.allocator().alloc(*const mlir.Value, inputs.len) catch unreachable;
+        for (0..inputs.len) |i| {
+            local_values[i] = manual_block.argument(i);
+        }
+
+        const local_custom_call = appendStablehloCustomCall(
+            arena.allocator(),
+            ctx,
+            target_name,
+            local_values,
+            local_input_shapes,
+            local_output_shapes,
+            metadata,
+            opts,
+            side_effect_policy,
+        );
+
+        const sdy_results = arena.allocator().alloc(*const mlir.Value, outputs.len) catch unreachable;
+        for (0..outputs.len) |i| {
+            sdy_results[i] = local_custom_call.result(i);
+        }
+
+        _ = mlir.Operation.make(ctx.mlir_ctx, "sdy.return", .{
+            .operands = .{ .flat = sdy_results },
+            .verify = true,
+            .location = .unknown(ctx.mlir_ctx),
+        }).appendTo(manual_block);
+
+        const global_result_types = arena.allocator().alloc(*const mlir.Type, outputs.len) catch unreachable;
+        for (outputs, 0..) |output_shape, i| {
+            global_result_types[i] = mlir.rankedTensorType(output_shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, output_shape.dtype()));
+        }
+
+        log.err(">>>>>>>>>>>\n{any}\n{any}\n<<<<<<<<<<<<<<\n", .{ input_shardings, output_shardings });
+        break :blk mlir.Operation.make(ctx.mlir_ctx, "sdy.manual_computation", .{
+            .operands = .{ .flat = values },
+            .results = .{ .flat = global_result_types },
+            .blocks = &.{manual_block},
+            .attributes = &.{
+                .named(ctx.mlir_ctx, "in_shardings", mlir.arrayAttribute(ctx.mlir_ctx, input_shardings)),
+                .named(ctx.mlir_ctx, "out_shardings", mlir.arrayAttribute(ctx.mlir_ctx, output_shardings)),
+            },
+            .verify = true,
+            .location = .unknown(ctx.mlir_ctx),
+        }).appendTo(CompilationContext.current().currentScope().block);
+    } else appendStablehloCustomCall(
+        arena.allocator(),
+        ctx,
+        target_name,
+        values,
+        input_shapes,
+        outputs,
+        metadata,
+        opts,
+        side_effect_policy,
+    );
 
     const outputs_ = ctx.arena.allocator().alloc(Tensor, outputs.len) catch unreachable;
     for (outputs, 0..) |output, i| {
@@ -1106,6 +1233,29 @@ test customCall {
     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
         .has_side_effect = false,
         .output_operand_aliases = &.{0},
+    });
+
+    try zml.testing.expectEqualShapes(input.shape(), output.shape());
+}
+
+test "customCall shardy manual computation" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    defer comp.deinit();
+    comp.activate();
+    defer comp.deactivate();
+
+    const block = mlir.Block.init(&.{}, &.{});
+    comp.pushBlock(block);
+    defer comp.popBlock();
+
+    const shape = zml.Shape.init(.{128}, .bf16).withPartitioning(.{ ._0 = .x });
+    const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
+    const output = customCall("my_custom_call", .{input}, .{shape}, .{}, .{
+        .has_side_effect = false,
+        .shardy_manual_computation = true,
     });
 
     try zml.testing.expectEqualShapes(input.shape(), output.shape());
