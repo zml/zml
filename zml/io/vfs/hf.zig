@@ -125,7 +125,7 @@ pub const HF = struct {
 
     pub fn auto(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, environ_map: *std.process.Environ.Map) !HF {
         const hf_token = if (environ_map.get("HF_TOKEN")) |token| blk: {
-            break :blk token;
+            break :blk try allocator.dupe(u8, token);
         } else blk: {
             const home_path = environ_map.get("HOME") orelse break :blk null;
 
@@ -141,6 +141,7 @@ pub const HF = struct {
 
             break :blk token;
         };
+        defer if (hf_token) |tk| allocator.free(tk);
 
         if (hf_token == null) log.warn("No Hugging Face authentication token found in environment or home config; proceeding without authentication.", .{});
 

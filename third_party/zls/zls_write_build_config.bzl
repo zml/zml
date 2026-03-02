@@ -18,7 +18,7 @@ def _zls_construct_zig_module_info_impl(target, ctx):
     if ZigModuleInfo in target:
         return []
 
-    if ctx.rule.kind not in ("zig_binary", "zig_static_library", "zig_shared_library"):
+    if ctx.rule.kind not in ("zig_binary", "zig_static_library", "zig_shared_library", "zig_test"):
         return []
 
     cdeps = []
