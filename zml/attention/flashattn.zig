@@ -136,16 +136,11 @@ fn fixupKvCacheBuffer(buffer: Buffer, layer_index: i64) Buffer {
 pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
     return struct {
         pub fn register(platform: *const zml.Platform) !void {
-            zml.ffi.register(platform.pjrt_api, platform.pjrt_client, .{
+            try platform.registerFfi(.{
                 .name = T.custom_call_name,
-                .ffi = .{
-                    .handler = T.run,
-                    .traits = .{ .command_buffer_compatible = true },
-                    .platform_name = "cuda",
-                },
-                .partitioner = .{
-                    .batch_partitionable = true,
-                },
+                .platform_name = "cuda",
+                .handler = T.run,
+                .traits = .{ .command_buffer_compatible = true },
             });
         }
 
@@ -302,32 +297,41 @@ pub const fa2 = struct {
             q = q.splitAxis(.h, .{ .h = num_heads_k, .ngroups = ngroups }).transpose(.{ .tot, .ngroups, .h, .hd }).merge(.{ .tot = .{ .tot, .ngroups } });
         }
 
-        var o = zml.ops.customCall(
-            custom_call_name,
+        // q must have shape (total_q, num_heads, head_size)
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const output_shape = q_sharded.shape();
+        var o = zml.ops.manualComputation(
             .{
-                q,
+                q_sharded,
                 k,
                 v,
                 cu_seqlens_q,
-                cu_seqlens_k,
-                metadata.softmax_lse,
-                metadata.softmax_lse_accum,
-                metadata.out_accum,
+                cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
+                metadata.softmax_lse.withPartitioning(.{ .h = .model }),
+                metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
+                metadata.out_accum.withPartitioning(.{ .h = .model }),
             },
-            .{q.shape()},
+            output_shape,
             .{
-                //.softmax_scale = @as(f32, 1.0),
-                .is_causal = true,
-                .window_size_left = @as(i32, -1),
-                .window_size_right = @as(i32, -1),
-                .max_seqlen_q = max_seqlen_q,
-                .max_seqlen_k = max_seqlen_k,
-                .num_heads = @as(i32, @intCast(num_heads)),
+                .metadata = .{
+                    //.softmax_scale = @as(f32, 1.0),
+                    .is_causal = true,
+                    .window_size_left = @as(i32, -1),
+                    .window_size_right = @as(i32, -1),
+                    .max_seqlen_q = max_seqlen_q,
+                    .max_seqlen_k = max_seqlen_k,
+                    .num_heads = @as(i32, @intCast(@divExact(num_heads, 2))), // ctx.partitioning.numPartitions("", .model)
+                },
+                .opts = zml.ops.CustomCallOptions{
+                    .output_operand_aliases = &.{0},
+                    .has_side_effect = false,
+                },
             },
-            .{
-                .output_operand_aliases = &.{0},
-                .has_side_effect = false,
-            },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                    return zml.ops.customCall(custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
+                }
+            }).body,
         );
 
         if (seqlenq_ngroups_swapped) {

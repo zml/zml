@@ -1026,7 +1026,7 @@ pub const Operation = opaque {
     }
 
     pub fn name(self: *const Operation) []const u8 {
-        return string(c.mlirOperationGetName(self.ptr()));
+        return string(c.mlirIdentifierStr(c.mlirOperationGetName(self.ptr())));
     }
 
     pub fn clone(self: *const Operation) *Operation {

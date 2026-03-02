@@ -31,7 +31,6 @@ zig_library(
         "attention/paged_attention.zig",
         "buffer.zig",
         "constants.zig",
-        "ffi.zig",
         "dtype.zig",
         "exe.zig",
         "floats.zig",

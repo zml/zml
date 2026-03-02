@@ -147,19 +147,16 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const sharding = ctx.partitioning.selectSharding(partitioned_shape) catch unreachable;
-        const attr_info = ctx.partitioning.tensorShardingAttr(ctx.allocator, partitioned_shape, sharding) catch unreachable;
-        defer ctx.allocator.free(attr_info.?.attr);
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, partitioned_shape, null) catch unreachable;
+        defer ctx.allocator.free(attr);
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
-                const sdy_attr = mlir.Attribute.parse(ctx.mlir_ctx, attr_info.?.attr) catch unreachable;
-
                 const op = mlir.Operation.make(ctx.mlir_ctx, "sdy.sharding_constraint", .{
                     .operands = .{ .flat = &.{self.value()} },
                     .results = .{ .flat = &.{self.value().type_()} },
                     .attributes = &.{
-                        .named(ctx.mlir_ctx, "sharding", sdy_attr), // todo: move "sharding" string
+                        .named(ctx.mlir_ctx, "sharding", mlir.Attribute.parse(ctx.mlir_ctx, attr) catch unreachable),
                     },
                 }).appendTo(currentBlock());
                 break :blk op.result(0);
@@ -174,7 +171,7 @@ pub const Tensor = struct {
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, attr_info.?.name, mlir.stringAttribute(ctx.mlir_ctx, attr_info.?.attr)),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, attr)),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
@@ -4122,20 +4119,11 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
-        const side_effect_policy = ops.customCallSideEffectPolicy("zml$print", true);
-
-        var print_input = input;
-        if (side_effect_policy.needs_keepalive) {
-            print_input._shape = print_input.shape().withReplicatedPartitioning();
-        }
-
-        _ = ops.customCall(
-            "zml$print",
-            .{print_input},
-            .{print_input.shape()},
-            .{ .name = name },
-            .{ .has_side_effect = side_effect_policy.effective_has_side_effect },
-        );
+        ops.manualComputation(input, {}, .{ .name = name }, (struct {
+            fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
+                ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
+            }
+        }).body);
     }
 
     fn mlirCtx() *mlir.Context {

@@ -18,6 +18,11 @@ pub const SelectShardingMode = enum {
 };
 
 pub const Partitioning = struct {
+    pub const ShardingAttrInfo = struct {
+        name: []const u8,
+        attr: []const u8,
+    };
+
     pub const Partitioner = union(enum) {
         shardy,
         gspmd,
@@ -74,17 +79,77 @@ pub const Partitioning = struct {
         };
     }
 
-    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: Sharding) !?struct { name: []const u8, attr: []const u8 } {
+    pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: ?Sharding) ![]const u8 {
+        const selected_sharding = sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
-            .shardy => if (try sharding.sdyShardingAttrForShape(allocator, shape)) |attr| .{
-                .name = "sdy.sharding",
-                .attr = attr,
-            } else null,
-            .gspmd => if (try sharding.gspmdShardingAttrForShape(allocator, shape)) |attr| .{
-                .name = "mhlo.sharding",
-                .attr = attr,
-            } else null,
+            .shardy => try selected_sharding.sdyShardingAttrForShape(allocator, shape),
+            .gspmd => try selected_sharding.gspmdShardingAttrForShape(allocator, shape),
         };
+    }
+
+    pub fn localShapeForShape(self: Partitioning, shape: Shape) !Shape {
+        const sharding = try self.selectSharding(shape);
+        const placement = try Placement.init(sharding, shape);
+        return placement.shards.get(0).shape;
+    }
+
+    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shapes: []const Shape) ![]const u8 {
+        stdx.debug.assert(self.partitioner == .shardy, "sdyPerValueShardingAttr requires shardy partitioner", .{});
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        out.writer.writeAll("#sdy.sharding_per_value<[") catch unreachable;
+        for (shapes, 0..) |shape, i| {
+            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
+            if (i > 0) out.writer.writeAll(", ") catch unreachable;
+            out.writer.writeAll(attr_str["#sdy.sharding".len..]) catch unreachable;
+        }
+        out.writer.writeAll("]>") catch unreachable;
+        return out.toOwnedSlice() catch unreachable;
+    }
+
+    pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, in_shapes: []const Shape, out_shapes: []const Shape) ![]const u8 {
+        stdx.debug.assert(self.partitioner == .shardy, "sdyManualAxesAttr requires shardy partitioner", .{});
+
+        var axis_names = std.ArrayList([]const u8).empty;
+        defer axis_names.deinit(allocator);
+
+        const Collect = struct {
+            fn appendUnique(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, axis_name: []const u8) void {
+                for (list.items) |existing| {
+                    if (std.mem.eql(u8, existing, axis_name)) return;
+                }
+                list.append(allocator_, axis_name) catch unreachable;
+            }
+
+            fn scan(list: *std.ArrayList([]const u8), allocator_: std.mem.Allocator, sharding: []const u8) void {
+                var i: usize = 0;
+                while (i < sharding.len) : (i += 1) {
+                    if (sharding[i] != '"') continue;
+                    const start = i + 1;
+                    i = start;
+                    while (i < sharding.len and sharding[i] != '"') : (i += 1) {}
+                    if (i > start) appendUnique(list, allocator_, sharding[start..i]);
+                }
+            }
+        };
+
+        for (in_shapes) |shape| {
+            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
+            Collect.scan(&axis_names, allocator, attr_str);
+        }
+        for (out_shapes) |shape| {
+            const attr_str = try self.tensorShardingAttr(allocator, shape, null);
+            Collect.scan(&axis_names, allocator, attr_str);
+        }
+
+        var out: std.Io.Writer.Allocating = .init(allocator);
+        out.writer.writeAll("#sdy<manual_axes{") catch unreachable;
+        for (axis_names.items, 0..) |axis_name, i| {
+            if (i > 0) out.writer.writeAll(", ") catch unreachable;
+            out.writer.print("\"{s}\"", .{axis_name}) catch unreachable;
+        }
+        out.writer.writeAll("}>") catch unreachable;
+        return out.toOwnedSlice() catch unreachable;
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
@@ -1222,7 +1287,7 @@ pub const Sharding = struct {
         };
     }
 
-    pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
+    pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1230,7 +1295,7 @@ pub const Sharding = struct {
                 break;
             }
         }
-        if (!any_explicit) return null;
+        const all_replicated = !any_explicit;
 
         const mapping = self.getDimMapping(shape);
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -1260,7 +1325,13 @@ pub const Sharding = struct {
                     }
                 },
                 .replicated => try out.writer.writeAll("{}"),
-                .open, .unknown => try out.writer.writeAll("{?}"),
+                .open, .unknown => {
+                    if (all_replicated) {
+                        try out.writer.writeAll("{}");
+                    } else {
+                        try out.writer.writeAll("{?}");
+                    }
+                },
             }
         }
         try out.writer.writeAll("]");
@@ -1277,7 +1348,7 @@ pub const Sharding = struct {
         return try out.toOwnedSlice();
     }
 
-    pub fn gspmdShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) !?[]const u8 {
+    pub fn gspmdShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) == .axis) {
@@ -1796,7 +1867,6 @@ const ShardingTest = struct {
         expected_shards: []const ExpectedShard = &.{},
 
         expect_error: ?anyerror = null,
-        expect_sdy_null: bool = false,
     };
 
     allocator: std.mem.Allocator,
@@ -1854,15 +1924,9 @@ const ShardingTest = struct {
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
-            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape) orelse return error.ExpectedAnnotationButGotNull;
+            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape);
             defer self.allocator.free(actual_attr);
             try std.testing.expectEqualStrings(expected_attr, actual_attr);
-        } else if (s.expect_sdy_null) {
-            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape);
-            if (actual_attr) |a| {
-                self.allocator.free(a);
-                return error.ExpectedNullAnnotation;
-            }
         }
 
         // Verify Placement logic / Error
@@ -1904,7 +1968,7 @@ test "sharding: unknown partitioning implies replication" {
         .logical = logical,
         .strategy = strategy,
         .shape = Shape.init(.{ .batch = 8 }, .f32),
-        .expect_sdy_null = true,
+        .expected_sdy = "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
             .{ .device_id = 0, .slices = &.{.{ 0, 8 }} },
             .{ .device_id = 1, .slices = &.{.{ 0, 8 }} },

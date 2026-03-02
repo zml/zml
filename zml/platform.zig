@@ -10,7 +10,6 @@ const upb = @import("upb");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const zml = @import("zml.zig");
-const zml_ffi = @import("ffi.zig");
 
 const log = std.log.scoped(.zml);
 
@@ -244,25 +243,15 @@ pub const Platform = struct {
             else => {},
         }
 
-        const print_partitioner_callbacks = initPrintCustomPartitionerCallbacks(arena.allocator(), allocator, &platform.arena_state, io) catch |err| b: {
-            log.warn("Failed to initialize print custom partitioner callbacks: {}", .{err});
-            break :b null;
-        };
-        const print_partitioner_registration: ?zml_ffi.PartitionerRegistration = if (print_partitioner_callbacks) |callbacks|
-            .{ .callbacks = callbacks }
-        else
-            null;
-
-        zml_ffi.registerAll(platform.pjrt_api, platform.pjrt_client, &.{
+        platform.registerFfi(
             .{
                 .name = "zml$print",
-                .ffi = .{
-                    .handler = printCallback,
-                    .traits = .{ .command_buffer_compatible = false },
-                },
-                .partitioner = print_partitioner_registration,
+                .handler = printCallback,
+                .traits = .{ .command_buffer_compatible = false },
             },
-        });
+        ) catch |err| {
+            log.warn("Failed to register FFI custom call \"zml$print\", error: {}", .{err});
+        };
 
         return platform;
     }
@@ -462,6 +451,22 @@ pub const Platform = struct {
         unreachable;
     }
 
+    pub const FfiRegistration = struct {
+        name: []const u8,
+        handler: *const pjrt.ffi.Handler,
+        traits: pjrt.ffi.HandlerTraits = .{ .command_buffer_compatible = false },
+        platform_name: ?[]const u8 = null,
+    };
+
+    pub fn registerFfi(self: *const zml.Platform, registration: FfiRegistration) !void {
+        const platform_name = registration.platform_name orelse self.pjrt_client.platformName(self.pjrt_api);
+        if (self.pjrt_api.ffi()) |ffi| {
+            try ffi.register(self.pjrt_api, registration.name, platform_name, registration.handler, registration.traits);
+        } else {
+            log.warn("PJRT FFI extension not available for {s}", .{@tagName(self.target)});
+        }
+    }
+
     pub fn profiler(self: *const Platform, allocator: std.mem.Allocator) !?pjrt.Profiler {
         var arena = std.heap.ArenaAllocator.init(allocator);
         defer arena.deinit();
@@ -625,88 +630,6 @@ fn shapeFromFfiBuffer(buffer: *const pjrt.ffi.Buffer) zml.Shape {
 fn getScalarAttributeAs(comptime T: type, call_frame: *pjrt.ffi.CallFrame, attribute_name: []const u8) ?T {
     const attribute = call_frame.attrs.getByName(.scalar, attribute_name) orelse return null;
     return attribute.get(T);
-}
-
-fn printCustomPartitionerPartition(
-    callbacks: [*c]pjrt.CustomPartitioner.Callbacks,
-    args_: [*c]pjrt.CustomPartitioner.PartitionArgs,
-) callconv(.c) void {
-    if (args_ == null) return;
-    const args: *pjrt.CustomPartitioner.PartitionArgs = @ptrCast(&args_[0]);
-    const context = getCustomPartitionerContext(callbacks) orelse {
-        zml_ffi.setStaticError(&args.header, .internal, "zml$print: missing callback allocator");
-        return;
-    };
-    context.mutex.lockUncancelable(context.io);
-    defer context.mutex.unlock(context.io);
-    var arena = context.arena_state.promote(context.arena_backing_allocator);
-    defer context.arena_state.* = arena.state;
-    const allocator = arena.allocator();
-    zml_ffi.partitionAsPassthroughCustomCall(allocator, args, .{
-        .module_name = "zml_print_partitioner",
-        .custom_call_target = "zml$print",
-        .has_side_effect = true,
-    }, "zml$print");
-}
-
-fn printCustomPartitionerInferSharding(
-    callbacks: [*c]pjrt.CustomPartitioner.Callbacks,
-    args_: [*c]pjrt.CustomPartitioner.InferShardingFromOperandsArgs,
-) callconv(.c) void {
-    if (args_ == null) return;
-    const infer_args: *pjrt.CustomPartitioner.InferShardingFromOperandsArgs = @ptrCast(&args_[0]);
-    const context = getCustomPartitionerContext(callbacks) orelse {
-        zml_ffi.setStaticError(&infer_args.header, .internal, "zml$print: missing callback allocator");
-        infer_args.has_result_sharding = false;
-        infer_args.result_sharding = .{ .data = null, .size = 0 };
-        return;
-    };
-    context.mutex.lockUncancelable(context.io);
-    defer context.mutex.unlock(context.io);
-    var arena = context.arena_state.promote(context.arena_backing_allocator);
-    defer context.arena_state.* = arena.state;
-    const allocator = arena.allocator();
-    zml_ffi.inferResultShardingFromOperand(allocator, infer_args, 0, "zml$print");
-}
-
-const CustomPartitionerContext = struct {
-    callback_state_allocator: std.mem.Allocator,
-    arena_backing_allocator: std.mem.Allocator,
-    arena_state: *std.heap.ArenaAllocator.State,
-    io: std.Io,
-    mutex: std.Io.Mutex = .init,
-};
-
-fn getCustomPartitionerContext(callbacks: [*c]pjrt.CustomPartitioner.Callbacks) ?*CustomPartitionerContext {
-    if (callbacks == null) return null;
-    const private_data = callbacks[0].private_data orelse return null;
-    return @ptrCast(@alignCast(private_data));
-}
-
-fn initPrintCustomPartitionerCallbacks(
-    callback_state_allocator: std.mem.Allocator,
-    arena_backing_allocator: std.mem.Allocator,
-    arena_state: *std.heap.ArenaAllocator.State,
-    io: std.Io,
-) !*pjrt.CustomPartitioner.Callbacks {
-    const context = try callback_state_allocator.create(CustomPartitionerContext);
-    context.* = .{
-        .callback_state_allocator = callback_state_allocator,
-        .arena_backing_allocator = arena_backing_allocator,
-        .arena_state = arena_state,
-        .io = io,
-    };
-
-    const callbacks = try callback_state_allocator.create(pjrt.CustomPartitioner.Callbacks);
-    callbacks.* = pjrt.CustomPartitioner.initCallbacks(
-        context,
-        &zml_ffi.noopDtor,
-        &printCustomPartitionerPartition,
-        &printCustomPartitionerInferSharding,
-        &zml_ffi.noopPropagateUserSharding,
-        true,
-    );
-    return callbacks;
 }
 
 fn printCallback(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {

@@ -21,7 +21,6 @@ pub const Data = dtype.Data;
 pub const DataType = dtype.DataType;
 pub const exe = @import("exe.zig");
 pub const Exe = exe.Exe;
-pub const ffi = @import("ffi.zig");
 pub const floats = @import("floats.zig");
 pub const io = @import("io.zig");
 pub const mem = @import("mem.zig");
