@@ -1,4 +1,5 @@
 const std = @import("std");
+
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
@@ -33,13 +34,14 @@ pub const Options = union(Backend) {
     cuda_fa3: flashattn.paged_fa3.Options,
 
     pub fn fromBackend(backend: Backend, is_prefill: bool, batch_size: u32, seq_len: u32, page_chunk_size: u32, max_token_count: u32, num_attention_heads: u32, head_dim: u32) Options {
+        const max_num_pages = @divFloor(seq_len + page_chunk_size - 1, page_chunk_size); // @divCeil
         return switch (backend) {
             .cuda_fa2 => if (is_prefill) .{
                 .cuda_fa2 = .{
                     .mixed = .{
                         .batch_size_decode = batch_size,
                         .batch_size_prefill = batch_size,
-                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_num_pages = max_num_pages,
                         .max_seqlen_k = seq_len,
                         .max_token_count = max_token_count,
                         .num_heads = num_attention_heads,
@@ -50,7 +52,7 @@ pub const Options = union(Backend) {
                 .cuda_fa2 = .{
                     .decode = .{
                         .batch_size = batch_size,
-                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_num_pages = max_num_pages,
                         .max_seqlen_k = seq_len,
                         .max_token_count = max_token_count,
                         .num_heads = num_attention_heads,
@@ -63,7 +65,7 @@ pub const Options = union(Backend) {
                     .mixed = .{
                         .batch_size_decode = batch_size,
                         .batch_size_prefill = batch_size,
-                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_num_pages = max_num_pages,
                         .max_seqlen_k = seq_len,
                         .max_token_count = max_token_count,
                         .num_heads = num_attention_heads,
@@ -74,7 +76,7 @@ pub const Options = union(Backend) {
                 .cuda_fa3 = .{
                     .decode = .{
                         .batch_size = batch_size,
-                        .max_num_pages = seq_len / page_chunk_size,
+                        .max_num_pages = max_num_pages,
                         .max_seqlen_k = seq_len,
                         .max_token_count = max_token_count,
                         .num_heads = num_attention_heads,
