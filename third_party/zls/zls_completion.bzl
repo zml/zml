@@ -34,7 +34,10 @@ def zls_completion(name, deps, testonly = False, **kwargs):
             ":{}".format(build_config),
         ],
         args = [
-            "$(location :{})".format(build_config),
+            "$(rlocationpath :{})".format(build_config),
+        ],
+        deps = [
+            "@rules_zig//zig/runfiles",
         ],
         visibility = ["//visibility:private"],
         testonly = testonly,
