@@ -864,7 +864,7 @@ pub const paged_fa2 = struct {
                 .softmax_scale = softmax_scale,
                 .window_size_left = window_size_left,
                 .window_size_right = window_size_right,
-                .num_splits = MAX_NUM_SPLITS,
+                .num_splits = 8,
                 .num_heads = num_heads,
             };
 
