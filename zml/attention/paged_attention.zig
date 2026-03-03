@@ -106,6 +106,12 @@ pub const Options = union(Backend) {
             inline else => |v| v.isPrefill(),
         };
     }
+
+    pub fn maxNumPages(self: Options) usize {
+        return switch (self) {
+            inline else => |v| v.maxNumPages(),
+        };
+    }
 };
 
 pub const Parameters = union(Backend) {

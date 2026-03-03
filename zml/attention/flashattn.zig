@@ -527,6 +527,13 @@ pub const paged_fa2 = struct {
         pub fn isPrefill(self: Options) bool {
             return self == .mixed;
         }
+
+        pub fn maxNumPages(self: Options) usize {
+            return switch (self) {
+                .decode => |decode_options| decode_options.max_num_pages,
+                .mixed => |mixed_options| mixed_options.max_num_pages,
+            };
+        }
     };
 
     pub const Parameters = union(Variant) {
@@ -933,7 +940,7 @@ pub const paged_fa2 = struct {
                 if (seqlenq_ngroups_swapped) {
                     q2 = q2.transpose(.{ .b, .hg, .hkv, .hd }).merge(.{ .b = .{ .b, .hg } }).withPartitioning(.{ .hkv = .model });
                 } else {
-                    q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .hkv = .{ .hkv, .hg } }).withPartitioning(.{ .hkv = .model });
+                    q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
                 }
 
                 var o = zml.ops.customCall(
@@ -967,7 +974,7 @@ pub const paged_fa2 = struct {
                 if (seqlenq_ngroups_swapped) {
                     o = o.splitAxis(.b, .{ .b = batch_dim, .hg = num_head_groups }).transpose(.{ .b, .hkv, .hg, .hd });
                 } else {
-                    o = o.splitAxis(.hkv, .{ .hkv = num_kv_heads, .hg = num_head_groups });
+                    o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
                 }
 
                 break :b o;
@@ -1004,7 +1011,7 @@ pub const paged_fa2 = struct {
                 const dummy_cu_seqlens_k_prefill = zml.Tensor.constant(zml.DataType.i32.zero()).broad(cu_seqlens_q_prefill.shape());
 
                 var q2 = q;
-                q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .hkv = .{ .hkv, .hg } }).withPartitioning(.{ .hkv = .model });
+                q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
 
                 log.err("{any}", .{mixed_parameters.options});
                 log.err("mixed_prefill/q={f}", .{q.shape()});
@@ -1049,7 +1056,7 @@ pub const paged_fa2 = struct {
                     },
                 );
 
-                o = o.splitAxis(.hkv, .{ .hkv = num_kv_heads, .hg = num_head_groups });
+                o = o.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
 
                 const batch_dim_decode = block_table_decode.dim(0);
                 const out_accum_decode = zml.Tensor.constant(zml.DataType.f32.zero()).broad(.init(.{
@@ -1076,7 +1083,7 @@ pub const paged_fa2 = struct {
                 if (seqlenq_ngroups_swapped) {
                     q_decode = q_decode.transpose(.{ .b, .hg, .hkv, .hd }).merge(.{ .b = .{ .b, .hg } }).withPartitioning(.{ .hkv = .model });
                 } else {
-                    q_decode = q_decode.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .hkv = .{ .hkv, .hg } }).withPartitioning(.{ .hkv = .model });
+                    q_decode = q_decode.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
                 }
 
                 log.err("mixed_decode/q={f}", .{q_decode.shape()});
@@ -1122,7 +1129,7 @@ pub const paged_fa2 = struct {
                 if (seqlenq_ngroups_swapped) {
                     o_decode = o_decode.splitAxis(.b, .{ .b = batch_dim_decode, .hg = num_head_groups }).transpose(.{ .b, .hkv, .hg, .hd });
                 } else {
-                    o_decode = o_decode.splitAxis(.hkv, .{ .hkv = num_kv_heads, .hg = num_head_groups });
+                    o_decode = o_decode.splitAxis(.h, .{ .hkv = num_kv_heads, .hg = num_head_groups });
                 }
 
                 o = o.dynamicUpdateSlice1d(o_decode, 0, context.decode_offset.?);
@@ -1146,6 +1153,13 @@ pub const paged_fa3 = struct {
 
         pub fn isPrefill(self: Options) bool {
             return self == .mixed;
+        }
+
+        pub fn maxNumPages(self: Options) usize {
+            return switch (self) {
+                .decode => |decode_options| decode_options.max_num_pages,
+                .mixed => |mixed_options| mixed_options.max_num_pages,
+            };
         }
     };
 
