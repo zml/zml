@@ -1617,13 +1617,17 @@ pub const Placement = struct {
         global_shape: Shape,
         slices: stdx.BoundedArray(Slice1d, Shape.MAX_RANK),
 
+        pub fn platformDeviceIndex(self: *const Shard, platform: *const Platform) ?usize {
+            for (platform.devices, 0..) |d, device_index| {
+                if (d.id() == self.device_id) return device_index;
+            }
+
+            return null;
+        }
+
         pub fn device(self: *const Shard, platform: *const Platform) PlatformDevice {
-            return blk: {
-                for (platform.devices) |d| {
-                    if (d.id() == self.device_id) break :blk d;
-                }
-                unreachable;
-            };
+            const device_index = self.platformDeviceIndex(platform) orelse unreachable;
+            return platform.devices[device_index];
         }
 
         pub fn memory(self: *const Shard, platform: *const Platform, kind: Memory.Kind) *const Memory {
