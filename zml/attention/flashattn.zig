@@ -500,6 +500,13 @@ pub const paged_fa2 = struct {
         pub fn isPrefill(self: Options) bool {
             return self == .mixed;
         }
+
+        pub fn maxNumPages(self: Options) usize {
+            return switch (self) {
+                .decode => |decode_options| decode_options.max_num_pages,
+                .mixed => |mixed_options| mixed_options.max_num_pages,
+            };
+        }
     };
 
     pub const Parameters = union(Variant) {
@@ -984,6 +991,13 @@ pub const paged_fa3 = struct {
 
         pub fn isPrefill(self: Options) bool {
             return self == .mixed;
+        }
+
+        pub fn maxNumPages(self: Options) usize {
+            return switch (self) {
+                .decode => |decode_options| decode_options.max_num_pages,
+                .mixed => |mixed_options| mixed_options.max_num_pages,
+            };
         }
     };
 
