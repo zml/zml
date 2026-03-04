@@ -472,7 +472,7 @@ pub const Client = opaque {
         buffer_type: BufferType,
         dims: []const i64,
         byte_strides: ?[]const i64,
-        layout: ?MemoryLayout = null,
+        layout: MemoryLayout,
         host_buffer_semantics: HostBufferSemantics,
         dst: union(enum) {
             device: *const Device,
@@ -481,7 +481,6 @@ pub const Client = opaque {
     };
 
     pub fn bufferFromHostBuffer(self: *const Client, api: *const Api, args: BufferFromHostBufferArgs) ApiError!struct { *Buffer, ?*Event } {
-        var c_layout: ?c.PJRT_Buffer_MemoryLayout = if (args.layout) |layout| layout.toCStruct() else null;
         const ret = try api.call(.PJRT_Client_BufferFromHostBuffer, .{
             .client = self.inner(),
             .data = @constCast(args.data),
@@ -490,7 +489,7 @@ pub const Client = opaque {
             .num_dims = args.dims.len,
             .byte_strides = if (args.byte_strides) |bs| @ptrCast(@constCast(bs)) else null,
             .num_byte_strides = if (args.byte_strides) |bs| bs.len else 0,
-            .device_layout = if (c_layout) |*layout| @ptrCast(layout) else null,
+            .device_layout = @ptrCast(@constCast(&args.layout.toCStruct())),
             .host_buffer_semantics = @intFromEnum(args.host_buffer_semantics),
             .device = if (args.dst == .device) @ptrCast(@constCast(args.dst.device)) else null,
             .memory = if (args.dst == .memory) @ptrCast(@constCast(args.dst.memory)) else null,

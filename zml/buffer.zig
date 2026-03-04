@@ -32,6 +32,35 @@ pub const Buffer = struct {
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
 
+    pub const Shard = struct {
+        _platform: *const Platform,
+        _pjrt_buffer: *pjrt.Buffer,
+
+        pub fn devicePtr(self: *const Shard) *anyopaque {
+            return self._pjrt_buffer.opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
+        }
+    };
+
+    pub const ShardIterator = struct {
+        _platform: *const Platform,
+        _shards: []const *pjrt.Buffer,
+        _index: usize = 0,
+
+        pub fn remaining(self: *ShardIterator) usize {
+            return self._shards.len -| self._index;
+        }
+
+        pub fn next(self: *ShardIterator) ?Shard {
+            defer self._index += 1;
+            if (self._index >= self._shards.len) return null;
+
+            return .{
+                ._pjrt_buffer = self._shards[self._index],
+                ._platform = self._platform,
+            };
+        }
+    };
+
     pub const FromOptions = struct { wait: bool = true, memory: Memory.Kind = .default };
 
     /// Frees the accelerator memory.
@@ -46,6 +75,13 @@ pub const Buffer = struct {
     /// This Buffer shape.
     pub fn shape(self: Buffer) Shape {
         return self._shape;
+    }
+
+    pub fn shards(self: *const Buffer) ShardIterator {
+        return .{
+            ._platform = self._platform,
+            ._shards = self._shards.constSlice(),
+        };
     }
 
     pub fn format(self: Buffer, writer: *std.Io.Writer) !void {
@@ -74,7 +110,7 @@ pub const Buffer = struct {
         for (res.placement().shards.constSlice()) |shard| {
             const sub_slice = shard.shardSlice(slice);
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: ?pjrt.MemoryLayout = switch (platform.target) {
+            const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
                         platform.pjrt_api,
@@ -83,9 +119,15 @@ pub const Buffer = struct {
                     );
                     break :blk default_layout.?.toMemoryLayout();
                 },
-                else => null,
+                else => .{
+                    .tiled = .{
+                        .minor_to_major = constants.minorToMajor(shard.shape.rank()),
+                        .tile_dims = &.{},
+                        .tile_dims_sizes = &.{},
+                    },
+                },
             };
-            const args = pjrt.Client.BufferFromHostBufferArgs{
+            const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 .data = sub_slice.constData().ptr,
                 .buffer_type = buffer_type,
                 .dims = shard.shape.dims(),
@@ -176,7 +218,7 @@ pub const Buffer = struct {
                     },
                 },
             };
-            const args = pjrt.Client.CreateUninitializedBufferArgs{
+            const args: pjrt.Client.CreateUninitializedBufferArgs = .{
                 .dims = shard.shape.dims(),
                 .element_type = pjrtx.bufferTypeFromDtype(shard.shape.dtype()),
                 .layout = layout,
@@ -194,18 +236,13 @@ pub const Buffer = struct {
     pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
-        var shards: Shards = .{};
-        shards.appendSliceAssumeCapacity(pjrt_buffers);
+
         return .{
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = shards,
+            ._shards = Shards.fromSlice(pjrt_buffers) catch unreachable,
         };
-    }
-
-    pub fn shardDevicePtr(self: Buffer, shard_index: usize) *anyopaque {
-        return self._shards.get(shard_index).opaqueDeviceMemoryDataPointer(self._platform.pjrt_api) catch unreachable;
     }
 
     /// Fetches the content of the given buffer into a stack variable of the given type.
