@@ -33,10 +33,17 @@ pub fn Union(comptime T: type) type {
         value: T,
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
+            var parse_options = options;
+            parse_options.allocate = .alloc_always;
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+
+            const parsed_value = try std.json.innerParse(std.json.Value, arena.allocator(), source, parse_options);
+
             return jsonParseFromValue(
                 allocator,
-                try std.json.innerParse(std.json.Value, allocator, source, options),
-                options,
+                parsed_value,
+                parse_options,
             );
         }
 
@@ -94,10 +101,17 @@ pub fn TaggedUnion(comptime T: type, comptime tag_name: [:0]const u8) type {
         value: T,
 
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) std.json.ParseError(@TypeOf(source.*))!Self {
+            var parse_options = options;
+            parse_options.allocate = .alloc_always;
+            var arena: std.heap.ArenaAllocator = .init(allocator);
+            defer arena.deinit();
+
+            const parsed_value = try std.json.innerParse(std.json.Value, arena.allocator(), source, parse_options);
+
             return jsonParseFromValue(
                 allocator,
-                try std.json.innerParse(std.json.Value, allocator, source, options),
-                options,
+                parsed_value,
+                parse_options,
             );
         }
 
