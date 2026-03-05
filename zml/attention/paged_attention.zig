@@ -4,12 +4,14 @@ const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
+const triton = @import("triton.zig");
 
 const PagedAttention = @This();
 
 pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
+    triton,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -24,6 +26,7 @@ pub const Backend = enum {
 
                 break :b .cuda_fa2;
             },
+            .rocm => .triton,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -32,6 +35,7 @@ pub const Backend = enum {
 pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
+    triton: triton.paged.Options,
 
     const Args = struct {
         backend: Backend,
@@ -43,6 +47,7 @@ pub const Options = union(Backend) {
         num_heads: u32,
         num_kv_heads: u32,
         head_dim: u32,
+        max_seqlen_q: u32,
     };
 
     pub fn fromBackend(args: Args) Options {
@@ -100,6 +105,14 @@ pub const Options = union(Backend) {
                     },
                 },
             },
+            .triton => .{
+                .triton = .{
+                    .batch_size = args.batch_size,
+                    .max_num_pages = args.max_num_pages,
+                    .max_seqlen_q = args.max_seqlen_q,
+                    .is_prefill = args.is_prefill,
+                },
+            },
         };
     }
 
@@ -119,11 +132,13 @@ pub const Options = union(Backend) {
 pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Parameters,
     cuda_fa3: flashattn.paged_fa3.Parameters,
+    triton: triton.paged.Parameters,
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
             .cuda_fa2 => |cuda_fa2_options| .{ .cuda_fa2 = flashattn.paged_fa2.Parameters.init(cuda_fa2_options) },
             .cuda_fa3 => |cuda_fa3_options| .{ .cuda_fa3 = flashattn.paged_fa3.Parameters.init(cuda_fa3_options) },
+            .triton => |triton_options| .{ .triton = triton.paged.Parameters.init(triton_options) },
         };
     }
 
@@ -131,6 +146,7 @@ pub const Parameters = union(Backend) {
         return switch (self) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.options() },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
+            .triton => |v| .{ .triton = v.options() },
         };
     }
 
@@ -145,11 +161,13 @@ pub const Parameters = union(Backend) {
 pub const Context = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Context,
     cuda_fa3: flashattn.paged_fa3.Context,
+    triton: triton.paged.Context,
 
     pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
         return switch (parameters) {
             .cuda_fa2 => |cuda_fa2_parameters| .{ .cuda_fa2 = flashattn.paged_fa2.Context.init(cuda_fa2_parameters, num_heads, num_kv_heads, head_dim, page_size) },
             .cuda_fa3 => |cuda_fa3_parameters| .{ .cuda_fa3 = flashattn.paged_fa3.Context.init(cuda_fa3_parameters, num_heads, num_kv_heads, head_dim, page_size) },
+            .triton => |triton_parameters| .{ .triton = triton.paged.Context.init(triton_parameters, num_heads, num_kv_heads, head_dim, page_size) },
         };
     }
 };
@@ -165,5 +183,6 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
         .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),
+        .triton => |triton_parameters| triton.paged.pagedAttention(triton_parameters, context.triton, q, k_cache, v_cache, layer_index, opts),
     };
 }
