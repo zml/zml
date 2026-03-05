@@ -50,6 +50,10 @@ pub fn registerPasses(comptime passes: []const u8) void {
     @field(c, "mlirRegister" ++ passes ++ "Passes")();
 }
 
+pub fn registerFuncExtensions(registry: *DialectRegistry) void {
+    c.mlirRegisterFuncExtensions(registry.ptr());
+}
+
 fn isPtrConst(comptime T: type) bool {
     return @typeInfo(T).pointer.is_const;
 }

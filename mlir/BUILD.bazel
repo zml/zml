@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 cc_library(
     name = "c",
+    srcs = ["register.cc"],
     hdrs = ["mlir.h"],
     visibility = ["//mlir:__subpackages__"],
     deps = [
@@ -11,6 +12,7 @@ cc_library(
         "@llvm-project//mlir:CAPIMath",
         "@llvm-project//mlir:CAPISCF",
         "@llvm-project//mlir:CAPITransforms",
+        "@llvm-project//mlir:FuncExtensions",
     ],
 )
 

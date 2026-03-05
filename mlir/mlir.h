@@ -7,3 +7,13 @@
 #include <mlir-c/IR.h>
 #include <mlir-c/Pass.h>
 #include <mlir-c/Transforms.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+void mlirRegisterFuncExtensions(MlirDialectRegistry registry);
+
+#ifdef __cplusplus
+}
+#endif

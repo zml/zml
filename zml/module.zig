@@ -33,6 +33,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         inline for (.{ "func", "stablehlo" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
+        mlir.registerFuncExtensions(mlir_registry);
 
         mlir_global_registry = mlir_registry;
     }
