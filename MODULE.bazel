@@ -20,7 +20,7 @@ bazel_dep(name = "rules_rust", version = "0.68.1")
 bazel_dep(name = "rules_rs", version = "0.0.28")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
-bazel_dep(name = "toolchains_llvm_bootstrapped", version = "0.5.5")
+bazel_dep(name = "llvm", version = "0.6.1")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.1")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
@@ -53,9 +53,7 @@ register_toolchains("@zig_toolchains//:all")
 ###
 
 ### LLVM Bootstrapped toolchains
-register_toolchains(
-    "@toolchains_llvm_bootstrapped//toolchain:all",
-)
+register_toolchains("@llvm//toolchain:all")
 ###
 
 uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
