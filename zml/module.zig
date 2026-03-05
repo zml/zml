@@ -19,6 +19,27 @@ const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");
 
+var mlir_global_init_mutex: std.Io.Mutex = .init;
+var mlir_global_registry: ?*mlir.DialectRegistry = null;
+
+fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
+    mlir_global_init_mutex.lockUncancelable(io);
+    defer mlir_global_init_mutex.unlock(io);
+
+    if (mlir_global_registry == null) {
+        mlir.registerPasses("Transforms");
+
+        const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
+        inline for (.{ "func", "stablehlo" }) |d| {
+            mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
+        }
+
+        mlir_global_registry = mlir_registry;
+    }
+
+    return mlir_global_registry.?;
+}
+
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
 pub const CompilationContext = struct {
@@ -60,12 +81,7 @@ pub const CompilationContext = struct {
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) CompilationContext {
-        _ = io; // autofix
-        mlir.registerPasses("Transforms");
-        const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo" }) |d| {
-            mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
-        }
+        const mlir_registry = mlirRegistry(io);
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
 
@@ -101,7 +117,6 @@ pub const CompilationContext = struct {
         self.mlir_pass_manager.deinit();
         self.module.deinit();
         self.mlir_ctx.deinit();
-        self.mlir_registry.deinit();
         self.arena.deinit();
     }
 
