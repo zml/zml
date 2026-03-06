@@ -79,3 +79,11 @@ platform(
     ],
     visibility = ["//visibility:public"],
 )
+
+platform(
+    name = "host_glibc",
+    parents = ["@platforms//host"],
+    constraint_values = [
+        "@llvm//constraints/libc:gnu.2.28",
+    ],
+)

@@ -7,6 +7,7 @@ rust_static_library(
     srcs = ["hftokenizers.rs"],
     crate_name = "zml_tokenizer_hftokenizers",
     edition = "2021",
+    proc_macro_deps = ["@crates//:tokenizers"],
     deps = ["@crates//:tokenizers"],
 )
 

@@ -71,11 +71,11 @@ common          --incompatible_enable_proto_toolchain_resolution
 common          --incompatible_disallow_empty_glob=false
 
 # Use the C linker to link Zig code
-common          --@rules_zig//zig/settings:use_cc_common_link=True
+common          --@rules_zig//zig/settings:use_cc_common_link=true
 # Zig self hosted backend is too fragile for now
 common          --@rules_zig//zig/settings:zigopt=-fllvm
 
-common          --@llvm//config:experimental_stub_libgcc_s=True
+common          --@llvm//config:experimental_stub_libgcc_s=true
 
 common          --macos_minimum_os=13.0
 
@@ -114,3 +114,5 @@ common:release  --@rules_zig//zig/settings:mode=release_safe
 common:native   --copt=-march=native
 common:native   --@rules_zig//zig/settings:zigopt=-mcpu=native
 common:native   --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native
+
+common:linux    --host_platform=//platforms:host_glibc
