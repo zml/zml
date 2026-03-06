@@ -16,8 +16,11 @@ pub fn isEnabled() bool {
 }
 
 fn hasNvidiaDevice(io: std.Io) bool {
-    std.Io.Dir.accessAbsolute(io, "/dev/nvidiactl", .{ .read = true }) catch return false;
-    return true;
+    for (&[_][]const u8{ "/dev/nvidiactl", "/dev/dxg" }) |dev| {
+        std.Io.Dir.accessAbsolute(io, dev, .{ .read = true }) catch continue;
+        return true;
+    }
+    return false;
 }
 
 fn hasCudaPathInLDPath() bool {
