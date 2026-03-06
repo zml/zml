@@ -755,12 +755,9 @@ pub const paged_fa2 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[11]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -827,12 +824,9 @@ pub const paged_fa2 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[10]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -888,6 +882,7 @@ pub const paged_fa2 = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index_: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        _ = layer_index_; // autofix
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
@@ -897,7 +892,6 @@ pub const paged_fa2 = struct {
         const num_kv_heads = q.dim(.hkv);
         const head_dim = q.dim(.hd);
         const num_heads = num_head_groups * num_kv_heads;
-        const layer_index = layer_index_.reshape(.{1}).withPartitioning(.{ ._0 = .replicated });
         // FIXME: remove unreachable and propagate error correctly.
         const num_heads_per_shard = @divExact(num_heads, ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable);
 
@@ -950,7 +944,6 @@ pub const paged_fa2 = struct {
                         softmax_lse,
                         softmax_lse_accum,
                         out_accum,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1027,7 +1020,6 @@ pub const paged_fa2 = struct {
                         softmax_lse_accum_prefill,
                         out_accum_prefill,
                         host_metadata,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1091,7 +1083,6 @@ pub const paged_fa2 = struct {
                         softmax_lse_decode,
                         softmax_lse_accum_decode,
                         out_accum_decode,
-                        layer_index,
                     },
                     output_shape_decode,
                     .{
