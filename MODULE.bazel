@@ -16,7 +16,7 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.8.4")
-bazel_dep(name = "rules_rs", version = "0.0.33")
+bazel_dep(name = "rules_rs", version = "0.0.41")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "llvm", version = "0.6.1")
@@ -130,7 +130,7 @@ use_repo(llvm, "llvm-project")
 rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
     edition = "2024",
-    version = "1.92.0",
+    version = "1.94.0",
 )
 use_repo(rs_toolchains, "default_rust_toolchains")
 
@@ -147,6 +147,7 @@ crate.from_cargo(
         "aarch64-unknown-linux-gnu",
         "x86_64-unknown-linux-gnu",
     ],
+    use_experimental_platforms = True,
 )
 use_repo(crate, "crates")
 
