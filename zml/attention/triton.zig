@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("../zml.zig");
-
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
@@ -312,15 +311,13 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        const sliced_k_cache = k_cache.dynamicSlice1d(0, .{ .start = layer_index, .len = 1 }).squeeze(.layer);
-        const sliced_v_cache = v_cache.dynamicSlice1d(0, .{ .start = layer_index, .len = 1 }).squeeze(.layer);
         const paged_attention_opts: PagedAttentionOptions = .{
             // TODO(Corentin): get the cu count
             .cu_count = 128,
             .all_decode = !parameters.options_.is_prefill,
             .num_tokens = @intCast(q.dim(.b)),
             .num_heads = @intCast(q.dim(.h)),
-            .num_kv_heads = @intCast(sliced_k_cache.dim(.h)),
+            .num_kv_heads = @intCast(k_cache.dim(.h)),
             .head_dim = @intCast(q.dim(.hd)),
             .batch_size = @intCast(parameters.block_table.dim(.b)),
             .block_size = @intCast(k_cache.dim(.k_chunk)),
@@ -339,9 +336,9 @@ pub const paged = struct {
             paged_attention_opts.num2dPrograms(),
         );
         const output = if (use_2d_kernel)
-            pagedAttention2d(parameters, context, q, sliced_k_cache, sliced_v_cache, layer_index, opts, paged_attention_opts)
+            pagedAttention2d(parameters, context, q, k_cache, v_cache, layer_index, opts, paged_attention_opts)
         else
-            pagedAttention3d(parameters, context, q, sliced_k_cache, sliced_v_cache, layer_index, opts, paged_attention_opts);
+            pagedAttention3d(parameters, context, q, k_cache, v_cache, layer_index, opts, paged_attention_opts);
 
         return output;
     }
