@@ -617,13 +617,9 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(DecodeMetadata) {
-            const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
-            const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
-            const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(platform, tp_mesh, tp_strategy);
-
+        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(DecodeMetadata) {
             return .{
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding_tp),
+                .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
             };
         }
 
@@ -710,13 +706,9 @@ pub const paged_fa2 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(MixedMetadata) {
-            const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
-            const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
-            const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(platform, tp_mesh, tp_strategy);
-
+        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(MixedMetadata) {
             return .{
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding_tp),
+                .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
                 .host_metadata = undefined,
             };
         }
@@ -1021,20 +1013,6 @@ pub const paged_fa2 = struct {
                 var q2 = q;
                 q2 = q2.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
 
-                log.err("{any}", .{mixed_parameters.options});
-                log.err("mixed_prefill/q={f}", .{q.shape()});
-                log.err("mixed_prefill/k_cache={f}", .{k_cache.shape()});
-                log.err("mixed_prefill/v_cache={f}", .{v_cache.shape()});
-                log.err("mixed_prefill/cu_seqlens_q={f}", .{cu_seqlens_q_prefill.shape()});
-                log.err("mixed_prefill/dummy_cu_seqlens_k={f}", .{dummy_cu_seqlens_k_prefill.shape()});
-                log.err("mixed_prefill/seqused_k={f}", .{seqused_k_prefill.shape()});
-                log.err("mixed_prefill/block_table={f}", .{block_table_prefill.shape()});
-                log.err("mixed_prefill/softmax_lse={f}", .{softmax_lse_prefill.shape()});
-                log.err("mixed_prefill/softmax_lse_accum={f}", .{softmax_lse_accum_prefill.shape()});
-                log.err("mixed_prefill/out_accum={f}", .{mixed_parameters.metadata.out_accum.shape()});
-                log.err("mixed_prefill/host_metadata={f}", .{host_metadata.shape()});
-                log.err("mixed_prefill/layer_index={f}", .{layer_index.shape()});
-
                 const output_shape = q2.shape();
                 var o = zml.ops.manualComputation(
                     .{
@@ -1099,18 +1077,6 @@ pub const paged_fa2 = struct {
                 } else {
                     q_decode = q_decode.transpose(.{ .b, .hkv, .hg, .hd }).merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
                 }
-
-                log.err("mixed_decode/q={f}", .{q_decode.shape()});
-                log.err("mixed_decode/k_cache={f}", .{k_cache.shape()});
-                log.err("mixed_decode/v_cache={f}", .{v_cache.shape()});
-                log.err("mixed_decode/cu_seqlens_q={f}", .{cu_seqlens_q_decode.shape()});
-                log.err("mixed_decode/dummy_cu_seqlens_k={f}", .{dummy_cu_seqlens_k_decode.shape()});
-                log.err("mixed_decode/seqused_k={f}", .{seqused_k_decode.shape()});
-                log.err("mixed_decode/block_table={f}", .{block_table_decode.shape()});
-                log.err("mixed_decode/softmax_lse={f}", .{softmax_lse_decode.shape()});
-                log.err("mixed_decode/softmax_lse_accum={f}", .{softmax_lse_accum_decode.shape()});
-                log.err("mixed_decode/out_accum={f}", .{mixed_parameters.metadata.out_accum.shape()});
-                log.err("mixed_decode/layer_index={f}", .{layer_index.shape()});
 
                 const output_shape_decode = q_decode.shape();
                 var o_decode = zml.ops.manualComputation(
@@ -1257,9 +1223,9 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(DecodeMetadata) {
+        pub fn initBuffers(self: *const DecodeMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(DecodeMetadata) {
             return .{
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
             };
         }
 
@@ -1335,9 +1301,9 @@ pub const paged_fa3 = struct {
             };
         }
 
-        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform) !zml.Bufferized(MixedMetadata) {
+        pub fn initBuffers(self: *const MixedMetadata, io: std.Io, platform: zml.Platform, out_accum_sharding: zml.sharding.Sharding) !zml.Bufferized(MixedMetadata) {
             return .{
-                .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), .{}),
+                .out_accum = try zml.Buffer.uninitialized(io, &platform, self.out_accum.shape(), out_accum_sharding, .{}),
                 .host_metadata = undefined,
             };
         }

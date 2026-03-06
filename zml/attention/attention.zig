@@ -71,7 +71,7 @@ pub const Metadata = union(Backend) {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
-                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads  } },
+                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
             };
         }
     };

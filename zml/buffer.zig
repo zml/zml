@@ -300,6 +300,16 @@ pub const Buffer = struct {
         return slice;
     }
 
+    pub fn byteSize(self: Buffer) usize {
+        var byte_size: usize = 0;
+
+        for (self.placement().shards.constSlice()) |shard| {
+            byte_size += shard.shape.byteSize();
+        }
+
+        return byte_size;
+    }
+
     pub fn placement(self: Buffer) Placement {
         return Placement.init(self._sharding, self._shape) catch unreachable;
     }

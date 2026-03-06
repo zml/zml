@@ -93,7 +93,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu,.neuron => return true,
+            .cpu, .neuron => return true,
         }
     }
 

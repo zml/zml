@@ -169,6 +169,23 @@ pub fn main(init: std.process.Init) !void {
     var platform: *zml.Platform = try .auto(allocator, io, create_options);
     defer platform.deinit(allocator);
 
+    log.info("\n{f}", .{platform.fmtVerbose()});
+
+    var profiler = try platform.profiler(init.arena.allocator());
+    if (profiler) |*p| {
+        try p.start();
+    }
+
+    defer {
+        if (profiler) |*p| {
+            p.stop() catch {};
+            const pb = p.collectData(allocator) catch unreachable;
+            const file: std.Io.File = std.Io.Dir.createFile(.cwd(), io, "/tmp/profiling.pb", .{}) catch unreachable;
+            file.writePositionalAll(io, pb, 0) catch unreachable;
+            allocator.free(pb);
+        }
+    }
+
     log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
     log.info("{f}", .{platform.physical_mesh});
 
