@@ -7,7 +7,11 @@
   | <a href="./CONTRIBUTING.md">Contributing</a>
 </div>
 
+[ZML]: https://zml.ai/
+[Getting Started]: #getting-started
+[Documentation]: https://docs.zml.ai
 [Contributing]: ./CONTRIBUTING.md
+[Discord]: https://discord.gg/6y72SN2E7H
 
 # Bonjour 👋
 
