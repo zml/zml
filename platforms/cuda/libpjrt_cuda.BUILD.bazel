@@ -42,7 +42,7 @@ copy_to_directory(
         "@zml//platforms/cuda:zmlxcuda",
     ],
     replace_prefixes = {
-        "compat": "lib",
+        "compat": "lib/compat",
         "libcuda": "lib",
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
@@ -50,7 +50,7 @@ copy_to_directory(
         "lib/x86_64-linux-gnu": "lib",
         "platforms/cuda": "lib",
     } | {
-        "{}.patchelf".format(file): "lib"
+        "{}.patchelf".format(file): "lib/compat"
         for file in CUDA_COMPAT_FILES
     },
     add_directory_to_runfiles = False,

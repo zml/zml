@@ -15,6 +15,56 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CUDA");
 }
 
+pub fn modelNameNeedsCompat(model_line: []const u8) bool {
+    const names = &[_][]const u8{
+        " A100",
+        " A6000",
+        " H100",
+        " H200",
+        " B100",
+        " B200",
+        " B300",
+    };
+    for (names) |name| {
+        if (std.ascii.findIgnoreCase(model_line, name) != null) {
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn needsCudaCompat(io: std.Io) !bool {
+    var dir = try std.Io.Dir.openDirAbsolute(io, "/proc/driver/nvidia/gpus", .{ .iterate = true });
+    defer dir.close(io);
+
+    var it = dir.iterate();
+    while (try it.next(io)) |entry| {
+        if (entry.kind != .directory) {
+            continue;
+        }
+
+        var gpu_dir = try dir.openDir(io, entry.name, .{});
+        defer gpu_dir.close(io);
+
+        var information_file: std.Io.File = try gpu_dir.openFile(io, "information", .{});
+        defer information_file.close(io);
+
+        var buffer: [4096]u8 = undefined;
+        var file_reader = information_file.reader(io, &buffer);
+        while (true) {
+            const line = file_reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
+                std.Io.Reader.DelimiterError.EndOfStream => break,
+                else => return err,
+            };
+            if (std.ascii.startsWithIgnoreCase(line, "Model:")) {
+                return modelNameNeedsCompat(line);
+            }
+        }
+    }
+
+    return false;
+}
+
 fn hasNvidiaDevice(io: std.Io) bool {
     for (&[_][]const u8{ "/dev/nvidiactl", "/dev/dxg" }) |dev| {
         std.Io.Dir.accessAbsolute(io, dev, .{ .read = true }) catch continue;
@@ -64,12 +114,20 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
     {
-        var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnvtx3interop.so" });
-        _ = std.c.dlopen(path, .{ .NOW = true, .GLOBAL = true }) orelse {
-            log.err("Unable to dlopen libnvtx3interop.so: {s}", .{std.c.dlerror().?});
-            return error.DlError;
+        const cudaCompat = needsCudaCompat(io) catch |err| blk: {
+            log.err("Unable to determine wether or not to use CUDA Compat, disabling: {any}", .{err});
+            break :blk false;
         };
+
+        if (cudaCompat) {
+            log.warn("Detected NVIDIA GPU that requires CUDA compatibility libraries.", .{});
+            var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "compat", "libcuda.so.1" });
+            _ = std.c.dlopen(path, .{ .NOW = true }) orelse {
+                log.warn("Failed to load CUDA compatibility library from {s}: {any}", .{ path, std.mem.span(std.c.dlerror()) });
+            };
+            log.info("Loaded CUDA compatibility libraries.", .{});
+        }
     }
 
     return blk: {
