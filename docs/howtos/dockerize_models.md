@@ -135,10 +135,10 @@ And that's almost it! You can already build the image:
 ```
 bazel build --config=release //examples/simple_layer:image
 
-INFO: Analyzed target //simple_layer:image (1 packages loaded, 8 targets configured).
+INFO: Analyzed target //examples/simple_layer:image (1 packages loaded, 8 targets configured).
 INFO: Found 1 target...
-Target //simple_layer:image up-to-date:
-  bazel-out/k8-dbg-ST-f832ad0148ae/bin/simple_layer/image_
+Target //examples/simple_layer:image up-to-date:
+  bazel-out/k8-dbg-ST-f832ad0148ae/bin/examples/simple_layer/image_
 INFO: Elapsed time: 0.279s, Critical Path: 0.00s
 INFO: 1 process: 1 internal.
 INFO: Build completed successfully, 1 total action
@@ -168,7 +168,7 @@ oci_load(
 ... then we can load the image and run it with the following commands:
 
 ```
-bazel run --config=release //simple_layer:load
+bazel run --config=release //examples/simple_layer:load
 docker run --rm distroless/simple_layer:latest
 ```
 
@@ -193,7 +193,7 @@ This will push the `simple_layer` image with the tag `latest` (you can add more)
 to the docker registry:
 
 ```
-bazel run --config=release //simple_layer:push
+bazel run --config=release //examples/simple_layer:push
 ```
 
 When dealing with maybe a public and a private container registry - or if you
@@ -201,7 +201,7 @@ just want to try it out **right now**, you can always override the repository on
 the command line:
 
 ```
-bazel run --config=release //simple_layer:push -- --repository my.server.com/org/image
+bazel run --config=release //examples/simple_layer:push -- --repository my.server.com/org/image
 ```
 
 
@@ -215,7 +215,7 @@ We'll use the [MNIST
 example](https://github.com/zml/zml/tree/master/examples/mnist) to illustrate
 how to build Docker images that also contain data files.
 
-You can `bazel run --config=release //mnist:push -- --repository
+You can `bazel run --config=release //examples/mnist:push -- --repository
 index.docker.io/my_org/zml_mnist` in the `./examples` folder if you want to try
 it out.
 
@@ -231,7 +231,7 @@ platforms your containerized model should support.**
 **Example:**
 
 ```
-bazel run //mnist:push --config=release --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //examples/mnist:push --config=release --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
 
 
@@ -372,5 +372,5 @@ And that's it! With one simple bazel command, you can push a neatly packaged
 MNIST model, including weights and dataset, to the docker registry:
 
 ```
-bazel run //mnist:push --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //examples/mnist:push --@zml//runtimes:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```

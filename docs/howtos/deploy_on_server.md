@@ -24,7 +24,7 @@ So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
-bazel run --config=release //examples/llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama:llama --@zml//runtimes:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
 ```
 
 
@@ -40,7 +40,7 @@ architectures:
 As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
-bazel build --config=release //examples/llama          \
+bazel build --config=release //examples/llama:llama \
     --@zml//runtimes:cuda=true                \
     --@zml//runtimes:cpu=false                \
     --platforms=@zml//platforms:linux_amd64
@@ -81,15 +81,15 @@ tar(
 ... and then build the TAR archive:
 
 ```
-bazel build --config=release //mnist:archive                    \
+bazel build --config=release //examples/mnist:archive                    \
             --@zml//runtimes:cuda=true                \
             --@zml//runtimes:cpu=false                \
             --platforms=@zml//platforms:linux_amd64
 ```
 
-Note the `//mnist:archive` notation.
+Note the `//examples/mnist:archive` notation.
 
-The resulting tar file will be in `bazel-bin/mnist/archive.tar.zst`.
+The resulting tar file will be in `bazel-bin/examples/mnist/archive.tar.zst`.
 
 ### Run it on the server
 
@@ -98,14 +98,14 @@ and run it:
 
 ```bash
 # on your machine
-scp bazel-bin/mnist/archive.tar.zst destination-server:
+scp bazel-bin/examples/mnist/archive.tar.zst destination-server:
 ssh destination-server   # to enter the server
 
 # ... on the server
 tar xvf archive.tar.zst
 ./mnist \
-    'mnist.runfiles/_main~_repo_rules~com_github_ggerganov_ggml_mnist/file/mnist.pt' \
-    'mnist.runfiles/_main~_repo_rules~com_github_ggerganov_ggml_mnist_data/file/mnist.ylc'
+    'mnist.runfiles/zml~_repo_rules~mnist/file/mnist.safetensors' \
+    'mnist.runfiles/zml~_repo_rules~mnist_data/file/t10k-images.idx3-ubyte'
 ```
 
 The easiest way to figure out the commandline arguments of an example model is
@@ -116,16 +116,16 @@ file or in a `weights.bzl` file.
 You can also consult the console output when running your model locally:
 
 ```bash
-bazel run //mnist
+bazel run //examples/mnist:mnist
 
-INFO: Analyzed target //mnist:mnist (0 packages loaded, 0 targets configured).
+INFO: Analyzed target //examples/mnist:mnist (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
-Target //mnist:mnist up-to-date:
-  bazel-bin/mnist/mnist
+Target //examples/mnist:mnist up-to-date:
+  bazel-bin/examples/mnist/mnist
 INFO: Elapsed time: 0.302s, Critical Path: 0.00s
 INFO: 3 processes: 3 internal.
 INFO: Build completed successfully, 3 total actions
-INFO: Running command line: bazel-bin/mnist/mnist ../_main~_repo_rules~com_github_ggerganov_ggml_mnist/file/mnist.pt ../_main~_repo_rules~com_github_ggerganov_ggml_mnist_data/file/mnist.ylc
+INFO: Running command line: bazel-bin/examples/mnist/mnist ../_main~_repo_rules~com_google_sentencepiece/file/..
 # ...
 ```
 

@@ -7,11 +7,7 @@
   | <a href="./CONTRIBUTING.md">Contributing</a>
 </div>
 
-[ZML]: https://zml.ai/
-[Getting Started]: #getting-started
-[Documentation]: https://docs.zml.ai
 [Contributing]: ./CONTRIBUTING.md
-[Discord]: https://discord.gg/6y72SN2E7H
 
 # Bonjour 👋
 
@@ -28,7 +24,8 @@ power of [Bazel](https://bazel.build).
 
 &nbsp;
 
-# We're happy to share!
+# We're happy to share
+
 We're very happy to share our inference stack with the World and hope it allows
 you, too, to build cool and exciting AI projects.
 
@@ -37,7 +34,7 @@ To give you a glimpse of what you can do with ZML, here is an early demo:
 <div align="center"><img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/ZML.gif" style="width:75%"></div>
 
 It shows a prototype running a LLama3 model sharded on 1 NVIDIA RTX 4090, 1 AMD
-6800XT, and 1 Google Cloud TPU v2.  All accelerators were hosted in different
+6800XT, and 1 Google Cloud TPU v2. All accelerators were hosted in different
 locations, with activations being passed over a VPN.
 
 All processes used the same model code, cross-compiled on a Mac, and copied onto
@@ -46,11 +43,7 @@ the servers.
 For more inspiration, see also the examples below or check out the
 [examples](./examples) folder.
 
-
-
 # Getting started
-
-
 
 ## Prerequisites
 
@@ -67,24 +60,27 @@ and runs it.
 <details><summary>
 
 ### macOS
+
 </summary>
 
 ```
 brew install bazelisk
 ```
+
 </details>
 
 <details><summary>
 
 ### Linux
+
 </summary>
 
 ```
 curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64'
 chmod +x /usr/local/bin/bazel
 ```
-</details>
 
+</details>
 
 ## Run a pre-packaged model
 
@@ -109,8 +105,6 @@ bazel run --config=release //examples/mnist
 ./bazel.sh run --config=release //examples/mnist
 ```
 
-
-
 ### Meta Llama 3.1 8B
 
 This model has restrictions, see
@@ -120,7 +114,7 @@ approval from Meta on Huggingface**, which can take a few hours to get granted.
 Once you've been granted access, you're ready to download a gated model like
 `Llama-3.1-8B-Instruct`!
 
-First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
+First, you need to download the model using the [Huggingface CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
 Note you don't need to install it yourself,
 you can just use the packaged version `bazel run //tools/hf --`.
 
@@ -173,20 +167,15 @@ bazel run --config=release //examples/llama                       \
           --prompt="What is the capital of France?"
 ```
 
-
 ## Run Tests
 
 ```
 bazel test //zml:test
 ```
 
-
 # A taste of ZML
 
-
-
 ## MNIST
-
 
 ```zig
 const std = @import("std");
@@ -219,8 +208,6 @@ const Mnist = struct {
 };
 ```
 
-
-
 ## Tagged Tensors
 
 ```zig
@@ -235,29 +222,20 @@ const Sdpa = struct {
 };
 ```
 
-
-
-
-# Where to go next:
+# Where to go next
 
 You might want to check out more [examples](./examples), read through the
 [documentation directly on GitHub](./docs/README.md), or, for the full rendering
 experience, browse the
 [online documentation with included API reference](https://docs.zml.ai).
 
-
-
 # Contributing
 
 See [here][Contributing].
 
-
-
 # License
 
 ZML is licensed under the [Apache 2.0 license](./LICENSE).
-
-
 
 # Thanks to our contributors
 

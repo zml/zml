@@ -378,20 +378,20 @@ With everything in place now, running the model is easy:
 
 ```
 # run release (--config=release)
-bazel run --config=release //examples/simple_layer
+bazel run --config=release //examples/simple_layer:simple_layer
 
 # compile and run debug version
-bazel run //simple_layer
+bazel run //examples/simple_layer:simple_layer
 ```
 
 And voila! Here's the output:
 
 ```
-bazel run --config=release //simple_layer
-INFO: Analyzed target //simple_layer:simple_layer (0 packages loaded, 0 targets configured).
+bazel run --config=release //examples/simple_layer:simple_layer
+INFO: Analyzed target //examples/simple_layer:simple_layer (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
-Target //simple_layer:simple_layer up-to-date:
-  bazel-bin/simple_layer/simple_layer
+Target //examples/simple_layer:simple_layer up-to-date:
+  bazel-bin/examples/simple_layer/simple_layer
 INFO: Elapsed time: 0.120s, Critical Path: 0.00s
 INFO: 1 process: 1 internal.
 INFO: Build completed successfully, 1 total action
