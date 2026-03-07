@@ -7,6 +7,8 @@ const c = @import("c");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
+const compat_probe = @import("compat_probe.zig");
+
 const nvidiaLibsPath = "/cuda/";
 
 const log = std.log.scoped(.@"zml/platforms/cuda");
@@ -15,54 +17,33 @@ pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CUDA");
 }
 
-pub fn modelNameNeedsCompat(model_line: []const u8) bool {
-    const names = &[_][]const u8{
-        " A100",
-        " A6000",
-        " H100",
-        " H200",
-        " B100",
-        " B200",
-        " B300",
+pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const nvidia_compat_path = try stdx.Io.Dir.path.bufJoinZ(&buf, &.{ sandbox_path, "bin", "compat_probe" });
+
+    var child = try std.process.spawn(io, .{
+        .argv = &[_][]const u8{nvidia_compat_path},
+        .cwd = .{ .path = sandbox_path },
+        .stdin = .ignore,
+        .stdout = .ignore,
+        .stderr = .ignore,
+    });
+    defer child.kill(io);
+
+    const res = child.wait(io) catch |err| {
+        log.err("Failed to run CUDA compatibility probe: {any}", .{err});
+        return err;
     };
-    for (names) |name| {
-        if (std.ascii.findIgnoreCase(model_line, name) != null) {
-            return true;
-        }
-    }
-    return false;
-}
+    const result: compat_probe.ExitCode = @enumFromInt(res.exited);
 
-pub fn needsCudaCompat(io: std.Io) !bool {
-    var dir = try std.Io.Dir.openDirAbsolute(io, "/proc/driver/nvidia/gpus", .{ .iterate = true });
-    defer dir.close(io);
-
-    var it = dir.iterate();
-    while (try it.next(io)) |entry| {
-        if (entry.kind != .directory) {
-            continue;
-        }
-
-        var gpu_dir = try dir.openDir(io, entry.name, .{});
-        defer gpu_dir.close(io);
-
-        var information_file: std.Io.File = try gpu_dir.openFile(io, "information", .{});
-        defer information_file.close(io);
-
-        var buffer: [4096]u8 = undefined;
-        var file_reader = information_file.reader(io, &buffer);
-        while (true) {
-            const line = file_reader.interface.takeDelimiterInclusive('\n') catch |err| switch (err) {
-                std.Io.Reader.DelimiterError.EndOfStream => break,
-                else => return err,
-            };
-            if (std.ascii.startsWithIgnoreCase(line, "Model:")) {
-                return modelNameNeedsCompat(line);
-            }
-        }
-    }
-
-    return false;
+    return switch (result) {
+        .Success => true,
+        .CompatNotSupportedOnDevice => false,
+        .UnexpectedError => blk: {
+            log.err("CUDA compatibility probe returned unexpected error code", .{});
+            break :blk false;
+        },
+    };
 }
 
 fn hasNvidiaDevice(io: std.Io) bool {
@@ -114,7 +95,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     try setupXlaGpuCudaDirFlag(arena.allocator(), sandbox_path);
 
     {
-        const cudaCompat = needsCudaCompat(io) catch |err| blk: {
+        const cudaCompat = needsCudaCompat(io, sandbox_path) catch |err| blk: {
             log.err("Unable to determine wether or not to use CUDA Compat, disabling: {any}", .{err});
             break :blk false;
         };

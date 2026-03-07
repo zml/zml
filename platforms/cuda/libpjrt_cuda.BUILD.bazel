@@ -39,16 +39,17 @@ copy_to_directory(
         "@libnvjitlink",
         "@nccl",
         "@zlib1g",
+        "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
     ],
     replace_prefixes = {
         "compat": "lib/compat",
-        "libcuda": "lib",
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
         "libpjrt_cuda_so": "lib",
         "lib/x86_64-linux-gnu": "lib",
-        "platforms/cuda": "lib",
+        "platforms/cuda/compat_probe": "bin/compat_probe",
+        "platforms/cuda/libzmlxcuda": "lib/libzmlxcuda",
     } | {
         "{}.patchelf".format(file): "lib/compat"
         for file in CUDA_COMPAT_FILES

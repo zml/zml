@@ -1,5 +1,11 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_binary");
+
+zig_binary(
+    name = "compat_probe",
+    main = "compat_probe.zig",
+    visibility = ["@libpjrt_cuda//:__subpackages__"],
+)
 
 zig_shared_library(
     name = "zmlxcuda",
@@ -32,6 +38,7 @@ zig_library(
         ],
         "//conditions:default": [":empty"],
     }),
+    srcs = ["compat_probe.zig"],
     import_name = "platforms/cuda",
     main = "cuda.zig",
     visibility = ["//visibility:public"],
