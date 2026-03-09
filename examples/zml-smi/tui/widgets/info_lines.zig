@@ -40,7 +40,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     });
     const total_kib = host.mem_total_kib orelse 0;
     const avail_kib = host.mem_available_kib orelse 0;
-    const used_gb = (total_kib - avail_kib) / (1024 * 1024);
+    const used_gb = (total_kib -| avail_kib) / (1024 * 1024);
     const total_gb = total_kib / (1024 * 1024);
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});

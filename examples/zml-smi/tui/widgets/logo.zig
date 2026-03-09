@@ -13,8 +13,6 @@ compact: bool = false,
 
 const logo_lines = [_][]const u8{
     "                           ",
-    "                           ",
-    "                           ",
     "███████╗███╗   ███╗██╗     ",
     "╚══███╔╝████╗ ████║██║     ",
     "  ███╔╝ ██╔████╔██║██║     ",
@@ -33,7 +31,7 @@ const compact_lines = [_][]const u8{
 };
 
 pub const logo_width: u16 = 28;
-pub const logo_height: u16 = 9;
+pub const logo_height: u16 = 7;
 pub const compact_height: u16 = 6;
 
 pub fn widget(self: *const Logo) vxfw.Widget {
@@ -68,9 +66,7 @@ fn drawAscii(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     // Gradient colors for each row
     const all_colors = [logo_height]vaxis.Cell.Color{
         .{ .rgb = .{ 120, 170, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
         .{ .rgb = .{ 160, 190, 255 } },
-        .{ .rgb = .{ 180, 200, 255 } },
         .{ .rgb = .{ 140, 180, 255 } },
         .{ .rgb = .{ 140, 180, 255 } },
         .{ .rgb = .{ 140, 180, 255 } },

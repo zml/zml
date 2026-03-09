@@ -7,7 +7,6 @@ const StatusLine = @This();
 
 viewing_device: ?u8,
 use_braille: bool,
-processes_collapsed: bool,
 
 pub fn widget(self: *const StatusLine) vxfw.Widget {
     return .{
@@ -46,9 +45,6 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
         bindings_buf[n] = .{ .key = "v", .desc = chart_label };
         n += 1;
     }
-    const proc_label = if (self.processes_collapsed) "expand procs" else "collapse procs";
-    bindings_buf[n] = .{ .key = "p", .desc = proc_label };
-    n += 1;
     bindings_buf[n] = .{ .key = "q", .desc = "quit" };
     n += 1;
 

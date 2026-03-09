@@ -40,6 +40,7 @@ pub const ReturnError = error{
 
 fn check(ret: c.amdsmi_status_t) Error!void {
     if (ret == c.AMDSMI_STATUS_SUCCESS) return;
+
     return switch (ret) {
         c.AMDSMI_STATUS_INVAL => error.inval,
         c.AMDSMI_STATUS_NOT_SUPPORTED => error.not_supported,
@@ -156,10 +157,12 @@ pub fn getName(handle: Handle, buf: *[256]u8) Error![:0]const u8 {
 }
 
 pub fn getPowerUsage(handle: Handle) Error!u32 {
-    var info: c.amdsmi_power_info_t = undefined;
-    try call("amdsmi_get_power_info", .{ handle, &info });
-    if (info.current_socket_power > 0) return info.current_socket_power;
-    return info.average_socket_power;
+    var metrics: c.amdsmi_gpu_metrics_t = undefined;
+    try call("amdsmi_get_gpu_metrics_info", .{ handle, &metrics });
+    const unsupported16 = std.math.maxInt(u16);
+    if (metrics.current_socket_power != unsupported16) return metrics.current_socket_power;
+    if (metrics.average_socket_power != unsupported16) return metrics.average_socket_power;
+    return error.not_supported;
 }
 
 pub fn getPowerLimit(handle: Handle) Error!u32 {
@@ -210,12 +213,6 @@ pub fn getGpuUtil(handle: Handle) Error!u32 {
     return usage.gfx_activity;
 }
 
-pub fn getMemUtil(handle: Handle) Error!u32 {
-    var usage: c.amdsmi_engine_usage_t = undefined;
-    try call("amdsmi_get_gpu_activity", .{ handle, &usage });
-    return usage.umc_activity;
-}
-
 pub fn getMmUtil(handle: Handle) Error!u32 {
     var usage: c.amdsmi_engine_usage_t = undefined;
     try call("amdsmi_get_gpu_activity", .{ handle, &usage });
@@ -264,12 +261,6 @@ pub fn getMemUsed(handle: Handle) Error!u64 {
     return used;
 }
 
-pub fn getPerfLevel(handle: Handle) Error!u32 {
-    var level: c.amdsmi_dev_perf_level_t = undefined;
-    try call("amdsmi_get_gpu_perf_level", .{ handle, &level });
-    return @intCast(level);
-}
-
 pub fn getPcieWidth(handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try call("amdsmi_get_pcie_info", .{ handle, &info });
@@ -310,6 +301,12 @@ pub fn getVoltageMem(handle: Handle) Error!u64 {
     var info: c.amdsmi_power_info_t = undefined;
     try call("amdsmi_get_power_info", .{ handle, &info });
     return info.mem_voltage;
+}
+
+pub fn getBdfId(handle: Handle) Error!u64 {
+    var bdf_id: u64 = 0;
+    try call("amdsmi_get_gpu_bdf_id", .{ handle, &bdf_id });
+    return bdf_id;
 }
 
 pub const ProcInfo = c.amdsmi_proc_info_t;

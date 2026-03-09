@@ -1,76 +1,81 @@
 const std = @import("std");
 const DeviceInfo = @import("info/device_info.zig").DeviceInfo;
 
-pub var poll_interval_ms: u16 = undefined;
+pub const Worker = struct {
+    poll_interval_ms: u16,
+    should_stop: std.atomic.Value(bool) = .init(false),
+    group: std.Io.Group = .init,
 
-var should_stop: std.atomic.Value(bool) = .init(false);
-var group: std.Io.Group = .init;
+    pub fn shutdown(self: *Worker, io: std.Io) void {
+        self.should_stop.store(true, .release);
+        self.group.await(io) catch {};
+    }
 
-pub fn shutdown(io: std.Io) void {
-    should_stop.store(true, .release);
-    group.await(io) catch {};
-}
+    pub fn isRunning(self: *const Worker) bool {
+        return !self.should_stop.load(.acquire);
+    }
 
-pub fn isRunning() bool {
-    return !should_stop.load(.acquire);
-}
+    pub fn spawnCustomWorker(
+        self: *Worker,
+        io: std.Io,
+        comptime runFn: anytype,
+        args: std.meta.ArgsTuple(@TypeOf(runFn)),
+    ) !void {
+        try self.group.concurrent(io, runFn, args);
+    }
 
-pub fn spawnCustomWorker(
-    io: std.Io,
-    comptime runFn: anytype,
-    args: std.meta.ArgsTuple(@TypeOf(runFn)),
-) !void {
-    try group.concurrent(io, runFn, args);
-}
+    pub fn spawnWorker(
+        self: *Worker,
+        io: std.Io,
+        info: anytype,
+        comptime field: []const u8,
+        comptime queryFn: anytype,
+        device: anytype,
+    ) !void {
+        const InfoType = @TypeOf(info);
+        const DeviceType = @TypeOf(device);
+        const S = struct {
+            fn run(io_: std.Io, w: *Worker, info_: InfoType, dev: DeviceType) void {
+                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
+                while (!w.should_stop.load(.acquire)) {
+                    const start: std.Io.Timestamp = .now(io_, .awake);
 
-pub fn spawnWorker(
-    io: std.Io,
-    info: anytype,
-    comptime field: []const u8,
-    comptime queryFn: anytype,
-    device: anytype,
-) !void {
-    const InfoType = @TypeOf(info);
-    const DeviceType = @TypeOf(device);
-    const Worker = struct {
-        fn run(io_: std.Io, info_: InfoType, dev: DeviceType) void {
-            const interval: std.Io.Duration = .fromMilliseconds(poll_interval_ms);
-            while (!should_stop.load(.acquire)) {
-                const start: std.Io.Timestamp = .now(io_, .awake);
+                    @field(info_, field) = queryFn(dev) catch null;
 
-                @field(info_, field) = queryFn(dev) catch null;
-
-                const elapsed = start.untilNow(io_, .awake);
-                if (elapsed.nanoseconds < interval.nanoseconds) {
-                    io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    const elapsed = start.untilNow(io_, .awake);
+                    if (elapsed.nanoseconds < interval.nanoseconds) {
+                        io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    }
                 }
             }
-        }
-    };
+        };
 
-    try group.concurrent(io, Worker.run, .{ io, info, device });
-}
+        try self.group.concurrent(io, S.run, .{ io, self, info, device });
+    }
 
-pub fn spawnBatchWorker(
-    io: std.Io,
-    infos: []*DeviceInfo,
-    comptime queryFn: *const fn ([]*DeviceInfo) void,
-) !void {
-    const S = struct {
-        fn run(io_: std.Io, infos_: []*DeviceInfo) void {
-            const interval: std.Io.Duration = .fromMilliseconds(poll_interval_ms);
-            while (!should_stop.load(.acquire)) {
-                const start: std.Io.Timestamp = .now(io_, .awake);
+    pub fn spawnBatchWorker(
+        self: *Worker,
+        io: std.Io,
+        infos: []*DeviceInfo,
+        comptime queryFn: *const fn ([]*DeviceInfo) void,
+    ) !void {
+        const S = struct {
+            fn run(io_: std.Io, w: *Worker, infos_: []*DeviceInfo) void {
+                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
 
-                queryFn(infos_);
+                while (!w.should_stop.load(.acquire)) {
+                    const start: std.Io.Timestamp = .now(io_, .awake);
 
-                const elapsed = start.untilNow(io_, .awake);
-                if (elapsed.nanoseconds < interval.nanoseconds) {
-                    io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    queryFn(infos_);
+
+                    const elapsed = start.untilNow(io_, .awake);
+                    if (elapsed.nanoseconds < interval.nanoseconds) {
+                        io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    }
                 }
             }
-        }
-    };
+        };
 
-    try group.concurrent(io, S.run, .{ io, infos });
-}
+        try self.group.concurrent(io, S.run, .{ io, self, infos });
+    }
+};
