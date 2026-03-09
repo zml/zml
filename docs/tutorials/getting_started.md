@@ -1,4 +1,3 @@
-
 # Getting Started with ZML
 
 In this tutorial, we will install `ZML` and run a few models locally.
@@ -15,8 +14,7 @@ cd zml/
 We use `bazel` to build ZML and its dependencies. We recommend to download it
 through `bazelisk`, a version manager for `bazel`.
 
-
-### Install Bazel:
+### Install Bazel
 
 **macOs:**
 
@@ -31,8 +29,6 @@ through `bazelisk`, a version manager for `bazel`.
     chmod +x /usr/local/bin/bazel
 ```
 
-
-
 ## Run a pre-packaged model
 
 ZML comes with a variety of model examples. See also our reference implementations in the [examples](https://github.com/zml/zml/tree/master/examples/) folder.
@@ -45,11 +41,10 @@ has been converted to a 28x28 pixel monochrome image. `Bazel` will download a
 pre-trained model, and the test dataset. The program will load the model,
 compile it, and classify a randomly picked example from the test dataset.
 
-
 On the command line:
 
 ```
-bazel run --config=release //mnist
+bazel run --config=release //examples/mnist
 ```
 
 ### Llama
@@ -72,10 +67,9 @@ Once you've been granted access, you're ready to download a gated model like
 
 ```
 # requires token in $HOME/.cache/huggingface/token, as created by the
-# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+# `hf auth login` command, or the `HUGGINGFACE_TOKEN` environment variable.
+bazel run @zml//tools/hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -86,13 +80,11 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
+bazel run @zml//tools/hf:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
+bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
-
 
 ## Run Tests
 
@@ -113,18 +105,16 @@ following arguments to the command line when compiling or running a model:
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
 
-
 So, to run the OpenLLama model from above on your host sporting an NVIDIA GPU,
 run the following:
 
 ```
-bazel run --config=release //examples/llama:Llama-3.2-1B-Instruct \
+bazel run --config=release //examples/llama \
           --@zml//runtimes:cuda=true                              \
           -- --prompt="What is the capital of France?"
 ```
 
-
-## Where to go next:
+## Where to go next
 
 In [Deploying Models on a Server](../howtos/deploy_on_server.md), we show how you can
 cross-compile and package for a specific architecture, then deploy and run your
