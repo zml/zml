@@ -41,18 +41,22 @@ py_library(
 
 py_binary(
     name = "generate_py",
-    main = "generate.py",
     srcs = ["generate.py"],
+    main = "generate.py",
     python_version = "3.14",
-    deps = ["@triton_py_deps//triton", ":triton_kernels", ":fake_plugin"],
+    deps = [
+        ":fake_plugin",
+        ":triton_kernels",
+        "@triton_py_deps//triton",
+    ],
 )
 
 cc_library(
     name = "libpython",
     hdrs = ["libpython.h"],
     deps = [
-        "@python_3_14//:python_headers",
         "@python_3_14//:libpython",
+        "@python_3_14//:python_headers",
     ],
 )
 
