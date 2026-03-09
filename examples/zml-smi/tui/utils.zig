@@ -2,8 +2,6 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
-pub const blocks = [_][]const u8{ " ", "\u{2581}", "\u{2582}", "\u{2583}", "\u{2584}", "\u{2585}", "\u{2586}", "\u{2587}", "\u{2588}" };
-
 pub const ImageCellSize = struct {
     cols: u16,
     rows: u16,

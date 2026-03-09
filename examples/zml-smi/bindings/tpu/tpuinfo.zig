@@ -15,8 +15,10 @@ pub fn queryInt(
     values: []c_longlong,
 ) Error!u32 {
     if (comptime !has_tpu) return error.TpuUnavailable;
+
     const n = c.tpu_query_int(address.ptr, metric_name.ptr, device_ids.ptr, values.ptr, @intCast(device_ids.len));
     if (n < 0) return error.QueryFailed;
+
     return @intCast(n);
 }
 
@@ -27,7 +29,9 @@ pub fn queryDouble(
     values: []f64,
 ) Error!u32 {
     if (comptime !has_tpu) return error.TpuUnavailable;
+
     const n = c.tpu_query_double(address.ptr, metric_name.ptr, device_ids.ptr, values.ptr, @intCast(device_ids.len));
     if (n < 0) return error.QueryFailed;
+
     return @intCast(n);
 }

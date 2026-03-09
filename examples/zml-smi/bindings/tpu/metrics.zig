@@ -3,9 +3,82 @@ const sysfs = @import("../../sysfs.zig");
 const tpuinfo = @import("tpuinfo.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
-const worker = @import("../../worker.zig");
+const Worker = @import("../../worker.zig").Worker;
+const pi = @import("../../info/process_info.zig");
+const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";
+
+pub const Backend = struct {
+    processes: std.ArrayList(pi.ProcessInfo) = .{},
+
+    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
+        const chip = scanPciChips(io) orelse return error.TpuUnavailable;
+        const device_count = chip.chip_count * chip.devices_per_chip;
+        const tpu_start = device_infos.items.len;
+
+        for (0..device_count) |_| {
+            const info = try allocator.create(DeviceInfo);
+            info.* = .{ .tpu = .{ .name = toName(chip.name) } };
+            try device_infos.append(allocator, info);
+        }
+
+        const tpu_infos = device_infos.items[tpu_start..];
+        inline for (batch_metrics) |query| {
+            try w.spawnBatchWorker(io, tpu_infos, query);
+        }
+
+        if (tpu_infos.len > 0) {
+            try tpu_process.init(w, io, proc_allocator, chip.devices_per_chip, tpu_infos, &self.processes);
+        }
+    }
+
+    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
+        self.processes.deinit(proc_allocator);
+    }
+};
+
+fn clearField(infos: []*DeviceInfo, comptime field: []const u8) void {
+    for (infos) |info| {
+        @field(&info.tpu, field) = null;
+    }
+}
+
+fn metric(comptime ValType: type, comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
+    return &struct {
+        fn query(infos: []*DeviceInfo) void {
+            var ids: [64]c_longlong = undefined;
+            var vals: [64]ValType = undefined;
+
+            const n = (if (ValType == c_longlong)
+                tpuinfo.queryInt(address, metric_name, &ids, &vals)
+            else
+                tpuinfo.queryDouble(address, metric_name, &ids, &vals)) catch {
+                clearField(infos, field);
+                return;
+            };
+
+            for (ids[0..n], vals[0..n]) |id, val| {
+                if (id >= 0 and id < infos.len) {
+                    @field(&infos[@intCast(id)].tpu, field) = if (ValType == c_longlong)
+                        @intCast(val)
+                    else
+                        @intFromFloat(@round(val));
+                }
+            }
+        }
+    }.query;
+}
+
+const batch_metrics = .{
+    metric(c_longlong, "mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes"),
+    metric(c_longlong, "mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes"),
+    metric(f64, "util_percent", "tpu.runtime.tensorcore.dutycycle.percent"),
+};
+
+// -- Discover available chips
+// We need to scan /sys/bus/pci/devices for Google TPU chips.
+// From: https://github.com/AI-Hypercomputer/cloud-accelerator-diagnostics/blob/c94f463dd3bf99eaecf4f5af46f87cc2a5ff1b22/tpu_info/tpu_info/device.py#L43-L92
 
 const ChipInfo = struct {
     name: []const u8,
@@ -16,25 +89,22 @@ const ChipInfo = struct {
 const google_pci_vendor_id = "0x1ae0";
 const pci_base = "/sys/bus/pci/devices";
 
-const chip_table = [_]struct { device_id: []const u8, subsystem_id: ?[]const u8, name: []const u8, devices_per_chip: u32 }{
-    .{ .device_id = "0x0027", .subsystem_id = "0x004e", .name = "TPU v2", .devices_per_chip = 2 },
-    .{ .device_id = "0x0027", .subsystem_id = "0x004f", .name = "TPU v3", .devices_per_chip = 2 },
-    .{ .device_id = "0x005e", .subsystem_id = null, .name = "TPU v4", .devices_per_chip = 1 },
-    .{ .device_id = "0x0063", .subsystem_id = null, .name = "TPU v5e", .devices_per_chip = 1 },
-    .{ .device_id = "0x0062", .subsystem_id = null, .name = "TPU v5p", .devices_per_chip = 1 },
-    .{ .device_id = "0x006f", .subsystem_id = null, .name = "TPU v6e", .devices_per_chip = 1 },
+const ChipEntry = struct {
+    device_id: []const u8,
+    subsystem_id: ?[]const u8 = null,
+    name: []const u8,
+    devices_per_chip: u32,
 };
 
-fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, slot: []const u8, file: []const u8) ![256]u8 {
-    const path = std.fmt.bufPrint(path_buf, pci_base ++ "/{s}/{s}", .{ slot, file }) catch return error.Overflow;
-    return sysfs.readString(io, path);
-}
+const chip_table = [_]ChipEntry{
+    .{ .device_id = "0x0027", .subsystem_id = "0x004e", .name = "TPU v2", .devices_per_chip = 2 },
+    .{ .device_id = "0x0027", .subsystem_id = "0x004f", .name = "TPU v3", .devices_per_chip = 2 },
+    .{ .device_id = "0x005e", .name = "TPU v4", .devices_per_chip = 1 },
+    .{ .device_id = "0x0063", .name = "TPU v5e", .devices_per_chip = 1 },
+    .{ .device_id = "0x0062", .name = "TPU v5p", .devices_per_chip = 1 },
+    .{ .device_id = "0x006f", .name = "TPU v6e", .devices_per_chip = 1 },
+};
 
-fn sysfsEql(raw: [256]u8, expected: []const u8) bool {
-    return std.mem.eql(u8, std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&raw)), 0), expected);
-}
-
-/// Scan /sys/bus/pci/devices for Google TPU chips.
 fn scanPciChips(io: std.Io) ?ChipInfo {
     var pci_dir = std.Io.Dir.openDir(.cwd(), io, pci_base, .{ .iterate = true }) catch return null;
     defer pci_dir.close(io);
@@ -74,83 +144,23 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
         result.chip_count = chip_count;
         return result;
     }
+
     return null;
+}
+
+fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, slot: []const u8, file: []const u8) ![256]u8 {
+    const path = std.fmt.bufPrint(path_buf, pci_base ++ "/{s}/{s}", .{ slot, file }) catch return error.Overflow;
+
+    return sysfs.readString(io, path);
+}
+
+fn sysfsEql(raw: [256]u8, expected: []const u8) bool {
+    return std.mem.eql(u8, std.mem.sliceTo(@as([*:0]const u8, @ptrCast(&raw)), 0), expected);
 }
 
 fn toName(name: []const u8) [256]u8 {
     var buf: [256]u8 = .{0} ** 256;
     @memcpy(buf[0..name.len], name);
+
     return buf;
 }
-
-pub var detected_devices_per_chip: u32 = 1; // TODO: check
-
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
-    const chip = scanPciChips(io) orelse return;
-    detected_devices_per_chip = chip.devices_per_chip;
-    const device_count = chip.chip_count * chip.devices_per_chip;
-    const start = device_infos.items.len;
-
-    for (0..device_count) |_| {
-        const info = try allocator.create(DeviceInfo);
-        info.* = .{ .tpu = .{ .name = toName(chip.name) } };
-        try device_infos.append(allocator, info);
-    }
-
-    const tpu_infos = device_infos.items[start..];
-    inline for (batch_metrics) |metric| {
-        try worker.spawnBatchWorker(io, tpu_infos, metric.query);
-    }
-}
-
-fn clearField(infos: []*DeviceInfo, comptime field: []const u8) void {
-    for (infos) |info| {
-        @field(&info.tpu, field) = null;
-    }
-}
-
-fn intMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
-    return &struct {
-        fn query(infos: []*DeviceInfo) void {
-            var ids: [64]c_longlong = undefined;
-            var vals: [64]c_longlong = undefined;
-
-            const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
-                clearField(infos, field);
-                return;
-            };
-
-            for (ids[0..n], vals[0..n]) |id, val| {
-                if (id >= 0 and id < infos.len) {
-                    @field(&infos[@intCast(id)].tpu, field) = @intCast(val);
-                }
-            }
-        }
-    }.query;
-}
-
-fn doubleMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
-    return &struct {
-        fn query(infos: []*DeviceInfo) void {
-            var ids: [64]c_longlong = undefined;
-            var vals: [64]f64 = undefined;
-
-            const n = tpuinfo.queryDouble(address, metric_name, &ids, &vals) catch {
-                clearField(infos, field);
-                return;
-            };
-
-            for (ids[0..n], vals[0..n]) |id, val| {
-                if (id >= 0 and id < infos.len) {
-                    @field(&infos[@intCast(id)].tpu, field) = @intFromFloat(@round(val));
-                }
-            }
-        }
-    }.query;
-}
-
-const batch_metrics = .{
-    .{ .query = intMetric("mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes") },
-    .{ .query = intMetric("mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes") },
-    .{ .query = doubleMetric("util_percent", "tpu.runtime.tensorcore.dutycycle.percent") },
-};

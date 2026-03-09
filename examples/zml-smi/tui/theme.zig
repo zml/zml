@@ -44,7 +44,3 @@ pub const label_style: Style = .{ .fg = text_secondary };
 pub const value_style: Style = .{ .bold = true, .fg = text_primary };
 pub const border_style: Style = .{ .fg = surface_border };
 pub const dim_style: Style = .{ .fg = dim };
-
-pub const active_tab: Style = .{ .bold = true, .fg = .{ .rgb = .{ 30, 30, 40 } }, .bg = accent };
-pub const inactive_tab: Style = .{ .fg = text_secondary };
-pub const hover_tab: Style = .{ .fg = accent, .ul_style = .single, .ul = accent };

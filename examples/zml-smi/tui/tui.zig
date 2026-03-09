@@ -78,11 +78,6 @@ const Model = struct {
                         return;
                     }
                 }
-                if (key.matches('p', .{})) {
-                    self.process_table.toggleCollapsed();
-                    ctx.redraw = true;
-                    return;
-                }
                 if (key.matches(vaxis.Key.down, .{})) {
                     self.scroll.scrollBy(1, 0);
                     ctx.redraw = true;
@@ -161,7 +156,6 @@ const Model = struct {
         const status_line: StatusLine = .{
             .viewing_device = self.viewing_device,
             .use_braille = self.overview.use_braille,
-            .processes_collapsed = self.process_table.collapsed,
         };
         const status_surf = try status_line.draw(ctx.withConstraints(
             .{ .width = screen.width },

@@ -33,7 +33,6 @@ pub const GpuInfo = struct {
 
     // Utilization
     util_percent: ?u64 = null,
-    mem_util_percent: ?u64 = null,
     encoder_util_percent: ?u64 = null,
     decoder_util_percent: ?u64 = null,
 
@@ -53,12 +52,8 @@ pub const GpuInfo = struct {
     clock_graphics_max_mhz: ?u64 = null,
     clock_mem_max_mhz: ?u64 = null,
 
-    // Performance
-    pstate: ?u64 = null,
-
     // Memory
     mem_used_bytes: ?u64 = null,
-    mem_free_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
     mem_bus_width: ?u64 = null,
 

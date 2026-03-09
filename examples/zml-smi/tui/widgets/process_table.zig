@@ -13,13 +13,10 @@ const Segment = vaxis.Cell.Segment;
 
 const ProcessTable = @This();
 
-const max_expanded_rows: u16 = 20;
+const max_visible_rows: u16 = 20;
 
 scroll_bars: vxfw.ScrollBars,
-row_count: u32 = 0,
-collapsed: bool = true,
-collapsed_visible: u32 = 3,
-rows: [pi.max_processes]ProcessRow = [_]ProcessRow{.{}} ** pi.max_processes,
+merged: std.ArrayList(ProcessInfo) = .{},
 
 pub fn init(self: *ProcessTable) void {
     self.scroll_bars = .{
@@ -36,52 +33,31 @@ pub fn init(self: *ProcessTable) void {
     };
 }
 
-pub fn prepare(self: *ProcessTable, state: *const data.SystemState, device_id: ?u8) void {
-    if (state.getProcesses()) |pl| {
-        if (device_id) |did| {
-            // Detail view: only show processes associated with this device
-            var n: u32 = 0;
-            for (0..pl.count) |i| {
-                if (pl.entries[i].device_idx) |d| {
-                    if (d == did) {
-                        self.rows[n].info = pl.entries[i];
-                        n += 1;
-                    }
-                }
+pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) void {
+    self.merged.clearRetainingCapacity();
+
+    for (state.process_lists) |pl| {
+        for (pl.items) |entry| {
+            if (device_id) |did| {
+                if (entry.device_idx != did) continue;
             }
-            self.row_count = n;
-            // Sort by GPU memory descending
-            std.sort.insertion(ProcessRow, self.rows[0..n], {}, struct {
-                fn cmp(_: void, a: ProcessRow, b: ProcessRow) bool {
-                    return (a.info.gpu_mem_kib orelse 0) > (b.info.gpu_mem_kib orelse 0);
-                }
-            }.cmp);
-        } else {
-            // Overview: all processes, GPU processes pinned at top
-            self.row_count = pl.count;
-            for (0..pl.count) |i| {
-                self.rows[i].info = pl.entries[i];
-            }
-            std.sort.insertion(ProcessRow, self.rows[0..pl.count], {}, struct {
-                fn cmp(_: void, a: ProcessRow, b: ProcessRow) bool {
-                    const a_gpu: u1 = if (a.info.device_idx != null) 1 else 0;
-                    const b_gpu: u1 = if (b.info.device_idx != null) 1 else 0;
-                    if (a_gpu != b_gpu) return a_gpu > b_gpu;
-                    if (a_gpu == 1) return (a.info.gpu_mem_kib orelse 0) > (b.info.gpu_mem_kib orelse 0);
-                    return false;
-                }
-            }.cmp);
+            self.merged.append(state.allocator, entry) catch break;
         }
-    } else {
-        self.row_count = 0;
     }
 
-    self.scroll_bars.estimated_content_height = self.row_count;
-    self.scroll_bars.scroll_view.item_count = self.row_count;
-}
+    // Enrich with host data (uid, username, cpu%, rss, cmdline)
+    state.enricher.enrich(state.allocator, state.io, self.merged.items);
 
-pub fn toggleCollapsed(self: *ProcessTable) void {
-    self.collapsed = !self.collapsed;
+    // Sort by gpu_mem descending
+    std.sort.insertion(ProcessInfo, self.merged.items, {}, struct {
+        fn cmp(_: void, a: ProcessInfo, b: ProcessInfo) bool {
+            return (a.gpu_mem_kib orelse 0) > (b.gpu_mem_kib orelse 0);
+        }
+    }.cmp);
+
+    const count: u32 = @intCast(self.merged.items.len);
+    self.scroll_bars.estimated_content_height = count;
+    self.scroll_bars.scroll_view.item_count = count;
 }
 
 pub fn resetScroll(self: *ProcessTable) void {
@@ -103,7 +79,7 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Er
 
 pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
-    const show_footer = self.collapsed and self.row_count > self.collapsed_visible;
+    const row_count = self.merged.items.len;
 
     var header_rt = try headerRichText(ctx.arena);
     const empty_rt: RichText = .{
@@ -111,38 +87,18 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
         .softwrap = false,
         .overflow = .clip,
     };
-    const footer_text = if (show_footer)
-        try std.fmt.allocPrint(ctx.arena, "  + {d} more — press 'p' to expand", .{self.row_count - self.collapsed_visible})
-    else
-        "";
-    var footer_rt: RichText = .{
-        .text = if (show_footer) try ctx.arena.dupe(Segment, &.{.{ .text = footer_text, .style = theme.dim_style }}) else &.{},
-        .softwrap = false,
-        .overflow = .clip,
-    };
-    var spacer_rt: RichText = .{ .text = &.{.{ .text = " " }}, .softwrap = false };
-    const scroll_h: u16 = @min(@as(u16, @intCast(self.row_count)), max_expanded_rows);
-    const scroll_box: vxfw.SizedBox = .{
-        .child = self.scroll_bars.widget(),
-        .size = .{ .width = w, .height = scroll_h },
-    };
 
-    // Build children list, conditionally picking from the stack widgets above.
     var children: std.ArrayList(vxfw.Widget) = .empty;
     try children.append(ctx.arena, header_rt.widget());
 
-    if (self.row_count == 0) {
+    if (row_count == 0) {
         try children.append(ctx.arena, empty_rt.widget());
-    } else if (self.collapsed) {
-        const visible = @min(self.row_count, self.collapsed_visible);
-        for (0..visible) |i| {
-            try children.append(ctx.arena, self.rows[i].widget());
-        }
-        if (show_footer) {
-            try children.append(ctx.arena, spacer_rt.widget());
-            try children.append(ctx.arena, footer_rt.widget());
-        }
     } else {
+        const scroll_h: u16 = @min(@as(u16, @intCast(row_count)), max_visible_rows);
+        const scroll_box: vxfw.SizedBox = .{
+            .child = self.scroll_bars.widget(),
+            .size = .{ .width = w, .height = scroll_h },
+        };
         try children.append(ctx.arena, scroll_box.widget());
     }
 
@@ -154,15 +110,43 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     };
     return tb.draw(ctx.withConstraints(
         .{ .width = w },
-        .{ .width = w, .height = content_h + max_expanded_rows + 4 },
+        .{ .width = w, .height = content_h + max_visible_rows + 4 },
     ));
 }
 
-/// Builds only data rows (no header) for the scroll view in expanded mode.
+/// Builds only data rows (no header) for the scroll view.
 fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *ProcessTable = @ptrCast(@alignCast(@constCast(ptr)));
-    if (idx >= self.row_count) return null;
-    return self.rows[idx].widget();
+    if (idx >= self.merged.items.len) return null;
+    return .{ .userdata = @ptrCast(&self.merged.items[idx]), .drawFn = drawProcessRow };
+}
+
+fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    const info: *const ProcessInfo = @ptrCast(@alignCast(ptr));
+    const val: vaxis.Style = .{ .fg = theme.text_primary };
+    const dim: vaxis.Style = .{ .fg = theme.dim };
+
+    const segs = try ctx.arena.alloc(Segment, 8);
+    segs[0] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, " {d: >7} ", .{info.pid}) };
+    segs[1] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: <10} ", .{trunc(strZ(&info.username), 10)}) };
+    segs[2] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: <5} ", .{info.device_idx}) };
+    segs[3] = if (info.gpu_util_percent) |util|
+        .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >4}% ", .{util}) }
+    else
+        .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >6} ", .{@as([]const u8, "-")}) };
+    segs[4] = if (info.gpu_mem_kib) |mem|
+        .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{try fmtMem(ctx.arena, mem)}) }
+    else
+        .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{@as([]const u8, "-")}) };
+    segs[5] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >3}.{d}% ", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
+    segs[6] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8}  ", .{try fmtMem(ctx.arena, info.rss_kib)}) };
+    segs[7] = .{ .style = val, .text = strZ(&info.comm) };
+
+    const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
+    return rich.draw(ctx.withConstraints(
+        .{ .width = ctx.min.width, .height = 1 },
+        .{ .width = ctx.max.width, .height = 1 },
+    ));
 }
 
 fn headerRichText(arena: std.mem.Allocator) !RichText {
@@ -178,46 +162,6 @@ fn headerRichText(arena: std.mem.Allocator) !RichText {
     segs[7] = .{ .style = s, .text = "Command" };
     return .{ .text = segs, .softwrap = false, .overflow = .clip };
 }
-
-const ProcessRow = struct {
-    info: ProcessInfo = .{},
-
-    fn widget(self: *const ProcessRow) vxfw.Widget {
-        return .{ .userdata = @constCast(self), .drawFn = drawFn };
-    }
-
-    fn drawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *const ProcessRow = @ptrCast(@alignCast(ptr));
-        const info = &self.info;
-        const val: vaxis.Style = .{ .fg = theme.text_primary };
-        const dim: vaxis.Style = .{ .fg = theme.dim };
-
-        const segs = try ctx.arena.alloc(Segment, 8);
-        segs[0] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, " {d: >7} ", .{info.pid}) };
-        segs[1] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: <10} ", .{trunc(strZ(&info.username), 10)}) };
-        segs[2] = if (info.device_idx) |idx|
-            .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: <5} ", .{idx}) }
-        else
-            .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: <5} ", .{@as([]const u8, "-")}) };
-        segs[3] = if (info.gpu_util_percent) |util|
-            .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >4}% ", .{util}) }
-        else
-            .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >6} ", .{@as([]const u8, "-")}) };
-        segs[4] = if (info.gpu_mem_kib) |mem|
-            .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{try fmtMem(ctx.arena, mem)}) }
-        else
-            .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{@as([]const u8, "-")}) };
-        segs[5] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >3}.{d}% ", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
-        segs[6] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8}  ", .{try fmtMem(ctx.arena, info.rss_kib)}) };
-        segs[7] = .{ .style = val, .text = strZ(&info.comm) };
-
-        const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
-        return rich.draw(ctx.withConstraints(
-            .{ .width = ctx.min.width, .height = 1 },
-            .{ .width = ctx.max.width, .height = 1 },
-        ));
-    }
-};
 
 fn strZ(buf: anytype) []const u8 {
     return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);

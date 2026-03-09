@@ -132,13 +132,6 @@ pub fn getUtilizationGpu(handle: Handle) Error!c_uint {
     return util.gpu;
 }
 
-pub fn getUtilizationMem(handle: Handle) Error!c_uint {
-    if (comptime !has_nvml) return error.NvmlUnavailable;
-    var util: c.nvmlUtilization_t = undefined;
-    try check(c.nvmlDeviceGetUtilizationRates(handle, &util));
-    return util.memory;
-}
-
 pub fn getClockGraphics(handle: Handle) Error!c_uint {
     if (comptime !has_nvml) return error.NvmlUnavailable;
     var clock: c_uint = 0;
@@ -188,13 +181,6 @@ pub fn getMemUsed(handle: Handle) Error!u64 {
     return @intCast(mem.used);
 }
 
-pub fn getMemFree(handle: Handle) Error!u64 {
-    if (comptime !has_nvml) return error.NvmlUnavailable;
-    var mem: c.nvmlMemory_t = undefined;
-    try check(c.nvmlDeviceGetMemoryInfo(handle, &mem));
-    return @intCast(mem.free);
-}
-
 pub fn getFanSpeed(handle: Handle) Error!c_uint {
     if (comptime !has_nvml) return error.NvmlUnavailable;
     var speed: c_uint = 0;
@@ -207,13 +193,6 @@ pub fn getPowerLimit(handle: Handle) Error!c_uint {
     var limit: c_uint = 0;
     try check(c.nvmlDeviceGetEnforcedPowerLimit(handle, &limit));
     return limit;
-}
-
-pub fn getPState(handle: Handle) Error!c_uint {
-    if (comptime !has_nvml) return error.NvmlUnavailable;
-    var pstate: c_uint = 0;
-    try check(c.nvmlDeviceGetPerformanceState(handle, &pstate));
-    return pstate;
 }
 
 pub fn getPcieTxKBps(handle: Handle) Error!c_uint {

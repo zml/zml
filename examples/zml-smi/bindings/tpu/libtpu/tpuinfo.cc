@@ -49,6 +49,7 @@ extern "C" int tpu_query_int(const char* address, const char* metric_name,
   int i = 0;
   for (const auto& [id, val] : sorted) {
     if (i >= max_n) break;
+    
     device_ids[i] = id;
     values[i] = val;
     ++i;
@@ -73,9 +74,11 @@ extern "C" int tpu_query_double(const char* address, const char* metric_name,
   int i = 0;
   for (const auto& [id, val] : sorted) {
     if (i >= max_n) break;
+    
     device_ids[i] = id;
     values[i] = val;
     ++i;
   }
+  
   return i;
 }

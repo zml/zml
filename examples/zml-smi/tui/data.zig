@@ -7,8 +7,8 @@ pub const TpuInfo = di.TpuInfo;
 pub const Target = di.Target;
 pub const Targets = @import("../platform.zig").Targets;
 pub const HostInfo = @import("../info/host_info.zig").HostInfo;
-pub const ProcessScanner = @import("../bindings/linux/process.zig").ProcessScanner;
-pub const ProcessList = @import("../info/process_info.zig").ProcessList;
+pub const pi = @import("../info/process_info.zig");
+pub const ProcessEnricher = @import("../bindings/linux/process.zig").ProcessEnricher;
 
 pub const history_len: usize = 500;
 
@@ -75,20 +75,37 @@ pub const HistoryBuffers = struct {
 };
 
 pub const SystemState = struct {
-    devices: []*DeviceInfo = &.{},
+    devices: []*DeviceInfo,
     host: *HostInfo,
     history: HistoryBuffers = .{},
-    targets: Targets = .{},
-    process_scanner: ?*ProcessScanner = null,
+    targets: Targets,
+    process_lists: []*std.ArrayList(pi.ProcessInfo),
+    enricher: *ProcessEnricher,
+    allocator: std.mem.Allocator,
+    io: std.Io,
     sample_interval_ms: u16,
 
-    pub fn init(allocator: std.mem.Allocator, devices: []*DeviceInfo, host_info: *HostInfo, targets: Targets, sample_interval_ms: u16) !SystemState {
+    pub const Config = struct {
+        devices: []*DeviceInfo,
+        host: *HostInfo,
+        targets: Targets,
+        sample_interval_ms: u16,
+        process_lists: []*std.ArrayList(pi.ProcessInfo),
+        enricher: *ProcessEnricher,
+        io: std.Io,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, cfg: Config) !SystemState {
         return .{
-            .devices = devices,
-            .host = host_info,
-            .history = try HistoryBuffers.init(allocator, devices.len),
-            .targets = targets,
-            .sample_interval_ms = sample_interval_ms,
+            .devices = cfg.devices,
+            .host = cfg.host,
+            .history = try HistoryBuffers.init(allocator, cfg.devices.len),
+            .targets = cfg.targets,
+            .sample_interval_ms = cfg.sample_interval_ms,
+            .process_lists = cfg.process_lists,
+            .enricher = cfg.enricher,
+            .allocator = allocator,
+            .io = cfg.io,
         };
     }
 
@@ -98,11 +115,6 @@ pub const SystemState = struct {
 
     pub fn deviceCount(self: *const SystemState) usize {
         return self.devices.len;
-    }
-
-    pub fn getProcesses(self: *const SystemState) ?*const ProcessList {
-        if (self.process_scanner) |scanner| return scanner.getFront();
-        return null;
     }
 
     pub fn recordHistory(self: *SystemState) void {

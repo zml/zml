@@ -41,9 +41,14 @@ pub fn draw(
         .title = "Memory",
         .data = try utils.normalizeRange(ctx.arena, try state.history.mem_util[id].sliceLast(ctx.arena, data.history_len), 0, 100),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{if (gpu.mem_total_bytes) |total| if (total > 0) (gpu.mem_used_bytes orelse 0) * 100 / total else 0 else 0}),
-        .info_line = try std.fmt.allocPrint(ctx.arena, "VRAM {d} / {d} MB", .{
-            utils.bytesToMb(gpu.mem_used_bytes), utils.bytesToMb(gpu.mem_total_bytes),
-        }),
+        .info_line = if (gpu.mem_bus_width) |bw|
+            try std.fmt.allocPrint(ctx.arena, "VRAM {d} / {d} MB ({d}-bit)", .{
+                utils.bytesToMb(gpu.mem_used_bytes), utils.bytesToMb(gpu.mem_total_bytes), bw,
+            })
+        else
+            try std.fmt.allocPrint(ctx.arena, "VRAM {d} / {d} MB", .{
+                utils.bytesToMb(gpu.mem_used_bytes), utils.bytesToMb(gpu.mem_total_bytes),
+            }),
         .y_min = 0,
         .y_max = 100,
         .y_unit = "%",

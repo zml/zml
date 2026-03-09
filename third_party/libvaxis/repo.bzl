@@ -4,6 +4,6 @@ def repo():
     new_git_repository(
         name = "libvaxis",
         remote = "https://github.com/elogir/libvaxis.git",
-        commit = "102b13d199720dd93ec8cd9324148f77e3bf6ded",
+        commit = "f88c96524af51ca08faa192a58565ab98383202d",
         build_file = "//third_party/libvaxis:libvaxis.bazel",
     )
