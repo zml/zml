@@ -12,33 +12,32 @@ pub const std_options: std.Options = .{
 };
 
 var log_err_count: usize = 0;
-var fba_buffer: [8192]u8 = undefined;
-var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     testing.log_level = log_level;
 
     const test_fn_list: []const std.builtin.TestFn = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;
     var fail_count: usize = 0;
-    const root_node = std.Progress.start(std.testing.io, .{
+
+    // Use single-threaded Io for Progress initialization
+    var progress_io: std.Io.Threaded = .init_single_threaded;
+
+    const root_node = std.Progress.start(progress_io.io(), .{
         .root_name = "Test",
         .estimated_total_items = test_fn_list.len,
     });
 
-    const have_tty = try std.Io.File.stderr().isTty(std.testing.io);
+    const have_tty = try std.Io.File.stderr().isTty(progress_io.io());
 
-    var args = std.process.args();
-    // Skip executable path
-    _ = args.next().?;
+    var args_it = std.process.Args.iterate(init.minimal.args);
+    _ = args_it.next(); // executable path
+    const identifier_query: []const u8 = if (args_it.next()) |arg| arg else "";
 
-    const identifier_query = if (args.next()) |arg| blk: {
-        std.debug.print("Only tests with identifiers that includes `{s}` will be run\n", .{arg});
-        break :blk arg;
-    } else blk: {
-        break :blk "";
-    };
+    if (identifier_query.len > 0) {
+        std.debug.print("Only tests with identifiers that include `{s}` will be run\n", .{identifier_query});
+    }
 
     var leaks: usize = 0;
 

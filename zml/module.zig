@@ -335,7 +335,7 @@ fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context,
     return res;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
+pub fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: stdx.meta.FnArgs(func)) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 

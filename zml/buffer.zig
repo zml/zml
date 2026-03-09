@@ -133,7 +133,10 @@ pub const Buffer = struct {
         }
     }
 
-    pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
+    pub const UnitializedOptions = struct {
+        memory: Memory.Kind = .default,
+        layout: ?pjrt.MemoryLayout = null,
+    };
 
     pub fn uninitialized(io: std.Io, platform: *const Platform, shape_: Shape, opts: UnitializedOptions) !Buffer {
         _ = io; // autofix
@@ -157,16 +160,18 @@ pub const Buffer = struct {
         //    break :s shard_shape;
         //} else shape_;
 
+        const layout = opts.layout orelse pjrt.MemoryLayout{
+            .tiled = .{
+                .minor_to_major = constants.minorToMajor(shape_.rank()),
+                .tile_dims = &.{},
+                .tile_dims_sizes = &.{},
+            },
+        };
+
         var args = pjrt.Client.CreateUninitializedBufferArgs{
             .dims = shape_.dims(),
             .element_type = pjrtx.bufferTypeFromDtype(shape_.dtype()),
-            .layout = .{
-                .tiled = .{
-                    .minor_to_major = constants.minorToMajor(shape_.rank()),
-                    .tile_dims = &.{},
-                    .tile_dims_sizes = &.{},
-                },
-            },
+            .layout = layout,
             // set per device, see below.
             .dst = undefined,
         };

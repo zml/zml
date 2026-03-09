@@ -399,8 +399,15 @@ pub const SelfAttn = struct {
 
         const dtype = q.dtype();
         const new_kv_cache = kv_cache.update(k, v, token_index);
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
+
+        const use_cache_for_attention = q.dim(.q) == 1;
+        if (use_cache_for_attention) {
+            k = new_kv_cache.keys().convert(dtype);
+            v = new_kv_cache.values().convert(dtype);
+        } else {
+            k = k.convert(dtype);
+            v = v.convert(dtype);
+        }
 
         const attn_output = zml.attention.attention.attention(q, k, v, token_index, attention_metadata, attention_parameters);
 
@@ -431,11 +438,36 @@ pub const KvCache = struct {
     }
 
     pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
+        var k_buffer = try initKvBuffer(self.k.shape(), io, platform);
+        errdefer k_buffer.deinit();
+        var v_buffer = try initKvBuffer(self.v.shape(), io, platform);
+        errdefer v_buffer.deinit();
+
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
+            .k = k_buffer,
+            .v = v_buffer,
             .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32),
         };
+    }
+
+    fn initKvBuffer(shape: zml.Shape, io: std.Io, platform: *const zml.Platform) !zml.Buffer {
+        if (platform.target != .tpu or shape.rank() != 4) {
+            return zml.Buffer.uninitialized(io, platform, shape, .{});
+        }
+
+        var minor_to_major = [_]i64{ 1, 3, 2, 0 };
+        var tile_dims = [_]i64{ shape.dim(2), @min(shape.dim(1), 128) };
+        var tile_dims_sizes = [_]usize{ 2, 1 };
+
+        return zml.Buffer.uninitialized(io, platform, shape, .{
+            .layout = .{
+                .tiled = .{
+                    .minor_to_major = &minor_to_major,
+                    .tile_dims = &tile_dims,
+                    .tile_dims_sizes = &tile_dims_sizes,
+                },
+            },
+        });
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(KvCache)) void {

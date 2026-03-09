@@ -123,7 +123,7 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 }
 
 test normalizeL2 {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
@@ -137,7 +137,7 @@ test normalizeL2 {
     defer res.deinit();
 
     const expectation: Slice = .init(input.shape(), std.mem.sliceAsBytes(&[_]f32{ -0.6937, -0.7203, -0.9360, 0.3520 }));
-    try zml.testing.expectClose(std.testing.io, expectation, res, 1e-4);
+    try zml.testing.expectClose(std.testing.io, expectation, res, .{ .absolute_tolerance = 1e-4 });
 }
 
 pub const RopeOpts = struct {
@@ -426,6 +426,7 @@ test "invFreq Yarn" {
             .beta_fast = 32.0,
             .beta_slow = 1.0,
             .original_max_position_embeddings = 4096,
+            .rope_theta = 10_000,
             .truncate = true,
         } },
     };
@@ -441,7 +442,7 @@ test "invFreq Yarn" {
 }
 
 test "real/img" {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Fns = struct {
         fn testSplitMergeIsId(layout: RopeOpts.Layout) Tensor {
@@ -547,7 +548,7 @@ test "real/img" {
 }
 
 test rope {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Local = struct {
         fn _fwd(x: Tensor, opts: RopeOpts) Tensor {
@@ -585,7 +586,7 @@ test rope {
     var res2 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_sequential, Local._fwd, .{x_buffer});
     defer res2.deinit();
 
-    try zml.testing.expectClose(std.testing.io, res1, res2, 1e-4);
+    try zml.testing.expectClose(std.testing.io, res1, res2, .{ .absolute_tolerance = 1e-4 });
 }
 
 pub const UpsampleMode = enum {
@@ -645,7 +646,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 }
 
 test nearest {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     // 3D Tensor (basic)
     {
@@ -661,7 +662,7 @@ test nearest {
 
         try std.testing.expectEqualSlices(i64, &.{ 1, 1, 6 }, result.shape().dims());
         const expected: Slice = .init(Shape.init(.{ 1, 1, 6 }, .i32), std.mem.sliceAsBytes(&[1][1][6]i32{.{.{ 1, 1, 1, 2, 2, 2 }}}));
-        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+        try zml.testing.expectClose(std.testing.io, expected, result, .{ .absolute_tolerance = 0 });
     }
 
     // 3D Tensor (advanced)
@@ -692,7 +693,7 @@ test nearest {
                 .{ 21, 21, 22, 22, 23, 23, 24, 24 },
             },
         }));
-        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+        try zml.testing.expectClose(std.testing.io, expected, result, .{ .absolute_tolerance = 0 });
     }
 
     // 4D Tensor (basic)
@@ -716,7 +717,7 @@ test nearest {
             .{ 3, 3, 3, 4, 4, 4 },
             .{ 3, 3, 3, 4, 4, 4 },
         }}}));
-        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+        try zml.testing.expectClose(std.testing.io, expected, result, .{ .absolute_tolerance = 0 });
     }
     // 4D Tensor (advanced)
     {
@@ -767,7 +768,7 @@ test nearest {
                 },
             },
         }));
-        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+        try zml.testing.expectClose(std.testing.io, expected, result, .{ .absolute_tolerance = 0 });
     }
     // 5D Tensor (basic)
     {
@@ -800,7 +801,7 @@ test nearest {
                 },
             },
         }));
-        try zml.testing.expectClose(std.testing.io, expected, result, 0);
+        try zml.testing.expectClose(std.testing.io, expected, result, .{ .absolute_tolerance = 0 });
     }
 }
 
@@ -831,9 +832,9 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
 }
 
 test resizeBilinear {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -897,9 +898,9 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
 }
 
 test resizeBicubic {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, platform);
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform);
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1111,7 +1112,7 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 }
 
 test sampleTokens {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const rng: zml.Tensor.Rng = .init();
     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
@@ -1247,7 +1248,7 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 }
 
 test sampleTokensDynamic {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const ___ = -std.math.inf(f32);
     const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };

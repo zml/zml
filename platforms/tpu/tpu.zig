@@ -8,6 +8,8 @@ const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 const stdx = @import("stdx");
 
+pub const gen_ir = @import("gen_ir.zig");
+
 const log = std.log.scoped(.@"zml/platforms/tpu");
 
 pub fn isEnabled() bool {

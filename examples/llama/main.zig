@@ -18,6 +18,9 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
+// bazel run //examples/llama --@zml//platforms:tpu=true -- --model=$HOME/Llama-3.2-1B-Instruct --backend=tpu --prompt="What is the capital of France?"
+// bazel run //tools/hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
+
 const CliArgs = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -36,7 +39,7 @@ const CliArgs = struct {
         \\  --model=<path>              Path to model (local path or HuggingFace repo)
         \\  --prompt=<text>             Input prompt (reads from stdin if not provided)
         \\  --seqlen=<n>                Maximum sequence length (default: 512)
-        \\  --backend=<text>            Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
+        \\  --backend=<text>            Attention backend to use ([vanilla, tpu, cuda_fa2, cuda_fa3], default: auto-selection)
         \\  --reader-buffer-size=<size> Reader buffer size (default: 32MiB)
         \\  --writer-buffer-size=<size> Writer buffer size (default: 32MiB)
         \\  --async-limit=<n>           Async I/O concurrency limit
@@ -277,6 +280,38 @@ fn compileModel(
 ) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled model [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+
+    if (parameters.attention_parameters == .tpu) {
+        progress.increaseEstimatedTotalItems(2);
+
+        var prefill_node = progress.start("Compiling prefill...", 1);
+        defer prefill_node.end();
+        const prefill_now: std.Io.Timestamp = .now(io, .awake);
+        const prefill_exe = try platform.compile(allocator, io, llama_model, .forward, .{
+            parameters.prefill_tokens,
+            parameters.token_index,
+            parameters.kv_cache,
+            parameters.rng,
+            parameters.attention_metadata,
+            parameters.attention_parameters,
+        });
+        log.info("Compiled prefill [{D}]", .{stdx.fmt.fmtDuration(prefill_now.untilNow(io, .awake))});
+
+        var decode_node = progress.start("Compiling decode...", 1);
+        defer decode_node.end();
+        const decode_now: std.Io.Timestamp = .now(io, .awake);
+        const decode_exe = try platform.compile(allocator, io, llama_model, .forward, .{
+            parameters.decode_tokens,
+            parameters.token_index,
+            parameters.kv_cache,
+            parameters.rng,
+            parameters.attention_metadata,
+            parameters.attention_parameters,
+        });
+        log.info("Compiled decode [{D}]", .{stdx.fmt.fmtDuration(decode_now.untilNow(io, .awake))});
+
+        return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
+    }
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = try io.concurrent(struct {
