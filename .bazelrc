@@ -113,6 +113,6 @@ common:release  --@rules_zig//zig/settings:mode=release_safe
 # --config=native builds everything optimized for the local CPU
 common:native   --copt=-march=native
 common:native   --@rules_zig//zig/settings:zigopt=-mcpu=native
-common:native   --@rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native
+common:native   --@@rules_rs++rules_rust+rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native
 
 common:linux    --host_platform=//platforms:host_glibc
