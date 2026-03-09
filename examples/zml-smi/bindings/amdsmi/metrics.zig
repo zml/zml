@@ -3,24 +3,36 @@ const amdsmi = @import("amdsmi.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const worker = @import("../../worker.zig");
+const Worker = @import("../../worker.zig").Worker;
+const pi = @import("../../info/process_info.zig");
+const process = @import("process.zig");
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
-    try amdsmi.init();
-    const count = try amdsmi.getDeviceCount();
+pub const Backend = struct {
+    processes: std.ArrayList(pi.ProcessInfo) = .{},
 
-    for (0..count) |i| {
-        const dev = Device.open(@intCast(i)) catch continue;
+    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
+        try amdsmi.init();
+        const count = try amdsmi.getDeviceCount();
 
-        const info = try allocator.create(DeviceInfo);
-        info.* = .{ .rocm = .{ .name = dev.getName() catch null } };
-        try device_infos.append(allocator, info);
+        for (0..count) |i| {
+            const dev = Device.open(@intCast(i)) catch continue;
 
-        inline for (metrics) |metric| {
-            try worker.spawnWorker(io, &info.rocm, metric.field, metric.query, dev);
+            const info = try allocator.create(DeviceInfo);
+            info.* = .{ .rocm = .{ .name = dev.getName() catch null } };
+            try device_infos.append(allocator, info);
+
+            inline for (metrics) |metric| {
+                try w.spawnWorker(io, &info.rocm, metric.field, metric.query, dev);
+            }
         }
+
+        try process.init(w, io, proc_allocator, &self.processes);
     }
-}
+
+    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
+        self.processes.deinit(proc_allocator);
+    }
+};
 
 const Device = struct {
     handle: amdsmi.Handle,
@@ -38,8 +50,7 @@ const Device = struct {
     // Power
     pub fn getPowerUsage(self: Device) !u64 {
         const pw = try amdsmi.getPowerUsage(self.handle);
-        if (pw == std.math.maxInt(u32)) return error.not_supported;
-        return pw;
+        return @as(u64, pw) * 1000;
     }
     pub fn getPowerLimit(self: Device) !u64 {
         // Header says W, but empirically power_limit is in µW; convert to mW
@@ -61,9 +72,6 @@ const Device = struct {
     // Utilization
     pub fn getGpuUtil(self: Device) !u64 {
         return try amdsmi.getGpuUtil(self.handle);
-    }
-    pub fn getMemUtil(self: Device) !u64 {
-        return try amdsmi.getMemUtil(self.handle);
     }
     pub fn getEncoderUtil(self: Device) !u64 {
         return try amdsmi.getMmUtil(self.handle);
@@ -89,19 +97,9 @@ const Device = struct {
         return try amdsmi.getMaxClockMem(self.handle);
     }
 
-    // Performance state
-    pub fn getPState(self: Device) !u64 {
-        return try amdsmi.getPerfLevel(self.handle);
-    }
-
     // Memory
     pub fn getMemUsed(self: Device) !u64 {
         return amdsmi.getMemUsed(self.handle);
-    }
-    pub fn getMemFree(self: Device) !u64 {
-        const total = try amdsmi.getMemTotal(self.handle);
-        const used = try amdsmi.getMemUsed(self.handle);
-        return total - used;
     }
     pub fn getMemTotal(self: Device) !u64 {
         return amdsmi.getMemTotal(self.handle);
@@ -132,7 +130,6 @@ const metrics = .{
     .{ .field = "temperature", .query = Device.getTemperature },
     .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
     .{ .field = "util_percent", .query = Device.getGpuUtil },
-    .{ .field = "mem_util_percent", .query = Device.getMemUtil },
     .{ .field = "encoder_util_percent", .query = Device.getEncoderUtil },
     .{ .field = "decoder_util_percent", .query = Device.getDecoderUtil },
     .{ .field = "clock_graphics_mhz", .query = Device.getClockGraphics },
@@ -140,9 +137,7 @@ const metrics = .{
     .{ .field = "clock_mem_mhz", .query = Device.getClockMem },
     .{ .field = "clock_graphics_max_mhz", .query = Device.getMaxClockGraphics },
     .{ .field = "clock_mem_max_mhz", .query = Device.getMaxClockMem },
-    .{ .field = "pstate", .query = Device.getPState },
     .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
-    .{ .field = "mem_free_bytes", .query = Device.getMemFree },
     .{ .field = "mem_total_bytes", .query = Device.getMemTotal },
     .{ .field = "pcie_tx_kbps", .query = Device.getPcieTx },
     .{ .field = "pcie_rx_kbps", .query = Device.getPcieRx },

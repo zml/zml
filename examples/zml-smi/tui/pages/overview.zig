@@ -96,15 +96,16 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
 
     // Wide: logo left, info lines vertically centered right.
     const info_max_w = @min(w -| (Logo.logo_width + 6), max_info_width);
-    const logo_sized: vxfw.SizedBox = .{ .child = logo.widget(), .size = .{ .width = Logo.logo_width + 4, .height = logo_h } };
+    const banner_h = @max(logo_h, 9); // info lines need at least 9 rows
+    const logo_sized: vxfw.SizedBox = .{ .child = logo.widget(), .size = .{ .width = Logo.logo_width + 4, .height = banner_h } };
     const info_centered: vxfw.Center = .{ .child = info_lines.widget() };
-    const info_sized: vxfw.SizedBox = .{ .child = info_centered.widget(), .size = .{ .width = info_max_w, .height = logo_h } };
+    const info_sized: vxfw.SizedBox = .{ .child = info_centered.widget(), .size = .{ .width = info_max_w, .height = banner_h } };
     const wide_flex_items = [2]vxfw.FlexItem{
         .{ .widget = logo_sized.widget(), .flex = 0 },
         .{ .widget = info_sized.widget(), .flex = 0 },
     };
     const wide_flex_row: vxfw.FlexRow = .{ .children = &wide_flex_items };
-    const wide_sized: vxfw.SizedBox = .{ .child = wide_flex_row.widget(), .size = .{ .width = content_w, .height = logo_h } };
+    const wide_sized: vxfw.SizedBox = .{ .child = wide_flex_row.widget(), .size = .{ .width = content_w, .height = banner_h } };
 
     const banner = if (narrow) narrow_layout.widget() else wide_sized.widget();
     try widgets.append(ctx.arena, banner);

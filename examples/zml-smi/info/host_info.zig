@@ -5,7 +5,6 @@ pub const HostInfo = struct {
     cpu_cores: ?u64 = null,
     mem_total_kib: ?u64 = null,
     mem_available_kib: ?u64 = null,
-    cpu_temp: ?u64 = null,
     load_avg: ?[256]u8 = null,
     uptime_seconds: ?u64 = null,
 };

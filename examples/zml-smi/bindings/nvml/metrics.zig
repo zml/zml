@@ -3,24 +3,36 @@ const nvml = @import("nvml.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const worker = @import("../../worker.zig");
+const Worker = @import("../../worker.zig").Worker;
+const pi = @import("../../info/process_info.zig");
+const process = @import("process.zig");
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
-    try nvml.init();
-    const count = try nvml.getDeviceCount();
+pub const Backend = struct {
+    processes: std.ArrayList(pi.ProcessInfo) = .{},
 
-    for (0..count) |i| {
-        const dev = Device.open(@intCast(i)) catch continue;
+    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
+        try nvml.init();
+        const count = try nvml.getDeviceCount();
 
-        const info = try allocator.create(DeviceInfo);
-        info.* = .{ .cuda = .{ .name = dev.getName() catch null } };
-        try device_infos.append(allocator, info);
+        for (0..count) |i| {
+            const dev = Device.open(@intCast(i)) catch continue;
 
-        inline for (metrics) |metric| {
-            try worker.spawnWorker(io, &info.cuda, metric.field, metric.query, dev);
+            const info = try allocator.create(DeviceInfo);
+            info.* = .{ .cuda = .{ .name = dev.getName() catch null } };
+            try device_infos.append(allocator, info);
+
+            inline for (metrics) |metric| {
+                try w.spawnWorker(io, &info.cuda, metric.field, metric.query, dev);
+            }
         }
+
+        try process.init(w, io, proc_allocator, &self.processes);
     }
-}
+
+    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
+        self.processes.deinit(proc_allocator);
+    }
+};
 
 const Device = struct {
     handle: nvml.Handle,
@@ -58,9 +70,6 @@ const Device = struct {
     pub fn getGpuUtil(self: Device) !u64 {
         return @intCast(try nvml.getUtilizationGpu(self.handle));
     }
-    pub fn getMemUtil(self: Device) !u64 {
-        return @intCast(try nvml.getUtilizationMem(self.handle));
-    }
     pub fn getEncoderUtil(self: Device) !u64 {
         return @intCast(try nvml.getEncoderUtil(self.handle));
     }
@@ -85,17 +94,9 @@ const Device = struct {
         return @intCast(try nvml.getMaxClockMem(self.handle));
     }
 
-    // Performance state
-    pub fn getPState(self: Device) !u64 {
-        return @intCast(try nvml.getPState(self.handle));
-    }
-
     // Memory
     pub fn getMemUsed(self: Device) !u64 {
         return nvml.getMemUsed(self.handle);
-    }
-    pub fn getMemFree(self: Device) !u64 {
-        return nvml.getMemFree(self.handle);
     }
     pub fn getMemTotal(self: Device) !u64 {
         return nvml.getMemTotal(self.handle);
@@ -126,7 +127,6 @@ const metrics = .{
     .{ .field = "temperature", .query = Device.getTemperature },
     .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
     .{ .field = "util_percent", .query = Device.getGpuUtil },
-    .{ .field = "mem_util_percent", .query = Device.getMemUtil },
     .{ .field = "encoder_util_percent", .query = Device.getEncoderUtil },
     .{ .field = "decoder_util_percent", .query = Device.getDecoderUtil },
     .{ .field = "clock_graphics_mhz", .query = Device.getClockGraphics },
@@ -134,9 +134,7 @@ const metrics = .{
     .{ .field = "clock_mem_mhz", .query = Device.getClockMem },
     .{ .field = "clock_graphics_max_mhz", .query = Device.getMaxClockGraphics },
     .{ .field = "clock_mem_max_mhz", .query = Device.getMaxClockMem },
-    .{ .field = "pstate", .query = Device.getPState },
     .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
-    .{ .field = "mem_free_bytes", .query = Device.getMemFree },
     .{ .field = "mem_total_bytes", .query = Device.getMemTotal },
     .{ .field = "mem_bus_width", .query = Device.getMemBusWidth },
     .{ .field = "pcie_tx_kbps", .query = Device.getPcieTx },
