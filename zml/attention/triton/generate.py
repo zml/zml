@@ -394,15 +394,6 @@ def compile_reduce_ptr(cfg: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate TTIR for wrapped unified-attention kernels")
-    parser.add_argument(
-        "--kernel",
-        required=True,
-        choices=[
-            "kernel_unified_attention_2d_ptr",
-            "kernel_unified_attention_3d_ptr",
-            "reduce_segments_ptr",
-        ],
-    )
     parser.add_argument("--config", required=True, help="Raw JSON string")
     args = parser.parse_args()
 
@@ -410,12 +401,14 @@ def main() -> None:
 
     register_fake_backend()
 
-    if args.kernel == "kernel_unified_attention_2d_ptr":
-        ttir = compile_2d_ptr(cfg)
-    elif args.kernel == "kernel_unified_attention_3d_ptr":
-        ttir = compile_3d_ptr(cfg)
+    if "kernel_unified_attention_2d_ptr" in cfg:
+        ttir = compile_2d_ptr(cfg["kernel_unified_attention_2d_ptr"])
+    elif "kernel_unified_attention_3d_ptr" in cfg:
+        ttir = compile_3d_ptr(cfg["kernel_unified_attention_3d_ptr"])
+    elif "reduce_segments_ptr" in cfg:
+        ttir = compile_reduce_ptr(cfg["reduce_segments_ptr"])
     else:
-        ttir = compile_reduce_ptr(cfg)
+        print("Unknown kernel variant")
 
     print(ttir)
 
