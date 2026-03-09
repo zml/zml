@@ -100,9 +100,9 @@ fn select3dConfig(head_size: usize, block_size: usize, element_size: usize, max_
 }
 
 pub const KernelKind = enum {
-    @"2d",
-    @"3d",
-    reduce,
+    kernel_unified_attention_2d_ptr,
+    kernel_unified_attention_3d_ptr,
+    reduce_segments_ptr,
 };
 
 pub const GenerationConfig2D = struct {
@@ -179,9 +179,9 @@ pub const GenerationConfigReduce = struct {
 };
 
 pub const GenerationConfig = union(KernelKind) {
-    @"2d": GenerationConfig2D,
-    @"3d": GenerationConfig3D,
-    reduce: GenerationConfigReduce,
+    kernel_unified_attention_2d_ptr: GenerationConfig2D,
+    kernel_unified_attention_3d_ptr: GenerationConfig3D,
+    reduce_segments_ptr: GenerationConfigReduce,
 };
 
 fn getGenerateBinPath(allocator: std.mem.Allocator) []const u8 {
@@ -207,22 +207,9 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
 
     var list: std.ArrayList([]const u8) = .empty;
     try list.append(arena.allocator(), getGenerateBinPath(arena.allocator()));
-    try list.append(arena.allocator(), "--kernel");
-    const kernel_name = switch (config) {
-        .@"2d" => "kernel_unified_attention_2d_ptr",
-        .@"3d" => "kernel_unified_attention_3d_ptr",
-        .reduce => "reduce_segments_ptr",
-    };
-    try list.append(arena.allocator(), kernel_name);
     try list.append(arena.allocator(), "--config");
-    // TODO(Corentin): have a single configuration json
-    switch (config) {
-        .@"2d" => try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config.@"2d", .{ .emit_null_optional_fields = false })})),
-        .@"3d" => try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config.@"3d", .{ .emit_null_optional_fields = false })})),
-        .reduce => try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config.reduce, .{ .emit_null_optional_fields = false })})),
-    }
+    try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })}));
     const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items });
-    std.log.info("stderr: {s}", .{result.stderr});
     return try allocator.dupeZ(u8, result.stdout);
 }
 
@@ -368,7 +355,7 @@ pub const paged = struct {
         _ = layer_index; // autofix
         _ = opts; // autofix
         const generation_config: GenerationConfig = .{
-            .@"2d" = .{
+            .kernel_unified_attention_2d_ptr = .{
                 .dimensions = .{
                     .batch_size = paged_attention_opts.batch_size,
                     .block_size = paged_attention_opts.block_size,
@@ -470,7 +457,7 @@ pub const paged = struct {
         _ = layer_index; // autofix
         _ = opts; // autofix
         const attn_generation_config: GenerationConfig = .{
-            .@"3d" = .{
+            .kernel_unified_attention_3d_ptr = .{
                 .dimensions = .{
                     .batch_size = paged_attention_opts.batch_size,
                     .block_size = paged_attention_opts.block_size,
@@ -501,7 +488,7 @@ pub const paged = struct {
         defer std.heap.c_allocator.free(attn_ttir);
 
         const reduce_generation_config: GenerationConfig = .{
-            .reduce = .{
+            .reduce_segments_ptr = .{
                 .dimensions = .{
                     .num_tokens = paged_attention_opts.num_tokens,
                     .num_heads = paged_attention_opts.num_heads,
