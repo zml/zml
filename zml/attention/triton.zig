@@ -213,6 +213,12 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
     return try allocator.dupeZ(u8, result.stdout);
 }
 
+fn getCuCount() usize {
+    const platform = zml.module.CompilationContext.current().platform;
+
+    return @intCast(platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "core_count").?.int64);
+}
+
 pub const paged = struct {
     pub const Options = struct {
         batch_size: usize,
@@ -319,8 +325,7 @@ pub const paged = struct {
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const paged_attention_opts: PagedAttentionOptions = .{
-            // TODO(Corentin): get the cu count
-            .cu_count = 128,
+            .cu_count = getCuCount(),
             .all_decode = !parameters.options_.is_prefill,
             .num_tokens = @intCast(q.dim(.b)),
             .num_heads = @intCast(q.dim(.h)),
