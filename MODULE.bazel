@@ -17,7 +17,7 @@ bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
-bazel_dep(name = "rules_python", version = "1.8.4")
+bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
@@ -81,7 +81,8 @@ uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-use_repo(python, "python_versions")
+python.toolchain(python_version = "3.14")
+use_repo(python, "python_versions", "python_3_14")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 
@@ -121,6 +122,15 @@ pip.parse(
     requirements_lock = "//tools/xprof:requirements.lock.txt",
 )
 use_repo(pip, "xprof_nightly")
+
+# For Triton generation
+pip.parse(
+    download_only = True,
+    hub_name = "triton_py_deps",
+    python_version = "3.14",
+    requirements_lock = "//zml/attention/triton:requirements.lock.txt",
+)
+use_repo(pip, "triton_py_deps")
 
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")

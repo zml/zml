@@ -59,6 +59,7 @@ zig_library(
         "tracer.zig",
         "zml.zig",
     ],
+    data = ["//zml/attention/triton:sandbox"],
     main = "zml.zig",
     visibility = ["//visibility:public"],
     zigopts = [

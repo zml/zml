@@ -1,5 +1,9 @@
 const std = @import("std");
 
+const bazel = @import("bazel");
+const bazel_builtin = @import("bazel_builtin");
+const stdx = @import("stdx");
+
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
@@ -180,14 +184,29 @@ pub const GenerationConfig = union(KernelKind) {
     reduce: GenerationConfigReduce,
 };
 
+fn getGenerateBinPath(allocator: std.mem.Allocator) []const u8 {
+    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch |err| {
+        stdx.debug.panic("Failed to initialize runfiles for Triton backend: {}", .{err});
+    };
+
+    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox_path = runfiles.rlocation("zml/zml/attention/triton/sandbox", &sandbox_path_buf) catch |err| {
+        stdx.debug.panic("Failed to find sandbox path for Triton backend: {}", .{err});
+    };
+
+    const path = std.fs.path.join(allocator, &.{ sandbox_path.?, "bin", "generate" }) catch |err| {
+        stdx.debug.panic("Failed to construct path to generate for Triton backend: {}", .{err});
+    };
+
+    return path;
+}
+
 fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConfig) ![:0]const u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
 
     var list: std.ArrayList([]const u8) = .empty;
-    try list.append(arena.allocator(), "/home/corendos/triton-playground/.venv/bin/python");
-    try list.append(arena.allocator(), "-m");
-    try list.append(arena.allocator(), "tools.generate_unified_attention_ttir");
+    try list.append(arena.allocator(), getGenerateBinPath(arena.allocator()));
     try list.append(arena.allocator(), "--kernel");
     const kernel_name = switch (config) {
         .@"2d" => "kernel_unified_attention_2d_ptr",
@@ -202,7 +221,8 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
         .@"3d" => try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config.@"3d", .{ .emit_null_optional_fields = false })})),
         .reduce => try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config.reduce, .{ .emit_null_optional_fields = false })})),
     }
-    const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items, .cwd = .{ .path = "/home/corendos/triton-playground" } });
+    const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items });
+    std.log.info("stderr: {s}", .{result.stderr});
     return try allocator.dupeZ(u8, result.stdout);
 }
 
