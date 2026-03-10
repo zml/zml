@@ -3,6 +3,42 @@ const std = @import("std");
 const bazel_builtin = @import("bazel_builtin");
 const runfiles = @import("runfiles");
 
+/// https://github.com/zigtools/zls/blob/master/src/build_runner/shared.zig#L6 (2026-03-10)
+pub const BuildConfig = struct {
+    /// The `dependencies` in `build.zig.zon`.
+    dependencies: std.json.ArrayHashMap([]const u8),
+    /// The key is the `root_source_file`.
+    /// All modules with the same root source file are merged. This limitation may be lifted in the future.
+    modules: std.json.ArrayHashMap(Module),
+    /// List of all compilations units.
+    compilations: []Compile,
+    /// The names of all top level steps.
+    top_level_steps: []const []const u8,
+    available_options: std.json.ArrayHashMap(AvailableOption),
+
+    pub const Module = struct {
+        import_table: std.json.ArrayHashMap([]const u8),
+        c_macros: []const []const u8,
+        include_dirs: []const []const u8,
+    };
+
+    pub const Compile = struct {
+        /// Key in `BuildConfig.modules`.
+        root_module: []const u8,
+
+        // may contain additional information in the future like `target` or `link_libc`.
+    };
+
+    /// Equivalent to `std.Build.AvailableOption` which is not accessible because it non-pub.
+    pub const AvailableOption = @FieldType(@FieldType(std.Build, "available_options_map").KV, "value");
+};
+
+fn processConfigLeaky(allocator: std.mem.Allocator, io: std.Io, config_string: []const u8) !BuildConfig {
+    var config = try std.json.parseFromSliceLeaky(BuildConfig, allocator, config_string, .{});
+    try canonicalizeModulesLeaky(allocator, io, &config);
+    return config;
+}
+
 // Neovim canonicalizes the path it sends to ZLS, we need to do the same as ZLS will match against the config we generate.
 // We canonicalize the following module paths:
 //
@@ -15,43 +51,29 @@ const runfiles = @import("runfiles");
 //     },
 //   },
 // }
-fn canonicalizeModules(allocator: std.mem.Allocator, io: std.Io, root: *std.json.Value) !void {
-    if (root.* != .object) return;
-    const modules_value = root.object.getPtr("modules") orelse return;
-    if (modules_value.* != .object) return;
+fn canonicalizeModulesLeaky(allocator: std.mem.Allocator, io: std.Io, config: *BuildConfig) !void {
+    var old_modules = config.modules.map.iterator();
+    var new_modules: std.StringArrayHashMapUnmanaged(BuildConfig.Module) = .empty;
+    try new_modules.ensureTotalCapacity(allocator, old_modules.len);
 
-    var canonical_modules = std.json.ObjectMap.init(allocator);
-    var modules_it = modules_value.object.iterator();
-    while (modules_it.next()) |module_entry| {
-        const module_path = module_entry.key_ptr.*;
-        var module_info = module_entry.value_ptr.*;
-
-        if (module_info == .object) {
-            if (module_info.object.getPtr("import_table")) |imports_value| {
-                if (imports_value.* == .object) {
-                    var canonical_imports = std.json.ObjectMap.init(allocator);
-                    var imports_it = imports_value.object.iterator();
-                    while (imports_it.next()) |import_entry| {
-                        const import_name = import_entry.key_ptr.*;
-                        const import_value = import_entry.value_ptr.*;
-
-                        const canonical_import_value = if (import_value == .string)
-                            std.json.Value{ .string = try std.Io.Dir.realPathFileAbsoluteAlloc(io, import_value.string, allocator) }
-                        else
-                            import_value;
-
-                        try canonical_imports.put(import_name, canonical_import_value);
-                    }
-                    imports_value.* = .{ .object = canonical_imports };
-                }
-            }
+    while (old_modules.next()) |entry| {
+        const module_name = canonicalizePath(allocator, io, entry.key_ptr.*);
+        var module: BuildConfig.Module = entry.value_ptr.*;
+        for (module.import_table.map.values()) |*imported_module_path| {
+            imported_module_path.* = canonicalizePath(allocator, io, imported_module_path.*);
         }
-
-        const canonical_module_path = try std.Io.Dir.realPathFileAbsoluteAlloc(io, module_path, allocator);
-        try canonical_modules.put(canonical_module_path, module_info);
+        new_modules.put(allocator, module_name, entry.value_ptr.*) catch return;
     }
 
-    modules_value.* = .{ .object = canonical_modules };
+    for (config.compilations) |*compile| {
+        compile.root_module = canonicalizePath(allocator, io, compile.root_module);
+    }
+
+    config.modules.map = new_modules;
+}
+
+fn canonicalizePath(allocator: std.mem.Allocator, io: std.Io, path: []const u8) []const u8 {
+    return std.Io.Dir.realPathFileAbsoluteAlloc(io, path, allocator) catch path;
 }
 
 fn readBuildConfig(
@@ -131,11 +153,13 @@ pub fn main(init: std.process.Init) !void {
         "@@__BAZEL_EXECUTION_ROOT__@@",
         execution_root,
     );
-    var root = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), output, .{});
-    try canonicalizeModules(arena.allocator(), io, &root);
 
     var stdout_buf: [4096]u8 = undefined;
     var writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    try std.json.Stringify.value(root, .{}, &writer.interface);
+    if (processConfigLeaky(arena.allocator(), io, output)) |config| {
+        try std.json.Stringify.value(config, .{}, &writer.interface);
+    } else |_| {
+        try writer.interface.writeAll(output);
+    }
     try writer.flush();
 }
