@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     var exe = blk: {
         log.info("⏱️ Compiling benchmark...", .{});
         const now: std.Io.Timestamp = .now(io, .awake);
-        defer log.info("✅ Compiled benchmark [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+        defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
         break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} });
     };
     defer exe.deinit();
@@ -88,11 +88,11 @@ pub fn main(init: std.process.Init) !void {
 
     const floating_op_count = 2 * cli_args.size * cli_args.size * cli_args.size;
     const flops = @as(f64, @floatFromInt(floating_op_count)) / elapsed_s;
-    log.info("Dot product size: {d}x{d} - Datatype: {s} - Elapsed: {D} - {d:.3} GFLOP/s", .{
+    log.info("Dot product size: {d}x{d} - Datatype: {s} - Elapsed: {f} - {d:.3} GFLOP/s", .{
         cli_args.size,
         cli_args.size,
         @tagName(cli_args.dtype),
-        stdx.fmt.fmtDuration(elapsed),
+        elapsed,
         flops / 1_000_000_000,
     });
 }

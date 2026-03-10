@@ -159,7 +159,7 @@ pub fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, 
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Loaded tokenizer [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Loaded tokenizer [{f}]", .{now.untilNow(io, .awake)});
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);

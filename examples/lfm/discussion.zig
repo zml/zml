@@ -117,10 +117,10 @@ pub const Context = struct {
 
             try stdout.interface.writeAll("\n\n");
 
-            try stdout.interface.print("\x1b[36mprefill\x1b[0m \x1b[2m{D} \xc2\xb7 {:.1}tok/s\x1b[0m \x1b[2m\xe2\x94\x82\x1b[0m \x1b[36mdecode\x1b[0m \x1b[2m{D} \xc2\xb7 {:.1}tok/s\x1b[0m\n\n\n", .{
-                stdx.fmt.fmtDuration(prefill_duration),
+            try stdout.interface.print("\x1b[36mprefill\x1b[0m \x1b[2m{f} \xc2\xb7 {:.1}tok/s\x1b[0m \x1b[2m\xe2\x94\x82\x1b[0m \x1b[36mdecode\x1b[0m \x1b[2m{f} \xc2\xb7 {:.1}tok/s\x1b[0m\n\n\n", .{
+                prefill_duration,
                 tokensPerSecond(prefill_duration, prefill_tokens),
-                stdx.fmt.fmtDuration(decode_duration),
+                decode_duration,
                 tokensPerSecond(decode_duration, decode_tokens),
             });
             try stdout.interface.flush();

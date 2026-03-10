@@ -1077,18 +1077,11 @@ pub fn load(
 ) !Bufferized(ModelType) {
     var bufferized = try mem.bufferize(allocator, ModelType, model);
 
-    // todo: remove when https://codeberg.org/ziglang/zig/pulls/31320 is merged
-    var thread_safe_allocator: std.heap.ThreadSafeAllocator = .{
-        .child_allocator = allocator,
-        .io = io,
-    };
-    const concurrent_allocator = thread_safe_allocator.allocator();
-
     const pool_count = platform.devices.len;
     const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
     defer allocator.free(dma_allocators);
     for (platform.devices, 0..) |*device, i| {
-        dma_allocators[i] = .init(concurrent_allocator, device);
+        dma_allocators[i] = .init(allocator, device);
     }
 
     const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
@@ -1120,7 +1113,7 @@ pub fn load(
         .platform = platform,
         .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
         .store = opts.store,
-        .allocator = concurrent_allocator,
+        .allocator = allocator,
         .dma_allocators = dma_allocators,
         .pinned_buffer_pools = buffer_pools,
         .io = io,
