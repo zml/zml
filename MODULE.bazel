@@ -27,7 +27,7 @@ bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = Tr
 ### Zig toolchain
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
-zig.toolchain(zig_version = "0.16.0-dev.2611+f996d2866")
+zig.toolchain(zig_version = "0.16.0-dev.2722+f16eb18ce")
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
     "https://zigmirror.hryx.net/zig",
@@ -56,7 +56,7 @@ register_toolchains("@llvm//toolchain:all")
 ###
 
 uv = use_extension("@rules_python//python/uv:uv.bzl", "uv", dev_dependency = True)
-uv.configure(version = "0.6.5")
+uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")

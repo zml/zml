@@ -1365,7 +1365,7 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
     if (sctx.err) |err| {
         return err;
     }
-    if (c.mlirLogicalResultIsFailure(result)) {
+    if (@as(c_int, result.value) == @as(c_int, 0)) {
         return error.InvalidMlirBytecodeVersion;
     }
 }

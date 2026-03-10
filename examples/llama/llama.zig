@@ -157,7 +157,7 @@ pub const Llama = struct {
     num_kv_heads: u32 = 32,
     rope_opts: zml.nn.RopeOpts = .{
         .layout = .interleaved,
-        .freq_base = 10_000,
+        .scaling = .{ .default = .{ .rope_theta = 10_000 } },
     },
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: LlamaLM.Config) !Llama {
@@ -331,6 +331,8 @@ pub const SelfAttn = struct {
     rope_opts: zml.nn.RopeOpts = undefined,
 
     pub fn init(store: zml.io.TensorStore.View, config: LlamaLM.Config) !SelfAttn {
+        var rope_scaling = config.rope_scaling;
+        rope_scaling.setRopeTheta(config.rope_theta);
         return .{
             .q_proj = .init(store.createTensor("q_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
             .k_proj = .init(store.createTensor("k_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
@@ -343,8 +345,7 @@ pub const SelfAttn = struct {
             .num_kv_heads = @intCast(config.num_key_value_heads),
             .rope_opts = .{
                 .layout = if (config.hf_rope_impl) .sequential else .interleaved,
-                .freq_base = config.rope_theta,
-                .scaling = config.rope_scaling,
+                .scaling = rope_scaling,
             },
         };
     }
