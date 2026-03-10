@@ -6,6 +6,7 @@ load("//third_party/translate-c:repo.bzl", translate_c = "repo")
 load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
+load("//third_party/stb:repo.bzl", stb = "repo")
 
 def _non_module_deps_impl(mctx):
     com_google_sentencepiece()
@@ -16,6 +17,7 @@ def _non_module_deps_impl(mctx):
     translate_c()
     flashattn()
     linenoise()
+    stb()
 
     return mctx.extension_metadata(
         reproducible = True,
