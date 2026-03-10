@@ -292,7 +292,10 @@ pub const HF = struct {
         const uri = try std.Uri.parse(url);
 
         var req = try self.client.request(.GET, uri, .{
-            .headers = .{ .authorization = self.authorization },
+            .headers = .{
+                .accept_encoding = .{ .override = "identity" },
+                .authorization = self.authorization,
+            },
         });
         defer req.deinit();
 
