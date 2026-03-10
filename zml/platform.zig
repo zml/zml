@@ -5,21 +5,13 @@ const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 pub const Target = platforms.Platform;
 const stdx = @import("stdx");
+const upb = @import("upb");
 
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
-
-pub const CompilationOptions = struct {
-    xla_dump_to: ?[]const u8 = null,
-    xla_dump_fusion_visualization: bool = false,
-    xla_dump_hlo_pass_re: ?[]const u8 = null,
-    sharding_enabled: bool = false,
-    sharding_axes: stdx.BoundedArray([*:0]const u8, 8) = .{},
-    device_memory_size: u64 = 0,
-};
 
 fn StaticPlatformMap(comptime E: type, comptime T: type) type {
     const tag_count = @typeInfo(E).@"enum".fields.len;
@@ -101,7 +93,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu,.neuron => return true,
+            .cpu, .neuron => return true,
         }
     }
 
@@ -135,7 +127,7 @@ pub const Device = struct {
         allocator.free(self.addressable_memories);
     }
 
-    pub fn id(self: Device) i32 {
+    pub fn id(self: Device) usize {
         return self.pjrt_desc.id(self.platform.pjrt_api);
     }
 
@@ -192,14 +184,9 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
+    physical_mesh: zml.sharding.PhysicalMesh,
 
-    // This make the pjrt struct quite fat, but is only used during compilation.
-    // TODO: Reconsider having it here, and maybe pass explicitly to compile,
-    // or create an intermediary struct:
-    // `const comp = platform.compiler(compile_opts); const exe = comp.compile(...);`
-    compilation_options: CompilationOptions = .{},
-
-    pub const MAX_NUM_DEVICES: u8 = if (platforms.isEnabled(.tpu)) 32 else 8;
+    pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, target: Target, options: CreateOptions) !*Platform {
         const api = try loadOrGetApi(allocator, io, target);
@@ -224,9 +211,9 @@ pub const Platform = struct {
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
-            .compilation_options = .{},
             .devices = devices,
             .memories = memories,
+            .physical_mesh = undefined,
         };
         defer platform.arena_state = arena.state;
 
@@ -237,6 +224,11 @@ pub const Platform = struct {
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
                 platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
             }
+
+            platform.physical_mesh = try switch (options.physical_mesh) {
+                .auto => zml.sharding.PhysicalMesh.auto(arena.allocator(), target, devices),
+                .custom => |builder| builder(arena.allocator(), target, devices),
+            };
         }
 
         switch (target) {
@@ -251,17 +243,15 @@ pub const Platform = struct {
             else => {},
         }
 
-        if (platform.pjrt_api.ffi()) |ffi| b: {
-            const platform_name = switch (target) {
-                .cuda => "cuda",
-                .rocm => "rocm",
-                .cpu => "host",
-                else => break :b,
-            };
-            ffi.register(platform.pjrt_api, "zml$print", platform_name, printCallback, .{ .command_buffer_compatible = false }) catch |e| {
-                log.warn("Failed to register \"print\" callback, error: {}", .{e});
-            };
-        }
+        platform.registerFfi(
+            .{
+                .name = "zml$print",
+                .handler = printCallback,
+                .traits = .{ .command_buffer_compatible = false },
+            },
+        ) catch |err| {
+            log.warn("Failed to register FFI custom call \"zml$print\", error: {}", .{err});
+        };
 
         return platform;
     }
@@ -279,14 +269,14 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
-    pub fn formatWithDevices(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const tee = "├─ ";
         const line = "│  ";
         const langle = "└─ ";
 
         try writer.print("platform: {s}\n", .{@tagName(self.target)});
         try writer.print("version: {f}\n", .{self.pjrt_api.version()});
-        try writer.print("stablehlo_version: {?s}\n", .{self.pjrt_api.stablehloCurrentVersion()});
+
         try writer.print("extensions:\n", .{});
         {
             var it = self.pjrt_api.extensions();
@@ -295,37 +285,104 @@ pub const Platform = struct {
             }
         }
 
+        try writer.print("plugin attributes:\n", .{});
+        {
+            const attributes = self.pjrt_api.pluginAttributes();
+            if (attributes.len == 0) {
+                try writer.print("{s}(none)\n", .{langle});
+            } else {
+                for (attributes, 0..) |attr, i| {
+                    const is_last_attr = i == attributes.len - 1;
+                    try writer.print("{s}{s}", .{ if (is_last_attr) langle else tee, attr.name() });
+                    switch (attr.value()) {
+                        .string => |v| try writer.print(": \"{s}\"", .{v}),
+                        .int64 => |v| try writer.print(": {d}", .{v}),
+                        .int64list => |v| {
+                            for (v, 0..) |item, j| {
+                                if (j == 0) {
+                                    try writer.print(": {d}", .{item});
+                                } else {
+                                    try writer.print(".{d}", .{item});
+                                }
+                            }
+                        },
+                        .float => |v| try writer.print(": {d}", .{v}),
+                        .bool => |v| try writer.print(": {}", .{v}),
+                    }
+                    try writer.writeAll("\n");
+                }
+            }
+        }
+
         try writer.print("devices:\n", .{});
         for (self.devices, 0..) |device, i| {
-            const is_last_device = i < self.devices.len - 1;
-            try writer.print("{s}{f}\n", .{ if (is_last_device) tee else langle, device });
-            for (device.addressable_memories, 0..) |mem, j| {
-                try writer.print("{s}{s}memory: {s}\n", .{
-                    if (is_last_device) line else "   ",
-                    if (j < device.addressable_memories.len - 1) tee else langle,
-                    mem.kind(),
-                });
+            const is_last_device = i == self.devices.len - 1;
+            const child_indent = if (is_last_device) "   " else line;
+
+            try writer.print("{s}{f}\n", .{ if (is_last_device) langle else tee, device });
+
+            {
+                const device_attrs = device.pjrt_desc.attributes(self.pjrt_api);
+                if (device_attrs.len > 0) {
+                    var last_name: ?[]const u8 = null;
+                    var remaining: usize = device_attrs.len;
+
+                    while (remaining > 0) : (remaining -= 1) {
+                        var next_index: ?usize = null;
+                        for (device_attrs, 0..) |attr, j| {
+                            const name = attr.name();
+                            if (last_name) |last| {
+                                if (std.mem.order(u8, name, last) != .gt) continue;
+                            }
+                            if (next_index) |ni| {
+                                if (std.mem.order(u8, name, device_attrs[ni].name()) == .lt) {
+                                    next_index = j;
+                                }
+                            } else {
+                                next_index = j;
+                            }
+                        }
+
+                        if (next_index == null) break;
+                        const attr = device_attrs[next_index.?];
+
+                        try writer.print("{s}{s}{s}", .{ child_indent, tee, attr.name() });
+                        switch (attr.value()) {
+                            .string => |v| try writer.print(": \"{s}\"", .{v}),
+                            .int64 => |v| try writer.print(": {d}", .{v}),
+                            .int64list => |v| try writer.print(": {any}", .{v}),
+                            .float => |v| try writer.print(": {d}", .{v}),
+                            .bool => |v| try writer.print(": {}", .{v}),
+                        }
+                        try writer.writeAll("\n");
+
+                        last_name = attr.name();
+                    }
+                }
+            }
+
+            try writer.print("{s}{s}memories:\n", .{ child_indent, langle });
+            {
+                const memory_indent = "   ";
+                if (device.addressable_memories.len == 0) {
+                    try writer.print("{s}{s}{s}(none)\n", .{ child_indent, memory_indent, langle });
+                } else {
+                    for (device.addressable_memories, 0..) |mem, j| {
+                        const is_last_mem = j == device.addressable_memories.len - 1;
+                        try writer.print("{s}{s}{s}memory: {s}\n", .{
+                            child_indent,
+                            memory_indent,
+                            if (is_last_mem) langle else tee,
+                            mem.pjrt_memory.debugString(self.pjrt_api),
+                        });
+                    }
+                }
             }
         }
     }
 
-    pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithDevices) {
+    pub fn fmtVerbose(self: *const Platform) std.fmt.Alt(*const Platform, formatWithAttributes) {
         return .{ .data = self };
-    }
-
-    pub const Sharding = struct { num_replicas: u8, num_partitions: u8 };
-
-    pub fn sharding(self: *const Platform) Sharding {
-        // replicas run the same function but with different inputs,
-        // while partitions contribute to one evaluation over a shared input.
-        // Inside an inference process, we generally don't want replicas,
-        // as it's best to fully isolate replicas on different processes.
-        // For now we hardcode num_replicas = 1.
-        const num_devices: u8 = @intCast(self.devices.len);
-        return if (self.compilation_options.sharding_enabled)
-            .{ .num_replicas = 1, .num_partitions = num_devices }
-        else
-            .{ .num_replicas = 1, .num_partitions = 1 };
     }
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
@@ -342,12 +399,14 @@ pub const Platform = struct {
         args: stdx.meta.Tail(
             std.meta.ArgsTuple(@TypeOf(@field(@TypeOf(model_), @tagName(func)))),
         ),
+        opts: zml.module.CompilationOptions,
     ) !Exe {
         return self.compileFn(
             allocator,
             io,
             @field(@TypeOf(model_), @tagName(func)),
             .{model_} ++ args,
+            opts,
         );
     }
 
@@ -358,8 +417,9 @@ pub const Platform = struct {
         comptime func: anytype,
         model: stdx.meta.Head(std.meta.ArgsTuple(@TypeOf(func))),
         args: stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(func))),
+        opts: zml.module.CompilationOptions,
     ) !Exe {
-        return self.compileFn(allocator, io, func, .{model} ++ args);
+        return self.compileFn(allocator, io, func, .{model} ++ args, opts);
     }
 
     pub fn compileFn(
@@ -368,8 +428,9 @@ pub const Platform = struct {
         io: std.Io,
         comptime func: anytype,
         args: std.meta.ArgsTuple(@TypeOf(func)),
+        opts: zml.module.CompilationOptions,
     ) !Exe {
-        return zml.module.compile(allocator, io, func, args, self);
+        return zml.module.compile(allocator, io, func, args, self, opts);
     }
 
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -389,9 +450,57 @@ pub const Platform = struct {
         }
         unreachable;
     }
+
+    pub const FfiRegistration = struct {
+        name: []const u8,
+        handler: *const pjrt.ffi.Handler,
+        traits: pjrt.ffi.HandlerTraits = .{ .command_buffer_compatible = false },
+        platform_name: ?[]const u8 = null,
+    };
+
+    pub fn registerFfi(self: *const zml.Platform, registration: FfiRegistration) !void {
+        const platform_name = registration.platform_name orelse self.pjrt_client.platformName(self.pjrt_api);
+        if (self.pjrt_api.ffi()) |ffi| {
+            try ffi.register(self.pjrt_api, registration.name, platform_name, registration.handler, registration.traits);
+        } else {
+            log.warn("PJRT FFI extension not available for {s}", .{@tagName(self.target)});
+        }
+    }
+
+    pub fn profiler(self: *const Platform, allocator: std.mem.Allocator) !?pjrt.Profiler {
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        defer arena.deinit();
+
+        var upb_alloc: upb.Allocator = .init(arena.allocator());
+        const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
+        defer c.upb_Arena_Free(upb_arena);
+
+        const options = try upb.new(c.tensorflow_ProfileOptions, upb_arena);
+
+        c.tensorflow_ProfileOptions_set_device_type(options, 0);
+        c.tensorflow_ProfileOptions_set_host_tracer_level(options, 3);
+        c.tensorflow_ProfileOptions_set_device_tracer_level(options, 3);
+        c.tensorflow_ProfileOptions_set_enable_hlo_proto(options, true);
+
+        const serialized_options = try upb.serialize(options, upb_arena);
+
+        return try self.pjrt_api.profiler(serialized_options);
+    }
 };
 
 pub const CreateOptions = struct {
+    pub const CreatePhysicalMeshFn = *const fn (
+        allocator: std.mem.Allocator,
+        target: Target,
+        devices: []const Device,
+    ) anyerror!zml.sharding.PhysicalMesh;
+
+    pub const PhysicalMesh = union(enum) {
+        auto,
+        custom: CreatePhysicalMeshFn,
+    };
+
+    physical_mesh: PhysicalMesh = .auto,
     cpu: Cpu = .{ .device_count = 4 },
 
     // bump memory fraction from XLA defaults of 75% to 90%.
@@ -571,7 +680,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     const slice: zml.Slice = .init(shape, host_visible_data[0..shape.byteSize()]);
     const name = call_frame.attrs.getByName(.string, "name").?.slice();
 
-    log.info("{s}: {d}", .{ name, slice });
+    log.info("{s} {f} [device={d}]: {d}", .{ name, slice.shape, device_ordinal, slice });
 
     return null;
 }

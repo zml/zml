@@ -16,7 +16,7 @@ pub const std_options: std.Options = .{
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
 
-    const Command = enum { cat, ls, cp, stat, realpath, safetensors };
+    const Command = enum { cat, ls, cp, stat, realpath, safetensors, load };
 
     var it = init.minimal.args.iterate();
     _ = it.next(); // skip program name
@@ -148,6 +148,73 @@ pub fn main(init: std.process.Init) !void {
             try stdout_writer.interface.print("{s}\n", .{path});
             try printTensorTree(&stdout_writer.interface, root, "", true, true);
             try stdout_writer.interface.flush();
+        },
+        .load => {
+            const ShardingType = enum { replicated, sharded };
+
+            const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
+
+            const platform: *zml.Platform = try .auto(allocator, io, .{});
+            defer platform.deinit(allocator);
+
+            var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+            defer registry.deinit();
+
+            var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+            defer store.deinit();
+
+            const AllTensorsModel = struct {
+                tensors: []zml.Tensor,
+            };
+
+            const tensor_count = registry.tensors.count();
+
+            const tensors = try allocator.alloc(zml.Tensor, tensor_count);
+            defer allocator.free(tensors);
+
+            var registry_it = registry.iterator();
+            var load_count: usize = 0;
+            while (registry_it.next()) |entry| : (load_count += 1) {
+                tensors[load_count] = switch (sharding_type) {
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, null),
+                    .sharded => if (entry.value_ptr.shape.rank() > 0)
+                        store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
+                    else
+                        store.view().createTensor(entry.key_ptr.*, null, null),
+                };
+            }
+
+            const model: AllTensorsModel = .{ .tensors = tensors };
+
+            const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+
+            const sharded_sharding: zml.sharding.Sharding = blk: {
+                const model_logical_mesh: zml.sharding.LogicalMesh = try .init("playground_model", .{ .model = .high_bandwidth });
+                const model_strategy: zml.sharding.Strategy = try .suggest(model_logical_mesh, platform.physical_mesh);
+                break :blk try .initFromStrategy(platform, model_logical_mesh, model_strategy);
+            };
+
+            var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
+            progress.increaseEstimatedTotalItems(load_count);
+            defer progress.end();
+
+            const now: std.Io.Timestamp = .now(io, .awake);
+            var total_bytes: usize = 0;
+            defer {
+                const took = now.untilNow(io, .awake);
+                const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
+                log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{ total_bytes, stdx.fmt.fmtDuration(took), bytes_per_sec });
+            }
+
+            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, .{
+                .store = &store,
+                .shardings = &.{ replicated_sharding, sharded_sharding },
+                .parallelism = 16,
+                .dma_chunks = 16,
+                .dma_chunk_size = 64 * zml.MiB,
+                .progress = &progress,
+                .total_bytes = &total_bytes,
+            });
         },
     }
 }

@@ -15,6 +15,9 @@ const mlirx = @import("mlirx.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const sharding_ = @import("sharding.zig");
+const Sharding = sharding_.Sharding;
+const Partitioning = sharding_.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");
@@ -30,7 +33,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         mlir.registerPasses("Transforms");
 
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo" }) |d| {
+        inline for (.{ "func", "stablehlo", "sdy" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         mlir.registerFuncExtensions(mlir_registry);
@@ -40,6 +43,16 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
 
     return mlir_global_registry.?;
 }
+pub const CompilationOptions = struct {
+    shardings: []const Sharding,
+    // If null, will be initialized from the target
+    partitioner: ?Partitioning.Partitioner = null,
+    // Debugging options
+    program_name: []const u8 = "zml",
+    xla_dump_to: ?[]const u8 = null,
+    xla_dump_fusion_visualization: bool = false,
+    xla_dump_hlo_pass_re: ?[]const u8 = null,
+};
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
 
@@ -73,22 +86,22 @@ pub const CompilationContext = struct {
     mlir_registry: *mlir.DialectRegistry,
     mlir_ctx: *mlir.Context,
     mlir_pass_manager: *mlir.PassManager,
-    //mlir_op_pass_manager: *mlir.OpPassManager,
     module: *mlir.Module,
     platform: *const Platform,
+    partitioning: Partitioning,
 
     scopes: stdx.BoundedArray(Scope, 16) = .{},
+    manual_computation_depth: usize = 0,
 
     threadlocal var _current: ?*CompilationContext = null;
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform) CompilationContext {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
         const mlir_registry = mlirRegistry(io);
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
 
-        //const loc = mlir.Location.fromSrc(mlir_ctx, @src()).named(mlir_ctx, "main");
         const module = mlir.Module.init(.unknown(mlir_ctx));
-        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, "zml"));
+        module.operation().setAttributeByName("sym_name", mlir.stringAttribute(mlir_ctx, opts.program_name));
 
         const pass_manager = mlir.PassManager.init(mlir_ctx);
         {
@@ -103,6 +116,8 @@ pub const CompilationContext = struct {
             }
         }
 
+        const partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable;
+
         return .{
             .allocator = allocator,
             .arena = std.heap.ArenaAllocator.init(allocator),
@@ -111,6 +126,7 @@ pub const CompilationContext = struct {
             .mlir_pass_manager = pass_manager,
             .module = module,
             .platform = platform,
+            .partitioning = partitioning,
         };
     }
 
@@ -150,41 +166,6 @@ pub const CompilationContext = struct {
             popped.deinit();
         }
     }
-
-    //pub fn addShardingAttributes(
-    //    self: *const CompilationContext,
-    //    mesh: Mesh,
-    //    arg_attrs: []AttributeList,
-    //    res_attrs: []AttributeList,
-    //    input_shapes: []const Shape,
-    //    input_meshes: []const ?Mesh,
-    //    output_info: OutputInfo,
-    //) void {
-    //    if (mesh.isSinglePartition()) return; // No sharding attributes for single partition.
-
-    //    const default_layout = mlir.NamedAttribute.named(self.mlir_ctx, "mhlo.layout_mode", mlir.stringAttribute(self.mlir_ctx, "default"));
-    //    for (arg_attrs, input_shapes, input_meshes) |*attr, shape, input_mesh| {
-    //        attr.appendAssumeCapacity(default_layout);
-    //        if (input_mesh) |m| {
-    //            // log.warn("addShardingAttributes for {} with input mesh: {}", .{ shape, m });
-    //            attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(m, shape))));
-    //        } else {
-    //            // log.warn("addShardingAttributes for {} with progran mesh: {}", .{ shape, mesh });
-    //            attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
-    //        }
-    //    }
-
-    //    for (res_attrs, output_info.shapes) |*attr, shape| {
-    //        attr.appendAssumeCapacity(default_layout);
-    //        attr.appendAssumeCapacity(.named(self.mlir_ctx, "mhlo.sharding", self.getShardingAttr(Sharding.init(mesh, shape))));
-    //    }
-    //}
-
-    //pub fn getShardingAttr(self: *const CompilationContext, sharding: Sharding) *const mlir.Attribute {
-    //    var sharding_str: stdx.BoundedArray(u8, 128) = .{};
-    //    sharding.writeShardingRepresentation(sharding_str.writer()) catch unreachable;
-    //    return mlir.stringAttribute(self.mlir_ctx, sharding_str.constSlice());
-    //}
 };
 
 pub fn compile(
@@ -193,74 +174,121 @@ pub fn compile(
     comptime func: anytype,
     args: std.meta.ArgsTuple(@TypeOf(func)),
     platform: *const Platform,
+    opts: CompilationOptions,
 ) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, io, platform);
+    var compilation_context: CompilationContext = .init(allocator, io, platform, opts);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;
     defer result.output_info.deinit(compilation_context.allocator);
     defer result.input_info.deinit(compilation_context.allocator);
 
+    try addPartitionerOperations(&compilation_context);
+
     _ = result.func.appendTo(compilation_context.module.body());
-    const sharding = platform.sharding();
-    compilation_context.module.operation().setAttributeByName("mhlo.num_replicas", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, sharding.num_replicas));
-    compilation_context.module.operation().setAttributeByName("mhlo.num_partitions", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, sharding.num_partitions));
+
+    const num_partitions = compilation_context.partitioning.numPartitions();
+    const num_replicas = compilation_context.partitioning.numReplicas();
+    const num_devices = compilation_context.partitioning.numDevices();
+
+    compilation_context.module.operation().setAttributeByName(
+        "mhlo.num_partitions",
+        mlir.integerAttribute(compilation_context.mlir_ctx, .i32, num_partitions),
+    );
+    compilation_context.module.operation().setAttributeByName(
+        "mhlo.num_replicas",
+        mlir.integerAttribute(compilation_context.mlir_ctx, .i32, num_replicas),
+    );
+
+    compilation_context.mlir_pass_manager.runOnOp(compilation_context.module.operation()) catch |err| switch (err) {
+        error.MlirUnexpected => {
+            std.log.err("Failed to canonicalize invalid mlir: \n {f} \n ", .{compilation_context.module.operation()});
+            @panic("ZML generated invalid mlir. Please open a bug report");
+        },
+    };
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, null) catch unreachable;
-
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
-    const num_devices = sharding.num_partitions * sharding.num_replicas;
-    const exe = try Exe.init(allocator, platform, loaded_executable, result.input_info.shapes, result.output_info.shapes, num_devices);
+    const exe = try Exe.init(
+        allocator,
+        platform,
+        loaded_executable,
+        @intCast(num_devices),
+        num_partitions,
+        result.input_info.shapes,
+        result.output_info.shapes,
+        result.input_info.shardings,
+        result.output_info.shardings,
+    );
     errdefer exe.deinit();
 
     return exe;
 }
 
-fn collectShapes(allocator: std.mem.Allocator, v: anytype) ![]Shape {
-    const LocalContext = struct {
-        list: *std.array_list.Managed(Shape),
-    };
-    var list = std.array_list.Managed(Shape).init(allocator);
-    errdefer list.deinit();
+fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
+    const allocator = compilation_context.arena.allocator();
+    const mlir_ctx = compilation_context.mlir_ctx;
+    const module = compilation_context.module;
+    const partitioning = compilation_context.partitioning;
 
-    var context: LocalContext = .{ .list = &list };
-    try meta.visit(struct {
-        fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
-            try ctx_.list.append(tensor.shape());
-        }
-    }.cb, &context, v);
+    switch (partitioning.partitioner) {
+        .gspmd => {},
+        .shardy => {
+            for (partitioning.shardings) |sharding| {
+                const attr_str = try sharding.sdyMeshAttr(allocator);
+                defer allocator.free(attr_str);
 
-    return try list.toOwnedSlice();
+                const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
+
+                const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
+                    .attributes = &.{
+                        .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, sharding.name())),
+                        .named(mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+                    },
+                    .location = .unknown(mlir_ctx),
+                    .verify = false,
+                });
+
+                _ = mesh_op.appendTo(module.body());
+            }
+        },
+    }
 }
 
 pub const OutputInfo = struct {
     shapes: []Shape,
+    shardings: []Sharding,
     values: []*const mlir.Value,
     donations: []?usize,
     output_memory_kinds: []Memory.Kind,
 
     pub fn deinit(self: OutputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
+        allocator.free(self.shardings);
         allocator.free(self.values);
         allocator.free(self.donations);
         allocator.free(self.output_memory_kinds);
     }
 };
 
-fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
+fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !OutputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
+        sharding_list: *std.array_list.Managed(Sharding),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
         output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
+        partitioning: Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    errdefer sharding_list.deinit();
     var value_list = std.array_list.Managed(*const mlir.Value).init(allocator);
     errdefer value_list.deinit();
     var donation_list = std.array_list.Managed(?usize).init(allocator);
@@ -270,14 +298,17 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
     var context: LocalContext = .{
         .shape_list = &shape_list,
+        .sharding_list = &sharding_list,
         .value_list = &value_list,
         .donation_list = &donation_list,
         .output_memory_kind_list = &output_memory_kind_list,
+        .partitioning = partitioning,
     };
 
     try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
+            try ctx_.sharding_list.append(try ctx_.partitioning.selectSharding(tensor.shape()));
             try ctx_.value_list.append(tensor.value());
             try ctx_.donation_list.append(tensor.donation());
             try ctx_.output_memory_kind_list.append(tensor.outputMemoryKind());
@@ -286,6 +317,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
     return .{
         .shapes = try shape_list.toOwnedSlice(),
+        .shardings = try sharding_list.toOwnedSlice(),
         .values = try value_list.toOwnedSlice(),
         .donations = try donation_list.toOwnedSlice(),
         .output_memory_kinds = try output_memory_kind_list.toOwnedSlice(),
@@ -294,30 +326,43 @@ fn collectOutputInfo(allocator: std.mem.Allocator, v: anytype) !OutputInfo {
 
 pub const InputInfo = struct {
     shapes: []Shape,
+    shardings: []Sharding,
 
     pub fn deinit(self: InputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
+        allocator.free(self.shardings);
     }
 };
 
-fn collectInputInfo(allocator: std.mem.Allocator, v: anytype) !InputInfo {
+fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !InputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
+        sharding_list: *std.array_list.Managed(Sharding),
+        partitioning: Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
 
-    var context: LocalContext = .{ .shape_list = &shape_list };
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    errdefer sharding_list.deinit();
+
+    var context: LocalContext = .{
+        .shape_list = &shape_list,
+        .sharding_list = &sharding_list,
+        .partitioning = partitioning,
+    };
 
     try meta.visit(struct {
         fn cb(ctx_: *LocalContext, tensor: *const Tensor) !void {
             try ctx_.shape_list.append(tensor.shape());
+            try ctx_.sharding_list.append(try ctx_.partitioning.selectSharding(tensor.shape()));
         }
     }.cb, &context, v);
 
     return .{
         .shapes = try shape_list.toOwnedSlice(),
+        .shardings = try sharding_list.toOwnedSlice(),
     };
 }
 
@@ -367,7 +412,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
         }
     }.cb, &context, &args);
 
-    const input_info = try collectInputInfo(compilation_context.allocator, &args);
+    const input_info = try collectInputInfo(compilation_context.allocator, compilation_context.partitioning, &args);
     errdefer input_info.deinit(compilation_context.allocator);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
@@ -379,7 +424,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
 
         const result = @call(.auto, func, args);
 
-        const output_info = try collectOutputInfo(compilation_context.allocator, &result);
+        const output_info = try collectOutputInfo(compilation_context.allocator, compilation_context.partitioning, &result);
         errdefer output_info.deinit(compilation_context.allocator);
 
         break :b output_info;
@@ -405,21 +450,36 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     }
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
+    for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
+        const attr_str = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding);
+
+        const name, const attr = switch (compilation_context.partitioning.partitioner) {
+            .gspmd => .{ "mhlo.sharding", mlir.stringAttribute(compilation_context.mlir_ctx, attr_str) },
+            .shardy => .{ "sdy.sharding", try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str) },
+        };
+
+        input_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
+    }
+
+    for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
+        const attr_str = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding);
+
+        const name, const attr = switch (compilation_context.partitioning.partitioner) {
+            .gspmd => .{ "mhlo.sharding", mlir.stringAttribute(compilation_context.mlir_ctx, attr_str) },
+            .shardy => .{ "sdy.sharding", try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str) },
+        };
+
+        output_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
+    }
+
     const mlir_func = dialects.func.func(compilation_context.mlir_ctx, .{
         .name = "main",
         .block = compilation_context.currentScope().block,
         .location = .unknown(compilation_context.mlir_ctx),
         .args_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, input_attributes),
         .results_attributes = try finalizeAttributeList(arena.allocator(), compilation_context.mlir_ctx, output_attributes),
+        .verify = false,
     });
-
-    compilation_context.mlir_pass_manager.runOnOp(mlir_func) catch |err| switch (err) {
-        error.MlirUnexpected => {
-            std.log.err("Failed to canonicalize invalid mlir: {f}", .{mlir_func});
-            // user errors should have triggered a panic before we reach this.
-            @panic("ZML generated invalid mlir. Please open a bug report");
-        },
-    };
 
     return .{
         .func = mlir_func,
@@ -450,39 +510,53 @@ fn setXlaOverrideFlag(map: *c.upb_Map, flag: []const u8, value: anytype, upb_are
     }
 }
 
-fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, xla_dump_to_: ?[]const u8) !*pjrt.LoadedExecutable {
-    //const tracer = Tracer.init("ai.zml.compilation");
-    //const compile_frame = tracer.frameStart("pjrt compilation");
-    //defer tracer.frameEnd(compile_frame, "pjrt compilation");
-
-    const sharding = platform.sharding();
-
+fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform: *const Platform, module: *const mlir.Module, partitioning: Partitioning, opts: CompilationOptions) !*pjrt.LoadedExecutable {
     var upb_alloc: upb.Allocator = .init(arena);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
     defer c.upb_Arena_Free(upb_arena);
+
+    const use_shardy_partitioner = switch (partitioning.partitioner) {
+        .shardy => true,
+        .gspmd => false,
+    };
+
+    const num_partitions = partitioning.numPartitions();
+    const num_replicas = partitioning.numReplicas();
+
+    const device_assignment = try partitioning.deviceAssignment(arena);
 
     const options = blk: {
         const options = try upb.new(c.xla_CompileOptionsProto, upb_arena);
         c.xla_CompileOptionsProto_set_executable_build_options(options, executable_build_options_blk: {
             const exec_build_options = try upb.new(c.xla_ExecutableBuildOptionsProto, upb_arena);
-
             c.xla_ExecutableBuildOptionsProto_set_device_ordinal(exec_build_options, -1);
-            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, sharding.num_replicas);
-            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, sharding.num_partitions);
-            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, sharding.num_partitions > 1 or sharding.num_replicas > 1);
+            c.xla_ExecutableBuildOptionsProto_set_num_replicas(exec_build_options, num_replicas);
+            c.xla_ExecutableBuildOptionsProto_set_num_partitions(exec_build_options, num_partitions);
+            c.xla_ExecutableBuildOptionsProto_set_use_spmd_partitioning(exec_build_options, true);
+            c.xla_ExecutableBuildOptionsProto_set_use_shardy_partitioner(exec_build_options, use_shardy_partitioner);
 
             c.xla_ExecutableBuildOptionsProto_set_device_assignment(exec_build_options, device_assignment_blk: {
-                const device_assignment = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
+                const device_assignment_proto = try upb.new(c.xla_DeviceAssignmentProto, upb_arena);
 
-                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment, sharding.num_replicas);
-                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment, sharding.num_partitions);
+                c.xla_DeviceAssignmentProto_set_replica_count(device_assignment_proto, num_replicas);
+                c.xla_DeviceAssignmentProto_set_computation_count(device_assignment_proto, num_partitions);
 
-                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(device_assignment, sharding.num_partitions, upb_arena);
-                for (computation_devices[0..sharding.num_partitions], 0..) |*computation_device, i| {
+                const computation_devices = c.xla_DeviceAssignmentProto_resize_computation_devices(
+                    device_assignment_proto,
+                    @intCast(num_partitions),
+                    upb_arena,
+                );
+
+                for (computation_devices[0..@intCast(num_partitions)], 0..) |*computation_device, i| {
                     computation_device.* = try upb.new(c.xla_DeviceAssignmentProto_ComputationDevice, upb_arena);
-                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(computation_device.*, @intCast(i), upb_arena);
+                    _ = c.xla_DeviceAssignmentProto_ComputationDevice_add_replica_device_ids(
+                        computation_device.*,
+                        @intCast(device_assignment[@intCast(i)]),
+                        upb_arena,
+                    );
                 }
-                break :device_assignment_blk device_assignment;
+
+                break :device_assignment_blk device_assignment_proto;
             });
 
             break :executable_build_options_blk exec_build_options;
@@ -524,13 +598,13 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             else => {},
         }
 
-        if (xla_dump_to_ orelse platform.compilation_options.xla_dump_to) |xla_dump_to| {
+        if (opts.xla_dump_to) |xla_dump_to| {
             try setXlaOverrideFlag(overrides_map, "xla_dump_to", xla_dump_to, upb_arena);
             try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_as_proto", true, upb_arena);
-            if (platform.compilation_options.xla_dump_fusion_visualization) {
+            if (opts.xla_dump_fusion_visualization) {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_fusion_visualization", true, upb_arena);
             }
-            if (platform.compilation_options.xla_dump_hlo_pass_re) |re| {
+            if (opts.xla_dump_hlo_pass_re) |re| {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
             }
         }

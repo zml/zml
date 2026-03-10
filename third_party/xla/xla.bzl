@@ -1,6 +1,7 @@
 load("@xla//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls", "tf_vendored")
 load("@xla//third_party/llvm:workspace.bzl", llvm = "repo")
 load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
+load("@xla//third_party/shardy:workspace.bzl", shardy = "repo")
 load("@xla//third_party/triton:workspace.bzl", triton = "repo")
 
 _BZL_HELPERS = """\
@@ -74,6 +75,7 @@ if_sycl_is_configured = always_if_false
 def _xla_impl(mctx):
     llvm("llvm-raw")
     stablehlo()
+    shardy()
     triton()
 
     tf_http_archive(

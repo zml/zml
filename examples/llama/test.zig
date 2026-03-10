@@ -103,7 +103,7 @@ pub fn asyncMain() !void {
 }
 
 fn testImplementation(
-    platform: zml.Platform,
+    platform: *const zml.Platform,
     llama: LlamaLM,
     llama_weights: zml.Bufferized(LlamaLM),
     buffer_store: zml.aio.BufferStore,

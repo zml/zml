@@ -12,6 +12,7 @@ zig_library(
         "//mlir",
         "//mlir/dialects/stablehlo",
         "//stdx",
+        "@shardy//shardy/integrations/c:sdy_capi",
     ],
 )
 

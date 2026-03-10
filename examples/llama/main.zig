@@ -134,9 +134,14 @@ pub fn main(init: std.process.Init) !void {
             .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
         }, dtype)),
         .rng = .init(),
-        .attention_metadata = .init(.fromBackend(backend, @intCast(args.seqlen))),
+        .attention_metadata = .init(.fromBackend(backend, @intCast(args.seqlen), @intCast(config.num_attention_heads))),
         .attention_parameters = .init(.fromBackend(backend)),
     };
+
+    const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
+    const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
+    const sharding_tp: zml.sharding.Sharding = try .initFromStrategy(platform, tp_mesh, tp_strategy);
+    const sharding_replicated = try zml.sharding.replicatedSharding(platform);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
@@ -146,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         v.deinit();
     }
 
-    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, &progress });
+    var compiled_model_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, llama_model, llama_parameters, &.{sharding_tp}, &progress });
     defer if (compiled_model_result_future.cancel(io)) |v| {
         v.prefill_exe.deinit();
         v.decode_exe.deinit();
@@ -161,6 +166,7 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         &store,
+        &.{sharding_tp},
         &progress,
     });
     defer blk: {
@@ -174,10 +180,10 @@ pub fn main(init: std.process.Init) !void {
     progress.end();
 
     log.info("Creating KvCache", .{});
-    var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform);
+    var kv_cache_buffers = try llama_parameters.kv_cache.initBuffer(io, platform, sharding_tp);
     defer llama.KvCache.deinitBuffer(&kv_cache_buffers);
 
-    var attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform);
+    var attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata) = try llama_parameters.attention_metadata.initBuffer(io, platform, sharding_tp);
     defer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
     const tokenizer = try tokenizer_future.await(io);
@@ -208,6 +214,7 @@ pub fn main(init: std.process.Init) !void {
         false,
         &stdout.interface,
         platform,
+        sharding_replicated,
     );
 }
 
@@ -273,6 +280,7 @@ fn compileModel(
     platform: *const zml.Platform,
     llama_model: llama.LlamaLM,
     parameters: LlamaParameters,
+    shardings: []const zml.sharding.Sharding,
     progress: *std.Progress.Node,
 ) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -280,7 +288,7 @@ fn compileModel(
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = try io.concurrent(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, progress_: *std.Progress.Node) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []const zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling prefill...", 1);
             defer node_.end();
@@ -293,15 +301,15 @@ fn compileModel(
                 parameters_.rng,
                 parameters_.attention_metadata,
                 parameters_.attention_parameters,
-            });
+            }, .{ .shardings = shardings_ });
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters, progress });
+    }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
 
     var decode_future = try io.concurrent(struct {
-        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, progress_: *std.Progress.Node) !zml.Exe {
+        fn call(allocator_: std.mem.Allocator, io_: std.Io, platform_: *const zml.Platform, llama_model_: llama.LlamaLM, parameters_: LlamaParameters, shardings_: []const zml.sharding.Sharding, progress_: *std.Progress.Node) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
             var node_ = progress_.start("Compiling decode...", 1);
             defer node_.end();
@@ -314,9 +322,9 @@ fn compileModel(
                 parameters_.rng,
                 parameters_.attention_metadata,
                 parameters_.attention_parameters,
-            });
+            }, .{ .shardings = shardings_ });
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters, progress });
+    }.call, .{ allocator, io, platform, llama_model, parameters, shardings, progress });
     errdefer if (decode_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -370,6 +378,7 @@ pub fn generateText(
     skip_llama3_encoding: bool,
     writer: *std.Io.Writer,
     platform: *const zml.Platform,
+    replicated_sharding: zml.sharding.Sharding,
 ) !void {
     const prompt_tok: []const u32 = try tokenizePrompt(allocator, tokenizer, config, prompt, skip_llama3_encoding);
     defer allocator.free(prompt_tok);
@@ -380,7 +389,7 @@ pub fn generateText(
     const max_seq_len = options.max_seq_len;
 
     // init RNG and buffers
-    var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io);
+    var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, replicated_sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
@@ -397,9 +406,9 @@ pub fn generateText(
         defer prefill_tokens_slice.free(allocator);
         @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
 
-        var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice);
+        var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
-        var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32);
+        var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, replicated_sharding);
         defer prefill_token_pos_buffer.deinit();
 
         prefill_args.set(.{ llama_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, attention_metadata_buffers });
@@ -424,7 +433,7 @@ pub fn generateText(
     defer decode_results.deinit(allocator);
 
     // start with the token generated based on the full prompt.
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice);
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, replicated_sharding);
     defer current_token_buffer.deinit();
 
     const output_tokens_len = max_seq_len - prompt_tok.len - 1;
@@ -455,7 +464,7 @@ pub fn generateText(
 
         // current token pos needs to go into a zml.Buffer
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
-        var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice);
+        var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice, replicated_sharding);
         defer token_pos_buffer.deinit();
 
         // call to generate the next token
