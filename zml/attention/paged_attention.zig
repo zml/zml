@@ -108,7 +108,7 @@ pub const Options = union(Backend) {
             .triton => .{
                 .triton = .{
                     .batch_size = args.batch_size,
-                    .max_num_pages = args.max_num_pages,
+                    .max_num_pages = max_num_pages,
                     .max_seqlen_q = args.max_seqlen_q,
                     .is_prefill = args.is_prefill,
                 },

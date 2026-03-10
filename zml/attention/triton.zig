@@ -324,33 +324,61 @@ pub const paged = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        const paged_attention_opts: PagedAttentionOptions = .{
-            .cu_count = getCuCount(),
-            .all_decode = !parameters.options_.is_prefill,
-            .num_tokens = @intCast(q.dim(.b)),
-            .num_heads = @intCast(q.dim(.h)),
-            .num_kv_heads = @intCast(k_cache.dim(.h)),
-            .head_dim = @intCast(q.dim(.hd)),
-            .batch_size = @intCast(parameters.block_table.dim(.b)),
-            .block_size = @intCast(k_cache.dim(.k_chunk)),
-            .num_blocks = @intCast(k_cache.dim(.page)),
-            .max_num_block_per_seq = @intCast(parameters.block_table.dim(.num_pages_per_seq)),
-            .sliding_window = if (opts.sliding_window < 0) 0 else @intCast(opts.sliding_window),
-        };
+        const output = zml.ops.manualComputation(
+            .{
+                q,
+                k_cache,
+                v_cache,
+                parameters.block_table,
+                parameters.seq_lens,
+                parameters.query_start_len,
+                layer_index,
+            },
+            q.shape(),
+            .{
+                .opts = opts,
+                .options = parameters.options_,
+                .context = context,
+            },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, _: zml.Shape) zml.Tensor {
+                    const q_ = sharded_inputs[0];
+                    const k_cache_ = sharded_inputs[1];
+                    const v_cache_ = sharded_inputs[2];
+                    const layer_index_ = sharded_inputs[6];
+                    const parameters_: Parameters = .{ .block_table = sharded_inputs[3], .seq_lens = sharded_inputs[4], .query_start_len = sharded_inputs[5], .options_ = ctx_.options };
+                    const paged_attention_opts: PagedAttentionOptions = .{
+                        .cu_count = getCuCount(),
+                        .all_decode = !ctx_.options.is_prefill,
+                        .num_tokens = @intCast(q_.dim(.b)),
+                        .num_heads = @intCast(q_.dim(.hkv) * q_.dim(.hg)),
+                        .num_kv_heads = @intCast(k_cache_.dim(.hkv)),
+                        .head_dim = @intCast(q_.dim(.hd)),
+                        .batch_size = @intCast(parameters_.block_table.dim(.b)),
+                        .block_size = @intCast(k_cache_.dim(.k_chunk)),
+                        .num_blocks = @intCast(k_cache_.dim(.page)),
+                        .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.num_pages_per_seq)),
+                        .sliding_window = if (ctx_.opts.sliding_window < 0) 0 else @intCast(ctx_.opts.sliding_window),
+                    };
 
-        const use_2d_kernel = use2dKernel(
-            paged_attention_opts.head_dim,
-            paged_attention_opts.sliding_window,
-            paged_attention_opts.all_decode,
-            parameters.options_.max_seqlen_q,
-            paged_attention_opts.maxSeqLenK(),
-            paged_attention_opts.targetNumPrograms(),
-            paged_attention_opts.num2dPrograms(),
+                    const use_2d_kernel = use2dKernel(
+                        paged_attention_opts.head_dim,
+                        paged_attention_opts.sliding_window,
+                        paged_attention_opts.all_decode,
+                        ctx_.options.max_seqlen_q,
+                        paged_attention_opts.maxSeqLenK(),
+                        paged_attention_opts.targetNumPrograms(),
+                        paged_attention_opts.num2dPrograms(),
+                    );
+                    const output = if (use_2d_kernel)
+                        pagedAttention2d(parameters_, ctx_.context, q_, k_cache_, v_cache_, layer_index_, ctx_.opts, paged_attention_opts)
+                    else
+                        pagedAttention3d(parameters_, ctx_.context, q_, k_cache_, v_cache_, layer_index_, ctx_.opts, paged_attention_opts);
+
+                    return output;
+                }
+            }).body,
         );
-        const output = if (use_2d_kernel)
-            pagedAttention2d(parameters, context, q, k_cache, v_cache, layer_index, opts, paged_attention_opts)
-        else
-            pagedAttention3d(parameters, context, q, k_cache, v_cache, layer_index, opts, paged_attention_opts);
 
         return output;
     }
@@ -395,7 +423,8 @@ pub const paged = struct {
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
         const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
         const block_table_strides_ptr = zml.Tensor.constant(zml.DataType.i64.constant(block_table_strides[0]));
-        const q_strides = q.shape().computeElementStrides().constSlice();
+        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+        const q_strides = q_shape.computeElementStrides().constSlice();
         const q_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0]));
         const q_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1]));
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
@@ -515,7 +544,8 @@ pub const paged = struct {
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
         const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
         const block_table_strides_ptr = zml.Tensor.constant(zml.DataType.i64.constant(block_table_strides[0]));
-        const q_strides = q.shape().computeElementStrides().constSlice();
+        const q_shape = q.shape().mergeAxes(.{ .h = .{ .hkv, .hg } });
+        const q_strides = q_shape.computeElementStrides().constSlice();
         const q_strides_0_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[0]));
         const q_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(q_strides[1]));
         const k_strides = k_cache.shape().computeElementStrides().constSlice();
