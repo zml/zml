@@ -60,9 +60,9 @@ pub const Model = struct {
         defer {
             const took = now.untilNow(io, .awake);
             const took_ns: usize = @max(1, @as(usize, @intCast(took.toNanoseconds())));
-            log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{
                 total_bytes,
-                stdx.fmt.fmtDuration(took),
+                took,
                 total_bytes * std.time.ns_per_s / took_ns,
             });
         }

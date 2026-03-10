@@ -125,6 +125,7 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 test normalizeL2 {
     const platform = zml.testing.env();
 
+
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
@@ -142,7 +143,6 @@ test normalizeL2 {
 
 pub const RopeOpts = struct {
     layout: Layout = .sequential,
-    freq_base: f32 = 10_000,
     scaling: Scaling = .{ .default = .{} },
 
     /// There are two layouts corresponding to how to split `x` in real/imag parts.
@@ -179,7 +179,7 @@ pub const RopeOpts = struct {
             mscale_all_dim: ?f32 = null,
             truncate: bool = true,
             original_max_position_embeddings: u32,
-            rope_theta: f32,
+            rope_theta: f32 = 10000,
             llama_4_scaling_beta: ?f32 = null,
             attention_factor: ?f32 = null,
         };
@@ -335,7 +335,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
     const N = inv_freq.len;
     // Default frequencies
     for (0.., inv_freq) |n, *f| {
-        f.* = @exp(-@log(opts.freq_base) * stdx.math.divFloat(f32, n, N));
+        f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
     }
 
     switch (opts.scaling) {
@@ -374,8 +374,8 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
             const downscaling = 1.0 / s.factor.?;
 
             // This isn't a typo: low n have a high frequency, high n have a low frequency.
-            var n_low: f64 = -@log(f_high) / @log(opts.freq_base) * N_f;
-            var n_high: f64 = -@log(f_low) / @log(opts.freq_base) * N_f;
+            var n_low: f64 = -@log(f_high) / @log(opts.scaling.getRopeTheta()) * N_f;
+            var n_high: f64 = -@log(f_low) / @log(opts.scaling.getRopeTheta()) * N_f;
             if (s.truncate) {
                 n_high = std.math.ceil(n_high);
                 n_low = std.math.floor(n_low);
@@ -400,12 +400,12 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 test "invFreq Llama3" {
     // Llama 3.2-1B config
     const llama_conf: RopeOpts = .{
-        .freq_base = 500_000,
         .scaling = .{ .llama3 = .{
             .factor = 32,
             .high_freq_factor = 4,
             .low_freq_factor = 1,
             .original_max_position_embeddings = 8192,
+            .rope_theta = 500_000,
         } },
     };
     const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
@@ -420,14 +420,13 @@ test "invFreq Llama3" {
 
 test "invFreq Yarn" {
     const yarn_conf: RopeOpts = .{
-        .freq_base = 150_000,
         .scaling = .{ .yarn = .{
             .factor = 32.0,
             .beta_fast = 32.0,
             .beta_slow = 1.0,
             .original_max_position_embeddings = 4096,
             .truncate = true,
-            .rope_theta = 10000,
+            .rope_theta = 150_000,
         } },
     };
     const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };

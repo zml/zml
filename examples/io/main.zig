@@ -203,7 +203,7 @@ pub fn main(init: std.process.Init) !void {
             defer {
                 const took = now.untilNow(io, .awake);
                 const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-                log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{ total_bytes, stdx.fmt.fmtDuration(took), bytes_per_sec });
+                log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, .{

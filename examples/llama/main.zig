@@ -221,9 +221,7 @@ pub fn main(init: std.process.Init) !void {
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(LlamaLM.Config) {
     const now: std.Io.Timestamp = .now(io, .awake);
     log.info("Loading model config", .{});
-    defer log.info("Loaded model config [{D}]", .{
-        stdx.fmt.fmtDuration(now.untilNow(io, .awake)),
-    });
+    defer log.info("Loaded model config [{f}]", .{now.untilNow(io, .awake)});
 
     const parsed_config = blk: {
         const config_json_file = try dir.openFile(io, "config.json", .{});
@@ -245,9 +243,7 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Loaded tokenizer [{D}]", .{
-        stdx.fmt.fmtDuration(now.untilNow(io, .awake)),
-    });
+    defer log.info("Loaded tokenizer [{f}]", .{now.untilNow(io, .awake)});
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
@@ -284,7 +280,7 @@ fn compileModel(
     progress: *std.Progress.Node,
 ) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled model [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
 
     // Compile the model twice, one for prefill, one for generation.
     var prefill_future = try io.concurrent(struct {
@@ -293,7 +289,7 @@ fn compileModel(
             var node_ = progress_.start("Compiling prefill...", 1);
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
-            defer log.info("Compiled prefill [{D}]", .{stdx.fmt.fmtDuration(now_.untilNow(io_, .awake))});
+            defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.prefill_tokens,
                 parameters_.token_index,
@@ -314,7 +310,7 @@ fn compileModel(
             var node_ = progress_.start("Compiling decode...", 1);
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
-            defer log.info("Compiled decode [{D}]", .{stdx.fmt.fmtDuration(now_.untilNow(io_, .awake))});
+            defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
             return platform_.compile(allocator_, io_, llama_model_, .forward, .{
                 parameters_.decode_tokens,
                 parameters_.token_index,
@@ -479,9 +475,9 @@ pub fn generateText(
     }
     const duration = now.untilNow(io, .awake);
     std.debug.print("\n", .{});
-    log.info("✅ Generated {} tokens in {D}: {:.3}tok/s", .{
+    log.info("✅ Generated {} tokens in {f}: {:.3}tok/s", .{
         num_tokens_generated,
-        stdx.fmt.fmtDuration(duration),
+        duration,
         stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(duration, num_tokens_generated)),
     });
 }

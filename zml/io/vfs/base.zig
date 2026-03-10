@@ -23,7 +23,6 @@ pub const VFSBase = struct {
             .recancel = recancel,
             .swapCancelProtection = swapCancelProtection,
             .checkCancel = checkCancel,
-            .select = select,
             .futexWait = futexWait,
             .futexWaitUncancelable = futexWaitUncancelable,
             .futexWake = futexWake,
@@ -157,12 +156,12 @@ pub const VFSBase = struct {
         return self.inner.vtable.cancel(self.inner.userdata, any_future, result, result_alignment);
     }
 
-    pub fn groupAsync(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) std.Io.Cancelable!void) void {
+    pub fn groupAsync(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) void) void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.groupAsync(self.inner.userdata, group, context, context_alignment, start);
     }
 
-    pub fn groupConcurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) std.Io.Cancelable!void) std.Io.ConcurrentError!void {
+    pub fn groupConcurrent(userdata: ?*anyopaque, group: *std.Io.Group, context: []const u8, context_alignment: std.mem.Alignment, start: *const fn (context: *const anyopaque) void) std.Io.ConcurrentError!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.groupConcurrent(self.inner.userdata, group, context, context_alignment, start);
     }
@@ -190,11 +189,6 @@ pub const VFSBase = struct {
     pub fn checkCancel(userdata: ?*anyopaque) std.Io.Cancelable!void {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.checkCancel(self.inner.userdata);
-    }
-
-    pub fn select(userdata: ?*anyopaque, futures: []const *std.Io.AnyFuture) std.Io.Cancelable!usize {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.select(self.inner.userdata, futures);
     }
 
     pub fn futexWait(userdata: ?*anyopaque, ptr: *const u32, expected: u32, timeout: std.Io.Timeout) std.Io.Cancelable!void {

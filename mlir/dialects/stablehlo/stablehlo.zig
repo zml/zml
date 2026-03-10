@@ -1365,7 +1365,9 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
     if (sctx.err) |err| {
         return err;
     }
-    if (c.mlirLogicalResultIsFailure(result)) {
+    // TODO(Corentin): Find out why this crashes on macOS
+    //if (c.mlirLogicalResultIsFailure(result)) {
+    if (@as(c_int, result.value) == 0) {
         return error.InvalidMlirBytecodeVersion;
     }
 }

@@ -159,7 +159,7 @@ fn compileSingleKernelExe(allocator: std.mem.Allocator, io: std.Io, platform: *z
     var node = progress.start("Compiling single kernel...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled single kernel [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled single kernel [{f}]", .{now.untilNow(io, .awake)});
 
     const actual_seq_len: zml.Tensor = .init(.{}, .u32);
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
@@ -300,7 +300,7 @@ fn compileEmbedTokens(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     var node = progress.start("Compiling embed_tokens...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled embed_tokens [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled embed_tokens [{f}]", .{now.untilNow(io, .awake)});
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     return platform.compile(allocator, io, embed_tokens, .forward, .{tokens});
@@ -311,7 +311,7 @@ fn compileConvLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     var node = progress.start("Compiling conv layer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled conv layer [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled conv layer [{f}]", .{now.untilNow(io, .awake)});
 
     // Find the first conv layer as a representative for compilation.
     const conv_layer = for (mdl.layers) |layer| {
@@ -342,7 +342,7 @@ fn compileAttnLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     var node = progress.start("Compiling attn layer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled attn layer [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled attn layer [{f}]", .{now.untilNow(io, .awake)});
 
     // Find the first attention layer as a representative for compilation.
     const attn_layer = for (mdl.layers) |layer| {
@@ -373,7 +373,7 @@ fn compileLmHead(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
     var node = progress.start("Compiling lm_head...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
-    defer log.info("Compiled lm_head [{D}]", .{stdx.fmt.fmtDuration(now.untilNow(io, .awake))});
+    defer log.info("Compiled lm_head [{f}]", .{now.untilNow(io, .awake)});
 
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
