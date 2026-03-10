@@ -263,7 +263,7 @@ pub const TransformerLayer = struct {
             .add(x1)
             .withPartitioning(.{ .d = .replicated });
 
-        return .{ x2, updated_kv_cache };
+        return .{ x2.reuseBuffer(x0), updated_kv_cache };
     }
 };
 
