@@ -18,7 +18,7 @@ pub const std_options: std.Options = .{
     .log_level = .info,
 };
 
-// bazel run //examples/llama --@zml//platforms:tpu=true -- --model=$HOME/Llama-3.2-1B-Instruct --backend=tpu --prompt="What is the capital of France?"
+// bazel run //examples/llama --@zml//platforms:tpu=true -- --model=$HOME/Llama-3.2-1B-Instruct --backend=tpu --prompt="write a story about a cat"
 // bazel run //tools/hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
 
 const CliArgs = struct {

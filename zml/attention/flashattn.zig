@@ -1676,6 +1676,95 @@ pub const mosaic_tpu = struct {
         return result.stdout;
     }
 
+    fn renderBackendConfigStream(allocator: std.mem.Allocator, io: std.Io, params: AttentionParams) []u8 {
+        const json_string = switch (params) {
+            .paged => |paged_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(paged_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate paged attention TPU params: {}", .{err}),
+            .decode => |decode_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(decode_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate decode attention TPU params: {}", .{err}),
+            .flash => |flash_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"flash\",\"params\":{f}}}", .{std.json.fmt(flash_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate flash attention TPU params: {}", .{err}),
+        };
+        defer allocator.free(json_string);
+
+        const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch |err| {
+            stdx.debug.panic("Failed to initialize runfiles for TPU runtime: {}", .{err});
+        };
+
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const sandbox_path = block_tpu_sandbox: {
+            break :block_tpu_sandbox (runfiles.rlocation("libpjrt_tpu/sandbox", &path_buf) catch |err| {
+                stdx.debug.panic("Failed to find sandbox path for TPU runtime: {}", .{err});
+            }) orelse stdx.debug.panic("Sandbox path for TPU runtime not found in runfiles", .{});
+        };
+
+        var gen_ir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        const path = stdx.Io.Dir.path.bufJoinZ(&gen_ir_buf, &.{ sandbox_path, "bin", "gen_ir_zig" }) catch |err| {
+            stdx.debug.panic("Failed to construct path to gen_ir_zig for TPU runtime: {}", .{err});
+        };
+
+        var child = std.process.spawn(io, .{
+            .argv = &.{path},
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .stderr = .pipe,
+        }) catch |err| stdx.debug.panic("Failed to spawn gen_ir_zig process for TPU backend config stream: {}", .{err});
+        defer child.kill(io);
+
+        child.stdin.?.writeStreamingAll(io, json_string) catch |err| {
+            stdx.debug.panic("Failed to write json config to gen_ir_zig stdin for TPU backend config stream: {}", .{err});
+        };
+        child.stdin.?.close(io);
+        child.stdin = null;
+
+        var multi_reader_buffer: std.Io.File.MultiReader.Buffer(2) = undefined;
+        var multi_reader: std.Io.File.MultiReader = undefined;
+        multi_reader.init(allocator, io, multi_reader_buffer.toStreams(), &.{ child.stdout.?, child.stderr.? });
+        defer multi_reader.deinit();
+
+        while (multi_reader.fill(64, .none)) |_| {} else |err| switch (err) {
+            error.EndOfStream => {},
+            else => stdx.debug.panic("Failed reading gen_ir_zig process output for TPU backend config stream: {}", .{err}),
+        }
+
+        multi_reader.checkAnyError() catch |err| {
+            stdx.debug.panic("Failed to consume gen_ir_zig process output for TPU backend config stream: {}", .{err});
+        };
+
+        const term = child.wait(io) catch |err| {
+            stdx.debug.panic("Failed to wait for gen_ir_zig process for TPU backend config stream: {}", .{err});
+        };
+
+        const stdout = multi_reader.toOwnedSlice(0) catch |err| {
+            stdx.debug.panic("Failed to allocate gen_ir_zig stdout for TPU backend config stream: {}", .{err});
+        };
+        const stderr = multi_reader.toOwnedSlice(1) catch |err| {
+            allocator.free(stdout);
+            stdx.debug.panic("Failed to allocate gen_ir_zig stderr for TPU backend config stream: {}", .{err});
+        };
+        defer allocator.free(stderr);
+
+        switch (term) {
+            .exited => |code| {
+                if (code != 0) {
+                    allocator.free(stdout);
+                    stdx.debug.panic("gen_ir_zig process for TPU backend config stream exited with code {}. Stderr: {s}", .{ code, stderr });
+                }
+            },
+            else => {
+                allocator.free(stdout);
+                stdx.debug.panic("gen_ir_zig process for TPU backend config stream terminated unexpectedly: {any}", .{term});
+            },
+        }
+
+        if (stderr.len > 0) {
+            allocator.free(stdout);
+            stdx.debug.panic("gen_ir_zig process for TPU backend config stream produced stderr output: {s}", .{stderr});
+        }
+        if (stdout.len == 0) {
+            allocator.free(stdout);
+            stdx.debug.panic("gen_ir_zig process for TPU backend config stream produced no stdout output", .{});
+        }
+        return stdout;
+    }
+
     pub fn prefillAttention(allocator: std.mem.Allocator, io: std.Io, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor) zml.Tensor {
         const num_q_heads = q.dim(.h);
         const num_kv_heads = k.dim(.h);
@@ -1729,7 +1818,7 @@ pub const mosaic_tpu = struct {
                 .sm_scale = sm_scale,
             },
         };
-        const backend_config = renderBackendConfig(allocator, io, params);
+        const backend_config = renderBackendConfigStream(allocator, io, params);
         defer allocator.free(backend_config);
 
         var out = flashKernelCall(q_4d, k_4d, v_4d, backend_config);
@@ -1793,7 +1882,7 @@ pub const mosaic_tpu = struct {
                 .pages_per_compute_block = context.pages_per_compute_block,
             },
         };
-        const backend_config = renderBackendConfig(allocator, io, paged_params);
+        const backend_config = renderBackendConfigStream(allocator, io, paged_params);
         defer allocator.free(backend_config);
 
         const num_groups = @divFloor(num_q_heads, num_kv_heads);
@@ -1861,7 +1950,7 @@ pub const mosaic_tpu = struct {
             },
         };
 
-        const backend_config = renderBackendConfig(allocator, io, decode_params);
+        const backend_config = renderBackendConfigStream(allocator, io, decode_params);
         defer allocator.free(backend_config);
 
         const q_4d = if (has_batch)
