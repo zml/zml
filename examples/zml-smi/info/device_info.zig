@@ -1,5 +1,41 @@
-pub const DeviceInfo = struct {
+pub const Target = enum {
+    cuda,
+    rocm,
+    neuron,
+    tpu,
+
+    pub fn deviceLabel(self: Target) []const u8 {
+        return switch (self) {
+            .cuda, .rocm => "GPU",
+            .neuron => "NC",
+            .tpu => "TPU",
+        };
+    }
+
+    pub fn utilLabel(self: Target) []const u8 {
+        return switch (self) {
+            .cuda, .rocm => "GPU",
+            .neuron => "Core",
+            .tpu => "Duty",
+        };
+    }
+};
+
+pub const DeviceInfo = union(Target) {
+    cuda: GpuInfo,
+    rocm: GpuInfo,
+    neuron: NeuronInfo,
+    tpu: TpuInfo,
+};
+
+pub const GpuInfo = struct {
     name: ?[256]u8 = null,
+
+    // Utilization
+    util_percent: ?u64 = null,
+    mem_util_percent: ?u64 = null,
+    encoder_util_percent: ?u64 = null,
+    decoder_util_percent: ?u64 = null,
 
     // Power
     power_mw: ?u64 = null,
@@ -9,12 +45,6 @@ pub const DeviceInfo = struct {
     // Thermal
     temperature: ?u64 = null,
     fan_speed_percent: ?u64 = null,
-
-    // Utilization
-    gpu_util_percent: ?u64 = null,
-    mem_util_percent: ?u64 = null,
-    encoder_util_percent: ?u64 = null,
-    decoder_util_percent: ?u64 = null,
 
     // Clocks
     clock_graphics_mhz: ?u64 = null,
@@ -37,6 +67,14 @@ pub const DeviceInfo = struct {
     pcie_rx_kbps: ?u64 = null,
     pcie_link_gen: ?u64 = null,
     pcie_link_width: ?u64 = null,
+};
+
+pub const NeuronInfo = struct {
+    name: ?[256]u8 = null,
+
+    util_percent: ?u64 = null,
+    mem_used_bytes: ?u64 = null,
+    mem_total_bytes: ?u64 = null,
 
     // Neuron per-core HBM breakdown (bytes)
     nc_tensors: ?u64 = null,
@@ -50,4 +88,12 @@ pub const DeviceInfo = struct {
     nc_collectives: ?u64 = null,
     nc_notifications: ?u64 = null,
     nc_uncategorized: ?u64 = null,
+};
+
+pub const TpuInfo = struct {
+    name: ?[256]u8 = null,
+
+    util_percent: ?u64 = null,
+    mem_used_bytes: ?u64 = null,
+    mem_total_bytes: ?u64 = null,
 };

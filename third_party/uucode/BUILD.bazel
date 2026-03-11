@@ -1,0 +1,4 @@
+exports_files([
+    "tables.zig",
+    "fix-imports.patch",
+])

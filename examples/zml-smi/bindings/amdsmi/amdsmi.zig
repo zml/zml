@@ -311,3 +311,14 @@ pub fn getVoltageMem(handle: Handle) Error!u64 {
     try call("amdsmi_get_power_info", .{ handle, &info });
     return info.mem_voltage;
 }
+
+pub const ProcInfo = c.amdsmi_proc_info_t;
+
+pub fn getProcessList(handle: Handle, procs: []ProcInfo) Error![]const ProcInfo {
+    var count: u32 = 0;
+    try call("amdsmi_get_gpu_process_list", .{ handle, &count, null });
+    if (count == 0) return procs[0..0];
+    count = @min(count, @as(u32, @intCast(procs.len)));
+    try call("amdsmi_get_gpu_process_list", .{ handle, &count, @ptrCast(procs.ptr) });
+    return procs[0..count];
+}
