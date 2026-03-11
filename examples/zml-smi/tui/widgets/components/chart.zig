@@ -21,7 +21,7 @@ y_min: u32 = 0,
 y_max: u32 = 100,
 y_unit: []const u8 = "%",
 chart_height: u16 = 6,
-sample_interval_ms: u16,
+tui_refresh_rate: u16,
 
 pub fn widget(self: *const Chart) vxfw.Widget {
     return .{
@@ -109,7 +109,7 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     }
 
     // ── X-axis time labels ───────────────────────────────────
-    const total_ms: u32 = @as(u32, chart_w) * 2 * @as(u32, self.sample_interval_ms);
+    const total_ms: u32 = @as(u32, chart_w) * 2 * @as(u32, self.tui_refresh_rate);
     const total_s: u16 = @intCast(std.math.divCeil(u32, total_ms, 1000) catch unreachable);
     const mid_s: u16 = @intCast(std.math.divCeil(u32, total_ms / 2, 1000) catch unreachable);
     const label_row = self.chart_height + x_axis_h;

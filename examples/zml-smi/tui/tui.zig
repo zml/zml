@@ -63,7 +63,7 @@ const Model = struct {
             },
             .tick => {
                 self.state.recordHistory();
-                try ctx.tick(self.state.sample_interval_ms, self.widget());
+                try ctx.tick(self.state.tui_refresh_rate, self.widget());
                 ctx.redraw = true;
             },
             .key_press => |key| {

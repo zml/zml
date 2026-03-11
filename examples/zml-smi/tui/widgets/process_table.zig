@@ -46,7 +46,7 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) vo
     }
 
     // Enrich with host data (uid, username, cpu%, rss, cmdline)
-    state.enricher.enrich(state.allocator, state.io, self.merged.items);
+    state.enricher.enrich(state.io, self.merged.items);
 
     // Sort by gpu_mem descending
     std.sort.insertion(ProcessInfo, self.merged.items, {}, struct {
