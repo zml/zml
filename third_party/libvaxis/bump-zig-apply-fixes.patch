@@ -1,0 +1,1674 @@
+diff --git a/src/Loop.zig b/src/Loop.zig
+index a11e2f7..cd7e9d9 100644
+--- a/src/Loop.zig
++++ b/src/Loop.zig
+@@ -18,8 +18,9 @@ pub fn Loop(comptime T: type) type {
+ 
+         tty: *Tty,
+         vaxis: *Vaxis,
++        io: std.Io,
+ 
+-        queue: Queue(T, 512) = .{},
++        queue: Queue(T, 512),
+         thread: ?std.Thread = null,
+         should_quit: bool = false,
+ 
+@@ -214,7 +215,7 @@ pub fn handleEventGeneric(self: anytype, vx: *Vaxis, cache: *GraphemeCache, Even
+                     }
+                 },
+                 .cap_da1 => {
+-                    std.Thread.Futex.wake(&vx.query_futex, 10);
++                    std.Io.futexWake(self.io, u32, &vx.query_futex.raw, 10);
+                     vx.queries_done.store(true, .unordered);
+                 },
+                 .mouse => |mouse| {
+@@ -359,7 +360,7 @@ pub fn handleEventGeneric(self: anytype, vx: *Vaxis, cache: *GraphemeCache, Even
+                     vx.caps.multi_cursor = true;
+                 },
+                 .cap_da1 => {
+-                    std.Thread.Futex.wake(&vx.query_futex, 10);
++                    std.Io.futexWake(self.io, u32, &vx.query_futex.raw, 10);
+                     vx.queries_done.store(true, .unordered);
+                 },
+                 .winsize => |winsize| {
+@@ -386,13 +387,13 @@ test Loop {
+         foo: u8,
+     };
+ 
+-    var tty = try vaxis.Tty.init(&.{});
++    var tty = try vaxis.Tty.init(std.testing.io);
+     defer tty.deinit();
+ 
+     var vx = try vaxis.init(std.testing.allocator, .{});
+     defer vx.deinit(std.testing.allocator, tty.writer());
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = std.testing.io, .queue = .{ .io = std.testing.io } };
+     try loop.init();
+ 
+     try loop.start();
+@@ -400,5 +401,5 @@ test Loop {
+ 
+     // Optionally enter the alternate screen
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_ms);
++    try vx.queryTerminal(tty.writer(), std.testing.io, 1 * std.time.ns_per_ms);
+ }
+diff --git a/src/Parser.zig b/src/Parser.zig
+index 6358269..1b125dd 100644
+--- a/src/Parser.zig
++++ b/src/Parser.zig
+@@ -118,7 +118,7 @@ inline fn parseGround(input: []const u8) !Result {
+             var grapheme_len: usize = 0;
+             var cp_count: usize = 0;
+ 
+-            while (grapheme_iter.next()) |result| {
++            while (grapheme_iter.nextCodePoint()) |result| {
+                 cp_count += 1;
+                 if (result.is_break) {
+                     // Found the first grapheme boundary
+diff --git a/src/Vaxis.zig b/src/Vaxis.zig
+index a6a3830..2b2ee49 100644
+--- a/src/Vaxis.zig
++++ b/src/Vaxis.zig
+@@ -3,7 +3,7 @@ const builtin = @import("builtin");
+ const atomic = std.atomic;
+ const base64Encoder = std.base64.standard.Encoder;
+ const zigimg = @import("zigimg");
+-const IoWriter = std.io.Writer;
++const IoWriter = std.Io.Writer;
+ 
+ const Cell = @import("Cell.zig");
+ const Image = @import("Image.zig");
+@@ -127,14 +127,13 @@ pub fn deinit(self: *Vaxis, alloc: ?std.mem.Allocator, tty: *IoWriter) void {
+     }
+ }
+ 
+-/// resets enabled features, sends cursor to home and clears below cursor
+-pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+-    // always show the cursor on state reset
++/// Resets enabled terminal features without clearing screen content.
++/// Use this for non-interactive / single-shot rendering where the
++/// output should remain visible after exit.
++pub fn resetModes(self: *Vaxis, tty: *IoWriter) !void {
+     tty.writeAll(ctlseqs.show_cursor) catch {};
+     tty.writeAll(ctlseqs.sgr_reset) catch {};
+     if (self.screen.cursor_shape != .default) {
+-        // In many terminals, `.default` will set to the configured cursor shape. Others, it will
+-        // change to a blinking block.
+         tty.print(ctlseqs.cursor_shape, .{@intFromEnum(Cell.CursorShape.default)}) catch {};
+     }
+     if (self.state.kitty_keyboard) {
+@@ -147,18 +146,6 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+     if (self.state.bracketed_paste) {
+         try self.setBracketedPaste(tty, false);
+     }
+-    if (self.state.alt_screen) {
+-        try tty.writeAll(ctlseqs.home);
+-        try tty.writeAll(ctlseqs.erase_below_cursor);
+-        try self.exitAltScreen(tty);
+-    } else {
+-        try tty.writeByte('\r');
+-        var i: u16 = 0;
+-        while (i < self.state.cursor.row) : (i += 1) {
+-            try tty.writeAll(ctlseqs.ri);
+-        }
+-        try tty.writeAll(ctlseqs.erase_below_cursor);
+-    }
+     if (self.state.color_scheme_updates) {
+         try tty.writeAll(ctlseqs.color_scheme_reset);
+         self.state.color_scheme_updates = false;
+@@ -179,7 +166,24 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+         try tty.writeAll(ctlseqs.osc12_reset);
+         self.state.changed_cursor_color = false;
+     }
++    try tty.flush();
++}
+ 
++/// resets enabled features, sends cursor to home and clears below cursor
++pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
++    self.resetModes(tty) catch {};
++    if (self.state.alt_screen) {
++        try tty.writeAll(ctlseqs.home);
++        try tty.writeAll(ctlseqs.erase_below_cursor);
++        try self.exitAltScreen(tty);
++    } else {
++        try tty.writeByte('\r');
++        var i: u16 = 0;
++        while (i < self.state.cursor.row) : (i += 1) {
++            try tty.writeAll(ctlseqs.ri);
++        }
++        try tty.writeAll(ctlseqs.erase_below_cursor);
++    }
+     try tty.flush();
+ }
+ 
+@@ -250,10 +254,10 @@ pub fn exitAltScreen(self: *Vaxis, tty: *IoWriter) !void {
+ ///
+ /// This call will block until Vaxis.query_futex is woken up, or the timeout.
+ /// Event loops can wake up this futex when cap_da1 is received
+-pub fn queryTerminal(self: *Vaxis, tty: *IoWriter, timeout_ns: u64) !void {
++pub fn queryTerminal(self: *Vaxis, tty: *IoWriter, io: std.Io, timeout_ns: u64) !void {
+     try self.queryTerminalSend(tty);
+     // 1 second timeout
+-    std.Thread.Futex.timedWait(&self.query_futex, 0, timeout_ns) catch {};
++    std.Io.futexWaitTimeout(io, u32, &self.query_futex.raw, 0, .{ .duration = .{ .raw = .{ .nanoseconds = @intCast(timeout_ns) }, .clock = .awake } }) catch {};
+     self.queries_done.store(true, .unordered);
+     try self.enableDetectedFeatures(tty);
+ }
+@@ -265,7 +269,7 @@ pub fn queryTerminalSend(vx: *Vaxis, tty: *IoWriter) !void {
+     vx.queries_done.store(false, .unordered);
+ 
+     // TODO: re-enable this
+-    // const colorterm = std.posix.getenv("COLORTERM") orelse "";
++    // const colorterm = std.c.getenv("COLORTERM") orelse "";
+     // if (std.mem.eql(u8, colorterm, "truecolor") or
+     //     std.mem.eql(u8, colorterm, "24bit"))
+     // {
+@@ -320,22 +324,22 @@ pub fn enableDetectedFeatures(self: *Vaxis, tty: *IoWriter) !void {
+         },
+         else => {
+             // Apply any environment variables
+-            if (std.posix.getenv("TERMUX_VERSION")) |_|
++            if (std.c.getenv("TERMUX_VERSION")) |_|
+                 self.sgr = .legacy;
+-            if (std.posix.getenv("VHS_RECORD")) |_| {
++            if (std.c.getenv("VHS_RECORD")) |_| {
+                 self.caps.unicode = .wcwidth;
+                 self.caps.kitty_keyboard = false;
+                 self.sgr = .legacy;
+             }
+-            if (std.posix.getenv("TERM_PROGRAM")) |prg| {
+-                if (std.mem.eql(u8, prg, "vscode"))
++            if (std.c.getenv("TERM_PROGRAM")) |prg| {
++                if (std.mem.eql(u8, std.mem.span(prg), "vscode"))
+                     self.sgr = .legacy;
+             }
+-            if (std.posix.getenv("VAXIS_FORCE_LEGACY_SGR")) |_|
++            if (std.c.getenv("VAXIS_FORCE_LEGACY_SGR")) |_|
+                 self.sgr = .legacy;
+-            if (std.posix.getenv("VAXIS_FORCE_WCWIDTH")) |_|
++            if (std.c.getenv("VAXIS_FORCE_WCWIDTH")) |_|
+                 self.caps.unicode = .wcwidth;
+-            if (std.posix.getenv("VAXIS_FORCE_UNICODE")) |_|
++            if (std.c.getenv("VAXIS_FORCE_UNICODE")) |_|
+                 self.caps.unicode = .unicode;
+ 
+             // enable detected features
+@@ -943,19 +947,19 @@ pub fn transmitLocalImagePath(
+     switch (format) {
+         .rgb => {
+             try tty.print(
+-                "\x1b_Gf=24,s={d},v={d},i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=24,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
+                 .{ width, height, id, medium_char, encoded },
+             );
+         },
+         .rgba => {
+             try tty.print(
+-                "\x1b_Gf=32,s={d},v={d},i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=32,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
+                 .{ width, height, id, medium_char, encoded },
+             );
+         },
+         .png => {
+             try tty.print(
+-                "\x1b_Gf=100,i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=100,i={d},t={c},q=2;{s}\x1b\\",
+                 .{ id, medium_char, encoded },
+             );
+         },
+@@ -991,7 +995,7 @@ pub fn transmitPreEncodedImage(
+ 
+     if (bytes.len < 4096) {
+         try tty.print(
+-            "\x1b_Gf={d},s={d},v={d},i={d};{s}\x1b\\",
++            "\x1b_Gf={d},s={d},v={d},i={d},q=2;{s}\x1b\\",
+             .{
+                 fmt,
+                 width,
+@@ -1004,14 +1008,14 @@ pub fn transmitPreEncodedImage(
+         var n: usize = 4096;
+ 
+         try tty.print(
+-            "\x1b_Gf={d},s={d},v={d},i={d},m=1;{s}\x1b\\",
++            "\x1b_Gf={d},s={d},v={d},i={d},m=1,q=2;{s}\x1b\\",
+             .{ fmt, width, height, id, bytes[0..n] },
+         );
+         while (n < bytes.len) : (n += 4096) {
+             const end: usize = @min(n + 4096, bytes.len);
+             const m: u2 = if (end == bytes.len) 0 else 1;
+             try tty.print(
+-                "\x1b_Gm={d};{s}\x1b\\",
++                "\x1b_Gm={d},q=2;{s}\x1b\\",
+                 .{
+                     m,
+                     bytes[n..end],
+@@ -1067,6 +1071,7 @@ pub fn transmitImage(
+ pub fn loadImage(
+     self: *Vaxis,
+     alloc: std.mem.Allocator,
++    io: std.Io,
+     tty: *IoWriter,
+     src: Image.Source,
+ ) !Image {
+@@ -1074,7 +1079,7 @@ pub fn loadImage(
+ 
+     var read_buffer: [1024 * 1024]u8 = undefined; // 1MB buffer
+     var img = switch (src) {
+-        .path => |path| try zigimg.Image.fromFilePath(alloc, path, &read_buffer),
++        .path => |path| try zigimg.Image.fromFilePath(alloc, io, path, &read_buffer),
+         .mem => |bytes| try zigimg.Image.fromMemory(alloc, bytes),
+     };
+     defer img.deinit(alloc);
+@@ -1481,7 +1486,7 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
+         return error.InvalidAbsolutePath;
+     const hostname = switch (builtin.os.tag) {
+         .windows => null,
+-        else => std.posix.getenv("HOSTNAME"),
++        else => std.c.getenv("HOSTNAME"),
+     } orelse "localhost";
+ 
+     const uri: std.Uri = .{
+@@ -1495,11 +1500,11 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
+ 
+ test "render: no output when no changes" {
+     var vx = try Vaxis.init(std.testing.allocator, .{});
+-    var deinit_writer = std.io.Writer.Allocating.init(std.testing.allocator);
++    var deinit_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+     defer deinit_writer.deinit();
+     defer vx.deinit(std.testing.allocator, &deinit_writer.writer);
+ 
+-    var render_writer = std.io.Writer.Allocating.init(std.testing.allocator);
++    var render_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+     defer render_writer.deinit();
+     try vx.render(&render_writer.writer);
+     const output = try render_writer.toOwnedSlice();
+diff --git a/src/ctlseqs.zig b/src/ctlseqs.zig
+index ab415c6..4baa496 100644
+--- a/src/ctlseqs.zig
++++ b/src/ctlseqs.zig
+@@ -138,8 +138,8 @@ pub const osc52_clipboard_copy = "\x1b]52;c;{s}\x1b\\";
+ pub const osc52_clipboard_request = "\x1b]52;c;?\x1b\\";
+ 
+ // Kitty graphics
+-pub const kitty_graphics_clear = "\x1b_Ga=d\x1b\\";
+-pub const kitty_graphics_preamble = "\x1b_Ga=p,i={d}";
++pub const kitty_graphics_clear = "\x1b_Ga=d,q=2\x1b\\";
++pub const kitty_graphics_preamble = "\x1b_Ga=p,q=2,i={d}";
+ pub const kitty_graphics_closing = ",C=1\x1b\\";
+ 
+ // Color control sequences
+diff --git a/src/gwidth.zig b/src/gwidth.zig
+index 194139f..ecffaf7 100644
+--- a/src/gwidth.zig
++++ b/src/gwidth.zig
+@@ -55,10 +55,10 @@ pub fn gwidth(str: []const u8, method: Method) u16 {
+             var grapheme_start: usize = 0;
+             var prev_break: bool = true;
+ 
+-            while (grapheme_iter.next()) |result| {
++            while (grapheme_iter.nextCodePoint()) |result| {
+                 if (prev_break and !result.is_break) {
+                     // Start of a new grapheme
+-                    const cp_len: usize = std.unicode.utf8CodepointSequenceLength(result.cp) catch 1;
++                    const cp_len: usize = std.unicode.utf8CodepointSequenceLength(result.code_point) catch 1;
+                     grapheme_start = grapheme_iter.i - cp_len;
+                 }
+ 
+diff --git a/src/queue.zig b/src/queue.zig
+index 6d847ea..908cf70 100644
+--- a/src/queue.zig
++++ b/src/queue.zig
+@@ -1,7 +1,7 @@
+ const std = @import("std");
+ const assert = std.debug.assert;
+ const atomic = std.atomic;
+-const Condition = std.Thread.Condition;
++const Condition = std.Io.Condition;
+ 
+ /// Thread safe. Fixed size. Blocking push and pop.
+ pub fn Queue(
+@@ -11,23 +11,25 @@ pub fn Queue(
+     return struct {
+         buf: [size]T = undefined,
+ 
++        io: std.Io,
++
+         read_index: usize = 0,
+         write_index: usize = 0,
+ 
+-        mutex: std.Thread.Mutex = .{},
++        mutex: std.Io.Mutex = .init,
+         // blocks when the buffer is full
+-        not_full: Condition = .{},
++        not_full: Condition = .init,
+         // ...or empty
+-        not_empty: Condition = .{},
++        not_empty: Condition = .init,
+ 
+         const Self = @This();
+ 
+         /// Pop an item from the queue. Blocks until an item is available.
+         pub fn pop(self: *Self) T {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             while (self.isEmptyLH()) {
+-                self.not_empty.wait(&self.mutex);
++                self.not_empty.waitUncancelable(self.io, &self.mutex);
+             }
+             std.debug.assert(!self.isEmptyLH());
+             return self.popAndSignalLH();
+@@ -36,10 +38,10 @@ pub fn Queue(
+         /// Push an item into the queue. Blocks until an item has been
+         /// put in the queue.
+         pub fn push(self: *Self, item: T) void {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             while (self.isFullLH()) {
+-                self.not_full.wait(&self.mutex);
++                self.not_full.waitUncancelable(self.io, &self.mutex);
+             }
+             std.debug.assert(!self.isFullLH());
+             self.pushAndSignalLH(item);
+@@ -49,8 +51,8 @@ pub fn Queue(
+         /// was successfully placed in the queue, false if the queue
+         /// was full.
+         pub fn tryPush(self: *Self, item: T) bool {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             if (self.isFullLH()) return false;
+             self.pushAndSignalLH(item);
+             return true;
+@@ -59,28 +61,28 @@ pub fn Queue(
+         /// Pop an item from the queue. Returns null when no item is
+         /// available.
+         pub fn tryPop(self: *Self) ?T {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             if (self.isEmptyLH()) return null;
+             return self.popAndSignalLH();
+         }
+ 
+         /// Poll the queue. This call blocks until events are in the queue
+         pub fn poll(self: *Self) void {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             while (self.isEmptyLH()) {
+-                self.not_empty.wait(&self.mutex);
++                self.not_empty.waitUncancelable(self.io, &self.mutex);
+             }
+             std.debug.assert(!self.isEmptyLH());
+         }
+ 
+         pub fn lock(self: *Self) void {
+-            self.mutex.lock();
++            self.mutex.lockUncancelable(self.io);
+         }
+ 
+         pub fn unlock(self: *Self) void {
+-            self.mutex.unlock();
++            self.mutex.unlock(self.io);
+         }
+ 
+         /// Used to efficiently drain the queue while the lock is externally held
+@@ -92,7 +94,7 @@ pub fn Queue(
+             const was_full = self.isFullLH();
+             const item = self.popLH();
+             if (was_full) {
+-                self.not_full.signal();
++                self.not_full.signal(self.io);
+             }
+             return item;
+         }
+@@ -108,15 +110,15 @@ pub fn Queue(
+ 
+         /// Returns `true` if the queue is empty and `false` otherwise.
+         pub fn isEmpty(self: *Self) bool {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             return self.isEmptyLH();
+         }
+ 
+         /// Returns `true` if the queue is full and `false` otherwise.
+         pub fn isFull(self: *Self) bool {
+-            self.mutex.lock();
+-            defer self.mutex.unlock();
++            self.mutex.lockUncancelable(self.io);
++            defer self.mutex.unlock(self.io);
+             return self.isFullLH();
+         }
+ 
+@@ -143,7 +145,7 @@ pub fn Queue(
+             self.buf[self.mask(self.write_index)] = item;
+             self.write_index = self.mask2(self.write_index + 1);
+             if (was_empty) {
+-                self.not_empty.signal();
++                self.not_empty.signal(self.io);
+             }
+         }
+ 
+@@ -151,7 +153,7 @@ pub fn Queue(
+             const was_full = self.isFullLH();
+             const result = self.popLH();
+             if (was_full) {
+-                self.not_full.signal();
++                self.not_full.signal(self.io);
+             }
+             return result;
+         }
+@@ -167,7 +169,7 @@ pub fn Queue(
+ const testing = std.testing;
+ const cfg = Thread.SpawnConfig{ .allocator = testing.allocator };
+ test "Queue: simple push / pop" {
+-    var queue: Queue(u8, 16) = .{};
++    var queue: Queue(u8, 16) = .{ .io = std.testing.io };
+     queue.push(1);
+     queue.push(2);
+     const pop = queue.pop();
+@@ -182,7 +184,7 @@ fn testPushPop(q: *Queue(u8, 2)) !void {
+ }
+ 
+ test "Fill, wait to push, pop once in another thread" {
+-    var queue: Queue(u8, 2) = .{};
++    var queue: Queue(u8, 2) = .{ .io = std.testing.io };
+     queue.push(1);
+     queue.push(2);
+     const t = try Thread.spawn(cfg, testPushPop, .{&queue});
+@@ -202,7 +204,7 @@ fn testPush(q: *Queue(u8, 2)) void {
+ }
+ 
+ test "Try to pop, fill from another thread" {
+-    var queue: Queue(u8, 2) = .{};
++    var queue: Queue(u8, 2) = .{ .io = std.testing.io };
+     const thread = try Thread.spawn(cfg, testPush, .{&queue});
+     for (0..5) |idx| {
+         try testing.expectEqual(@as(u8, @intCast(idx)), queue.pop());
+@@ -217,8 +219,8 @@ fn sleepyPop(q: *Queue(u8, 2), state: *atomic.Value(u8)) !void {
+ 
+     // Then we spuriously wake it up, because that's a thing that can
+     // happen.
+-    q.not_full.signal();
+-    q.not_empty.signal();
++    q.not_full.signal(q.io);
++    q.not_empty.signal(q.io);
+ 
+     // Then give the other thread a good chance of waking up. It's not
+     // clear that yield guarantees the other thread will be scheduled,
+@@ -226,7 +228,7 @@ fn sleepyPop(q: *Queue(u8, 2), state: *atomic.Value(u8)) !void {
+     // still full and the push in the other thread is still blocked
+     // waiting for space.
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+     // Finally, let that other thread go.
+     try std.testing.expectEqual(1, q.pop());
+ 
+@@ -235,15 +237,15 @@ fn sleepyPop(q: *Queue(u8, 2), state: *atomic.Value(u8)) !void {
+         try Thread.yield();
+     // But we want to ensure that there's a second push waiting, so
+     // here's another sleep.
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+ 
+     // Another spurious wake...
+-    q.not_full.signal();
+-    q.not_empty.signal();
++    q.not_full.signal(q.io);
++    q.not_empty.signal(q.io);
+     // And another chance for the other thread to see that it's
+     // spurious and go back to sleep.
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+ 
+     // Pop that thing and we're done.
+     try std.testing.expectEqual(2, q.pop());
+@@ -256,19 +258,20 @@ test "Fill, block, fill, block" {
+     // that too (after some time) then drain the queue. This test
+     // fails if the while loop in `push` is turned into an `if`.
+ 
+-    var queue: Queue(u8, 2) = .{};
++    var queue: Queue(u8, 2) = .{ .io = std.testing.io };
+     var state = atomic.Value(u8).init(0);
+     const thread = try Thread.spawn(cfg, sleepyPop, .{ &queue, &state });
+     queue.push(1);
+     queue.push(2);
+     state.store(1, .release);
+-    const now = std.time.milliTimestamp();
++    const start = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+     queue.push(3); // This one should block.
+-    const then = std.time.milliTimestamp();
++    const end = std.Io.Clock.Timestamp.now(std.testing.io, .awake);
+ 
+     // Just to make sure the sleeps are yielding to this thread, make
+     // sure it took at least 5ms to do the push.
+-    try std.testing.expect(then - now > 5);
++    const elapsed = start.durationTo(end);
++    try std.testing.expect(elapsed.raw.toMilliseconds() > 5);
+ 
+     state.store(2, .release);
+     // This should block again, waiting for the other thread.
+@@ -283,14 +286,14 @@ test "Fill, block, fill, block" {
+ fn sleepyPush(q: *Queue(u8, 1), state: *atomic.Value(u8)) !void {
+     // Try to ensure the other thread has already started trying to pop.
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+ 
+     // Spurious wake
+-    q.not_full.signal();
+-    q.not_empty.signal();
++    q.not_full.signal(q.io);
++    q.not_empty.signal(q.io);
+ 
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+ 
+     // Stick something in the queue so it can be popped.
+     q.push(1);
+@@ -299,11 +302,11 @@ fn sleepyPush(q: *Queue(u8, 1), state: *atomic.Value(u8)) !void {
+         try Thread.yield();
+     // Give the other thread time to block again.
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+ 
+     // Spurious wake
+-    q.not_full.signal();
+-    q.not_empty.signal();
++    q.not_full.signal(q.io);
++    q.not_empty.signal(q.io);
+ 
+     q.push(2);
+ }
+@@ -313,7 +316,7 @@ test "Drain, block, drain, block" {
+     // test should fail if the `while` loop in `pop` is turned into an
+     // `if`.
+ 
+-    var queue: Queue(u8, 1) = .{};
++    var queue: Queue(u8, 1) = .{ .io = std.testing.io };
+     var state = atomic.Value(u8).init(0);
+     const thread = try Thread.spawn(cfg, sleepyPush, .{ &queue, &state });
+     try std.testing.expectEqual(1, queue.pop());
+@@ -328,11 +331,11 @@ fn readerThread(q: *Queue(u8, 1)) !void {
+ 
+ test "2 readers" {
+     // 2 threads read, one thread writes
+-    var queue: Queue(u8, 1) = .{};
++    var queue: Queue(u8, 1) = .{ .io = std.testing.io };
+     const t1 = try Thread.spawn(cfg, readerThread, .{&queue});
+     const t2 = try Thread.spawn(cfg, readerThread, .{&queue});
+     try Thread.yield();
+-    std.Thread.sleep(10 * std.time.ns_per_ms);
++    std.Io.sleep(std.testing.io, .fromMilliseconds(10), .awake) catch {};
+     queue.push(1);
+     queue.push(1);
+     t1.join();
+@@ -344,7 +347,7 @@ fn writerThread(q: *Queue(u8, 1)) !void {
+ }
+ 
+ test "2 writers" {
+-    var queue: Queue(u8, 1) = .{};
++    var queue: Queue(u8, 1) = .{ .io = std.testing.io };
+     const t1 = try Thread.spawn(cfg, writerThread, .{&queue});
+     const t2 = try Thread.spawn(cfg, writerThread, .{&queue});
+ 
+diff --git a/src/tty.zig b/src/tty.zig
+index 4a3c142..7f6a303 100644
+--- a/src/tty.zig
++++ b/src/tty.zig
+@@ -33,8 +33,11 @@ pub const PosixTty = struct {
+     /// The file descriptor of the tty
+     fd: posix.fd_t,
+ 
++    io: std.Io,
++
+     /// File.Writer for efficient buffered writing
+-    tty_writer: std.fs.File.Writer,
++    tty_buffer: [1024]u8 = undefined,
++    tty_writer: ?std.Io.File.Writer = null,
+ 
+     pub const SignalHandler = struct {
+         context: *anyopaque,
+@@ -43,17 +46,22 @@ pub const PosixTty = struct {
+ 
+     /// global signal handlers
+     var handlers: [8]SignalHandler = undefined;
+-    var handler_mutex: std.Thread.Mutex = .{};
++    var handler_mutex: std.Io.Mutex = .init;
++    var handler_io: std.Io = undefined;
+     var handler_idx: usize = 0;
+ 
+     var handler_installed: bool = false;
+ 
++    /// Atomic flag set by the SIGWINCH signal handler. Checked and cleared
++    /// by pollWinch() from a non-signal context to avoid deadlocks.
++    var winch_pending: std.atomic.Value(bool) = .{ .raw = false };
++
+     /// initializes a Tty instance by opening /dev/tty and "making it raw". A
+     /// signal handler is installed for SIGWINCH. No callbacks are installed, be
+     /// sure to register a callback when initializing the event loop
+-    pub fn init(buffer: []u8) !PosixTty {
++    pub fn init(io: std.Io) !PosixTty {
+         // Open our tty
+-        const fd = try posix.open("/dev/tty", .{ .ACCMODE = .RDWR }, 0);
++        const fd = try posix.openat(posix.AT.FDCWD, "/dev/tty", .{ .ACCMODE = .RDWR }, 0);
+ 
+         // Set the termios of the tty
+         const termios = try makeRaw(fd);
+@@ -69,13 +77,8 @@ pub const PosixTty = struct {
+         posix.sigaction(posix.SIG.WINCH, &act, null);
+         handler_installed = true;
+ 
+-        const file = std.fs.File{ .handle = fd };
+-
+-        const self: PosixTty = .{
+-            .fd = fd,
+-            .termios = termios,
+-            .tty_writer = .initStreaming(file, buffer),
+-        };
++        handler_io = io;
++        const self: PosixTty = .{ .fd = fd, .io = io, .termios = termios };
+ 
+         global_tty = self;
+ 
+@@ -88,7 +91,7 @@ pub const PosixTty = struct {
+             std.log.err("couldn't restore terminal: {}", .{err});
+         };
+         if (builtin.os.tag != .macos) // closing /dev/tty may block indefinitely on macos
+-            posix.close(self.fd);
++            (std.Io.File{ .handle = self.fd, .flags = .{ .nonblocking = false } }).close(handler_io);
+     }
+ 
+     /// Resets the signal handler to it's default
+@@ -107,7 +110,12 @@ pub const PosixTty = struct {
+     }
+ 
+     pub fn writer(self: *PosixTty) *std.Io.Writer {
+-        return &self.tty_writer.interface;
++        if (self.tty_writer == null) {
++            const file: std.Io.File = .{ .handle = self.fd, .flags = .{ .nonblocking = false } };
++            self.tty_writer = .initStreaming(file, self.io, &self.tty_buffer);
++        }
++
++        return &self.tty_writer.?.interface;
+     }
+ 
+     pub fn read(self: *const PosixTty, buf: []u8) !usize {
+@@ -117,16 +125,29 @@ pub const PosixTty = struct {
+     /// Install a signal handler for winsize. A maximum of 8 handlers may be
+     /// installed
+     pub fn notifyWinsize(handler: SignalHandler) !void {
+-        handler_mutex.lock();
+-        defer handler_mutex.unlock();
++        handler_mutex.lockUncancelable(handler_io);
++        defer handler_mutex.unlock(handler_io);
+         if (handler_idx == handlers.len) return error.OutOfMemory;
+         handlers[handler_idx] = handler;
+         handler_idx += 1;
+     }
+ 
+-    fn handleWinch(_: c_int) callconv(.c) void {
+-        handler_mutex.lock();
+-        defer handler_mutex.unlock();
++    fn handleWinch(_: posix.SIG) callconv(.c) void {
++        // Only set an atomic flag. Calling mutex.lock() or queue.push()
++        // from a signal handler is not async-signal-safe and causes
++        // deadlocks when the signal is delivered to a thread that already
++        // holds one of those locks. Registered handlers are dispatched
++        // from pollWinch() instead.
++        winch_pending.store(true, .release);
++    }
++
++    /// Check if a SIGWINCH was received and dispatch registered handlers.
++    /// Must be called from a non-signal context (e.g., the main event loop)
++    /// to avoid the async-signal-safety issues with the old approach.
++    pub fn pollWinch() void {
++        if (!winch_pending.swap(false, .acquire)) return;
++        handler_mutex.lockUncancelable(handler_io);
++        defer handler_mutex.unlock(handler_io);
+         var i: usize = 0;
+         while (i < handler_idx) : (i += 1) {
+             const handler = handlers[i];
+@@ -189,6 +210,7 @@ pub const PosixTty = struct {
+ pub const WindowsTty = struct {
+     stdin: windows.HANDLE,
+     stdout: windows.HANDLE,
++    io: std.Io,
+ 
+     initial_codepage: c_uint,
+     initial_input_mode: CONSOLE_MODE_INPUT,
+@@ -198,7 +220,8 @@ pub const WindowsTty = struct {
+     buf: [4]u8 = undefined,
+ 
+     /// File.Writer for efficient buffered writing
+-    tty_writer: std.fs.File.Writer,
++    tty_buffer: [1024]u8 = undefined,
++    tty_writer: ?std.Io.File.Writer = null,
+ 
+     /// The last mouse button that was pressed. We store the previous state of button presses on each
+     /// mouse event so we can detect which button was released
+@@ -221,7 +244,7 @@ pub const WindowsTty = struct {
+         .ENABLE_LVB_GRID_WORLDWIDE = 1, // enables reverse video and underline
+     };
+ 
+-    pub fn init(buffer: []u8) !Tty {
++    pub fn init(io: std.Io) !Tty {
+         const stdin: std.fs.File = .stdin();
+         const stdout: std.fs.File = .stdout();
+ 
+@@ -237,12 +260,12 @@ pub const WindowsTty = struct {
+             return windows.unexpectedError(windows.kernel32.GetLastError());
+ 
+         const self: Tty = .{
++            .io = io,
+             .stdin = stdin.handle,
+             .stdout = stdout.handle,
+             .initial_codepage = initial_output_codepage,
+             .initial_input_mode = initial_input_mode,
+             .initial_output_mode = initial_output_mode,
+-            .tty_writer = .initStreaming(stdout, buffer),
+         };
+ 
+         // save a copy of this tty as the global_tty for panic handling
+@@ -298,7 +321,12 @@ pub const WindowsTty = struct {
+     }
+ 
+     pub fn writer(self: *Tty) *std.Io.Writer {
+-        return &self.tty_writer.interface;
++        if (self.tty_writer == null) {
++            const stdout: std.fs.File = .stdout();
++            self.tty_writer = .initStreaming(stdout, &self.tty_buffer);
++        }
++
++        return &self.tty_writer.?.interface;
+     }
+ 
+     pub fn read(self: *const Tty, buf: []u8) !usize {
+@@ -694,20 +722,20 @@ pub const WindowsTty = struct {
+ pub const TestTty = struct {
+     /// Used for API compat
+     fd: posix.fd_t,
++    io: std.Io,
+     pipe_read: posix.fd_t,
+     pipe_write: posix.fd_t,
+     tty_writer: *std.Io.Writer.Allocating,
+ 
+     /// Initializes a TestTty.
+-    pub fn init(buffer: []u8) !TestTty {
+-        _ = buffer;
+-
++    pub fn init(io: std.Io) !TestTty {
+         if (builtin.os.tag == .windows) return error.SkipZigTest;
+         const list = try std.testing.allocator.create(std.Io.Writer.Allocating);
+         list.* = .init(std.testing.allocator);
+-        const r, const w = try posix.pipe();
++        const r, const w = try std.Io.Threaded.pipe2(.{});
+         return .{
+             .fd = r,
++            .io = io,
+             .pipe_read = r,
+             .pipe_write = w,
+             .tty_writer = list,
+@@ -715,8 +743,9 @@ pub const TestTty = struct {
+     }
+ 
+     pub fn deinit(self: TestTty) void {
+-        std.posix.close(self.pipe_read);
+-        std.posix.close(self.pipe_write);
++        const io = std.testing.io;
++        (std.Io.File{ .handle = self.pipe_read, .flags = .{ .nonblocking = false } }).close(io);
++        (std.Io.File{ .handle = self.pipe_write, .flags = .{ .nonblocking = false } }).close(io);
+         self.tty_writer.deinit();
+         std.testing.allocator.destroy(self.tty_writer);
+     }
+diff --git a/src/unicode.zig b/src/unicode.zig
+index a5253ac..4ff2e4c 100644
+--- a/src/unicode.zig
++++ b/src/unicode.zig
+@@ -26,10 +26,10 @@ pub const GraphemeIterator = struct {
+     }
+ 
+     pub fn next(self: *GraphemeIterator) ?Grapheme {
+-        while (self.inner.next()) |res| {
++        while (self.inner.nextCodePoint()) |res| {
+             // When leaving a break and entering a non-break, set the start of a cluster
+             if (self.prev_break and !res.is_break) {
+-                const cp_len: usize = std.unicode.utf8CodepointSequenceLength(res.cp) catch 1;
++                const cp_len: usize = std.unicode.utf8CodepointSequenceLength(res.code_point) catch 1;
+                 self.start = self.inner.i - cp_len;
+             }
+ 
+diff --git a/src/vxfw/App.zig b/src/vxfw/App.zig
+index 6d394a9..2661cf4 100644
+--- a/src/vxfw/App.zig
++++ b/src/vxfw/App.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const builtin = @import("builtin");
+ const vaxis = @import("../main.zig");
+ const vxfw = @import("vxfw.zig");
+ 
+@@ -16,7 +17,7 @@ tty: vaxis.Tty,
+ vx: vaxis.Vaxis,
+ timers: std.ArrayList(vxfw.Tick),
+ wants_focus: ?vxfw.Widget,
+-buffer: [1024]u8,
++io: std.Io,
+ 
+ /// Runtime options
+ pub const Options = struct {
+@@ -27,10 +28,10 @@ pub const Options = struct {
+ /// Create an application. We require stable pointers to do the set up, so this will create an App
+ /// object on the heap. Call destroy when the app is complete to reset terminal state and release
+ /// resources
+-pub fn init(allocator: Allocator) !App {
+-    var app: App = .{
++pub fn init(allocator: Allocator, io: std.Io) !App {
++    return .{
+         .allocator = allocator,
+-        .tty = undefined,
++        .tty = try vaxis.Tty.init(io),
+         .vx = try vaxis.init(allocator, .{
+             .system_clipboard_allocator = allocator,
+             .kitty_keyboard_flags = .{
+@@ -39,10 +40,8 @@ pub fn init(allocator: Allocator) !App {
+         }),
+         .timers = std.ArrayList(vxfw.Tick){},
+         .wants_focus = null,
+-        .buffer = undefined,
++        .io = io,
+     };
+-    app.tty = try vaxis.Tty.init(&app.buffer);
+-    return app;
+ }
+ 
+ pub fn deinit(self: *App) void {
+@@ -55,7 +54,8 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+     const tty = &self.tty;
+     const vx = &self.vx;
+ 
+-    var loop: EventLoop = .{ .tty = tty, .vaxis = vx };
++    const io = self.io;
++    var loop: EventLoop = .{ .tty = tty, .vaxis = vx, .io = io, .queue = .{ .io = io } };
+     try loop.start();
+     defer loop.stop();
+ 
+@@ -65,7 +65,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+     loop.postEvent(.focus_in);
+ 
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), io, 1 * std.time.ns_per_s);
+     try vx.setBracketedPaste(tty.writer(), true);
+     try vx.subscribeToColorSchemeUpdates(tty.writer());
+ 
+@@ -97,13 +97,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+     defer focus_handler.deinit(self.allocator);
+ 
+     // Timestamp of our next frame
+-    var next_frame_ms: u64 = @intCast(std.time.milliTimestamp());
++    var next_frame_ms: u64 = nowMs(io);
+ 
+     // Create our event context
+     var ctx: vxfw.EventContext = .{
+         .alloc = self.allocator,
+         .phase = .capturing,
+         .cmds = vxfw.CommandList{},
++        .io = io,
+         .consume_event = false,
+         .redraw = false,
+         .quit = false,
+@@ -111,18 +112,25 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+     defer ctx.cmds.deinit(self.allocator);
+ 
+     while (true) {
+-        const now_ms: u64 = @intCast(std.time.milliTimestamp());
++        const now_ms: u64 = nowMs(io);
+         if (now_ms >= next_frame_ms) {
+             // Deadline exceeded. Schedule the next frame
+             next_frame_ms = now_ms + tick_ms;
+         } else {
+             // Sleep until the deadline
+-            std.Thread.sleep((next_frame_ms - now_ms) * std.time.ns_per_ms);
++            try std.Io.sleep(io, .fromMilliseconds(@intCast(next_frame_ms - now_ms)), .real);
+             next_frame_ms += tick_ms;
+         }
+ 
+         try self.checkTimers(&ctx);
+ 
++        // Poll for pending SIGWINCH outside of queue lock.
++        // The signal handler only sets an atomic flag; we dispatch
++        // the registered callbacks here where mutex operations are safe.
++        if (builtin.os.tag != .windows and !builtin.is_test) {
++            if (!vx.state.in_band_resize) vaxis.Tty.pollWinch();
++        }
++
+         {
+             loop.queue.lock();
+             defer loop.queue.unlock();
+@@ -296,7 +304,7 @@ fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
+ }
+ 
+ fn checkTimers(self: *App, ctx: *vxfw.EventContext) anyerror!void {
+-    const now_ms = std.time.milliTimestamp();
++    const now_ms = nowMs(ctx.io);
+ 
+     // timers are always sorted descending
+     while (self.timers.pop()) |tick| {
+@@ -349,12 +357,16 @@ const MouseHandler = struct {
+             .surface = last_frame,
+             .z_index = 0,
+         };
+-        const mouse_point: vxfw.Point = .{
+-            .row = @intCast(mouse.row),
+-            .col = @intCast(mouse.col),
+-        };
+-        if (sub.containsPoint(mouse_point)) {
+-            try last_frame.hitTest(app.allocator, &hits, mouse_point);
++
++        if (mouse.row >= 0 and mouse.col >= 0) {
++            const mouse_point: vxfw.Point = .{
++                .row = @intCast(mouse.row),
++                .col = @intCast(mouse.col),
++            };
++
++            if (sub.containsPoint(mouse_point)) {
++                try last_frame.hitTest(app.allocator, &hits, mouse_point);
++            }
+         }
+ 
+         // We store the hit list from the last mouse event to determine mouse_enter and mouse_leave
+@@ -408,12 +420,16 @@ const MouseHandler = struct {
+             .surface = last_frame,
+             .z_index = 0,
+         };
+-        const mouse_point: vxfw.Point = .{
+-            .row = @intCast(mouse.row),
+-            .col = @intCast(mouse.col),
+-        };
+-        if (sub.containsPoint(mouse_point)) {
+-            try last_frame.hitTest(app.allocator, &hits, mouse_point);
++
++        if (mouse.row >= 0 and mouse.col >= 0) {
++            const mouse_point: vxfw.Point = .{
++                .row = @intCast(mouse.row),
++                .col = @intCast(mouse.col),
++            };
++
++            if (sub.containsPoint(mouse_point)) {
++                try last_frame.hitTest(app.allocator, &hits, mouse_point);
++            }
+         }
+ 
+         // Handle mouse_enter and mouse_leave events
+@@ -602,3 +618,8 @@ const FocusHandler = struct {
+         }
+     }
+ };
++
++fn nowMs(io: std.Io) u64 {
++    const now = std.Io.Clock.now(.real, io);
++    return @intCast(now.toMilliseconds());
++}
+diff --git a/src/vxfw/Button.zig b/src/vxfw/Button.zig
+index d4b2a9c..075627e 100644
+--- a/src/vxfw/Button.zig
++++ b/src/vxfw/Button.zig
+@@ -142,6 +142,7 @@ test Button {
+     var ctx: vxfw.EventContext = .{
+         .alloc = std.testing.allocator,
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     defer ctx.cmds.deinit(ctx.alloc);
+ 
+diff --git a/src/vxfw/Image.zig b/src/vxfw/Image.zig
+new file mode 100644
+index 0000000..0f0b99f
+--- /dev/null
++++ b/src/vxfw/Image.zig
+@@ -0,0 +1,89 @@
++const std = @import("std");
++const vaxis = @import("../main.zig");
++const vxfw = @import("vxfw.zig");
++
++const Allocator = std.mem.Allocator;
++
++const Image = @This();
++
++/// The loaded image to display.
++image: vaxis.Image,
++/// Desired height in cell rows. Width is computed to maintain aspect ratio.
++/// If null, uses max constraint height (or 1 if unbounded).
++rows: ?u16 = null,
++
++pub fn widget(self: *const Image) vxfw.Widget {
++    return .{
++        .userdata = @constCast(self),
++        .drawFn = typeErasedDrawFn,
++    };
++}
++
++fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
++    const self: *const Image = @ptrCast(@alignCast(ptr));
++    return self.draw(ctx);
++}
++
++pub fn draw(self: *const Image, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
++    const target_rows = self.rows orelse ctx.max.height orelse 1;
++    if (target_rows == 0 or self.image.width == 0 or self.image.height == 0) {
++        return .{
++            .size = .{ .width = 0, .height = 0 },
++            .widget = self.widget(),
++            .buffer = &.{},
++            .children = &.{},
++        };
++    }
++
++    // Compute cell columns from image aspect ratio and terminal cell pixel size
++    const cell_h: u32 = if (ctx.cell_size.height > 0) ctx.cell_size.height else 20;
++    const cell_w: u32 = if (ctx.cell_size.width > 0) ctx.cell_size.width else 10;
++    const height_px = @as(u32, target_rows) * cell_h;
++    const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(self.image.height));
++    const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(self.image.width)) * scale_f);
++    const cols: u16 = @intCast((width_px + cell_w - 1) / cell_w);
++
++    const size: vxfw.Size = .{ .width = cols, .height = target_rows };
++    var surf = try vxfw.Surface.init(ctx.arena, self.widget(), size);
++    surf.writeCell(0, 0, .{
++        .image = .{
++            .img_id = self.image.id,
++            .options = .{
++                .size = .{ .rows = target_rows },
++            },
++        },
++    });
++    return surf;
++}
++
++test Image {
++    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
++    defer arena.deinit();
++    vxfw.DrawContext.init(.unicode);
++
++    const img: Image = .{
++        .image = .{ .id = 1, .width = 100, .height = 50 },
++        .rows = 5,
++    };
++    const w = img.widget();
++
++    const draw_ctx: vxfw.DrawContext = .{
++        .arena = arena.allocator(),
++        .min = .{},
++        .max = .{ .width = 40, .height = 10 },
++        .cell_size = .{ .width = 10, .height = 20 },
++    };
++
++    const surface = try w.draw(draw_ctx);
++    try std.testing.expectEqual(@as(u16, 5), surface.size.height);
++    // 5 rows * 20px = 100px height. scale = 100/50 = 2.0. width = 100*2 = 200px. cols = 200/10 = 20
++    try std.testing.expectEqual(@as(u16, 20), surface.size.width);
++    // Image cell should be at (0, 0)
++    const cell = surface.buffer[0];
++    try std.testing.expect(cell.image != null);
++    try std.testing.expectEqual(@as(u32, 1), cell.image.?.img_id);
++}
++
++test "refAllDecls" {
++    std.testing.refAllDecls(@This());
++}
+diff --git a/src/vxfw/ListView.zig b/src/vxfw/ListView.zig
+index 8ff9551..de93d5d 100644
+--- a/src/vxfw/ListView.zig
++++ b/src/vxfw/ListView.zig
+@@ -564,6 +564,7 @@ test ListView {
+     var ctx: vxfw.EventContext = .{
+         .alloc = std.testing.allocator,
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     defer ctx.cmds.deinit(ctx.alloc);
+ 
+@@ -731,6 +732,7 @@ test "ListView: uneven scroll" {
+     var ctx: vxfw.EventContext = .{
+         .alloc = std.testing.allocator,
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     defer ctx.cmds.deinit(ctx.alloc);
+ 
+diff --git a/src/vxfw/Padding.zig b/src/vxfw/Padding.zig
+index e60162f..a9039ba 100644
+--- a/src/vxfw/Padding.zig
++++ b/src/vxfw/Padding.zig
+@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
+ const vxfw = @import("vxfw.zig");
+ 
+ const Padding = @This();
+-const PadValues = struct {
++pub const PadValues = struct {
+     left: u16 = 0,
+     right: u16 = 0,
+     top: u16 = 0,
+diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
+index 36319a4..38859ea 100644
+--- a/src/vxfw/ScrollView.zig
++++ b/src/vxfw/ScrollView.zig
+@@ -646,6 +646,7 @@ test ScrollView {
+     var ctx: vxfw.EventContext = .{
+         .alloc = std.testing.allocator,
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     defer ctx.cmds.deinit(ctx.alloc);
+ 
+@@ -1044,6 +1045,7 @@ test "ScrollView: uneven scroll" {
+     var ctx: vxfw.EventContext = .{
+         .alloc = std.testing.allocator,
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     defer ctx.cmds.deinit(ctx.alloc);
+ 
+diff --git a/src/vxfw/Spinner.zig b/src/vxfw/Spinner.zig
+index 6619522..eb3d8ba 100644
+--- a/src/vxfw/Spinner.zig
++++ b/src/vxfw/Spinner.zig
+@@ -20,11 +20,11 @@ frame: u4 = 0,
+ was_spinning: std.atomic.Value(bool) = .{ .raw = false },
+ 
+ /// Start, or add one, to the spinner counter. Thread safe.
+-pub fn start(self: *Spinner) ?vxfw.Command {
++pub fn start(self: *Spinner, io: std.Io) ?vxfw.Command {
+     self.was_spinning.store(true, .unordered);
+     const count = self.count.fetchAdd(1, .monotonic);
+     if (count == 0) {
+-        return vxfw.Tick.in(time_lapse, self.widget());
++        return vxfw.Tick.in(io, time_lapse, self.widget());
+     }
+     return null;
+ }
+@@ -111,13 +111,13 @@ test Spinner {
+     // Start the spinner. This (maybe) returns a Tick command to schedule the next frame. If the
+     // spinner is already running, no command is returned. Calling start is thread safe. The
+     // returned command can be added to an EventContext to schedule the frame
+-    const maybe_cmd = spinner.start();
++    const maybe_cmd = spinner.start(std.testing.io);
+     try std.testing.expect(maybe_cmd != null);
+     try std.testing.expect(maybe_cmd.? == .tick);
+     try std.testing.expectEqual(1, spinner.count.load(.unordered));
+ 
+     // If we call start again, we won't get another command but our counter will go up
+-    const maybe_cmd2 = spinner.start();
++    const maybe_cmd2 = spinner.start(std.testing.io);
+     try std.testing.expect(maybe_cmd2 == null);
+     try std.testing.expectEqual(2, spinner.count.load(.unordered));
+ 
+@@ -126,6 +126,7 @@ test Spinner {
+     var ctx: vxfw.EventContext = .{
+         .alloc = arena.allocator(),
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+ 
+     // The event loop handles the tick event and calls us back with a .tick event. If we should keep
+diff --git a/src/vxfw/SplitView.zig b/src/vxfw/SplitView.zig
+index 9a355a0..591e5e9 100644
+--- a/src/vxfw/SplitView.zig
++++ b/src/vxfw/SplitView.zig
+@@ -229,6 +229,7 @@ test SplitView {
+     var ctx: vxfw.EventContext = .{
+         .alloc = arena.allocator(),
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+     try split_widget.handleEvent(&ctx, .{ .mouse = mouse });
+     // We should get a command to change the mouse shape
+diff --git a/src/vxfw/Text.zig b/src/vxfw/Text.zig
+index 1f76cba..a7b71bb 100644
+--- a/src/vxfw/Text.zig
++++ b/src/vxfw/Text.zig
+@@ -223,7 +223,7 @@ pub const SoftwrapIterator = struct {
+         // Advance the hard iterator
+         if (self.index == self.line.len) {
+             self.line = self.hard_iter.next() orelse return null;
+-            self.line = std.mem.trimRight(u8, self.line, " \t");
++            self.line = std.mem.trimEnd(u8, self.line, " \t");
+             self.index = 0;
+         }
+ 
+@@ -237,7 +237,7 @@ pub const SoftwrapIterator = struct {
+             if (self.ctx.max.width) |max| {
+                 if (cur_width + next_width > max) {
+                     // Trim the word to see if it can fit on a line by itself
+-                    const trimmed = std.mem.trimLeft(u8, word, " \t");
++                    const trimmed = std.mem.trimStart(u8, word, " \t");
+                     const trimmed_bytes = word.len - trimmed.len;
+                     // The number of bytes we trimmed is equal to the reduction in length
+                     const trimmed_width = next_width - trimmed_bytes;
+diff --git a/src/vxfw/TextField.zig b/src/vxfw/TextField.zig
+index 6ad108b..e5a4d5b 100644
+--- a/src/vxfw/TextField.zig
++++ b/src/vxfw/TextField.zig
+@@ -346,7 +346,7 @@ pub fn deleteAfterCursor(self: *TextField) void {
+ /// Moves the cursor backward by words. If the character before the cursor is a space, the cursor is
+ /// positioned just after the next previous space
+ pub fn moveBackwardWordwise(self: *TextField) void {
+-    const trimmed = std.mem.trimRight(u8, self.buf.firstHalf(), " ");
++    const trimmed = std.mem.trimEnd(u8, self.buf.firstHalf(), " ");
+     const idx = if (std.mem.lastIndexOfScalar(u8, trimmed, ' ')) |last|
+         last + 1
+     else
+@@ -562,6 +562,7 @@ test TextField {
+     var ctx: vxfw.EventContext = .{
+         .alloc = arena.allocator(),
+         .cmds = .empty,
++        .io = std.testing.io,
+     };
+ 
+     // Enough boiler plate...Create the text field
+diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
+index 1510e71..e78dd7f 100644
+--- a/src/vxfw/vxfw.zig
++++ b/src/vxfw/vxfw.zig
+@@ -16,6 +16,7 @@ pub const Button = @import("Button.zig");
+ pub const Center = @import("Center.zig");
+ pub const FlexColumn = @import("FlexColumn.zig");
+ pub const FlexRow = @import("FlexRow.zig");
++pub const Image = @import("Image.zig");
+ pub const ListView = @import("ListView.zig");
+ pub const Padding = @import("Padding.zig");
+ pub const RichText = @import("RichText.zig");
+@@ -61,8 +62,8 @@ pub const Tick = struct {
+         return lhs.deadline_ms > rhs.deadline_ms;
+     }
+ 
+-    pub fn in(ms: u32, widget: Widget) Command {
+-        const now = std.time.milliTimestamp();
++    pub fn in(io: std.Io, ms: u32, widget: Widget) Command {
++        const now = std.Io.Clock.now(.real, io).toMilliseconds();
+         return .{ .tick = .{
+             .deadline_ms = now + ms,
+             .widget = widget,
+@@ -101,6 +102,7 @@ pub const EventContext = struct {
+     phase: Phase = .at_target,
+     alloc: Allocator,
+     cmds: CommandList,
++    io: std.Io,
+ 
+     /// The event was handled, do not pass it on
+     consume_event: bool = false,
+@@ -120,7 +122,7 @@ pub const EventContext = struct {
+     }
+ 
+     pub fn tick(self: *EventContext, ms: u32, widget: Widget) Allocator.Error!void {
+-        try self.addCmd(Tick.in(ms, widget));
++        try self.addCmd(Tick.in(self.io, ms, widget));
+     }
+ 
+     pub fn consumeAndRedraw(self: *EventContext) void {
+@@ -541,10 +543,10 @@ test "All widgets have a doctest and refAllDecls test" {
+     // it easy to fail CI early, or spot bad tests vs non-existant tests
+     const excludes = &[_][]const u8{ "vxfw.zig", "App.zig" };
+ 
+-    var cwd = try std.fs.cwd().openDir("./src/vxfw", .{ .iterate = true });
++    var cwd = try std.Io.Dir.cwd().openDir(std.testing.io, "./src/vxfw", .{ .iterate = true });
+     var iter = cwd.iterate();
+-    defer cwd.close();
+-    outer: while (try iter.next()) |file| {
++    defer cwd.close(std.testing.io);
++    outer: while (try iter.next(std.testing.io)) |file| {
+         if (file.kind != .file) continue;
+         for (excludes) |ex| if (std.mem.eql(u8, ex, file.name)) continue :outer;
+ 
+@@ -552,7 +554,7 @@ test "All widgets have a doctest and refAllDecls test" {
+             file.name[0..idx]
+         else
+             continue;
+-        const data = try cwd.readFileAllocOptions(std.testing.allocator, file.name, 10_000_000, null, .of(u8), 0x00);
++        const data = try cwd.readFileAllocOptions(std.testing.io, file.name, std.testing.allocator, std.Io.Limit.limited(10_000_000), .of(u8), 0x00);
+         defer std.testing.allocator.free(data);
+         var ast = try std.zig.Ast.parse(std.testing.allocator, data, .zig);
+         defer ast.deinit(std.testing.allocator);
+diff --git a/src/widgets/TextInput.zig b/src/widgets/TextInput.zig
+index a6236a4..6b8871b 100644
+--- a/src/widgets/TextInput.zig
++++ b/src/widgets/TextInput.zig
+@@ -266,7 +266,7 @@ pub fn deleteAfterCursor(self: *TextInput) void {
+ /// Moves the cursor backward by words. If the character before the cursor is a space, the cursor is
+ /// positioned just after the next previous space
+ pub fn moveBackwardWordwise(self: *TextInput) void {
+-    const trimmed = std.mem.trimRight(u8, self.buf.firstHalf(), " ");
++    const trimmed = std.mem.trimEnd(u8, self.buf.firstHalf(), " ");
+     const idx = if (std.mem.lastIndexOfScalar(u8, trimmed, ' ')) |last|
+         last + 1
+     else
+diff --git a/src/widgets/TextView.zig b/src/widgets/TextView.zig
+index 45f9e44..ee326cf 100644
+--- a/src/widgets/TextView.zig
++++ b/src/widgets/TextView.zig
+@@ -79,52 +79,22 @@ pub const Buffer = struct {
+         var cols: usize = self.last_cols;
+         var iter = uucode.grapheme.Iterator(uucode.utf8.Iterator).init(.init(content.bytes));
+ 
+-        var grapheme_start: usize = 0;
+-        var prev_break: bool = true;
+-
+-        while (iter.next()) |result| {
+-            if (prev_break and !result.is_break) {
+-                // Start of a new grapheme
+-                const cp_len: usize = std.unicode.utf8CodepointSequenceLength(result.cp) catch 1;
+-                grapheme_start = iter.i - cp_len;
+-            }
+-
+-            if (result.is_break) {
+-                // End of a grapheme
+-                const grapheme_end = iter.i;
+-                const grapheme_len = grapheme_end - grapheme_start;
+-
+-                try self.grapheme.append(allocator, .{
+-                    .len = @intCast(grapheme_len),
+-                    .offset = @intCast(self.content.items.len + grapheme_start),
+-                });
+-
+-                const cluster = content.bytes[grapheme_start..grapheme_end];
+-                if (std.mem.eql(u8, cluster, "\n")) {
+-                    self.cols = @max(self.cols, cols);
+-                    cols = 0;
+-                } else {
+-                    // Calculate width using gwidth
+-                    const w = vaxis.gwidth.gwidth(cluster, .unicode);
+-                    cols +|= w;
+-                }
+-
+-                grapheme_start = grapheme_end;
+-            }
+-            prev_break = result.is_break;
+-        }
+-
+-        // Flush the last grapheme if we ended mid-cluster
+-        if (!prev_break and grapheme_start < content.bytes.len) {
+-            const grapheme_len = content.bytes.len - grapheme_start;
++        while (iter.nextGrapheme()) |grapheme| {
++            const grapheme_start = grapheme.start;
++            const grapheme_end = grapheme.end;
++            const grapheme_len = grapheme_end - grapheme_start;
+ 
+             try self.grapheme.append(allocator, .{
+                 .len = @intCast(grapheme_len),
+                 .offset = @intCast(self.content.items.len + grapheme_start),
+             });
+ 
+-            const cluster = content.bytes[grapheme_start..];
+-            if (!std.mem.eql(u8, cluster, "\n")) {
++            const cluster = content.bytes[grapheme_start..grapheme_end];
++            if (std.mem.eql(u8, cluster, "\n")) {
++                self.cols = @max(self.cols, cols);
++                cols = 0;
++            } else {
++                // Calculate width using gwidth
+                 const w = vaxis.gwidth.gwidth(cluster, .unicode);
+                 cols +|= w;
+             }
+diff --git a/src/widgets/terminal/Command.zig b/src/widgets/terminal/Command.zig
+index 0cd24f7..ed41553 100644
+--- a/src/widgets/terminal/Command.zig
++++ b/src/widgets/terminal/Command.zig
+@@ -14,7 +14,7 @@ working_directory: ?[]const u8,
+ // Set after spawn()
+ pid: ?std.posix.pid_t = null,
+ 
+-env_map: *const std.process.EnvMap,
++env_map: *const std.process.Environ.Map,
+ 
+ pty: Pty,
+ 
+@@ -43,8 +43,8 @@ pub fn spawn(self: *Command, allocator: std.mem.Allocator) !void {
+         try posix.dup2(self.pty.tty.handle, std.posix.STDOUT_FILENO);
+         try posix.dup2(self.pty.tty.handle, std.posix.STDERR_FILENO);
+ 
+-        self.pty.tty.close();
+-        if (self.pty.pty.handle > 2) self.pty.pty.close();
++        _ = std.os.linux.close(self.pty.tty.handle);
++        if (self.pty.pty.handle > 2) _ = std.os.linux.close(self.pty.pty.handle);
+ 
+         if (self.working_directory) |wd| {
+             try std.posix.chdir(wd);
+@@ -78,8 +78,8 @@ pub fn spawn(self: *Command, allocator: std.mem.Allocator) !void {
+ fn handleSigChild(_: c_int) callconv(.c) void {
+     const result = std.posix.waitpid(-1, 0);
+ 
+-    Terminal.global_vt_mutex.lock();
+-    defer Terminal.global_vt_mutex.unlock();
++    if (!Terminal.global_vt_mutex.tryLock()) return;
++    defer Terminal.global_vt_mutex.unlock(Terminal.global_vt_io);
+     if (Terminal.global_vts) |vts| {
+         var vt = vts.get(result.pid) orelse return;
+         vt.event_queue.push(.exited);
+@@ -97,7 +97,7 @@ pub fn kill(self: *Command) void {
+ /// hash map plus options.
+ fn createEnvironFromMap(
+     arena: std.mem.Allocator,
+-    map: *const std.process.EnvMap,
++    map: *const std.process.Environ.Map,
+ ) ![:null]?[*:0]u8 {
+     const envp_count: usize = map.count();
+ 
+diff --git a/src/widgets/terminal/Pty.zig b/src/widgets/terminal/Pty.zig
+index d9f4138..4c67328 100644
+--- a/src/widgets/terminal/Pty.zig
++++ b/src/widgets/terminal/Pty.zig
+@@ -7,8 +7,8 @@ const Winsize = @import("../../main.zig").Winsize;
+ 
+ const posix = std.posix;
+ 
+-pty: std.fs.File,
+-tty: std.fs.File,
++pty: std.Io.File,
++tty: std.Io.File,
+ 
+ /// opens a new tty/pty pair
+ pub fn init() !Pty {
+@@ -19,9 +19,9 @@ pub fn init() !Pty {
+ }
+ 
+ /// closes the tty and pty
+-pub fn deinit(self: Pty) void {
+-    self.pty.close();
+-    self.tty.close();
++pub fn deinit(self: Pty, io: std.Io) void {
++    self.pty.close(io);
++    self.tty.close(io);
+ }
+ 
+ /// sets the size of the pty
+@@ -37,7 +37,7 @@ pub fn setSize(self: Pty, ws: Winsize) !void {
+ }
+ 
+ fn openPtyLinux() !Pty {
+-    const p = try posix.open("/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
++    const p = try posix.openat(posix.AT.FDCWD, "/dev/ptmx", .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
+     errdefer posix.close(p);
+ 
+     // unlockpt
+@@ -50,7 +50,7 @@ fn openPtyLinux() !Pty {
+     const sname = try std.fmt.bufPrint(&buf, "/dev/pts/{d}", .{n});
+     std.log.debug("pts: {s}", .{sname});
+ 
+-    const t = try posix.open(sname, .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
++    const t = try posix.openat(posix.AT.FDCWD, sname, .{ .ACCMODE = .RDWR, .NOCTTY = true }, 0);
+ 
+     return .{
+         .pty = .{ .handle = p },
+diff --git a/src/widgets/terminal/Terminal.zig b/src/widgets/terminal/Terminal.zig
+index 36d61d7..786ca85 100644
+--- a/src/widgets/terminal/Terminal.zig
++++ b/src/widgets/terminal/Terminal.zig
+@@ -43,21 +43,23 @@ pub const InputEvent = union(enum) {
+     key_press: vaxis.Key,
+ };
+ 
+-pub var global_vt_mutex: std.Thread.Mutex = .{};
++pub var global_vt_mutex: std.Io.Mutex = .init;
++var global_vt_io: std.Io = undefined;
+ pub var global_vts: ?std.AutoHashMap(i32, *Terminal) = null;
+ pub var global_sigchild_installed: bool = false;
+ 
+ allocator: std.mem.Allocator,
++io: std.Io,
+ scrollback_size: u16,
+ 
+ pty: Pty,
+-pty_writer: std.fs.File.Writer,
++pty_writer: std.Io.File.Writer,
+ cmd: Command,
+ thread: ?std.Thread = null,
+ 
+ /// the screen we draw from
+ front_screen: Screen,
+-front_mutex: std.Thread.Mutex = .{},
++front_mutex: std.Io.Mutex = .init,
+ 
+ /// the back screens
+ back_screen: *Screen = undefined,
+@@ -65,7 +67,7 @@ back_screen_pri: Screen,
+ back_screen_alt: Screen,
+ // only applies to primary screen
+ scroll_offset: usize = 0,
+-back_mutex: std.Thread.Mutex = .{},
++back_mutex: std.Io.Mutex = .init,
+ // dirty is protected by back_mutex. Only access this field when you hold that mutex
+ dirty: bool = false,
+ 
+@@ -79,14 +81,15 @@ working_directory: std.ArrayList(u8) = .empty,
+ 
+ last_printed: []const u8 = "",
+ 
+-event_queue: Queue = .{},
++event_queue: Queue,
+ 
+ /// initialize a Terminal. This sets the size of the underlying pty and allocates the sizes of the
+ /// screen
+ pub fn init(
+     allocator: std.mem.Allocator,
++    io: std.Io,
+     argv: []const []const u8,
+-    env: *const std.process.EnvMap,
++    env: *const std.process.Environ.Map,
+     opts: Options,
+     write_buf: []u8,
+ ) !Terminal {
+@@ -107,8 +110,10 @@ pub fn init(
+     while (col < opts.winsize.cols) : (col += 8) {
+         try tabs.append(allocator, col);
+     }
++    global_vt_io = io;
+     return .{
+         .allocator = allocator,
++        .io = io,
+         .pty = pty,
+         .pty_writer = pty.pty.writerStreaming(write_buf),
+         .cmd = cmd,
+@@ -117,6 +122,7 @@ pub fn init(
+         .back_screen_pri = try Screen.init(allocator, opts.winsize.cols, opts.winsize.rows + opts.scrollback_size),
+         .back_screen_alt = try Screen.init(allocator, opts.winsize.cols, opts.winsize.rows),
+         .tab_stops = tabs,
++        .event_queue = .{ .io = io },
+     };
+ }
+ 
+@@ -125,8 +131,8 @@ pub fn deinit(self: *Terminal) void {
+     self.should_quit = true;
+ 
+     pid: {
+-        global_vt_mutex.lock();
+-        defer global_vt_mutex.unlock();
++        global_vt_mutex.lockUncancelable(global_vt_io);
++        defer global_vt_mutex.unlock(global_vt_io);
+         var vts = global_vts orelse break :pid;
+         if (self.cmd.pid) |pid|
+             _ = vts.remove(pid);
+@@ -143,7 +149,7 @@ pub fn deinit(self: *Terminal) void {
+         thread.join();
+         self.thread = null;
+     }
+-    self.pty.deinit();
++    self.pty.deinit(self.io);
+     self.front_screen.deinit(self.allocator);
+     self.back_screen_pri.deinit(self.allocator);
+     self.back_screen_alt.deinit(self.allocator);
+@@ -162,16 +168,15 @@ pub fn spawn(self: *Terminal) !void {
+     if (self.cmd.working_directory) |pwd| {
+         try self.working_directory.appendSlice(self.allocator, pwd);
+     } else {
+-        const pwd = std.fs.cwd();
+         var buffer: [std.fs.max_path_bytes]u8 = undefined;
+-        const out_path = try std.os.getFdPath(pwd.fd, &buffer);
++        const out_path = try std.posix.readlinkZ("/proc/self/cwd", &buffer);
+         try self.working_directory.appendSlice(self.allocator, out_path);
+     }
+ 
+     {
+         // add to our global list
+-        global_vt_mutex.lock();
+-        defer global_vt_mutex.unlock();
++        global_vt_mutex.lockUncancelable(global_vt_io);
++        defer global_vt_mutex.unlock(global_vt_io);
+         if (global_vts == null)
+             global_vts = std.AutoHashMap(i32, *Terminal).init(self.allocator);
+         if (self.cmd.pid) |pid|
+@@ -190,8 +195,8 @@ pub fn resize(self: *Terminal, ws: Winsize) !void {
+         ws.rows == self.front_screen.height)
+         return;
+ 
+-    self.back_mutex.lock();
+-    defer self.back_mutex.unlock();
++    self.back_mutex.lockUncancelable(self.io);
++    defer self.back_mutex.unlock(self.io);
+ 
+     self.front_screen.deinit(self.allocator);
+     self.front_screen = try Screen.init(self.allocator, ws.cols, ws.rows);
+@@ -206,7 +211,7 @@ pub fn resize(self: *Terminal, ws: Winsize) !void {
+ 
+ pub fn draw(self: *Terminal, allocator: std.mem.Allocator, win: vaxis.Window) !void {
+     if (self.back_mutex.tryLock()) {
+-        defer self.back_mutex.unlock();
++        defer self.back_mutex.unlock(self.io);
+         // We keep this as a separate condition so we don't deadlock by obtaining the lock but not
+         // having sync
+         if (!self.mode.sync) {
+@@ -249,7 +254,7 @@ pub fn get_pty_writer(self: *Terminal) *std.Io.Writer {
+     return &self.pty_writer.interface;
+ }
+ 
+-fn reader(self: *const Terminal, buf: []u8) std.fs.File.Reader {
++fn reader(self: *const Terminal, buf: []u8) std.Io.File.Reader {
+     return self.pty.pty.readerStreaming(buf);
+ }
+ 
+@@ -265,8 +270,8 @@ fn run(self: *Terminal) !void {
+ 
+     while (!self.should_quit) {
+         const event = try parser.parseReader(&reader_.interface);
+-        self.back_mutex.lock();
+-        defer self.back_mutex.unlock();
++        self.back_mutex.lockUncancelable(self.io);
++        defer self.back_mutex.unlock(self.io);
+ 
+         if (!self.dirty and self.event_queue.tryPush(.redraw))
+             self.dirty = true;

@@ -35,7 +35,7 @@ pub fn draw(
         .y_max = 100,
         .y_unit = "%",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
     const mem_chart: Chart = .{
         .title = "Memory",
@@ -53,7 +53,7 @@ pub fn draw(
         .y_max = 100,
         .y_unit = "%",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
 
     // ── Temperature + Power charts ──────────────────────────
@@ -66,7 +66,7 @@ pub fn draw(
         .y_max = 100,
         .y_unit = "\u{00b0}C",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
 
     const power_limit_mw = gpu.power_limit_mw orelse 0;
@@ -87,7 +87,7 @@ pub fn draw(
         .y_max = @intCast(@min(y_max, std.math.maxInt(u32))),
         .y_unit = "W",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
 
     const charts_flow: ColumnLayout = .{
