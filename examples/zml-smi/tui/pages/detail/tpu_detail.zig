@@ -31,7 +31,7 @@ pub fn draw(
         .y_max = 100,
         .y_unit = "%",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
 
     const mem_used = tp.mem_used_bytes orelse 0;
@@ -47,7 +47,7 @@ pub fn draw(
         .y_max = 100,
         .y_unit = "%",
         .chart_height = 8,
-        .sample_interval_ms = state.sample_interval_ms,
+        .tui_refresh_rate = state.tui_refresh_rate,
     };
 
     const charts_flow: ColumnLayout = .{

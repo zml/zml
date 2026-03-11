@@ -5,26 +5,28 @@ const pi = @import("../../info/process_info.zig");
 const ProcessInfo = pi.ProcessInfo;
 
 pub const ProcessEnricher = struct {
+    gpa: std.mem.Allocator,
     prev_ticks: std.AutoHashMapUnmanaged(u32, u64) = .{},
     prev_total_ticks: u64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !ProcessEnricher {
+    pub fn init(gpa: std.mem.Allocator, io: std.Io) !ProcessEnricher {
         var enricher: ProcessEnricher = .{
+            .gpa = gpa,
             .prev_total_ticks = readTotalCpuTicks(io),
             .prev_ticks = .{},
         };
 
-        try enricher.prev_ticks.ensureTotalCapacity(allocator, 64);
+        try enricher.prev_ticks.ensureTotalCapacity(gpa, 64);
 
         return enricher;
     }
 
-    pub fn enrich(self: *ProcessEnricher, allocator: std.mem.Allocator, io: std.Io, procs: []ProcessInfo) void {
+    pub fn enrich(self: *ProcessEnricher, io: std.Io, procs: []ProcessInfo) void {
         const curr_total = readTotalCpuTicks(io);
         const delta_total = curr_total -| self.prev_total_ticks;
 
         var curr_ticks: std.AutoHashMapUnmanaged(u32, u64) = .{};
-        curr_ticks.ensureTotalCapacity(allocator, @intCast(procs.len)) catch {};
+        curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch {};
 
         for (procs) |*info| {
             var path_buf: [64]u8 = undefined;
@@ -54,7 +56,7 @@ pub const ProcessEnricher = struct {
             curr_ticks.getOrPutAssumeCapacity(info.pid).value_ptr.* = ticks;
         }
 
-        self.prev_ticks.deinit(allocator);
+        self.prev_ticks.deinit(self.gpa);
         self.prev_ticks = curr_ticks;
         self.prev_total_ticks = curr_total;
     }

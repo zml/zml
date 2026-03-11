@@ -34,8 +34,8 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
 
 const CliArgs = struct {
     top: bool = false,
-    sample_interval: u16 = 100,
-    poll_interval: u16 = 100,
+    tui_refresh_rate: u16 = 100,
+    poll_interval: u16 = 500,
 
     pub const help =
         \\ zml-smi [--top] [--sample-interval MS] [--poll-interval MS]
@@ -66,7 +66,7 @@ pub fn main(init: std.process.Init) !void {
     var host_info: HostInfo = .{};
     try host.init(&w, io, &host_info);
 
-    var enricher: ProcessEnricher = try .init(allocator, io);
+    var enricher: ProcessEnricher = try .init(gpa, io);
 
     var cuda: nvml.Backend = .{};
     var rocm: amdsmi.Backend = .{};
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !void {
         .devices = device_infos.items,
         .host = &host_info,
         .targets = targets,
-        .sample_interval_ms = args.sample_interval,
+        .tui_refresh_rate = args.tui_refresh_rate,
         .process_lists = &proc_ptrs,
         .enricher = &enricher,
         .io = io,
@@ -124,8 +124,8 @@ pub fn main(init: std.process.Init) !void {
     defer state.deinit(allocator);
 
     if (args.top) {
-        try tui.run(allocator, io, &state);
+        try tui.run(gpa, io, &state);
     } else {
-        try static_print.run(allocator, io, &state);
+        try static_print.run(gpa, io, &state);
     }
 }
