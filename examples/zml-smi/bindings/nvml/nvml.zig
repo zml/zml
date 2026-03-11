@@ -260,34 +260,47 @@ pub fn getNumFans(handle: Handle) Error!c_uint {
     return count;
 }
 
-pub fn getComputeRunningProcesses(handle: Handle, infos: []ProcessInfo_t) Error![]const ProcessInfo_t {
+pub fn getComputeRunningProcesses(allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcessInfo_t {
     if (comptime !has_nvml) return error.NvmlUnavailable;
-    var count: c_uint = @intCast(infos.len);
-    const ret = c.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr));
-    if (ret == NVML_INSUFFICIENT_SIZE) return infos[0..0];
-    try check(ret);
+    var count: c_uint = 0;
+    const ret = c.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, null);
+    if (ret != NVML_INSUFFICIENT_SIZE) {
+        if (ret == NVML_SUCCESS) return &.{};
+        try check(ret);
+    }
+    if (count == 0) return &.{};
+    const infos = try allocator.alloc(ProcessInfo_t, count);
+    errdefer allocator.free(infos);
+    try check(c.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
     return infos[0..count];
 }
 
-pub fn getGraphicsRunningProcesses(handle: Handle, infos: []ProcessInfo_t) Error![]const ProcessInfo_t {
+pub fn getGraphicsRunningProcesses(allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcessInfo_t {
     if (comptime !has_nvml) return error.NvmlUnavailable;
-    var count: c_uint = @intCast(infos.len);
-    const ret = c.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr));
-    if (ret == NVML_INSUFFICIENT_SIZE) return infos[0..0];
-    try check(ret);
+    var count: c_uint = 0;
+    const ret = c.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, null);
+    if (ret != NVML_INSUFFICIENT_SIZE) {
+        if (ret == NVML_SUCCESS) return &.{};
+        try check(ret);
+    }
+    if (count == 0) return &.{};
+    const infos = try allocator.alloc(ProcessInfo_t, count);
+    errdefer allocator.free(infos);
+    try check(c.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
     return infos[0..count];
 }
 
-pub fn getProcessUtilization(handle: Handle, samples: []ProcessUtilSample_t, last_seen: u64) Error![]const ProcessUtilSample_t {
+pub fn getProcessUtilization(allocator: std.mem.Allocator, handle: Handle, last_seen: u64) (Error || error{OutOfMemory})![]const ProcessUtilSample_t {
     if (comptime !has_nvml) return error.NvmlUnavailable;
     var count: c_uint = 0;
     const ret = c.nvmlDeviceGetProcessUtilization(handle, null, &count, last_seen);
     if (ret != NVML_INSUFFICIENT_SIZE) {
-        if (ret == NVML_SUCCESS) return samples[0..0];
+        if (ret == NVML_SUCCESS) return &.{};
         try check(ret);
     }
-    if (count == 0) return samples[0..0];
-    count = @min(count, @as(c_uint, @intCast(samples.len)));
+    if (count == 0) return &.{};
+    const samples = try allocator.alloc(ProcessUtilSample_t, count);
+    errdefer allocator.free(samples);
     try check(c.nvmlDeviceGetProcessUtilization(handle, @ptrCast(samples.ptr), &count, last_seen));
     return samples[0..count];
 }

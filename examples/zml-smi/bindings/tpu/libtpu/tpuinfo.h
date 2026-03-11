@@ -1,6 +1,8 @@
 #ifndef TPUINFO_H_
 #define TPUINFO_H_
 
+#define TPUINFO_MAX_DEVICES 64
+
 #ifdef __cplusplus
 extern "C" {
 #endif

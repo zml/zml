@@ -3,6 +3,8 @@ const c = @import("c");
 
 const has_tpu = @hasDecl(c, "ZML_RUNTIME_TPU");
 
+pub const max_devices: usize = c.TPUINFO_MAX_DEVICES;
+
 pub const Error = error{
     TpuUnavailable,
     QueryFailed,

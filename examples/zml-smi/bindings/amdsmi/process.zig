@@ -33,8 +33,8 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
         for (0..device_count) |dev_idx| {
             const handle = amdsmi.getHandleByIndex(@intCast(dev_idx)) catch continue;
 
-            var buf: [64]amdsmi.ProcInfo = undefined;
-            const procs = amdsmi.getProcessList(handle, &buf) catch continue;
+            const procs = amdsmi.getProcessList(allocator, handle) catch continue;
+            defer if (procs.len > 0) allocator.free(procs);
 
             const pci_slot = if (dev_idx < pci_slots.items.len) &pci_slots.items[dev_idx] else continue;
 

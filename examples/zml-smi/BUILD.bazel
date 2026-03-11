@@ -1,5 +1,43 @@
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+# tpu grpc
+
+proto_library(
+    name = "tpu_metric_service_proto",
+    srcs = ["bindings/tpu/libtpu/tpu_metric_service.proto"],
+    strip_import_prefix = "bindings/tpu/libtpu",
+    deps = ["@com_google_protobuf//:timestamp_proto"],
+)
+
+cc_proto_library(
+    name = "tpu_metric_service_cc_proto",
+    deps = [":tpu_metric_service_proto"],
+)
+
+cc_grpc_library(
+    name = "tpu_metric_service_cc_grpc",
+    srcs = [":tpu_metric_service_proto"],
+    grpc_only = True,
+    deps = [":tpu_metric_service_cc_proto"],
+)
+
+cc_library(
+    name = "tpuinfo",
+    srcs = ["bindings/tpu/libtpu/tpuinfo.cc"],
+    hdrs = ["bindings/tpu/libtpu/tpuinfo.h"],
+    strip_include_prefix = "bindings/tpu/libtpu",
+    deps = [
+        ":tpu_metric_service_cc_grpc",
+        ":tpu_metric_service_cc_proto",
+        "@grpc//:grpc++",
+    ],
+)
+
+# Defines
 
 cc_library(
     name = "cuda_defines",
@@ -11,12 +49,10 @@ cc_library(
 
 cc_library(
     name = "rocm_defines",
-    hdrs = ["bindings/amdsmi/amdsmi.h"],
     defines = select({
         "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
         "//conditions:default": ["ZML_RUNTIME_ROCM_DISABLED"],
     }),
-    includes = ["bindings/amdsmi"],
 )
 
 cc_library(
@@ -35,6 +71,8 @@ cc_library(
     }),
 )
 
+# smi
+
 zig_binary(
     name = "zml-smi",
     srcs = glob([
@@ -51,15 +89,15 @@ zig_binary(
         "bindings/nvml/metrics.zig",
         "bindings/nvml/nvml.zig",
         "bindings/nvml/process.zig",
-        "//examples/zml-smi/bindings/tpu:process.zig",
+        "bindings/tpu/process.zig",
+        "bindings/tpu/metrics.zig",
+        "bindings/tpu/tpuinfo.zig",
         "info/device_info.zig",
         "info/host_info.zig",
         "info/process_info.zig",
         "platform.zig",
         "sysfs.zig",
         "worker.zig",
-        "//examples/zml-smi/bindings/tpu:metrics.zig",
-        "//examples/zml-smi/bindings/tpu:tpuinfo.zig",
     ],
     extra_srcs = glob([
         "tui/assets/*",
@@ -77,12 +115,17 @@ zig_binary(
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:tpu.enabled": [
-            "//examples/zml-smi/bindings/tpu/libtpu:tpuinfo",
+            ":tpuinfo",
         ],
         "//conditions:default": [],
     }) + select({
         "//platforms:cuda.enabled": [
             "@cuda_nvml_dev//:nvml",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//platforms:rocm.enabled": [
+            "@amd-smi-lib//:amdsmi",
         ],
         "//conditions:default": [],
     }),

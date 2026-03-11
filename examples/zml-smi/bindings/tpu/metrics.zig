@@ -47,8 +47,8 @@ fn clearField(infos: []*DeviceInfo, comptime field: []const u8) void {
 fn metric(comptime ValType: type, comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
     return &struct {
         fn query(infos: []*DeviceInfo) void {
-            var ids: [64]c_longlong = undefined;
-            var vals: [64]ValType = undefined;
+            var ids: [tpuinfo.max_devices]c_longlong = undefined;
+            var vals: [tpuinfo.max_devices]ValType = undefined;
 
             const n = (if (ValType == c_longlong)
                 tpuinfo.queryInt(address, metric_name, &ids, &vals)
