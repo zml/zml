@@ -11,7 +11,7 @@ pub const Backend = struct {
     processes: std.ArrayList(pi.ProcessInfo) = .{},
 
     pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
-        try amdsmi.init();
+        try amdsmi.init(allocator);
         const count = try amdsmi.getDeviceCount();
 
         for (0..count) |i| {
@@ -43,7 +43,7 @@ const Device = struct {
 
     fn getName(self: Device) ![256]u8 {
         var buf: [256]u8 = .{0} ** 256;
-        _ = try amdsmi.getName(self.handle, &buf);
+        _ = try amdsmi.getName(self.handle, buf[0..amdsmi.name_buf_len]);
         return buf;
     }
 

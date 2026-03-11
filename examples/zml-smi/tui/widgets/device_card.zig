@@ -86,6 +86,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         }),
         else => "",
     };
+
     const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{d}/{d} MB", .{
         utils.bytesToMb(mem_used), utils.bytesToMb(mem_total),
     });

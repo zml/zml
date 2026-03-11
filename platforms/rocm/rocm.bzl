@@ -64,7 +64,7 @@ _ROCM_PACKAGES = {
         name = "rocm_smi",
         src = "lib/librocm_smi64.so.1",
     ),
-    "amd-smi-lib": packages.filegroup(name = "amdsmi", srcs = ["lib/libamd_smi.so"]),
+    "amd-smi-lib": packages.cc_library(name = "amdsmi", hdrs = ["include/amd_smi/amdsmi.h"], includes = ["include/amd_smi"], srcs = ["lib/libamd_smi.so.26"]),
     "rocprofiler-sdk": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(

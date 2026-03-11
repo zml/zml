@@ -67,6 +67,7 @@ pub fn main(init: std.process.Init) !void {
     try host.init(&w, io, &host_info);
 
     var enricher: ProcessEnricher = try .init(gpa, io);
+    defer enricher.deinit();
 
     var cuda: nvml.Backend = .{};
     var rocm: amdsmi.Backend = .{};
@@ -78,13 +79,6 @@ pub fn main(init: std.process.Init) !void {
     defer google_tpu.deinit(gpa);
 
     if (@hasDecl(c, "ZML_RUNTIME_ROCM") and targets.contains(.rocm)) {
-        const r = try bazel.runfiles(bazel_builtin.current_repository);
-        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const sandbox_path = try r.rlocation("libpjrt_rocm/sandbox", &path_buf) orelse {
-            return error.FileNotFound;
-        };
-
-        try setupRocmEnv(sandbox_path);
         rocm.start(&w, io, allocator, &device_infos, gpa) catch {
             std.log.err("rocm smi init failed; skipped", .{});
         };
@@ -126,6 +120,6 @@ pub fn main(init: std.process.Init) !void {
     if (args.top) {
         try tui.run(gpa, io, &state);
     } else {
-        try static_print.run(gpa, io, &state);
+        try static_print.run(allocator, io, &state);
     }
 }
