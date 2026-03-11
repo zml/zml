@@ -89,9 +89,8 @@ fn call(comptime name: [:0]const u8, args: std.meta.ArgsTuple(@TypeOf(@field(c, 
     try check(@call(.auto, f, args));
 }
 
-const MAX_GPUS = 32;
-var gpu_handles: [MAX_GPUS]c.amdsmi_processor_handle = .{null} ** MAX_GPUS;
-var gpu_count: u32 = 0;
+var gpu_handles: []c.amdsmi_processor_handle = &.{};
+var gpu_allocator: std.mem.Allocator = undefined;
 
 var lib: std.DynLib = undefined;
 var lib_loaded: bool = false;
@@ -111,45 +110,51 @@ fn openLib() !std.DynLib {
     return std.DynLib.open("/opt/rocm/lib/libamd_smi.so");
 }
 
-pub fn init() Error!void {
+pub fn init(allocator: std.mem.Allocator) (Error || error{OutOfMemory})!void {
     lib = openLib() catch return error.AmdSmiUnavailable;
     lib_loaded = true;
+    gpu_allocator = allocator;
 
     try call("amdsmi_init", .{c.AMDSMI_INIT_AMD_GPUS});
 
     var socket_count: u32 = 0;
     try call("amdsmi_get_socket_handles", .{ &socket_count, null });
 
-    var sockets: [8]c.amdsmi_socket_handle = .{null} ** 8;
-    try call("amdsmi_get_socket_handles", .{ &socket_count, &sockets });
+    const sockets = try allocator.alloc(c.amdsmi_socket_handle, socket_count);
+    defer allocator.free(sockets);
+    try call("amdsmi_get_socket_handles", .{ &socket_count, @ptrCast(sockets.ptr) });
 
-    gpu_count = 0;
+    var handle_list: std.ArrayList(c.amdsmi_processor_handle) = .{};
+    defer handle_list.deinit(allocator);
+
     for (sockets[0..socket_count]) |socket| {
         var proc_count: u32 = 0;
         try call("amdsmi_get_processor_handles", .{ socket, &proc_count, null });
 
-        var procs: [MAX_GPUS]c.amdsmi_processor_handle = .{null} ** MAX_GPUS;
-        try call("amdsmi_get_processor_handles", .{ socket, &proc_count, &procs });
+        const procs = try allocator.alloc(c.amdsmi_processor_handle, proc_count);
+        defer allocator.free(procs);
+        try call("amdsmi_get_processor_handles", .{ socket, &proc_count, @ptrCast(procs.ptr) });
 
         for (procs[0..proc_count]) |proc| {
-            if (gpu_count < MAX_GPUS) {
-                gpu_handles[gpu_count] = proc;
-                gpu_count += 1;
-            }
+            try handle_list.append(allocator, proc);
         }
     }
+
+    gpu_handles = try handle_list.toOwnedSlice(allocator);
 }
 
 pub fn getHandleByIndex(device_id: u32) Error!Handle {
-    if (device_id >= gpu_count) return error.not_found;
+    if (device_id >= gpu_handles.len) return error.not_found;
     return gpu_handles[device_id];
 }
 
 pub fn getDeviceCount() Error!u32 {
-    return gpu_count;
+    return @intCast(gpu_handles.len);
 }
 
-pub fn getName(handle: Handle, buf: *[256]u8) Error![:0]const u8 {
+pub const name_buf_len = c.AMDSMI_MAX_STRING_LENGTH;
+
+pub fn getName(handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) Error![:0]const u8 {
     var info: c.amdsmi_asic_info_t = undefined;
     try call("amdsmi_get_gpu_asic_info", .{ handle, &info });
     @memcpy(buf, &info.market_name);
@@ -311,11 +316,12 @@ pub fn getBdfId(handle: Handle) Error!u64 {
 
 pub const ProcInfo = c.amdsmi_proc_info_t;
 
-pub fn getProcessList(handle: Handle, procs: []ProcInfo) Error![]const ProcInfo {
+pub fn getProcessList(allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {
     var count: u32 = 0;
     try call("amdsmi_get_gpu_process_list", .{ handle, &count, null });
-    if (count == 0) return procs[0..0];
-    count = @min(count, @as(u32, @intCast(procs.len)));
+    if (count == 0) return &.{};
+    const procs = try allocator.alloc(ProcInfo, count);
+    errdefer allocator.free(procs);
     try call("amdsmi_get_gpu_process_list", .{ handle, &count, @ptrCast(procs.ptr) });
     return procs[0..count];
 }

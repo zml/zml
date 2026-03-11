@@ -21,6 +21,10 @@ pub const ProcessEnricher = struct {
         return enricher;
     }
 
+    pub fn deinit(self: *ProcessEnricher) void {
+        self.prev_ticks.deinit(self.gpa);
+    }
+
     pub fn enrich(self: *ProcessEnricher, io: std.Io, procs: []ProcessInfo) void {
         const curr_total = readTotalCpuTicks(io);
         const delta_total = curr_total -| self.prev_total_ticks;
@@ -29,7 +33,7 @@ pub const ProcessEnricher = struct {
         curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch {};
 
         for (procs) |*info| {
-            var path_buf: [64]u8 = undefined;
+            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
 
             // Read Uid, VmRSS, Name from /proc/{pid}/status
             const status_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{info.pid}) catch continue;
@@ -83,7 +87,7 @@ fn formatUid(uid: u32) [32]u8 {
 
 /// Extract utime + stime from /proc/{pid}/stat.
 fn readProcTicks(io: std.Io, pid: u32) ?u64 {
-    var path_buf: [64]u8 = undefined;
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return null;
     var buf: [1024]u8 = undefined;
     const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return null;

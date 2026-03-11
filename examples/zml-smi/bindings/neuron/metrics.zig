@@ -8,6 +8,9 @@ const schema = @import("schema.zig");
 const pi = @import("../../info/process_info.zig");
 const neuron_process = @import("process.zig");
 
+const max_neuron_devices: usize = 64;
+const max_neuron_cores: usize = 64;
+
 const base_path = "/sys/devices/virtual/neuron_device";
 
 const monitor_config =
@@ -22,13 +25,13 @@ pub const Backend = struct {
         defer neuron_ptrs.deinit(allocator);
 
         var device_idx: u32 = 0;
-        while (device_idx < 64) : (device_idx += 1) {
+        while (device_idx < max_neuron_devices) : (device_idx += 1) {
             var dev_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const dev_path = std.fmt.bufPrint(&dev_buf, base_path ++ "/neuron{d}/info/architecture/device_name", .{device_idx}) catch break;
-            _ = sysfs.readString(io, dev_path) catch break; // we could check existence direcltly but this does the job
+            _ = sysfs.readString(io, dev_path) catch break;
 
             var core_idx: u32 = 0;
-            while (core_idx < 64) : (core_idx += 1) {
+            while (core_idx < max_neuron_cores) : (core_idx += 1) {
                 var core_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
                 const core_path = std.fmt.bufPrint(&core_buf, base_path ++ "/neuron{d}/neuron_core{d}/stats/memory_usage/device_mem/tensors/total", .{ device_idx, core_idx }) catch break;
                 _ = sysfs.readInt(io, core_path) catch break;
@@ -171,7 +174,7 @@ fn updateFromMonitor(allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_al
         }
     }
 
-    var utils: [64]u32 = .{0} ** 64;
+    var utils: [max_neuron_cores]u32 = .{0} ** max_neuron_cores;
     for (report.neuron_runtime_data) |runtime| {
         const counters = runtime.report.neuroncore_counters orelse continue;
         var it = counters.neuroncores_in_use.map.iterator();

@@ -3,8 +3,6 @@ const nvml = @import("nvml.zig");
 const pi = @import("../../info/process_info.zig");
 const Worker = @import("../../worker.zig").Worker;
 
-const max_devices: usize = 16;
-
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)) !void {
     try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list });
 }
@@ -13,26 +11,33 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
-    var last_seen_ts: [max_devices]u64 = .{0} ** max_devices;
+    const device_count = nvml.getDeviceCount() catch 0;
+    const last_seen_ts = allocator.alloc(u64, device_count) catch return;
+    defer allocator.free(last_seen_ts);
+    @memset(last_seen_ts, 0);
+
     var shadow: std.ArrayList(pi.ProcessInfo) = .{};
     defer shadow.deinit(allocator);
 
     while (w.isRunning()) {
         shadow.clearRetainingCapacity();
 
-        const device_count = nvml.getDeviceCount() catch 0;
-        for (0..@min(device_count, max_devices)) |dev_idx| {
+        for (0..device_count) |dev_idx| {
             const handle = nvml.getHandleByIndex(@intCast(dev_idx)) catch continue;
             const idx: u8 = @intCast(dev_idx);
 
-            var buf: [64]nvml.ProcessInfo_t = undefined;
-            collectFromQuery(allocator, &shadow, idx, nvml.getComputeRunningProcesses(handle, &buf) catch &.{});
-            collectFromQuery(allocator, &shadow, idx, nvml.getGraphicsRunningProcesses(handle, &buf) catch &.{});
+            const compute = nvml.getComputeRunningProcesses(allocator, handle) catch &.{};
+            defer if (compute.len > 0) allocator.free(compute);
+            collectFromQuery(allocator, &shadow, idx, compute);
+
+            const graphics = nvml.getGraphicsRunningProcesses(allocator, handle) catch &.{};
+            defer if (graphics.len > 0) allocator.free(graphics);
+            collectFromQuery(allocator, &shadow, idx, graphics);
 
             // Apply utilization samples
-            var util_buf: [256]nvml.ProcessUtilSample_t = undefined;
             const last_ts = last_seen_ts[dev_idx];
-            const utils = nvml.getProcessUtilization(handle, &util_buf, last_ts) catch continue;
+            const utils = nvml.getProcessUtilization(allocator, handle, last_ts) catch continue;
+            defer if (utils.len > 0) allocator.free(utils);
 
             for (utils) |sample| {
                 if (sample.smUtil > 100 or sample.timeStamp <= last_ts) continue;
