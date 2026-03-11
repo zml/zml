@@ -1,21 +1,20 @@
 const std = @import("std");
 const sysfs = @import("../../sysfs.zig");
-const HostInfo = @import("../../host_info.zig").HostInfo;
+const HostInfo = @import("../../info/host_info.zig").HostInfo;
 const worker = @import("../../worker.zig");
 
-pub fn init(io: std.Io, info: *HostInfo, signal: *worker.Signal) !void {
+pub fn init(io: std.Io, info: *HostInfo) !void {
     const host = Host{ .io = io };
 
-    // Static values — read once
+    // read once metrics
     info.hostname = host.getHostname() catch null;
     info.kernel = host.getKernel() catch null;
     info.cpu_name = host.getCpuName() catch null;
     info.cpu_cores = host.getCpuCores() catch null;
     info.mem_total_kib = host.getMemTotal() catch null;
 
-    // Dynamic values — poll with workers
-    inline for (dynamic_metrics) |metric| {
-        try worker.spawnWorker(io, info, metric.field, metric.query, host, signal);
+    inline for (metrics) |metric| {
+        try worker.spawnWorker(io, info, metric.field, metric.query, host);
     }
 }
 
@@ -66,7 +65,7 @@ const Host = struct {
     }
 };
 
-const dynamic_metrics = .{
+const metrics = .{
     .{ .field = "mem_available_kib", .query = Host.getMemAvailable },
     .{ .field = "cpu_temp", .query = Host.getCpuTemp },
     .{ .field = "load_avg", .query = Host.getLoadAvg },

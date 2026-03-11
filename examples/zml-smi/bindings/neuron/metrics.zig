@@ -1,16 +1,22 @@
 const std = @import("std");
 const sysfs = @import("../../sysfs.zig");
-const DeviceInfo = @import("../../device_info.zig").DeviceInfo;
+const device_info = @import("../../info/device_info.zig");
+const DeviceInfo = device_info.DeviceInfo;
+const NeuronInfo = device_info.NeuronInfo;
 const worker = @import("../../worker.zig");
 const schema = @import("schema.zig");
+const neuron_process = @import("process.zig");
 
 const base_path = "/sys/devices/virtual/neuron_device";
 
 const monitor_config =
-    \\{"period":"1s","neuron_runtimes":[{"tag_filter":".*","metrics":[{"type":"neuroncore_counters"}]}]}
+    \\{"period":"1s","neuron_runtimes":[{"tag_filter":".*","metrics":[{"type":"neuroncore_counters"},{"type":"memory_used"}]}]}
 ;
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(DeviceInfo), signal: *worker.Signal) !void {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
+    var neuron_ptrs: std.ArrayList(*NeuronInfo) = .{};
+    defer neuron_ptrs.deinit(allocator);
+
     var device_idx: u32 = 0;
     while (device_idx < 64) : (device_idx += 1) {
         var dev_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
@@ -23,25 +29,30 @@ pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayLi
             const core_path = std.fmt.bufPrint(&core_buf, base_path ++ "/neuron{d}/neuron_core{d}/stats/memory_usage/device_mem/tensors/total", .{ device_idx, core_idx }) catch break;
             _ = sysfs.readInt(io, core_path) catch break;
 
-            const info = try device_infos.addOne(allocator);
-            info.* = .{ .gpu_util_percent = 0 };
-
             const dev = Device{
                 .io = io,
                 .device_idx = device_idx,
                 .core_idx = @intCast(core_idx),
             };
 
-            info.name = dev.getName() catch null;
+            const info = try allocator.create(DeviceInfo);
+            info.* = .{ .neuron = .{ .name = dev.getName() catch null, .util_percent = 0 } };
+            try device_infos.append(allocator, info);
+
+            const neuron_ptr = &info.neuron;
+            try neuron_ptrs.append(allocator, neuron_ptr);
 
             inline for (metrics) |metric| {
-                try worker.spawnWorker(io, info, metric.field, metric.query, dev, signal);
+                try worker.spawnWorker(io, neuron_ptr, metric.field, metric.query, dev);
             }
         }
     }
 
-    if (device_infos.items.len > 0) {
-        startMonitor(io, allocator, device_infos, signal) catch {};
+    if (neuron_ptrs.items.len > 0) {
+        const owned = try allocator.dupe(*NeuronInfo, neuron_ptrs.items);
+        startMonitor(io, allocator, owned) catch {
+            allocator.free(owned);
+        };
     }
 }
 
@@ -58,7 +69,7 @@ const Device = struct {
         return std.fmt.bufPrint(buf, base_path ++ "/neuron{d}/neuron_core{d}/{s}", .{ self.device_idx, self.core_idx, sub_path });
     }
 
-    pub fn getName(self: Device) ![256]u8 {
+    fn getName(self: Device) ![256]u8 {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         return sysfs.readString(self.io, try self.devicePath(&buf, "info/architecture/device_name"));
     }
@@ -95,7 +106,7 @@ const metrics = .{
 
 // --- neuron-monitor subprocess for utilization + device memory capacity ---
 
-fn startMonitor(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(DeviceInfo), signal: *worker.Signal) !void {
+fn startMonitor(io: std.Io, allocator: std.mem.Allocator, infos: []*NeuronInfo) !void {
     const config_path = "/tmp/zml-smi-neuron-monitor.conf";
     var config_file = try std.Io.Dir.createFileAbsolute(io, config_path, .{});
     try config_file.writeStreamingAll(io, monitor_config);
@@ -109,24 +120,25 @@ fn startMonitor(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.Arr
     });
 
     const stdout_file = child.stdout orelse return error.NoPipe;
-    _ = try io.concurrent(monitorLoop, .{ io, allocator, device_infos, signal, stdout_file });
+    try worker.spawnCustomWorker(io, monitorLoop, .{ io, allocator, infos, stdout_file });
 }
 
-fn monitorLoop(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(DeviceInfo), signal: *worker.Signal, stdout_file: std.Io.File) void {
+fn monitorLoop(io: std.Io, allocator: std.mem.Allocator, infos: []*NeuronInfo, stdout_file: std.Io.File) void {
+    defer allocator.free(infos);
     var read_buf: [4096]u8 = undefined;
     var file_reader = stdout_file.reader(io, &read_buf);
     var line_buf: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(allocator, 4096) catch return;
+    defer line_buf.deinit();
 
-    while (true) {
+    while (worker.isRunning()) {
         _ = file_reader.interface.streamDelimiterEnding(&line_buf.writer, '\n') catch return;
         file_reader.interface.toss(1);
-        updateFromMonitor(allocator, device_infos.items, line_buf.written());
-        signal.notify(io);
+        updateFromMonitor(allocator, infos, line_buf.written());
         line_buf.clearRetainingCapacity();
     }
 }
 
-fn updateFromMonitor(allocator: std.mem.Allocator, infos: []DeviceInfo, json_data: []const u8) void {
+fn updateFromMonitor(allocator: std.mem.Allocator, infos: []*NeuronInfo, json_data: []const u8) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -143,18 +155,23 @@ fn updateFromMonitor(allocator: std.mem.Allocator, infos: []DeviceInfo, json_dat
     if (hw.neuron_device_memory_size > 0) {
         const cores_per_device = @max(hw.neuroncore_per_device_count, 1);
         const mem_per_core = hw.neuron_device_memory_size / cores_per_device;
-        for (infos) |*info| {
+        for (infos) |info| {
             info.mem_total_bytes = mem_per_core;
         }
     }
 
+    var utils: [64]u32 = .{0} ** 64;
     for (report.neuron_runtime_data) |runtime| {
         const counters = runtime.report.neuroncore_counters orelse continue;
         var it = counters.neuroncores_in_use.map.iterator();
         while (it.next()) |entry| {
             const core_idx = std.fmt.parseInt(usize, entry.key_ptr.*, 10) catch continue;
             if (core_idx >= infos.len) continue;
-            infos[core_idx].gpu_util_percent = @intFromFloat(@round(entry.value_ptr.neuroncore_utilization));
+            const util: u32 = @intFromFloat(@round(entry.value_ptr.neuroncore_utilization));
+            utils[core_idx] = @max(utils[core_idx], util);
         }
     }
+    for (infos, 0..) |info, i| info.util_percent = utils[i];
+
+    neuron_process.updateCache(report.neuron_runtime_data);
 }

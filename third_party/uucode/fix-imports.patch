@@ -1,0 +1,269 @@
+diff --git a/src/build/Ucd.zig b/src/build/Ucd.zig
+index 93b3fc1..48f889e 100644
+--- a/src/build/Ucd.zig
++++ b/src/build/Ucd.zig
+@@ -4,8 +4,8 @@
+ 
+ const std = @import("std");
+ const builtin = @import("builtin");
+-const types = @import("types.zig");
+-const config = @import("config.zig");
++const types = @import("../types.zig");
++const config = @import("../config.zig");
+ const inlineAssert = config.quirks.inlineAssert;
+ 
+ const n = config.max_code_point + 1;
+diff --git a/src/build/tables.zig b/src/build/tables.zig
+index 324ca2d..53106bb 100644
+--- a/src/build/tables.zig
++++ b/src/build/tables.zig
+@@ -1,7 +1,7 @@
+ const std = @import("std");
+ const Ucd = @import("Ucd.zig");
+-const types = @import("types.zig");
+-const config = @import("config.zig");
++const types = @import("../types.zig");
++const config = @import("../config.zig");
+ const build_config = @import("build_config");
+ const inlineAssert = config.quirks.inlineAssert;
+ 
+diff --git a/src/build/test_build_config.zig b/src/build/test_build_config.zig
+index bd4effb..1fc2b2a 100644
+--- a/src/build/test_build_config.zig
++++ b/src/build/test_build_config.zig
+@@ -1,7 +1,7 @@
+ const std = @import("std");
+-const config = @import("config.zig");
+-const config_x = @import("config.x.zig");
+-const types = @import("types.zig");
++const config = @import("../config.zig");
++const config_x = @import("../x/config.x.zig");
++const types = @import("../types.zig");
+ const d = config.default;
+ 
+ const Allocator = std.mem.Allocator;
+diff --git a/src/get.zig b/src/get.zig
+index 0433af8..1749f03 100644
+--- a/src/get.zig
++++ b/src/get.zig
+@@ -2,7 +2,7 @@
+ //! (It also must be separate from `root.zig` so that `types.zig` can use it to
+ //! allow for a better API on `Slice` fields.)
+ const std = @import("std");
+-const tables = @import("tables").tables;
++const tables = @import("tables.zig").tables;
+ const types = @import("types.zig");
+ 
+ fn TableData(comptime Table: anytype) type {
+diff --git a/src/x/config_x/grapheme_break.zig b/src/x/config_x/grapheme_break.zig
+index 0991a89..5979737 100644
+--- a/src/x/config_x/grapheme_break.zig
++++ b/src/x/config_x/grapheme_break.zig
+@@ -1,6 +1,6 @@
+ const std = @import("std");
+-const config = @import("config.zig");
+-const types_x = @import("types.x.zig");
++const config = @import("../../config.zig");
++const types_x = @import("../types.x.zig");
+ 
+ fn compute(
+     allocator: std.mem.Allocator,
+diff --git a/src/x/config_x/wcwidth.zig b/src/x/config_x/wcwidth.zig
+index f8f871c..95cf42e 100644
+--- a/src/x/config_x/wcwidth.zig
++++ b/src/x/config_x/wcwidth.zig
+@@ -150,7 +150,7 @@
+ //!
+ 
+ const std = @import("std");
+-const config = @import("config.zig");
++const config = @import("../../config.zig");
+ 
+ fn compute(
+     allocator: std.mem.Allocator,
+diff --git a/src/x/grapheme.zig b/src/x/grapheme.zig
+index 28d5e98..754ef54 100644
+--- a/src/x/grapheme.zig
++++ b/src/x/grapheme.zig
+@@ -56,7 +56,7 @@
+ const std = @import("std");
+ const uucode = @import("../root.zig");
+ const types_x = @import("types.x.zig");
+-const inlineAssert = @import("config.zig").quirks.inlineAssert;
++const inlineAssert = @import("../config.zig").quirks.inlineAssert;
+ 
+ // This calculates the width of just a single grapheme, advancing the iterator.
+ // See `wcwidth` for a version that doesn't advance the iterator (accepting a
+diff --git a/src/x/root.zig b/src/x/root.zig
+index 706b8cb..dc09815 100644
+--- a/src/x/root.zig
++++ b/src/x/root.zig
+@@ -11,7 +11,7 @@ test {
+ // wcwidth tests
+ 
+ test "wcwidth_standalone control characters are width 0" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x0000)); // NULL (C0)
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x001F)); // UNIT SEPARATOR (C0)
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x007F)); // DELETE (C0)
+@@ -20,7 +20,7 @@ test "wcwidth_standalone control characters are width 0" {
+ }
+ 
+ test "wcwidth_standalone surrogates are width 0" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0xD800)); // High surrogate start
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0xDBFF)); // High surrogate end
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0xDC00)); // Low surrogate start
+@@ -28,13 +28,13 @@ test "wcwidth_standalone surrogates are width 0" {
+ }
+ 
+ test "wcwidth_standalone line and paragraph separators are width 0" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x2028)); // LINE SEPARATOR (Zl)
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x2029)); // PARAGRAPH SEPARATOR (Zp)
+ }
+ 
+ test "wcwidth_standalone default ignorable characters are width 0" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x200B)); // ZERO WIDTH SPACE
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x200C)); // ZERO WIDTH NON-JOINER (ZWNJ)
+     try testing.expectEqual(0, get(.wcwidth_standalone, 0x200D)); // ZERO WIDTH JOINER (ZWJ)
+@@ -44,19 +44,19 @@ test "wcwidth_standalone default ignorable characters are width 0" {
+ }
+ 
+ test "wcwidth_standalone soft hyphen exception is width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x00AD)); // SOFT HYPHEN
+ }
+ 
+ test "wcwidth_standalone combining marks are width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x0300)); // COMBINING GRAVE ACCENT (Mn)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x0903)); // DEVANAGARI SIGN VISARGA (Mc)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x20DD)); // COMBINING ENCLOSING CIRCLE (Me)
+ }
+ 
+ test "wcwidth_zero_in_grapheme combining marks" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     // mark_nonspacing (Mn) are true
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x0300)); // COMBINING GRAVE ACCENT (Mn)
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x0341)); // COMBINING GREEK PERISPOMENI (Mn)
+@@ -74,17 +74,17 @@ test "wcwidth_zero_in_grapheme combining marks" {
+ }
+ 
+ test "wcwidth_standalone combining enclosing keycap exception is width 2" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x20E3)); // COMBINING ENCLOSING KEYCAP
+ }
+ 
+ test "wcwidth_zero_in_grapheme combining enclosing keycap exception is true" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x20E3)); // COMBINING ENCLOSING KEYCAP
+ }
+ 
+ test "wcwidth_standalone regional indicators are width 2" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x1F1E6)); // Regional Indicator A
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x1F1FA)); // Regional Indicator U
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x1F1F8)); // Regional Indicator S
+@@ -92,20 +92,20 @@ test "wcwidth_standalone regional indicators are width 2" {
+ }
+ 
+ test "wcwidth_standalone em dashes have special widths" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x2E3A)); // TWO-EM DASH
+     try testing.expectEqual(3, get(.wcwidth_standalone, 0x2E3B)); // THREE-EM DASH
+ }
+ 
+ test "wcwidth_standalone ambiguous width characters are width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x00A1)); // INVERTED EXCLAMATION MARK (A)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x00B1)); // PLUS-MINUS SIGN (A)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x2664)); // WHITE SPADE SUIT (A)
+ }
+ 
+ test "wcwidth_standalone east asian wide and fullwidth are width 2" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x3000)); // IDEOGRAPHIC SPACE (F)
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0xFF01)); // FULLWIDTH EXCLAMATION MARK (F)
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x4E00)); // CJK UNIFIED IDEOGRAPH (W)
+@@ -113,7 +113,7 @@ test "wcwidth_standalone east asian wide and fullwidth are width 2" {
+ }
+ 
+ test "wcwidth_standalone hangul jamo V and T are width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x1161)); // HANGUL JUNGSEONG A (V)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x11A8)); // HANGUL JONGSEONG KIYEOK (T)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0xD7B0)); // HANGUL JUNGSEONG O-YEO (V)
+@@ -121,7 +121,7 @@ test "wcwidth_standalone hangul jamo V and T are width 1" {
+ }
+ 
+ test "wcwidth_zero_in_grapheme hangul jamo V and T are true" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x1161)); // HANGUL JUNGSEONG A (V)
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x11A8)); // HANGUL JONGSEONG KIYEOK (T)
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0xD7B0)); // HANGUL JUNGSEONG O-YEO (V)
+@@ -130,41 +130,41 @@ test "wcwidth_zero_in_grapheme hangul jamo V and T are true" {
+ }
+ 
+ test "wcwidth_standalone format characters non-DI are width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x0600)); // ARABIC NUMBER SIGN (Cf, not DI)
+ }
+ 
+ test "wcwidth_zero_in_grapheme format characters non-DI is true" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x0600)); // ARABIC NUMBER SIGN (Cf, not DI)
+ }
+ 
+ test "wcwidth_standalone prepend characters are width 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     // Lo Prepend (0D4E)
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x0D4E));
+ }
+ 
+ test "wcwidth_zero_in_grapheme prepend characters are true" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     // Lo Prepend (0D4E)
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x0D4E));
+ }
+ 
+ test "wcwidth_standalone emoji with default text presentation is 1" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     // weight lifter
+     try testing.expectEqual(1, get(.wcwidth_standalone, 0x1F3CB));
+ }
+ 
+ test "wcwidth_standalone emoji_modifier is 2" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x1F3FB)); // 🏻 EMOJI MODIFIER FITZPATRICK TYPE-1-2
+     try testing.expectEqual(2, get(.wcwidth_standalone, 0x1F3FF)); // 🏿 EMOJI MODIFIER FITZPATRICK TYPE-6
+ }
+ 
+ test "wcwidth_zero_in_grapheme emoji_modifier is true" {
+-    const get = @import("get.zig").get;
++    const get = @import("../get.zig").get;
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x1F3FB)); // 🏻 EMOJI MODIFIER FITZPATRICK TYPE-1-2
+     try testing.expect(get(.wcwidth_zero_in_grapheme, 0x1F3FF)); // 🏿 EMOJI MODIFIER FITZPATRICK TYPE-6
+ }

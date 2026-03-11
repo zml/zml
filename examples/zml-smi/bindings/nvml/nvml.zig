@@ -4,6 +4,8 @@ const c = @import("c");
 const has_nvml = @hasDecl(c, "nvmlInit_v2");
 
 pub const Handle = if (has_nvml) c.nvmlDevice_t else ?*opaque {};
+pub const ProcessInfo_t = if (has_nvml) c.nvmlProcessInfo_t else ?*opaque {};
+pub const ProcessUtilSample_t = if (has_nvml) c.nvmlProcessUtilizationSample_t else ?*opaque {};
 
 pub const Error = ReturnError || error{NvmlUnavailable};
 
@@ -41,8 +43,11 @@ pub const ReturnError = error{
     error_unknown,
 };
 
+const NVML_SUCCESS: c_uint = if (has_nvml) c.NVML_SUCCESS else 0;
+const NVML_INSUFFICIENT_SIZE: c_uint = if (has_nvml) c.NVML_ERROR_INSUFFICIENT_SIZE else 7;
+
 fn check(ret: c_uint) Error!void {
-    if (ret == 0) return;
+    if (ret == NVML_SUCCESS) return;
     return switch (ret) {
         1 => error.error_uninitialized,
         2 => error.error_invalid_argument,
@@ -274,4 +279,36 @@ pub fn getNumFans(handle: Handle) Error!c_uint {
     var count: c_uint = 0;
     try check(c.nvmlDeviceGetNumFans(handle, &count));
     return count;
+}
+
+pub fn getComputeRunningProcesses(handle: Handle, infos: []ProcessInfo_t) Error![]const ProcessInfo_t {
+    if (comptime !has_nvml) return error.NvmlUnavailable;
+    var count: c_uint = @intCast(infos.len);
+    const ret = c.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr));
+    if (ret == NVML_INSUFFICIENT_SIZE) return infos[0..0];
+    try check(ret);
+    return infos[0..count];
+}
+
+pub fn getGraphicsRunningProcesses(handle: Handle, infos: []ProcessInfo_t) Error![]const ProcessInfo_t {
+    if (comptime !has_nvml) return error.NvmlUnavailable;
+    var count: c_uint = @intCast(infos.len);
+    const ret = c.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr));
+    if (ret == NVML_INSUFFICIENT_SIZE) return infos[0..0];
+    try check(ret);
+    return infos[0..count];
+}
+
+pub fn getProcessUtilization(handle: Handle, samples: []ProcessUtilSample_t, last_seen: u64) Error![]const ProcessUtilSample_t {
+    if (comptime !has_nvml) return error.NvmlUnavailable;
+    var count: c_uint = 0;
+    const ret = c.nvmlDeviceGetProcessUtilization(handle, null, &count, last_seen);
+    if (ret != NVML_INSUFFICIENT_SIZE) {
+        if (ret == NVML_SUCCESS) return samples[0..0];
+        try check(ret);
+    }
+    if (count == 0) return samples[0..0];
+    count = @min(count, @as(c_uint, @intCast(samples.len)));
+    try check(c.nvmlDeviceGetProcessUtilization(handle, @ptrCast(samples.ptr), &count, last_seen));
+    return samples[0..count];
 }

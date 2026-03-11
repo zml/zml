@@ -40,11 +40,13 @@ _UBUNTU_PACKAGES = {
 
 CUDA_PACKAGES = {
     "cuda_nvml_dev": "\n".join([
-        packages.cc_library(
+        packages.cc_import(
             name = "nvml",
             hdrs = ["include/nvml.h"],
             includes = ["include"],
-            srcs = ["lib/stubs/libnvidia-ml.so"],
+            interface_library = "lib/stubs/libnvidia-ml.so",
+            shared_library = "libnvidia-ml.so",
+            visibility = ["//visibility:public"],
         ),
     ]),
     "cuda_cudart": "\n".join([

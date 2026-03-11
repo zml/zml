@@ -20,6 +20,14 @@ cc_library(
 )
 
 cc_library(
+    name = "neuron_defines",
+    defines = select({
+        "//platforms:neuron.enabled": ["ZML_RUNTIME_NEURON"],
+        "//conditions:default": ["ZML_RUNTIME_NEURON_DISABLED"],
+    }),
+)
+
+cc_library(
     name = "tpu_defines",
     defines = select({
         "//platforms:tpu.enabled": ["ZML_RUNTIME_TPU"],
@@ -29,30 +37,43 @@ cc_library(
 
 zig_binary(
     name = "zml-smi",
-    srcs = [
+    srcs = glob([
+        "tui/**/*.zig",
+    ]) + [
         "bindings/amdsmi/amdsmi.zig",
         "bindings/amdsmi/metrics.zig",
+        "bindings/amdsmi/process.zig",
         "bindings/linux/metrics.zig",
+        "bindings/linux/process.zig",
         "bindings/neuron/metrics.zig",
+        "bindings/neuron/process.zig",
         "bindings/neuron/schema.zig",
         "bindings/nvml/metrics.zig",
         "bindings/nvml/nvml.zig",
-        "device_info.zig",
-        "display.zig",
-        "host_info.zig",
+        "bindings/nvml/process.zig",
+        "//examples/zml-smi/bindings/tpu:process.zig",
+        "info/device_info.zig",
+        "info/host_info.zig",
+        "info/process_info.zig",
+        "platform.zig",
         "sysfs.zig",
         "worker.zig",
         "//examples/zml-smi/bindings/tpu:metrics.zig",
         "//examples/zml-smi/bindings/tpu:tpuinfo.zig",
     ],
+    extra_srcs = glob([
+        "tui/assets/*",
+    ]),
     main = "main.zig",
     deps = [
         ":cuda_defines",
+        ":neuron_defines",
         ":rocm_defines",
         ":tpu_defines",
         "//bazel",
         "//stdx",
         "//zml",
+        "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:tpu.enabled": [
