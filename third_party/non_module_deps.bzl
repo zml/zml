@@ -7,6 +7,9 @@ load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
 load("//third_party/stb:repo.bzl", stb = "repo")
+load("//third_party/zigimg:repo.bzl", zigimg = "repo")
+load("//third_party/uucode:repo.bzl", uucode = "repo")
+load("//third_party/libvaxis:repo.bzl", libvaxis = "repo")
 
 def _non_module_deps_impl(mctx):
     com_google_sentencepiece()
@@ -18,6 +21,9 @@ def _non_module_deps_impl(mctx):
     flashattn()
     linenoise()
     stb()
+    zigimg()
+    uucode()
+    libvaxis()
 
     return mctx.extension_metadata(
         reproducible = True,

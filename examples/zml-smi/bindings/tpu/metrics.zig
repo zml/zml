@@ -1,13 +1,14 @@
 const std = @import("std");
 const sysfs = @import("../../sysfs.zig");
 const tpuinfo = @import("tpuinfo.zig");
-const DeviceInfo = @import("../../device_info.zig").DeviceInfo;
+const device_info = @import("../../info/device_info.zig");
+const DeviceInfo = device_info.DeviceInfo;
 const worker = @import("../../worker.zig");
 
 const address = "localhost:8431";
 
 const ChipInfo = struct {
-    name: [256]u8,
+    name: []const u8,
     devices_per_chip: u32,
     chip_count: u32,
 };
@@ -23,13 +24,6 @@ const chip_table = [_]struct { device_id: []const u8, subsystem_id: ?[]const u8,
     .{ .device_id = "0x0062", .subsystem_id = null, .name = "TPU v5p", .devices_per_chip = 1 },
     .{ .device_id = "0x006f", .subsystem_id = null, .name = "TPU v6e", .devices_per_chip = 1 },
 };
-
-fn toName(name: []const u8) [256]u8 {
-    var buf: [256]u8 = .{0} ** 256;
-    const len = @min(name.len, 255);
-    @memcpy(buf[0..len], name[0..len]);
-    return buf;
-}
 
 fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, slot: []const u8, file: []const u8) ![256]u8 {
     const path = std.fmt.bufPrint(path_buf, pci_base ++ "/{s}/{s}", .{ slot, file }) catch return error.Overflow;
@@ -66,7 +60,7 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
 
             if (dev_match and sub_match) {
                 result = .{
-                    .name = toName(chip.name),
+                    .name = chip.name,
                     .devices_per_chip = chip.devices_per_chip,
                     .chip_count = undefined,
                 };
@@ -83,57 +77,72 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
     return null;
 }
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(DeviceInfo), signal: *worker.Signal) !void {
+fn toName(name: []const u8) [256]u8 {
+    var buf: [256]u8 = .{0} ** 256;
+    @memcpy(buf[0..name.len], name);
+    return buf;
+}
+
+pub var detected_devices_per_chip: u32 = 1; // TODO: check
+
+pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
     const chip = scanPciChips(io) orelse return;
+    detected_devices_per_chip = chip.devices_per_chip;
     const device_count = chip.chip_count * chip.devices_per_chip;
+    const start = device_infos.items.len;
 
     for (0..device_count) |_| {
-        const info = try device_infos.addOne(allocator);
-        info.* = .{};
-        info.name = chip.name;
+        const info = try allocator.create(DeviceInfo);
+        info.* = .{ .tpu = .{ .name = toName(chip.name) } };
+        try device_infos.append(allocator, info);
     }
 
+    const tpu_infos = device_infos.items[start..];
     inline for (batch_metrics) |metric| {
-        try worker.spawnBatchWorker(io, device_infos.items, metric.query, signal);
+        try worker.spawnBatchWorker(io, tpu_infos, metric.query);
     }
 }
 
-fn clearField(infos: []DeviceInfo, comptime field: []const u8) void {
-    for (infos) |*info| {
-        @field(info, field) = null;
+fn clearField(infos: []*DeviceInfo, comptime field: []const u8) void {
+    for (infos) |info| {
+        @field(&info.tpu, field) = null;
     }
 }
 
-fn intMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]DeviceInfo) void {
+fn intMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
     return &struct {
-        fn query(infos: []DeviceInfo) void {
+        fn query(infos: []*DeviceInfo) void {
             var ids: [64]c_longlong = undefined;
             var vals: [64]c_longlong = undefined;
+
             const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
                 clearField(infos, field);
                 return;
             };
+
             for (ids[0..n], vals[0..n]) |id, val| {
                 if (id >= 0 and id < infos.len) {
-                    @field(infos[@intCast(id)], field) = @intCast(val);
+                    @field(&infos[@intCast(id)].tpu, field) = @intCast(val);
                 }
             }
         }
     }.query;
 }
 
-fn doubleMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]DeviceInfo) void {
+fn doubleMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
     return &struct {
-        fn query(infos: []DeviceInfo) void {
+        fn query(infos: []*DeviceInfo) void {
             var ids: [64]c_longlong = undefined;
             var vals: [64]f64 = undefined;
+
             const n = tpuinfo.queryDouble(address, metric_name, &ids, &vals) catch {
                 clearField(infos, field);
                 return;
             };
+
             for (ids[0..n], vals[0..n]) |id, val| {
                 if (id >= 0 and id < infos.len) {
-                    @field(infos[@intCast(id)], field) = @intFromFloat(@round(val));
+                    @field(&infos[@intCast(id)].tpu, field) = @intFromFloat(@round(val));
                 }
             }
         }
@@ -143,5 +152,5 @@ fn doubleMetric(comptime field: []const u8, comptime metric_name: [:0]const u8) 
 const batch_metrics = .{
     .{ .query = intMetric("mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes") },
     .{ .query = intMetric("mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes") },
-    .{ .query = doubleMetric("gpu_util_percent", "tpu.runtime.tensorcore.dutycycle.percent") },
+    .{ .query = doubleMetric("util_percent", "tpu.runtime.tensorcore.dutycycle.percent") },
 };

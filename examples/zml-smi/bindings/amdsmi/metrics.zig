@@ -1,20 +1,23 @@
 const std = @import("std");
 const amdsmi = @import("amdsmi.zig");
-const DeviceInfo = @import("../../device_info.zig").DeviceInfo;
+const device_info = @import("../../info/device_info.zig");
+const DeviceInfo = device_info.DeviceInfo;
+const GpuInfo = device_info.GpuInfo;
 const worker = @import("../../worker.zig");
 
-pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(DeviceInfo), signal: *worker.Signal) !void {
+pub fn init(io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo)) !void {
     try amdsmi.init();
     const count = try amdsmi.getDeviceCount();
 
     for (0..count) |i| {
         const dev = Device.open(@intCast(i)) catch continue;
 
-        const info = try device_infos.addOne(allocator);
-        info.* = .{};
+        const info = try allocator.create(DeviceInfo);
+        info.* = .{ .rocm = .{ .name = dev.getName() catch null } };
+        try device_infos.append(allocator, info);
 
         inline for (metrics) |metric| {
-            try worker.spawnWorker(io, info, metric.field, metric.query, dev, signal);
+            try worker.spawnWorker(io, &info.rocm, metric.field, metric.query, dev);
         }
     }
 }
@@ -26,7 +29,7 @@ const Device = struct {
         return .{ .handle = try amdsmi.getHandleByIndex(index) };
     }
 
-    pub fn getName(self: Device) ![256]u8 {
+    fn getName(self: Device) ![256]u8 {
         var buf: [256]u8 = .{0} ** 256;
         _ = try amdsmi.getName(self.handle, &buf);
         return buf;
@@ -124,12 +127,11 @@ const Device = struct {
 };
 
 const metrics = .{
-    .{ .field = "name", .query = Device.getName },
     .{ .field = "power_mw", .query = Device.getPowerUsage },
     .{ .field = "power_limit_mw", .query = Device.getPowerLimit },
     .{ .field = "temperature", .query = Device.getTemperature },
     .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
-    .{ .field = "gpu_util_percent", .query = Device.getGpuUtil },
+    .{ .field = "util_percent", .query = Device.getGpuUtil },
     .{ .field = "mem_util_percent", .query = Device.getMemUtil },
     .{ .field = "encoder_util_percent", .query = Device.getEncoderUtil },
     .{ .field = "decoder_util_percent", .query = Device.getDecoderUtil },

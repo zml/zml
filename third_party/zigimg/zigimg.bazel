@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "zigimg",
+    srcs = glob([
+        "src/*.zig",
+        "src/compressions/*.zig",
+        "src/compressions/deflate/*.zig",
+        "src/formats/*.zig",
+        "src/formats/jpeg/*.zig",
+        "src/formats/png/*.zig",
+        "src/formats/tiff/*.zig",
+        "src/Image/*.zig",
+        "tests/**/*.zig",
+    ]),
+    main = "zigimg.zig",
+    visibility = ["//visibility:public"],
+)

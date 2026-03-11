@@ -1,4 +1,4 @@
-#include "examples/zml-smi/bindings/tpu/libtpu/tpuinfo.h"
+#include "tpuinfo.h"
 
 #include <chrono>
 #include <map>
@@ -7,8 +7,8 @@
 
 #include <grpcpp/grpcpp.h>
 
-#include "examples/zml-smi/bindings/tpu/libtpu/tpu_metric_service.grpc.pb.h"
-#include "examples/zml-smi/bindings/tpu/libtpu/tpu_metric_service.pb.h"
+#include "tpu_metric_service.grpc.pb.h"
+#include "tpu_metric_service.pb.h"
 
 using tpu::monitoring::runtime::MetricRequest;
 using tpu::monitoring::runtime::MetricResponse;
@@ -19,13 +19,17 @@ static MetricResponse FetchMetric(const char* address, const char* metric_name,
   auto channel =
       grpc::CreateChannel(address, grpc::InsecureChannelCredentials());
   auto stub = RuntimeMetricService::NewStub(channel);
+  
   grpc::ClientContext ctx;
   ctx.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(1));
+  
   MetricRequest req;
   req.set_metric_name(metric_name);
+  
   MetricResponse resp;
   auto status = stub->GetRuntimeMetric(&ctx, req, &resp);
   *ok = status.ok();
+  
   return resp;
 }
 
@@ -49,6 +53,7 @@ extern "C" int tpu_query_int(const char* address, const char* metric_name,
     values[i] = val;
     ++i;
   }
+  
   return i;
 }
 
