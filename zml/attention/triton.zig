@@ -20,31 +20,36 @@ pub const Config2D = struct {
     tile_size: usize,
     num_warps: usize,
     num_stages: usize,
+    total_q_blocks: usize,
 };
 
-fn select2dConfig(block_size: usize, head_size: usize, all_decode: bool, max_seqlen_q: usize, num_queries_per_kv: usize) Config2D {
-    var block_m: usize = if (num_queries_per_kv <= 16)
-        16
-    else
-        std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+fn select2dConfig(options: paged.PagedAttentionOptions) Config2D {
+    const max_num_stages_2d: usize = if (options.head_dim <= 128) 4 else 2;
 
-    const max_num_stages_2d: usize = if (head_size <= 128) 4 else 2;
+    var num_stages_2d: usize, var num_warps: usize, var tile_size: usize = if (!options.all_decode) .{ 1, 2, 64 } else .{ 3, 2, options.block_size };
 
-    var num_stages_2d: usize, var num_warps: usize, const tile_size: usize = if (!all_decode) .{ 1, 2, 64 } else .{ 3, 2, block_size };
-
-    if (max_seqlen_q >= 256) {
-        block_m = 128;
+    var block_m = options.block_m;
+    var block_q = options.block_q;
+    if (options.max_seqlen_q >= 256) {
+        if (options.head_dim >= 256) {
+            block_m = 64;
+            tile_size = 16;
+        } else {
+            block_m = 128;
+        }
         num_stages_2d = 1;
         num_warps = 4;
     }
+    block_q = block_m / options.numQueriesPerKv();
+    const total_q_blocks = options.num_tokens / block_q + options.batch_size;
 
-    const block_q = @max(1, @divFloor(block_m, num_queries_per_kv));
     return .{
         .block_m = block_m,
         .block_q = block_q,
         .tile_size = tile_size,
         .num_warps = num_warps,
         .num_stages = @min(max_num_stages_2d, num_stages_2d),
+        .total_q_blocks = total_q_blocks,
     };
 }
 
@@ -54,27 +59,29 @@ pub const Config3D = struct {
         num_segments_per_seq: usize,
         num_warps: usize,
         num_stages: usize,
+        block_q: usize,
+        block_m: usize,
+        total_q_blocks: usize,
     };
     const ReduceConfig = struct {
         tile_size: usize,
         num_segments_per_seq: usize,
         num_warps: usize,
         num_stages: usize,
+        block_q: usize,
+        block_m: usize,
     };
     attention: AttentionConfig,
     reduce: ReduceConfig,
 };
 
-fn select3dConfig(head_size: usize, block_size: usize, element_size: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) Config3D {
-    _ = head_size; // autofix
-    _ = element_size; // autofix
-    _ = max_seqlen_k; // autofix
+fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     var reduce_num_warps: usize = 2;
     const attn_warps: usize = 2;
-    const tile_size = block_size;
+    const tile_size = options.block_size;
 
     //const MAX_SEGMENTS: usize = @min(128, std.math.divCeil(usize, max_seqlen_k, tile_size));
-    var num_segments = std.math.divCeil(usize, target_num_prgms, num_2d_prgms) catch unreachable;
+    var num_segments = std.math.divCeil(usize, options.target_num_prgms, options.num_2d_prgms) catch unreachable;
     num_segments = std.math.ceilPowerOfTwoAssert(usize, num_segments);
     num_segments = @min(num_segments, 128);
     const min_segments: usize = if (tile_size <= 16) 16 else 8;
@@ -89,12 +96,17 @@ fn select3dConfig(head_size: usize, block_size: usize, element_size: usize, max_
             .num_segments_per_seq = num_segments,
             .num_warps = attn_warps,
             .num_stages = 1,
+            .block_m = options.block_m,
+            .block_q = options.block_q,
+            .total_q_blocks = options.total_q_blocks,
         },
         .reduce = .{
             .tile_size = tile_size,
             .num_segments_per_seq = num_segments,
             .num_warps = reduce_num_warps,
             .num_stages = 1,
+            .block_m = options.block_m,
+            .block_q = options.block_q,
         },
     };
 }
@@ -129,6 +141,7 @@ pub const GenerationConfig2D = struct {
     };
 
     dimensions: Dimensions,
+    config: Config2D,
     feature_flags: FeatureFlags,
 };
 
@@ -155,6 +168,7 @@ pub const GenerationConfig3D = struct {
     };
 
     dimensions: Dimensions,
+    config: Config3D.AttentionConfig,
     feature_flags: FeatureFlags,
 };
 
@@ -175,6 +189,7 @@ pub const GenerationConfigReduce = struct {
     };
 
     dimensions: Dimensions,
+    config: Config3D.ReduceConfig,
     feature_flags: FeatureFlags,
 };
 
@@ -210,6 +225,15 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
     try list.append(arena.allocator(), "--config");
     try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })}));
     const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items });
+    std.log.err("Stderr: {s}", .{result.stderr});
+    switch (result.term) {
+        .exited => |exit_code| {
+            if (exit_code != 0) {
+                std.log.err("Failed to generate ttir. Stderr: {s}", .{result.stderr});
+            }
+        },
+        else => {},
+    }
     return try allocator.dupeZ(u8, result.stdout);
 }
 
@@ -290,32 +314,15 @@ pub const paged = struct {
         num_blocks: usize,
         max_num_block_per_seq: usize,
         sliding_window: usize,
+        block_m: usize,
+        block_q: usize,
+        total_q_blocks: usize,
+        target_num_prgms: usize,
+        num_2d_prgms: usize,
+        max_seqlen_q: usize,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
-        }
-
-        pub fn blockM(self: PagedAttentionOptions) usize {
-            return if (self.numQueriesPerKv() <= 16)
-                16
-            else
-                std.math.ceilPowerOfTwoAssert(usize, self.numQueriesPerKv());
-        }
-
-        pub fn blockQ(self: PagedAttentionOptions) usize {
-            return self.blockM() / self.numQueriesPerKv();
-        }
-
-        pub fn totalNumQBlocks(self: PagedAttentionOptions) usize {
-            return self.num_tokens / self.blockQ() + self.batch_size;
-        }
-
-        pub fn targetNumPrograms(self: PagedAttentionOptions) usize {
-            return self.cu_count * 4;
-        }
-
-        pub fn num2dPrograms(self: PagedAttentionOptions) usize {
-            return self.totalNumQBlocks() * self.num_kv_heads;
         }
 
         pub fn maxSeqLenK(self: PagedAttentionOptions) usize {
@@ -347,28 +354,47 @@ pub const paged = struct {
                     const v_cache_ = sharded_inputs[2];
                     const layer_index_ = sharded_inputs[6];
                     const parameters_: Parameters = .{ .block_table = sharded_inputs[3], .seq_lens = sharded_inputs[4], .query_start_len = sharded_inputs[5], .options_ = ctx_.options };
+
+                    const cu_count = getCuCount();
+                    const num_heads: usize = @intCast(q_.dim(.hkv) * q_.dim(.hg));
+                    const num_kv_heads: usize = @intCast(k_cache_.dim(.hkv));
+                    const num_queries_per_kv: usize = num_heads / num_kv_heads;
+                    const block_m: usize = if (num_queries_per_kv <= 16) 16 else std.math.ceilPowerOfTwoAssert(usize, num_queries_per_kv);
+                    const block_q: usize = block_m / num_queries_per_kv;
+                    const num_tokens: usize = @intCast(q_.dim(.b));
+                    const num_seqs: usize = @intCast(parameters_.block_table.dim(.b));
+                    const total_q_blocks: usize = num_tokens / block_q + num_seqs;
+                    const target_num_prgms: usize = cu_count * 4;
+                    const num_2d_prgms: usize = total_q_blocks * num_kv_heads;
+
                     const paged_attention_opts: PagedAttentionOptions = .{
                         .cu_count = getCuCount(),
                         .all_decode = !ctx_.options.is_prefill,
-                        .num_tokens = @intCast(q_.dim(.b)),
-                        .num_heads = @intCast(q_.dim(.hkv) * q_.dim(.hg)),
-                        .num_kv_heads = @intCast(k_cache_.dim(.hkv)),
+                        .num_tokens = num_tokens,
+                        .num_heads = num_heads,
+                        .num_kv_heads = num_kv_heads,
                         .head_dim = @intCast(q_.dim(.hd)),
                         .batch_size = @intCast(parameters_.block_table.dim(.b)),
                         .block_size = @intCast(k_cache_.dim(.k_chunk)),
                         .num_blocks = @intCast(k_cache_.dim(.page)),
                         .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.num_pages_per_seq)),
                         .sliding_window = if (ctx_.opts.sliding_window < 0) 0 else @intCast(ctx_.opts.sliding_window),
+                        .block_m = block_m,
+                        .block_q = block_q,
+                        .total_q_blocks = total_q_blocks,
+                        .target_num_prgms = target_num_prgms,
+                        .num_2d_prgms = num_2d_prgms,
+                        .max_seqlen_q = ctx_.options.max_seqlen_q,
                     };
 
                     const use_2d_kernel = use2dKernel(
                         paged_attention_opts.head_dim,
                         paged_attention_opts.sliding_window,
                         paged_attention_opts.all_decode,
-                        ctx_.options.max_seqlen_q,
+                        paged_attention_opts.max_seqlen_q,
                         paged_attention_opts.maxSeqLenK(),
-                        paged_attention_opts.targetNumPrograms(),
-                        paged_attention_opts.num2dPrograms(),
+                        paged_attention_opts.target_num_prgms,
+                        paged_attention_opts.num_2d_prgms,
                     );
                     const output = if (use_2d_kernel)
                         pagedAttention2d(parameters_, ctx_.context, q_, k_cache_, v_cache_, layer_index_, ctx_.opts, paged_attention_opts)
@@ -387,6 +413,7 @@ pub const paged = struct {
         _ = context; // autofix
         _ = layer_index; // autofix
         _ = opts; // autofix
+        const config = select2dConfig(paged_attention_opts);
         const generation_config: GenerationConfig = .{
             .kernel_unified_attention_2d_ptr = .{
                 .dimensions = .{
@@ -400,9 +427,10 @@ pub const paged = struct {
                     .num_tokens = paged_attention_opts.num_tokens,
                     .max_seqlen_q = parameters.options_.max_seqlen_q,
                 },
+                .config = config,
                 .feature_flags = .{
                     .all_decode = paged_attention_opts.all_decode,
-                    .sliding_window = 0,
+                    .sliding_window = paged_attention_opts.sliding_window,
                     .use_alibi_slopes = false,
                     .use_fp8 = false,
                     .use_sinks = false,
@@ -410,6 +438,8 @@ pub const paged = struct {
                 },
             },
         };
+
+        std.log.info("pagedAttention2d config: {any}", .{generation_config});
 
         var threaded_io: std.Io.Threaded = .init_single_threaded;
         threaded_io.allocator = std.heap.c_allocator;
@@ -438,14 +468,6 @@ pub const paged = struct {
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
         const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
-
-        const config = select2dConfig(
-            paged_attention_opts.block_size,
-            paged_attention_opts.head_dim,
-            paged_attention_opts.all_decode,
-            parameters.options_.max_seqlen_q,
-            paged_attention_opts.numQueriesPerKv(),
-        );
 
         const output = zml.ops.triton(.{
             q,
@@ -479,7 +501,7 @@ pub const paged = struct {
             .debug = false,
             .name = "kernel_unified_attention_2d_ptr",
             .ir = ttir,
-            .grid = .{ @intCast(paged_attention_opts.num_kv_heads), @intCast(paged_attention_opts.totalNumQBlocks()), 1 },
+            .grid = .{ @intCast(paged_attention_opts.num_kv_heads), @intCast(config.total_q_blocks), 1 },
             .num_stages = @intCast(config.num_stages),
             .num_warps = @intCast(config.num_warps),
         });
@@ -490,6 +512,9 @@ pub const paged = struct {
         _ = context; // autofix
         _ = layer_index; // autofix
         _ = opts; // autofix
+
+        const config = select3dConfig(paged_attention_opts);
+
         const attn_generation_config: GenerationConfig = .{
             .kernel_unified_attention_3d_ptr = .{
                 .dimensions = .{
@@ -503,6 +528,7 @@ pub const paged = struct {
                     .num_tokens = paged_attention_opts.num_tokens,
                     .cu_count = paged_attention_opts.cu_count,
                 },
+                .config = config.attention,
                 .feature_flags = .{
                     .all_decode = paged_attention_opts.all_decode,
                     .sliding_window = paged_attention_opts.sliding_window,
@@ -512,6 +538,8 @@ pub const paged = struct {
                 },
             },
         };
+
+        std.log.info("pagedAttention3d attention config: {any}", .{attn_generation_config});
 
         var threaded_io: std.Io.Threaded = .init_single_threaded;
         threaded_io.allocator = std.heap.c_allocator;
@@ -533,11 +561,13 @@ pub const paged = struct {
                     .num_blocks_per_seq = paged_attention_opts.max_num_block_per_seq,
                     .cu_count = paged_attention_opts.cu_count,
                 },
+                .config = config.reduce,
                 .feature_flags = .{
                     .use_fp8 = false,
                 },
             },
         };
+        std.log.info("pagedAttention3d reduce config: {any}", .{reduce_generation_config});
         const reduce_ttir = generateTtir(std.heap.c_allocator, io, reduce_generation_config) catch unreachable;
         defer std.heap.c_allocator.free(reduce_ttir);
 
@@ -560,16 +590,7 @@ pub const paged = struct {
         const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
 
-        const config = select3dConfig(
-            paged_attention_opts.head_dim,
-            paged_attention_opts.block_size,
-            q.dtype().sizeOf(),
-            paged_attention_opts.maxSeqLenK(),
-            paged_attention_opts.targetNumPrograms(),
-            paged_attention_opts.num2dPrograms(),
-        );
-
-        const attn_grid: [3]i32 = .{ @intCast(paged_attention_opts.totalNumQBlocks()), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
+        const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
         const attn_output = zml.ops.triton(.{
             q,
             k_cache,
