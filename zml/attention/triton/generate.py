@@ -44,40 +44,6 @@ def next_power_of_2(x: int) -> int:
     return 1 if x <= 1 else 1 << (x - 1).bit_length()
 
 
-def select_2d_config(
-    block_size: int,
-    head_size: int,
-    all_decode: bool,
-    max_seqlen_q: int,
-    num_queries_per_kv: int,
-) -> dict:
-    block_m = 16 if num_queries_per_kv <= 16 else next_power_of_2(num_queries_per_kv)
-    tile_size = 64
-    max_num_stages_2d = 4 if head_size <= 128 else 2
-
-    if not all_decode:
-        num_stages_2d = 1
-        num_warps = 2
-    else:
-        num_stages_2d = 3
-        num_warps = 2
-        tile_size = block_size
-
-    if max_seqlen_q >= 256:
-        block_m = 128
-        num_stages_2d = 1
-        num_warps = 4
-
-    block_q = max(1, block_m // num_queries_per_kv)
-    return {
-        "BLOCK_M": block_m,
-        "BLOCK_Q": block_q,
-        "TILE_SIZE": tile_size,
-        "num_warps": num_warps,
-        "num_stages": min(max_num_stages_2d, num_stages_2d),
-    }
-
-
 def select_3d_config(
     block_size: int,
     max_seqlen_k: int,
@@ -149,18 +115,13 @@ def compile_2d_ptr(cfg: dict) -> str:
     all_decode = flags["all_decode"]
     sliding_window = flags["sliding_window"]
 
-    cfg_2d = select_2d_config(
-        block_size=block_size,
-        head_size=head_dim,
-        all_decode=all_decode,
-        max_seqlen_q=max_seqlen_q,
-        num_queries_per_kv=num_queries_per_kv,
-    )
-    block_q = cfg_2d["BLOCK_Q"]
-    block_m = cfg_2d["BLOCK_M"]
-    tile_size = cfg_2d["TILE_SIZE"]
+    cfg_2d = cfg["config"]
+    block_q = cfg_2d["block_q"]
+    block_m = cfg_2d["block_m"]
+    tile_size = cfg_2d["tile_size"]
     num_warps = cfg_2d["num_warps"]
     num_stages = cfg_2d["num_stages"]
+    total_q_blocks = cfg_2d["total_q_blocks"]
 
     kwargs = {
         "output_ptr": FakeTensor("bf16", q_shape),
@@ -213,7 +174,6 @@ def compile_2d_ptr(cfg: dict) -> str:
         "num_stages": num_stages,
     }
 
-    total_q_blocks = max(1, math.ceil(num_tokens / block_q) + batch_size)
     kernel = kernel_unified_attention_2d_ptr.warmup(grid=(num_kv_heads, total_q_blocks), **kwargs)
     return kernel.asm["ttir"]
 
@@ -234,31 +194,22 @@ def compile_3d_ptr(cfg: dict) -> str:
     cu_count = dims["cu_count"]
     num_queries_per_kv = num_heads // num_kv_heads
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
-    total_q_blocks = (num_tokens // BLOCK_Q) + batch_size
-    target_num_prgms = cu_count * 4
-    num_2d_prgms = total_q_blocks * num_kv_heads
     # unused
     max_seqlen_k = 0
-    attn_cfg, _ = select_3d_config(
-        block_size=block_size,
-        max_seqlen_k=max_seqlen_k,
-        target_num_prgms=target_num_prgms,
-        num_2d_prgms=num_2d_prgms,
-    )
-    num_segments_per_seq = attn_cfg["NUM_SEGMENTS_PER_SEQ"]
+    attn_cfg = cfg["config"]
+
+    block_m = attn_cfg["block_m"]
+    block_q = attn_cfg["block_q"]
+    tile_size = attn_cfg["tile_size"]
+    num_warps = attn_cfg["num_warps"]
+    num_stages = attn_cfg["num_stages"]
+    num_segments_per_seq = attn_cfg["num_segments_per_seq"]
+    total_q_blocks = attn_cfg["total_q_blocks"]
 
     q_shape = (num_tokens, num_heads, head_dim)
     kv_shape = (num_blocks, block_size, num_kv_heads, head_dim)
     segm_out_shape = (num_tokens, num_heads, num_segments_per_seq, triton.next_power_of_2(head_dim))
     segm_stat_shape = (num_tokens, num_heads, num_segments_per_seq)
-
-    tile_size = attn_cfg["TILE_SIZE"]
-    num_warps = attn_cfg["num_warps"]
-    num_stages = attn_cfg["num_stages"]
 
     flags = cfg["feature_flags"]
     use_alibi_slopes = flags["use_alibi_slopes"]
@@ -305,9 +256,9 @@ def compile_3d_ptr(cfg: dict) -> str:
         "stride_v_cache_2_ptr": FakeTensor("i64", (1,)),
         "stride_v_cache_3": 1,
         "query_start_len_ptr": FakeTensor("i32", (batch_size + 1,)),
-        "BLOCK_Q": BLOCK_Q,
+        "BLOCK_Q": block_q,
         "num_seqs_ptr": FakeTensor("i32", (1,)),
-        "BLOCK_M": BLOCK_M,
+        "BLOCK_M": block_m,
         "NUM_SEGMENTS_PER_SEQ": num_segments_per_seq,
         "ALL_DECODE": all_decode,
         "segm_output_ptr": FakeTensor("fp32", segm_out_shape),
@@ -337,31 +288,21 @@ def compile_reduce_ptr(cfg: dict) -> str:
     cu_count = dims["cu_count"]
     num_queries_per_kv = max(1, num_heads // num_kv_heads)
 
-    BLOCK_M = (
-        16 if num_queries_per_kv <= 16 else triton.next_power_of_2(num_queries_per_kv)
-    )
-    BLOCK_Q = BLOCK_M // num_queries_per_kv
-    total_q_blocks = (num_tokens // BLOCK_Q) + batch_size
-    target_num_prgms = cu_count * 4
-    num_2d_prgms = total_q_blocks * num_kv_heads
     # unused
     max_seqlen_k = 0
-    _, reduce_cfg = select_3d_config(
-        block_size=block_size,
-        max_seqlen_k=max_seqlen_k,
-        target_num_prgms=target_num_prgms,
-        num_2d_prgms=num_2d_prgms,
-    )
-    num_segments_per_seq = reduce_cfg["NUM_SEGMENTS_PER_SEQ"]
 
+
+    reduce_cfg = cfg["config"]
+    num_segments_per_seq = reduce_cfg["num_segments_per_seq"]
+    tile_size = reduce_cfg["tile_size"]
+    num_warps = reduce_cfg["num_warps"]
+    num_stages = reduce_cfg["num_stages"]
+    block_q = reduce_cfg["block_q"]
+    
     out_shape = (num_tokens, num_heads, head_dim)
     segm_out_shape = (num_tokens, num_heads, num_segments_per_seq, head_dim)
     segm_stat_shape = (num_tokens, num_heads, num_segments_per_seq)
     out_strides = contiguous_strides(out_shape)
-
-    tile_size = reduce_cfg["TILE_SIZE"]
-    num_warps = reduce_cfg["num_warps"]
-    num_stages = reduce_cfg["num_stages"]
 
     use_fp8 = cfg["feature_flags"]["use_fp8"]
 
@@ -380,7 +321,7 @@ def compile_reduce_ptr(cfg: dict) -> str:
         "HEAD_SIZE": head_dim,
         "HEAD_SIZE_PADDED": padded_head_dim,
         "query_start_len_ptr": FakeTensor("i32", (batch_size + 1,)),
-        "BLOCK_Q": BLOCK_Q,
+        "BLOCK_Q": block_q,
         "NUM_SEGMENTS_PER_SEQ": num_segments_per_seq,
         "USE_FP8": use_fp8,
         "output_ptr": FakeTensor("bf16", out_shape),
