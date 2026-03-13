@@ -13,16 +13,16 @@
 # limitations under the License.
 import builtins
 import enum
-import inspect
 import logging
 import re
+from typing import Optional
 
 import torch
 
 log = logging.getLogger(__name__)
 
 class ActivationCollector:
-    """Wrap a given torch.nn.Module and collect all its intermediary activations.
+    """Wrap a torch module and collect intermediate activations.
 
     Usage:
 
@@ -31,9 +31,13 @@ class ActivationCollector:
     zml_utils.save_with_confirmation("activations.pt", activations)
 
     Args:
-        * max_layers: stop collecting activations after this many collected
-        * stop_after_first_step: if a layer is called twice (typically for generative model), stop immediately
-        * blacklist_regexes: skeep layers matching any of the regexes
+        * max_layers: stop collecting after this many captured module calls.
+        * stop_after_first_step: if a module is called twice, keep first capture only.
+        * include_regexes: optional module-name regex allowlist for pass-based tracing.
+        * leaf_modules_only: when True, capture only modules with no child modules.
+        * capture_inputs: when True, also store positional and keyword inputs.
+        * max_capture_bytes: in-memory capture budget; disables further captures when reached.
+        * blacklist_regexes: legacy field kept for compatibility.
     """
 
     class CollectionOver(Exception):
@@ -46,14 +50,44 @@ class ActivationCollector:
         max_layers: int = -1,
         stop_after_first_step: bool = False,
         blacklist_regexes: list[str] = [r".*\.(\d\d+)\.", r".*\.[1-9]\."],
+        include_regexes: Optional[list[str]] = None,
+        leaf_modules_only: bool = True,
+        capture_inputs: bool = False,
+        max_capture_bytes: int = 2 * 1024**3,
     ):
         self.model = model
         self.max_layers = max_layers
         self.stop_after_first_step = stop_after_first_step
         self.blacklist_regexes = blacklist_regexes
+        self.include_regexes = include_regexes or []
+        self.leaf_modules_only = leaf_modules_only
+        self.capture_inputs = capture_inputs
+        self.max_capture_bytes = max_capture_bytes
         self.count = 0
-        mods = named_modules(model)
-        self.outs = {id(module): (name, None, None) for name, module in mods}
+        self.capture_bytes = 0
+        self.capture_disabled = False
+        self.outs = {}
+        self.modules = []
+        self._seen = 0
+
+        if not isinstance(model, torch.nn.Module):
+            raise TypeError(f"ActivationCollector expects a torch.nn.Module, got {type(model)}")
+        mods = list(model.named_modules())
+        print("ActivationCollector __init__: registered modules count:", len(mods))
+        for name, mod in mods:
+            if self.include_regexes and not any(re.match(pat, name) for pat in self.include_regexes):
+                continue
+            if self.leaf_modules_only and any(True for _ in mod.children()):
+                continue
+            self.modules.append(mod)
+            self.outs[id(mod)] = (name, None, None)
+        print("ActivationCollector __init__: traced modules count:", len(self.modules))
+
+
+        # mods = list(named_modules(model))
+        # print("mods names:", [name for name, _ in mods])
+        # self.outs = {id(module): (name, None, None) for name, module in mods}
+        # print("ActivationCollector __init__: registered modules count:", len(self.outs))
 
     def __call__(self, *args, **kwargs):
         """Call the wrapped model with the given arguments.
@@ -61,67 +95,131 @@ class ActivationCollector:
         Return the model output and the activations.
         """
         self.count = 0
-        hook = torch.nn.modules.module.register_module_forward_hook(
-            self.log_activation_hook
-        )
+        self.capture_bytes = 0
+        self.capture_disabled = False
+        self._seen = 0
+        hooks = [
+            module.register_forward_hook(self.log_activation_hook, with_kwargs=True)
+            for module in self.modules
+        ]
 
         try:
             res = self.model(*args, **kwargs)
-        except ActivationCollector.CollectionOver:
-            res = None
         finally:
-            hook.remove()
+            for hook in hooks:
+                hook.remove()
 
-        tensors = {}
+        # tensors = {}
 
-        for name, outputs, inputs in self.outs.values():
-            # Only save first layer for a smaller file.
-            for blacklist in self.blacklist_regexes:
-                if re.match(blacklist, name):
-                    continue
+        # for name, outputs, inputs in self.outs.values():
+        #     # Only save first layer for a smaller file.
+        #     for blacklist in self.blacklist_regexes:
+        #         if re.match(blacklist, name):
+        #             continue
 
-            if name == "":
-                # Skip the softmax output
-                continue
-            if (outputs, inputs) == (None, None):
-                # print(f"no inputs/outputs for {name}")
-                continue
-            for idx, inp in enumerate(inputs):
-                tensors[f"{name}.in.{idx}"] = inp
+        #     if name == "":
+        #         # Skip the softmax output
+        #         continue
+        #     if (outputs, inputs) == (None, None):
+        #         print(f"no inputs/outputs for {name}")
+        #         continue
+        #     for idx, inp in enumerate(inputs):
+        #         tensors[f"{name}.in.{idx}"] = inp
 
-            for idx, out in enumerate(outputs):
-                tensors[f"{name}.out.{idx}"] = out
+        #     for idx, out in enumerate(outputs):
+        #         tensors[f"{name}.out.{idx}"] = out
 
-        for k, v in tensors.items():
-            print(k, "->", v.shape)
+        # for k, v in tensors.items():
+        #     print(k, "->", v.shape)
 
-        return res, tensors
+        activations = {}
+        for _, (name, out, inp) in self.outs.items():
+            if out is not None:
+                activations[name] = {
+                    "input": inp,
+                    "output": out,
+                }
 
-    def log_activation_hook(self, module, input, out) -> None:
-        name, prev_out, prev_in = self.outs.get(id(module), (None, None, None))
+        # return res, tensors
+        return res, activations
 
-        if self.stop_after_first_step and prev_out is not None:
-            print(f"stopping collection cause {name} was already recorded or stop_after_first_step was set to `True`")
-            raise ActivationCollector.CollectionOver()
+    def log_activation_hook(self, module, input, kwargs, out) -> None:
+        # Debug
+        # print("hook:", type(module), "known:", id(module) in self.outs)
 
-        if prev_out is None:
-            self.count += 1
+        # name, prev_out, prev_in = self.outs.get(id(module), (None, None, None))
 
-        if name is None:
-            print("err: unknown module", module.__class__)
-            breakpoint()
+        # if self.stop_after_first_step and prev_out is not None:
+        #     print(f"stopping collection cause {name} was already recorded or stop_after_first_step was set to `True`")
+        #     raise ActivationCollector.CollectionOver()
+
+        # if prev_out is None:
+        #     self.count += 1
+
+        # if name is None:
+        #     return
+
+        # assert out is not None
+        # outs = [o.detach().cpu() for o in _flatten(out)]
+        # inputs = [i.detach().cpu() for i in _flatten(input)]
+
+        # kwargs = inspect.stack()[1].frame.f_locals["kwargs"]
+        # extra_inputs = [i.detach().cpu() for i in _flatten(kwargs)]
+
+        # self.outs[id(module)] = (name, outs, inputs + extra_inputs)
+        # if 0 < self.max_layers < self.count:
+        #     print(f"stopping collection cause we got {self.count} activations already")
+        #     raise ActivationCollector.CollectionOver()
+        
+        if self.capture_disabled:
             return
 
-        assert out is not None
+        entry = self.outs.get(id(module))
+        if entry is None:
+            return
+
+        self._seen += 1
+        if self._seen % 200 == 0:
+            print(f"ActivationCollector progress: seen {self._seen} module calls")
+
+        name, prev_out, prev_in = entry
+
+        if self.stop_after_first_step and prev_out is not None:
+            return
+
+        if out is None:
+            return
+
         outs = [o.detach().cpu() for o in _flatten(out)]
-        inputs = [i.detach().cpu() for i in _flatten(input)]
+        captured_inputs = []
+        if self.capture_inputs:
+            captured_inputs = [i.detach().cpu() for i in _flatten(input)]
+            captured_inputs.extend(i.detach().cpu() for i in _flatten(kwargs))
 
-        kwargs = inspect.stack()[1].frame.f_locals["kwargs"]
-        extra_inputs = [i.detach().cpu() for i in _flatten(kwargs)]
+        new_bytes = 0
+        for t in outs:
+            new_bytes += t.numel() * t.element_size()
+        for t in captured_inputs:
+            new_bytes += t.numel() * t.element_size()
 
-        self.outs[id(module)] = (name, outs, inputs + extra_inputs)
+        if self.max_capture_bytes > 0 and self.capture_bytes + new_bytes > self.max_capture_bytes:
+            self.capture_disabled = True
+            print(
+                "ActivationCollector: reached capture budget "
+                f"({self.capture_bytes / 1024**3:.2f} GiB), disabling further captures"
+            )
+            return
+
+        self.capture_bytes += new_bytes
+        self.outs[id(module)] = (name, outs, captured_inputs)
+
+        self.count += 1
+        if self.count % 100 == 0:
+            print(
+                "ActivationCollector progress: captured "
+                f"{self.count} activations, stored {self.capture_bytes / 1024**3:.2f} GiB"
+            )
         if 0 < self.max_layers < self.count:
-            print(f"stopping collection cause we got {self.count} activations already")
             raise ActivationCollector.CollectionOver()
 
 
@@ -160,9 +258,11 @@ def _flatten(out):
 
 def named_modules(model):
     if hasattr(model, "named_modules"):
+        print("-------------- hasattr(model, \"named_modules\") -------------- ")
         return model.named_modules()
 
     else:
+        print("ELSE -------------- hasattr(model, \"named_modules\") -------------- ")
         root_modules = [
             (k, v) for k, v in model.__dict__.items() if isinstance(v, torch.nn.Module)
         ]
