@@ -45,15 +45,15 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});
     const entries = [_]Entry{
-        .{ .label = "zml-smi ", .value = "v0.1" },
-        .{ .label = "Hostname ", .value = utils.strSlice(&host.hostname) },
-        .{ .label = "Kernel ", .value = utils.strSlice(&host.kernel) },
-        .{ .label = "CPU ", .value = utils.strSlice(&host.cpu_name) },
-        .{ .label = "Cores ", .value = cores_str },
-        .{ .label = "Memory ", .value = mem_str },
-        .{ .label = "Uptime ", .value = uptime_str },
-        .{ .label = "Load ", .value = load_str },
-        .{ .label = "Devices ", .value = devices_str },
+        .{ .label = "zml-smi", .value = "v0.1" },
+        .{ .label = "Hostname", .value = utils.strSlice(&host.hostname) },
+        .{ .label = "Kernel", .value = utils.strSlice(&host.kernel) },
+        .{ .label = "CPU", .value = utils.strSlice(&host.cpu_name) },
+        .{ .label = "Cores", .value = cores_str },
+        .{ .label = "Memory", .value = mem_str },
+        .{ .label = "Uptime", .value = uptime_str },
+        .{ .label = "Load", .value = load_str },
+        .{ .label = "Devices", .value = devices_str },
     };
 
     var children: std.ArrayList(vxfw.SubSurface) = .empty;

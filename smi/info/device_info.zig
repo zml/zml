@@ -48,6 +48,7 @@ pub const GpuInfo = struct {
     // Clocks
     clock_graphics_mhz: ?u64 = null,
     clock_sm_mhz: ?u64 = null,
+    clock_soc_mhz: ?u64 = null,
     clock_mem_mhz: ?u64 = null,
     clock_graphics_max_mhz: ?u64 = null,
     clock_mem_max_mhz: ?u64 = null,
@@ -60,6 +61,7 @@ pub const GpuInfo = struct {
     // PCIe
     pcie_tx_kbps: ?u64 = null,
     pcie_rx_kbps: ?u64 = null,
+    pcie_bandwidth_mbps: ?u64 = null,
     pcie_link_gen: ?u64 = null,
     pcie_link_width: ?u64 = null,
 };

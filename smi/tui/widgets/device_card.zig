@@ -64,7 +64,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const name = switch (dev.*) {
         inline else => |*info| utils.strSlice(&info.name),
     };
-    const gpu_util = switch (dev.*) {
+    const dev_util = switch (dev.*) {
         inline else => |info| info.util_percent orelse 0,
     };
     const mem_used = switch (dev.*) {
@@ -74,13 +74,13 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         inline else => |info| info.mem_total_bytes orelse 0,
     };
 
-    const gpu_pct: u8 = @intCast(@min(gpu_util, 100));
+    const dev_pct: u8 = @intCast(@min(dev_util, 100));
     const mem_pct: u8 = if (mem_total > 0) @intCast(@min(mem_used * 100 / mem_total, 100)) else 0;
 
     const target: data.Target = std.meta.activeTag(dev.*);
     const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ target.deviceLabel(), i, name });
     const util_label = target.utilLabel();
-    const gpu_suffix = switch (dev.*) {
+    const dev_suffix = switch (dev.*) {
         .cuda, .rocm => |gpu| try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C \u{2502} {d}W", .{
             gpu.temperature orelse 0, (gpu.power_mw orelse 0) / 1000,
         }),
@@ -103,17 +103,17 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         .highlighted = self.highlighted,
     };
 
-    const gpu_hist = try self.state.history.util[i].sliceLast(ctx.arena, data.history_len);
+    const util_hist = try self.state.history.util[i].sliceLast(ctx.arena, data.history_len);
     const mem_hist = try self.state.history.mem_util[i].sliceLast(ctx.arena, data.history_len);
-    const gpu_chart_data = try utils.normalizeRange(ctx.arena, gpu_hist, 0, 100);
+    const util_chart_data = try utils.normalizeRange(ctx.arena, util_hist, 0, 100);
     const mem_chart_data = try utils.normalizeRange(ctx.arena, mem_hist, 0, 100);
 
     const chart_entries = [2]MetricCard.ChartEntry{
-        .{ .label = util_label, .value = gpu_pct, .suffix = gpu_suffix, .data = gpu_chart_data },
+        .{ .label = util_label, .value = dev_pct, .suffix = dev_suffix, .data = util_chart_data },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix, .data = mem_chart_data },
     };
     const gauge_entries = [2]MetricCard.GaugeEntry{
-        .{ .label = util_label, .value = gpu_pct, .suffix = gpu_suffix },
+        .{ .label = util_label, .value = dev_pct, .suffix = dev_suffix },
         .{ .label = "MEM", .value = mem_pct, .suffix = mem_suffix },
     };
 

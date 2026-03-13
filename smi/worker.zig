@@ -36,17 +36,11 @@ pub const Worker = struct {
         const DeviceType = @TypeOf(device);
         const S = struct {
             fn run(io_: std.Io, w: *Worker, info_: InfoType, dev: DeviceType) void {
-                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
-                while (!w.should_stop.load(.acquire)) {
-                    const start: std.Io.Timestamp = .now(io_, .awake);
-
-                    @field(info_, field) = queryFn(dev) catch null;
-
-                    const elapsed = start.untilNow(io_, .awake);
-                    if (elapsed.nanoseconds < interval.nanoseconds) {
-                        io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                w.pollLoop(io_, struct {
+                    fn poll(i: InfoType, d: DeviceType) void {
+                        @field(i, field) = queryFn(d) catch null;
                     }
-                }
+                }.poll, .{ info_, dev });
             }
         };
 
@@ -61,21 +55,28 @@ pub const Worker = struct {
     ) !void {
         const S = struct {
             fn run(io_: std.Io, w: *Worker, infos_: []*DeviceInfo) void {
-                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
-
-                while (!w.should_stop.load(.acquire)) {
-                    const start: std.Io.Timestamp = .now(io_, .awake);
-
-                    queryFn(infos_);
-
-                    const elapsed = start.untilNow(io_, .awake);
-                    if (elapsed.nanoseconds < interval.nanoseconds) {
-                        io_.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                w.pollLoop(io_, struct {
+                    fn poll(i: []*DeviceInfo) void {
+                        queryFn(i);
                     }
-                }
+                }.poll, .{infos_});
             }
         };
 
         try self.group.concurrent(io, S.run, .{ io, self, infos });
+    }
+
+    fn pollLoop(self: *const Worker, io: std.Io, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
+        const interval: std.Io.Duration = .fromMilliseconds(self.poll_interval_ms);
+        while (!self.should_stop.load(.acquire)) {
+            const start: std.Io.Timestamp = .now(io, .awake);
+
+            @call(.auto, func, args);
+
+            const elapsed = start.untilNow(io, .awake);
+            if (elapsed.nanoseconds < interval.nanoseconds) {
+                io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+            }
+        }
     }
 };

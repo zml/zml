@@ -232,12 +232,6 @@ pub fn getMemBusWidth(handle: c.nvmlDevice_t) Error!c_uint {
     return width;
 }
 
-pub fn getNumFans(handle: c.nvmlDevice_t) Error!c_uint {
-    var count: c_uint = 0;
-    try call("nvmlDeviceGetNumFans", .{ handle, &count });
-    return count;
-}
-
 pub fn getComputeRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
     const f = lib.sym("nvmlDeviceGetComputeRunningProcesses_v3") orelse return error.NvmlUnavailable;
     var count: c_uint = 0;
@@ -250,7 +244,7 @@ pub fn getComputeRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDe
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
     try check(f(handle, &count, @ptrCast(infos.ptr)));
-    return infos[0..count];
+    return infos;
 }
 
 pub fn getGraphicsRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]const c.nvmlProcessInfo_t {
@@ -271,7 +265,7 @@ pub fn getGraphicsRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlD
 
     try check(f(handle, &count, @ptrCast(infos.ptr)));
 
-    return infos[0..count];
+    return infos;
 }
 
 pub fn getProcessUtilization(allocator: std.mem.Allocator, handle: c.nvmlDevice_t, last_seen: u64) (Error || error{OutOfMemory})![]const c.nvmlProcessUtilizationSample_t {
@@ -292,5 +286,5 @@ pub fn getProcessUtilization(allocator: std.mem.Allocator, handle: c.nvmlDevice_
 
     try check(f(handle, @ptrCast(samples.ptr), &count, last_seen));
 
-    return samples[0..count];
+    return samples;
 }

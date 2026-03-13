@@ -2,7 +2,7 @@ const std = @import("std");
 const pi = @import("../../info/process_info.zig");
 const schema = @import("schema.zig");
 
-pub fn update(allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), shadow: *std.ArrayList(pi.ProcessInfo), runtimes: []const schema.RuntimeData) void {
+pub fn update(io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), shadow: *std.ArrayList(pi.ProcessInfo), runtimes: []const schema.RuntimeData) void {
     shadow.clearRetainingCapacity();
 
     for (runtimes) |rt| {
@@ -40,12 +40,16 @@ pub fn update(allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)
         shadow.append(allocator, .{
             .pid = rt.pid,
             .device_idx = core,
-            .gpu_mem_kib = @intCast(mem_used.neuron_runtime_used_bytes.neuron_device / 1024),
-            .gpu_util_percent = util,
+            .dev_mem_kib = @intCast(mem_used.neuron_runtime_used_bytes.neuron_device / 1024),
+            .dev_util_percent = util,
         }) catch break;
     }
 
-    const tmp = list.*;
-    list.* = shadow.*;
-    shadow.* = tmp;
+    {
+        pi.process_mutex.lockUncancelable(io);
+        defer pi.process_mutex.unlock(io);
+        const tmp = list.*;
+        list.* = shadow.*;
+        shadow.* = tmp;
+    }
 }

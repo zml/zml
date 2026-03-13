@@ -63,24 +63,14 @@ fn drawAscii(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     const lines: []const []const u8 = if (self.compact) &compact_lines else &logo_lines;
     const h: u16 = if (self.compact) compact_height else logo_height;
 
-    // Gradient colors for each row
-    const all_colors = [logo_height]vaxis.Cell.Color{
-        .{ .rgb = .{ 120, 170, 255 } },
-        .{ .rgb = .{ 160, 190, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
-        .{ .rgb = .{ 140, 180, 255 } },
-    };
-    const color_offset: usize = if (self.compact) logo_height - compact_height else 0;
+    const logo_color: vaxis.Cell.Color = .{ .rgb = .{ 140, 180, 255 } };
 
     var children = try std.ArrayList(vxfw.SubSurface).initCapacity(ctx.arena, h);
 
     for (lines, 0..) |line, row| {
         const text_widget: Text = .{
             .text = line,
-            .style = .{ .bold = self.style.bold, .fg = all_colors[row + color_offset] },
+            .style = .{ .bold = self.style.bold, .fg = logo_color },
             .softwrap = false,
         };
         const text_surf = try text_widget.draw(ctx.withConstraints(

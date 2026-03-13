@@ -86,40 +86,80 @@ const Device = struct {
         return sysfs.readString(self.io, try self.devicePath(&buf, "info/architecture/device_name"));
     }
 
-    pub fn getMemUsed(self: Device) !u64 {
+    fn readCoreMem(self: Device, comptime subdir: []const u8) !u64 {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        return sysfs.readInt(self.io, try self.corePath(&buf, "stats/memory_usage/device_mem/total"));
+        return sysfs.readInt(self.io, try self.corePath(&buf, "stats/memory_usage/device_mem/" ++ subdir ++ "/total"));
+    }
+
+    pub fn getMemUsed(self: Device) !u64 {
+        return self.readCoreMem("total");
+    }
+
+    pub fn getTensors(self: Device) !u64 {
+        return self.readCoreMem("tensors");
+    }
+
+    pub fn getConstants(self: Device) !u64 {
+        return self.readCoreMem("constants");
+    }
+
+    pub fn getModelCode(self: Device) !u64 {
+        return self.readCoreMem("model_code");
+    }
+
+    pub fn getSharedScratchpad(self: Device) !u64 {
+        return self.readCoreMem("model_shared_scratchpad");
+    }
+
+    pub fn getNonsharedScratchpad(self: Device) !u64 {
+        return self.readCoreMem("nonshared_scratchpad");
+    }
+
+    pub fn getRuntime(self: Device) !u64 {
+        return self.readCoreMem("runtime_memory");
+    }
+
+    pub fn getDriver(self: Device) !u64 {
+        return self.readCoreMem("driver_memory");
+    }
+
+    pub fn getDmaRings(self: Device) !u64 {
+        return self.readCoreMem("dma_rings");
+    }
+
+    pub fn getCollectives(self: Device) !u64 {
+        return self.readCoreMem("collectives");
+    }
+
+    pub fn getNotifications(self: Device) !u64 {
+        return self.readCoreMem("notifications");
+    }
+
+    pub fn getUncategorized(self: Device) !u64 {
+        return self.readCoreMem("uncategorized");
     }
 };
 
-fn memQuery(comptime sysfs_dir: []const u8) type {
-    return struct {
-        pub fn get(dev: Device) !u64 {
-            var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-            return sysfs.readInt(dev.io, try dev.corePath(&buf, "stats/memory_usage/device_mem/" ++ sysfs_dir ++ "/total"));
-        }
-    };
-}
-
 const metrics = .{
     .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
-    .{ .field = "nc_tensors", .query = memQuery("tensors").get },
-    .{ .field = "nc_constants", .query = memQuery("constants").get },
-    .{ .field = "nc_model_code", .query = memQuery("model_code").get },
-    .{ .field = "nc_shared_scratchpad", .query = memQuery("model_shared_scratchpad").get },
-    .{ .field = "nc_nonshared_scratchpad", .query = memQuery("nonshared_scratchpad").get },
-    .{ .field = "nc_runtime", .query = memQuery("runtime_memory").get },
-    .{ .field = "nc_driver", .query = memQuery("driver_memory").get },
-    .{ .field = "nc_dma_rings", .query = memQuery("dma_rings").get },
-    .{ .field = "nc_collectives", .query = memQuery("collectives").get },
-    .{ .field = "nc_notifications", .query = memQuery("notifications").get },
-    .{ .field = "nc_uncategorized", .query = memQuery("uncategorized").get },
+    .{ .field = "nc_tensors", .query = Device.getTensors },
+    .{ .field = "nc_constants", .query = Device.getConstants },
+    .{ .field = "nc_model_code", .query = Device.getModelCode },
+    .{ .field = "nc_shared_scratchpad", .query = Device.getSharedScratchpad },
+    .{ .field = "nc_nonshared_scratchpad", .query = Device.getNonsharedScratchpad },
+    .{ .field = "nc_runtime", .query = Device.getRuntime },
+    .{ .field = "nc_driver", .query = Device.getDriver },
+    .{ .field = "nc_dma_rings", .query = Device.getDmaRings },
+    .{ .field = "nc_collectives", .query = Device.getCollectives },
+    .{ .field = "nc_notifications", .query = Device.getNotifications },
+    .{ .field = "nc_uncategorized", .query = Device.getUncategorized },
 };
 
 // --- neuron-monitor subprocess for utilization + device memory capacity ---
 
 fn startMonitor(w: *Worker, io: std.Io, allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_allocator: std.mem.Allocator, proc_list: *std.ArrayList(pi.ProcessInfo)) !void {
-    const config_path = "/tmp/zml-smi-neuron-monitor.conf";
+    var config_path_buf: [64]u8 = undefined;
+    const config_path = try std.fmt.bufPrintZ(&config_path_buf, "/tmp/zml-smi-neuron-monitor-{d}.conf", .{std.c.getpid()});
     var config_file = try std.Io.Dir.createFileAbsolute(io, config_path, .{});
     try config_file.writeStreamingAll(io, monitor_config);
     config_file.close(io);
@@ -137,6 +177,7 @@ fn startMonitor(w: *Worker, io: std.Io, allocator: std.mem.Allocator, infos: []*
 
 fn monitorLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_allocator: std.mem.Allocator, proc_list: *std.ArrayList(pi.ProcessInfo), stdout_file: std.Io.File) void {
     defer allocator.free(infos);
+
     var read_buf: [4096]u8 = undefined;
     var file_reader = stdout_file.reader(io, &read_buf);
     var line_buf: std.Io.Writer.Allocating = std.Io.Writer.Allocating.initCapacity(allocator, 4096) catch return;
@@ -147,12 +188,18 @@ fn monitorLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, infos
     while (w.isRunning()) {
         _ = file_reader.interface.streamDelimiterEnding(&line_buf.writer, '\n') catch return;
         file_reader.interface.toss(1);
-        updateFromMonitor(allocator, infos, proc_allocator, proc_list, &shadow, line_buf.written());
+        updateFromMonitor(io, allocator, infos, proc_allocator, proc_list, &shadow, line_buf.written());
         line_buf.clearRetainingCapacity();
+    }
+
+    { // cant defer
+        var cleanup_buf: [64]u8 = undefined;
+        const cleanup_path = std.fmt.bufPrintZ(&cleanup_buf, "/tmp/zml-smi-neuron-monitor-{d}.conf", .{std.c.getpid()}) catch return;
+        std.Io.Dir.deleteFileAbsolute(io, cleanup_path) catch {};
     }
 }
 
-fn updateFromMonitor(allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_allocator: std.mem.Allocator, proc_list: *std.ArrayList(pi.ProcessInfo), shadow: *std.ArrayList(pi.ProcessInfo), json_data: []const u8) void {
+fn updateFromMonitor(io: std.Io, allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_allocator: std.mem.Allocator, proc_list: *std.ArrayList(pi.ProcessInfo), shadow: *std.ArrayList(pi.ProcessInfo), json_data: []const u8) void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
@@ -180,12 +227,12 @@ fn updateFromMonitor(allocator: std.mem.Allocator, infos: []*NeuronInfo, proc_al
         var it = counters.neuroncores_in_use.map.iterator();
         while (it.next()) |entry| {
             const core_idx = std.fmt.parseInt(usize, entry.key_ptr.*, 10) catch continue;
-            if (core_idx >= infos.len) continue;
+            if (core_idx >= infos.len or core_idx >= max_neuron_cores) continue;
             const util: u32 = @intFromFloat(@round(entry.value_ptr.neuroncore_utilization));
             utils[core_idx] = @max(utils[core_idx], util);
         }
     }
     for (infos, 0..) |info, i| info.util_percent = utils[i];
 
-    neuron_process.update(proc_allocator, proc_list, shadow, report.neuron_runtime_data);
+    neuron_process.update(io, proc_allocator, proc_list, shadow, report.neuron_runtime_data);
 }
