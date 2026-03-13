@@ -24,7 +24,7 @@ pub fn draw(
     const header = try common.headerText(ctx.arena, id, utils.strSlice(&nc.name));
 
     // ── Utilization + Memory charts ─────────────────────────
-    const gpu_chart: Chart = .{
+    const util_chart: Chart = .{
         .title = "Core Utilization",
         .data = try utils.normalizeRange(ctx.arena, try state.history.util[id].sliceLast(ctx.arena, data.history_len), 0, 100),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{nc.util_percent orelse 0}),
@@ -52,7 +52,7 @@ pub fn draw(
     };
 
     const charts_flow: ColumnLayout = .{
-        .children = &.{ gpu_chart.widget(), mem_chart.widget() },
+        .children = &.{ util_chart.widget(), mem_chart.widget() },
         .min_child_width = 40,
         .gap = 1,
     };
@@ -81,7 +81,7 @@ pub fn draw(
     };
 
     // ── Compose vertical layout ─────────────────────────────
-    const layout: ColumnLayout = .{
+    return common.pageFrame(ctx, .{
         .children = &.{
             header.widget(),
             charts_flow.widget(),
@@ -89,19 +89,5 @@ pub fn draw(
             process_table.widget(),
         },
         .gap = 1,
-    };
-
-    const layout_surf = try layout.widget().draw(ctx.withConstraints(
-        .{ .width = content_w },
-        .{ .width = content_w, .height = null },
-    ));
-
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    children[0] = .{ .origin = .{ .row = 1, .col = 2 }, .surface = layout_surf };
-    return .{
-        .size = .{ .width = w, .height = layout_surf.size.height + 1 },
-        .widget = parent_widget,
-        .buffer = &.{},
-        .children = children,
-    };
+    }, w, content_w, parent_widget);
 }

@@ -4,6 +4,7 @@ const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const image_cache = @import("../image_cache.zig");
 const ColumnLayout = @import("../widgets/components/column_layout.zig");
+const common = @import("detail/detail_common.zig");
 const DeviceCard = @import("../widgets/device_card.zig");
 const Logo = @import("../widgets/logo.zig");
 const InfoLines = @import("../widgets/info_lines.zig");
@@ -147,23 +148,8 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     }
 
     // ── Compose with ColumnLayout ───────────────────────────
-    const layout: ColumnLayout = .{
+    return common.pageFrame(ctx, .{
         .children = widgets.items,
         .gap = 1,
-    };
-
-    const layout_surf = try layout.widget().draw(ctx.withConstraints(
-        .{ .width = content_w },
-        .{ .width = content_w, .height = null },
-    ));
-
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    children[0] = .{ .origin = .{ .row = 1, .col = 2 }, .surface = layout_surf };
-
-    return .{
-        .size = .{ .width = w, .height = layout_surf.size.height + 1 },
-        .widget = self.widget(),
-        .buffer = &.{},
-        .children = children,
-    };
+    }, w, content_w, self.widget());
 }

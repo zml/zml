@@ -86,7 +86,6 @@ fn call(comptime name: [:0]const u8, args: std.meta.ArgsTuple(@TypeOf(@field(c, 
 }
 
 var gpu_handles: []c.amdsmi_processor_handle = &.{};
-var gpu_allocator: std.mem.Allocator = undefined;
 
 var lib: DynLib = .{};
 
@@ -102,8 +101,6 @@ pub fn init(allocator: std.mem.Allocator) !void {
 
     if (!lib.open(path))
         return error.AmdSmiUnavailable;
-
-    gpu_allocator = allocator;
 
     try call("amdsmi_init", .{c.AMDSMI_INIT_AMD_GPUS});
 
@@ -166,27 +163,9 @@ pub fn getPowerLimit(handle: Handle) Error!u32 {
     return info.power_limit;
 }
 
-pub fn getPowerCap(handle: Handle) Error!u64 {
-    var info: c.amdsmi_power_cap_info_t = undefined;
-    try call("amdsmi_get_power_cap_info", .{ handle, @as(u32, 0), &info });
-    return info.power_cap;
-}
-
 pub fn getTemperature(handle: Handle) Error!i64 {
     var temp: i64 = 0;
     try call("amdsmi_get_temp_metric", .{ handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT, &temp });
-    return temp;
-}
-
-pub fn getTemperatureHotspot(handle: Handle) Error!i64 {
-    var temp: i64 = 0;
-    try call("amdsmi_get_temp_metric", .{ handle, c.AMDSMI_TEMPERATURE_TYPE_HOTSPOT, c.AMDSMI_TEMP_CURRENT, &temp });
-    return temp;
-}
-
-pub fn getTemperatureVram(handle: Handle) Error!i64 {
-    var temp: i64 = 0;
-    try call("amdsmi_get_temp_metric", .{ handle, c.AMDSMI_TEMPERATURE_TYPE_VRAM, c.AMDSMI_TEMP_CURRENT, &temp });
     return temp;
 }
 
@@ -196,22 +175,10 @@ pub fn getFanSpeed(handle: Handle) Error!i64 {
     return speed;
 }
 
-pub fn getFanRpms(handle: Handle) Error!i64 {
-    var rpms: i64 = 0;
-    try call("amdsmi_get_gpu_fan_rpms", .{ handle, @as(u32, 0), &rpms });
-    return rpms;
-}
-
 pub fn getGpuUtil(handle: Handle) Error!u32 {
     var usage: c.amdsmi_engine_usage_t = undefined;
     try call("amdsmi_get_gpu_activity", .{ handle, &usage });
     return usage.gfx_activity;
-}
-
-pub fn getMmUtil(handle: Handle) Error!u32 {
-    var usage: c.amdsmi_engine_usage_t = undefined;
-    try call("amdsmi_get_gpu_activity", .{ handle, &usage });
-    return usage.mm_activity;
 }
 
 pub fn getClockGraphics(handle: Handle) Error!u32 {
@@ -262,12 +229,6 @@ pub fn getPcieWidth(handle: Handle) Error!u32 {
     return @intCast(info.pcie_metric.pcie_width);
 }
 
-pub fn getPcieSpeed(handle: Handle) Error!u32 {
-    var info: c.amdsmi_pcie_info_t = undefined;
-    try call("amdsmi_get_pcie_info", .{ handle, &info });
-    return info.pcie_metric.pcie_speed;
-}
-
 pub fn getPcieBandwidth(handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try call("amdsmi_get_pcie_info", .{ handle, &info });
@@ -278,24 +239,6 @@ pub fn getPcieLinkGen(handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try call("amdsmi_get_pcie_info", .{ handle, &info });
     return info.pcie_static.pcie_interface_version;
-}
-
-pub fn getVoltageGfx(handle: Handle) Error!u64 {
-    var info: c.amdsmi_power_info_t = undefined;
-    try call("amdsmi_get_power_info", .{ handle, &info });
-    return info.gfx_voltage;
-}
-
-pub fn getVoltageSoc(handle: Handle) Error!u64 {
-    var info: c.amdsmi_power_info_t = undefined;
-    try call("amdsmi_get_power_info", .{ handle, &info });
-    return info.soc_voltage;
-}
-
-pub fn getVoltageMem(handle: Handle) Error!u64 {
-    var info: c.amdsmi_power_info_t = undefined;
-    try call("amdsmi_get_power_info", .{ handle, &info });
-    return info.mem_voltage;
 }
 
 pub fn getBdfId(handle: Handle) Error!u64 {
@@ -311,5 +254,5 @@ pub fn getProcessList(allocator: std.mem.Allocator, handle: Handle) (Error || er
     const procs = try allocator.alloc(ProcInfo, count);
     errdefer allocator.free(procs);
     try call("amdsmi_get_gpu_process_list", .{ handle, &count, @ptrCast(procs.ptr) });
-    return procs[0..count];
+    return procs;
 }

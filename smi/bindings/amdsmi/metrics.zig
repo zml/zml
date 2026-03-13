@@ -73,19 +73,13 @@ const Device = struct {
     pub fn getGpuUtil(self: Device) !u64 {
         return try amdsmi.getGpuUtil(self.handle);
     }
-    pub fn getEncoderUtil(self: Device) !u64 {
-        return try amdsmi.getMmUtil(self.handle);
-    }
-    pub fn getDecoderUtil(self: Device) !u64 {
-        return try amdsmi.getMmUtil(self.handle);
-    }
 
     // Clocks
     pub fn getClockGraphics(self: Device) !u64 {
         return try amdsmi.getClockGraphics(self.handle);
     }
-    pub fn getClockSm(self: Device) !u64 {
-        return try amdsmi.getClockGraphics(self.handle);
+    pub fn getClockSoc(self: Device) !u64 {
+        return try amdsmi.getClockSoc(self.handle);
     }
     pub fn getClockMem(self: Device) !u64 {
         return try amdsmi.getClockMem(self.handle);
@@ -106,15 +100,10 @@ const Device = struct {
     }
 
     // PCIe
-    pub fn getPcieTx(self: Device) !u64 {
+    pub fn getPcieBandwidth(self: Device) !u64 {
         const bw = try amdsmi.getPcieBandwidth(self.handle);
         if (bw == std.math.maxInt(u32)) return error.not_supported;
-        return @as(u64, bw) * 125;
-    }
-    pub fn getPcieRx(self: Device) !u64 {
-        const bw = try amdsmi.getPcieBandwidth(self.handle);
-        if (bw == std.math.maxInt(u32)) return error.not_supported;
-        return @as(u64, bw) * 125;
+        return bw;
     }
     pub fn getPcieLinkGen(self: Device) !u64 {
         return try amdsmi.getPcieLinkGen(self.handle);
@@ -130,17 +119,14 @@ const metrics = .{
     .{ .field = "temperature", .query = Device.getTemperature },
     .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
     .{ .field = "util_percent", .query = Device.getGpuUtil },
-    .{ .field = "encoder_util_percent", .query = Device.getEncoderUtil },
-    .{ .field = "decoder_util_percent", .query = Device.getDecoderUtil },
     .{ .field = "clock_graphics_mhz", .query = Device.getClockGraphics },
-    .{ .field = "clock_sm_mhz", .query = Device.getClockSm },
+    .{ .field = "clock_soc_mhz", .query = Device.getClockSoc },
     .{ .field = "clock_mem_mhz", .query = Device.getClockMem },
     .{ .field = "clock_graphics_max_mhz", .query = Device.getMaxClockGraphics },
     .{ .field = "clock_mem_max_mhz", .query = Device.getMaxClockMem },
     .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
     .{ .field = "mem_total_bytes", .query = Device.getMemTotal },
-    .{ .field = "pcie_tx_kbps", .query = Device.getPcieTx },
-    .{ .field = "pcie_rx_kbps", .query = Device.getPcieRx },
+    .{ .field = "pcie_bandwidth_mbps", .query = Device.getPcieBandwidth },
     .{ .field = "pcie_link_gen", .query = Device.getPcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.getPcieLinkWidth },
 };

@@ -10,7 +10,7 @@ pub fn readInt(io: std.Io, path: []const u8) !u64 {
 pub fn readString(io: std.Io, path: []const u8) ![256]u8 {
     var result: [256]u8 = .{0} ** 256;
     const data = try std.Io.Dir.readFile(.cwd(), io, path, &result);
-    result[std.mem.trimEnd(u8, data, &std.ascii.whitespace).len] = 0;
+    result[@min(std.mem.trimEnd(u8, data, &std.ascii.whitespace).len, 255)] = 0;
 
     return result;
 }
