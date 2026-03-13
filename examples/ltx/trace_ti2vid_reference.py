@@ -123,25 +123,36 @@ def main():
     sigmas = LTX2Scheduler().execute(steps=num_inference_steps).to(dtype=torch.float32, device=device)
     save_pt("03_stage1_sigmas", sigmas.detach().cpu())
 
+    stage1_steps = []
+    stage1_base_denoise_fn = multi_modal_guider_factory_denoising_func(
+        video_guider_factory=create_multimodal_guider_factory(
+            params=video_guider_params,
+            negative_context=v_context_n,
+        ),
+        audio_guider_factory=create_multimodal_guider_factory(
+            params=audio_guider_params,
+            negative_context=a_context_n,
+        ),
+        v_context=v_context_p,
+        a_context=a_context_p,
+        transformer=transformer,
+    )
+
+    def stage1_traced_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs):
+        stage1_steps.append({
+            "sigma": sigmas[step_idx].detach().cpu(),
+            "video_latent": video_state.latent.detach().cpu(),
+            "audio_latent": audio_state.latent.detach().cpu(),
+        })
+        return stage1_base_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs)
+
     def first_stage_denoising_loop(sigmas, video_state, audio_state, stepper):
         return euler_denoising_loop(
             sigmas=sigmas,
             video_state=video_state,
             audio_state=audio_state,
             stepper=stepper,
-            denoise_fn=multi_modal_guider_factory_denoising_func(
-                video_guider_factory=create_multimodal_guider_factory(
-                    params=video_guider_params,
-                    negative_context=v_context_n,
-                ),
-                audio_guider_factory=create_multimodal_guider_factory(
-                    params=audio_guider_params,
-                    negative_context=a_context_n,
-                ),
-                v_context=v_context_p,
-                a_context=a_context_p,
-                transformer=transformer,
-            ),
+            denoise_fn=stage1_traced_denoise_fn,
         )
 
     video_state, audio_state = denoise_audio_video(
@@ -160,6 +171,12 @@ def main():
         "video_latent": video_state.latent.detach().cpu(),
         "audio_latent": audio_state.latent.detach().cpu(),
     })
+    save_pt("10_stage1_steps", stage1_steps)
+
+    # Drop closures that capture the stage-1 transformer before stage-2 loads.
+    del stage1_base_denoise_fn
+    del stage1_traced_denoise_fn
+    del first_stage_denoising_loop
 
     del transformer
     torch.cuda.synchronize()
@@ -197,6 +214,21 @@ def main():
     distilled_sigmas = torch.tensor(STAGE_2_DISTILLED_SIGMA_VALUES, device=device)
     save_pt("07_stage2_sigmas", distilled_sigmas.detach().cpu())
 
+    stage2_steps = []
+    stage2_base_denoise_fn = simple_denoising_func(
+        video_context=v_context_p,
+        audio_context=a_context_p,
+        transformer=transformer,
+    )
+
+    def stage2_traced_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs):
+        stage2_steps.append({
+            "sigma": sigmas[step_idx].detach().cpu(),
+            "video_latent": video_state.latent.detach().cpu(),
+            "audio_latent": audio_state.latent.detach().cpu(),
+        })
+        return stage2_base_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs)
+
     def second_stage_denoising_loop(
             sigmas: torch.Tensor, video_state, audio_state, stepper
         ):
@@ -205,11 +237,7 @@ def main():
                 video_state=video_state,
                 audio_state=audio_state,
                 stepper=stepper,
-                denoise_fn=simple_denoising_func(
-                    video_context=v_context_p,
-                    audio_context=a_context_p,
-                    transformer=transformer,  # noqa: F821
-                ),
+                denoise_fn=stage2_traced_denoise_fn,
             )
     
     video_state, audio_state = denoise_audio_video(
@@ -231,6 +259,7 @@ def main():
         "video_latent": video_state.latent.detach().cpu(),
         "audio_latent": audio_state.latent.detach().cpu(),
     })
+    save_pt("11_stage2_steps", stage2_steps)
 
     del transformer
     torch.cuda.synchronize()
