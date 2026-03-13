@@ -1,7 +1,12 @@
 const std = @import("std");
 const c = @import("c");
+const stdx = @import("stdx");
+const bazel = @import("bazel");
+const bazel_builtin = @import("bazel_builtin");
+const DynLib = @import("../dynlib.zig").Lib(c);
 
 pub const Handle = c.amdsmi_processor_handle;
+pub const ProcInfo = c.amdsmi_proc_info_t;
 
 pub const Error = ReturnError || error{AmdSmiUnavailable};
 
@@ -75,44 +80,29 @@ fn check(ret: c.amdsmi_status_t) Error!void {
     };
 }
 
-fn Fn(comptime name: [:0]const u8) type {
-    return *const @TypeOf(@field(c, name));
-}
-
-fn sym(comptime name: [:0]const u8) ?Fn(name) {
-    if (!lib_loaded) return null;
-    return lib.lookup(Fn(name), name);
-}
-
 fn call(comptime name: [:0]const u8, args: std.meta.ArgsTuple(@TypeOf(@field(c, name)))) Error!void {
-    const f = sym(name) orelse return error.AmdSmiUnavailable;
+    const f = lib.sym(name) orelse return error.AmdSmiUnavailable;
     try check(@call(.auto, f, args));
 }
 
 var gpu_handles: []c.amdsmi_processor_handle = &.{};
 var gpu_allocator: std.mem.Allocator = undefined;
 
-var lib: std.DynLib = undefined;
-var lib_loaded: bool = false;
+var lib: DynLib = .{};
 
-fn openLib() !std.DynLib {
-    if (std.DynLib.open("libamd_smi.so")) |l| {
-        return l;
-    } else |_| {}
+pub fn init(allocator: std.mem.Allocator) !void {
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
+    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const sandbox_path = try r.rlocation("zml/smi/sandbox", &path_buf) orelse {
+        return error.AmdSmiUnavailable;
+    };
 
-    if (c.getenv("ROCM_PATH")) |rocm_path| {
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const path = std.fmt.bufPrintZ(&buf, "{s}/lib/libamd_smi.so", .{rocm_path}) catch return error.FileNotFound;
+    var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
 
-        return std.DynLib.open(path);
-    }
+    if (!lib.open(path))
+        return error.AmdSmiUnavailable;
 
-    return std.DynLib.open("/opt/rocm/lib/libamd_smi.so");
-}
-
-pub fn init(allocator: std.mem.Allocator) (Error || error{OutOfMemory})!void {
-    lib = openLib() catch return error.AmdSmiUnavailable;
-    lib_loaded = true;
     gpu_allocator = allocator;
 
     try call("amdsmi_init", .{c.AMDSMI_INIT_AMD_GPUS});
@@ -313,8 +303,6 @@ pub fn getBdfId(handle: Handle) Error!u64 {
     try call("amdsmi_get_gpu_bdf_id", .{ handle, &bdf_id });
     return bdf_id;
 }
-
-pub const ProcInfo = c.amdsmi_proc_info_t;
 
 pub fn getProcessList(allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {
     var count: u32 = 0;
