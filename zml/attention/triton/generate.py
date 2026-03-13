@@ -1,7 +1,7 @@
-import argparse
+import signal
+import sys
 import json
 import math
-import os
 import triton
 
 import triton.backends as triton_backends
@@ -333,26 +333,33 @@ def compile_reduce_ptr(cfg: dict) -> str:
     return kernel.asm["ttir"]
 
 
+def handle_sigint(signum, frame):
+    sys.exit(0)
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate TTIR for wrapped unified-attention kernels")
-    parser.add_argument("--config", required=True, help="Raw JSON string")
-    args = parser.parse_args()
-
-    cfg = json.loads(args.config)
-
     register_fake_backend()
+    signal.signal(signal.SIGINT, handle_sigint)
 
-    if "kernel_unified_attention_2d_ptr" in cfg:
-        ttir = compile_2d_ptr(cfg["kernel_unified_attention_2d_ptr"])
-    elif "kernel_unified_attention_3d_ptr" in cfg:
-        ttir = compile_3d_ptr(cfg["kernel_unified_attention_3d_ptr"])
-    elif "reduce_segments_ptr" in cfg:
-        ttir = compile_reduce_ptr(cfg["reduce_segments_ptr"])
-    else:
-        print("Unknown kernel variant")
+    for raw_line in sys.stdin:
+        line = raw_line.strip()
+        if not line:
+            continue
 
-    print(ttir)
+        try:
+            cfg = json.loads(line)
+            if not isinstance(cfg, dict):
+                raise ValueError("request must be a JSON object")
 
+            if "kernel_unified_attention_2d_ptr" in cfg:
+                ttir = compile_2d_ptr(cfg["kernel_unified_attention_2d_ptr"])
+            elif "kernel_unified_attention_3d_ptr" in cfg:
+                ttir = compile_3d_ptr(cfg["kernel_unified_attention_3d_ptr"])
+            elif "reduce_segments_ptr" in cfg:
+                ttir = compile_reduce_ptr(cfg["reduce_segments_ptr"])
 
-if __name__ == "__main__":
-    main()
+            response = {"ok": True, "result": ttir}
+        except Exception as exc:
+            response = {"ok": False, "error": str(exc)}
+
+        print(json.dumps(response), flush=True)

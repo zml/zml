@@ -7,6 +7,8 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 
+const log = std.log.scoped(.@"zml/attention/triton");
+
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
     _ = head_size; // autofix
     _ = all_decode; // autofix
@@ -199,42 +201,39 @@ pub const GenerationConfig = union(KernelKind) {
     reduce_segments_ptr: GenerationConfigReduce,
 };
 
-fn getGenerateBinPath(allocator: std.mem.Allocator) []const u8 {
-    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch |err| {
-        stdx.debug.panic("Failed to initialize runfiles for Triton backend: {}", .{err});
-    };
+fn getGenerateBinPath(allocator: std.mem.Allocator) ![]const u8 {
+    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
 
     var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = runfiles.rlocation("zml/zml/attention/triton/sandbox", &sandbox_path_buf) catch |err| {
-        stdx.debug.panic("Failed to find sandbox path for Triton backend: {}", .{err});
-    };
+    const sandbox_path = runfiles.rlocation("zml/zml/attention/triton/sandbox", &sandbox_path_buf) catch unreachable;
 
-    const path = std.fs.path.join(allocator, &.{ sandbox_path.?, "bin", "generate" }) catch |err| {
-        stdx.debug.panic("Failed to construct path to generate for Triton backend: {}", .{err});
-    };
-
-    return path;
+    return std.fs.path.join(allocator, &.{ sandbox_path.?, "bin", "generate" });
 }
 
 fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConfig) ![:0]const u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
+    const writer_buffer = try arena.allocator().alloc(u8, 4096);
+    const reader_buffer = try arena.allocator().alloc(u8, 4096);
 
-    var list: std.ArrayList([]const u8) = .empty;
-    try list.append(arena.allocator(), getGenerateBinPath(arena.allocator()));
-    try list.append(arena.allocator(), "--config");
-    try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })}));
-    const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items });
-    std.log.err("Stderr: {s}", .{result.stderr});
-    switch (result.term) {
-        .exited => |exit_code| {
-            if (exit_code != 0) {
-                std.log.err("Failed to generate ttir. Stderr: {s}", .{result.stderr});
-            }
-        },
-        else => {},
-    }
-    return try allocator.dupeZ(u8, result.stdout);
+    const compilation_context = zml.module.CompilationContext.current();
+    const platform = compilation_context.platform;
+    const triton_runtime = platform.triton_runtime.?;
+
+    var writer = triton_runtime.process.stdin.?.writer(io, writer_buffer);
+    try writer.interface.print("{f}\n", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+    try writer.interface.flush();
+
+    var reader = triton_runtime.process.stdout.?.reader(io, reader_buffer);
+    var allocating: std.Io.Writer.Allocating = .init(arena.allocator());
+    _ = try reader.interface.streamDelimiter(&allocating.writer, '\n');
+    _ = try reader.interface.discardShort(1);
+
+    const response: std.json.Value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), allocating.written(), .{});
+    return if (response.object.get("ok").?.bool)
+        try allocator.dupeZ(u8, response.object.get("result").?.string)
+    else
+        error.GenerationFailed;
 }
 
 fn getCuCount() usize {
@@ -439,7 +438,7 @@ pub const paged = struct {
             },
         };
 
-        std.log.info("pagedAttention2d config: {any}", .{generation_config});
+        log.debug("pagedAttention2d config: {any}", .{generation_config});
 
         var threaded_io: std.Io.Threaded = .init_single_threaded;
         threaded_io.allocator = std.heap.c_allocator;
@@ -539,7 +538,7 @@ pub const paged = struct {
             },
         };
 
-        std.log.info("pagedAttention3d attention config: {any}", .{attn_generation_config});
+        log.debug("pagedAttention3d attention config: {any}", .{attn_generation_config});
 
         var threaded_io: std.Io.Threaded = .init_single_threaded;
         threaded_io.allocator = std.heap.c_allocator;
@@ -567,7 +566,7 @@ pub const paged = struct {
                 },
             },
         };
-        std.log.info("pagedAttention3d reduce config: {any}", .{reduce_generation_config});
+        log.debug("pagedAttention3d reduce config: {any}", .{reduce_generation_config});
         const reduce_ttir = generateTtir(std.heap.c_allocator, io, reduce_generation_config) catch unreachable;
         defer std.heap.c_allocator.free(reduce_ttir);
 
@@ -652,5 +651,25 @@ pub const paged = struct {
         });
 
         return output[0];
+    }
+};
+
+pub const Runtime = struct {
+    process: std.process.Child,
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Runtime {
+        const path = try getGenerateBinPath(allocator);
+        defer allocator.free(path);
+
+        const process = try std.process.spawn(io, .{ .argv = &.{path}, .stdin = .pipe, .stdout = .pipe });
+        errdefer process.kill(io);
+
+        return .{ .process = process };
+    }
+
+    pub fn deinit(self: *Runtime, io: std.Io) void {
+        // NOTE(Corendos): This is not portable, but I couldn't find a better way with the current std.Io.
+        _ = std.c.kill(self.process.id.?, .INT);
+        _ = self.process.wait(io) catch unreachable;
     }
 };
