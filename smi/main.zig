@@ -27,11 +27,6 @@ const tui = @import("tui/tui.zig");
 const static_print = @import("tui/print.zig");
 const data = @import("tui/data.zig");
 
-fn setupRocmEnv(rocm_data_dir: []const u8) !void {
-    var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1);
-}
-
 const CliArgs = struct {
     top: bool = false,
     tui_refresh_rate: u16 = 100,
