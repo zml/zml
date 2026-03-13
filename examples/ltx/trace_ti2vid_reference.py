@@ -141,8 +141,16 @@ def main():
     def stage1_traced_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs):
         stage1_steps.append({
             "sigma": sigmas[step_idx].detach().cpu(),
+
             "video_latent": video_state.latent.detach().cpu(),
+            "video_denoise_mask": video_state.denoise_mask.detach().cpu(),
+            "video_positions": video_state.positions.detach().cpu(),
+            "video_clean_latent": video_state.clean_latent.detach().cpu(),
+
             "audio_latent": audio_state.latent.detach().cpu(),
+            "audio_denoise_mask": audio_state.denoise_mask.detach().cpu(),
+            "audio_positions": audio_state.positions.detach().cpu(),
+            "audio_clean_latent": audio_state.clean_latent.detach().cpu(),
         })
         return stage1_base_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs)
 
@@ -224,8 +232,16 @@ def main():
     def stage2_traced_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs):
         stage2_steps.append({
             "sigma": sigmas[step_idx].detach().cpu(),
+
             "video_latent": video_state.latent.detach().cpu(),
+            "video_denoise_mask": video_state.denoise_mask.detach().cpu(),
+            "video_positions": video_state.positions.detach().cpu(),
+            "video_clean_latent": video_state.clean_latent.detach().cpu(),
+
             "audio_latent": audio_state.latent.detach().cpu(),
+            "audio_denoise_mask": audio_state.denoise_mask.detach().cpu(),
+            "audio_positions": audio_state.positions.detach().cpu(),
+            "audio_clean_latent": audio_state.clean_latent.detach().cpu(),
         })
         return stage2_base_denoise_fn(video_state, audio_state, sigmas, step_idx, *args, **kwargs)
 
