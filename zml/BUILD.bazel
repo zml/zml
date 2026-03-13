@@ -59,7 +59,10 @@ zig_library(
         "tracer.zig",
         "zml.zig",
     ],
-    data = ["//zml/attention/triton:sandbox"],
+    data = select({
+        "@platforms//os:macos": [],
+        "//conditions:default": ["//zml/attention/triton:sandbox"],
+    }),
     main = "zml.zig",
     visibility = ["//visibility:public"],
     zigopts = [
