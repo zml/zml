@@ -46,7 +46,7 @@ pub const Options = union(Backend) {
     };
 
     pub fn fromBackend(args: Args) Options {
-        const max_num_pages = @divFloor(args.seq_len + args.page_chunk_size - 1, args.page_chunk_size); // @divCeil
+        const max_num_pages = std.math.divCeil(args.seq_len, args.page_chunk_size) catch unreachable;
         return switch (args.backend) {
             .cuda_fa2 => if (args.is_prefill) .{
                 .cuda_fa2 = .{
