@@ -24,13 +24,16 @@ pub fn draw(
     const header = try common.headerText(ctx.arena, id, utils.strSlice(&gpu.name));
 
     // ── GPU Utilization + Memory charts ─────────────────────
-    const gpu_chart: Chart = .{
+    const util_chart: Chart = .{
         .title = "GPU Utilization",
         .data = try utils.normalizeRange(ctx.arena, try state.history.util[id].sliceLast(ctx.arena, data.history_len), 0, 100),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{gpu.util_percent orelse 0}),
-        .info_line = try std.fmt.allocPrint(ctx.arena, "Enc {d}%  Dec {d}%", .{
-            gpu.encoder_util_percent orelse 0, gpu.decoder_util_percent orelse 0,
-        }),
+        .info_line = if (gpu.encoder_util_percent != null or gpu.decoder_util_percent != null)
+            try std.fmt.allocPrint(ctx.arena, "Enc {d}%  Dec {d}%", .{
+                gpu.encoder_util_percent orelse 0, gpu.decoder_util_percent orelse 0,
+            })
+        else
+            null,
         .y_min = 0,
         .y_max = 100,
         .y_unit = "%",
@@ -91,33 +94,54 @@ pub fn draw(
     };
 
     const charts_flow: ColumnLayout = .{
-        .children = &.{ gpu_chart.widget(), mem_chart.widget(), temp_chart.widget(), power_chart.widget() },
+        .children = &.{ util_chart.widget(), mem_chart.widget(), temp_chart.widget(), power_chart.widget() },
         .min_child_width = 60,
         .gap = 1,
     };
 
     // ── Clocks + PCIe ───────────────────────────────────────
+    var clock_buf: [4]MetricCard.LineEntry = undefined;
+    var clock_n: usize = 0;
+    clock_buf[clock_n] = .{ .label = "Graphics ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
+        gpu.clock_graphics_mhz orelse 0, gpu.clock_graphics_max_mhz orelse 0,
+    }) };
+    clock_n += 1;
+    if (gpu.clock_sm_mhz) |sm| {
+        clock_buf[clock_n] = .{ .label = "SM       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{sm}) };
+        clock_n += 1;
+    }
+    if (gpu.clock_soc_mhz) |soc| {
+        clock_buf[clock_n] = .{ .label = "SOC      ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{soc}) };
+        clock_n += 1;
+    }
+    clock_buf[clock_n] = .{ .label = "Memory   ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
+        gpu.clock_mem_mhz orelse 0, gpu.clock_mem_max_mhz orelse 0,
+    }) };
+    clock_n += 1;
     const clocks_card: MetricCard = .{
         .title = "Clocks",
-        .lines = &.{
-            .{ .label = "Graphics ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
-                gpu.clock_graphics_mhz orelse 0, gpu.clock_graphics_max_mhz orelse 0,
-            }) },
-            .{ .label = "SM       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{gpu.clock_sm_mhz orelse 0}) },
-            .{ .label = "Memory   ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
-                gpu.clock_mem_mhz orelse 0, gpu.clock_mem_max_mhz orelse 0,
-            }) },
-        },
+        .lines = clock_buf[0..clock_n],
     };
+
+    var pcie_buf: [4]MetricCard.LineEntry = undefined;
+    var pcie_n: usize = 0;
+    pcie_buf[pcie_n] = .{ .label = "Link     ", .value = try std.fmt.allocPrint(ctx.arena, " Gen{d} x{d}", .{
+        gpu.pcie_link_gen orelse 0, gpu.pcie_link_width orelse 0,
+    }) };
+    pcie_n += 1;
+    if (gpu.pcie_tx_kbps != null or gpu.pcie_rx_kbps != null) {
+        pcie_buf[pcie_n] = .{ .label = "TX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) };
+        pcie_n += 1;
+        pcie_buf[pcie_n] = .{ .label = "RX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) };
+        pcie_n += 1;
+    }
+    if (gpu.pcie_bandwidth_mbps) |bw| {
+        pcie_buf[pcie_n] = .{ .label = "BW       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} Mb/s", .{bw}) };
+        pcie_n += 1;
+    }
     const pcie_card: MetricCard = .{
         .title = "PCIe",
-        .lines = &.{
-            .{ .label = "Link     ", .value = try std.fmt.allocPrint(ctx.arena, " Gen{d} x{d}", .{
-                gpu.pcie_link_gen orelse 0, gpu.pcie_link_width orelse 0,
-            }) },
-            .{ .label = "TX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) },
-            .{ .label = "RX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) },
-        },
+        .lines = pcie_buf[0..pcie_n],
     };
 
     const cards_flow: ColumnLayout = .{
@@ -126,7 +150,7 @@ pub fn draw(
     };
 
     // ── Compose vertical layout ─────────────────────────────
-    const layout: ColumnLayout = .{
+    return common.pageFrame(ctx, .{
         .children = &.{
             header.widget(),
             charts_flow.widget(),
@@ -134,19 +158,5 @@ pub fn draw(
             process_table.widget(),
         },
         .gap = 1,
-    };
-
-    const layout_surf = try layout.widget().draw(ctx.withConstraints(
-        .{ .width = content_w },
-        .{ .width = content_w, .height = null },
-    ));
-
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    children[0] = .{ .origin = .{ .row = 1, .col = 2 }, .surface = layout_surf };
-    return .{
-        .size = .{ .width = w, .height = layout_surf.size.height + 1 },
-        .widget = parent_widget,
-        .buffer = &.{},
-        .children = children,
-    };
+    }, w, content_w, parent_widget);
 }

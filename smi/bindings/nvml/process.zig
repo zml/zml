@@ -20,6 +20,8 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     defer shadow.deinit(allocator);
 
     while (w.isRunning()) {
+        const start: std.Io.Timestamp = .now(io, .awake);
+
         shadow.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
@@ -46,17 +48,24 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
 
                 for (shadow.items) |*entry| {
                     if (entry.pid == sample.pid and entry.device_idx == idx) {
-                        entry.gpu_util_percent = @intCast(sample.smUtil);
+                        entry.dev_util_percent = @intCast(sample.smUtil);
                     }
                 }
             }
         }
 
-        const tmp = list.*;
-        list.* = shadow;
-        shadow = tmp;
+        {
+            pi.process_mutex.lockUncancelable(io);
+            defer pi.process_mutex.unlock(io);
+            const tmp = list.*;
+            list.* = shadow;
+            shadow = tmp;
+        }
 
-        io.sleep(interval, .awake) catch {};
+        const elapsed = start.untilNow(io, .awake);
+        if (elapsed.nanoseconds < interval.nanoseconds) {
+            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+        }
     }
 }
 
@@ -65,7 +74,7 @@ fn collectFromQuery(allocator: std.mem.Allocator, list: *std.ArrayList(pi.Proces
         list.append(allocator, .{
             .pid = gp.pid,
             .device_idx = dev_idx,
-            .gpu_mem_kib = @intCast(gp.usedGpuMemory / 1024),
+            .dev_mem_kib = @intCast(gp.usedGpuMemory / 1024),
         }) catch return;
     }
 }

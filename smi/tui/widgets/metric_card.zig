@@ -2,7 +2,6 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
-const utils = @import("../utils.zig");
 const Gauge = @import("components/gauge.zig");
 const BrailleChart = @import("components/braille_chart.zig");
 const TitledBorder = @import("components/titled_border.zig");

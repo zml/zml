@@ -20,9 +20,13 @@ fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
 
         scan(io, allocator, &shadow, devices_per_chip, device_infos);
 
-        const tmp = list.*;
-        list.* = shadow;
-        shadow = tmp;
+        {
+            pi.process_mutex.lockUncancelable(io);
+            defer pi.process_mutex.unlock(io);
+            const tmp = list.*;
+            list.* = shadow;
+            shadow = tmp;
+        }
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {
@@ -58,11 +62,11 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.Proces
                     const tpu = infos[dev_idx].tpu;
 
                     if (tpu.mem_used_bytes) |mem| {
-                        info.gpu_mem_kib = @intCast(mem / 1024);
+                        info.dev_mem_kib = @intCast(mem / 1024);
                     }
 
                     if (tpu.util_percent) |util| {
-                        info.gpu_util_percent = @intCast(util);
+                        info.dev_util_percent = @intCast(util);
                     }
                 }
 

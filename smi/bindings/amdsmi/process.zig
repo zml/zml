@@ -28,6 +28,8 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     defer shadow.deinit(allocator);
 
     while (w.isRunning()) {
+        const start: std.Io.Timestamp = .now(io, .awake);
+
         shadow.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
@@ -42,17 +44,24 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
                 shadow.append(allocator, .{
                     .pid = proc.pid,
                     .device_idx = @intCast(dev_idx),
-                    .gpu_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
-                    .gpu_mem_kib = readProcessGpuVram(io, proc.pid, pci_slot),
+                    .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
+                    .dev_mem_kib = readProcessGpuVram(io, proc.pid, pci_slot),
                 }) catch break;
             }
         }
 
-        const tmp = list.*;
-        list.* = shadow;
-        shadow = tmp;
+        {
+            pi.process_mutex.lockUncancelable(io);
+            defer pi.process_mutex.unlock(io);
+            const tmp = list.*;
+            list.* = shadow;
+            shadow = tmp;
+        }
 
-        io.sleep(interval, .awake) catch {};
+        const elapsed = start.untilNow(io, .awake);
+        if (elapsed.nanoseconds < interval.nanoseconds) {
+            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+        }
     }
 }
 

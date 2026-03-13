@@ -33,11 +33,11 @@ const CliArgs = struct {
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--sample-interval MS] [--poll-interval MS]
+        \\ zml-smi [--top] [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
-        \\ --poll-interval     Device polling interval in ms (default: 100)
+        \\ --poll-interval     Device polling interval in ms (default: 500)
         \\
     ;
 };

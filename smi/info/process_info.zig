@@ -1,8 +1,12 @@
+const std = @import("std");
+
+pub var process_mutex: std.Io.Mutex = .init;
+
 pub const ProcessInfo = struct {
     pid: u32 = 0,
     device_idx: u8 = 0,
-    gpu_util_percent: ?u16 = null,
-    gpu_mem_kib: ?u64 = null,
+    dev_util_percent: ?u16 = null,
+    dev_mem_kib: ?u64 = null,
     uid: u32 = 0,
     username: [32]u8 = .{0} ** 32,
     comm: [256]u8 = .{0} ** 256,

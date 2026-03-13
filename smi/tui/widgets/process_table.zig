@@ -36,22 +36,26 @@ pub fn init(self: *ProcessTable) void {
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) void {
     self.merged.clearRetainingCapacity();
 
-    for (state.process_lists) |pl| {
-        for (pl.items) |entry| {
-            if (device_id) |did| {
-                if (entry.device_idx != did) continue;
+    {
+        pi.process_mutex.lockUncancelable(state.io);
+        defer pi.process_mutex.unlock(state.io);
+        for (state.process_lists) |pl| {
+            for (pl.items) |entry| {
+                if (device_id) |did| {
+                    if (entry.device_idx != did) continue;
+                }
+                self.merged.append(state.allocator, entry) catch break;
             }
-            self.merged.append(state.allocator, entry) catch break;
         }
     }
 
     // Enrich with host data (uid, username, cpu%, rss, cmdline)
     state.enricher.enrich(state.io, self.merged.items);
 
-    // Sort by gpu_mem descending
+    // Sort by dev_mem descending
     std.sort.insertion(ProcessInfo, self.merged.items, {}, struct {
         fn cmp(_: void, a: ProcessInfo, b: ProcessInfo) bool {
-            return (a.gpu_mem_kib orelse 0) > (b.gpu_mem_kib orelse 0);
+            return (a.dev_mem_kib orelse 0) > (b.dev_mem_kib orelse 0);
         }
     }.cmp);
 
@@ -130,11 +134,11 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     segs[0] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, " {d: >7} ", .{info.pid}) };
     segs[1] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: <10} ", .{trunc(strZ(&info.username), 10)}) };
     segs[2] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: <5} ", .{info.device_idx}) };
-    segs[3] = if (info.gpu_util_percent) |util|
+    segs[3] = if (info.dev_util_percent) |util|
         .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >4}% ", .{util}) }
     else
         .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >6} ", .{@as([]const u8, "-")}) };
-    segs[4] = if (info.gpu_mem_kib) |mem|
+    segs[4] = if (info.dev_mem_kib) |mem|
         .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{try fmtMem(ctx.arena, mem)}) }
     else
         .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{@as([]const u8, "-")}) };

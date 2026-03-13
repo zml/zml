@@ -38,43 +38,47 @@ pub const Backend = struct {
     }
 };
 
-fn clearField(infos: []*DeviceInfo, comptime field: []const u8) void {
-    for (infos) |info| {
-        @field(&info.tpu, field) = null;
+const batch_metrics = .{
+    &queryMemUsed,
+    &queryMemTotal,
+    &queryUtil,
+};
+
+fn queryMemUsed(infos: []*DeviceInfo) void {
+    queryInt(infos, "mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes");
+}
+
+fn queryMemTotal(infos: []*DeviceInfo) void {
+    queryInt(infos, "mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes");
+}
+
+fn queryInt(infos: []*DeviceInfo, comptime field: []const u8, comptime metric_name: [:0]const u8) void {
+    var ids: [tpuinfo.max_devices]c_longlong = undefined;
+    var vals: [tpuinfo.max_devices]c_longlong = undefined;
+    const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
+        for (infos) |info| @field(&info.tpu, field) = null;
+        return;
+    };
+    for (ids[0..n], vals[0..n]) |id, val| {
+        if (id >= 0 and id < infos.len) {
+            @field(&infos[@intCast(id)].tpu, field) = @intCast(val);
+        }
     }
 }
 
-fn metric(comptime ValType: type, comptime field: []const u8, comptime metric_name: [:0]const u8) *const fn ([]*DeviceInfo) void {
-    return &struct {
-        fn query(infos: []*DeviceInfo) void {
-            var ids: [tpuinfo.max_devices]c_longlong = undefined;
-            var vals: [tpuinfo.max_devices]ValType = undefined;
-
-            const n = (if (ValType == c_longlong)
-                tpuinfo.queryInt(address, metric_name, &ids, &vals)
-            else
-                tpuinfo.queryDouble(address, metric_name, &ids, &vals)) catch {
-                clearField(infos, field);
-                return;
-            };
-
-            for (ids[0..n], vals[0..n]) |id, val| {
-                if (id >= 0 and id < infos.len) {
-                    @field(&infos[@intCast(id)].tpu, field) = if (ValType == c_longlong)
-                        @intCast(val)
-                    else
-                        @intFromFloat(@round(val));
-                }
-            }
+fn queryUtil(infos: []*DeviceInfo) void {
+    var ids: [tpuinfo.max_devices]c_longlong = undefined;
+    var vals: [tpuinfo.max_devices]f64 = undefined;
+    const n = tpuinfo.queryDouble(address, "tpu.runtime.tensorcore.dutycycle.percent", &ids, &vals) catch {
+        for (infos) |info| info.tpu.util_percent = null;
+        return;
+    };
+    for (ids[0..n], vals[0..n]) |id, val| {
+        if (id >= 0 and id < infos.len) {
+            infos[@intCast(id)].tpu.util_percent = @intFromFloat(@round(val));
         }
-    }.query;
+    }
 }
-
-const batch_metrics = .{
-    metric(c_longlong, "mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes"),
-    metric(c_longlong, "mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes"),
-    metric(f64, "util_percent", "tpu.runtime.tensorcore.dutycycle.percent"),
-};
 
 // -- Discover available chips
 // We need to scan /sys/bus/pci/devices for Google TPU chips.
