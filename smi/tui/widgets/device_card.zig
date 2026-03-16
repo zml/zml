@@ -92,7 +92,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
             const power_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{power});
 
             break :blk try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C | {s}{s} W", .{
-                gpu.temperature orelse 0, spaces[0 .. power_limit_str.len - power_str.len], power_str,
+                gpu.temperature orelse 0, spaces[0..power_limit_str.len -| power_str.len], power_str,
             });
         },
         else => "",
@@ -105,7 +105,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const mem_total_len = mem_total_str.len;
 
     const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{s}{s}/{s} MB", .{
-        spaces[0 .. mem_total_len - mem_used_str.len], mem_used_str,
+        spaces[0..mem_total_len -| mem_used_str.len], mem_used_str,
         mem_total_str,
     });
 

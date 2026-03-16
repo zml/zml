@@ -30,13 +30,13 @@ pub fn colorForTemp(temp_c: u16) Color {
 
 // ── Style Constants ──────────────────────────────────────────────
 
-pub const accent = Color{ .rgb = .{ 120, 180, 255 } };
-pub const accent_secondary = Color{ .rgb = .{ 200, 160, 255 } };
-pub const dim = Color{ .rgb = .{ 100, 100, 120 } };
-pub const text_primary = Color{ .rgb = .{ 230, 230, 240 } };
-pub const text_secondary = Color{ .rgb = .{ 160, 160, 175 } };
-pub const surface_border = Color{ .rgb = .{ 70, 70, 90 } };
-pub const gauge_empty = Color{ .rgb = .{ 50, 50, 65 } };
+pub const accent: Color = .{ .rgb = .{ 120, 180, 255 } };
+pub const accent_secondary: Color = .{ .rgb = .{ 200, 160, 255 } };
+pub const dim: Color = .{ .rgb = .{ 100, 100, 120 } };
+pub const text_primary: Color = .{ .rgb = .{ 230, 230, 240 } };
+pub const text_secondary: Color = .{ .rgb = .{ 160, 160, 175 } };
+pub const surface_border: Color = .{ .rgb = .{ 70, 70, 90 } };
+pub const gauge_empty: Color = .{ .rgb = .{ 50, 50, 65 } };
 
 pub const header_style: Style = .{ .bold = true, .fg = accent };
 pub const title_style: Style = .{ .bold = true, .fg = accent_secondary };
