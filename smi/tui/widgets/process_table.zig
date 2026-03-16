@@ -36,16 +36,14 @@ pub fn init(self: *ProcessTable) void {
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) void {
     self.merged.clearRetainingCapacity();
 
-    {
-        pi.process_mutex.lockUncancelable(state.io);
-        defer pi.process_mutex.unlock(state.io);
-        for (state.process_lists) |pl| {
-            for (pl.items) |entry| {
-                if (device_id) |did| {
-                    if (entry.device_idx != did) continue;
-                }
-                self.merged.append(state.allocator, entry) catch break;
+    for (state.process_lists) |pl| {
+        pl.mutex.lockUncancelable(state.io);
+        defer pl.mutex.unlock(state.io);
+        for (pl.list.items) |entry| {
+            if (device_id) |did| {
+                if (entry.device_idx != did) continue;
             }
+            self.merged.append(state.allocator, entry) catch break;
         }
     }
 

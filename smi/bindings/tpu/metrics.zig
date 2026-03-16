@@ -5,12 +5,13 @@ const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const Worker = @import("../../worker.zig").Worker;
 const pi = @import("../../info/process_info.zig");
+const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";
 
 pub const Backend = struct {
-    processes: std.ArrayList(pi.ProcessInfo) = .{},
+    processes: ProcessShadowList = .init(),
 
     pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
         const chip = scanPciChips(io) orelse return error.TpuUnavailable;

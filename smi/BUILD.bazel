@@ -5,7 +5,6 @@ load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
-
 # tpu grpc
 
 proto_library(
@@ -39,53 +38,23 @@ cc_library(
     ],
 )
 
-# Defines
-
-cc_library(
-    name = "cuda_defines",
-    defines = select({
-        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
-        "//conditions:default": ["ZML_RUNTIME_CUDA_DISABLED"],
-    }),
-)
-
-cc_library(
-    name = "rocm_defines",
-    defines = select({
-        "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
-        "//conditions:default": ["ZML_RUNTIME_ROCM_DISABLED"],
-    }),
-)
-
-cc_library(
-    name = "neuron_defines",
-    defines = select({
-        "//platforms:neuron.enabled": ["ZML_RUNTIME_NEURON"],
-        "//conditions:default": ["ZML_RUNTIME_NEURON_DISABLED"],
-    }),
-)
-
-cc_library(
-    name = "tpu_defines",
-    defines = select({
-        "//platforms:tpu.enabled": ["ZML_RUNTIME_TPU"],
-        "//conditions:default": ["ZML_RUNTIME_TPU_DISABLED"],
-    }),
-)
-
 # smi
 
 copy_to_directory(
     name = "sandbox",
     srcs = select({
-        "//platforms:rocm.enabled": [
+        "@platforms//os:macos": [],
+        "//conditions:default": [
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1//:libdrm_amdgpu",
+            "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+            "@aws-neuronx-runtime-lib//:libncfw.patchelf",
         ],
-        "//conditions:default": [],
     }),
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
+        "libnrt.patchelf": "lib",
+        "libncfw.patchelf": "lib",
     },
     include_external_repositories = ["**"],
 )
@@ -102,8 +71,8 @@ zig_binary(
         "bindings/linux/metrics.zig",
         "bindings/linux/process.zig",
         "bindings/neuron/metrics.zig",
+        "bindings/neuron/nrt.zig",
         "bindings/neuron/process.zig",
-        "bindings/neuron/schema.zig",
         "bindings/nvml/metrics.zig",
         "bindings/nvml/nvml.zig",
         "bindings/nvml/process.zig",
@@ -114,6 +83,7 @@ zig_binary(
         "info/host_info.zig",
         "info/process_info.zig",
         "platform.zig",
+        "shadow_list.zig",
         "sysfs.zig",
         "worker.zig",
     ],
@@ -123,29 +93,18 @@ zig_binary(
     data = [":sandbox"],
     main = "main.zig",
     deps = [
-        ":cuda_defines",
-        ":neuron_defines",
-        ":rocm_defines",
-        ":tpu_defines",
         "//bazel",
         "//stdx",
         "//zml",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
     ] + select({
-        "//platforms:tpu.enabled": [
+        "@platforms//os:macos": [],
+        "//conditions:default": [
+            "//platforms/neuron:libnrt_headers",
             ":tpuinfo",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "//platforms:cuda.enabled": [
             "@cuda_nvml_dev//:nvml",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "//platforms:rocm.enabled": [
             "@amd-smi-lib//:amdsmi",
         ],
-        "//conditions:default": [],
     }),
 )

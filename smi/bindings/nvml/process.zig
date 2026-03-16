@@ -1,13 +1,14 @@
 const std = @import("std");
-const nvml = @import("nvml.zig");
+const Nvml = @import("nvml.zig");
 const pi = @import("../../info/process_info.zig");
+const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)) !void {
-    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list });
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, nvml: *const Nvml) !void {
+    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list, nvml });
 }
 
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)) void {
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, nvml: *const Nvml) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
@@ -16,13 +17,13 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     defer allocator.free(last_seen_ts);
     @memset(last_seen_ts, 0);
 
-    var shadow: std.ArrayList(pi.ProcessInfo) = .{};
-    defer shadow.deinit(allocator);
+    var sl = list.shadow();
+    defer sl.deinit(allocator);
 
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
 
-        shadow.clearRetainingCapacity();
+        sl.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
             const handle = nvml.getHandleByIndex(@intCast(dev_idx)) catch continue;
@@ -30,11 +31,11 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
 
             const compute = nvml.getComputeRunningProcesses(allocator, handle) catch &.{};
             defer if (compute.len > 0) allocator.free(compute);
-            collectFromQuery(allocator, &shadow, idx, compute);
+            collectFromQuery(allocator, &sl, idx, compute);
 
             const graphics = nvml.getGraphicsRunningProcesses(allocator, handle) catch &.{};
             defer if (graphics.len > 0) allocator.free(graphics);
-            collectFromQuery(allocator, &shadow, idx, graphics);
+            collectFromQuery(allocator, &sl, idx, graphics);
 
             // Apply utilization samples
             const last_ts = last_seen_ts[dev_idx];
@@ -46,7 +47,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
 
                 last_seen_ts[dev_idx] = @max(last_seen_ts[dev_idx], sample.timeStamp);
 
-                for (shadow.items) |*entry| {
+                for (sl.list.items) |*entry| {
                     if (entry.pid == sample.pid and entry.device_idx == idx) {
                         entry.dev_util_percent = @intCast(sample.smUtil);
                     }
@@ -54,13 +55,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
             }
         }
 
-        {
-            pi.process_mutex.lockUncancelable(io);
-            defer pi.process_mutex.unlock(io);
-            const tmp = list.*;
-            list.* = shadow;
-            shadow = tmp;
-        }
+        sl.swap(io);
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {
@@ -69,9 +64,9 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     }
 }
 
-fn collectFromQuery(allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), dev_idx: u8, procs: []const nvml.ProcessInfo_t) void {
+fn collectFromQuery(allocator: std.mem.Allocator, sl: *ProcessShadowList.Shadow, dev_idx: u8, procs: []const Nvml.ProcessInfo_t) void {
     for (procs) |gp| {
-        list.append(allocator, .{
+        sl.append(allocator, .{
             .pid = gp.pid,
             .device_idx = dev_idx,
             .dev_mem_kib = @intCast(gp.usedGpuMemory / 1024),

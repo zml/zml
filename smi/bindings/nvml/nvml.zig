@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @import("c");
-const DynLib = @import("../dynlib.zig").Lib(c);
+const DynLib = @import("../dynlib.zig");
 
 pub const Error = ReturnError || error{NvmlUnavailable};
 pub const Handle = c.nvmlDevice_t;
@@ -78,164 +78,186 @@ fn check(ret: c_uint) Error!void {
     };
 }
 
-var lib: DynLib = .{};
+const Nvml = @This();
+lib: Fns,
 
-fn call(comptime name: [:0]const u8, args: std.meta.ArgsTuple(@TypeOf(@field(c, name)))) Error!void {
-    const f = lib.sym(name) orelse return error.NvmlUnavailable;
-    try check(@call(.auto, f, args));
-}
+const Fns = struct {
+    nvmlInit_v2: DynLib.Fn("nvmlInit_v2"),
+    nvmlDeviceGetHandleByIndex_v2: DynLib.Fn("nvmlDeviceGetHandleByIndex_v2"),
+    nvmlDeviceGetCount_v2: DynLib.Fn("nvmlDeviceGetCount_v2"),
+    nvmlDeviceGetName: DynLib.Fn("nvmlDeviceGetName"),
+    nvmlDeviceGetPowerUsage: DynLib.Fn("nvmlDeviceGetPowerUsage"),
+    nvmlDeviceGetTemperature: DynLib.Fn("nvmlDeviceGetTemperature"),
+    nvmlDeviceGetUtilizationRates: DynLib.Fn("nvmlDeviceGetUtilizationRates"),
+    nvmlDeviceGetClockInfo: DynLib.Fn("nvmlDeviceGetClockInfo"),
+    nvmlDeviceGetMaxClockInfo: DynLib.Fn("nvmlDeviceGetMaxClockInfo"),
+    nvmlDeviceGetMemoryInfo: DynLib.Fn("nvmlDeviceGetMemoryInfo"),
+    nvmlDeviceGetFanSpeed: DynLib.Fn("nvmlDeviceGetFanSpeed"),
+    nvmlDeviceGetEnforcedPowerLimit: DynLib.Fn("nvmlDeviceGetEnforcedPowerLimit"),
+    nvmlDeviceGetPcieThroughput: DynLib.Fn("nvmlDeviceGetPcieThroughput"),
+    nvmlDeviceGetEncoderUtilization: DynLib.Fn("nvmlDeviceGetEncoderUtilization"),
+    nvmlDeviceGetDecoderUtilization: DynLib.Fn("nvmlDeviceGetDecoderUtilization"),
+    nvmlDeviceGetTotalEnergyConsumption: DynLib.Fn("nvmlDeviceGetTotalEnergyConsumption"),
+    nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn("nvmlDeviceGetCurrPcieLinkGeneration"),
+    nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn("nvmlDeviceGetCurrPcieLinkWidth"),
+    nvmlDeviceGetMemoryBusWidth: DynLib.Fn("nvmlDeviceGetMemoryBusWidth"),
+    nvmlDeviceGetComputeRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetComputeRunningProcesses_v3"),
+    nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetGraphicsRunningProcesses_v3"),
+    nvmlDeviceGetProcessUtilization: DynLib.Fn("nvmlDeviceGetProcessUtilization"),
+};
 
 // Public API
 
-pub fn init() Error!void {
-    if (!lib.open("libnvidia-ml.so.1") and !lib.open("libnvidia-ml.so"))
+pub fn init() Error!Nvml {
+    const fns = DynLib.open(Fns, "libnvidia-ml.so.1") orelse
+        DynLib.open(Fns, "libnvidia-ml.so") orelse
         return error.NvmlUnavailable;
-    try call("nvmlInit_v2", .{});
+    try check(fns.nvmlInit_v2());
+    return .{ .lib = fns };
 }
 
-pub fn getHandleByIndex(device_id: u32) Error!c.nvmlDevice_t {
+pub fn getHandleByIndex(self: Nvml, device_id: u32) Error!c.nvmlDevice_t {
     var handle: c.nvmlDevice_t = undefined;
-    try call("nvmlDeviceGetHandleByIndex_v2", .{ device_id, &handle });
+    try check(self.lib.nvmlDeviceGetHandleByIndex_v2(device_id, &handle));
     return handle;
 }
 
-pub fn getDeviceCount() Error!u32 {
+pub fn getDeviceCount(self: Nvml) Error!u32 {
     var count: c_uint = 0;
-    try call("nvmlDeviceGetCount_v2", .{&count});
+    try check(self.lib.nvmlDeviceGetCount_v2(&count));
     return @intCast(count);
 }
 
-pub fn getName(handle: c.nvmlDevice_t, buf: []u8) Error![:0]const u8 {
-    try call("nvmlDeviceGetName", .{ handle, buf.ptr, @as(c_uint, @intCast(buf.len)) });
+pub fn getName(self: Nvml, handle: c.nvmlDevice_t, buf: []u8) Error![:0]const u8 {
+    try check(self.lib.nvmlDeviceGetName(handle, buf.ptr, @as(c_uint, @intCast(buf.len))));
     return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf.ptr)), 0);
 }
 
-pub fn getPowerUsage(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPowerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var power_mw: c_uint = 0;
-    try call("nvmlDeviceGetPowerUsage", .{ handle, &power_mw });
+    try check(self.lib.nvmlDeviceGetPowerUsage(handle, &power_mw));
     return power_mw;
 }
 
-pub fn getTemperature(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getTemperature(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var temp: c_uint = 0;
-    try call("nvmlDeviceGetTemperature", .{ handle, c.NVML_TEMPERATURE_GPU, &temp });
+    try check(self.lib.nvmlDeviceGetTemperature(handle, c.NVML_TEMPERATURE_GPU, &temp));
     return temp;
 }
 
-pub fn getUtilizationGpu(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getUtilizationGpu(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c.nvmlUtilization_t = undefined;
-    try call("nvmlDeviceGetUtilizationRates", .{ handle, &util });
+    try check(self.lib.nvmlDeviceGetUtilizationRates(handle, &util));
     return util.gpu;
 }
 
-pub fn getClockGraphics(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getClockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
-    try call("nvmlDeviceGetClockInfo", .{ handle, c.NVML_CLOCK_GRAPHICS, &clock });
+    try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &clock));
     return clock;
 }
 
-pub fn getClockSm(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getClockSm(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
-    try call("nvmlDeviceGetClockInfo", .{ handle, c.NVML_CLOCK_SM, &clock });
+    try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_SM, &clock));
     return clock;
 }
 
-pub fn getClockMem(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getClockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
-    try call("nvmlDeviceGetClockInfo", .{ handle, c.NVML_CLOCK_MEM, &clock });
+    try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_MEM, &clock));
     return clock;
 }
 
-pub fn getMaxClockGraphics(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getMaxClockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
-    try call("nvmlDeviceGetMaxClockInfo", .{ handle, c.NVML_CLOCK_GRAPHICS, &clock });
+    try check(self.lib.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &clock));
     return clock;
 }
 
-pub fn getMaxClockMem(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getMaxClockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
-    try call("nvmlDeviceGetMaxClockInfo", .{ handle, c.NVML_CLOCK_MEM, &clock });
+    try check(self.lib.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_MEM, &clock));
     return clock;
 }
 
-pub fn getMemTotal(handle: c.nvmlDevice_t) Error!u64 {
+pub fn getMemTotal(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var mem: c.nvmlMemory_t = undefined;
-    try call("nvmlDeviceGetMemoryInfo", .{ handle, &mem });
+    try check(self.lib.nvmlDeviceGetMemoryInfo(handle, &mem));
     return @intCast(mem.total);
 }
 
-pub fn getMemUsed(handle: c.nvmlDevice_t) Error!u64 {
+pub fn getMemUsed(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var mem: c.nvmlMemory_t = undefined;
-    try call("nvmlDeviceGetMemoryInfo", .{ handle, &mem });
+    try check(self.lib.nvmlDeviceGetMemoryInfo(handle, &mem));
     return @intCast(mem.used);
 }
 
-pub fn getFanSpeed(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getFanSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var speed: c_uint = 0;
-    try call("nvmlDeviceGetFanSpeed", .{ handle, &speed });
+    try check(self.lib.nvmlDeviceGetFanSpeed(handle, &speed));
     return speed;
 }
 
-pub fn getPowerLimit(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPowerLimit(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var limit: c_uint = 0;
-    try call("nvmlDeviceGetEnforcedPowerLimit", .{ handle, &limit });
+    try check(self.lib.nvmlDeviceGetEnforcedPowerLimit(handle, &limit));
     return limit;
 }
 
-pub fn getPcieTxKBps(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPcieTxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var value: c_uint = 0;
-    try call("nvmlDeviceGetPcieThroughput", .{ handle, c.NVML_PCIE_UTIL_TX_BYTES, &value });
+    try check(self.lib.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_TX_BYTES, &value));
     return value;
 }
 
-pub fn getPcieRxKBps(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPcieRxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var value: c_uint = 0;
-    try call("nvmlDeviceGetPcieThroughput", .{ handle, c.NVML_PCIE_UTIL_RX_BYTES, &value });
+    try check(self.lib.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_RX_BYTES, &value));
     return value;
 }
 
-pub fn getEncoderUtil(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getEncoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c_uint = 0;
     var sampling: c_uint = 0;
-    try call("nvmlDeviceGetEncoderUtilization", .{ handle, &util, &sampling });
+    try check(self.lib.nvmlDeviceGetEncoderUtilization(handle, &util, &sampling));
     return util;
 }
 
-pub fn getDecoderUtil(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getDecoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c_uint = 0;
     var sampling: c_uint = 0;
-    try call("nvmlDeviceGetDecoderUtilization", .{ handle, &util, &sampling });
+    try check(self.lib.nvmlDeviceGetDecoderUtilization(handle, &util, &sampling));
     return util;
 }
 
-pub fn getTotalEnergy(handle: c.nvmlDevice_t) Error!u64 {
+pub fn getTotalEnergy(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var energy: c_ulonglong = 0;
-    try call("nvmlDeviceGetTotalEnergyConsumption", .{ handle, &energy });
+    try check(self.lib.nvmlDeviceGetTotalEnergyConsumption(handle, &energy));
     return @intCast(energy);
 }
 
-pub fn getPcieLinkGen(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPcieLinkGen(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var gen: c_uint = 0;
-    try call("nvmlDeviceGetCurrPcieLinkGeneration", .{ handle, &gen });
+    try check(self.lib.nvmlDeviceGetCurrPcieLinkGeneration(handle, &gen));
     return gen;
 }
 
-pub fn getPcieLinkWidth(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getPcieLinkWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
-    try call("nvmlDeviceGetCurrPcieLinkWidth", .{ handle, &width });
+    try check(self.lib.nvmlDeviceGetCurrPcieLinkWidth(handle, &width));
     return width;
 }
 
-pub fn getMemBusWidth(handle: c.nvmlDevice_t) Error!c_uint {
+pub fn getMemBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
-    try call("nvmlDeviceGetMemoryBusWidth", .{ handle, &width });
+    try check(self.lib.nvmlDeviceGetMemoryBusWidth(handle, &width));
     return width;
 }
 
-pub fn getComputeRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
-    const f = lib.sym("nvmlDeviceGetComputeRunningProcesses_v3") orelse return error.NvmlUnavailable;
+pub fn getComputeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
     var count: c_uint = 0;
-    const ret = f(handle, &count, null);
+    const ret = self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, null);
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
         if (ret == c.NVML_SUCCESS) return &.{};
         try check(ret);
@@ -243,15 +265,13 @@ pub fn getComputeRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDe
     if (count == 0) return &.{};
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
-    try check(f(handle, &count, @ptrCast(infos.ptr)));
+    try check(self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
     return infos;
 }
 
-pub fn getGraphicsRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]const c.nvmlProcessInfo_t {
-    const f = lib.sym("nvmlDeviceGetGraphicsRunningProcesses_v3") orelse return error.NvmlUnavailable;
-
+pub fn getGraphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]const c.nvmlProcessInfo_t {
     var count: c_uint = 0;
-    const ret = f(handle, &count, null);
+    const ret = self.lib.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, null);
 
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
         if (ret == c.NVML_SUCCESS) return &.{};
@@ -263,16 +283,14 @@ pub fn getGraphicsRunningProcesses(allocator: std.mem.Allocator, handle: c.nvmlD
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
 
-    try check(f(handle, &count, @ptrCast(infos.ptr)));
+    try check(self.lib.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
 
     return infos;
 }
 
-pub fn getProcessUtilization(allocator: std.mem.Allocator, handle: c.nvmlDevice_t, last_seen: u64) (Error || error{OutOfMemory})![]const c.nvmlProcessUtilizationSample_t {
-    const f = lib.sym("nvmlDeviceGetProcessUtilization") orelse return error.NvmlUnavailable;
-
+pub fn getProcessUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t, last_seen: u64) (Error || error{OutOfMemory})![]const c.nvmlProcessUtilizationSample_t {
     var count: c_uint = 0;
-    const ret = f(handle, null, &count, last_seen);
+    const ret = self.lib.nvmlDeviceGetProcessUtilization(handle, null, &count, last_seen);
 
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
         if (ret == c.NVML_SUCCESS) return &.{};
@@ -284,7 +302,7 @@ pub fn getProcessUtilization(allocator: std.mem.Allocator, handle: c.nvmlDevice_
     const samples = try allocator.alloc(c.nvmlProcessUtilizationSample_t, count);
     errdefer allocator.free(samples);
 
-    try check(f(handle, @ptrCast(samples.ptr), &count, last_seen));
+    try check(self.lib.nvmlDeviceGetProcessUtilization(handle, @ptrCast(samples.ptr), &count, last_seen));
 
     return samples;
 }

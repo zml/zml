@@ -1,3 +1,5 @@
+const std = @import("std");
+
 pub const Target = enum {
     cuda,
     rocm,
@@ -72,6 +74,10 @@ pub const NeuronInfo = struct {
     util_percent: ?u64 = null,
     mem_used_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
+
+    // Utilization delta tracking (written by metrics worker)
+    prev_total_us: u64 = 0,
+    prev_timestamp: ?std.Io.Timestamp = null,
 
     // Neuron per-core HBM breakdown (bytes)
     nc_tensors: ?u64 = null,
