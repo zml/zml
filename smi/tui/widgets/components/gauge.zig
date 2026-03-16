@@ -47,8 +47,8 @@ pub fn draw(self: *const Gauge, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
     const actual_suffix_area: u16 = if (self.suffix) |s| @as(u16, @intCast(ctx.stringWidth(s))) + sep_w else 0;
     const effective_suffix_area = @max(actual_suffix_area, self.suffix_reserve);
 
-    // Reserved: label + "[" + "]" + " " (after ]) + pct + suffix_area
-    const reserved = label_w + pct_width + 3 + effective_suffix_area; // 3 for [ ] and space after ]
+    // Reserved: label + "[" + "]" + pct + suffix_area
+    const reserved = label_w + pct_width + 2 + effective_suffix_area; // 2 for [ ]
     if (reserved >= width) {
         // Not enough space for a bar — just show label
         var spans: std.ArrayList(vaxis.Cell.Segment) = .empty;
@@ -102,15 +102,20 @@ pub fn draw(self: *const Gauge, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
         spans.appendAssumeCapacity(.{ .text = empty_str, .style = .{ .fg = theme.gauge_empty } });
     }
 
-    // Closing bracket + space
-    spans.appendAssumeCapacity(.{ .text = "] ", .style = theme.dim_style });
+    // Closing bracket (no space — pct% collides with bar)
+    spans.appendAssumeCapacity(.{ .text = "]", .style = theme.dim_style });
 
     // Percentage text
     spans.appendAssumeCapacity(.{ .text = pct_str, .style = .{ .bold = true, .fg = theme.colorForPercent(self.value) } });
 
-    // Suffix
+    // Suffix (right-aligned)
     if (self.suffix) |suffix| {
-        spans.appendAssumeCapacity(.{ .text = "   ", .style = theme.dim_style });
+        const suffix_text_w: u16 = @intCast(ctx.stringWidth(suffix));
+        const pad = effective_suffix_area -| suffix_text_w;
+        if (pad > 0) {
+            const pad_str = try utils.repeatStr(ctx.arena, " ", pad);
+            spans.appendAssumeCapacity(.{ .text = pad_str, .style = theme.dim_style });
+        }
         spans.appendAssumeCapacity(.{ .text = suffix, .style = theme.dim_style });
     }
 

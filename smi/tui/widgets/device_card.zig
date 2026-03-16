@@ -16,6 +16,8 @@ state: *const data.SystemState = undefined,
 use_braille: bool = false,
 viewing_device: *?u8 = undefined,
 
+const spaces = [_]u8{' '} ** 255;
+
 pub fn widget(self: *DeviceCard) vxfw.Widget {
     return .{
         .userdata = self,
@@ -80,15 +82,31 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const target: data.Target = std.meta.activeTag(dev.*);
     const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ target.deviceLabel(), i, name });
     const util_label = target.utilLabel();
+
     const dev_suffix = switch (dev.*) {
-        .cuda, .rocm => |gpu| try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C \u{2502} {d}W", .{
-            gpu.temperature orelse 0, (gpu.power_mw orelse 0) / 1000,
-        }),
+        .cuda, .rocm => |gpu| blk: {
+            const power = (gpu.power_mw orelse 0) / 1000;
+            const power_limit = (gpu.power_limit_mw orelse 0) / 1000;
+
+            const power_limit_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{power_limit});
+            const power_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{power});
+
+            break :blk try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C | {s}{s} W", .{
+                gpu.temperature orelse 0, spaces[0 .. power_limit_str.len - power_str.len], power_str,
+            });
+        },
         else => "",
     };
 
-    const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{d}/{d} MB", .{
-        utils.bytesToMb(mem_used), utils.bytesToMb(mem_total),
+    const mem_used_mb = utils.bytesToMb(mem_used);
+    const mem_total_mb = utils.bytesToMb(mem_total);
+    const mem_total_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_total_mb});
+    const mem_used_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_used_mb});
+    const mem_total_len = mem_total_str.len;
+
+    const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{s}{s}/{s} MB", .{
+        spaces[0 .. mem_total_len - mem_used_str.len], mem_used_str,
+        mem_total_str,
     });
 
     var card: MetricCard = .{
