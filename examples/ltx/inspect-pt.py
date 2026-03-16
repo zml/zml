@@ -73,6 +73,10 @@ def print_activation_summary(acts, max_keys: int) -> None:
             print(f"  {k}")
             print(f"    input:  {describe_value(inp)}")
             print(f"    output: {describe_value(out)}")
+        elif isinstance(v, dict) and ("input" in v or "output" in v):
+            print(f"  {k}")
+            print(f"    input:  {describe_value(v.get('input'))}")
+            print(f"    output: {describe_value(v.get('output'))}")
         else:
             print(f"  {k}: {describe_value(v)}")
 
