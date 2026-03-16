@@ -8,7 +8,39 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "ff_parity",
+    main = "ff_parity.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "model_check",
+    main = "model_check.zig",
+    srcs = ["model.zig"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "ff_forward_check",
+    main = "ff_forward_check.zig",
+    srcs = ["model.zig"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
-    targets = [":ltx"],
+    targets = [
+        ":ltx",
+        ":ff_parity",
+        ":model_check",
+        ":ff_forward_check",
+    ],
 )
