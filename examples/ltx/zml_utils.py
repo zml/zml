@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import builtins
+import dataclasses
 import enum
 import logging
 import re
@@ -69,6 +70,7 @@ class ActivationCollector:
         self.outs = {}
         self.modules = []
         self._seen = 0
+        self._budget_debug_printed = False
 
         if not isinstance(model, torch.nn.Module):
             raise TypeError(f"ActivationCollector expects a torch.nn.Module, got {type(model)}")
@@ -190,11 +192,14 @@ class ActivationCollector:
         if out is None:
             return
 
-        outs = [o.detach().cpu() for o in _flatten(out)]
+        out_tensors = _dedup_tensors(_flatten(out))
+        outs = [o.detach().cpu() for o in out_tensors]
         captured_inputs = []
         if self.capture_inputs:
-            captured_inputs = [i.detach().cpu() for i in _flatten(input)]
-            captured_inputs.extend(i.detach().cpu() for i in _flatten(kwargs))
+            in_tensors = _dedup_tensors(_flatten(input))
+            kw_tensors = _dedup_tensors(_flatten(kwargs))
+            captured_inputs = [i.detach().cpu() for i in in_tensors]
+            captured_inputs.extend(i.detach().cpu() for i in kw_tensors)
 
         new_bytes = 0
         for t in outs:
@@ -204,6 +209,19 @@ class ActivationCollector:
 
         if self.max_capture_bytes > 0 and self.capture_bytes + new_bytes > self.max_capture_bytes:
             self.capture_disabled = True
+            if not self._budget_debug_printed:
+                self._budget_debug_printed = True
+                print(
+                    "ActivationCollector debug: single hook too large ",
+                    {
+                        "module": name,
+                        "out_type": str(type(out)),
+                        "out_tensors": len(out_tensors),
+                        "captured_inputs": len(captured_inputs),
+                        "new_bytes_gib": round(new_bytes / 1024**3, 3),
+                        "max_capture_gib": round(self.max_capture_bytes / 1024**3, 3),
+                    },
+                )
             print(
                 "ActivationCollector: reached capture budget "
                 f"({self.capture_bytes / 1024**3:.2f} GiB), disabling further captures"
@@ -239,21 +257,77 @@ def save_with_confirmation(filename: str, tensors: dict):
 
 
 def _flatten(out):
+    return _flatten_impl(out, seen=set())
+
+
+def _dedup_tensors(tensors: list[torch.Tensor]) -> list[torch.Tensor]:
+    out = []
+    seen = set()
+    for t in tensors:
+        tid = id(t)
+        if tid in seen:
+            continue
+        seen.add(tid)
+        out.append(t)
+    return out
+
+
+def _flatten_impl(out, seen: set[int]):
     if out is None:
         return []
-    elif isinstance(out, torch.Tensor):
-        outs = [out]
-    elif isinstance(out, tuple):
+
+    if isinstance(out, torch.Tensor):
+        return [out]
+
+    # Skip primitive scalars and strings.
+    if isinstance(out, (str, bytes, int, float, bool)):
+        return []
+
+    # Guard against cycles in arbitrary object graphs.
+    oid = id(out)
+    if oid in seen:
+        return []
+    seen.add(oid)
+
+    if isinstance(out, (tuple, list, set)):
         outs = []
         for x in out:
-            outs.extend(_flatten(x))
-    elif isinstance(out, dict):
+            outs.extend(_flatten_impl(x, seen))
+        return outs
+
+    if isinstance(out, dict):
         outs = []
         for x in out.values():
-            outs.extend(_flatten(x))
-    else:
+            outs.extend(_flatten_impl(x, seen))
+        return outs
+
+    if dataclasses.is_dataclass(out):
         outs = []
-    return outs
+        for f in dataclasses.fields(out):
+            outs.extend(_flatten_impl(getattr(out, f.name), seen))
+        return outs
+
+    if hasattr(out, "_asdict"):
+        outs = []
+        for x in out._asdict().values():
+            outs.extend(_flatten_impl(x, seen))
+        return outs
+
+    # Avoid traversing model/module internals; this explodes capture size.
+    if isinstance(out, torch.nn.Module):
+        return []
+
+    if hasattr(out, "__dict__"):
+        outs = []
+        for key, x in vars(out).items():
+            if key.startswith("_"):
+                continue
+            if isinstance(x, torch.nn.Module):
+                continue
+            outs.extend(_flatten_impl(x, seen))
+        return outs
+
+    return []
 
 
 def named_modules(model):
