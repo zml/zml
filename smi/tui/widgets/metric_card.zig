@@ -186,16 +186,16 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
             try children.append(ctx.arena, .{ .origin = .{ .row = text_row, .col = right_col }, .surface = pct_surf });
 
             if (chart.suffix) |suffix| {
-                const suffix_col: i17 = right_col + @as(i17, @intCast(pct_w)) + 1;
+                const suffix_text_w: u16 = @intCast(ctx.stringWidth(suffix));
+                const suffix_col: i17 = @intCast(inner_w -| suffix_text_w);
                 const suffix_rich: RichText = .{
                     .text = &.{
-                        .{ .text = "   ", .style = theme.dim_style },
                         .{ .text = suffix, .style = theme.dim_style },
                     },
                     .softwrap = false,
                     .overflow = .clip,
                 };
-                const suffix_surf = try suffix_rich.draw(ctx.withConstraints(.{}, .{ .width = effective_suffix_area, .height = 1 }));
+                const suffix_surf = try suffix_rich.draw(ctx.withConstraints(.{}, .{ .width = suffix_text_w, .height = 1 }));
                 try children.append(ctx.arena, .{ .origin = .{ .row = text_row, .col = suffix_col }, .surface = suffix_surf });
             }
 
