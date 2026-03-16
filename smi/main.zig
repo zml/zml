@@ -1,5 +1,7 @@
 const std = @import("std");
-const c = @import("c");
+const builtin = @import("builtin");
+const c = if (builtin.os.tag == .macos) @import("c") else void;
+
 const stdx = @import("stdx");
 
 pub const std_options: std.Options = .{
@@ -44,7 +46,7 @@ const CliArgs = struct {
 
 pub fn main(init: std.process.Init) !void {
     const gpa = init.gpa;
-    const allocator = init.arena.allocator();
+    const arena = init.arena.allocator();
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
@@ -55,14 +57,31 @@ pub fn main(init: std.process.Init) !void {
 
     var device_infos: std.ArrayList(*DeviceInfo) = .{};
     defer {
-        for (device_infos.items) |info| allocator.destroy(info);
-        device_infos.deinit(allocator);
+        for (device_infos.items) |info| arena.destroy(info);
+        device_infos.deinit(arena);
     }
+
     var host_info: HostInfo = .{};
     try host.init(&w, io, &host_info);
 
     var enricher: ProcessEnricher = try .init(gpa, io);
     defer enricher.deinit();
+
+    var state_config: data.SystemState.Config = .{
+        .devices = device_infos.items,
+        .host = &host_info,
+        .targets = targets,
+        .tui_refresh_rate = args.tui_refresh_rate,
+        .process_lists = &.{},
+        .enricher = &enricher,
+        .io = io,
+    };
+
+    if (comptime builtin.os.tag == .macos) {
+        try runSmi(io, gpa, arena, args.top, state_config);
+
+        return;
+    }
 
     var cuda: nvml.Backend = .{};
     var rocm: amdsmi.Backend = .{};
@@ -73,48 +92,47 @@ pub fn main(init: std.process.Init) !void {
     defer aws_neuron.deinit(gpa);
     defer google_tpu.deinit(gpa);
 
-    if (@hasDecl(c, "ZML_RUNTIME_ROCM") and targets.contains(.rocm)) {
-        rocm.start(&w, io, allocator, &device_infos, gpa) catch {
-            std.log.err("rocm smi init failed; skipped", .{});
+    if (targets.contains(.rocm)) {
+        rocm.start(&w, io, arena, &device_infos, gpa) catch {
+            std.log.err("rocm skipped", .{});
         };
     }
 
-    if (@hasDecl(c, "ZML_RUNTIME_CUDA") and targets.contains(.cuda)) {
-        cuda.start(&w, io, allocator, &device_infos, gpa) catch {
-            std.log.err("nvml smi init failed; skipped", .{});
+    if (targets.contains(.cuda)) {
+        cuda.start(&w, io, arena, &device_infos, gpa) catch {
+            std.log.err("nvml skipped", .{});
         };
     }
 
-    if (@hasDecl(c, "ZML_RUNTIME_NEURON") and targets.contains(.neuron)) {
-        aws_neuron.start(&w, io, allocator, &device_infos, gpa) catch {
-            std.log.err("neuron smi init failed; skipped", .{});
+    if (targets.contains(.neuron)) {
+        aws_neuron.start(&w, io, arena, &device_infos, gpa) catch {
+            std.log.err("neuron skipped", .{});
         };
     }
 
-    if (@hasDecl(c, "ZML_RUNTIME_TPU") and targets.contains(.tpu)) {
-        google_tpu.start(&w, io, allocator, &device_infos, gpa) catch {
-            std.log.err("tpu smi init failed; skipped", .{});
+    if (targets.contains(.tpu)) {
+        google_tpu.start(&w, io, arena, &device_infos, gpa) catch {
+            std.log.err("tpu skipped", .{});
         };
     }
 
-    var proc_ptrs = [_]*std.ArrayList(data.pi.ProcessInfo){
+    var proc_ptrs = [_]*data.ProcessShadowList{
         &cuda.processes, &rocm.processes, &aws_neuron.processes, &google_tpu.processes,
     };
 
-    var state = try data.SystemState.init(allocator, .{
-        .devices = device_infos.items,
-        .host = &host_info,
-        .targets = targets,
-        .tui_refresh_rate = args.tui_refresh_rate,
-        .process_lists = &proc_ptrs,
-        .enricher = &enricher,
-        .io = io,
-    });
-    defer state.deinit(allocator);
+    state_config.process_lists = &proc_ptrs;
+    state_config.devices = device_infos.items;
 
-    if (args.top) {
+    try runSmi(io, gpa, arena, args.top, state_config);
+}
+
+fn runSmi(io: std.Io, gpa: std.mem.Allocator, arena: std.mem.Allocator, top: bool, state_config: data.SystemState.Config) !void {
+    var state = try data.SystemState.init(arena, state_config);
+    defer state.deinit(arena);
+
+    if (top) {
         try tui.run(gpa, io, &state);
     } else {
-        try static_print.run(allocator, io, &state);
+        try static_print.run(arena, io, &state);
     }
 }

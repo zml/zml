@@ -4,7 +4,7 @@ const HostInfo = @import("../../info/host_info.zig").HostInfo;
 const Worker = @import("../../worker.zig").Worker;
 
 pub fn init(w: *Worker, io: std.Io, info: *HostInfo) !void {
-    const host = Host{ .io = io };
+    const host: Host = .{ .io = io };
 
     // read once metrics
     info.hostname = host.getHostname() catch null;

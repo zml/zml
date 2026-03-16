@@ -1,55 +1,97 @@
 const std = @import("std");
+const c = @import("c");
+const Nrt = @import("nrt.zig");
 const pi = @import("../../info/process_info.zig");
-const schema = @import("schema.zig");
+const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
+const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
+const Worker = @import("../../worker.zig").Worker;
 
-pub fn update(io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), shadow: *std.ArrayList(pi.ProcessInfo), runtimes: []const schema.RuntimeData) void {
-    shadow.clearRetainingCapacity();
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo) !void {
+    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list, nrt, handles, nc_per_device, device_infos });
+}
 
-    for (runtimes) |rt| {
-        if (rt.pid == 0) break;
-        const mem_used = rt.report.memory_used orelse continue;
-        const breakdown = mem_used.neuron_runtime_used_bytes.usage_breakdown orelse continue;
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo) void {
+    const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
+    io.sleep(interval, .awake) catch {};
 
-        // Find the neuroncore with the most memory usage for this process because
-        // neuron still show every core per process even though the core is not used
-        var best_core: ?u8 = null;
-        var best_mem: u64 = 0;
-        var it = breakdown.neuroncore_memory_usage.map.iterator();
-        while (it.next()) |entry| {
-            const v = entry.value_ptr;
-            const total = v.constants + v.model_code + v.model_shared_scratchpad + v.runtime_memory + v.tensors;
-            if (total > best_mem) {
-                best_mem = total;
-                best_core = std.fmt.parseInt(u8, entry.key_ptr.*, 10) catch continue;
+    if (handles.len == 0) return;
+
+    var sl = list.shadow();
+    defer sl.deinit(allocator);
+
+    while (w.isRunning()) {
+        const start: std.Io.Timestamp = .now(io, .awake);
+
+        sl.clearRetainingCapacity();
+
+        for (handles, 0..) |handle, dev_i| {
+            const apps_result = nrt.getAllAppsInfo(handle) catch continue;
+            defer if (apps_result.ptr) |ptr| std.c.free(@ptrCast(ptr));
+
+            const apps = if (apps_result.ptr) |ptr| ptr[0..apps_result.count] else continue;
+
+            var total_us_per_core: [c.MAX_NC_PER_DEVICE]u64 = .{0} ** c.MAX_NC_PER_DEVICE;
+
+            for (apps) |*app| {
+                if (app.pid <= 0) continue;
+
+                const nds = nrt.ndsOpen(handle, app.pid) catch continue;
+                defer nrt.ndsClose(nds);
+
+                for (0..nc_per_device) |ci| {
+                    const time_in_use = nrt.getNcCounter(nds, @intCast(ci), c.NDS_NC_COUNTER_TIME_IN_USE) catch continue;
+                    total_us_per_core[ci] += time_in_use;
+
+                    if (time_in_use == 0) continue;
+
+                    const dev_idx: u32 = @intCast(dev_i * nc_per_device + ci);
+
+                    var info: pi.ProcessInfo = .{
+                        .pid = @bitCast(app.pid),
+                        .device_idx = @intCast(dev_idx),
+                        .dev_mem_kib = @intCast(app.device_mem_size / 1024),
+                    };
+
+                    if (dev_idx < device_infos.len) {
+                        if (device_infos[dev_idx].neuron.util_percent) |util| {
+                            info.dev_util_percent = @intCast(util);
+                        }
+                    }
+
+                    if (info.dev_mem_kib != null and info.dev_mem_kib.? > 0)
+                        sl.append(allocator, info) catch break;
+                }
+            }
+
+            const now: std.Io.Timestamp = .now(io, .awake);
+
+            for (0..nc_per_device) |ci| {
+                const dev_idx = dev_i * nc_per_device + ci;
+                if (dev_idx >= device_infos.len) break;
+
+                const ni = &device_infos[dev_idx].neuron;
+                const prev_us = ni.prev_total_us;
+
+                ni.prev_total_us = total_us_per_core[ci];
+
+                if (ni.prev_timestamp) |prev| {
+                    const elapsed = prev.untilNow(io, .awake);
+                    const elapsed_us: u64 = @intCast(@divFloor(elapsed.nanoseconds, std.time.ns_per_us));
+                    if (elapsed_us > 0) {
+                        const delta_us = total_us_per_core[ci] -| prev_us;
+                        ni.util_percent = @min(100, delta_us * 100 / elapsed_us);
+                    }
+                }
+
+                ni.prev_timestamp = now;
             }
         }
 
-        const core = best_core orelse continue;
+        sl.swap(io);
 
-        // Look up utilization for the matched core
-        const util: ?u16 = blk: {
-            const counters = rt.report.neuroncore_counters orelse break :blk null;
-            var buf: [4]u8 = undefined;
-            const key = std.fmt.bufPrint(&buf, "{d}", .{core}) catch break :blk null;
-            break :blk if (counters.neuroncores_in_use.map.get(key)) |usage|
-                @intFromFloat(@round(usage.neuroncore_utilization))
-            else
-                null;
-        };
-
-        shadow.append(allocator, .{
-            .pid = rt.pid,
-            .device_idx = core,
-            .dev_mem_kib = @intCast(mem_used.neuron_runtime_used_bytes.neuron_device / 1024),
-            .dev_util_percent = util,
-        }) catch break;
-    }
-
-    {
-        pi.process_mutex.lockUncancelable(io);
-        defer pi.process_mutex.unlock(io);
-        const tmp = list.*;
-        list.* = shadow.*;
-        shadow.* = tmp;
+        const elapsed = start.untilNow(io, .awake);
+        if (elapsed.nanoseconds < interval.nanoseconds) {
+            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+        }
     }
 }

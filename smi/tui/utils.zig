@@ -40,7 +40,7 @@ pub fn repeatStr(arena: std.mem.Allocator, char: []const u8, count: u16) std.mem
     return buf;
 }
 
-/// Map values from [min_val, max_val] to [0, 100], clamped.
+/// Maps values from [min_val, max_val] to [0, 100], clamped.
 pub fn normalizeRange(arena: std.mem.Allocator, raw: []const u64, min_val: u64, max_val: u64) std.mem.Allocator.Error![]u8 {
     const result = try arena.alloc(u8, raw.len);
     const range = max_val -| min_val;

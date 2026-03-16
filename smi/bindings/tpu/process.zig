@@ -1,32 +1,27 @@
 const std = @import("std");
 const pi = @import("../../info/process_info.zig");
+const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *std.ArrayList(pi.ProcessInfo)) !void {
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessShadowList) !void {
     try w.spawnCustomWorker(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos });
 }
 
-fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, device_infos: []*DeviceInfo) void {
+fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, devices_per_chip: u32, device_infos: []*DeviceInfo) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
 
-    var shadow: std.ArrayList(pi.ProcessInfo) = .{};
-    defer shadow.deinit(allocator);
+    var sl = list.shadow();
+    defer sl.deinit(allocator);
 
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
 
-        shadow.clearRetainingCapacity();
+        sl.clearRetainingCapacity();
 
-        scan(io, allocator, &shadow, devices_per_chip, device_infos);
+        scan(io, allocator, &sl, devices_per_chip, device_infos);
 
-        {
-            pi.process_mutex.lockUncancelable(io);
-            defer pi.process_mutex.unlock(io);
-            const tmp = list.*;
-            list.* = shadow;
-            shadow = tmp;
-        }
+        sl.swap(io);
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {
@@ -35,7 +30,7 @@ fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     }
 }
 
-fn scan(io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, infos: []*DeviceInfo) void {
+fn scan(io: std.Io, allocator: std.mem.Allocator, sl: *ProcessShadowList.Shadow, devices_per_chip: u32, infos: []*DeviceInfo) void {
     var proc_dir = std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true }) catch return;
     defer proc_dir.close(io);
 
@@ -70,7 +65,7 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.Proces
                     }
                 }
 
-                list.append(allocator, info) catch return;
+                sl.append(allocator, info) catch return;
                 break;
             }
         }

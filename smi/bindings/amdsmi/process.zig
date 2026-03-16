@@ -1,22 +1,23 @@
 const std = @import("std");
-const amdsmi = @import("amdsmi.zig");
+const AmdSmi = @import("amdsmi.zig");
 const pi = @import("../../info/process_info.zig");
+const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const Worker = @import("../../worker.zig").Worker;
 
 const bdf_len = "0000:00:00.0".len;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)) !void {
-    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list });
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi) !void {
+    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list, amdsmi });
 }
 
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *std.ArrayList(pi.ProcessInfo)) void {
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
     var pci_slots: std.ArrayList([bdf_len]u8) = .{};
     defer pci_slots.deinit(allocator);
 
-    const device_count = amdsmi.getDeviceCount() catch 0;
+    const device_count = amdsmi.getDeviceCount();
     pci_slots.ensureTotalCapacity(allocator, device_count) catch {};
     for (0..device_count) |i| {
         const handle = amdsmi.getHandleByIndex(@intCast(i)) catch continue;
@@ -24,13 +25,13 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
         pci_slots.appendAssumeCapacity(formatBdf(bdf_id));
     }
 
-    var shadow: std.ArrayList(pi.ProcessInfo) = .{};
-    defer shadow.deinit(allocator);
+    var sl = list.shadow();
+    defer sl.deinit(allocator);
 
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
 
-        shadow.clearRetainingCapacity();
+        sl.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
             const handle = amdsmi.getHandleByIndex(@intCast(dev_idx)) catch continue;
@@ -41,7 +42,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
             const pci_slot = if (dev_idx < pci_slots.items.len) &pci_slots.items[dev_idx] else continue;
 
             for (procs) |proc| {
-                shadow.append(allocator, .{
+                sl.append(allocator, .{
                     .pid = proc.pid,
                     .device_idx = @intCast(dev_idx),
                     .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
@@ -50,13 +51,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
             }
         }
 
-        {
-            pi.process_mutex.lockUncancelable(io);
-            defer pi.process_mutex.unlock(io);
-            const tmp = list.*;
-            list.* = shadow;
-            shadow = tmp;
-        }
+        sl.swap(io);
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {
@@ -65,7 +60,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *s
     }
 }
 
-/// Read per-GPU VRAM from /proc/<pid>/fdinfo/, filtered by PCI slot.
+/// Reads per-GPU VRAM from /proc/<pid>/fdinfo/, filtered by PCI slot.
 /// amdsmi reports global VRAM across all GPUs; fdinfo gives per-GPU values.
 fn readProcessGpuVram(io: std.Io, pid: u32, pci_slot: *const [bdf_len]u8) u64 {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;

@@ -8,6 +8,7 @@ pub const Target = di.Target;
 pub const Targets = @import("../platform.zig").Targets;
 pub const HostInfo = @import("../info/host_info.zig").HostInfo;
 pub const pi = @import("../info/process_info.zig");
+pub const ProcessShadowList = @import("../shadow_list.zig").ShadowList(pi.ProcessInfo);
 pub const ProcessEnricher = @import("../bindings/linux/process.zig").ProcessEnricher;
 
 pub const history_len: usize = 500;
@@ -79,7 +80,7 @@ pub const SystemState = struct {
     host: *HostInfo,
     history: HistoryBuffers = .{},
     targets: Targets,
-    process_lists: []*std.ArrayList(pi.ProcessInfo),
+    process_lists: []*ProcessShadowList,
     enricher: *ProcessEnricher,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -90,7 +91,7 @@ pub const SystemState = struct {
         host: *HostInfo,
         targets: Targets,
         tui_refresh_rate: u16,
-        process_lists: []*std.ArrayList(pi.ProcessInfo),
+        process_lists: []*ProcessShadowList,
         enricher: *ProcessEnricher,
         io: std.Io,
     };
