@@ -9,6 +9,7 @@ zls_completion(
         "//examples/sharding",
         "//stdx",
         "//zml",
+        "//zml/tokenizer/iree",
     ],
 )
 

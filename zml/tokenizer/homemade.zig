@@ -125,7 +125,7 @@ pub const Tokenizer = struct {
         return self.token_lookup.get(str);
     }
 
-    pub fn tokenToId(self: *const Tokenizer, token: []const u8) ?u32 {
+    pub fn findTokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         return self.token_lookup.get(token);
     }
 

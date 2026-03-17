@@ -41,6 +41,21 @@ use_repo(
 )
 ###
 
+bazel_dep(name = "iree_core", version = "main")
+git_override(
+    module_name = "iree_core",
+    remote = "https://github.com/iree-org/iree.git",
+    commit = "71af3a5e41a8e265330bc693194c708cf6df4724",
+)
+
+bazel_dep(name = "llvm-project-overlay", version = "main")
+archive_override(
+    module_name = "llvm-project-overlay",
+    urls = ["https://github.com/iree-org/llvm-project/archive/b99385ff6bea40fb5701141d3077a5db2ff7894f.tar.gz"],
+    strip_prefix = "llvm-project-b99385ff6bea40fb5701141d3077a5db2ff7894f/utils/bazel",
+    integrity = "sha256-anLzeSPHWmIA6mz49br0j2lC66UgfEKPqyp+1wwG+8M="
+)
+
 ### Zig toolchain
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
@@ -172,6 +187,18 @@ llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
 llvm.configure()
 use_repo(llvm, "llvm-project")
 
+llvm_overlay_ext = use_extension(
+    "@llvm-project-overlay//:extensions.bzl",
+    "llvm_repos_extension",
+)
+inject_repo(llvm_overlay_ext, "llvm-raw")
+
+iree_ext = use_extension(
+    "@iree_core//build_tools/bazel:extensions.bzl",
+    "iree_extension",
+)
+inject_repo(iree_ext, "llvm-raw")
+
 rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
 rs_toolchains.toolchain(
     edition = "2024",
@@ -226,6 +253,7 @@ oci.pull(
     platforms = ["linux/amd64"],
 )
 use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+
 
 git_override(
     module_name = "rules_zig",
