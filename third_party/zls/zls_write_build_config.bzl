@@ -156,17 +156,6 @@ zls_write_build_config = rule(
             default = ":zls.completion.tpl",
             allow_single_file = True,
         ),
-        "_translate_c": attr.label(
-            default = Label("@rules_zig//zig/private/common:translate-c"),
-            cfg = "exec",
-            executable = True,
-        ),
-        "_c_helpers": attr.label(
-            default = Label("@rules_zig//zig/private/common:helpers"),
-        ),
-        "_c_builtins": attr.label(
-            default = Label("@rules_zig//zig/private/common:c_builtins"),
-        ),
     },
     toolchains = [
         "@rules_zig//zig:toolchain_type",
