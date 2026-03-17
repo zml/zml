@@ -1,0 +1,19 @@
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_python//python:py_binary.bzl", "py_binary")
+
+py_binary(
+    name = "xprof",
+    srcs = ["main.py"],
+    main = "main.py",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+    deps = ["@xprof_nightly//xprof_nightly:pkg"],
+)
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = ["--upgrade"],
+    tags = ["manual"],
+)

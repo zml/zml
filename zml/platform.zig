@@ -5,10 +5,10 @@ const pjrt = @import("pjrt");
 const platforms = @import("platforms");
 pub const Target = platforms.Platform;
 const stdx = @import("stdx");
-const upb = @import("upb");
 
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
+const profiler_ = @import("profiler.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
@@ -467,24 +467,11 @@ pub const Platform = struct {
         }
     }
 
-    pub fn profiler(self: *const Platform, allocator: std.mem.Allocator) !?pjrt.Profiler {
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        defer arena.deinit();
+    pub const Profiler = profiler_.Profiler;
+    pub const ProfilerOptions = profiler_.ProfilerOptions;
 
-        var upb_alloc: upb.Allocator = .init(arena.allocator());
-        const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
-        defer c.upb_Arena_Free(upb_arena);
-
-        const options = try upb.new(c.tensorflow_ProfileOptions, upb_arena);
-
-        c.tensorflow_ProfileOptions_set_device_type(options, 0);
-        c.tensorflow_ProfileOptions_set_host_tracer_level(options, 3);
-        c.tensorflow_ProfileOptions_set_device_tracer_level(options, 3);
-        c.tensorflow_ProfileOptions_set_enable_hlo_proto(options, true);
-
-        const serialized_options = try upb.serialize(options, upb_arena);
-
-        return try self.pjrt_api.profiler(serialized_options);
+    pub fn profiler(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, options: ProfilerOptions) !Profiler {
+        return try profiler_.profiler(self.pjrt_api, allocator, io, options);
     }
 };
 

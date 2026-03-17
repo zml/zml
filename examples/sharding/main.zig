@@ -171,18 +171,17 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var profiler = try platform.profiler(init.arena.allocator());
-    if (profiler) |*p| {
-        try p.start();
-    }
+    var profiler_options: zml.Platform.ProfilerOptions = .defaults;
+    profiler_options.repository_path = "/tmp/xprof";
+    profiler_options.session_id = "profiling";
 
+    var profiler = try platform.profiler(allocator, io, profiler_options);
+    defer profiler.deinit();
+
+    try profiler.start();
     defer {
-        if (profiler) |*p| {
-            p.stop() catch {};
-            const pb = p.collectData(allocator) catch unreachable;
-            const file: std.Io.File = std.Io.Dir.createFile(.cwd(), io, "/tmp/profiling.pb", .{}) catch unreachable;
-            file.writePositionalAll(io, pb, 0) catch unreachable;
-            allocator.free(pb);
+        if ((profiler.stop() catch unreachable)) |profile| {
+            log.info("Profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
         }
     }
 
