@@ -86,6 +86,9 @@ common          --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 # Required for protobuf upb on Linux
 common:linux    --copt=-fPIC
 
+# Prefer prebuilt protoc (finally!)
+common          --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc=true
+
 # Print test errors in the console
 test            --test_output=errors
 
