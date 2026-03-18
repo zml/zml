@@ -425,7 +425,7 @@
     },
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
-        "bzlTransitiveDigest": "+eLA5tKLmYYsk3vwQ5V6L8BLyV5uoQPm6tbs+jLOFNk=",
+        "bzlTransitiveDigest": "twSeB3VPTVkayY0uwqEzDzal5MbnZX45iC6jdheZQRo=",
         "usagesDigest": "IIGPr69MT/mSUo6fNUffrIiU31EqGjlEYm5qFmNjmUc=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},

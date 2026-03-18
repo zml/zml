@@ -155,7 +155,7 @@ pub fn main(init: std.process.Init) !void {
             const sharding_type: ShardingType = std.meta.stringToEnum(ShardingType, it.next() orelse "sharded") orelse return error.InvalidShardingKind;
 
             const platform: *zml.Platform = try .auto(allocator, io, .{});
-            defer platform.deinit(allocator);
+            defer platform.deinit(allocator, io);
 
             var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
             defer registry.deinit();

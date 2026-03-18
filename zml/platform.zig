@@ -402,8 +402,8 @@ pub const Platform = struct {
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         self.pjrt_client.deinit(self.pjrt_api);
-        self.arena_state.promote(allocator).deinit();
         if (self.triton_runtime) |*rt| rt.deinit(io);
+        self.arena_state.promote(allocator).deinit();
     }
 
     pub fn compile(
