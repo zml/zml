@@ -188,6 +188,6 @@ use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
 
 git_override(
     module_name = "rules_zig",
-    commit = "dbc3d75d4fce20d998eea343c2cc0fadc51aac0e",
+    commit = "3f4ab088be5f21a7409a03f7c19bf25a82cc7bde",
     remote = "https://github.com/zml/rules_zig.git",
 )
