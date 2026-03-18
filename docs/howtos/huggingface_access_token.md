@@ -3,7 +3,7 @@
 Some models have restrictions and may require some sort of approval or agreement
 process, which, by consequence, **requires token-authentication with Huggingface**.
 
-The easiest way might be to use the `huggingface-cli login` command.
+The easiest way might be to use the `hf auth login` command.
 
 Alternatively, here is how you can generate a **"read-only public repositories"**
 access token to log into your account on Huggingface, directly from `bazel`, in order to download models.

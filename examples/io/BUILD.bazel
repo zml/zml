@@ -1,4 +1,5 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
@@ -7,4 +8,25 @@ zig_binary(
     data = [],
     main = "main.zig",
     deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [":io"],
+)
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":playground"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":playground"],
+    #args = [
+    #    "--options",
+    #    "zstd:compression-level=9",
+    #],
+    compress = "zstd",
+    mtree = ":mtree",
 )

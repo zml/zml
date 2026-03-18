@@ -120,7 +120,7 @@ approval from Meta on Huggingface**, which can take a few hours to get granted.
 Once you've been granted access, you're ready to download a gated model like
 `Llama-3.1-8B-Instruct`!
 
-First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
+First, you need to download the model using the [hf](https://huggingface.co/docs/huggingface_hub/en/guides/cli) CLI.
 Note you don't need to install it yourself,
 you can just use the packaged version `bazel run //tools/hf --`.
 

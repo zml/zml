@@ -24,7 +24,11 @@ So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
-bazel run --config=release //examples/llama --@zml//platforms:cuda=true -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
+bazel run --config=release //examples/llama             \
+          --@zml//platforms:cuda=true                   \
+          --                                            \
+          --model=hf://meta-llama/Llama-3.2-1B-Instruct \
+          --prompt="What is the capital of France?"
 ```
 
 
@@ -40,7 +44,7 @@ architectures:
 As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
-bazel build --config=release //examples/llama          \
+bazel build --config=release //examples/llama  \
     --@zml//platforms:cuda=true                \
     --@zml//platforms:cpu=false                \
     --platforms=@zml//platforms:linux_amd64
@@ -81,15 +85,15 @@ tar(
 ... and then build the TAR archive:
 
 ```
-bazel build --config=release //mnist:archive                    \
+bazel build --config=release //examples/mnist:archive           \
             --@zml//platforms:cuda=true                \
             --@zml//platforms:cpu=false                \
             --platforms=@zml//platforms:linux_amd64
 ```
 
-Note the `//mnist:archive` notation.
+Note the `//examples/mnist:archive` notation.
 
-The resulting tar file will be in `bazel-bin/mnist/archive.tar.zst`.
+The resulting tar file will be in `bazel-bin/examples/mnist/archive.tar.zst`.
 
 ### Run it on the server
 
@@ -98,7 +102,7 @@ and run it:
 
 ```bash
 # on your machine
-scp bazel-bin/mnist/archive.tar.zst destination-server:
+scp bazel-bin/examples/mnist/archive.tar.zst destination-server:
 ssh destination-server   # to enter the server
 
 # ... on the server
