@@ -128,5 +128,6 @@ build_test(
         ":ff_gelu_check",
         ":ff_linear1_gelu_check",
         ":patchify_forward_check",
+        ":attention_forward_check",
     ],
 )
