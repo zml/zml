@@ -12,6 +12,7 @@ const log = std.log.scoped(.qwen3_5);
 pub const Qwen35 = struct {
     pub const Config = struct {
         text_config: TextConfig,
+        vision_config: VisionConfig,
     };
 
     pub const TextConfig = struct {
@@ -25,7 +26,11 @@ pub const Qwen35 = struct {
         head_dim: i64,
         num_attention_heads: i64,
         num_key_value_heads: i64,
-        rope_parameters: RopeParameters,
+        rope_parameters: struct {
+            mrope_section: [3]i64,
+            partial_rotary_factor: f32,
+            rope_theta: f32,
+        },
         // Linear attention
         linear_conv_kernel_dim: i64,
         linear_key_head_dim: i64,
@@ -34,16 +39,20 @@ pub const Qwen35 = struct {
         linear_value_head_dim: i64,
     };
 
+    pub const VisionConfig = struct {
+        hidden_size: i64,
+        depth: i64,
+        num_heads: i64,
+        patch_size: i64,
+        spatial_merge_size: i64,
+        temporal_patch_size: i64,
+        num_position_embeddings: i64,
+    };
+
     // Each layer uses either: full attention (SelfAttn) or linear attention (GatedDeltaNet).
     pub const LayerType = enum {
         linear_attention,
         full_attention,
-    };
-
-    pub const RopeParameters = struct {
-        mrope_section: [3]i64,
-        partial_rotary_factor: f32,
-        rope_theta: f32,
     };
 
     pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{}, max_seq_len: i64 };
@@ -55,6 +64,7 @@ pub const Qwen35 = struct {
     };
 
     text_model: TextModel,
+    vision_model: VisionModel,
     lm_head: zml.nn.Linear,
 
     config: Config,
@@ -70,6 +80,7 @@ pub const Qwen35 = struct {
         const lm_head_prefix = if (store.hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
         return .{
             .text_model = try .init(allocator, store.withPrefix("model.language_model"), config),
+            .vision_model = .init(allocator, config),
             .lm_head = .init(store.withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
             .config = config,
             .gen_options = gen_options,
@@ -78,6 +89,7 @@ pub const Qwen35 = struct {
 
     pub fn deinit(self: Qwen35, allocator: std.mem.Allocator) void {
         self.text_model.deinit(allocator);
+        self.vision_model.deinit(allocator);
     }
 
     pub fn load(
@@ -109,20 +121,8 @@ pub const Qwen35 = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
         TextModel.unloadBuffers(&self.text_model, allocator);
+        // VisionModel.unloadBuffers(&self.vision_model, allocator);
         self.lm_head.weight.deinit();
-    }
-
-    pub fn forward(
-        self: Qwen35,
-        tokens_: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor.Rng } {
-        const tokens = tokens_.withPartialTags(.{.s});
-        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
-        const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
-        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
     pub fn sampleTokens(
@@ -133,6 +133,136 @@ pub const Qwen35 = struct {
         const logits = self.lm_head.forward(out.withPartialTags(.{.d})).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
         return .{ next_tokens, new_rng };
+    }
+
+    pub fn build3dPositionIds(
+        self: Qwen35,
+        batch_count: i64,
+        seq_len: i64,
+        prompt_shape: Tensor,
+        image_grid_thw: [3]u32,
+    ) struct { Tensor, Tensor } {
+        const text_pre_image_token_count = prompt_shape.choose1d(0, 0).convert(.i32);
+        const image_token_count = prompt_shape.choose1d(0, 1).convert(.i32);
+        const text_post_image_token_count = prompt_shape.choose1d(0, 2).convert(.i32);
+
+        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i32), .s);
+
+        const t = image_grid_thw[0];
+        const h = @divExact(image_grid_thw[1], self.config.vision_config.spatial_merge_size);
+        const w = @divExact(image_grid_thw[2], self.config.vision_config.spatial_merge_size);
+
+        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i32), .s)
+            .sub(image_token_count)
+            .addConstant(@max(w, h, t));
+        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, pre_image_positions);
+
+        // Define the shape of the iota tensor
+        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i32);
+        const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i32);
+
+        // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
+        const t_index = zml.Tensor.iota(iota_shape, .t).reshape(reshape_shape).add(text_pre_image_token_count);
+        const h_index = zml.Tensor.iota(iota_shape, .h).reshape(reshape_shape).add(text_pre_image_token_count);
+        const w_index = zml.Tensor.iota(iota_shape, .w).reshape(reshape_shape).add(text_pre_image_token_count);
+
+        // Update the position ids with the 3D positional ids
+        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, t_index);
+        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, h_index);
+        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, w_index);
+
+        // Stack the position ids
+        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
+
+        // Position max after 3d compression - real seq len
+        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i32).add(text_post_image_token_count).add(text_pre_image_token_count);
+        const real_seq_len = text_pre_image_token_count.add(text_post_image_token_count).add(image_token_count);
+        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .s = 1 });
+
+        return .{ stacked_position_ids, mrope_position_deltas };
+    }
+
+    pub fn forward(
+        self: Qwen35,
+        tokens_: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor.Rng } {
+        const tokens = tokens_.withPartialTags(.{.s});
+
+        // Extract embeddings
+
+        // Update the embedding with the vision model embedding
+
+        // Build the 3D positional ids
+        // const position_ids, const mrope_position_deltas = self.build3dPositionIds(
+        //     1,
+        //     tokens.dim(.s),
+        //     .fromShape(zml.Shape.init(.{ .p = 3 }, .i32)),
+        //     .{ 1, 16, 16 },
+        // );
+
+        // log.info("position_ids shape {any}", .{position_ids.shape()});
+        // log.info("mrope_position_deltas shape {any}", .{mrope_position_deltas.shape()});
+
+        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
+        const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+    }
+
+    pub fn vision_test_forward(
+        self: Qwen35,
+        pixel_values: Tensor,
+        grid_thw: [3]u32,
+    ) struct { Tensor } {
+        const vision_output = self.vision_model.forward(pixel_values, grid_thw);
+        return .{vision_output};
+    }
+};
+
+//========================Vision model========================
+
+pub const VisionModel = struct {
+    // vision_patch_embed: VisionPatchEmbed,
+    // pos_embed: zml.nn.TokenEmbedding,
+    // blocks: []VisionBlock,
+    // patch_merger: PatchMerger,
+
+    hidden_size: i64,
+    num_heads: i64,
+    spatial_merge_size: i64,
+    num_position_embeddings: i64,
+    rope_opts: zml.nn.RopeOpts,
+
+    pub fn init(allocator: std.mem.Allocator, config: Qwen35.Config) VisionModel {
+        _ = allocator;
+        return .{
+            .hidden_size = config.vision_config.hidden_size,
+            .num_heads = config.vision_config.num_heads,
+            .spatial_merge_size = config.vision_config.spatial_merge_size,
+            .num_position_embeddings = config.vision_config.num_position_embeddings,
+            .rope_opts = .{
+                .layout = .sequential,
+                .scaling = .{ .default = .{ .rope_theta = 10000.0 } },
+            },
+        };
+    }
+
+    pub fn deinit(self: VisionModel, allocator: std.mem.Allocator) void {
+        _ = self;
+        _ = allocator;
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
+        _ = self;
+        _ = allocator;
+    }
+
+    pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]u32) Tensor {
+        _ = self;
+        _ = grid_thw;
+        return pixel_values;
     }
 };
 

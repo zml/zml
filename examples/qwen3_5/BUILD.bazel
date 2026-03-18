@@ -11,3 +11,14 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "vision_tests",
+    srcs = ["qwen3_5.zig"],
+    main = "vision_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
