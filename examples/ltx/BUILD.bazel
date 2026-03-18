@@ -28,7 +28,88 @@ zig_binary(
 zig_binary(
     name = "ff_forward_check",
     main = "ff_forward_check.zig",
-    srcs = ["model.zig"],
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "ff_linear1_check",
+    main = "ff_linear1_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "ff_linear2_check",
+    main = "ff_linear2_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "ff_gelu_check",
+    main = "ff_gelu_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "ff_linear1_gelu_check",
+    main = "ff_linear1_gelu_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "patchify_forward_check",
+    main = "patchify_forward_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "attention_forward_check",
+    main = "attention_forward_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//zml",
@@ -42,5 +123,10 @@ build_test(
         ":ff_parity",
         ":model_check",
         ":ff_forward_check",
+        ":ff_linear1_check",
+        ":ff_linear2_check",
+        ":ff_gelu_check",
+        ":ff_linear1_gelu_check",
+        ":patchify_forward_check",
     ],
 )

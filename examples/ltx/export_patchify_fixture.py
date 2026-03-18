@@ -4,12 +4,12 @@ from export_activation_fixture import export_fixture
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export block0.ff activation fixture from replay .pt to safetensors")
-    parser.add_argument("input_pt", type=Path, help="Path to acts_stage2_transformer_step_..._b00_ff_boundary.pt")
+    parser = argparse.ArgumentParser(description="Export patchify activation fixture from replay .pt to safetensors")
+    parser.add_argument("input_pt", type=Path, help="Path to acts_stage2_transformer_step_... .pt")
     parser.add_argument("output_st", type=Path, help="Output safetensors path")
     parser.add_argument(
         "--activation-key",
-        default="velocity_model.transformer_blocks.0.ff",
+        default="velocity_model.patchify_proj",
         help="Activation key inside obj['activations']",
     )
     return parser.parse_args()
@@ -21,8 +21,8 @@ def main() -> None:
         input_pt=args.input_pt,
         output_st=args.output_st,
         activation_key=args.activation_key,
-        tensor_prefix="ff",
-        allow_proj_suffix=True,
+        tensor_prefix="patchify",
+        allow_proj_suffix=False,
     )
 
 
