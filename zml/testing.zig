@@ -13,24 +13,24 @@ const log = std.log.scoped(.@"zml/testing");
 var _platform: ?*const Platform = null;
 var _replicated_sharding: ?sharding.Sharding = null;
 
-pub fn env() *const Platform {
+pub fn env() !*const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
     if (_platform == null) {
-        _platform = Platform.auto(std.heap.c_allocator, std.testing.io, .{
+        _platform = try Platform.auto(std.heap.c_allocator, std.testing.io, .{
             .cuda = .{ .allocator = .{ .bfc = .{ .preallocate = true, .memory_fraction = 0.85 } } },
-        }) catch unreachable;
+        });
     }
 
     return _platform.?;
 }
 
-pub fn physicalMesh() sharding.PhysicalMesh {
-    return env().physical_mesh;
+pub fn physicalMesh() !sharding.PhysicalMesh {
+    return (try env()).physical_mesh;
 }
 
-pub fn replicatedSharding() sharding.Sharding {
+pub fn replicatedSharding() !sharding.Sharding {
     if (_replicated_sharding == null) {
-        _replicated_sharding = sharding.replicatedSharding(env()) catch unreachable;
+        _replicated_sharding = try sharding.replicatedSharding(try env());
     }
     return _replicated_sharding.?;
 }

@@ -180,14 +180,17 @@ pub const Buffer = struct {
         }
     }
 
-    pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
+    pub const UninitializedOptions = struct {
+        memory: Memory.Kind = .default,
+        layout: ?pjrt.MemoryLayout = null,
+    };
 
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
         sh: Shape,
         sharding: Sharding,
-        opts: UnitializedOptions,
+        opts: UninitializedOptions,
     ) !Buffer {
         var res: Buffer = .{
             ._platform = platform,
@@ -201,7 +204,7 @@ pub const Buffer = struct {
 
         for (res.placement().shards.constSlice()) |shard| {
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: pjrt.MemoryLayout = switch (platform.target) {
+            const layout: pjrt.MemoryLayout = opts.layout orelse switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
                         platform.pjrt_api,
@@ -277,8 +280,97 @@ pub const Buffer = struct {
         }
     }
 
-    /// Copies the content of the Buffer to the provided slice.
-    /// The returned slice owns the memory.
+    const Prefix1dCopyMode = enum { sync, async };
+
+    pub const D2HEvents = stdx.BoundedArray(?*pjrt.Event, MAX_NUM_SHARDS);
+
+    const PrefixShardCopy = struct {
+        dst_offset: usize,
+        byte_len: usize,
+        src_offset: i64,
+    };
+
+    inline fn prefixShardCopy(
+        self: Buffer,
+        shard: anytype,
+        prefix_len: i64,
+        elem_size: i64,
+        fn_name: []const u8,
+    ) ?PrefixShardCopy {
+        var shard_start: i64 = 0;
+        var shard_size: i64 = self._shape.dim(0);
+
+        switch (shard.slices.len) {
+            0 => {},
+            1 => {
+                const shard_slice = shard.slices.get(0);
+                stdx.debug.assert(shard_slice.axis == 0, "{s} expects a rank-1 shard along axis 0, got axis {}", .{ fn_name, shard_slice.axis });
+                shard_start = shard_slice.start;
+                shard_size = shard_slice.size;
+            },
+            else => stdx.debug.panic("{s} got unsupported shard slicing for rank-1 buffer: {} slices", .{ fn_name, shard.slices.len }),
+        }
+
+        const overlap_start = @max(@as(i64, 0), shard_start);
+        const overlap_end = @min(prefix_len, shard_start + shard_size);
+        if (overlap_start >= overlap_end) return null;
+
+        return .{
+            .byte_len = @intCast((overlap_end - overlap_start) * elem_size),
+            .dst_offset = @intCast(overlap_start * elem_size),
+            .src_offset = (overlap_start - shard_start) * elem_size,
+        };
+    }
+
+    fn prefix1dCopyImpl(self: Buffer, slice: Slice, comptime mode: Prefix1dCopyMode, io: if (mode == .sync) std.Io else void) !D2HEvents {
+        const fn_name = if (mode == .sync) "toPrefix1dSlice" else "startPrefix1dCopy";
+
+        stdx.debug.assert(self._shape.rank() == 1, "{s} expects a rank-1 buffer, got {}", .{ fn_name, self._shape.rank() });
+        stdx.debug.assert(slice.shape.rank() == 1, "{s} expects a rank-1 destination slice, got {}", .{ fn_name, slice.shape.rank() });
+        stdx.debug.assert(self._shape.dtype() == slice.shape.dtype(), "{s} dtype mismatch: buffer={} destination={}", .{ fn_name, self._shape.dtype(), slice.shape.dtype() });
+
+        const prefix_len: i64 = slice.shape.dim(0);
+        stdx.debug.assert(prefix_len <= self._shape.dim(0), "{s} prefix length {} exceeds buffer length {}", .{ fn_name, prefix_len, self._shape.dim(0) });
+
+        var events: D2HEvents = .{};
+        if (prefix_len == 0) return events;
+
+        const elem_size = self._shape.dtype().sizeOf();
+        for (self.placement().shards.constSlice(), 0..) |shard, shard_index| {
+            const copy = prefixShardCopy(self, shard, prefix_len, elem_size, fn_name) orelse continue;
+            const destination = slice.data()[copy.dst_offset..][0..copy.byte_len];
+            const maybe_event = try self._shards.get(shard_index).copyRawToHost(self._platform.pjrt_api, destination, copy.src_offset);
+
+            if (mode == .sync) {
+                if (maybe_event) |event| {
+                    defer event.deinit(self._platform.pjrt_api);
+                    try event.await(self._platform.pjrt_api, io);
+                }
+            } else {
+                events.appendAssumeCapacity(maybe_event);
+            }
+        }
+
+        return events;
+    }
+
+    pub fn toPrefix1dSlice(self: Buffer, io: std.Io, slice: Slice) !void {
+        _ = try self.prefix1dCopyImpl(slice, .sync, io);
+    }
+
+    pub fn startPrefix1dCopy(self: Buffer, slice: Slice) !D2HEvents {
+        return self.prefix1dCopyImpl(slice, .async, {});
+    }
+
+    pub fn awaitD2HEvents(self: Buffer, io: std.Io, events: D2HEvents) !void {
+        for (events.constSlice()) |maybe_event| {
+            if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
+                try event.await(self._platform.pjrt_api, io);
+            }
+        }
+    }
+
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);

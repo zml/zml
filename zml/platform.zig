@@ -185,6 +185,7 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
+    tpu_ir_runtime: ?*platforms.tpu.gen_ir.Runtime = null,
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -214,6 +215,7 @@ pub const Platform = struct {
             .devices = devices,
             .memories = memories,
             .physical_mesh = undefined,
+            .tpu_ir_runtime = null,
         };
         defer platform.arena_state = arena.state;
 
@@ -267,6 +269,22 @@ pub const Platform = struct {
         return for (ordered_targets) |target| {
             break init(allocator, io, target, options) catch continue;
         } else error.Unavailable;
+    }
+
+    pub fn ensureTpuIrRuntime(self: *Platform, allocator: std.mem.Allocator, io: std.Io) !*platforms.tpu.gen_ir.Runtime {
+        if (self.target != .tpu) return error.UnsupportedPlatform;
+        if (self.tpu_ir_runtime) |runtime| return runtime;
+
+        const runtime = try allocator.create(platforms.tpu.gen_ir.Runtime);
+        errdefer allocator.destroy(runtime);
+
+        runtime.* = try platforms.tpu.gen_ir.Runtime.init(allocator, io);
+        self.tpu_ir_runtime = runtime;
+        return runtime;
+    }
+
+    pub fn initTpuIrRuntime(self: *Platform, allocator: std.mem.Allocator, io: std.Io) !void {
+        _ = try self.ensureTpuIrRuntime(allocator, io);
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
@@ -385,7 +403,11 @@ pub const Platform = struct {
         return .{ .data = self };
     }
 
-    pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
+        if (self.tpu_ir_runtime) |runtime| {
+            runtime.deinit(io);
+            allocator.destroy(runtime);
+        }
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena_state.promote(allocator).deinit();
     }

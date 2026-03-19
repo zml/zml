@@ -10,6 +10,8 @@ const PagedAttention = @This();
 pub const Backend = enum {
     cuda_fa2,
     cuda_fa3,
+    mosaic_tpu,
+    vllm_tpu,
 
     pub fn auto(platform: *const zml.Platform) Backend {
         return switch (platform.target) {
@@ -24,6 +26,7 @@ pub const Backend = enum {
 
                 break :b .cuda_fa2;
             },
+            .tpu => .mosaic_tpu,
             else => stdx.debug.panic("Paged attention is not supported on {s} yet", .{@tagName(platform.target)}),
         };
     }
@@ -32,8 +35,10 @@ pub const Backend = enum {
 pub const Options = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Options,
     cuda_fa3: flashattn.paged_fa3.Options,
+    mosaic_tpu: flashattn.mosaic_tpu.Options,
+    vllm_tpu: flashattn.vllm_tpu.Options,
 
-    const Args = struct {
+    pub const Args = struct {
         backend: Backend,
         is_prefill: bool,
         batch_size: u32,
@@ -100,6 +105,28 @@ pub const Options = union(Backend) {
                     },
                 },
             },
+            .mosaic_tpu => .{
+                .mosaic_tpu = .{
+                    .is_prefill = args.is_prefill,
+                    .batch_size = args.batch_size,
+                    .max_num_pages = max_num_pages,
+                    .max_seqlen_k = args.seq_len,
+                    .max_token_count = args.max_token_count,
+                    .num_heads = args.num_heads,
+                    .head_dim = args.head_dim,
+                },
+            },
+            .vllm_tpu => .{
+                .vllm_tpu = .{
+                    .is_prefill = args.is_prefill,
+                    .batch_size = args.batch_size,
+                    .max_num_pages = max_num_pages,
+                    .max_seqlen_k = args.seq_len,
+                    .max_token_count = args.max_token_count,
+                    .num_heads = args.num_heads,
+                    .head_dim = args.head_dim,
+                },
+            },
         };
     }
 
@@ -119,11 +146,41 @@ pub const Options = union(Backend) {
 pub const Parameters = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Parameters,
     cuda_fa3: flashattn.paged_fa3.Parameters,
+    mosaic_tpu: flashattn.mosaic_tpu.Parameters,
+    vllm_tpu: flashattn.vllm_tpu.Parameters,
+
+    inline fn incrementSequsedK(seqused_k: zml.Tensor) zml.Tensor {
+        return seqused_k.addConstant(@as(i32, 1));
+    }
+
+    inline fn incrementFlashAttentionParams(params: anytype) @TypeOf(params) {
+        return switch (params) {
+            .decode => |d| .{ .decode = .{
+                .block_table = d.block_table,
+                .cu_seqlens_q = d.cu_seqlens_q,
+                .seqused_k = incrementSequsedK(d.seqused_k),
+                .metadata = d.metadata,
+                .options = d.options,
+            } },
+            .mixed => |m| .{ .mixed = .{
+                .block_table_prefill = m.block_table_prefill,
+                .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
+                .seqused_k_prefill = m.seqused_k_prefill,
+                .block_table_decode = m.block_table_decode,
+                .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
+                .seqused_k_decode = incrementSequsedK(m.seqused_k_decode),
+                .metadata = m.metadata,
+                .options = m.options,
+            } },
+        };
+    }
 
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
             .cuda_fa2 => |cuda_fa2_options| .{ .cuda_fa2 = flashattn.paged_fa2.Parameters.init(cuda_fa2_options) },
             .cuda_fa3 => |cuda_fa3_options| .{ .cuda_fa3 = flashattn.paged_fa3.Parameters.init(cuda_fa3_options) },
+            .mosaic_tpu => |tpu_options| .{ .mosaic_tpu = flashattn.mosaic_tpu.Parameters.init(tpu_options) },
+            .vllm_tpu => |tpu_options| .{ .vllm_tpu = flashattn.vllm_tpu.Parameters.init(tpu_options) },
         };
     }
 
@@ -131,6 +188,8 @@ pub const Parameters = union(Backend) {
         return switch (self) {
             .cuda_fa2 => |v| .{ .cuda_fa2 = v.options() },
             .cuda_fa3 => |v| .{ .cuda_fa3 = v.options() },
+            .mosaic_tpu => |v| .{ .mosaic_tpu = v.options() },
+            .vllm_tpu => |v| .{ .vllm_tpu = v.options() },
         };
     }
 
@@ -139,17 +198,43 @@ pub const Parameters = union(Backend) {
             inline else => |v| v.allocationSize(),
         };
     }
+
+    /// Returns a copy of these parameters with KV sequence lengths incremented by 1.
+    /// Used inside multi-token decode to let each sub-step's attention see the
+    /// KV entries written by the previous sub-step.
+    pub fn incrementKvLens(self: Parameters) Parameters {
+        return switch (self) {
+            .cuda_fa2 => |fa2| .{ .cuda_fa2 = incrementFlashAttentionParams(fa2) },
+            .cuda_fa3 => |fa3| .{ .cuda_fa3 = incrementFlashAttentionParams(fa3) },
+            .mosaic_tpu => |tpu| .{ .mosaic_tpu = .{
+                .opts = tpu.opts,
+                .cu_seqlens_q = tpu.cu_seqlens_q,
+                .page_indices = tpu.page_indices,
+                .kv_lens = incrementSequsedK(tpu.kv_lens),
+            } },
+            .vllm_tpu => |tpu| .{ .vllm_tpu = .{
+                .opts = tpu.opts,
+                .cu_seqlens_q = tpu.cu_seqlens_q,
+                .page_indices = tpu.page_indices,
+                .kv_lens = incrementSequsedK(tpu.kv_lens),
+            } },
+        };
+    }
 };
 
 /// Internal state that can be used inside the model code. It's derived from Parameters and Option.
 pub const Context = union(Backend) {
     cuda_fa2: flashattn.paged_fa2.Context,
     cuda_fa3: flashattn.paged_fa3.Context,
+    mosaic_tpu: flashattn.mosaic_tpu.Context,
+    vllm_tpu: flashattn.vllm_tpu.Context,
 
     pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
         return switch (parameters) {
             .cuda_fa2 => |cuda_fa2_parameters| .{ .cuda_fa2 = flashattn.paged_fa2.Context.init(cuda_fa2_parameters, num_heads, num_kv_heads, head_dim, page_size) },
             .cuda_fa3 => |cuda_fa3_parameters| .{ .cuda_fa3 = flashattn.paged_fa3.Context.init(cuda_fa3_parameters, num_heads, num_kv_heads, head_dim, page_size) },
+            .mosaic_tpu => |tpu_parameters| .{ .mosaic_tpu = flashattn.mosaic_tpu.Context.init(tpu_parameters) },
+            .vllm_tpu => |tpu_parameters| .{ .vllm_tpu = flashattn.vllm_tpu.Context.init(tpu_parameters) },
         };
     }
 };
@@ -157,13 +242,21 @@ pub const Context = union(Backend) {
 pub const AttentionOptions = struct {
     is_causal: bool = true,
     sliding_window: i32 = -1,
+    token_pos: ?zml.Tensor = null,
+    kv_update: ?struct {
+        k: zml.Tensor,
+        v: zml.Tensor,
+    } = null,
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-    _ = k;
-    _ = v;
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
         .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),
+        .mosaic_tpu => |tpu_params| flashattn.mosaic_tpu.raggedPagedAttention(tpu_params, context.mosaic_tpu, q, k_cache),
+        .vllm_tpu => |tpu_params| b: {
+            const kv_update = opts.kv_update orelse stdx.debug.panic("vllm_tpu paged attention requires kv_update inputs", .{});
+            break :b flashattn.vllm_tpu.raggedPagedAttention(tpu_params, context.vllm_tpu, q, k_cache, kv_update.k, kv_update.v);
+        },
     };
 }

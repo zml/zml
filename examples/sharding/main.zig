@@ -167,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
     };
 
     var platform: *zml.Platform = try .auto(allocator, io, create_options);
-    defer platform.deinit(allocator);
+    defer platform.deinit(allocator, io);
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
