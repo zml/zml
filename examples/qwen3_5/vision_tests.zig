@@ -88,6 +88,14 @@ pub fn main(init: std.process.Init) !void {
     var output = exe_results.get(zml.Buffer);
     defer output.deinit();
 
+    const output_slice = try output.toSliceAlloc(allocator, io);
+    defer output_slice.free(allocator);
+    const expected_slice = try expected_output.toSliceAlloc(allocator, io);
+    defer expected_slice.free(allocator);
+
+    logSliceChunk("output", output_slice, 8, 8);
+    logSliceChunk("expected", expected_slice, 8, 8);
+
     try zml.testing.expectClose(io, output, expected_output, .{});
     log.info("vision_test_forward output matches expected tensor", .{});
 }
@@ -143,7 +151,7 @@ fn loadGridThwFromStore(
     io: std.Io,
     store: *zml.io.TensorStore,
     key: []const u8,
-) ![3]u32 {
+) ![3]i64 {
     const shape = store.view().getShape(key) orelse return error.NotFound;
     if (shape.count() != 3) return error.InvalidGridThw;
 
@@ -159,19 +167,22 @@ fn loadGridThwFromStore(
     return switch (shape.dtype()) {
         .u32 => blk: {
             const items = slice.constItems(u32);
-            break :blk .{ items[0], items[1], items[2] };
+            break :blk .{
+                @intCast(items[0]),
+                @intCast(items[1]),
+                @intCast(items[2]),
+            };
         },
         .u64 => blk: {
             const items = slice.constItems(u64);
             break :blk .{
-                std.math.cast(u32, items[0]) orelse return error.InvalidGridThw,
-                std.math.cast(u32, items[1]) orelse return error.InvalidGridThw,
-                std.math.cast(u32, items[2]) orelse return error.InvalidGridThw,
+                std.math.cast(i64, items[0]) orelse return error.InvalidGridThw,
+                std.math.cast(i64, items[1]) orelse return error.InvalidGridThw,
+                std.math.cast(i64, items[2]) orelse return error.InvalidGridThw,
             };
         },
         .i32 => blk: {
             const items = slice.constItems(i32);
-            if (items[0] < 0 or items[1] < 0 or items[2] < 0) return error.InvalidGridThw;
             break :blk .{
                 @intCast(items[0]),
                 @intCast(items[1]),
@@ -180,13 +191,50 @@ fn loadGridThwFromStore(
         },
         .i64 => blk: {
             const items = slice.constItems(i64);
-            if (items[0] < 0 or items[1] < 0 or items[2] < 0) return error.InvalidGridThw;
-            break :blk .{
-                std.math.cast(u32, items[0]) orelse return error.InvalidGridThw,
-                std.math.cast(u32, items[1]) orelse return error.InvalidGridThw,
-                std.math.cast(u32, items[2]) orelse return error.InvalidGridThw,
-            };
+            break :blk .{ items[0], items[1], items[2] };
         },
         else => return error.InvalidGridThw,
     };
+}
+
+fn logSliceChunk(name: []const u8, slice: zml.Slice, max_rows: usize, max_cols: usize) void {
+    const shape = slice.shape;
+    if (shape.rank() != 2) {
+        log.info("{s} shape {f} (non-2D tensor, skipping detailed dump)", .{ name, shape });
+        return;
+    }
+
+    const rows_total: usize = @intCast(shape.dim(0));
+    const cols_total: usize = @intCast(shape.dim(1));
+    const rows: usize = @min(max_rows, rows_total);
+    const cols: usize = @min(max_cols, cols_total);
+
+    log.info("{s} shape {f}, showing first {d}x{d} values:", .{ name, shape, rows, cols });
+    switch (shape.dtype()) {
+        .f32 => dumpFloatChunk(f32, name, slice.constItems(f32), cols_total, rows, cols),
+        .f16 => dumpFloatChunk(f16, name, slice.constItems(f16), cols_total, rows, cols),
+        .bf16 => dumpFloatChunk(zml.floats.BFloat16, name, slice.constItems(zml.floats.BFloat16), cols_total, rows, cols),
+        else => log.info("{s}: chunk dump supports only f32/f16/bf16, got {}", .{ name, shape.dtype() }),
+    }
+}
+
+fn dumpFloatChunk(comptime T: type, name: []const u8, data: []const T, cols_total: usize, rows: usize, cols: usize) void {
+    for (0..rows) |r| {
+        var line_buf: [512]u8 = undefined;
+        var used: usize = 0;
+
+        used += (std.fmt.bufPrint(line_buf[used..], "{s}[{d},0:{d}] ", .{ name, r, cols }) catch break).len;
+        used += (std.fmt.bufPrint(line_buf[used..], "[", .{}) catch break).len;
+        for (0..cols) |c| {
+            const idx = r * cols_total + c;
+            const v = zml.floats.floatCast(f32, data[idx]);
+            if (c + 1 < cols) {
+                used += (std.fmt.bufPrint(line_buf[used..], "{d:.6} ", .{v}) catch break).len;
+            } else {
+                used += (std.fmt.bufPrint(line_buf[used..], "{d:.6}", .{v}) catch break).len;
+            }
+        }
+        used += (std.fmt.bufPrint(line_buf[used..], "]", .{}) catch break).len;
+        log.info("{s}", .{line_buf[0..used]});
+    }
 }

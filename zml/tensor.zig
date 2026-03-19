@@ -2053,7 +2053,6 @@ pub const Tensor = struct {
         if (args.start != 0) {
             res = res.addConstant(args.start);
         }
-
         return res;
     }
 
