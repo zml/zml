@@ -2,7 +2,7 @@ name: ci
 on:
   push:
     branches:
-      - corendos/fix-ci
+      - master
     tags:
       - "*"
   pull_request:
@@ -73,7 +73,7 @@ jobs:
             common --disk_cache=/home/${{ matrix.runtimes.user }}/.cache/bazel-disk
             common --strip=always
 
-      - name: ZML / bazel build //examples/...
+      - name: ZML / bazel build //zml/...
         run: bazel build ${{ matrix.runtimes.bazel_opts }} //zml/...
 
       - name: ZML / bazel test //zml/...
@@ -84,6 +84,33 @@ jobs:
 
       - name: ZML / bazel test //stdx/...
         run: bazel test ${{ matrix.runtimes.bazel_opts }} //stdx/...
+
+  zig-lint:
+    runs-on:
+      [
+        "runs-on",
+        "runner=4cpu-linux-x64",
+        "image=ubuntu24-amd64",
+        "run-id=${{ github.run_id }}",
+        "extras=s3-cache",
+      ]
+    steps:
+      - uses: runs-on/action@v1
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          mirror: https://mirror.zml.ai/zig
+
+      - name: Zig Format
+        run: zig fmt --check  $(git ls-files --exclude-standard -- ':!third_party/*' '*.zig' | xargs)
+
+      - name: No autofix in Zig code
+        run: bash -c "! git grep -l '// autofix' -- '*.zig'"
+
   ci:
     runs-on:
       [
@@ -98,32 +125,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: runs-on/snapshot@v1
-        with:
-          path: /home/runner/.cache/bazel-disk
-          volume_size: 350
-
-      - name: TMP fix for the mount user
-        run: sudo chown -R runner:runner /home/runner/.cache/
-
-      - name: Setup Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: 0.15.2
-          mirror: https://mirror.zml.ai/zig
-
-      - name: Zig Format
-        run: zig fmt --check  $(git ls-files --exclude-standard -- ':!third_party/*' '*.zig' | xargs)
-
-      - name: No autofix in Zig code
-        run: bash -c "! git grep -l '// autofix' -- '*.zig'"
-
       - uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-version: 1.28.1
-          bazelisk-cache: false
-          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
+          bazelisk-cache: true
+          repository-cache: true
           bazelrc: |
+            common --config=remote
+            common --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_CI_API_KEY }}
             common -c opt
             common --verbose_failures
             common --keep_going
@@ -133,11 +142,6 @@ jobs:
             common --disk_cache=/home/runner/.cache/bazel-disk
             common --strip=always
 
-      - name: ZML / bazel mod explain
-        run: bazel mod explain
-
-      - name: ZML / bazel mod graph
-        run: bazel mod graph
-
-      - name: ZML / bazel query //...
-        run: bazel query //...
+      - run: bazel mod explain
+      - run: bazel mod graph
+      - run: bazel query //...
