@@ -2,23 +2,12 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
+const ui = @import("../lib/ui.zig");
 
 const StatusLine = @This();
 
 viewing_device: ?u8,
 use_braille: bool,
-
-pub fn widget(self: *const StatusLine) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const StatusLine = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
 
 const Binding = struct {
     key: []const u8,
@@ -71,10 +60,7 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
         .softwrap = false,
         .overflow = .clip,
     };
-    var surf = try rich.draw(ctx.withConstraints(
-        .{ .width = w, .height = 1 },
-        .{ .width = w, .height = 1 },
-    ));
+    var surf = try rich.draw(ui.fixedSize(ctx, w, 1));
 
     // Fill background across full width
     if (surf.buffer.len > 0) {

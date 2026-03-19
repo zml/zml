@@ -1,7 +1,9 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const theme = @import("../../theme.zig");
+const theme = @import("../theme.zig");
+
+const ui = @import("../lib/ui.zig");
 
 const BrailleChart = @This();
 
@@ -19,21 +21,9 @@ pub const dot_bits = [4][2]u8{
     .{ 0x40, 0x80 }, // row 3
 };
 
-pub fn widget(self: *const BrailleChart) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const BrailleChart = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
-
 pub fn draw(self: *const BrailleChart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 40;
-    var surface = try vxfw.Surface.init(ctx.arena, self.widget(), .{ .width = w, .height = self.height });
+    var surface = try vxfw.Surface.init(ctx.arena, ui.widget(self), .{ .width = w, .height = self.height });
     try self.renderTo(ctx.arena, &surface, 0, 0, w);
     return surface;
 }

@@ -2,11 +2,11 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
-const Gauge = @import("components/gauge.zig");
-const BrailleChart = @import("components/braille_chart.zig");
-const TitledBorder = @import("components/titled_border.zig");
-
-const RichText = vxfw.RichText;
+const ui = @import("../lib/ui.zig");
+const compose = @import("../lib/compose.zig");
+const Gauge = @import("gauge.zig");
+const BrailleChart = @import("braille_chart.zig");
+const TitledBorder = @import("titled_border.zig");
 
 const MetricCard = @This();
 
@@ -69,25 +69,13 @@ fn contentHeight(self: *const MetricCard) u16 {
     return content_h;
 }
 
-pub fn widget(self: *const MetricCard) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const MetricCard = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
-
 pub fn draw(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const bstyle: vaxis.Cell.Style = if (self.highlighted)
         .{ .fg = theme.accent, .bold = true }
     else
         theme.border_style;
     const tb: TitledBorder = .{
-        .child = self.contentWidget(),
+        .child = ui.drawWidget(self, drawContent),
         .title = self.title,
         .title_image = self.title_image,
         .cell_size = self.cell_size,
@@ -100,34 +88,27 @@ pub fn draw(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     }));
 }
 
-fn contentWidget(self: *const MetricCard) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedContentDrawFn,
-    };
-}
-
-fn typeErasedContentDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const MetricCard = @ptrCast(@alignCast(ptr));
-    return self.drawContent(ctx);
+fn maxSuffixWidth(ctx: vxfw.DrawContext, suffixes: anytype) u16 {
+    var max_w: u16 = 0;
+    for (suffixes) |entry| {
+        if (entry.suffix) |s| {
+            const sw: u16 = @intCast(ctx.stringWidth(s));
+            max_w = @max(max_w, sw + Gauge.sep_w);
+        }
+    }
+    return max_w;
 }
 
 fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const inner_w = ctx.max.width orelse 40;
     const content_h = self.contentHeight();
 
-    var children: std.ArrayList(vxfw.SubSurface) = .empty;
+    var sb = compose.surfaceBuilder(ctx.arena);
     var row: i17 = 0;
 
     // Charts (gauge-like layout: label [braille] pct% suffix, braille spans multiple rows)
     {
-        var max_chart_suffix_w: u16 = 0;
-        for (self.charts) |ch| {
-            if (ch.suffix) |s| {
-                const sw: u16 = @intCast(ctx.stringWidth(s));
-                max_chart_suffix_w = @max(max_chart_suffix_w, sw + Gauge.sep_w);
-            }
-        }
+        const max_chart_suffix_w = maxSuffixWidth(ctx, self.charts);
 
         for (self.charts, 0..) |chart, ci| {
             if (ci > 0) row += 1;
@@ -149,54 +130,33 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
             const text_row: i17 = row + @as(i17, @intCast(ch_h / 2));
 
             // Label (vertically centered, col 0)
-            const label_rich: RichText = .{
-                .text = &.{
-                    .{ .text = chart.label, .style = theme.label_style },
-                },
-                .softwrap = false,
-                .overflow = .clip,
-            };
-            const label_surf = try label_rich.draw(ctx.withConstraints(.{}, .{ .width = label_w, .height = 1 }));
-            try children.append(ctx.arena, .{ .origin = .{ .row = text_row, .col = 0 }, .surface = label_surf });
+            const label_surf = try ui.drawRichLine(ctx, &.{
+                .{ .text = chart.label, .style = theme.label_style },
+            }, label_w);
+            try sb.add(text_row, 0, label_surf);
 
             // Braille chart (all rows, after label)
             if (braille_w > 0) {
                 const braille: BrailleChart = .{ .values = chart.data, .height = ch_h };
-                const braille_surf = try braille.draw(ctx.withConstraints(
-                    .{ .width = braille_w },
-                    .{ .width = braille_w, .height = ch_h },
-                ));
-                try children.append(ctx.arena, .{
-                    .origin = .{ .row = row, .col = @intCast(label_w) },
-                    .surface = braille_surf,
-                });
+                const braille_surf = try braille.draw(ui.fixedSize(ctx, braille_w, ch_h));
+                try sb.add(row, @intCast(label_w), braille_surf);
             }
 
             // Pct + suffix (vertically centered, after braille)
             const right_col: i17 = @intCast(label_w + braille_w);
-            const pct_rich: RichText = .{
-                .text = &.{
-                    .{ .text = " ", .style = .{} },
-                    .{ .text = pct_str, .style = .{ .bold = true, .fg = theme.colorForPercent(chart.value) } },
-                },
-                .softwrap = false,
-                .overflow = .clip,
-            };
-            const pct_surf = try pct_rich.draw(ctx.withConstraints(.{}, .{ .width = pct_w + 1, .height = 1 }));
-            try children.append(ctx.arena, .{ .origin = .{ .row = text_row, .col = right_col }, .surface = pct_surf });
+            const pct_surf = try ui.drawRichLine(ctx, &.{
+                .{ .text = " ", .style = .{} },
+                .{ .text = pct_str, .style = .{ .bold = true, .fg = theme.colorForPercent(chart.value) } },
+            }, pct_w + 1);
+            try sb.add(text_row, right_col, pct_surf);
 
             if (chart.suffix) |suffix| {
                 const suffix_text_w: u16 = @intCast(ctx.stringWidth(suffix));
                 const suffix_col: i17 = @intCast(inner_w -| suffix_text_w);
-                const suffix_rich: RichText = .{
-                    .text = &.{
-                        .{ .text = suffix, .style = theme.dim_style },
-                    },
-                    .softwrap = false,
-                    .overflow = .clip,
-                };
-                const suffix_surf = try suffix_rich.draw(ctx.withConstraints(.{}, .{ .width = suffix_text_w, .height = 1 }));
-                try children.append(ctx.arena, .{ .origin = .{ .row = text_row, .col = suffix_col }, .surface = suffix_surf });
+                const suffix_surf = try ui.drawRichLine(ctx, &.{
+                    .{ .text = suffix, .style = theme.dim_style },
+                }, suffix_text_w);
+                try sb.add(text_row, suffix_col, suffix_surf);
             }
 
             row += @intCast(ch_h);
@@ -206,16 +166,8 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
     // Gap between charts and gauges
     if (self.charts.len > 0 and self.gauges.len > 0) row += 1;
 
-    // Pre-compute max suffix area for aligned gauges (text + separator)
-    var max_suffix_w: u16 = 0;
-    for (self.gauges) |ge| {
-        if (ge.suffix) |s| {
-            const sw: u16 = @intCast(ctx.stringWidth(s));
-            max_suffix_w = @max(max_suffix_w, sw + Gauge.sep_w);
-        }
-    }
-
     // Gauges (with 1-row gap between consecutive gauges)
+    const max_suffix_w = maxSuffixWidth(ctx, self.gauges);
     for (self.gauges, 0..) |ge, gi| {
         if (row >= content_h) break;
         const gauge: Gauge = .{
@@ -224,14 +176,8 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
             .suffix = ge.suffix,
             .suffix_reserve = max_suffix_w,
         };
-        const gauge_surf = try gauge.draw(ctx.withConstraints(
-            .{ .width = inner_w, .height = 1 },
-            .{ .width = inner_w, .height = 1 },
-        ));
-        try children.append(ctx.arena, .{
-            .origin = .{ .row = row, .col = 0 },
-            .surface = gauge_surf,
-        });
+        const gauge_surf = try gauge.draw(ui.fixedSize(ctx, inner_w, 1));
+        try sb.add(row, 0, gauge_surf);
         row += 1;
         if (gi + 1 < self.gauges.len) row += 1; // gap between gauges
     }
@@ -239,29 +185,13 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
     // Text lines
     for (self.lines) |line| {
         if (row >= content_h) break;
-        const rich: RichText = .{
-            .text = &.{
-                .{ .text = line.label, .style = theme.label_style },
-                .{ .text = line.value, .style = line.style },
-            },
-            .softwrap = false,
-            .overflow = .clip,
-        };
-        const text_surf = try rich.draw(ctx.withConstraints(
-            .{},
-            .{ .width = inner_w, .height = 1 },
-        ));
-        try children.append(ctx.arena, .{
-            .origin = .{ .row = row, .col = 0 },
-            .surface = text_surf,
-        });
+        const text_surf = try ui.drawRichLine(ctx, &.{
+            .{ .text = line.label, .style = theme.label_style },
+            .{ .text = line.value, .style = line.style },
+        }, inner_w);
+        try sb.add(row, 0, text_surf);
         row += 1;
     }
 
-    return .{
-        .size = .{ .width = inner_w, .height = content_h },
-        .widget = self.contentWidget(),
-        .buffer = &.{},
-        .children = children.items,
-    };
+    return sb.finish(.{ .width = inner_w, .height = content_h }, ui.drawWidget(self, drawContent));
 }

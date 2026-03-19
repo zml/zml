@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 
 const data = @import("data.zig");
+const ui = @import("lib/ui.zig");
 const image_cache = @import("image_cache.zig");
 const Logo = @import("widgets/logo.zig");
 const ProcessTable = @import("widgets/process_table.zig");
@@ -46,24 +47,15 @@ const Model = struct {
     process_table: ProcessTable,
     overview: Overview = undefined,
 
-    pub fn widget(self: *Model) vxfw.Widget {
-        return .{
-            .userdata = self,
-            .eventHandler = typeErasedEventHandler,
-            .drawFn = typeErasedDrawFn,
-        };
-    }
-
-    fn typeErasedEventHandler(ptr: *anyopaque, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-        const self: *Model = @ptrCast(@alignCast(ptr));
+    pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .init => {
                 image_cache.global.loadAll(self.vx, self.allocator, self.tty.writer());
-                try ctx.tick(1000, self.widget());
+                try ctx.tick(1000, ui.widget(self));
             },
             .tick => {
                 self.state.recordHistory();
-                try ctx.tick(self.state.tui_refresh_rate, self.widget());
+                try ctx.tick(self.state.tui_refresh_rate, ui.widget(self));
                 ctx.redraw = true;
             },
             .key_press => |key| {
@@ -112,12 +104,7 @@ const Model = struct {
         }
     }
 
-    fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-        const self: *Model = @ptrCast(@alignCast(ptr));
-        return self.draw(ctx);
-    }
-
-    fn draw(self: *Model, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
+    pub fn draw(self: *Model, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
         const screen = ctx.max.size();
         const content_w = @max(screen.width, min_width);
 
@@ -137,15 +124,9 @@ const Model = struct {
                 .device_id = dev_id,
                 .process_table = &self.process_table,
             };
-            content_surf = try detail.draw(ctx.withConstraints(
-                .{ .width = content_w },
-                .{ .width = content_w, .height = null },
-            ));
+            content_surf = try detail.draw(ui.fixedWidth(ctx, content_w));
         } else {
-            content_surf = try self.overview.draw(ctx.withConstraints(
-                .{ .width = content_w },
-                .{ .width = content_w, .height = null },
-            ));
+            content_surf = try self.overview.draw(ui.fixedWidth(ctx, content_w));
         }
 
         content_surf.size.height = @max(content_surf.size.height, min_height);
@@ -157,10 +138,7 @@ const Model = struct {
             .viewing_device = self.viewing_device,
             .use_braille = self.overview.use_braille,
         };
-        const status_surf = try status_line.draw(ctx.withConstraints(
-            .{ .width = screen.width },
-            .{ .width = screen.width, .height = 1 },
-        ));
+        const status_surf = try status_line.draw(ui.fixedSize(ctx, screen.width, 1));
 
         const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
         children[0] = .{ .origin = .{ .row = -self.scroll.row, .col = -self.scroll.col }, .surface = content_surf };
@@ -168,7 +146,7 @@ const Model = struct {
 
         return .{
             .size = screen,
-            .widget = self.widget(),
+            .widget = ui.widget(self),
             .buffer = &.{},
             .children = children,
         };
@@ -198,5 +176,5 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     try model.overview.init(allocator);
     defer model.overview.deinit(allocator);
 
-    try app.run(model.widget(), .{});
+    try app.run(ui.widget(&model), .{});
 }

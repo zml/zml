@@ -2,9 +2,9 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../../data.zig");
-const utils = @import("../../utils.zig");
-const Chart = @import("../../widgets/components/chart.zig");
-const ColumnLayout = @import("../../widgets/components/column_layout.zig");
+const utils = @import("../../lib/utils.zig");
+const ui = @import("../../lib/ui.zig");
+const ColumnLayout = @import("../../widgets/column_layout.zig");
 const ProcessTable = @import("../../widgets/process_table.zig");
 const common = @import("detail_common.zig");
 
@@ -23,35 +23,23 @@ pub fn draw(
     const header = try common.headerText(ctx.arena, id, utils.strSlice(&tp.name));
 
     // ── Utilization + Memory charts ─────────────────────────
-    const util_chart: Chart = .{
+    const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{
         .title = "Duty Cycle",
-        .data = try utils.normalizeRange(ctx.arena, try state.history.util[id].sliceLast(ctx.arena, data.history_len), 0, 100),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{tp.util_percent orelse 0}),
-        .y_min = 0,
-        .y_max = 100,
-        .y_unit = "%",
-        .chart_height = 8,
-        .tui_refresh_rate = state.tui_refresh_rate,
-    };
+    });
 
     const mem_used = tp.mem_used_bytes orelse 0;
     const mem_total = tp.mem_total_bytes orelse 0;
-    const mem_chart: Chart = .{
+    const mem_chart = try common.historyChart(ctx, state, id, state.history.mem_util, .{
         .title = "Memory",
-        .data = try utils.normalizeRange(ctx.arena, try state.history.mem_util[id].sliceLast(ctx.arena, data.history_len), 0, 100),
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}%", .{if (mem_total > 0) mem_used * 100 / mem_total else 0}),
         .info_line = try std.fmt.allocPrint(ctx.arena, "HBM {d} / {d} MB", .{
             utils.bytesToMb(tp.mem_used_bytes), utils.bytesToMb(tp.mem_total_bytes),
         }),
-        .y_min = 0,
-        .y_max = 100,
-        .y_unit = "%",
-        .chart_height = 8,
-        .tui_refresh_rate = state.tui_refresh_rate,
-    };
+    });
 
     const charts_flow: ColumnLayout = .{
-        .children = &.{ util_chart.widget(), mem_chart.widget() },
+        .children = &.{ ui.widget(&util_chart), ui.widget(&mem_chart) },
         .min_child_width = 40,
         .gap = 1,
     };
@@ -60,8 +48,8 @@ pub fn draw(
     return common.pageFrame(ctx, .{
         .children = &.{
             header.widget(),
-            charts_flow.widget(),
-            process_table.widget(),
+            ui.widget(&charts_flow),
+            ui.widget(process_table),
         },
         .gap = 1,
     }, w, content_w, parent_widget);
