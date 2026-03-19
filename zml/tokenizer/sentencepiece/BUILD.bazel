@@ -30,8 +30,3 @@ zig_library(
 #     name = "sources",
 #     zig_lib = ":sentencepiece",
 # )
-
-cc_static_library(
-    name="sentencepiece_static",
-    deps = [":sentencepiece_swig"]
-)
