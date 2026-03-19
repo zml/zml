@@ -1,8 +1,9 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const theme = @import("../../theme.zig");
-const utils = @import("../../utils.zig");
+const theme = @import("../theme.zig");
+const utils = @import("../lib/utils.zig");
+const ui = @import("../lib/ui.zig");
 
 const RichText = vxfw.RichText;
 
@@ -15,18 +16,6 @@ suffix: ?[]const u8 = null,
 suffix_reserve: u16 = 0,
 
 pub const sep_w: u16 = 3; // "  " before suffix
-
-pub fn widget(self: *const Gauge) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const Gauge = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
 
 pub fn draw(self: *const Gauge, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const max_w = ctx.max.width orelse 30;
@@ -61,10 +50,7 @@ pub fn draw(self: *const Gauge, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
             .overflow = .clip,
             .width_basis = .parent,
         };
-        return rich.draw(ctx.withConstraints(
-            .{ .width = width, .height = 1 },
-            .{ .width = width, .height = 1 },
-        ));
+        return rich.draw(ui.fixedSize(ctx, width, 1));
     }
 
     const bar_width = width - reserved;
@@ -125,8 +111,5 @@ pub fn draw(self: *const Gauge, ctx: vxfw.DrawContext) std.mem.Allocator.Error!v
         .overflow = .clip,
         .width_basis = .parent,
     };
-    return rich.draw(ctx.withConstraints(
-        .{ .width = width, .height = 1 },
-        .{ .width = width, .height = 1 },
-    ));
+    return rich.draw(ui.fixedSize(ctx, width, 1));
 }

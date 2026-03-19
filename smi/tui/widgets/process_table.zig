@@ -3,8 +3,11 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
-const TitledBorder = @import("components/titled_border.zig");
-const ColumnLayout = @import("components/column_layout.zig");
+const utils = @import("../lib/utils.zig");
+const ui = @import("../lib/ui.zig");
+const compose = @import("../lib/compose.zig");
+const TitledBorder = @import("titled_border.zig");
+const ColumnLayout = @import("column_layout.zig");
 const pi = @import("../../info/process_info.zig");
 const ProcessInfo = pi.ProcessInfo;
 
@@ -67,23 +70,11 @@ pub fn resetScroll(self: *ProcessTable) void {
     self.scroll_bars.scroll_view.cursor = 0;
 }
 
-pub fn widget(self: *ProcessTable) vxfw.Widget {
-    return .{
-        .userdata = self,
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *ProcessTable = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
-
 pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
     const row_count = self.merged.items.len;
 
-    var header_rt = try headerRichText(ctx.arena);
+    var header_rt: RichText = .{ .text = &header_segs, .softwrap = false, .overflow = .clip };
     const empty_rt: RichText = .{
         .text = &.{.{ .text = "  No process data available", .style = theme.dim_style }},
         .softwrap = false,
@@ -94,28 +85,23 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     try children.append(ctx.arena, header_rt.widget());
 
     if (row_count == 0) {
-        const padded: vxfw.Padding = .{ .child = empty_rt.widget(), .padding = .{ .top = 1 } };
-        const empty_box: vxfw.SizedBox = .{ .child = padded.widget(), .size = .{ .width = w, .height = 2 } };
-        try children.append(ctx.arena, empty_box.widget());
+        try children.append(ctx.arena, try compose.sized(
+            ctx.arena,
+            try compose.pad(ctx.arena, empty_rt.widget(), .{ .top = 1 }),
+            .{ .width = w, .height = 2 },
+        ));
     } else {
         const scroll_h: u16 = @min(@as(u16, @intCast(row_count)), max_visible_rows);
-        const scroll_box: vxfw.SizedBox = .{
-            .child = self.scroll_bars.widget(),
-            .size = .{ .width = w, .height = scroll_h },
-        };
-        try children.append(ctx.arena, scroll_box.widget());
+        try children.append(ctx.arena, try compose.sized(ctx.arena, self.scroll_bars.widget(), .{ .width = w, .height = scroll_h }));
     }
 
     const content: ColumnLayout = .{ .children = children.items };
     const content_h: u16 = @intCast(children.items.len);
     const tb: TitledBorder = .{
-        .child = content.widget(),
+        .child = ui.widget(&content),
         .title = "Processes",
     };
-    return tb.draw(ctx.withConstraints(
-        .{ .width = w },
-        .{ .width = w, .height = content_h + max_visible_rows + 4 },
-    ));
+    return tb.draw(ui.fixedSize(ctx, w, content_h + max_visible_rows + 4));
 }
 
 /// Builds only data rows (no header) for the scroll view.
@@ -125,66 +111,60 @@ fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     return .{ .userdata = @ptrCast(&self.merged.items[idx]), .drawFn = drawProcessRow };
 }
 
+// Column format strings — shared between header (comptime) and row (runtime).
+const col_fmt = struct {
+    const pid = " {s: >7} ";
+    const user = "{s: <10} ";
+    const dev = "{s: <5} ";
+    const util = "{s: >6} ";
+    const mem = "{s: >8} ";
+    const cpu = "{s: >6} ";
+    const host_mem = "{s: >8}  ";
+};
+
+const header_segs = blk: {
+    const s = theme.label_style;
+    break :blk [_]Segment{
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.pid, .{"PID"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.user, .{"USER"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.dev, .{"DEV"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.util, .{"UTIL"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.mem, .{"DEV MEM"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.cpu, .{"CPU"}) },
+        .{ .style = s, .text = std.fmt.comptimePrint(col_fmt.host_mem, .{"HOST MEM"}) },
+        .{ .style = s, .text = "Command" },
+    };
+};
+
+/// Format a value into a column: col(arena, col_fmt.pid, "{d}", .{pid})
+fn col(arena: std.mem.Allocator, comptime column: []const u8, comptime fmt: []const u8, args: anytype) std.mem.Allocator.Error![]const u8 {
+    return std.fmt.allocPrint(arena, column, .{try std.fmt.allocPrint(arena, fmt, args)});
+}
+
 fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const info: *const ProcessInfo = @ptrCast(@alignCast(ptr));
     const val: vaxis.Style = .{ .fg = theme.text_primary };
     const dim: vaxis.Style = .{ .fg = theme.dim };
 
     const segs = try ctx.arena.alloc(Segment, 8);
-    segs[0] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, " {d: >7} ", .{info.pid}) };
-    segs[1] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: <10} ", .{trunc(strZ(&info.username), 10)}) };
-    segs[2] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: <5} ", .{info.device_idx}) };
+    segs[0] = .{ .style = val, .text = try col(ctx.arena, col_fmt.pid, "{d}", .{info.pid}) };
+    segs[1] = .{ .style = val, .text = try col(ctx.arena, col_fmt.user, "{s}", .{utils.trunc(utils.strZ(&info.username), 10)}) };
+    segs[2] = .{ .style = val, .text = try col(ctx.arena, col_fmt.dev, "{d}", .{info.device_idx}) };
     segs[3] = if (info.dev_util_percent) |util|
-        .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >4}% ", .{util}) }
+        .{ .style = val, .text = try col(ctx.arena, col_fmt.util, "{d}%", .{util}) }
     else
-        .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >6} ", .{@as([]const u8, "-")}) };
+        .{ .style = dim, .text = try col(ctx.arena, col_fmt.util, "-", .{}) };
     segs[4] = if (info.dev_mem_kib) |mem|
-        .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{try fmtMem(ctx.arena, mem)}) }
+        .{ .style = val, .text = try col(ctx.arena, col_fmt.mem, "{s}", .{try utils.fmtMem(ctx.arena, mem)}) }
     else
-        .{ .style = dim, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8} ", .{@as([]const u8, "-")}) };
-    segs[5] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{d: >3}.{d}% ", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
-    segs[6] = .{ .style = val, .text = try std.fmt.allocPrint(ctx.arena, "{s: >8}  ", .{try fmtMem(ctx.arena, info.rss_kib)}) };
-    segs[7] = .{ .style = val, .text = strZ(&info.comm) };
+        .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
+    segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
+    segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try utils.fmtMem(ctx.arena, info.rss_kib)}) };
+    segs[7] = .{ .style = val, .text = utils.strZ(&info.comm) };
 
     const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
     return rich.draw(ctx.withConstraints(
         .{ .width = ctx.min.width, .height = 1 },
         .{ .width = ctx.max.width, .height = 1 },
     ));
-}
-
-fn headerRichText(arena: std.mem.Allocator) !RichText {
-    const s = theme.label_style;
-    const segs = try arena.alloc(Segment, 8);
-    segs[0] = .{ .style = s, .text = try std.fmt.allocPrint(arena, " {s: >7} ", .{"PID"}) };
-    segs[1] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: <10} ", .{"USER"}) };
-    segs[2] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: <5} ", .{"DEV"}) };
-    segs[3] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: >6} ", .{"UTIL"}) };
-    segs[4] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: >8} ", .{"DEV MEM"}) };
-    segs[5] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: >6} ", .{"CPU"}) };
-    segs[6] = .{ .style = s, .text = try std.fmt.allocPrint(arena, "{s: >8}  ", .{"HOST MEM"}) };
-    segs[7] = .{ .style = s, .text = "Command" };
-    return .{ .text = segs, .softwrap = false, .overflow = .clip };
-}
-
-fn strZ(buf: anytype) []const u8 {
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
-}
-
-fn trunc(s: []const u8, max: usize) []const u8 {
-    return s[0..@min(s.len, max)];
-}
-
-fn fmtMem(arena: std.mem.Allocator, kib: u64) ![]const u8 {
-    if (kib >= 1024 * 1024) {
-        const whole = kib / (1024 * 1024);
-        const frac = (kib % (1024 * 1024)) * 10 / (1024 * 1024);
-        return std.fmt.allocPrint(arena, "{d}.{d}G", .{ whole, frac });
-    } else if (kib >= 1024) {
-        const whole = kib / 1024;
-        const frac = (kib % 1024) * 10 / 1024;
-        return std.fmt.allocPrint(arena, "{d}.{d}M", .{ whole, frac });
-    } else {
-        return std.fmt.allocPrint(arena, "{d}K", .{kib});
-    }
 }

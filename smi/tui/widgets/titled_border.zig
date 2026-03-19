@@ -1,8 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const theme = @import("../../theme.zig");
-const utils = @import("../../utils.zig");
+const theme = @import("../theme.zig");
+const ui = @import("../lib/ui.zig");
 
 const Text = vxfw.Text;
 
@@ -17,18 +17,6 @@ value_label: ?[]const u8 = null,
 value_label_style: vaxis.Cell.Style = theme.value_style,
 border_style: vaxis.Cell.Style = theme.border_style,
 padding: vxfw.Padding.PadValues = .{ .left = 1, .right = 1, .top = 1, .bottom = 1 },
-
-pub fn widget(self: *const TitledBorder) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const TitledBorder = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
 
 pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const pad: vxfw.Padding = .{
@@ -47,7 +35,7 @@ pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.
     var has_image = false;
 
     if (self.title_image) |img| {
-        const icon = utils.imageCellSize(img, 1, self.cell_size);
+        const icon = ui.imageCellSize(img, 1, self.cell_size);
         has_image = true;
         title_col += icon.cols;
         overlay_count += 1;
@@ -84,10 +72,7 @@ pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.
             .overflow = .clip,
         };
         const max_title_w = surf.size.width -| (title_col + 1);
-        const title_surf = try title_widget.draw(ctx.withConstraints(
-            .{},
-            .{ .width = max_title_w, .height = 1 },
-        ));
+        const title_surf = try title_widget.draw(ui.maxSize(ctx, max_title_w, 1));
         new_children[idx] = .{
             .origin = .{ .row = 0, .col = @intCast(title_col) },
             .surface = title_surf,
@@ -107,10 +92,7 @@ pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.
         };
         const right = surf.size.width -| 1;
         const lw: u16 = @intCast(@min(ctx.stringWidth(label_text), right -| 2));
-        const label_surf = try label_widget.draw(ctx.withConstraints(
-            .{},
-            .{ .width = lw, .height = 1 },
-        ));
+        const label_surf = try label_widget.draw(ui.maxSize(ctx, lw, 1));
         new_children[idx] = .{
             .origin = .{ .row = 0, .col = @intCast(right -| lw) },
             .surface = label_surf,

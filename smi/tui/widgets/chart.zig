@@ -1,7 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
-const theme = @import("../../theme.zig");
+const theme = @import("../theme.zig");
+const ui = @import("../lib/ui.zig");
 const TitledBorder = @import("titled_border.zig");
 const BrailleChart = @import("braille_chart.zig");
 
@@ -23,19 +24,11 @@ y_unit: []const u8 = "%",
 chart_height: u16 = 6,
 tui_refresh_rate: u16,
 
-pub fn widget(self: *const Chart) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const Chart = @ptrCast(@alignCast(ptr));
+pub fn draw(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const content_h: u16 = self.chart_height + x_axis_h + time_labels_h + info_line_h;
     const total_h: u16 = content_h + border_h;
     const tb: TitledBorder = .{
-        .child = .{ .userdata = @constCast(self), .drawFn = typeErasedContentFn },
+        .child = ui.drawWidget(self, drawContent),
         .title = self.title,
         .value_label = self.value_label,
     };
@@ -45,15 +38,9 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     }));
 }
 
-fn typeErasedContentFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const Chart = @ptrCast(@alignCast(ptr));
-    return self.drawContent(ctx);
-}
-
 fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const max_w = ctx.max.width orelse 40;
     const content_h: u16 = self.chart_height + x_axis_h + time_labels_h + info_line_h;
-    const content_widget: vxfw.Widget = .{ .userdata = @constCast(self), .drawFn = typeErasedContentFn };
 
     // ── Y-axis label widths ──────────────────────────────────
     const y_labels = [3]struct { row: u16, val: u32 }{
@@ -72,7 +59,7 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const chart_start: u16 = y_label_w + 1;
     const chart_w: u16 = if (max_w > chart_start) max_w - chart_start else 0;
 
-    var surface = try vxfw.Surface.init(ctx.arena, content_widget, .{ .width = max_w, .height = content_h });
+    var surface = try vxfw.Surface.init(ctx.arena, ui.drawWidget(self, drawContent), .{ .width = max_w, .height = content_h });
     if (chart_w == 0) return surface;
 
     // ── Y-axis labels + axis line ────────────────────────────

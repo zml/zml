@@ -3,25 +3,13 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
-const utils = @import("../utils.zig");
-
-const RichText = vxfw.RichText;
+const utils = @import("../lib/utils.zig");
+const ui = @import("../lib/ui.zig");
+const compose = @import("../lib/compose.zig");
 
 const InfoLines = @This();
 
 state: *const data.SystemState,
-
-pub fn widget(self: *const InfoLines) vxfw.Widget {
-    return .{
-        .userdata = @constCast(self),
-        .drawFn = typeErasedDrawFn,
-    };
-}
-
-fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const self: *const InfoLines = @ptrCast(@alignCast(ptr));
-    return self.draw(ctx);
-}
 
 const Entry = struct {
     label: []const u8,
@@ -56,7 +44,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
         .{ .label = "Devices ", .value = devices_str },
     };
 
-    var children: std.ArrayList(vxfw.SubSurface) = .empty;
+    var sb = compose.surfaceBuilder(ctx.arena);
 
     for (entries, 0..) |entry, i| {
         if (w == 0) continue;
@@ -79,27 +67,11 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
             .{ .text = entry.value, .style = theme.value_style },
         });
 
-        const rich: RichText = .{
-            .text = segments,
-            .softwrap = false,
-            .overflow = .clip,
-        };
-        const text_surf = try rich.draw(ctx.withConstraints(
-            .{},
-            .{ .width = w, .height = 1 },
-        ));
+        const text_surf = try ui.drawRichLine(ctx, segments, w);
 
-        try children.append(ctx.arena, .{
-            .origin = .{ .row = @intCast(i), .col = 0 },
-            .surface = text_surf,
-        });
+        try sb.add(@intCast(i), 0, text_surf);
     }
 
     const total_h: u16 = @intCast(entries.len);
-    return .{
-        .size = .{ .width = w, .height = total_h },
-        .widget = self.widget(),
-        .buffer = &.{},
-        .children = children.items,
-    };
+    return sb.finish(.{ .width = w, .height = total_h }, ui.widget(self));
 }

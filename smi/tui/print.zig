@@ -2,6 +2,7 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("data.zig");
+const ui = @import("lib/ui.zig");
 const image_cache = @import("image_cache.zig");
 const Overview = @import("pages/overview.zig");
 
@@ -73,7 +74,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
         .width = surface.size.width,
         .height = surface.size.height,
     });
-    surface.render(root_win, overview.widget());
+    surface.render(root_win, ui.widget(&overview));
 
     // Scroll terminal to make room for content
     const writer = tty.writer();
