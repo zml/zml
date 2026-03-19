@@ -2,7 +2,7 @@ name: ci
 on:
   push:
     branches:
-      - master
+      - corendos/fix-ci
     tags:
       - "*"
   pull_request:
@@ -58,9 +58,9 @@ jobs:
         if: ${{ !matrix.runtimes.enable_cache }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - uses: bazel-contrib/setup-bazel@0.18.0
         with:
-          bazelisk-version: 1.26.0
+          bazelisk-version: 1.28.1
           bazelisk-cache: false
           # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
           bazelrc: |
