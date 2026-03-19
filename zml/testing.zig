@@ -302,7 +302,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const zml.Sharding,
+    shardings: []const zml.sharding.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -332,7 +332,7 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey);
+            tensor.* = ctx_.activation_store.createTensor(subkey, null, null);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);

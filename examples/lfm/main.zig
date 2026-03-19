@@ -87,7 +87,8 @@ pub fn main(init: std.process.Init) !void {
 
     const params: inference.CompilationOptions = .init(mdl, config, args.seqlen, attention_backend, args.single);
 
-    var compilation_fut = try io.concurrent(inference.Inference.init, .{ allocator, io, platform, mdl, params, args.seqlen, &progress });
+    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+    var compilation_fut = try io.concurrent(inference.Inference.init, .{ allocator, io, platform, mdl, params, args.seqlen, &progress, replicated_sharding });
     defer if (compilation_fut.cancel(io)) |exe| {
         exe.deinit();
     } else |_| {};
@@ -132,7 +133,7 @@ pub fn main(init: std.process.Init) !void {
     };
     defer allocator.free(prompt);
 
-    var ctx = try discussion.Context.init(allocator, io, platform, &model_buffers, params.cache, params.attention_metadata, exe, tokenizer, config, args.seqlen);
+    var ctx = try discussion.Context.init(allocator, io, platform, &model_buffers, params.cache, params.attention_metadata, exe, tokenizer, config, args.seqlen, replicated_sharding);
     defer ctx.deinit();
 
     if (interactive) {
