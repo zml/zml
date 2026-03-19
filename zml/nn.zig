@@ -199,8 +199,8 @@ pub const RopeOpts = struct {
         }
 
         pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
-            _ = allocator; // autofix
-            _ = options; // autofix
+            _ = allocator;
+            _ = options;
             if (source == .null) return .{ .default = .{} };
 
             if (source != .object) return error.InvalidEnumTag;

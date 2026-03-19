@@ -126,8 +126,6 @@ pub const SingleKernelExe = struct {
     }
 
     pub fn run(self: *const SingleKernelExe, args: Args) !void {
-        _ = args.io; // autofix
-        _ = args.platform; // autofix
         var exe_args = try self.exe.args(args.allocator);
         defer exe_args.deinit(args.allocator);
 

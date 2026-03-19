@@ -27,7 +27,7 @@ fn setupRocmEnv(rocm_data_dir: []const u8) !void {
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
-    _ = allocator; // autofix
+    _ = allocator;
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }

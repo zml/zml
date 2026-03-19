@@ -93,8 +93,8 @@ pub const Tokenizer = union(Tokenizers) {
     homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
-        _ = allocator; // autofix
-        _ = io; // autofix
+        _ = allocator;
+        _ = io;
         if (std.mem.endsWith(u8, model, ".pb")) {
             return .{ .sentencepiece = try .fromFile(model) };
         }
@@ -106,8 +106,8 @@ pub const Tokenizer = union(Tokenizers) {
     }
 
     pub fn fromBytes(allocator: std.mem.Allocator, io: std.Io, bytes: []const u8) !Tokenizer {
-        _ = allocator; // autofix
-        _ = io; // autofix
+        _ = allocator;
+        _ = io;
         if (bytes[0] == '{') {
             return .{ .hftokenizers = try .fromBytes(bytes) };
         }
