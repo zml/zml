@@ -70,9 +70,9 @@ pub fn main(init: std.process.Init) !void {
     defer pixel_values.deinit();
     var expected_output = try loadBufferFromStore(allocator, io, platform, replicated_sharding, &vision_store, "output");
     defer expected_output.deinit();
+    const grid_thw = try loadGridThwFromStore(allocator, io, &vision_store, "grid_thw");
 
     const pixel_values_tensor = Tensor.fromShape(pixel_values.shape());
-    const grid_thw = [3]u32{ 1, 16, 16 };
 
     const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ pixel_values_tensor, grid_thw }, .{ .shardings = &.{replicated_sharding} });
     defer exe.deinit();
@@ -136,4 +136,57 @@ fn loadBufferFromStore(
     _ = try reader.interface.readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+}
+
+fn loadGridThwFromStore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    store: *zml.io.TensorStore,
+    key: []const u8,
+) ![3]u32 {
+    const shape = store.view().getShape(key) orelse return error.NotFound;
+    if (shape.count() != 3) return error.InvalidGridThw;
+
+    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(host_bytes);
+
+    var io_buffer: [1024]u8 = undefined;
+    var reader = try store.view().getReader(key, io, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(host_bytes);
+
+    const slice = zml.Slice.init(shape, host_bytes);
+    return switch (shape.dtype()) {
+        .u32 => blk: {
+            const items = slice.constItems(u32);
+            break :blk .{ items[0], items[1], items[2] };
+        },
+        .u64 => blk: {
+            const items = slice.constItems(u64);
+            break :blk .{
+                std.math.cast(u32, items[0]) orelse return error.InvalidGridThw,
+                std.math.cast(u32, items[1]) orelse return error.InvalidGridThw,
+                std.math.cast(u32, items[2]) orelse return error.InvalidGridThw,
+            };
+        },
+        .i32 => blk: {
+            const items = slice.constItems(i32);
+            if (items[0] < 0 or items[1] < 0 or items[2] < 0) return error.InvalidGridThw;
+            break :blk .{
+                @intCast(items[0]),
+                @intCast(items[1]),
+                @intCast(items[2]),
+            };
+        },
+        .i64 => blk: {
+            const items = slice.constItems(i64);
+            if (items[0] < 0 or items[1] < 0 or items[2] < 0) return error.InvalidGridThw;
+            break :blk .{
+                std.math.cast(u32, items[0]) orelse return error.InvalidGridThw,
+                std.math.cast(u32, items[1]) orelse return error.InvalidGridThw,
+                std.math.cast(u32, items[2]) orelse return error.InvalidGridThw,
+            };
+        },
+        else => return error.InvalidGridThw,
+    };
 }

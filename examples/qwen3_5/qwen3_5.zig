@@ -47,6 +47,7 @@ pub const Qwen35 = struct {
         spatial_merge_size: i64,
         temporal_patch_size: i64,
         num_position_embeddings: i64,
+        in_channels: i64,
     };
 
     // Each layer uses either: full attention (SelfAttn) or linear attention (GatedDeltaNet).
@@ -80,7 +81,7 @@ pub const Qwen35 = struct {
         const lm_head_prefix = if (store.hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
         return .{
             .text_model = try .init(allocator, store.withPrefix("model.language_model"), config),
-            .vision_model = .init(allocator, config),
+            .vision_model = .init(allocator, store.withPrefix("model.visual"), config),
             .lm_head = .init(store.withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
             .config = config,
             .gen_options = gen_options,
@@ -121,7 +122,7 @@ pub const Qwen35 = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
         TextModel.unloadBuffers(&self.text_model, allocator);
-        // VisionModel.unloadBuffers(&self.vision_model, allocator);
+        VisionModel.unloadBuffers(&self.vision_model);
         self.lm_head.weight.deinit();
     }
 
@@ -224,7 +225,7 @@ pub const Qwen35 = struct {
 //========================Vision model========================
 
 pub const VisionModel = struct {
-    // vision_patch_embed: VisionPatchEmbed,
+    vision_patch_embed: VisionPatchEmbed,
     // pos_embed: zml.nn.TokenEmbedding,
     // blocks: []VisionBlock,
     // patch_merger: PatchMerger,
@@ -235,9 +236,9 @@ pub const VisionModel = struct {
     num_position_embeddings: i64,
     rope_opts: zml.nn.RopeOpts,
 
-    pub fn init(allocator: std.mem.Allocator, config: Qwen35.Config) VisionModel {
-        _ = allocator;
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Qwen35.Config) VisionModel {
         return .{
+            .vision_patch_embed = .init(allocator, config, store.withPrefix("patch_embed")),
             .hidden_size = config.vision_config.hidden_size,
             .num_heads = config.vision_config.num_heads,
             .spatial_merge_size = config.vision_config.spatial_merge_size,
@@ -254,15 +255,108 @@ pub const VisionModel = struct {
         _ = allocator;
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionModel)) void {
+        VisionPatchEmbed.unloadBuffers(&self.vision_patch_embed);
     }
 
     pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]u32) Tensor {
-        _ = self;
         _ = grid_thw;
-        return pixel_values;
+        const hidden_states = self.vision_patch_embed.forward(pixel_values);
+        return hidden_states;
+    }
+};
+
+pub const VisionPatchEmbed = struct {
+    proj: Conv3d,
+    patch_size: i64,
+    temporal_patch_size: i64,
+    in_channels: i64,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: Qwen35.Config,
+        store: zml.io.TensorStore.View,
+    ) VisionPatchEmbed {
+        _ = allocator;
+        return .{
+            .proj = .init(store.withPrefix("proj"), config),
+            .patch_size = config.vision_config.patch_size,
+            .temporal_patch_size = config.vision_config.temporal_patch_size,
+            .in_channels = config.vision_config.in_channels,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionPatchEmbed)) void {
+        Conv3d.unloadBuffers(&self.proj);
+    }
+
+    pub fn forward(self: VisionPatchEmbed, pixel_values: Tensor) Tensor {
+        const reshaped = pixel_values.reshape(.{ -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size }); // TODO: add clean tags
+        const conv_output = self.proj.forward(reshaped);
+        return conv_output.reshape(.{ conv_output.dim(0), conv_output.dim(1) });
+    }
+};
+
+pub const Conv3d = struct {
+    weight: Tensor,
+    bias: ?Tensor = null,
+    temporal_stride: i64,
+    spatial_stride: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) Conv3d {
+        return .{
+            .weight = store.createTensor("weight", null, null),
+            .bias = store.maybeCreateTensor("bias", null, null),
+            .temporal_stride = config.vision_config.temporal_patch_size,
+            .spatial_stride = config.vision_config.patch_size,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Conv3d)) void {
+        self.weight.deinit();
+        if (self.bias) |*bias| bias.deinit();
+    }
+
+    pub fn forward(self: Conv3d, input: Tensor) Tensor {
+        const x = input;
+        var strides: [3]i64 = .{ self.temporal_stride, self.spatial_stride, self.spatial_stride };
+        const padding = getPadding(x.dims()[2..5].*, self.weight.dims()[2..5].*, strides);
+        var y = x.convolution(
+            self.weight.convert(x.dtype()),
+            .{
+                .window_strides = &strides,
+                .pad_value = &padding,
+                .lhs_dilation = &.{ 1, 1, 1 },
+                .rhs_dilation = &.{ 1, 1, 1 },
+                .window_reversal = &.{ false, false, false },
+                .input_batch_dimension = 0,
+                .input_feature_dimension = 1,
+                .input_spatial_dimensions = &.{ 2, 3, 4 },
+                .kernel_input_feature_dimension = 1,
+                .kernel_output_feature_dimension = 0,
+                .kernel_spatial_dimensions = &.{ 2, 3, 4 },
+                .output_batch_dimension = 0,
+                .output_feature_dimension = 1,
+                .output_spatial_dimensions = &.{ 2, 3, 4 },
+                .feature_group_count = 1,
+                .batch_group_count = 1,
+            },
+        );
+        if (self.bias) |b| y = y.add(b.convert(y.dtype()).broadcast(y._shape, &.{1}));
+        return y;
+    }
+
+    fn getPadding(input_dims: [3]i64, kernel_dims: [3]i64, strides: [3]i64) [6]i64 {
+        var res: [6]i64 = undefined;
+        for (0..3) |i| {
+            const output_size = @divFloor(input_dims[i], strides[i]);
+            const total_padding = (output_size - 1) * strides[i] + kernel_dims[i] - input_dims[i];
+            const pad_start = @divFloor(total_padding, 2);
+            const pad_end = total_padding - pad_start;
+            res[2 * i] = pad_start;
+            res[2 * i + 1] = pad_end;
+        }
+        return res;
     }
 };
 
