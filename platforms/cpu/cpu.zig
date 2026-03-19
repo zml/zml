@@ -15,8 +15,8 @@ pub fn isEnabled() bool {
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
-    _ = io; // autofix
-    _ = allocator; // autofix
+    _ = io;
+    _ = allocator;
     if (comptime !isEnabled()) {
         return error.Unavailable;
     }

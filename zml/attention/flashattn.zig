@@ -416,7 +416,7 @@ pub const fa3 = struct {
         pub const InitOptions = struct {};
 
         pub fn init(opts: InitOptions) fa3.Parameters {
-            _ = opts; // autofix
+            _ = opts;
             return .{};
         }
     };
@@ -730,10 +730,10 @@ pub const paged_fa2 = struct {
         decode_offset: ?zml.Tensor = null,
 
         pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-            _ = num_heads; // autofix
-            _ = num_kv_heads; // autofix
-            _ = head_dim; // autofix
-            _ = page_size; // autofix
+            _ = num_heads;
+            _ = num_kv_heads;
+            _ = head_dim;
+            _ = page_size;
             const max_seqlen_k = switch (parameters) {
                 inline else => |v| v.options.max_seqlen_k,
             };
@@ -1325,10 +1325,10 @@ pub const paged_fa3 = struct {
         decode_offset: ?zml.Tensor = null,
 
         pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-            _ = num_heads; // autofix
-            _ = num_kv_heads; // autofix
-            _ = head_dim; // autofix
-            _ = page_size; // autofix
+            _ = num_heads;
+            _ = num_kv_heads;
+            _ = head_dim;
+            _ = page_size;
             const max_seqlen_k = switch (parameters) {
                 inline else => |v| v.options.max_seqlen_k,
             };
@@ -1501,6 +1501,7 @@ pub const paged_fa3 = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        _ = opts;
         stdx.debug.assert(q.shape().hasTags(.{ .b, .h, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .h, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .h, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
