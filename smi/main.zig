@@ -51,7 +51,6 @@ pub fn main(init: std.process.Init) !void {
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
     var w: Worker = .{ .poll_interval_ms = args.poll_interval };
-    defer w.shutdown(io);
 
     const targets = platform.detect(io);
 
@@ -62,6 +61,7 @@ pub fn main(init: std.process.Init) !void {
         .io = io,
     };
     defer collector.deinit();
+    defer w.shutdown(io);
 
     var host_info: HostInfo = .{};
     try host.init(&w, io, &host_info);
