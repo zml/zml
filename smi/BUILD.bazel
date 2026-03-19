@@ -79,6 +79,7 @@ zig_binary(
         "bindings/tpu/process.zig",
         "bindings/tpu/metrics.zig",
         "bindings/tpu/tpuinfo.zig",
+        "collector.zig",
         "info/device_info.zig",
         "info/host_info.zig",
         "info/process_info.zig",

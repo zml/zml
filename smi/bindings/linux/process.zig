@@ -53,7 +53,7 @@ pub const ProcessEnricher = struct {
             if (delta_total > 0) {
                 if (self.prev_ticks.get(info.pid)) |prev| {
                     const delta_proc = ticks -| prev;
-                    info.cpu_percent = @intCast(@min(delta_proc * 1000 / delta_total, 9999));
+                    info.cpu_percent = @intCast(delta_proc * 1000 / delta_total);
                 }
             }
 
