@@ -337,7 +337,9 @@ pub fn testLayer(
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = shardings });
+    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{replicated_sharding} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
