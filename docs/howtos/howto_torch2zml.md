@@ -67,14 +67,15 @@ package, so the simplest way to use it, is to copy it next to your python
 script. Then wrap the model/pipeline in a `zml_utils.ActivationCollector`. The
 collector wraps the given model, and returns the original results AND the
 activations in a dict of `torch.Tensor` when it's being called. After that, you
-can save those activations to a `.pt` file.
+can save those activations to a `.safetensors` file.
 
 ```python
 import torch
 import transformers
+from safetensors.torch import save_file
 import zml_utils
 
-model_path = "meta-llama/Meta-Llama-3-8B"
+model_path = "meta-llama/Llama-3.2-1B-Instruct"
 
 pipeline = transformers.pipeline(
     "text-generation",
@@ -97,8 +98,8 @@ if output:
     print(output)
 
 # Save activations to a file.
-filename = model_path.split("/")[-1] + ".activations.pt"
-torch.save(activations, filename)
+filename = model_path.split("/")[-1] + ".activations.safetensors"
+save_file(activations, filename)
 print(f"Saved {len(activations)} activations to {filename}")
 ```
 
@@ -118,36 +119,27 @@ model. Put the following in `my_project/torch2zml.zig`.
 const std = @import("std");
 const log = std.log;
 
-const async = @import("async");
 const zml = @import("zml");
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    try async.AsyncThread.main(gpa.allocator(), asyncMain, .{});
-}
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-pub fn asyncMain() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
-
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
+    const args = try init.minimal.args.toSlice(allocator);
+    defer allocator.free(args);
     const model_path, const activations_path = args[1..3].*;
 
-    const activations = try zml.aio.torch.open(allocator, activations_path);
-    defer activations.deinit();
-    log.info("Found {} activations in {s}", .{ activations.buffers.count(), activations_path });
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, activations_path);
+    defer activations_registry.deinit();
+    log.info("Found {} activations in {s}", .{ activations_registry.tensors.count(), activations_path });
 
-    const model_weights = try zml.aio.detectFormatAndOpen(allocator, model_path);
-    defer model_weights.deinit();
-    log.info("Found {} model layers in {s}", .{ model_weights.buffers.count(), activations_path });
+    var model_registry = try zml.safetensors.TensorRegistry.fromPath(allocator, io, model_path);
+    defer model_registry.deinit();
+    log.info("Found {} activations in {s}", .{ model_registry.tensors.count(), model_path });
 }
 ```
 
-And add a `zig_cc_binary` target in `my_project/BUILD.bazel`:
+And add a `zig_binary` target in `my_project/BUILD.bazel`:
 
 ```python
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -156,7 +148,6 @@ zig_binary(
     name = "torch2zml",
     main = "torch2zml.zig",
     deps = [
-        "@zml//async",
         "@zml//zml",
     ],
 )
@@ -166,19 +157,16 @@ Now check that the weights can be loaded correctly using the bazel CLI.
 
 ```bash
 bazel build //my_project:torch2zml
-./bazel-bin/my_project/torch2zml /path/to/my/model.safetensors.index.json ./my_project/Meta-Llama-3-8B.activations.pt
+./bazel-bin/my_project/torch2zml /path/to/my/model.safetensors.index.json ./my_project/Llama-3.2-1B-Instruct.activations.safetensors
 
-info: Found 1108 activations in /Users/guw/Documents/zml/models/torch2zml/Meta-Llama-3-8B.activations.pt
-debug(zml_io): Loading shard: model-00004-of-00004.safetensors
-debug(zml_io): Loading shard: model-00001-of-00004.safetensors
-debug(zml_io): Loading shard: model-00002-of-00004.safetensors
-debug(zml_io): Loading shard: model-00003-of-00004.safetensors
-info: Found 291 model layers in /Users/guw/Documents/zml/models/torch2zml/Meta-Llama-3-8B.activations.pt
+info: Found 564 activations in /Users/corendos/dev/zml/python/temp/Llama-3.2-1B-Instruct.activations.safetensors
+debug(zml/safetensors): Added new metadata key=format with value=pt
+info: Found 146 activations in /Users/corendos/models/Llama-3.2-1B-Instruct/model.safetensors
 ```
 
-## Loading an individual layer
+## Initializing an individual layer
 
-In the above Zig code, the `model_weights` struct is a wrapper around a flat
+In the above Zig code, the `model_registry` struct is a wrapper around a flat
 dictionary, containing an entry for each tensor in the model (similar to a
 "state dict"). Manipulating a dictionary is generally not very convenient, so
 let's convert it to a Zig struct.
@@ -196,24 +184,70 @@ const Mlp = struct {
 The `zml.nn.Linear` is the equivalent of `torch.nn.Linear` and is defined by
 its `weight` and optional `bias` tensors.
 
-To create such a struct from our `model_weights` dictionary, we can use the
-`zml.aio.populateModelWithPrefix` helper:
+To create such a struct from our `model_registry` dictionary, we first need to
+convert it to a `TensorStore`:
 
 ```zig
-pub fn asyncMain() !void {
+pub fn main(init: std.process.Init) !void {
     ...
-    const mlp_shape = try zml.aio.populateModelWithPrefix(Mlp, allocator, model_weights, "model.layers.0.mlp");
-    log.info("layer.0.mlp: {}", .{mlp_shape});
+    var model_store: zml.io.TensorStore = .fromRegistry(allocator, &model_registry);
+    defer model_store.deinit();
+}
+```
+
+Then, we can initialize our MLP:
+
+```zig
+pub fn main(init: std.process.Init) !void {
+    ...
+
+    const mlp_view = model_store.view().withPrefix("model.layers.0.mlp");
+
+    const mlp: Mlp = .{
+        .up_proj = .init(
+            mlp_view.createTensor("up_proj.weight", .{ .dout, .d }, null),
+            mlp_view.maybeCreateTensor("up_proj.bias", .{.dout}, null),
+            .d,
+        ),
+        .gate_proj = .init(
+            mlp_view.createTensor("gate_proj.weight", .{ .dout, .d }, null),
+            mlp_view.maybeCreateTensor("gate_proj.bias", .{.dout}, null),
+            .d,
+        ),
+        .down_proj = .init(
+            mlp_view.createTensor("down_proj.weight", .{ .d, .dout }, null),
+            mlp_view.maybeCreateTensor("down_proj.bias", .{.d}, null),
+            .dout,
+        ),
+    };
 }
 ```
 
 Build and run, using previous commands.
 
-Typical errors are of the form _"Layer not found: ..."_. This is typically due
-to the naming of layers in Zig not matching the naming in the file.
+Typical errors are due to the naming of layers in Zig not matching the naming
+in the file.
 Double-check everything and don't hesitate to print more things, e.g. in the
 Python script. Alternatively, Huggingface's web-interface allows to peek into
 `.safetensor` files.
+
+
+## Loading an individual layer
+
+Currently, the layer is initialized but the weights are still on the disk.
+ZML provides a convenience to automatically load weights from an initialized model:
+
+```zig
+pub fn main(init: std.process.Init) !void {
+    ...
+
+    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator);
+    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, .{ .parallelism = 1, .store = &model_store, .dma_chunks = 2, .dma_chunk_size = 4096, .shardings = &.{}});
+}
+```
+
+TODO: Explain the load parameters ? Or find sane defaults to not have to worry about it ?
 
 
 ## Testing an individual layer
@@ -226,33 +260,39 @@ const Mlp = struct {
     gate_proj: zml.nn.Linear,
     down_proj: zml.nn.Linear,
 
-    pub fn forward(self: Mlp, x: Tensor) Tensor {
-        const proj = zml.call(self.up_proj, .forward, .{x});
-        var output = zml.call(self.gate_proj, .forward, .{x});
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
+        const proj = self.up_proj.forward(x);
+        var output = self.gate_proj.forward(x);
         output = output.silu().mul(proj);
-        return zml.call(self.down_proj, .forward, .{output});
+        return self.down_proj.forward(output);
     }
 };
 ```
 
-Note that we use `zml.call` instead of directly calling
-`self.up_proj.forward(x)`. Calling `forward` directly results in the same
-computation happening at runtime; but going through `zml.call` allows ZML to
-generate an MLIR representation that is closer to the Zig code and therefore
-easier to read.
-
-We can test the MLP layer with the `zml.testing.testLayer` utility:
+Our MLP layer is now almost ready to be tested with the `zml.testing.testLayer` utility.
+As you may have noticed, ZML makes heavy-use of tagged tensors. In the MLP, we expect
+to do a dot product on the `.d` dimension. But the activations we load from the
+activations files are not tagged. One solution could be to tag the tensors before saving
+them to file, but a much simpler solution is to intercept the inputs before providing
+them to the layer we want to test, using a wrapper.
 
 ```zig
-pub fn asyncMain() !void {
+pub const Wrapper = struct {
+    mlp: Mlp,
+
+    pub fn forward(wrapper: Wrapper, input: zml.Tensor) zml.Tensor {
+        const tagged_input = input.withTags(.{.b, .s, .d});
+        return wrapper.mlp.forward(tagged_input);
+    }
+};
+
+pub fn main(init: std.process.Init) !void {
     ...
 
-    var ctx = try zml.Context.init();
-    defer ctx.deinit();
-    const platform = ctx.autoPlatform(.{});
-    const mlp_weights = try zml.aio.loadModelBuffers(Mlp, mlp_shape, model_weights, allocator, platform);
+    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
+    defer activations_store.deinit();
 
-    zml.testing.testLayer(platform, activations, "model.layers.0.mlp", mlp_shape, mlp_weights, 1e-3);
+    try zml.testing.testLayer(allocator, io, platform, Wrapper{ .mlp = mlp }, .forward, activations_store.view(), "model.model.layers.0.mlp", .{ .mlp = mlp_weights }, &.{}, .{});
 }
 ```
 
