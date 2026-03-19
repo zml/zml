@@ -5,7 +5,7 @@ const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.Process
 const Worker = @import("../../worker.zig").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, nvml: *const Nvml) !void {
-    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list, nvml });
+    try w.spawn(io, pollLoop, .{ io, w, allocator, list, nvml });
 }
 
 fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, nvml: *const Nvml) void {

@@ -3,81 +3,76 @@ const sysfs = @import("../../sysfs.zig");
 const tpuinfo = @import("tpuinfo.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
+const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
-const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";
 
-pub const Backend = struct {
-    processes: ProcessShadowList = .init(),
+pub const target: device_info.Target = .tpu;
 
-    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
-        const chip = scanPciChips(io) orelse return error.TpuUnavailable;
-        const device_count = chip.chip_count * chip.devices_per_chip;
-        const tpu_start = device_infos.items.len;
+pub fn start(collector: *Collector) !void {
+    const chip = scanPciChips(collector.io) orelse return error.TpuUnavailable;
+    const device_count = chip.chip_count * chip.devices_per_chip;
+    var tpu_infos: std.ArrayList(*DeviceInfo) = .{};
 
-        for (0..device_count) |_| {
-            const info = try allocator.create(DeviceInfo);
-            info.* = .{ .tpu = .{ .name = toName(chip.name) } };
-            try device_infos.append(allocator, info);
-        }
-
-        const tpu_infos = device_infos.items[tpu_start..];
-        inline for (batch_metrics) |query| {
-            try w.spawnBatchWorker(io, tpu_infos, query);
-        }
-
-        if (tpu_infos.len > 0) {
-            try tpu_process.init(w, io, proc_allocator, chip.devices_per_chip, tpu_infos, &self.processes);
-        }
+    for (0..device_count) |_| {
+        const info = try collector.addDevice(.{ .tpu = .{ .name = toName(chip.name) } });
+        try tpu_infos.append(collector.arena, info);
     }
 
-    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
-        self.processes.deinit(proc_allocator);
+    try collector.worker.spawn(collector.io, pollAllDevices, .{ collector.io, collector.worker, tpu_infos.items });
+
+    if (tpu_infos.items.len > 0) {
+        const processes = try collector.createProcessList();
+        try tpu_process.init(collector.worker, collector.io, collector.gpa, chip.devices_per_chip, tpu_infos.items, processes);
     }
+}
+
+const MetricKind = enum { int, double };
+
+const metrics = .{
+    .{ .field = "mem_used_bytes", .metric = "tpu.runtime.hbm.memory.usage.bytes", .kind = MetricKind.int },
+    .{ .field = "mem_total_bytes", .metric = "tpu.runtime.hbm.memory.total.bytes", .kind = MetricKind.int },
+    .{ .field = "util_percent", .metric = "tpu.runtime.tensorcore.dutycycle.percent", .kind = MetricKind.double },
 };
 
-const batch_metrics = .{
-    &queryMemUsed,
-    &queryMemTotal,
-    &queryUtil,
-};
-
-fn queryMemUsed(infos: []*DeviceInfo) void {
-    queryInt(infos, "mem_used_bytes", "tpu.runtime.hbm.memory.usage.bytes");
-}
-
-fn queryMemTotal(infos: []*DeviceInfo) void {
-    queryInt(infos, "mem_total_bytes", "tpu.runtime.hbm.memory.total.bytes");
-}
-
-fn queryInt(infos: []*DeviceInfo, comptime field: []const u8, comptime metric_name: [:0]const u8) void {
-    var ids: [tpuinfo.max_devices]c_longlong = undefined;
-    var vals: [tpuinfo.max_devices]c_longlong = undefined;
-    const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
-        for (infos) |info| @field(&info.tpu, field) = null;
-        return;
-    };
-    for (ids[0..n], vals[0..n]) |id, val| {
-        if (id >= 0 and id < infos.len) {
-            @field(&infos[@intCast(id)].tpu, field) = @intCast(val);
+fn pollAllDevices(io: std.Io, w: *const Worker, infos: []*DeviceInfo) void {
+    w.pollLoop(io, struct {
+        fn poll(i: []*DeviceInfo) void {
+            inline for (metrics) |m| {
+                queryMetric(i, m.field, m.metric, m.kind);
+            }
         }
-    }
+    }.poll, .{infos});
 }
 
-fn queryUtil(infos: []*DeviceInfo) void {
+fn queryMetric(infos: []*DeviceInfo, comptime field: []const u8, metric_name: [:0]const u8, kind: MetricKind) void {
     var ids: [tpuinfo.max_devices]c_longlong = undefined;
-    var vals: [tpuinfo.max_devices]f64 = undefined;
-    const n = tpuinfo.queryDouble(address, "tpu.runtime.tensorcore.dutycycle.percent", &ids, &vals) catch {
-        for (infos) |info| info.tpu.util_percent = null;
-        return;
-    };
-    for (ids[0..n], vals[0..n]) |id, val| {
-        if (id >= 0 and id < infos.len) {
-            infos[@intCast(id)].tpu.util_percent = @intFromFloat(@round(val));
-        }
+
+    switch (kind) {
+        .int => {
+            var vals: [tpuinfo.max_devices]c_longlong = undefined;
+            const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
+                for (infos) |info| @field(&info.tpu, field) = null;
+                return;
+            };
+            for (ids[0..n], vals[0..n]) |id, val| {
+                if (id >= 0 and id < infos.len)
+                    @field(&infos[@intCast(id)].tpu, field) = @intCast(val);
+            }
+        },
+        .double => {
+            var vals: [tpuinfo.max_devices]f64 = undefined;
+            const n = tpuinfo.queryDouble(address, metric_name, &ids, &vals) catch {
+                for (infos) |info| @field(&info.tpu, field) = null;
+                return;
+            };
+            for (ids[0..n], vals[0..n]) |id, val| {
+                if (id >= 0 and id < infos.len)
+                    @field(&infos[@intCast(id)].tpu, field) = @intFromFloat(@round(val));
+            }
+        },
     }
 }
 

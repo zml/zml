@@ -7,7 +7,7 @@ const Worker = @import("../../worker.zig").Worker;
 const bdf_len = "0000:00:00.0".len;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi) !void {
-    try w.spawnCustomWorker(io, pollLoop, .{ io, w, allocator, list, amdsmi });
+    try w.spawn(io, pollLoop, .{ io, w, allocator, list, amdsmi });
 }
 
 fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi) void {

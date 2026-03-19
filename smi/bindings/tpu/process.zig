@@ -5,7 +5,7 @@ const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
 const Worker = @import("../../worker.zig").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessShadowList) !void {
-    try w.spawnCustomWorker(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos });
+    try w.spawn(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos });
 }
 
 fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, devices_per_chip: u32, device_infos: []*DeviceInfo) void {

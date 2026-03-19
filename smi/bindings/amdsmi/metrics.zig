@@ -3,38 +3,28 @@ const AmdSmi = @import("amdsmi.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
+const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
-const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const process = @import("process.zig");
 
-pub const Backend = struct {
-    amdsmi: AmdSmi = undefined,
-    processes: ProcessShadowList = .init(),
+pub const target: device_info.Target = .rocm;
 
-    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
-        self.amdsmi = try AmdSmi.init(allocator);
-        const count = self.amdsmi.getDeviceCount();
+pub fn start(collector: *Collector) !void {
+    const amdsmi = try collector.arena.create(AmdSmi);
+    amdsmi.* = try AmdSmi.init(collector.arena);
+    const count = amdsmi.getDeviceCount();
 
-        for (0..count) |i| {
-            const dev = Device.open(&self.amdsmi, @intCast(i)) catch continue;
-
-            const info = try allocator.create(DeviceInfo);
-            info.* = .{ .rocm = .{ .name = dev.getName() catch null } };
-            try device_infos.append(allocator, info);
-
-            inline for (metrics) |metric| {
-                try w.spawnWorker(io, &info.rocm, metric.field, metric.query, dev);
-            }
-        }
-
-        try process.init(w, io, proc_allocator, &self.processes, &self.amdsmi);
+    for (0..count) |i| {
+        const dev = Device.open(amdsmi, @intCast(i)) catch continue;
+        const info = try collector.addDevice(.{ .rocm = .{ .name = dev.getName() catch null } });
+        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
 
-    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
-        self.processes.deinit(proc_allocator);
-    }
-};
+    const processes = try collector.createProcessList();
+    try process.init(collector.worker, collector.io, collector.gpa, processes, amdsmi);
+}
+
+const pollDevice = Worker.pollMetrics(*GpuInfo, Device, metrics);
 
 const Device = struct {
     amdsmi: *const AmdSmi,

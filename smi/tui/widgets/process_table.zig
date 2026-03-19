@@ -94,7 +94,9 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     try children.append(ctx.arena, header_rt.widget());
 
     if (row_count == 0) {
-        try children.append(ctx.arena, empty_rt.widget());
+        const padded: vxfw.Padding = .{ .child = empty_rt.widget(), .padding = .{ .top = 1 } };
+        const empty_box: vxfw.SizedBox = .{ .child = padded.widget(), .size = .{ .width = w, .height = 2 } };
+        try children.append(ctx.arena, empty_box.widget());
     } else {
         const scroll_h: u16 = @min(@as(u16, @intCast(row_count)), max_visible_rows);
         const scroll_box: vxfw.SizedBox = .{
