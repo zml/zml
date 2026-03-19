@@ -5,7 +5,7 @@ const cuda = @import("platforms/cuda");
 const neuron = @import("platforms/neuron");
 const pjrt = @import("pjrt");
 const rocm = @import("platforms/rocm");
-const tpu = @import("platforms/tpu");
+pub const tpu = @import("platforms/tpu");
 
 pub const Platform = enum {
     cpu,

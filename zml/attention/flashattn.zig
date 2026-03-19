@@ -1,6 +1,8 @@
 const std = @import("std");
 
+const dialects = @import("mlir/dialects");
 const flashattn = @import("platforms/cuda/flashattn");
+const mlir = @import("mlir");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
@@ -1703,5 +1705,238 @@ pub const paged_fa3 = struct {
         };
 
         return o;
+    }
+};
+
+pub const mosaic_tpu = struct {
+    const FlashAttentionParams = struct {
+        batch_size: i64,
+        num_heads: i64,
+        q_seq_len: i64,
+        kv_seq_len: i64,
+        d_model: i64,
+        sm_scale: f32,
+    };
+    const PagedAttentionParams = struct {
+        batch_size: i64,
+        num_q_heads: i64,
+        num_kv_heads: i64,
+        head_dim: i64,
+        pages_per_sequence: i64,
+        total_num_pages: i64,
+        page_size: i64,
+        pages_per_compute_block: u32,
+    };
+    const DecodeAttentionParams = struct {
+        batch_size: i64,
+        num_q_heads: i64,
+        num_kv_heads: i64,
+        head_dim: i64,
+        pages_per_sequence: i64,
+        total_num_pages: i64,
+        page_size: i64,
+        pages_per_compute_block: u32,
+    };
+    const RaggedPagedAttentionParams = struct {
+        num_q_tokens: i64,
+        num_q_heads: i64,
+        num_kv_heads: i64,
+        head_dim: i64,
+        q_dtype: []const u8,
+        kv_dtype: []const u8,
+        max_num_seqs: i64,
+        pages_per_seq: i64,
+        total_num_pages: i64,
+        page_size: i64,
+        sm_scale: f32,
+        num_kv_pages_per_block: u32,
+        num_queries_per_block: u32,
+    };
+    pub const AttentionParams = union(enum) {
+        paged: PagedAttentionParams,
+        flash: FlashAttentionParams,
+        decode: DecodeAttentionParams,
+        ragged_paged: RaggedPagedAttentionParams,
+    };
+
+    fn kernelFrontendAttrs(comp_ctx: anytype) *const mlir.Attribute {
+        return mlir.dictionaryAttribute(comp_ctx.mlir_ctx, &.{
+            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_metadata", mlir.stringAttribute(comp_ctx.mlir_ctx, "{}")),
+        });
+    }
+
+    fn raggedPagedKernelCall(
+        q: zml.Tensor,
+        kv_pages: zml.Tensor,
+        kv_lens: zml.Tensor,
+        page_indices: zml.Tensor,
+        cu_q_lens: zml.Tensor,
+        num_seqs: zml.Tensor,
+        backend_config: []const u8,
+    ) zml.Tensor {
+        const seq_buf_idx = zml.Tensor.constant(zml.DataType.i32.zero()).broad(.init(.{2}, .i32));
+
+        const comp_ctx = zml.module.CompilationContext.current();
+        const op = dialects.stablehlo.custom_call(
+            comp_ctx.mlir_ctx,
+            &.{
+                kv_lens.value(),
+                page_indices.value(),
+                cu_q_lens.value(),
+                seq_buf_idx.value(),
+                num_seqs.value(),
+                q.value(),
+                kv_pages.value(),
+            },
+            &.{q.value().type_()},
+            .{
+                .call_target_name = "tpu_custom_call",
+                .backend_config = .{ .original = backend_config },
+                .has_side_effect = false,
+                .additional_attributes = &.{
+                    mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_name", mlir.stringAttribute(comp_ctx.mlir_ctx, "ragged_paged_attention_kernel")),
+                    mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "mhlo.frontend_attributes", kernelFrontendAttrs(comp_ctx)),
+                },
+            },
+            .unknown(comp_ctx.mlir_ctx),
+        ).appendTo(comp_ctx.currentScope().block);
+        return zml.Tensor._result(q.shape(), op.result(0));
+    }
+
+    pub const Options = struct {
+        is_prefill: bool,
+        batch_size: u32,
+        max_num_pages: u32,
+        max_seqlen_k: u32,
+        max_token_count: u32,
+        num_heads: u32,
+        head_dim: u32,
+        pages_per_compute_block: u32 = 1,
+
+        pub fn isPrefill(self: @This()) bool {
+            return self.is_prefill;
+        }
+
+        pub fn maxNumPages(self: @This()) usize {
+            return self.max_num_pages;
+        }
+    };
+
+    pub const Parameters = struct {
+        opts: mosaic_tpu.Options,
+        cu_seqlens_q: zml.Tensor,
+        page_indices: zml.Tensor,
+        kv_lens: zml.Tensor,
+
+        pub fn init(opts: mosaic_tpu.Options) @This() {
+            return .{
+                .opts = opts,
+                .cu_seqlens_q = zml.Tensor.init(.{ .n = @as(i64, opts.batch_size) + 1 }, .i32),
+                .page_indices = zml.Tensor.init(.{ @as(i64, opts.batch_size), @as(i64, opts.max_num_pages) }, .i32),
+                .kv_lens = zml.Tensor.init(.{@as(i64, opts.batch_size)}, .i32),
+            };
+        }
+
+        pub fn options(self: @This()) mosaic_tpu.Options {
+            return self.opts;
+        }
+
+        pub fn allocationSize(self: @This()) usize {
+            var size: usize = 0;
+            size += self.cu_seqlens_q.shape().byteSize();
+            size += self.page_indices.shape().byteSize();
+            size += self.kv_lens.shape().byteSize();
+            return size;
+        }
+    };
+
+    pub const Context = struct {
+        max_num_pages: u32,
+        pages_per_compute_block: u32,
+
+        pub fn init(parameters: mosaic_tpu.Parameters) @This() {
+            return .{
+                .max_num_pages = parameters.opts.max_num_pages,
+                .pages_per_compute_block = parameters.opts.pages_per_compute_block,
+            };
+        }
+    };
+
+    fn activeSequenceCount(cu_seqlens_q: zml.Tensor) zml.Tensor {
+        const start = cu_seqlens_q.slice1d(0, .{ .end = cu_seqlens_q.dim(0) - 1 });
+        const end = cu_seqlens_q.slice1d(0, .{ .start = 1 });
+        const query_lens = end.sub(start);
+        return query_lens
+            .cmp(.GT, zml.Tensor.constant(query_lens.dtype().zero()).broad(query_lens.shape()))
+            .convert(.i32)
+            .sum(0)
+            .reshape(zml.Shape.init(.{1}, .i32));
+    }
+
+    fn jnpDTypeExpr(dtype: zml.DataType) []const u8 {
+        return switch (dtype) {
+            .bf16 => "jnp.bfloat16",
+            .f32 => "jnp.float32",
+            else => stdx.debug.panic("mosaic_tpu ragged paged attention expects q/kv dtype bf16 or f32, got {}", .{dtype}),
+        };
+    }
+
+    fn renderBackendConfig(allocator: std.mem.Allocator, io: std.Io, params: AttentionParams) []u8 {
+        const json_string = switch (params) {
+            .paged => |paged_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(paged_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate paged attention TPU params: {}", .{err}),
+            .decode => |decode_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(decode_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate decode attention TPU params: {}", .{err}),
+            .ragged_paged => |ragged_paged_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"ragged_paged\",\"params\":{f}}}", .{std.json.fmt(ragged_paged_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate ragged paged attention TPU params: {}", .{err}),
+            .flash => |flash_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"flash\",\"params\":{f}}}", .{std.json.fmt(flash_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate flash attention TPU params: {}", .{err}),
+        };
+        defer allocator.free(json_string);
+
+        const compilation_context = zml.module.CompilationContext.current();
+        const runtime = compilation_context.platform.tpu_ir_runtime orelse stdx.debug.panic(
+            "TPU IR runtime is not initialized. Call platform.initTpuIrRuntime() before compiling TPU attention",
+            .{},
+        );
+        return runtime.request(allocator, io, json_string) catch |err| {
+            stdx.debug.panic("Failed to generate TPU backend config through persistent runtime: {}", .{err});
+        };
+    }
+
+    pub fn raggedPagedAttention(parameters: @This().Parameters, context: @This().Context, q: zml.Tensor, kv_cache: zml.Tensor) zml.Tensor {
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        threaded.allocator = zml.module.CompilationContext.current().allocator;
+        defer threaded.deinit();
+
+        const q_token_count = if (q.shape().hasTag(.q) != null) q.dim(.q) else q.dim(.b);
+        const padded_head_dim = q.dim(.hd);
+        const model_head_dim: i64 = @intCast(parameters.opts.head_dim);
+        const num_q_heads = q.dim(.h);
+        const num_kv_heads = @divExact(kv_cache.dim(.hkv), 2);
+        const max_num_seqs: i64 = @intCast(parameters.opts.batch_size);
+        const total_num_pages: i64 = kv_cache.dim(.page);
+
+        const num_queries_per_block: i64 = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
+
+        const ragged_params: AttentionParams = .{
+            .ragged_paged = .{
+                .num_q_tokens = q_token_count,
+                .num_q_heads = num_q_heads,
+                .num_kv_heads = num_kv_heads,
+                .head_dim = padded_head_dim,
+                .q_dtype = jnpDTypeExpr(q.dtype()),
+                .kv_dtype = jnpDTypeExpr(kv_cache.dtype()),
+                .max_num_seqs = max_num_seqs,
+                .pages_per_seq = context.max_num_pages,
+                .total_num_pages = total_num_pages,
+                .page_size = kv_cache.dim(.k_chunk),
+                .sm_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(model_head_dim))),
+                .num_kv_pages_per_block = context.pages_per_compute_block,
+                .num_queries_per_block = @intCast(num_queries_per_block),
+            },
+        };
+        const backend_config = renderBackendConfig(threaded.allocator, threaded.io(), ragged_params);
+        defer threaded.allocator.free(backend_config);
+
+        const num_seqs = activeSequenceCount(parameters.cu_seqlens_q);
+
+        return raggedPagedKernelCall(q, kv_cache, parameters.kv_lens, parameters.page_indices, parameters.cu_seqlens_q, num_seqs, backend_config);
     }
 };

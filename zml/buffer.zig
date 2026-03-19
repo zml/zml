@@ -180,7 +180,10 @@ pub const Buffer = struct {
         }
     }
 
-    pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
+    pub const UnitializedOptions = struct {
+        memory: Memory.Kind = .default,
+        layout: ?pjrt.MemoryLayout = null,
+    };
 
     pub fn uninitialized(
         _: std.Io,
@@ -271,6 +274,71 @@ pub const Buffer = struct {
             const destination = slice.data()[start..end];
             const maybe_event = try self._shards.get(shard_index).toHostBuffer(self._platform.pjrt_api, destination);
 
+            if (maybe_event) |event| {
+                try event.await(self._platform.pjrt_api, io);
+            }
+        }
+    }
+
+    /// Copies a prefix of this 1D buffer to a destination slice.
+    ///
+    /// This function extracts the first N elements from a rank-1 buffer and copies them
+    /// to a destination slice, where N is determined by the destination slice's length.
+    /// It handles sharded buffers by iterating through each shard and copying only the
+    /// overlapping portion that falls within the requested prefix range.
+    ///
+    /// The function is needed because PJRT buffers may be distributed across multiple
+    /// shards/devices, requiring element-wise coordination to gather a contiguous prefix
+    /// from the original buffer layout. This is commonly used when exporting partial
+    /// results or checkpointing the initial portion of large tensors without copying
+    /// the entire buffer.
+    ///
+    /// Args:
+    ///   self: The source buffer (must be rank-1)
+    ///   io: Standard I/O context for async operations
+    ///   slice: Destination slice in host memory (must be rank-1 and have same dtype as buffer)
+    ///
+    /// Returns: An error if:
+    ///   - The buffer or destination slice is not rank-1
+    ///   - Data types don't match between buffer and destination
+    ///   - Prefix length exceeds buffer length
+    ///   - Shard slicing is not along axis 0 or uses unsupported configurations
+    ///
+    /// Postcondition: The first `slice.shape.dim(0)` elements of the buffer are copied
+    /// to the destination slice, with all async copy operations awaited.
+    pub fn toPrefix1dSlice(self: Buffer, io: std.Io, slice: Slice) !void {
+        stdx.debug.assert(self._shape.rank() == 1, "toPrefix1dSlice expects a rank-1 buffer, got {}", .{self._shape.rank()});
+        stdx.debug.assert(slice.shape.rank() == 1, "toPrefix1dSlice expects a rank-1 destination slice, got {}", .{slice.shape.rank()});
+        stdx.debug.assert(self._shape.dtype() == slice.shape.dtype(), "toPrefix1dSlice dtype mismatch: buffer={} destination={}", .{ self._shape.dtype(), slice.shape.dtype() });
+
+        const prefix_len: i64 = slice.shape.dim(0);
+        stdx.debug.assert(prefix_len <= self._shape.dim(0), "toPrefix1dSlice prefix length {} exceeds buffer length {}", .{ prefix_len, self._shape.dim(0) });
+        if (prefix_len == 0) return;
+
+        const elem_size = self._shape.dtype().sizeOf();
+        for (self.placement().shards.constSlice(), 0..) |shard, shard_index| {
+            var shard_start: i64 = 0;
+            var shard_size: i64 = self._shape.dim(0);
+            switch (shard.slices.len) {
+                0 => {},
+                1 => {
+                    const shard_slice = shard.slices.get(0);
+                    stdx.debug.assert(shard_slice.axis == 0, "toPrefix1dSlice expects a rank-1 shard along axis 0, got axis {}", .{shard_slice.axis});
+                    shard_start = shard_slice.start;
+                    shard_size = shard_slice.size;
+                },
+                else => stdx.debug.panic("toPrefix1dSlice got unsupported shard slicing for rank-1 buffer: {} slices", .{shard.slices.len}),
+            }
+
+            const overlap_start = @max(@as(i64, 0), shard_start);
+            const overlap_end = @min(prefix_len, shard_start + shard_size);
+            if (overlap_start >= overlap_end) continue;
+
+            const byte_len: usize = @intCast((overlap_end - overlap_start) * elem_size);
+            const dst_offset: usize = @intCast(overlap_start * elem_size);
+            const src_offset: i64 = (overlap_start - shard_start) * elem_size;
+            const destination = slice.data()[dst_offset..][0..byte_len];
+            const maybe_event = try self._shards.get(shard_index).copyRawToHost(self._platform.pjrt_api, destination, src_offset);
             if (maybe_event) |event| {
                 try event.await(self._platform.pjrt_api, io);
             }

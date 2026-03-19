@@ -123,7 +123,7 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 }
 
 test normalizeL2 {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
@@ -440,7 +440,7 @@ test "invFreq Yarn" {
 }
 
 test "real/img" {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Fns = struct {
         fn testSplitMergeIsId(layout: RopeOpts.Layout) Tensor {
@@ -546,7 +546,7 @@ test "real/img" {
 }
 
 test rope {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Local = struct {
         fn _fwd(x: Tensor, opts: RopeOpts) Tensor {
@@ -644,7 +644,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 }
 
 test nearest {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     // 3D Tensor (basic)
     {

@@ -210,8 +210,8 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
 
     const exe = try Exe.init(
         allocator,
@@ -366,7 +366,7 @@ fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v:
     };
 }
 
-const EmitMlirResult = struct {
+pub const EmitMlirResult = struct {
     func: *mlir.Operation,
     input_info: InputInfo,
     output_info: OutputInfo,
@@ -380,7 +380,7 @@ fn finalizeAttributeList(allocator_: std.mem.Allocator, mlir_ctx: *mlir.Context,
     return res;
 }
 
-fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
+pub fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) !EmitMlirResult {
     var arena = std.heap.ArenaAllocator.init(compilation_context.allocator);
     defer arena.deinit();
 

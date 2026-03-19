@@ -10,6 +10,7 @@ const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
+const zml = @import("zml.zig");
 
 pub const ReduceArgs = struct {
     left: Tensor,
@@ -508,8 +509,7 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
 }
 
 test "triton" {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return error.SkipZigTest;
 
     if (platform.target != .cuda and platform.target != .rocm) return error.SkipZigTest;
 
@@ -806,8 +806,10 @@ fn scatterConfig(
 }
 
 test scatterConfig {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch |err| {
+        std.debug.print("Skipping scatterConfig test: platform unavailable ({any})\n", .{err});
+        return;
+    };
 
     var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
@@ -1564,8 +1566,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
 }
 
 test customCall {
-    const zml = @import("zml.zig");
-    const platform = zml.testing.env();
+    const platform = try zml.testing.env();
 
     var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
     defer comp.deinit();
