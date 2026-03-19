@@ -12,16 +12,16 @@ const Flags = struct {
     verbose: bool = false,
 };
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
     const allocator = gpa.allocator();
 
-    var threaded: std.Io.Threaded = .init(allocator);
+    var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
 
     const io = threaded.io();
 
-    const args = stdx.flags.parseProcessArgs(Flags);
+    const args = stdx.flags.parseProcessArgs(init.minimal, Flags);
 
     log.info("\tLoading tokenizer from {s}", .{args.tokenizer});
     var tokenizer = try zml_tokenizer.Tokenizer.fromFile(allocator, io, args.tokenizer);
