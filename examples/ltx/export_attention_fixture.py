@@ -133,15 +133,22 @@ def main() -> None:
         if not isinstance(q_entry, dict) or not isinstance(out_entry, dict):
             raise TypeError("Unexpected activation entry type for attention fallback")
 
-        q_inputs = q_entry.get("input", [])
-        out_outputs = out_entry.get("output", [])
-        if len(q_inputs) < 1 or len(out_outputs) < 1:
+        # ActivationCollector stores input/output as tuples (from PyTorch hooks).
+        # Normalize to list-like for consistent access.
+        q_inputs = q_entry.get("input") or []
+        out_outputs = out_entry.get("output") or []
+        if not isinstance(q_inputs, (list, tuple)) or len(q_inputs) < 1:
             raise ValueError(
-                f"Expected non-empty fallback entries for {activation_key}, got to_q.input={len(q_inputs)} to_out.0.output={len(out_outputs)}"
+                f"Expected non-empty input for {q_key}, got type={type(q_inputs)} len={len(q_inputs) if isinstance(q_inputs, (list, tuple)) else '?'}"
+            )
+        if not isinstance(out_outputs, (list, tuple)) or len(out_outputs) < 1:
+            raise ValueError(
+                f"Expected non-empty output for {out_key}, got type={type(out_outputs)} len={len(out_outputs) if isinstance(out_outputs, (list, tuple)) else '?'}"
             )
 
-        input0 = q_inputs[0].detach().cpu().contiguous()
-        output0 = out_outputs[0].detach().cpu().contiguous()
+        # Extract first input and output tensors (others are typically gradients or unused)
+        input0 = q_inputs[0].detach().cpu().contiguous() if isinstance(q_inputs[0], torch.Tensor) else q_inputs[0][0].detach().cpu().contiguous()
+        output0 = out_outputs[0].detach().cpu().contiguous() if isinstance(out_outputs[0], torch.Tensor) else out_outputs[0][0].detach().cpu().contiguous()
         resolved_key = f"{activation_key} [fallback: input={q_key}, output={out_key}]"
 
     input_name = f"{args.mode}.input0"

@@ -107,6 +107,15 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--log-sdpa-calls",
+        action="store_true",
+        help=(
+            "If set, monkeypatch torch.nn.functional.scaled_dot_product_attention and log "
+            "all observed call shapes (q/k/v/out). Useful to identify the correct call index "
+            "for --capture-sdpa-call-idx."
+        ),
+    )
+    parser.add_argument(
         "--token-limit",
         type=int,
         default=None,
@@ -281,10 +290,11 @@ def main() -> None:
     captured_kwargs: dict[str, dict[str, Any]] = {}
     kwargs_handles: list = []
     captured_sdpa: dict[str, torch.Tensor] = {}
+    sdpa_call_shapes: list[dict[str, Any]] = []
     orig_sdpa = None
     sdpa_call_count = 0
 
-    if args.capture_sdpa_call_idx is not None:
+    if args.capture_sdpa_call_idx is not None or args.log_sdpa_calls:
         target_idx = args.capture_sdpa_call_idx
         orig_sdpa = F.scaled_dot_product_attention
 
@@ -301,7 +311,19 @@ def main() -> None:
                 enable_gqa=enable_gqa,
             )
 
-            if sdpa_call_count == target_idx:
+            if args.log_sdpa_calls:
+                sdpa_call_shapes.append(
+                    {
+                        "idx": sdpa_call_count,
+                        "q": tuple(q.shape),
+                        "k": tuple(k.shape),
+                        "v": tuple(v.shape),
+                        "out": tuple(out.shape),
+                        "mask": tuple(attn_mask.shape) if isinstance(attn_mask, torch.Tensor) else None,
+                    }
+                )
+
+            if target_idx is not None and sdpa_call_count == target_idx:
                 captured_sdpa[f"__sdpa_call_{target_idx}__.q"] = q.detach().cpu().contiguous()
                 captured_sdpa[f"__sdpa_call_{target_idx}__.k"] = k.detach().cpu().contiguous()
                 captured_sdpa[f"__sdpa_call_{target_idx}__.v"] = v.detach().cpu().contiguous()
@@ -313,7 +335,10 @@ def main() -> None:
             return out
 
         F.scaled_dot_product_attention = _sdpa_wrapper
-        print(f"SDPA capture enabled for call index {target_idx}")
+        if target_idx is not None:
+            print(f"SDPA capture enabled for call index {target_idx}")
+        if args.log_sdpa_calls:
+            print("SDPA call logging enabled")
     if args.capture_kwargs and include_regexes:
         import re as _re
 
@@ -417,7 +442,13 @@ def main() -> None:
     for key, tensor in captured_sdpa.items():
         activations[key] = tensor
         print(f"sdpa captured for {key}: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
-    if args.capture_sdpa_call_idx is not None:
+    if args.log_sdpa_calls:
+        print("sdpa call shapes observed:")
+        for rec in sdpa_call_shapes:
+            print(
+                "  idx={idx} q={q} k={k} v={v} out={out} mask={mask}".format(**rec)
+            )
+    if args.capture_sdpa_call_idx is not None or args.log_sdpa_calls:
         print(f"sdpa calls observed: {sdpa_call_count}")
 
     print("denoised_video shape:", denoised_video.shape)

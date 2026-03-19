@@ -22,6 +22,18 @@ const Mode = enum {
     video_to_audio_attn,
 };
 
+const Ablation = enum {
+    pre_to_out_f32_sdpa,
+    pre_to_out_no_gate,
+    pre_to_out_sigmoid_gate,
+    pre_to_out_manual_sdpa_f32,
+    pre_to_out_alt_merge_transpose,
+    pre_to_out_head_first_sdpa,
+    pre_to_out_head_first_only,
+    pre_to_out_manual_sdpa_head_first,
+    no_mask,
+};
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
@@ -31,14 +43,14 @@ pub fn main(init: std.process.Init) !void {
 
     const stage2_checkpoint_path = it.next() orelse {
         std.log.err(
-            "Usage: bazel run //examples/ltx:attention_forward_check -- <stage2_checkpoint.safetensors> <attention_fixture.safetensors> <mode> [token_limit] [diagnostic_reference.safetensors] [--token-limited-reference]",
+            "Usage: bazel run //examples/ltx:attention_forward_check -- <stage2_checkpoint.safetensors> <attention_fixture.safetensors> <mode> [token_limit] [diagnostic_reference.safetensors] [--token-limited-reference] [--skip-ablations] [--only-ablation <name>] [--skip-final-assert]",
             .{},
         );
         return error.InvalidArgs;
     };
     const fixture_path = it.next() orelse {
         std.log.err(
-            "Usage: bazel run //examples/ltx:attention_forward_check -- <stage2_checkpoint.safetensors> <attention_fixture.safetensors> <mode> [token_limit] [diagnostic_reference.safetensors] [--token-limited-reference]",
+            "Usage: bazel run //examples/ltx:attention_forward_check -- <stage2_checkpoint.safetensors> <attention_fixture.safetensors> <mode> [token_limit] [diagnostic_reference.safetensors] [--token-limited-reference] [--skip-ablations] [--only-ablation <name>] [--skip-final-assert]",
             .{},
         );
         return error.InvalidArgs;
@@ -53,10 +65,32 @@ pub fn main(init: std.process.Init) !void {
     var token_limit: ?usize = null;
     var diagnostic_ref_path: ?[]const u8 = null;
     var token_limited_reference = false;
+    var skip_ablations = false;
+    var only_ablation: ?Ablation = null;
+    var skip_final_assert = false;
 
     while (it.next()) |v| {
         if (std.mem.eql(u8, v, "--token-limited-reference")) {
             token_limited_reference = true;
+            continue;
+        }
+
+        if (std.mem.eql(u8, v, "--skip-ablations")) {
+            skip_ablations = true;
+            continue;
+        }
+
+        if (std.mem.eql(u8, v, "--skip-final-assert")) {
+            skip_final_assert = true;
+            continue;
+        }
+
+        if (std.mem.eql(u8, v, "--only-ablation")) {
+            const ablation_name = it.next() orelse {
+                std.log.err("Missing value after --only-ablation", .{});
+                return error.InvalidArgs;
+            };
+            only_ablation = try parseAblation(ablation_name);
             continue;
         }
 
@@ -80,6 +114,10 @@ pub fn main(init: std.process.Init) !void {
     if (token_limited_reference and token_limit == null) {
         std.log.warn("Ignoring --token-limited-reference because no token_limit was provided", .{});
         token_limited_reference = false;
+    }
+
+    if (only_ablation) |selected| {
+        std.log.info("Running only ablation: {s}", .{@tagName(selected)});
     }
 
     const references_are_token_comparable = token_limit == null or token_limited_reference;
@@ -380,6 +418,50 @@ pub fn main(init: std.process.Init) !void {
                 std.log.info("Skipping stage 1: {s} not found in fixture", .{q_norm_key});
             }
 
+            // --- Stage 1.5: q_proj pre-RMSNorm (bf16 vs f32 accumulation) ---
+            const to_q_key = try std.fmt.allocPrint(allocator, "{s}.to_q_diag0", .{@tagName(mode)});
+            defer allocator.free(to_q_key);
+            if (fixture_store.view().hasKey(to_q_key)) {
+                var to_q_ref = try check_utils.loadBufferFromStore(allocator, io, platform, &fixture_store, to_q_key, replicated_sharding);
+                defer to_q_ref.deinit();
+                if (token_limit) |limit| {
+                    to_q_ref = try check_utils.sliceTokenPrefix(io, platform, to_q_ref, replicated_sharding, limit);
+                }
+
+                std.log.info("Compiling q_proj direct compare (forwardBlock0Attn1DiagQProj)...", .{});
+                var q_proj_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagQProj, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer q_proj_exe.deinit();
+                var q_proj_args = try q_proj_exe.args(allocator);
+                defer q_proj_args.deinit(allocator);
+                var q_proj_results = try q_proj_exe.results(allocator);
+                defer q_proj_results.deinit(allocator);
+                q_proj_args.set(.{ attn_input, attn_params_buffers });
+                q_proj_exe.call(q_proj_args, &q_proj_results);
+                var q_proj_out = q_proj_results.get(zml.Buffer);
+                defer q_proj_out.deinit();
+                const q_proj_m = try check_utils.compareBuffers(io, q_proj_out, to_q_ref, 0.1, 0.01);
+                std.log.info("q_proj direct (bf16): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ q_proj_m.max_abs_error, q_proj_m.mean_abs_error, q_proj_m.close_fraction });
+
+                std.log.info("Compiling q_proj direct compare with f32 accumulation (forwardBlock0Attn1DiagQProjF32)...", .{});
+                var q_proj_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagQProjF32, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer q_proj_f32_exe.deinit();
+                var q_proj_f32_args = try q_proj_f32_exe.args(allocator);
+                defer q_proj_f32_args.deinit(allocator);
+                var q_proj_f32_results = try q_proj_f32_exe.results(allocator);
+                defer q_proj_f32_results.deinit(allocator);
+                q_proj_f32_args.set(.{ attn_input, attn_params_buffers });
+                q_proj_f32_exe.call(q_proj_f32_args, &q_proj_f32_results);
+                var q_proj_f32_out = q_proj_f32_results.get(zml.Buffer);
+                defer q_proj_f32_out.deinit();
+                const q_proj_m_f32 = try check_utils.compareBuffers(io, q_proj_f32_out, to_q_ref, 0.1, 0.01);
+                std.log.info("q_proj direct (f32 accum): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ q_proj_m_f32.max_abs_error, q_proj_m_f32.mean_abs_error, q_proj_m_f32.close_fraction });
+
+                const q_proj_delta = try check_utils.compareBuffers(io, q_proj_out, q_proj_f32_out, 0.1, 0.01);
+                std.log.info("  -> q_proj bf16 vs f32 accum delta: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ q_proj_delta.max_abs_error, q_proj_delta.mean_abs_error, q_proj_delta.close_fraction });
+            } else {
+                std.log.info("Skipping stage 1.5: {s} not found in fixture", .{to_q_key});
+            }
+
             // --- Stage 2: q_rotated — validate head-split + RoPE for Q ---
             if (diagnostic_ref.q_rotated) |q_rotated_ref| {
                 std.log.info("Compiling forwardBlock0Attn1DiagQRot...", .{});
@@ -440,6 +522,50 @@ pub fn main(init: std.process.Init) !void {
                 }
             } else {
                 std.log.info("Skipping stage 3: k_rotated not found in diagnostic reference", .{});
+            }
+
+            // --- Stage 3.25: k_proj pre-RMSNorm (bf16 vs f32 accumulation) ---
+            const to_k_key = try std.fmt.allocPrint(allocator, "{s}.to_k_diag0", .{@tagName(mode)});
+            defer allocator.free(to_k_key);
+            if (fixture_store.view().hasKey(to_k_key)) {
+                var to_k_ref = try check_utils.loadBufferFromStore(allocator, io, platform, &fixture_store, to_k_key, replicated_sharding);
+                defer to_k_ref.deinit();
+                if (token_limit) |limit| {
+                    to_k_ref = try check_utils.sliceTokenPrefix(io, platform, to_k_ref, replicated_sharding, limit);
+                }
+
+                std.log.info("Compiling k_proj direct compare (forwardBlock0Attn1DiagKProj)...", .{});
+                var k_proj_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagKProj, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer k_proj_exe.deinit();
+                var k_proj_args = try k_proj_exe.args(allocator);
+                defer k_proj_args.deinit(allocator);
+                var k_proj_results = try k_proj_exe.results(allocator);
+                defer k_proj_results.deinit(allocator);
+                k_proj_args.set(.{ attn_input, attn_params_buffers });
+                k_proj_exe.call(k_proj_args, &k_proj_results);
+                var k_proj_out = k_proj_results.get(zml.Buffer);
+                defer k_proj_out.deinit();
+                const k_proj_m = try check_utils.compareBuffers(io, k_proj_out, to_k_ref, 0.1, 0.01);
+                std.log.info("k_proj direct (bf16): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ k_proj_m.max_abs_error, k_proj_m.mean_abs_error, k_proj_m.close_fraction });
+
+                std.log.info("Compiling k_proj direct compare with f32 accumulation (forwardBlock0Attn1DiagKProjF32)...", .{});
+                var k_proj_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagKProjF32, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer k_proj_f32_exe.deinit();
+                var k_proj_f32_args = try k_proj_f32_exe.args(allocator);
+                defer k_proj_f32_args.deinit(allocator);
+                var k_proj_f32_results = try k_proj_f32_exe.results(allocator);
+                defer k_proj_f32_results.deinit(allocator);
+                k_proj_f32_args.set(.{ attn_input, attn_params_buffers });
+                k_proj_f32_exe.call(k_proj_f32_args, &k_proj_f32_results);
+                var k_proj_f32_out = k_proj_f32_results.get(zml.Buffer);
+                defer k_proj_f32_out.deinit();
+                const k_proj_m_f32 = try check_utils.compareBuffers(io, k_proj_f32_out, to_k_ref, 0.1, 0.01);
+                std.log.info("k_proj direct (f32 accum): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ k_proj_m_f32.max_abs_error, k_proj_m_f32.mean_abs_error, k_proj_m_f32.close_fraction });
+
+                const k_proj_delta = try check_utils.compareBuffers(io, k_proj_out, k_proj_f32_out, 0.1, 0.01);
+                std.log.info("  -> k_proj bf16 vs f32 accum delta: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ k_proj_delta.max_abs_error, k_proj_delta.mean_abs_error, k_proj_delta.close_fraction });
+            } else {
+                std.log.info("Skipping stage 3.25: {s} not found in fixture", .{to_k_key});
             }
 
             // --- Stage 3.5: to_v projection (pre head-split) ---
@@ -597,6 +723,47 @@ pub fn main(init: std.process.Init) !void {
                     var sdpa_v_ref = try check_utils.loadBufferFromStore(allocator, io, platform, &fixture_store, sdpa_v_key, replicated_sharding);
                     defer sdpa_v_ref.deinit();
 
+                    // First, compare V projection directly (before head-split) to narrow down the source
+                    const v_proj_key = try std.fmt.allocPrint(allocator, "{s}.v_proj_diag0", .{@tagName(mode)});
+                    defer allocator.free(v_proj_key);
+                    if (fixture_store.view().hasKey(v_proj_key)) {
+                        var v_proj_ref = try check_utils.loadBufferFromStore(allocator, io, platform, &fixture_store, v_proj_key, replicated_sharding);
+                        defer v_proj_ref.deinit();
+
+                        std.log.info("Compiling v_proj direct compare (forwardBlock0Attn1DiagVProj)...", .{});
+                        var v_proj_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagVProj, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer v_proj_exe.deinit();
+                        var v_proj_args = try v_proj_exe.args(allocator);
+                        defer v_proj_args.deinit(allocator);
+                        var v_proj_results = try v_proj_exe.results(allocator);
+                        defer v_proj_results.deinit(allocator);
+                        v_proj_args.set(.{ attn_input, attn_params_buffers });
+                        v_proj_exe.call(v_proj_args, &v_proj_results);
+                        var v_proj_out = v_proj_results.get(zml.Buffer);
+                        defer v_proj_out.deinit();
+                        const m_proj = try check_utils.compareBuffers(io, v_proj_out, v_proj_ref, 0.1, 0.01);
+                        std.log.info("v_proj direct (bf16): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m_proj.max_abs_error, m_proj.mean_abs_error, m_proj.close_fraction });
+
+                        // Compare f32 accumulation version
+                        std.log.info("Compiling v_proj direct compare with f32 accumulation (forwardBlock0Attn1DiagVProjF32)...", .{});
+                        var v_proj_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagVProjF32, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer v_proj_f32_exe.deinit();
+                        var v_proj_f32_args = try v_proj_f32_exe.args(allocator);
+                        defer v_proj_f32_args.deinit(allocator);
+                        var v_proj_f32_results = try v_proj_f32_exe.results(allocator);
+                        defer v_proj_f32_results.deinit(allocator);
+                        v_proj_f32_args.set(.{ attn_input, attn_params_buffers });
+                        v_proj_f32_exe.call(v_proj_f32_args, &v_proj_f32_results);
+                        var v_proj_f32_out = v_proj_f32_results.get(zml.Buffer);
+                        defer v_proj_f32_out.deinit();
+                        const m_proj_f32 = try check_utils.compareBuffers(io, v_proj_f32_out, v_proj_ref, 0.1, 0.01);
+                        std.log.info("v_proj direct (f32 accum): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m_proj_f32.max_abs_error, m_proj_f32.mean_abs_error, m_proj_f32.close_fraction });
+
+                        // Delta between bf16 and f32 accumulation
+                        const m_proj_delta = try check_utils.compareBuffers(io, v_proj_out, v_proj_f32_out, 0.1, 0.01);
+                        std.log.info("  → v_proj bf16 vs f32 accum delta: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m_proj_delta.max_abs_error, m_proj_delta.mean_abs_error, m_proj_delta.close_fraction });
+                    }
+
                     std.log.info("Compiling sdpa_v direct compare (forwardBlock0Attn1DiagVHead)...", .{});
                     var sdpa_v_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagVHead, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
                     defer sdpa_v_exe.deinit();
@@ -609,7 +776,26 @@ pub fn main(init: std.process.Init) !void {
                     var sdpa_v_out = sdpa_v_results.get(zml.Buffer);
                     defer sdpa_v_out.deinit();
                     const m = try check_utils.compareBuffers(io, sdpa_v_out, sdpa_v_ref, 0.1, 0.01);
-                    std.log.info("sdpa_v direct: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m.max_abs_error, m.mean_abs_error, m.close_fraction });
+                    std.log.info("sdpa_v direct (bf16): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m.max_abs_error, m.mean_abs_error, m.close_fraction });
+
+                    // Now compare f32-precision V
+                    std.log.info("Compiling sdpa_v direct compare with f32 accumulation (forwardBlock0Attn1DiagVHeadF32)...", .{});
+                    var sdpa_v_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagVHeadF32, .{ input_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                    defer sdpa_v_f32_exe.deinit();
+                    var sdpa_v_f32_args = try sdpa_v_f32_exe.args(allocator);
+                    defer sdpa_v_f32_args.deinit(allocator);
+                    var sdpa_v_f32_results = try sdpa_v_f32_exe.results(allocator);
+                    defer sdpa_v_f32_results.deinit(allocator);
+                    sdpa_v_f32_args.set(.{ attn_input, attn_params_buffers });
+                    sdpa_v_f32_exe.call(sdpa_v_f32_args, &sdpa_v_f32_results);
+                    var sdpa_v_f32_out = sdpa_v_f32_results.get(zml.Buffer);
+                    defer sdpa_v_f32_out.deinit();
+                    const m_f32 = try check_utils.compareBuffers(io, sdpa_v_f32_out, sdpa_v_ref, 0.1, 0.01);
+                    std.log.info("sdpa_v direct (f32 accum): max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m_f32.max_abs_error, m_f32.mean_abs_error, m_f32.close_fraction });
+
+                    // Compare the two V variants against each other to see the precision gap
+                    const m_delta = try check_utils.compareBuffers(io, sdpa_v_out, sdpa_v_f32_out, 0.1, 0.01);
+                    std.log.info("  → vh bf16 vs f32 accum delta: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}", .{ m_delta.max_abs_error, m_delta.mean_abs_error, m_delta.close_fraction });
                 }
 
                 const sdpa_out_key = try std.fmt.allocPrint(allocator, "{s}.sdpa_out_diag0", .{@tagName(mode)});
@@ -728,140 +914,273 @@ pub fn main(init: std.process.Init) !void {
 
                 const to_out_only_metrics = try check_utils.compareBuffers(io, to_out_only_output, attn_expected, 0.2, 0.01);
                 std.log.info(
-                    "to_out_only from fixture pre_to_out: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    "to_out_only (bf16) from fixture pre_to_out: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
                     .{ to_out_only_metrics.max_abs_error, to_out_only_metrics.mean_abs_error, to_out_only_metrics.close_fraction },
                 );
 
-                // F32 SDPA ablation: same computation but SDPA core in f32.
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutF32Sdpa...", .{});
-                var pre_to_out_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutF32Sdpa, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_f32_exe.deinit();
-
-                var pre_to_out_f32_args = try pre_to_out_f32_exe.args(allocator);
-                defer pre_to_out_f32_args.deinit(allocator);
-                var pre_to_out_f32_results = try pre_to_out_f32_exe.results(allocator);
-                defer pre_to_out_f32_results.deinit(allocator);
-
-                pre_to_out_f32_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_f32_exe.call(pre_to_out_f32_args, &pre_to_out_f32_results);
-
-                var pre_to_out_f32_output = pre_to_out_f32_results.get(zml.Buffer);
-                defer pre_to_out_f32_output.deinit();
-
-                const pre_to_out_f32_metrics = try check_utils.compareBuffers(io, pre_to_out_f32_output, pre_to_out_ref, 0.1, 0.01);
+                // --- to_out f32 accumulation: feeds fixture pre_to_out through f32-accum variant ---
+                // If PyTorch's to_out runs in f32 under the hood, this should match fixture output better.
+                std.log.info("Compiling forwardBlock0Attn1DiagToOutOnlyF32...", .{});
+                var to_out_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagToOutOnlyF32, .{ pre_to_out_tensor, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer to_out_f32_exe.deinit();
+                var to_out_f32_args = try to_out_f32_exe.args(allocator);
+                defer to_out_f32_args.deinit(allocator);
+                var to_out_f32_results = try to_out_f32_exe.results(allocator);
+                defer to_out_f32_results.deinit(allocator);
+                to_out_f32_args.set(.{ pre_to_out_ref, attn_params_buffers });
+                to_out_f32_exe.call(to_out_f32_args, &to_out_f32_results);
+                var to_out_f32_output = to_out_f32_results.get(zml.Buffer);
+                defer to_out_f32_output.deinit();
+                const to_out_f32_metrics = try check_utils.compareBuffers(io, to_out_f32_output, attn_expected, 0.2, 0.01);
                 std.log.info(
-                    "pre_to_out_f32_sdpa ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_f32_metrics.max_abs_error, pre_to_out_f32_metrics.mean_abs_error, pre_to_out_f32_metrics.close_fraction },
+                    "to_out_only (f32 accum) from fixture pre_to_out: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ to_out_f32_metrics.max_abs_error, to_out_f32_metrics.mean_abs_error, to_out_f32_metrics.close_fraction },
+                );
+                const to_out_delta_metrics = try check_utils.compareBuffers(io, to_out_only_output, to_out_f32_output, 0.2, 0.01);
+                std.log.info(
+                    "  -> to_out bf16 vs f32 accum delta: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ to_out_delta_metrics.max_abs_error, to_out_delta_metrics.mean_abs_error, to_out_delta_metrics.close_fraction },
                 );
 
-                // Gate ablation 1: no gate at all
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutNoGate...", .{});
-                var pre_to_out_nogate_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutNoGate, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_nogate_exe.deinit();
+                // Lightweight isolation check: apply to_out to the COMPUTED pre_to_out output,
+                // then compare against both the main attn_output and fixture expected output.
+                // This avoids heavy ablations while pinpointing whether divergence appears
+                // before or after to_out in the full composed path.
+                var to_out_from_computed_args = try to_out_only_exe.args(allocator);
+                defer to_out_from_computed_args.deinit(allocator);
+                var to_out_from_computed_results = try to_out_only_exe.results(allocator);
+                defer to_out_from_computed_results.deinit(allocator);
 
-                var pre_to_out_nogate_args = try pre_to_out_nogate_exe.args(allocator);
-                defer pre_to_out_nogate_args.deinit(allocator);
-                var pre_to_out_nogate_results = try pre_to_out_nogate_exe.results(allocator);
-                defer pre_to_out_nogate_results.deinit(allocator);
+                to_out_from_computed_args.set(.{ pre_to_out_output, attn_params_buffers });
+                to_out_only_exe.call(to_out_from_computed_args, &to_out_from_computed_results);
 
-                pre_to_out_nogate_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_nogate_exe.call(pre_to_out_nogate_args, &pre_to_out_nogate_results);
+                var to_out_from_computed = to_out_from_computed_results.get(zml.Buffer);
+                defer to_out_from_computed.deinit();
 
-                var pre_to_out_nogate_output = pre_to_out_nogate_results.get(zml.Buffer);
-                defer pre_to_out_nogate_output.deinit();
-
-                const pre_to_out_nogate_metrics = try check_utils.compareBuffers(io, pre_to_out_nogate_output, pre_to_out_ref, 0.1, 0.01);
+                const to_out_vs_main_metrics = try check_utils.compareBuffers(io, to_out_from_computed, attn_output, 0.2, 0.01);
                 std.log.info(
-                    "pre_to_out_no_gate ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_nogate_metrics.max_abs_error, pre_to_out_nogate_metrics.mean_abs_error, pre_to_out_nogate_metrics.close_fraction },
+                    "to_out(computed pre_to_out) vs main attn_output: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ to_out_vs_main_metrics.max_abs_error, to_out_vs_main_metrics.mean_abs_error, to_out_vs_main_metrics.close_fraction },
                 );
 
-                // Gate ablation 2: sigmoid gate without *2
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutSigmoidGate...", .{});
-                var pre_to_out_sig_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutSigmoidGate, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_sig_exe.deinit();
-
-                var pre_to_out_sig_args = try pre_to_out_sig_exe.args(allocator);
-                defer pre_to_out_sig_args.deinit(allocator);
-                var pre_to_out_sig_results = try pre_to_out_sig_exe.results(allocator);
-                defer pre_to_out_sig_results.deinit(allocator);
-
-                pre_to_out_sig_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_sig_exe.call(pre_to_out_sig_args, &pre_to_out_sig_results);
-
-                var pre_to_out_sig_output = pre_to_out_sig_results.get(zml.Buffer);
-                defer pre_to_out_sig_output.deinit();
-
-                const pre_to_out_sig_metrics = try check_utils.compareBuffers(io, pre_to_out_sig_output, pre_to_out_ref, 0.1, 0.01);
+                const to_out_vs_expected_metrics = try check_utils.compareBuffers(io, to_out_from_computed, attn_expected, 0.2, 0.01);
                 std.log.info(
-                    "pre_to_out_sigmoid_gate ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_sig_metrics.max_abs_error, pre_to_out_sig_metrics.mean_abs_error, pre_to_out_sig_metrics.close_fraction },
+                    "to_out(computed pre_to_out) vs fixture output: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ to_out_vs_expected_metrics.max_abs_error, to_out_vs_expected_metrics.mean_abs_error, to_out_vs_expected_metrics.close_fraction },
                 );
 
-                // Manual SDPA ablation: explicit qk^T softmax v in f32 (no zml.nn.sdpa call).
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutManualSdpaF32...", .{});
-                var pre_to_out_manual_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutManualSdpaF32, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_manual_exe.deinit();
+                // End-to-end all-f32 diagnostic: quantifies the ceiling if precision is the primary issue.
+                std.log.info("Compiling forwardBlock0Attn1DiagAllF32...", .{});
+                var all_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagAllF32, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                defer all_f32_exe.deinit();
+                var all_f32_args = try all_f32_exe.args(allocator);
+                defer all_f32_args.deinit(allocator);
+                var all_f32_results = try all_f32_exe.results(allocator);
+                defer all_f32_results.deinit(allocator);
+                all_f32_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                all_f32_exe.call(all_f32_args, &all_f32_results);
+                var all_f32_output = all_f32_results.get(zml.Buffer);
+                defer all_f32_output.deinit();
 
-                var pre_to_out_manual_args = try pre_to_out_manual_exe.args(allocator);
-                defer pre_to_out_manual_args.deinit(allocator);
-                var pre_to_out_manual_results = try pre_to_out_manual_exe.results(allocator);
-                defer pre_to_out_manual_results.deinit(allocator);
-
-                pre_to_out_manual_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_manual_exe.call(pre_to_out_manual_args, &pre_to_out_manual_results);
-
-                var pre_to_out_manual_output = pre_to_out_manual_results.get(zml.Buffer);
-                defer pre_to_out_manual_output.deinit();
-
-                const pre_to_out_manual_metrics = try check_utils.compareBuffers(io, pre_to_out_manual_output, pre_to_out_ref, 0.1, 0.01);
+                const all_f32_vs_fixture = try check_utils.compareBuffers(io, all_f32_output, attn_expected, 0.2, 0.01);
                 std.log.info(
-                    "pre_to_out_manual_sdpa_f32 ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_manual_metrics.max_abs_error, pre_to_out_manual_metrics.mean_abs_error, pre_to_out_manual_metrics.close_fraction },
+                    "all_f32 attention vs fixture output: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ all_f32_vs_fixture.max_abs_error, all_f32_vs_fixture.mean_abs_error, all_f32_vs_fixture.close_fraction },
                 );
 
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutAltMergeTranspose...", .{});
-                var pre_to_out_alt_merge_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutAltMergeTranspose, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_alt_merge_exe.deinit();
-
-                var pre_to_out_alt_merge_args = try pre_to_out_alt_merge_exe.args(allocator);
-                defer pre_to_out_alt_merge_args.deinit(allocator);
-                var pre_to_out_alt_merge_results = try pre_to_out_alt_merge_exe.results(allocator);
-                defer pre_to_out_alt_merge_results.deinit(allocator);
-
-                pre_to_out_alt_merge_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_alt_merge_exe.call(pre_to_out_alt_merge_args, &pre_to_out_alt_merge_results);
-
-                var pre_to_out_alt_merge_output = pre_to_out_alt_merge_results.get(zml.Buffer);
-                defer pre_to_out_alt_merge_output.deinit();
-
-                const pre_to_out_alt_merge_metrics = try check_utils.compareBuffers(io, pre_to_out_alt_merge_output, pre_to_out_ref, 0.1, 0.01);
+                const all_f32_vs_main = try check_utils.compareBuffers(io, all_f32_output, attn_output, 0.2, 0.01);
                 std.log.info(
-                    "pre_to_out_alt_merge_transpose ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_alt_merge_metrics.max_abs_error, pre_to_out_alt_merge_metrics.mean_abs_error, pre_to_out_alt_merge_metrics.close_fraction },
+                    "all_f32 attention vs main attn_output: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                    .{ all_f32_vs_main.max_abs_error, all_f32_vs_main.mean_abs_error, all_f32_vs_main.close_fraction },
                 );
 
-                // Head-first SDPA ablation: [b,h,q,hd] layout around sdpa, then swap back.
-                std.log.info("Compiling forwardBlock0Attn1DiagPreToOutHeadFirstSdpa...", .{});
-                var pre_to_out_head_first_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutHeadFirstSdpa, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
-                defer pre_to_out_head_first_exe.deinit();
+                if (skip_ablations and only_ablation == null) {
+                    std.log.info("Skipping optional stage 6/pre_to_out ablations (--skip-ablations)", .{});
+                } else {
+                    if (shouldRunAblation(only_ablation, .pre_to_out_f32_sdpa)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutF32Sdpa...", .{});
+                        var pre_to_out_f32_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutF32Sdpa, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_f32_exe.deinit();
 
-                var pre_to_out_head_first_args = try pre_to_out_head_first_exe.args(allocator);
-                defer pre_to_out_head_first_args.deinit(allocator);
-                var pre_to_out_head_first_results = try pre_to_out_head_first_exe.results(allocator);
-                defer pre_to_out_head_first_results.deinit(allocator);
+                        var pre_to_out_f32_args = try pre_to_out_f32_exe.args(allocator);
+                        defer pre_to_out_f32_args.deinit(allocator);
+                        var pre_to_out_f32_results = try pre_to_out_f32_exe.results(allocator);
+                        defer pre_to_out_f32_results.deinit(allocator);
 
-                pre_to_out_head_first_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
-                pre_to_out_head_first_exe.call(pre_to_out_head_first_args, &pre_to_out_head_first_results);
+                        pre_to_out_f32_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_f32_exe.call(pre_to_out_f32_args, &pre_to_out_f32_results);
 
-                var pre_to_out_head_first_output = pre_to_out_head_first_results.get(zml.Buffer);
-                defer pre_to_out_head_first_output.deinit();
+                        var pre_to_out_f32_output = pre_to_out_f32_results.get(zml.Buffer);
+                        defer pre_to_out_f32_output.deinit();
 
-                const pre_to_out_head_first_metrics = try check_utils.compareBuffers(io, pre_to_out_head_first_output, pre_to_out_ref, 0.1, 0.01);
-                std.log.info(
-                    "pre_to_out_head_first_sdpa ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
-                    .{ pre_to_out_head_first_metrics.max_abs_error, pre_to_out_head_first_metrics.mean_abs_error, pre_to_out_head_first_metrics.close_fraction },
-                );
+                        const pre_to_out_f32_metrics = try check_utils.compareBuffers(io, pre_to_out_f32_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_f32_sdpa ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_f32_metrics.max_abs_error, pre_to_out_f32_metrics.mean_abs_error, pre_to_out_f32_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_no_gate)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutNoGate...", .{});
+                        var pre_to_out_nogate_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutNoGate, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_nogate_exe.deinit();
+
+                        var pre_to_out_nogate_args = try pre_to_out_nogate_exe.args(allocator);
+                        defer pre_to_out_nogate_args.deinit(allocator);
+                        var pre_to_out_nogate_results = try pre_to_out_nogate_exe.results(allocator);
+                        defer pre_to_out_nogate_results.deinit(allocator);
+
+                        pre_to_out_nogate_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_nogate_exe.call(pre_to_out_nogate_args, &pre_to_out_nogate_results);
+
+                        var pre_to_out_nogate_output = pre_to_out_nogate_results.get(zml.Buffer);
+                        defer pre_to_out_nogate_output.deinit();
+
+                        const pre_to_out_nogate_metrics = try check_utils.compareBuffers(io, pre_to_out_nogate_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_no_gate ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_nogate_metrics.max_abs_error, pre_to_out_nogate_metrics.mean_abs_error, pre_to_out_nogate_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_sigmoid_gate)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutSigmoidGate...", .{});
+                        var pre_to_out_sig_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutSigmoidGate, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_sig_exe.deinit();
+
+                        var pre_to_out_sig_args = try pre_to_out_sig_exe.args(allocator);
+                        defer pre_to_out_sig_args.deinit(allocator);
+                        var pre_to_out_sig_results = try pre_to_out_sig_exe.results(allocator);
+                        defer pre_to_out_sig_results.deinit(allocator);
+
+                        pre_to_out_sig_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_sig_exe.call(pre_to_out_sig_args, &pre_to_out_sig_results);
+
+                        var pre_to_out_sig_output = pre_to_out_sig_results.get(zml.Buffer);
+                        defer pre_to_out_sig_output.deinit();
+
+                        const pre_to_out_sig_metrics = try check_utils.compareBuffers(io, pre_to_out_sig_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_sigmoid_gate ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_sig_metrics.max_abs_error, pre_to_out_sig_metrics.mean_abs_error, pre_to_out_sig_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_manual_sdpa_f32)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutManualSdpaF32...", .{});
+                        var pre_to_out_manual_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutManualSdpaF32, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_manual_exe.deinit();
+
+                        var pre_to_out_manual_args = try pre_to_out_manual_exe.args(allocator);
+                        defer pre_to_out_manual_args.deinit(allocator);
+                        var pre_to_out_manual_results = try pre_to_out_manual_exe.results(allocator);
+                        defer pre_to_out_manual_results.deinit(allocator);
+
+                        pre_to_out_manual_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_manual_exe.call(pre_to_out_manual_args, &pre_to_out_manual_results);
+
+                        var pre_to_out_manual_output = pre_to_out_manual_results.get(zml.Buffer);
+                        defer pre_to_out_manual_output.deinit();
+
+                        const pre_to_out_manual_metrics = try check_utils.compareBuffers(io, pre_to_out_manual_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_manual_sdpa_f32 ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_manual_metrics.max_abs_error, pre_to_out_manual_metrics.mean_abs_error, pre_to_out_manual_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_alt_merge_transpose)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutAltMergeTranspose...", .{});
+                        var pre_to_out_alt_merge_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutAltMergeTranspose, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_alt_merge_exe.deinit();
+
+                        var pre_to_out_alt_merge_args = try pre_to_out_alt_merge_exe.args(allocator);
+                        defer pre_to_out_alt_merge_args.deinit(allocator);
+                        var pre_to_out_alt_merge_results = try pre_to_out_alt_merge_exe.results(allocator);
+                        defer pre_to_out_alt_merge_results.deinit(allocator);
+
+                        pre_to_out_alt_merge_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_alt_merge_exe.call(pre_to_out_alt_merge_args, &pre_to_out_alt_merge_results);
+
+                        var pre_to_out_alt_merge_output = pre_to_out_alt_merge_results.get(zml.Buffer);
+                        defer pre_to_out_alt_merge_output.deinit();
+
+                        const pre_to_out_alt_merge_metrics = try check_utils.compareBuffers(io, pre_to_out_alt_merge_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_alt_merge_transpose ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_alt_merge_metrics.max_abs_error, pre_to_out_alt_merge_metrics.mean_abs_error, pre_to_out_alt_merge_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_head_first_sdpa)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutHeadFirstSdpa...", .{});
+                        var pre_to_out_head_first_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutHeadFirstSdpa, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_head_first_exe.deinit();
+
+                        var pre_to_out_head_first_args = try pre_to_out_head_first_exe.args(allocator);
+                        defer pre_to_out_head_first_args.deinit(allocator);
+                        var pre_to_out_head_first_results = try pre_to_out_head_first_exe.results(allocator);
+                        defer pre_to_out_head_first_results.deinit(allocator);
+
+                        pre_to_out_head_first_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_head_first_exe.call(pre_to_out_head_first_args, &pre_to_out_head_first_results);
+
+                        var pre_to_out_head_first_output = pre_to_out_head_first_results.get(zml.Buffer);
+                        defer pre_to_out_head_first_output.deinit();
+
+                        const pre_to_out_head_first_metrics = try check_utils.compareBuffers(io, pre_to_out_head_first_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_head_first_sdpa ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_head_first_metrics.max_abs_error, pre_to_out_head_first_metrics.mean_abs_error, pre_to_out_head_first_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_head_first_only)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutHeadFirstOnly...", .{});
+                        var pre_to_out_head_first_only_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutHeadFirstOnly, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_head_first_only_exe.deinit();
+
+                        var pre_to_out_head_first_only_args = try pre_to_out_head_first_only_exe.args(allocator);
+                        defer pre_to_out_head_first_only_args.deinit(allocator);
+                        var pre_to_out_head_first_only_results = try pre_to_out_head_first_only_exe.results(allocator);
+                        defer pre_to_out_head_first_only_results.deinit(allocator);
+
+                        pre_to_out_head_first_only_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_head_first_only_exe.call(pre_to_out_head_first_only_args, &pre_to_out_head_first_only_results);
+
+                        var pre_to_out_head_first_only_output = pre_to_out_head_first_only_results.get(zml.Buffer);
+                        defer pre_to_out_head_first_only_output.deinit();
+
+                        const pre_to_out_head_first_only_metrics = try check_utils.compareBuffers(io, pre_to_out_head_first_only_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_head_first_only ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_head_first_only_metrics.max_abs_error, pre_to_out_head_first_only_metrics.mean_abs_error, pre_to_out_head_first_only_metrics.close_fraction },
+                        );
+                    }
+
+                    if (shouldRunAblation(only_ablation, .pre_to_out_manual_sdpa_head_first)) {
+                        std.log.info("Compiling forwardBlock0Attn1DiagPreToOutManualSdpaHeadFirst...", .{});
+                        var pre_to_out_manual_sdpa_head_first_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1DiagPreToOutManualSdpaHeadFirst, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
+                        defer pre_to_out_manual_sdpa_head_first_exe.deinit();
+
+                        var pre_to_out_manual_sdpa_head_first_args = try pre_to_out_manual_sdpa_head_first_exe.args(allocator);
+                        defer pre_to_out_manual_sdpa_head_first_args.deinit(allocator);
+                        var pre_to_out_manual_sdpa_head_first_results = try pre_to_out_manual_sdpa_head_first_exe.results(allocator);
+                        defer pre_to_out_manual_sdpa_head_first_results.deinit(allocator);
+
+                        pre_to_out_manual_sdpa_head_first_args.set(.{ attn_input, pe_cos_buf, pe_sin_buf, attn_params_buffers });
+                        pre_to_out_manual_sdpa_head_first_exe.call(pre_to_out_manual_sdpa_head_first_args, &pre_to_out_manual_sdpa_head_first_results);
+
+                        var pre_to_out_manual_sdpa_head_first_output = pre_to_out_manual_sdpa_head_first_results.get(zml.Buffer);
+                        defer pre_to_out_manual_sdpa_head_first_output.deinit();
+
+                        const pre_to_out_manual_sdpa_head_first_metrics = try check_utils.compareBuffers(io, pre_to_out_manual_sdpa_head_first_output, pre_to_out_ref, 0.1, 0.01);
+                        std.log.info(
+                            "pre_to_out_manual_sdpa_head_first ablation: max_abs_error={d:.4}, mean_abs_error={d:.4}, close_fraction={d:.4}",
+                            .{ pre_to_out_manual_sdpa_head_first_metrics.max_abs_error, pre_to_out_manual_sdpa_head_first_metrics.mean_abs_error, pre_to_out_manual_sdpa_head_first_metrics.close_fraction },
+                        );
+                    }
+                }
             } else {
                 if (token_limit != null and !token_limited_reference) {
                     std.log.info("Skipping stage 6/pre_to_out ablations for token-limited run (reference captured with full context)", .{});
@@ -872,7 +1191,9 @@ pub fn main(init: std.process.Init) !void {
 
             // Ablation: run attention without mask and compare against the same expected output.
             // If this is materially closer than the masked run, mask semantics are likely wrong.
-            if (references_are_token_comparable and attn_pe_cos != null and attn_pe_sin != null) {
+            if (skip_ablations and only_ablation == null) {
+                std.log.info("Skipping no-mask ablation (--skip-ablations)", .{});
+            } else if (shouldRunAblation(only_ablation, .no_mask) and references_are_token_comparable and attn_pe_cos != null and attn_pe_sin != null) {
                 std.log.info("Compiling no-mask ablation: forwardBlock0Attn1WithPeCosSin...", .{});
                 var ablation_exe = try platform.compileFn(allocator, io, model.forwardBlock0Attn1WithPeCosSin, .{ input_tensor, pe_cos_t, pe_sin_t, attn_params_shape }, .{ .shardings = &.{replicated_sharding} });
                 defer ablation_exe.deinit();
@@ -903,7 +1224,9 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
-    if (references_are_token_comparable) {
+    if (skip_final_assert) {
+        std.log.info("Skipping final output parity assert (--skip-final-assert)", .{});
+    } else if (references_are_token_comparable) {
         try zml.testing.expectClose(io, attn_output, attn_expected, .{
             .absolute_tolerance = 0.2,
             .relative_tolerance = 0.01,
@@ -925,6 +1248,24 @@ fn parseMode(v: []const u8) !Mode {
 
     std.log.err("Invalid mode: {s}. Expected one of: attn1, attn2, audio_attn1, audio_attn2, audio_to_video_attn, video_to_audio_attn", .{v});
     return error.InvalidArgs;
+}
+
+fn parseAblation(v: []const u8) !Ablation {
+    inline for (std.meta.fields(Ablation)) |field| {
+        if (std.mem.eql(u8, v, field.name)) {
+            return @enumFromInt(field.value);
+        }
+    }
+
+    std.log.err(
+        "Invalid ablation: {s}. Expected one of: pre_to_out_f32_sdpa, pre_to_out_no_gate, pre_to_out_sigmoid_gate, pre_to_out_manual_sdpa_f32, pre_to_out_alt_merge_transpose, pre_to_out_head_first_sdpa, no_mask",
+        .{v},
+    );
+    return error.InvalidArgs;
+}
+
+fn shouldRunAblation(selected: ?Ablation, candidate: Ablation) bool {
+    return if (selected) |value| value == candidate else true;
 }
 
 fn modeToKind(mode: Mode) model.AttentionKind {

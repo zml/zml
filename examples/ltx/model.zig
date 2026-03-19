@@ -205,6 +205,8 @@ pub const Attention = struct {
                 else
                     q_sin.rename(.{ .q = .k });
 
+                // LTX is a video generation model needing coordinates for temporal + spatial (height/width) dimensions, not flat sequential 
+                // token positions, so the RoPE implementation is customized but mathematically equivalent to standard RoPE.
                 qh = applyLtxRotaryEmb(qh, q_cos, q_sin);
                 kh = applyLtxRotaryEmb(kh, k_cos, k_sin);
             }
@@ -214,8 +216,6 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        // LTX 2.3 attention includes an elementwise gating of the attention output, where the gate is derived from the input x via a linear layer and sigmoid activation. Implement this after computing raw attention but before the final output projection.
-        // `qh`, `kh`, `vh` have already been split into heads, so they already carry a head axis. 
         // ZML uses named axes. The sdpa primitive expects a specific batch axis name, `.batch`, so it is temporarily renamed here. 
         var attn = zml.nn.sdpa(
             qh.rename(.{ .b = .batch }),
@@ -589,6 +589,28 @@ pub fn forwardBlock0Attn1DiagQNorm(x: Tensor, params: Attention.Params) Tensor {
     return zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.broad(q.shape()));
 }
 
+/// Diagnostic: returns q after projection (pre-RMSNorm).
+/// Output shape: [B, T, D_Q].
+pub fn forwardBlock0Attn1DiagQProj(x: Tensor, params: Attention.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const q = params.to_q.forward(x_);
+    return q.withPartialTags(.{ .b, .t, .d_q });
+}
+
+/// Diagnostic: q projection with f32 accumulation, cast back to input dtype.
+/// Output shape: [B, T, D_Q].
+pub fn forwardBlock0Attn1DiagQProjF32(x: Tensor, params: Attention.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const x_f32 = x_.convert(.f32);
+    const weight_f32 = params.to_q.weight.convert(.f32);
+    var y_f32 = x_f32.dot(weight_f32, .d);
+    if (params.to_q.bias) |bias_orig| {
+        const bias_f32 = bias_orig.convert(.f32);
+        y_f32 = y_f32.add(bias_f32.broad(y_f32.shape()));
+    }
+    return y_f32.convert(x.dtype()).withPartialTags(.{ .b, .t, .d_q });
+}
+
 /// Diagnostic: returns qh after projection + norm + head-split + RoPE.
 /// Output shape: [B, T, H, HD] — ZML-native layout matching Python reference saved with layout=BTHD.
 pub fn forwardBlock0Attn1DiagQRot(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
@@ -633,6 +655,28 @@ pub fn forwardBlock0Attn1DiagKRot(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, par
     return kh.withPartialTags(.{ .b, .k, .h, .hd }); // [B, T, H, HD]
 }
 
+/// Diagnostic: returns k after projection (pre-RMSNorm).
+/// Output shape: [B, T, D_K].
+pub fn forwardBlock0Attn1DiagKProj(x: Tensor, params: Attention.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const k = params.to_k.forward(x_);
+    return k.withPartialTags(.{ .b, .t, .d_k });
+}
+
+/// Diagnostic: k projection with f32 accumulation, cast back to input dtype.
+/// Output shape: [B, T, D_K].
+pub fn forwardBlock0Attn1DiagKProjF32(x: Tensor, params: Attention.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const x_f32 = x_.convert(.f32);
+    const weight_f32 = params.to_k.weight.convert(.f32);
+    var y_f32 = x_f32.dot(weight_f32, .d);
+    if (params.to_k.bias) |bias_orig| {
+        const bias_f32 = bias_orig.convert(.f32);
+        y_f32 = y_f32.add(bias_f32.broad(y_f32.shape()));
+    }
+    return y_f32.convert(x.dtype()).withPartialTags(.{ .b, .t, .d_k });
+}
+
 /// Diagnostic: returns vh after projection + head-split (no RoPE for V).
 /// Output shape: [B, T, H, HD] — ZML-native layout matching Python reference saved with layout=BTHD.
 pub fn forwardBlock0Attn1DiagVProj(x: Tensor, params: Attention.Params) Tensor {
@@ -657,6 +701,36 @@ pub fn forwardBlock0Attn1DiagVHead(x: Tensor, params: Attention.Params) Tensor {
     const x_ = x.withPartialTags(.{ .b, .t, .d });
     const v = params.to_v.forward(x_);
     var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    return vh.withPartialTags(.{ .b, .k, .h, .hd }); // [B, T, H, HD]
+}
+
+/// Diagnostic: V projection using f32 accumulation (precision-corrected variant).
+/// This upcasts context to f32 before matmul for accumulated precision, then downcasts back.
+/// Returns: [B, T, Dv]
+pub fn forwardBlock0Attn1DiagVProjF32(x: Tensor, params: Attention.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    // Upcast to f32 for matmul accumulation
+    const x_f32 = x_.convert(.f32);
+    // Weights must be upcast too; assume weight stored in same dtype as bias (typically bf16)
+    const weight_f32 = params.to_v.weight.convert(.f32);
+    // Perform matmul in f32
+    var y_f32 = x_f32.dot(weight_f32, .d);
+    // Add bias if present
+    if (params.to_v.bias) |bias_orig| {
+        const bias_f32 = bias_orig.convert(.f32);
+        y_f32 = y_f32.add(bias_f32.broad(y_f32.shape()));
+    }
+    // Downcast back to original dtype
+    const v = y_f32.convert(x.dtype());
+    return v.withPartialTags(.{ .b, .t, .d_v });
+}
+
+/// Diagnostic: V projection head-split using f32 accumulation (precision-corrected variant).
+/// Returns: [B, T, H, HD]
+pub fn forwardBlock0Attn1DiagVHeadF32(x: Tensor, params: Attention.Params) Tensor {
+    const num_heads = kindNumHeads(.attn1);
+    const v_f32 = forwardBlock0Attn1DiagVProjF32(x, params);
+    var vh = v_f32.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
     return vh.withPartialTags(.{ .b, .k, .h, .hd }); // [B, T, H, HD]
 }
 
@@ -757,6 +831,93 @@ pub fn forwardBlock0Attn1DiagGateLogits(x: Tensor, params: Attention.Params) Ten
 pub fn forwardBlock0Attn1DiagToOutOnly(pre_to_out: Tensor, params: Attention.Params) Tensor {
     const x_ = pre_to_out.withPartialTags(.{ .b, .t, .d_v });
     return params.to_out.forward(x_).withPartialTags(.{ .b, .t, .d });
+}
+
+
+/// Diagnostic: to_out projection with f32 accumulation, cast back to input dtype.
+/// Used to isolate whether PyTorch uses f32 intermediate accumulation in to_out.
+/// Input shape: [B, T, D_V], output shape: [B, T, D].
+pub fn forwardBlock0Attn1DiagToOutOnlyF32(pre_to_out: Tensor, params: Attention.Params) Tensor {
+    const x_ = pre_to_out.withPartialTags(.{ .b, .t, .d_v });
+    const x_f32 = x_.convert(.f32);
+    const weight_f32 = params.to_out.weight.convert(.f32);
+    var y_f32 = x_f32.dot(weight_f32, .d_v);
+    if (params.to_out.bias) |bias_orig| {
+        const bias_f32 = bias_orig.convert(.f32);
+        y_f32 = y_f32.add(bias_f32.broad(y_f32.shape()));
+    }
+    return y_f32.convert(pre_to_out.dtype()).withPartialTags(.{ .b, .t, .d });
+}
+
+/// Diagnostic: full attn1 path in f32 for all linear/attention intermediates, cast back at output.
+/// This isolates the best-case gain obtainable from precision-only changes.
+pub fn forwardBlock0Attn1DiagAllF32(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
+    const num_heads = kindNumHeads(.attn1);
+    const out_dtype = x.dtype();
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const x_f32 = x_.convert(.f32);
+
+    var q = x_f32.dot(params.to_q.weight.convert(.f32), .d);
+    if (params.to_q.bias) |bias_orig| {
+        q = q.add(bias_orig.convert(.f32).broad(q.shape()));
+    }
+
+    var k = x_f32.dot(params.to_k.weight.convert(.f32), .d);
+    if (params.to_k.bias) |bias_orig| {
+        k = k.add(bias_orig.convert(.f32).broad(k.shape()));
+    }
+
+    var v = x_f32.dot(params.to_v.weight.convert(.f32), .d);
+    if (params.to_v.bias) |bias_orig| {
+        v = v.add(bias_orig.convert(.f32).broad(v.shape()));
+    }
+
+    q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.convert(.f32).broad(q.shape()));
+    k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.convert(.f32).broad(k.shape()));
+
+    var qh = q.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+
+    const q_cos = if (pe_cos.rank() == 4)
+        pe_cos.withPartialTags(.{ .b, .h, .q, .hd }).convert(.f32)
+    else
+        pe_cos.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(.f32);
+    const q_sin = if (pe_sin.rank() == 4)
+        pe_sin.withPartialTags(.{ .b, .h, .q, .hd }).convert(.f32)
+    else
+        pe_sin.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(.f32);
+    const k_cos = q_cos.rename(.{ .q = .k });
+    const k_sin = q_sin.rename(.{ .q = .k });
+
+    qh = Attention.applyLtxRotaryEmb(qh, q_cos, q_sin);
+    kh = Attention.applyLtxRotaryEmb(kh, k_cos, k_sin);
+
+    qh = qh.withPartialTags(.{ .b, .q, .h, .hd });
+    kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
+    vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
+
+    var attn = zml.nn.sdpa(
+        qh.rename(.{ .b = .batch }),
+        kh.rename(.{ .b = .batch }),
+        vh.rename(.{ .b = .batch }),
+        .{},
+    ).rename(.{ .batch = .b });
+
+    var gate_logits = x_f32.dot(params.to_gate_logits.weight.convert(.f32), .d);
+    if (params.to_gate_logits.bias) |bias_orig| {
+        gate_logits = gate_logits.add(bias_orig.convert(.f32).broad(gate_logits.shape()));
+    }
+    const gate = gate_logits.sigmoid().scale(2.0).rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), ._gate = .auto }).squeeze(._gate);
+    attn = attn.mul(gate.broad(attn.shape()));
+
+    const merged = attn.merge(.{ .d_v = .{ .h, .hd } }).rename(.{ .q = .t });
+    var out_f32 = merged.dot(params.to_out.weight.convert(.f32), .d_v);
+    if (params.to_out.bias) |bias_orig| {
+        out_f32 = out_f32.add(bias_orig.convert(.f32).broad(out_f32.shape()));
+    }
+
+    return out_f32.convert(out_dtype).withPartialTags(.{ .b, .t, .d });
 }
 
 /// Diagnostic: returns merged attention after SDPA and gate, before to_out.
@@ -1094,6 +1255,116 @@ pub fn forwardBlock0Attn1DiagPreToOutAltMergeTranspose(x: Tensor, pe_cos: Tensor
     attn = attn.mul(gate.broad(attn.shape()));
 
     return attn.mergeTranspose(.{ .hd, .h }, .d_v).rename(.{ .q = .t }).withPartialTags(.{ .b, .t, .d_v });
+}
+
+/// Diagnostic ablation: head-first layout [b,h,q,hd] with native zml.nn.sdpa only
+/// (no manual SDPA, no f32 accumulation). Tests if layout alone explains the gap.
+pub fn forwardBlock0Attn1DiagPreToOutHeadFirstOnly(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
+    const num_heads = kindNumHeads(.attn1);
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const out_dtype = x.dtype();
+
+    var q = params.to_q.forward(x_);
+    var k = params.to_k.forward(x_);
+    var v = params.to_v.forward(x_);
+
+    q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.broad(q.shape()));
+    k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.broad(k.shape()));
+
+    var qh = q.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+
+    const q_cos = if (pe_cos.rank() == 4)
+        pe_cos.withPartialTags(.{ .b, .h, .q, .hd })
+    else
+        pe_cos.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd });
+    const q_sin = if (pe_sin.rank() == 4)
+        pe_sin.withPartialTags(.{ .b, .h, .q, .hd })
+    else
+        pe_sin.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd });
+    const k_cos = q_cos.rename(.{ .q = .k });
+    const k_sin = q_sin.rename(.{ .q = .k });
+
+    qh = Attention.applyLtxRotaryEmb(qh, q_cos, q_sin).withPartialTags(.{ .b, .q, .h, .hd });
+    kh = Attention.applyLtxRotaryEmb(kh, k_cos, k_sin).withPartialTags(.{ .b, .k, .h, .hd });
+    vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
+
+    // Reorder to head-first [b,h,q,hd] before SDPA
+    qh = qh.swapAxes(.q, .h);
+    kh = kh.swapAxes(.k, .h);
+    vh = vh.swapAxes(.k, .h);
+
+    var attn = zml.nn.sdpa(
+        qh.rename(.{ .b = .batch }),
+        kh.rename(.{ .b = .batch }),
+        vh.rename(.{ .b = .batch }),
+        .{},
+    ).rename(.{ .batch = .b });
+
+    // Reorder back to [b,q,h,hd] for gating + merge
+    attn = attn.swapAxes(.h, .q);
+
+    const gate_logits = params.to_gate_logits.forward(x_);
+    const gate = gate_logits.sigmoid().scale(2.0).rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), ._gate = .auto }).squeeze(._gate);
+    attn = attn.mul(gate.broad(attn.shape()));
+
+    return attn.merge(.{ .d_v = .{ .h, .hd } }).rename(.{ .q = .t }).convert(out_dtype).withPartialTags(.{ .b, .t, .d_v });
+}
+
+/// Diagnostic ablation: manual SDPA f32 logic with head-first layout [b,h,q,hd].
+/// Combines both fixes: explicit scaling/softmax in f32 + PyTorch head-first layout.
+pub fn forwardBlock0Attn1DiagPreToOutManualSdpaHeadFirst(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
+    const num_heads = kindNumHeads(.attn1);
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const out_dtype = x.dtype();
+
+    var q = params.to_q.forward(x_);
+    var k = params.to_k.forward(x_);
+    var v = params.to_v.forward(x_);
+
+    q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.broad(q.shape()));
+    k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.broad(k.shape()));
+
+    var qh = q.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+    var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+
+    const q_cos = if (pe_cos.rank() == 4)
+        pe_cos.withPartialTags(.{ .b, .h, .q, .hd })
+    else
+        pe_cos.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd });
+    const q_sin = if (pe_sin.rank() == 4)
+        pe_sin.withPartialTags(.{ .b, .h, .q, .hd })
+    else
+        pe_sin.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd });
+    const k_cos = q_cos.rename(.{ .q = .k });
+    const k_sin = q_sin.rename(.{ .q = .k });
+
+    qh = Attention.applyLtxRotaryEmb(qh, q_cos, q_sin).withPartialTags(.{ .b, .q, .h, .hd }).convert(.f32);
+    kh = Attention.applyLtxRotaryEmb(kh, k_cos, k_sin).withPartialTags(.{ .b, .k, .h, .hd }).convert(.f32);
+    vh = vh.withPartialTags(.{ .b, .k, .h, .hd }).convert(.f32);
+
+    // Reorder to head-first [b,h,q,hd] before manual SDPA
+    qh = qh.swapAxes(.q, .h);
+    kh = kh.swapAxes(.k, .h);
+    vh = vh.swapAxes(.k, .h);
+
+    const hd: f32 = @floatFromInt(qh.dim(.hd));
+    const scale = Tensor.scalar(1.0 / std.math.sqrt(hd), .f32);
+    const k_scaled = kh.mul(scale.broad(kh.shape()));
+
+    var attn_weights = qh.dot(k_scaled, .hd).softmax(.k);
+    var attn = attn_weights.dot(vh, .k);
+
+    // Reorder back to [b,q,h,hd] for gating + merge
+    attn = attn.swapAxes(.h, .q);
+
+    const gate_logits = params.to_gate_logits.forward(x_).convert(.f32);
+    const gate = gate_logits.sigmoid().scale(2.0).rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), ._gate = .auto }).squeeze(._gate);
+    attn = attn.mul(gate.broad(attn.shape()));
+
+    return attn.merge(.{ .d_v = .{ .h, .hd } }).rename(.{ .q = .t }).convert(out_dtype).withPartialTags(.{ .b, .t, .d_v });
 }
 
 pub fn forwardBlock0Attn2(x: Tensor, context: Tensor, params: Attention.Params) Tensor {
