@@ -2,6 +2,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig
 
@@ -47,6 +48,111 @@ class Qwen3_5VisionRotaryEmbedding(nn.Module):
         return freqs
 
 
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def apply_rotary_pos_emb_vision(
+    q: torch.Tensor, k: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    orig_q_dtype = q.dtype
+    orig_k_dtype = k.dtype
+    q, k = q.float(), k.float()
+    cos, sin = cos.unsqueeze(-2).float(), sin.unsqueeze(-2).float()
+    q_embed = (q * cos) + (rotate_half(q) * sin)
+    k_embed = (k * cos) + (rotate_half(k) * sin)
+    q_embed = q_embed.to(orig_q_dtype)
+    k_embed = k_embed.to(orig_k_dtype)
+    return q_embed, k_embed
+
+
+class Qwen3_5VisionBlock(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.norm1 = nn.LayerNorm(config.hidden_size, eps=1e-6)
+        self.norm2 = nn.LayerNorm(config.hidden_size, eps=1e-6)
+        self.attn = Qwen3_5VisionAttention(config=config)
+        self.mlp = Qwen3_5VisionMLP(config=config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        return hidden_states
+        # hidden_states = hidden_states + self.attn(
+        #     self.norm1(hidden_states),
+        #     cu_seqlens=cu_seqlens,
+        #     rotary_pos_emb=rotary_pos_emb,
+        #     position_embeddings=position_embeddings,
+        #     **kwargs,
+        # )
+        # hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
+        # return hidden_states
+
+
+class Qwen3_5VisionAttention(nn.Module):
+    def __init__(self, config) -> None:
+        super().__init__()
+        self.dim = config.hidden_size
+        self.num_heads = config.num_heads
+        self.head_dim = self.dim // self.num_heads
+        self.qkv = nn.Linear(self.dim, self.dim * 3, bias=True)
+        self.proj = nn.Linear(self.dim, self.dim)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor | None = None,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        seq_length = hidden_states.shape[0]
+        query_states, key_states, value_states = (
+            self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        )
+        cos, sin = position_embeddings
+        query_states, key_states = apply_rotary_pos_emb_vision(query_states, key_states, cos, sin)
+
+        query_states = query_states.transpose(0, 1)
+        key_states = key_states.transpose(0, 1)
+        value_states = value_states.transpose(0, 1)
+
+        outputs: list[torch.Tensor] = []
+        for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:]):
+            s = int(start.item())
+            e = int(end.item())
+            q = query_states[:, s:e, :].unsqueeze(0)
+            k = key_states[:, s:e, :].unsqueeze(0)
+            v = value_states[:, s:e, :].unsqueeze(0)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=0.0, is_causal=False).squeeze(0)
+            outputs.append(y)
+
+        attn_output = torch.cat(outputs, dim=1).transpose(0, 1).reshape(seq_length, -1).contiguous()
+        attn_output = self.proj(attn_output)
+        return attn_output
+
+
+class Qwen3_5VisionMLP(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.intermediate_size = config.intermediate_size
+        self.linear_fc1 = nn.Linear(self.hidden_size, self.intermediate_size, bias=True)
+        self.linear_fc2 = nn.Linear(self.intermediate_size, self.hidden_size, bias=True)
+        self.act_fn = F.silu
+
+    def forward(self, hidden_state):
+        return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
+
+
+
 
 #========================Test setup========================
 
@@ -58,6 +164,7 @@ class TestVisionModel(nn.Module):
         self.patch_embed = Qwen3_5VisionPatchEmbed(vision_config)
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.pos_embed = nn.Embedding(vision_config.num_position_embeddings, vision_config.hidden_size)
+        self.blocks = nn.ModuleList([Qwen3_5VisionBlock(vision_config) for _ in range(vision_config.depth)])
         self.num_grid_per_side = int(vision_config.num_position_embeddings**0.5)
         self.patch_embed.proj.weight.data.copy_(
             weights["model.visual.patch_embed.proj.weight"].to(dtype=self.patch_embed.proj.weight.dtype)
@@ -67,6 +174,27 @@ class TestVisionModel(nn.Module):
         )
         self.pos_embed.weight.data.copy_(weights["model.visual.pos_embed.weight"].to(dtype=self.pos_embed.weight.dtype))
         self.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(vision_config.hidden_size // vision_config.num_heads // 2)
+        self._load_block_weights(weights)
+
+    @staticmethod
+    def _copy_param(param: torch.Tensor, src: torch.Tensor) -> None:
+        param.data.copy_(src.to(dtype=param.dtype, device=param.device))
+
+    def _load_block_weights(self, weights: dict[str, torch.Tensor]) -> None:
+        for i, block in enumerate(self.blocks):
+            prefix = f"model.visual.blocks.{i}"
+            self._copy_param(block.norm1.weight, weights[f"{prefix}.norm1.weight"])
+            self._copy_param(block.norm1.bias, weights[f"{prefix}.norm1.bias"])
+            self._copy_param(block.norm2.weight, weights[f"{prefix}.norm2.weight"])
+            self._copy_param(block.norm2.bias, weights[f"{prefix}.norm2.bias"])
+            self._copy_param(block.attn.qkv.weight, weights[f"{prefix}.attn.qkv.weight"])
+            self._copy_param(block.attn.qkv.bias, weights[f"{prefix}.attn.qkv.bias"])
+            self._copy_param(block.attn.proj.weight, weights[f"{prefix}.attn.proj.weight"])
+            self._copy_param(block.attn.proj.bias, weights[f"{prefix}.attn.proj.bias"])
+            self._copy_param(block.mlp.linear_fc1.weight, weights[f"{prefix}.mlp.linear_fc1.weight"])
+            self._copy_param(block.mlp.linear_fc1.bias, weights[f"{prefix}.mlp.linear_fc1.bias"])
+            self._copy_param(block.mlp.linear_fc2.weight, weights[f"{prefix}.mlp.linear_fc2.weight"])
+            self._copy_param(block.mlp.linear_fc2.bias, weights[f"{prefix}.mlp.linear_fc2.bias"])
 
 
     def forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
@@ -76,7 +204,21 @@ class TestVisionModel(nn.Module):
         hidden_states = hidden_states + pos_embeds
 
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        return rotary_pos_emb
+        rotary_pos_emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        cos = rotary_pos_emb.cos()
+        sin = rotary_pos_emb.sin()
+
+        grid_thw_list = grid_thw.tolist()
+        lengths = [t * h * w for t, h, w in grid_thw_list]
+        cu_seqlens = torch.tensor(
+            [0] + list(torch.cumsum(torch.tensor(lengths, dtype=torch.int64), dim=0).tolist()),
+            dtype=torch.int64,
+            device=hidden_states.device,
+        )
+
+        for block in self.blocks:
+            hidden_states = block(hidden_states, cu_seqlens=cu_seqlens, position_embeddings=(cos, sin))
+        return hidden_states
 
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:

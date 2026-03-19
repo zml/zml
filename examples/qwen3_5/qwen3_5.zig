@@ -81,7 +81,7 @@ pub const Qwen35 = struct {
         const lm_head_prefix = if (store.hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
         return .{
             .text_model = try .init(allocator, store.withPrefix("model.language_model"), config),
-            .vision_model = .init(allocator, store.withPrefix("model.visual"), config),
+            .vision_model = try .init(allocator, store.withPrefix("model.visual"), config),
             .lm_head = .init(store.withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
             .config = config,
             .gen_options = gen_options,
@@ -122,7 +122,7 @@ pub const Qwen35 = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
         TextModel.unloadBuffers(&self.text_model, allocator);
-        VisionModel.unloadBuffers(&self.vision_model);
+        VisionModel.unloadBuffers(&self.vision_model, allocator);
         self.lm_head.weight.deinit();
     }
 
@@ -227,7 +227,7 @@ pub const Qwen35 = struct {
 pub const VisionModel = struct {
     vision_patch_embed: VisionPatchEmbed,
     pos_embed: zml.nn.TokenEmbedding,
-    // blocks: []VisionBlock,
+    blocks: []VisionBlock,
     // patch_merger: PatchMerger,
 
     hidden_size: i64,
@@ -236,10 +236,18 @@ pub const VisionModel = struct {
     num_position_embeddings: i64,
     rope_opts: zml.nn.RopeOpts,
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Qwen35.Config) VisionModel {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Qwen35.Config) !VisionModel {
+        const blocks = try allocator.alloc(VisionBlock, @intCast(config.vision_config.depth));
+        errdefer allocator.free(blocks);
+
+        for (blocks, 0..) |*block, i| {
+            block.* = .init(store.withPrefix("blocks").withLayer(i), config);
+        }
+
         return .{
             .vision_patch_embed = .init(allocator, config, store.withPrefix("patch_embed")),
             .pos_embed = .{ .weight = store.withPrefix("pos_embed").createTensor("weight", .{ .voc, .d }, null) },
+            .blocks = blocks,
             .hidden_size = config.vision_config.hidden_size,
             .num_heads = config.vision_config.num_heads,
             .spatial_merge_size = config.vision_config.spatial_merge_size,
@@ -252,13 +260,17 @@ pub const VisionModel = struct {
     }
 
     pub fn deinit(self: VisionModel, allocator: std.mem.Allocator) void {
-        _ = self;
-        _ = allocator;
+        allocator.free(self.blocks);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(VisionModel)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionModel), allocator: std.mem.Allocator) void {
         VisionPatchEmbed.unloadBuffers(&self.vision_patch_embed);
         self.pos_embed.weight.deinit();
+        _ = allocator;
+        // for (self.blocks) |*block| {
+        //     VisionBlock.unloadBuffers(block);
+        // }
+        // allocator.free(self.blocks);
     }
 
     pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]i64) Tensor {
@@ -268,9 +280,16 @@ pub const VisionModel = struct {
 
         hidden_states = hidden_states.add(pos_embeds.convert(hidden_states.dtype()));
 
-        const rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
+        var rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
+        rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1);
+        const cos = rotary_pos_emb.cos();
+        const sin = rotary_pos_emb.sin();
 
-        return rotary_pos_emb;
+        for (self.blocks) |block| {
+            hidden_states = block.forward(hidden_states, cos, sin);
+        }
+
+        return hidden_states;
     }
 
     // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
@@ -485,6 +504,36 @@ pub const Conv3d = struct {
     }
 };
 
+pub const VisionBlock = struct {
+    // norm1: zml.nn.LayerNorm,
+    // norm2: zml.nn.LayerNorm,
+    // attn: VisionAttention,
+    // mlp: VisionMlp,
+    // num_heads: u32,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionBlock {
+        _ = store;
+        _ = config;
+        return VisionBlock{};
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionBlock)) void {
+        _ = self;
+    }
+
+    pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
+        // const x = self.norm1.forward(hidden_states);
+        // const x1 = hidden_states.add(self.attn.forward(.{ x, cos, sin }).squeeze(0));
+        // const x2 = self.norm2.forward(x1);
+        // const x3 = x1.add(self.mlp.forward(x2));
+
+        // return x3.reuseBuffer(hidden_states);
+        _ = self;
+        _ = cos;
+        _ = sin;
+        return hidden_states;
+    }
+};
 //========================Text model========================
 
 pub const TextModel = struct {
@@ -501,7 +550,7 @@ pub const TextModel = struct {
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), config, i);
+            layer.* = .init(store.withPrefix("layers").withLayer(i), config, i);
         }
 
         return .{
@@ -553,12 +602,12 @@ pub const TransformerLayer = struct {
     mlp: Mlp,
     post_attention_layernorm: RmsNorm,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config, layer_index: usize) !TransformerLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config, layer_index: usize) TransformerLayer {
         const is_full_attention = config.text_config.layer_types[layer_index] == .full_attention;
         return .{
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm"), config.text_config.rms_norm_eps),
             .attn = if (is_full_attention)
-                .{ .self_attn = try .init(store.withPrefix("self_attn"), config) }
+                .{ .self_attn = .init(store.withPrefix("self_attn"), config) }
             else
                 .{ .linear_attn = .init(store.withPrefix("linear_attn"), config) },
             .mlp = .init(store.withPrefix("mlp")),
@@ -661,7 +710,7 @@ pub const SelfAttn = struct {
         return .init(store.createTensor("weight", .{ .dout, .d }, null), store.maybeCreateTensor("bias", .{.dout}, null), .d);
     }
 
-    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) !SelfAttn {
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) SelfAttn {
         const rotary_dim: i64 = @intFromFloat(@as(f32, @floatFromInt(config.text_config.head_dim)) *
             config.text_config.rope_parameters.partial_rotary_factor);
         return .{
