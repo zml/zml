@@ -268,10 +268,9 @@ pub const VisionModel = struct {
 
         hidden_states = hidden_states.add(pos_embeds.convert(hidden_states.dtype()));
 
-        // var rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
-        // rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, 2);
+        const rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
 
-        return hidden_states;
+        return rotary_pos_emb;
     }
 
     // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
@@ -372,7 +371,10 @@ pub const VisionModel = struct {
         wpos_ids = wpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 });
         wpos_ids = wpos_ids.reshape(.{ .seq = -1 });
 
-        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
+        // Python does `coords.repeat(num_frames, 1)`: repeat rows (tokens), not columns (coord components).
+        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(0, @as(u63, @intCast(t))).convert(.i32);
+        // Old implem:
+        // const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
 
         // Compute the inverse frequency
         const inv_freq = zml.nn.invFreq(@intCast(32), rope_opts).withTags(.{.s});
@@ -381,9 +383,11 @@ pub const VisionModel = struct {
         const rotary_pos_emb_full = zml.Tensor.outer(seq, inv_freq);
 
         const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
-        // Add a bs size for the output for the moment because the image processing is not done in batch but it is needed for the text processing
-        const output_with_bs = output.reshape(.{ .bs = 1, .s = output.dim(.seq), .d = output.dim(.d) });
-        return output_with_bs;
+        // Return without reshape to match Python
+        return output;
+        // Old implem: Add a bs size for the output for the moment because the image processing is not done in batch but it is needed for the text processing
+        // const output_with_bs = output.reshape(.{ .bs = 1, .s = output.dim(.seq), .d = output.dim(.d) });
+        // return output_with_bs;
     }
 };
 
