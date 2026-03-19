@@ -216,7 +216,8 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        // ZML uses named axes. The sdpa primitive expects a specific batch axis name, `.batch`, so it is temporarily renamed here. 
+        // ZML uses named axes. 
+        // The sdpa primitive expects a specific batch axis name, `.batch`, so it is temporarily renamed here. 
         var attn = zml.nn.sdpa(
             qh.rename(.{ .b = .batch }),
             kh.rename(.{ .b = .batch }),
