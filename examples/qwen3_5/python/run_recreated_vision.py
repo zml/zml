@@ -8,6 +8,7 @@ from transformers import AutoConfig
 
 MODEL = "/var/models/Qwen/Qwen3.5-0.8B"
 SAFETENSORS_FILE = "/home/tristan/zml/examples/qwen3_5/safetensors/vision_tests.safetensors"
+DEVICE = "cuda"
 
 #========================Qwen3.5 classes========================
 
@@ -84,7 +85,7 @@ class Qwen3_5VisionBlock(nn.Module):
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
     ) -> torch.Tensor:
-        return hidden_states
+        return self.norm1(hidden_states)
         # hidden_states = hidden_states + self.attn(
         #     self.norm1(hidden_states),
         #     cu_seqlens=cu_seqlens,
@@ -157,28 +158,28 @@ class Qwen3_5VisionMLP(nn.Module):
 #========================Test setup========================
 
 class TestVisionModel(nn.Module):
-    def __init__(self, model_path: str, weights: dict[str, torch.Tensor]) -> None:
+    def __init__(self, model_path: str, weights: dict[str, torch.Tensor], device: str = DEVICE) -> None:
         super().__init__()
         config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
         vision_config = config.vision_config
+        self.device = torch.device(device)
         self.patch_embed = Qwen3_5VisionPatchEmbed(vision_config)
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.pos_embed = nn.Embedding(vision_config.num_position_embeddings, vision_config.hidden_size)
         self.blocks = nn.ModuleList([Qwen3_5VisionBlock(vision_config) for _ in range(vision_config.depth)])
         self.num_grid_per_side = int(vision_config.num_position_embeddings**0.5)
-        self.patch_embed.proj.weight.data.copy_(
-            weights["model.visual.patch_embed.proj.weight"].to(dtype=self.patch_embed.proj.weight.dtype)
-        )
-        self.patch_embed.proj.bias.data.copy_(
-            weights["model.visual.patch_embed.proj.bias"].to(dtype=self.patch_embed.proj.bias.dtype)
-        )
-        self.pos_embed.weight.data.copy_(weights["model.visual.pos_embed.weight"].to(dtype=self.pos_embed.weight.dtype))
+        self.to(self.device)
+        self._copy_param(self.patch_embed.proj.weight, weights["model.visual.patch_embed.proj.weight"])
+        self._copy_param(self.patch_embed.proj.bias, weights["model.visual.patch_embed.proj.bias"])
+        self._copy_param(self.pos_embed.weight, weights["model.visual.pos_embed.weight"])
         self.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(vision_config.hidden_size // vision_config.num_heads // 2)
+        self.rotary_pos_emb.to(self.device)
         self._load_block_weights(weights)
 
     @staticmethod
     def _copy_param(param: torch.Tensor, src: torch.Tensor) -> None:
-        param.data.copy_(src.to(dtype=param.dtype, device=param.device))
+        # Keep checkpoint dtype (bf16/f32/...) instead of forcing module default dtype.
+        param.data = src.to(device=param.device).clone().contiguous()
 
     def _load_block_weights(self, weights: dict[str, torch.Tensor]) -> None:
         for i, block in enumerate(self.blocks):
@@ -273,8 +274,8 @@ class TestVisionModel(nn.Module):
         weight_list = [[] for _ in range(4)]
 
         for t, h, w in grid_thw_list:
-            h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h)
-            w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w)
+            h_idxs = torch.linspace(0, self.num_grid_per_side - 1, h, device=device)
+            w_idxs = torch.linspace(0, self.num_grid_per_side - 1, w, device=device)
 
             h_idxs_floor = h_idxs.int()
             w_idxs_floor = w_idxs.int()
@@ -339,16 +340,20 @@ def resolve_single_checkpoint_file(model_path: str) -> Path:
 
 
 def main() -> None:
-    torch.manual_seed(0)
-    checkpoint_file = resolve_single_checkpoint_file(MODEL)
-    weights = load_file(str(checkpoint_file))
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA is required but not available.")
 
-    test_model = TestVisionModel(MODEL, weights)
+    torch.manual_seed(0)
+    torch.cuda.manual_seed_all(0)
+    checkpoint_file = resolve_single_checkpoint_file(MODEL)
+    weights = load_file(str(checkpoint_file), device=DEVICE)
+
+    test_model = TestVisionModel(MODEL, weights, device=DEVICE)
 
     # Qwen3_5Model.get_image_features expects pixel_values as (batch, channels, image_size, image_size).
     # Use batch=2 so patch_embed's internal view with temporal_patch_size=2 is valid.
-    pixel_values = torch.randn((16, 3, 16, 16), dtype=torch.float32)
-    grid_thw = torch.tensor([[2, 2, 2]], dtype=torch.int64)
+    pixel_values = torch.randn((16, 3, 16, 16), dtype=torch.float32, device=DEVICE)
+    grid_thw = torch.tensor([[2, 2, 2]], dtype=torch.int64, device=DEVICE)
 
     output = test_model(pixel_values, grid_thw).clone()
 

@@ -266,11 +266,10 @@ pub const VisionModel = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(VisionModel), allocator: std.mem.Allocator) void {
         VisionPatchEmbed.unloadBuffers(&self.vision_patch_embed);
         self.pos_embed.weight.deinit();
-        _ = allocator;
-        // for (self.blocks) |*block| {
-        //     VisionBlock.unloadBuffers(block);
-        // }
-        // allocator.free(self.blocks);
+        for (self.blocks) |*block| {
+            VisionBlock.unloadBuffers(block);
+        }
+        allocator.free(self.blocks);
     }
 
     pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]i64) Tensor {
@@ -356,9 +355,9 @@ pub const VisionModel = struct {
         const w_grid = zml.Tensor.stack(&w_list, 0, .layers);
         const h_grid_idx = h_grid.scale(num_grid_per_side);
         const indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i32);
-        var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 });
+        var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 }).convert(self.pos_embed.weight.dtype());
         const embeds = self.pos_embed.forward(indices);
-        const weights_embed = embeds.convert(.f32).mul(weights.repeat1d(-1, @intCast(embedding_dim)));
+        const weights_embed = embeds.mul(weights.repeat1d(-1, @intCast(embedding_dim)));
         const combined = weights_embed.sum(0).withTags(.{ .bs, .hw, .d });
 
         // Split the combined tensor into the height and width dimensions
@@ -436,7 +435,8 @@ pub const VisionPatchEmbed = struct {
 
     pub fn forward(self: VisionPatchEmbed, pixel_values: Tensor) Tensor {
         const reshaped = pixel_values.reshape(.{ -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size }); // TODO: add clean tags
-        const conv_output = self.proj.forward(reshaped);
+        const target_type = self.proj.weight.dtype();
+        const conv_output = self.proj.forward(reshaped.convert(target_type));
         return conv_output.reshape(.{ conv_output.dim(0), conv_output.dim(1) });
     }
 };
@@ -466,7 +466,7 @@ pub const Conv3d = struct {
         var strides: [3]i64 = .{ self.temporal_stride, self.spatial_stride, self.spatial_stride };
         const padding = getPadding(x.dims()[2..5].*, self.weight.dims()[2..5].*, strides);
         var y = x.convolution(
-            self.weight.convert(x.dtype()),
+            self.weight,
             .{
                 .window_strides = &strides,
                 .pad_value = &padding,
@@ -486,7 +486,7 @@ pub const Conv3d = struct {
                 .batch_group_count = 1,
             },
         );
-        if (self.bias) |b| y = y.add(b.convert(y.dtype()).broadcast(y._shape, &.{1}));
+        if (self.bias) |b| y = y.add(b.broadcast(y._shape, &.{1}));
         return y;
     }
 
@@ -505,33 +505,37 @@ pub const Conv3d = struct {
 };
 
 pub const VisionBlock = struct {
-    // norm1: zml.nn.LayerNorm,
-    // norm2: zml.nn.LayerNorm,
+    norm1: zml.nn.LayerNorm,
+    norm2: zml.nn.LayerNorm,
     // attn: VisionAttention,
     // mlp: VisionMlp,
-    // num_heads: u32,
+    num_heads: i64,
 
     pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionBlock {
-        _ = store;
-        _ = config;
-        return VisionBlock{};
+        return .{
+            .norm1 = .{ .weight = store.createTensor("norm1.weight", .{.d}, null), .bias = store.createTensor("norm1.bias", .{.d}, null), .eps = 1e-6 },
+            .norm2 = .{ .weight = store.createTensor("norm2.weight", .{.d}, null), .bias = store.createTensor("norm2.bias", .{.d}, null), .eps = 1e-6 },
+            .num_heads = config.vision_config.num_heads,
+        };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(VisionBlock)) void {
-        _ = self;
+        self.norm1.weight.deinit();
+        if (self.norm1.bias) |*bias| bias.deinit();
+        self.norm2.weight.deinit();
+        if (self.norm2.bias) |*bias| bias.deinit();
     }
 
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
-        // const x = self.norm1.forward(hidden_states);
+        const x = self.norm1.forward(hidden_states);
         // const x1 = hidden_states.add(self.attn.forward(.{ x, cos, sin }).squeeze(0));
-        // const x2 = self.norm2.forward(x1);
+        // const x2 = self.norm2.forward(x);
         // const x3 = x1.add(self.mlp.forward(x2));
 
         // return x3.reuseBuffer(hidden_states);
-        _ = self;
         _ = cos;
         _ = sin;
-        return hidden_states;
+        return x;
     }
 };
 //========================Text model========================
