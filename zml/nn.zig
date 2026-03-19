@@ -125,7 +125,6 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 test normalizeL2 {
     const platform = zml.testing.env();
 
-
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
