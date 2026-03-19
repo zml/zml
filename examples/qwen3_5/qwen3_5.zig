@@ -508,13 +508,14 @@ pub const VisionBlock = struct {
     norm1: zml.nn.LayerNorm,
     norm2: zml.nn.LayerNorm,
     // attn: VisionAttention,
-    // mlp: VisionMlp,
+    mlp: VisionMlp,
     num_heads: i64,
 
     pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionBlock {
         return .{
             .norm1 = .{ .weight = store.createTensor("norm1.weight", .{.d}, null), .bias = store.createTensor("norm1.bias", .{.d}, null), .eps = 1e-6 },
             .norm2 = .{ .weight = store.createTensor("norm2.weight", .{.d}, null), .bias = store.createTensor("norm2.bias", .{.d}, null), .eps = 1e-6 },
+            .mlp = VisionMlp.init(store.withPrefix("mlp")),
             .num_heads = config.vision_config.num_heads,
         };
     }
@@ -524,10 +525,12 @@ pub const VisionBlock = struct {
         if (self.norm1.bias) |*bias| bias.deinit();
         self.norm2.weight.deinit();
         if (self.norm2.bias) |*bias| bias.deinit();
+        VisionMlp.unloadBuffers(&self.mlp);
     }
 
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
         const x = self.norm1.forward(hidden_states);
+        const y = x.add(self.mlp.forward(self.norm2.forward(x)));
         // const x1 = hidden_states.add(self.attn.forward(.{ x, cos, sin }).squeeze(0));
         // const x2 = self.norm2.forward(x);
         // const x3 = x1.add(self.mlp.forward(x2));
@@ -535,9 +538,37 @@ pub const VisionBlock = struct {
         // return x3.reuseBuffer(hidden_states);
         _ = cos;
         _ = sin;
-        return x;
+        return y;
     }
 };
+
+pub const VisionMlp = struct {
+    linear_fc1: zml.nn.Linear,
+    linear_fc2: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View) VisionMlp {
+        return .{
+            .linear_fc1 = .init(store.withPrefix("linear_fc1").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("linear_fc1").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .linear_fc2 = .init(store.withPrefix("linear_fc2").createTensor("weight", .{ .d, .dout }, null), store.withPrefix("linear_fc2").maybeCreateTensor("bias", .{.d}, null), .dout),
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionMlp)) void {
+        self.linear_fc1.weight.deinit();
+        if (self.linear_fc1.bias) |*bias| bias.deinit();
+        self.linear_fc2.weight.deinit();
+        if (self.linear_fc2.bias) |*bias| bias.deinit();
+    }
+
+    pub fn forward(self: VisionMlp, x: Tensor) Tensor {
+        const x_tagged = x.withTags(.{ .s, .d });
+        const x1 = self.linear_fc1.forward(x_tagged).silu();
+        const x2 = self.linear_fc2.forward(x1);
+
+        return x2;
+    }
+};
+
 //========================Text model========================
 
 pub const TextModel = struct {
