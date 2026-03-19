@@ -13,10 +13,10 @@ pub fn init(w: *Worker, io: std.Io, info: *HostInfo) !void {
     info.cpu_cores = host.getCpuCores() catch null;
     info.mem_total_kib = host.getMemTotal() catch null;
 
-    inline for (metrics) |metric| {
-        try w.spawnWorker(io, info, metric.field, metric.query, host);
-    }
+    try w.spawn(io, pollHost, .{ io, w, info, host });
 }
+
+const pollHost = Worker.pollMetrics(*HostInfo, Host, metrics);
 
 const Host = struct {
     io: std.Io,

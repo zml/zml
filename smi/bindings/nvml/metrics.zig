@@ -3,38 +3,28 @@ const Nvml = @import("nvml.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
+const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
-const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
 const process = @import("process.zig");
 
-pub const Backend = struct {
-    nvml: Nvml = undefined,
-    processes: ProcessShadowList = .init(),
+pub const target: device_info.Target = .cuda;
 
-    pub fn start(self: *Backend, w: *Worker, io: std.Io, allocator: std.mem.Allocator, device_infos: *std.ArrayList(*DeviceInfo), proc_allocator: std.mem.Allocator) !void {
-        self.nvml = try Nvml.init();
-        const count = try self.nvml.getDeviceCount();
+pub fn start(collector: *Collector) !void {
+    const nvml = try collector.arena.create(Nvml);
+    nvml.* = try Nvml.init();
+    const count = try nvml.getDeviceCount();
 
-        for (0..count) |i| {
-            const dev = Device.open(&self.nvml, @intCast(i)) catch continue;
-
-            const info = try allocator.create(DeviceInfo);
-            info.* = .{ .cuda = .{ .name = dev.getName() catch null } };
-            try device_infos.append(allocator, info);
-
-            inline for (metrics) |metric| {
-                try w.spawnWorker(io, &info.cuda, metric.field, metric.query, dev);
-            }
-        }
-
-        try process.init(w, io, proc_allocator, &self.processes, &self.nvml);
+    for (0..count) |i| {
+        const dev = Device.open(nvml, @intCast(i)) catch continue;
+        const info = try collector.addDevice(.{ .cuda = .{ .name = dev.getName() catch null } });
+        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
     }
 
-    pub fn deinit(self: *Backend, proc_allocator: std.mem.Allocator) void {
-        self.processes.deinit(proc_allocator);
-    }
-};
+    const processes = try collector.createProcessList();
+    try process.init(collector.worker, collector.io, collector.gpa, processes, nvml);
+}
+
+const pollDevice = Worker.pollMetrics(*GpuInfo, Device, metrics);
 
 const Device = struct {
     nvml: *const Nvml,

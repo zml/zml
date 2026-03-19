@@ -1,5 +1,4 @@
 const std = @import("std");
-const DeviceInfo = @import("info/device_info.zig").DeviceInfo;
 
 pub const Worker = struct {
     poll_interval_ms: u16,
@@ -15,7 +14,7 @@ pub const Worker = struct {
         return !self.should_stop.load(.acquire);
     }
 
-    pub fn spawnCustomWorker(
+    pub fn spawn(
         self: *Worker,
         io: std.Io,
         comptime runFn: anytype,
@@ -24,49 +23,21 @@ pub const Worker = struct {
         try self.group.concurrent(io, runFn, args);
     }
 
-    pub fn spawnWorker(
-        self: *Worker,
-        io: std.Io,
-        info: anytype,
-        comptime field: []const u8,
-        comptime queryFn: anytype,
-        device: anytype,
-    ) !void {
-        const InfoType = @TypeOf(info);
-        const DeviceType = @TypeOf(device);
-        const S = struct {
-            fn run(io_: std.Io, w: *Worker, info_: InfoType, dev: DeviceType) void {
-                w.pollLoop(io_, struct {
-                    fn poll(i: InfoType, d: DeviceType) void {
-                        @field(i, field) = queryFn(d) catch null;
+    pub fn pollMetrics(comptime Info: type, comptime Dev: type, comptime table: anytype) fn (std.Io, *const Worker, Info, Dev) void {
+        return struct {
+            fn f(io: std.Io, w: *const Worker, info: Info, dev: Dev) void {
+                w.pollLoop(io, struct {
+                    fn poll(i: Info, d: Dev) void {
+                        inline for (table) |m| {
+                            @field(i, m.field) = m.query(d) catch null;
+                        }
                     }
-                }.poll, .{ info_, dev });
+                }.poll, .{ info, dev });
             }
-        };
-
-        try self.group.concurrent(io, S.run, .{ io, self, info, device });
+        }.f;
     }
 
-    pub fn spawnBatchWorker(
-        self: *Worker,
-        io: std.Io,
-        infos: []*DeviceInfo,
-        comptime queryFn: *const fn ([]*DeviceInfo) void,
-    ) !void {
-        const S = struct {
-            fn run(io_: std.Io, w: *Worker, infos_: []*DeviceInfo) void {
-                w.pollLoop(io_, struct {
-                    fn poll(i: []*DeviceInfo) void {
-                        queryFn(i);
-                    }
-                }.poll, .{infos_});
-            }
-        };
-
-        try self.group.concurrent(io, S.run, .{ io, self, infos });
-    }
-
-    fn pollLoop(self: *const Worker, io: std.Io, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
+    pub fn pollLoop(self: *const Worker, io: std.Io, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
         const interval: std.Io.Duration = .fromMilliseconds(self.poll_interval_ms);
         while (!self.should_stop.load(.acquire)) {
             const start: std.Io.Timestamp = .now(io, .awake);
