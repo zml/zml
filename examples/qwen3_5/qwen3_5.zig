@@ -531,14 +531,10 @@ pub const VisionBlock = struct {
     }
 
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
-        const x = self.norm1.forward(hidden_states);
-        // const y = x.add(self.mlp.forward(self.norm2.forward(x)));
-        // const x1 = hidden_states.add(self.attn.forward(.{ x, cos, sin }).squeeze(0));
-        // const x2 = self.norm2.forward(x);
-        // const x3 = x1.add(self.mlp.forward(x2));
-
-        // return x3.reuseBuffer(hidden_states);
-        return self.attn.forward(x, cos, sin).squeeze(0);
+        const attn_output = self.attn.forward(self.norm1.forward(hidden_states), cos, sin);
+        const x = hidden_states.add(attn_output);
+        const mlp_output = self.mlp.forward(self.norm2.forward(x));
+        return x.add(mlp_output);
     }
 };
 
@@ -607,7 +603,7 @@ pub const VisionAttention = struct {
         const attn_output = zml.nn.sdpa(q_embed, k_embed, v, .{ .allow_cudnn = true });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const result = self.proj.forward(attn).rename(.{ .dout = .d });
-        return result;
+        return result.squeeze(.bs);
     }
 
     fn rotate_half(x: Tensor) Tensor {
