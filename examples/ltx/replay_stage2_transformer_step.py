@@ -289,6 +289,8 @@ def main() -> None:
     # Results are stored as activations['{name}.__kwargs__'] = {kwarg: tensor}.
     captured_kwargs: dict[str, dict[str, Any]] = {}
     kwargs_handles: list = []
+    captured_aux: dict[str, torch.Tensor] = {}
+    aux_handles: list = []
     captured_sdpa: dict[str, torch.Tensor] = {}
     sdpa_call_shapes: list[dict[str, Any]] = []
     orig_sdpa = None
@@ -417,6 +419,53 @@ def main() -> None:
             except Exception as exc:
                 print(f"WARNING: could not register {proj} hook for {name}: {exc}")
 
+        # Capture block-level AdaLN gate directly from the model implementation.
+        # This avoids reconstructing vgate_msa from heuristics on flattened inputs.
+        for name, mod in transformer.named_modules():
+            if name != "velocity_model.transformer_blocks.0":
+                continue
+            if not any(_re.search(rx, name) for rx in include_regexes):
+                continue
+
+            def _make_block0_aux_hook(mod_name: str):
+                def _hook(module, args_tup, kwargs):
+                    try:
+                        video = kwargs.get("video") if isinstance(kwargs, dict) else None
+                        if video is None and len(args_tup) > 0:
+                            video = args_tup[0]
+
+                        if video is None or not hasattr(video, "timesteps") or not hasattr(video, "x"):
+                            return None
+
+                        if not hasattr(module, "get_ada_values") or not hasattr(module, "scale_shift_table"):
+                            return None
+
+                        batch_size = int(video.x.shape[0])
+                        _, _, vgate_msa = module.get_ada_values(
+                            module.scale_shift_table,
+                            batch_size,
+                            video.timesteps,
+                            slice(0, 3),
+                        )
+                        if isinstance(vgate_msa, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.vgate_msa"] = vgate_msa.detach().cpu().contiguous()
+                        if isinstance(video.timesteps, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.video_timesteps"] = video.timesteps.detach().cpu().contiguous()
+                    except Exception as exc:
+                        print(f"WARNING: failed to capture block0 aux tensors: {exc}")
+                    return None
+
+                return _hook
+
+            try:
+                h = mod.register_forward_pre_hook(
+                    _make_block0_aux_hook(name), with_kwargs=True, prepend=True
+                )
+                aux_handles.append(h)
+                print(f"aux hook registered for: {name}")
+            except Exception as exc:
+                print(f"WARNING: could not register aux hook for {name}: {exc}")
+
     print("Starting transformer forward + activation collection...")
     try:
         (denoised_video, denoised_audio), activations = collector(
@@ -433,12 +482,17 @@ def main() -> None:
         h.remove()
     for h in intermediate_handles:
         h.remove()
+    for h in aux_handles:
+        h.remove()
     for mod_name, kw_tensors in captured_kwargs.items():
         activations[f"{mod_name}.__kwargs__"] = kw_tensors
         print(f"kwargs captured for {mod_name}: {list(kw_tensors.keys())}")
     for mod_name, tensor in captured_intermediates.items():
         activations[mod_name] = tensor
         print(f"intermediate captured for {mod_name}: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
+    for key, tensor in captured_aux.items():
+        activations[key] = tensor
+        print(f"aux captured for {key}: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
     for key, tensor in captured_sdpa.items():
         activations[key] = tensor
         print(f"sdpa captured for {key}: shape={tuple(tensor.shape)} dtype={tensor.dtype}")

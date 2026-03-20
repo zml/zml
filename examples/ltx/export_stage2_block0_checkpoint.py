@@ -1,12 +1,14 @@
-"""Export a LoRA-merged stage-2 block0 attention checkpoint for Zig parity checks.
+"""Export a LoRA-merged stage-2 block0 checkpoint for simplified Zig parity checks.
 
-This script builds TI2VidTwoStagesPipeline with optional distilled LoRA strength,
-then saves only stage-2 block0 attention tensors into a compact safetensors file.
+This exports only the tensors currently consumed by examples/ltx/block0_forward_check.zig:
+  - transformer_blocks.0.attn1.*
+  - transformer_blocks.0.ff.*
+  - transformer_blocks.0.audio_ff.*
 
 Typical usage:
-  uv run python examples/ltx/export_stage2_block0_attention_checkpoint.py \
+  uv run python examples/ltx/export_stage2_block0_checkpoint.py \
     --distilled-lora-strength 0.5 \
-    --output /root/repos/LTX-2/trace_run/stage2_block0_attention_lora0.5_merged.safetensors
+    --output trace_run/stage2_block0_lora0.5_merged.safetensors
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Export stage-2 block0 attention tensors from TI2VidTwoStagesPipeline")
+    parser = argparse.ArgumentParser(description="Export stage-2 block0 tensors for simplified Zig parity checks")
     parser.add_argument(
         "--checkpoint-path",
         type=Path,
@@ -38,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--distilled-lora-strength",
         type=float,
-        default=0.5,
+        default=0.0,
         help="Distilled LoRA strength applied when building stage-2 model",
     )
     parser.add_argument(
@@ -89,17 +91,8 @@ def main() -> None:
 
     keep_prefixes = (
         "transformer_blocks.0.attn1.",
-        "transformer_blocks.0.attn2.",
-        "transformer_blocks.0.audio_attn1.",
-        "transformer_blocks.0.audio_attn2.",
-        "transformer_blocks.0.audio_to_video_attn.",
-        "transformer_blocks.0.video_to_audio_attn.",
-        "transformer_blocks.0.scale_shift_table",
-        "transformer_blocks.0.audio_scale_shift_table",
-        "transformer_blocks.0.scale_shift_table_a2v_ca_audio",
-        "transformer_blocks.0.scale_shift_table_a2v_ca_video",
-        "transformer_blocks.0.prompt_scale_shift_table",
-        "transformer_blocks.0.audio_prompt_scale_shift_table",
+        "transformer_blocks.0.ff.",
+        "transformer_blocks.0.audio_ff.",
     )
 
     tensors: dict[str, torch.Tensor] = {}
@@ -111,7 +104,7 @@ def main() -> None:
         tensors[f"velocity_model.{key}"] = value.detach().to("cpu").contiguous()
 
     if not tensors:
-        raise RuntimeError("No block0 attention tensors were collected from stage-2 transformer")
+        raise RuntimeError("No block0 tensors were collected from stage-2 transformer")
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     save_file(
@@ -120,7 +113,7 @@ def main() -> None:
         metadata={
             "source": "TI2VidTwoStagesPipeline stage_2_model_ledger.transformer().velocity_model",
             "distilled_lora_strength": str(args.distilled_lora_strength),
-            "tensor_scope": "block0 attention modules + AdaLN/cross-attn scale-shift tables",
+            "tensor_scope": "block0 simplified parity modules (attn1, ff, audio_ff)",
         },
     )
 

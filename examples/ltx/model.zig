@@ -44,8 +44,8 @@ pub const FeedForward = struct {
     pub fn forward(self: FeedForward, x: Tensor, params: Params) Tensor {
         _ = self;
         const x_ = x.withPartialTags(.{ .b, .t, .d });
-        const h1 = params.proj.forward(x_);
-        const h2 = h1.gelu();
+        const h1 = params.proj.forward(x_); // In LTX pipeline, this projection is fused with the GELU approximation, but we separate it here for parity bring-up and diagnostics.
+        const h2 = forwardFFGeluF32(h1); // Keep GELU math in f32 for parity with reference behavior before casting back to the input dtype.
         return params.out.forward(h2);
     }
 
@@ -308,18 +308,25 @@ fn kindNumHeads(kind: AttentionKind) usize {
 }
 
 /// One AV transformer block. Shared implementation across stages.
+///
+/// NOTE: this is currently a simplified bring-up implementation for parity tooling.
+/// It is intentionally not feature-complete vs upstream Python BasicAVTransformerBlock
+/// (AdaLN modulation, residual wiring, text/audio cross-attn paths, etc.).
 pub const BasicAVTransformerBlock = struct {
     ff: FeedForward,
+    audio_ff: FeedForward,
     attn: Attention,
 
     pub const Params = struct {
         ff: FeedForward.Params,
+        audio_ff: FeedForward.Params,
         attn: Attention.Params,
     };
 
     pub fn init() BasicAVTransformerBlock {
         return .{
             .ff = .{},
+            .audio_ff = .{},
             .attn = .{},
         };
     }
@@ -327,6 +334,9 @@ pub const BasicAVTransformerBlock = struct {
     pub fn initParams(store: zml.io.TensorStore.View) Params {
         return .{
             .ff = FeedForward.initParams(store.withPrefix("ff")),
+            // audio_ff has the same structure as ff but operates on 2048-dim audio features (2048->8192->2048).
+            // FeedForward.initParams infers dimensions from checkpoint weight shapes via named axes.
+            .audio_ff = FeedForward.initParams(store.withPrefix("audio_ff")),
             .attn = Attention.initParams(store, .attn1),
         };
     }
@@ -334,11 +344,14 @@ pub const BasicAVTransformerBlock = struct {
     pub fn forward(self: BasicAVTransformerBlock, x: Tensor, params: Params) Tensor {
         _ = self.attn.forward(x, params.attn, kindNumHeads(.attn1), .{});
         // NOTE: residual/gating/adaln wiring belongs at block level and will be added here.
+        // audio_ff is defined on the audio stream (2048-dim) and cannot consume video x (4096-dim).
+        // Keep this simplified single-stream path focused on the video ff boundary.
         return self.ff.forward(x, params.ff);
     }
 
     pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
         FeedForward.unloadBuffers(&params.ff);
+        FeedForward.unloadBuffers(&params.audio_ff);
         Attention.unloadBuffers(&params.attn);
     }
 };
@@ -486,6 +499,20 @@ pub fn forwardBlock0FF(x: Tensor, params: X0Model.Params) Tensor {
     return ff.forward(x, params.velocity_model.blocks[0].ff);
 }
 
+/// Free-function entrypoint for simplified FF-boundary parity bring-up.
+///
+/// This does not represent full Python block semantics yet; it is used by
+/// examples/ltx:block0_ff_boundary_check as a temporary surrogate during bring-up.
+pub fn forwardBlock0FFBoundary(x: Tensor, params: BasicAVTransformerBlock.Params) Tensor {
+    const block = BasicAVTransformerBlock.init();
+    return block.forward(x, params);
+}
+
+/// Backward-compatible alias for older scripts still referring to `forwardBlock0`.
+pub fn forwardBlock0(x: Tensor, params: BasicAVTransformerBlock.Params) Tensor {
+    return forwardBlock0FFBoundary(x, params);
+}
+
 /// Focused FF-only entrypoint for parity bring-up.
 pub fn forwardFF(x: Tensor, params: FeedForward.Params) Tensor {
     const ff = FeedForward{};
@@ -519,7 +546,14 @@ pub fn forwardFFGeluF32(x: Tensor) Tensor {
 pub fn forwardFFLinear1Gelu(x: Tensor, params: FeedForward.Params) Tensor {
     const x_ = x.withPartialTags(.{ .b, .t, .d });
     const h1 = params.proj.forward(x_);
-    return h1.gelu();
+    return forwardFFGeluF32(h1);
+}
+
+/// Focused composed path: ff.net.0 projection followed by GELU in f32 math.
+pub fn forwardFFLinear1GeluF32(x: Tensor, params: FeedForward.Params) Tensor {
+    const x_ = x.withPartialTags(.{ .b, .t, .d });
+    const h1 = params.proj.forward(x_);
+    return forwardFFGeluF32(h1);
 }
 
 /// Build only block0.ff params from the selected transformer root.
@@ -528,7 +562,25 @@ pub fn initBlock0FFParams(store: zml.io.TensorStore.View) FeedForward.Params {
     return FeedForward.initParams(root.withPrefix("transformer_blocks").withLayer(0).withPrefix("ff"));
 }
 
+pub fn initBlock0Params(store: zml.io.TensorStore.View) BasicAVTransformerBlock.Params {
+    const root = selectTransformerRoot(store);
+    return BasicAVTransformerBlock.initParams(root.withPrefix("transformer_blocks").withLayer(0));
+}
+
+pub fn unloadBlock0Buffers(params: *zml.Bufferized(BasicAVTransformerBlock.Params)) void {
+    BasicAVTransformerBlock.unloadBuffers(params);
+}
+
 pub fn unloadBlock0FFBuffers(params: *zml.Bufferized(FeedForward.Params)) void {
+    FeedForward.unloadBuffers(params);
+}
+
+pub fn initBlock0AudioFFParams(store: zml.io.TensorStore.View) FeedForward.Params {
+    const root = selectTransformerRoot(store);
+    return FeedForward.initParams(root.withPrefix("transformer_blocks").withLayer(0).withPrefix("audio_ff"));
+}
+
+pub fn unloadBlock0AudioFFBuffers(params: *zml.Bufferized(FeedForward.Params)) void {
     FeedForward.unloadBuffers(params);
 }
 
@@ -570,6 +622,51 @@ pub fn unloadBlock0AttentionBuffers(params: *zml.Bufferized(Attention.Params)) v
 pub fn forwardBlock0Attn1(x: Tensor, params: Attention.Params) Tensor {
     const attn = Attention{};
     return attn.forward(x, params, kindNumHeads(.attn1), .{});
+}
+
+/// M1 – video self-attn given pre-computed AdaLN-normalised input.
+///
+/// Tests: attn1(norm_vx, pe_cos, pe_sin) == reference attn1 output.
+///
+/// `norm_vx` is the AdaLN-modulated query tensor fed into attn1 in the Python
+/// BasicAVTransformerBlock:
+///     norm_vx = rms_norm(vx) * (1 + vscale_msa) + vshift_msa
+/// By accepting norm_vx directly the checker does not need the full AdaLN stack
+/// and focuses purely on attention correctness with realistic conditioned inputs.
+pub fn forwardBlock0VideoSelfAttn(norm_vx: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
+    const attn = Attention{};
+    return attn.forward(norm_vx, params, kindNumHeads(.attn1), .{
+        .pe_cos = pe_cos,
+        .pe_sin = pe_sin,
+    });
+}
+
+/// M1 full residual – video self-attn residual equation given pre-computed AdaLN values.
+///
+/// Tests: vx + attn1(norm_vx, pe) * vgate_msa == reference vx_out.
+///
+/// Python source (transformer.py):
+///     vshift_msa, vscale_msa, vgate_msa = self.get_ada_values(
+///         self.scale_shift_table, B, video.timesteps, slice(0, 3))
+///     norm_vx = rms_norm(vx, eps=self.norm_eps) * (1 + vscale_msa) + vshift_msa
+///     vx = vx + self.attn1(norm_vx, pe=..., mask=...) * vgate_msa
+///
+/// `vx`       – [B, T, D]  video tokens before self-attn (residual base)
+/// `norm_vx`  – [B, T, D]  AdaLN-normalised vx fed into attn1
+/// `pe_cos`   – positional embeddings (cosine component)
+/// `pe_sin`   – positional embeddings (sine component)
+/// `vgate_msa` – [B, 1, D] AdaLN gate (broadcast over T)
+pub fn forwardBlock0VideoSelfAttnResidual(vx: Tensor, norm_vx: Tensor, pe_cos: Tensor, pe_sin: Tensor, vgate_msa: Tensor, params: Attention.Params) Tensor {
+    const attn_out = forwardBlock0VideoSelfAttn(norm_vx, pe_cos, pe_sin, params);
+    return vx.withPartialTags(.{ .b, .t, .d }).add(attn_out.mul(vgate_msa.broad(attn_out.shape())));
+}
+
+/// M1 residual algebra-only check using precomputed attention output from fixture.
+///
+/// Tests: vx + attn1_out * vgate_msa == vx_out
+/// without re-running attention, so this stage isolates gate+broadcast+residual math.
+pub fn forwardBlock0VideoSelfAttnResidualFromAttnOut(vx: Tensor, attn_out: Tensor, vgate_msa: Tensor) Tensor {
+    return vx.withPartialTags(.{ .b, .t, .d }).add(attn_out.withPartialTags(.{ .b, .t, .d }).mul(vgate_msa.broad(attn_out.shape())));
 }
 
 pub fn forwardBlock0Attn1WithPeCosSin(x: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
