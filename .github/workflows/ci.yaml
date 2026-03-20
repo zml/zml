@@ -129,19 +129,25 @@ jobs:
         with:
           bazelisk-version: 1.28.1
           bazelisk-cache: true
+          # Both cache are useful even with the remote execution.
+          # no cache 5min6s build
+          # repository-cache: 37s cache load + 4m3s build
+          # external-cache: 2m29s cache load + 1m25s build
+          # As of this comment, we're also limited by the runner's CPU with only 4 cores.
           repository-cache: true
+          external-cache: true
           bazelrc: |
             common --config=remote
             common --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_CI_API_KEY }}
-            common -c opt
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk_cache=/home/runner/.cache/bazel-disk
-            common --strip=always
+            common --remote_download_outputs=minimal
 
       - run: bazel mod explain
       - run: bazel mod graph
       - run: bazel query //...
+      - run: bazel build //...
+      - run: bazel test //...
