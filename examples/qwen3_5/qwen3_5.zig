@@ -507,7 +507,7 @@ pub const Conv3d = struct {
 pub const VisionBlock = struct {
     norm1: zml.nn.LayerNorm,
     norm2: zml.nn.LayerNorm,
-    // attn: VisionAttention,
+    attn: VisionAttention,
     mlp: VisionMlp,
     num_heads: i64,
 
@@ -515,6 +515,7 @@ pub const VisionBlock = struct {
         return .{
             .norm1 = .{ .weight = store.createTensor("norm1.weight", .{.d}, null), .bias = store.createTensor("norm1.bias", .{.d}, null), .eps = 1e-6 },
             .norm2 = .{ .weight = store.createTensor("norm2.weight", .{.d}, null), .bias = store.createTensor("norm2.bias", .{.d}, null), .eps = 1e-6 },
+            .attn = VisionAttention.init(store.withPrefix("attn"), config),
             .mlp = VisionMlp.init(store.withPrefix("mlp")),
             .num_heads = config.vision_config.num_heads,
         };
@@ -525,20 +526,19 @@ pub const VisionBlock = struct {
         if (self.norm1.bias) |*bias| bias.deinit();
         self.norm2.weight.deinit();
         if (self.norm2.bias) |*bias| bias.deinit();
+        VisionAttention.unloadBuffers(&self.attn);
         VisionMlp.unloadBuffers(&self.mlp);
     }
 
     pub fn forward(self: VisionBlock, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
         const x = self.norm1.forward(hidden_states);
-        const y = x.add(self.mlp.forward(self.norm2.forward(x)));
+        // const y = x.add(self.mlp.forward(self.norm2.forward(x)));
         // const x1 = hidden_states.add(self.attn.forward(.{ x, cos, sin }).squeeze(0));
         // const x2 = self.norm2.forward(x);
         // const x3 = x1.add(self.mlp.forward(x2));
 
         // return x3.reuseBuffer(hidden_states);
-        _ = cos;
-        _ = sin;
-        return y;
+        return self.attn.forward(x, cos, sin).squeeze(0);
     }
 };
 
@@ -566,6 +566,70 @@ pub const VisionMlp = struct {
         const x2 = self.linear_fc2.forward(x1);
 
         return x2;
+    }
+};
+
+pub const VisionAttention = struct {
+    qkv: zml.nn.Linear,
+    proj: zml.nn.Linear,
+
+    num_heads: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionAttention {
+        return .{
+            .qkv = .init(store.withPrefix("qkv").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("qkv").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .proj = .init(store.withPrefix("proj").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("proj").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .num_heads = config.vision_config.num_heads,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionAttention)) void {
+        self.qkv.weight.deinit();
+        if (self.qkv.bias) |*bias| bias.deinit();
+        self.proj.weight.deinit();
+        if (self.proj.bias) |*bias| bias.deinit();
+    }
+
+    pub fn forward(self: VisionAttention, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
+        const qkv = self.qkv.forward(hidden_states.withTags(.{ .s, .d }));
+
+        const qkv_reshaped = qkv.reshape(.{
+            hidden_states.dim(0),
+            3,
+            self.num_heads,
+            -1, // head_dim
+        }).withTags(.{ .s, .qkv, .h, .hd });
+        const qkv_permuted = qkv_reshaped.transpose(.{ .qkv, .s, .h, .hd });
+        const q, const k, var v = qkv_permuted.chunkExact(.qkv, 3);
+
+        const q_embed, const k_embed = applyRotaryPositionalEmbedding(q, k, cos, sin);
+        v = v.withTags(.{ .bs, .k, .h, .hd });
+        const attn_output = zml.nn.sdpa(q_embed, k_embed, v, .{ .allow_cudnn = true });
+        const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        const result = self.proj.forward(attn).rename(.{ .dout = .d });
+        return result;
+    }
+
+    fn rotate_half(x: Tensor) Tensor {
+        const x1 = x.slice1d(-1, .{ .start = 0, .end = @divExact(x.dim(-1), 2) });
+        const x2 = x.slice1d(-1, .{ .start = @divExact(x.dim(-1), 2), .end = x.dim(-1) });
+        return Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+    }
+
+    fn applyRotaryPositionalEmbedding(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) struct { Tensor, Tensor } {
+        // Broadcast cos and sin to the shape of q and k
+
+        const cos_q = cos.broadcast(q.shape(), &.{ 1, 3 });
+        const sin_q = sin.broadcast(q.shape(), &.{ 1, 3 });
+        const cos_k = cos.broadcast(k.shape(), &.{ 1, 3 });
+        const sin_k = sin.broadcast(k.shape(), &.{ 1, 3 });
+
+        const q_dtype = q.convert(cos.dtype());
+        const k_dtype = k.convert(cos.dtype());
+        const q_embed = q_dtype.mul(cos_q).add(rotate_half(q_dtype).mul(sin_q)).withTags(.{ .bs, .q, .h, .hd });
+        const k_embed = k_dtype.mul(cos_k).add(rotate_half(k_dtype).mul(sin_k)).withTags(.{ .bs, .k, .h, .hd });
+
+        return .{ q_embed.convert(q.dtype()), k_embed.convert(k.dtype()) };
     }
 };
 

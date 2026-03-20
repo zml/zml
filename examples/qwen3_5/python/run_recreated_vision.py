@@ -84,15 +84,15 @@ class Qwen3_5VisionBlock(nn.Module):
         rotary_pos_emb: torch.Tensor | None = None,
         position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
         **kwargs,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor: 
         # hidden_states = hidden_states 
-        # + self.attn(
-        #     self.norm1(hidden_states),
-        #     cu_seqlens=cu_seqlens,
-        #     rotary_pos_emb=rotary_pos_emb,
-        #     position_embeddings=position_embeddings,
-        #     **kwargs,
-        # )
+        return self.attn(
+            self.norm1(hidden_states),
+            cu_seqlens=cu_seqlens,
+            rotary_pos_emb=rotary_pos_emb,
+            position_embeddings=position_embeddings,
+            **kwargs,
+        )
         hidden_states = self.norm1(hidden_states)
         hidden_states = hidden_states + self.mlp(self.norm2(hidden_states))
         return hidden_states
