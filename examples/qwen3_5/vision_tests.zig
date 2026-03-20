@@ -288,7 +288,7 @@ fn buildPromptShapeBufferFromMmTokenTypeIds(
         }
     }
 
-    const text_before_image: i32, const image_tokens: i32, const text_after_image: i32 = if (first_image) |start| blk: {
+    const text_before_image: i64, const image_tokens: i64, const text_after_image: i64 = if (first_image) |start| blk: {
         const end = last_image.?;
         for (start..end + 1) |i| {
             if (try Local.tokenType(shape, slice, i) != 1) return error.InvalidMmTokenTypeIds;
@@ -300,12 +300,12 @@ fn buildPromptShapeBufferFromMmTokenTypeIds(
         };
     } else .{ @intCast(seq_len_local), 0, 0 };
 
-    const prompt_shape_data = [3]i32{
+    const prompt_shape_data = [3]i64{
         text_before_image,
         image_tokens,
         text_after_image,
     };
-    const prompt_shape = zml.Shape.init(.{3}, .i32);
+    const prompt_shape = zml.Shape.init(.{3}, .i64);
     return zml.Buffer.fromBytes(io, platform, prompt_shape, sharding, std.mem.sliceAsBytes(&prompt_shape_data));
 }
 

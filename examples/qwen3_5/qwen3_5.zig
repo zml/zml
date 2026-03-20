@@ -143,29 +143,30 @@ pub const Qwen35 = struct {
         prompt_shape: Tensor,
         image_grid_thw: [3]i64,
     ) struct { Tensor, Tensor } {
-        const text_pre_image_token_count = prompt_shape.choose1d(0, 0).convert(.i32);
-        const image_token_count = prompt_shape.choose1d(0, 1).convert(.i32);
-        const text_post_image_token_count = prompt_shape.choose1d(0, 2).convert(.i32);
+        const text_pre_image_token_count = prompt_shape.choose1d(0, 0).convert(.i64);
+        const image_token_count = prompt_shape.choose1d(0, 1).convert(.i64);
+        const text_post_image_token_count = prompt_shape.choose1d(0, 2).convert(.i64);
 
-        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i32), .s);
+        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i64), .s).convert(.i64);
 
         const t = image_grid_thw[0];
         const h = @divExact(image_grid_thw[1], self.config.vision_config.spatial_merge_size);
         const w = @divExact(image_grid_thw[2], self.config.vision_config.spatial_merge_size);
 
-        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i32), .s)
+        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i64), .s)
+            .convert(.i64)
             .sub(image_token_count)
             .addConstant(@max(w, h, t));
-        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i32) }, pre_image_positions);
+        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i64) }, pre_image_positions);
 
         // Define the shape of the iota tensor
-        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i32);
-        const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i32);
+        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i64);
+        const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i64);
 
         // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.scalar(0, .i32).broad(reshape_shape).add(text_pre_image_token_count); // NB: This was modified to match Python empirically
-        const h_index = zml.Tensor.iota(iota_shape, .h).reshape(reshape_shape).add(text_pre_image_token_count);
-        const w_index = zml.Tensor.iota(iota_shape, .w).reshape(reshape_shape).add(text_pre_image_token_count);
+        const t_index = zml.Tensor.scalar(0, .i64).broad(reshape_shape).add(text_pre_image_token_count); // NB: This was modified to match Python empirically
+        const h_index = zml.Tensor.iota(iota_shape, .h).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
+        const w_index = zml.Tensor.iota(iota_shape, .w).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
 
         // Update the position ids with the 3D positional ids
         const position_ids_t = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, t_index);
@@ -176,7 +177,7 @@ pub const Qwen35 = struct {
         const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
 
         // Position max after 3d compression - real seq len
-        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i32).add(text_post_image_token_count).add(text_pre_image_token_count);
+        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i64).add(text_post_image_token_count).add(text_pre_image_token_count);
         const real_seq_len = text_pre_image_token_count.add(text_post_image_token_count).add(image_token_count);
         const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .s = 1 });
 
@@ -208,9 +209,9 @@ pub const Qwen35 = struct {
         const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
         const vision_embed = self.vision_model.forward(pixel_values, grid_thw);
 
-        const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
-        const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
-        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i32);
+        const text_before_image = prompt_shape.choose1d(0, 0).convert(.i64);
+        const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i64);
+        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i64);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
         _ = real_seq_len; // autofix
 
@@ -234,7 +235,7 @@ pub const Qwen35 = struct {
             text_with_image_embed_batched,
             token_index,
             kv_cache,
-            position_ids.convert(.i64),
+            position_ids,
         );
 
         return .{text_model_output.squeeze(.b)};
@@ -375,7 +376,7 @@ pub const VisionModel = struct {
         const h_grid = zml.Tensor.stack(&h_list, 0, .layers);
         const w_grid = zml.Tensor.stack(&w_list, 0, .layers);
         const h_grid_idx = h_grid.scale(num_grid_per_side);
-        const indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i32);
+        const indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i64);
         var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 }).convert(self.pos_embed.weight.dtype());
         const embeds = self.pos_embed.forward(indices);
         const weights_embed = embeds.mul(weights.repeat1d(-1, @intCast(embedding_dim)));
@@ -411,9 +412,9 @@ pub const VisionModel = struct {
         wpos_ids = wpos_ids.reshape(.{ .seq = -1 });
 
         // Python does `coords.repeat(num_frames, 1)`: repeat rows (tokens), not columns (coord components).
-        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(0, @as(u63, @intCast(t))).convert(.i32);
+        const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(0, @as(u63, @intCast(t))).convert(.i64);
         // Old implem:
-        // const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i32);
+        // const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i64);
 
         // Compute the inverse frequency
         const inv_freq = zml.nn.invFreq(@intCast(32), rope_opts).withTags(.{.s});
@@ -1081,8 +1082,8 @@ pub const TextRotaryEmbedding = struct {
         freqs_h = freqs_h.squeeze(.g);
         freqs_w = freqs_w.squeeze(.g);
 
-        const h_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[1] }, .i32), .h).scale(3).addConstant(1);
-        const w_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[2] }, .i32), .h).scale(3).addConstant(2);
+        const h_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[1] }, .i64), .h).scale(3).addConstant(1);
+        const w_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[2] }, .i64), .h).scale(3).addConstant(2);
 
         const h_input = freqs_h.gather(.{ .hd = h_indices }, .{ .indices_are_sorted = true });
         const w_input = freqs_w.gather(.{ .hd = w_indices }, .{ .indices_are_sorted = true });
