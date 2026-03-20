@@ -10,6 +10,7 @@ zig_shared_library(
     # to avoid requiring on the _zig_probe_stack symbol.
     zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
+    target_compatible_with = ["@platforms//os:linux"]
 )
 
 alias(
