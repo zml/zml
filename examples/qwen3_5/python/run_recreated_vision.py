@@ -1597,8 +1597,9 @@ def main() -> None:
 
     # Qwen3_5Model.get_image_features expects pixel_values as (batch, channels, image_size, image_size).
     # Use batch=2 so patch_embed's internal view with temporal_patch_size=2 is valid.
-    pixel_values = torch.randn((16, 3, 16, 16), dtype=torch.float32, device=DEVICE)
-    grid_thw = torch.tensor([[2, 2, 2]], dtype=torch.int64, device=DEVICE)
+    pixel_values = torch.randn((512, 3, 16, 16), dtype=torch.float32, device=DEVICE)
+    # After temporal patching (size=2), 512 frame-patches map to an effective grid of [1, 16, 16].
+    grid_thw = torch.tensor([[1, 16, 16]], dtype=torch.int64, device=DEVICE)
     prompt_ids = tokenizer("What is in this picture?", return_tensors="pt")["input_ids"][0].to(device=DEVICE, dtype=torch.int64)
     image_token_count = int(
         (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).sum().item()
