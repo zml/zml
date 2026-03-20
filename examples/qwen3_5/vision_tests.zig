@@ -20,8 +20,6 @@ const CliArgs = struct {
     gen_tokens: usize = 128,
 };
 
-const vision_grid_thw: [3]i64 = .{ 1, 16, 16 };
-
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
@@ -81,20 +79,21 @@ pub fn main(init: std.process.Init) !void {
 
     progress.end();
 
-    var pixel_values_buffer = try loadPixelValuesBuffer(
+    var vision_inputs = try loadVisionInputs(
         allocator,
         io,
         platform,
         replicated_sharding,
         args.pixel_values_file,
     );
-    defer pixel_values_buffer.deinit();
+    defer vision_inputs.pixel_values.deinit();
 
     const merge_size = qwen_model.config.vision_config.spatial_merge_size;
     const number_image_pad_tokens: u32 = @intCast(
-        vision_grid_thw[0] *
-            @divExact(vision_grid_thw[1], merge_size) *
-            @divExact(vision_grid_thw[2], merge_size),
+        @divExact(
+            vision_inputs.image_grid_thw[0] * vision_inputs.image_grid_thw[1] * vision_inputs.image_grid_thw[2],
+            merge_size * merge_size,
+        ),
     );
     const prompt_tokens, const prompt_shape = try applyVisionChatTemplate(
         allocator,
@@ -117,7 +116,8 @@ pub fn main(init: std.process.Init) !void {
         tokenizer,
         prompt_tokens,
         prompt_shape,
-        pixel_values_buffer,
+        vision_inputs.image_grid_thw,
+        vision_inputs.pixel_values,
         args.gen_tokens,
     );
 }
@@ -132,6 +132,7 @@ fn runGenerationLoop(
     tokenizer: zml.tokenizer.Tokenizer,
     input_token_ids: []const u32,
     prompt_shape_values: [3]i64,
+    image_grid_thw: [3]i64,
     pixel_values_buffer: zml.Buffer,
     gen_tokens: usize,
 ) !void {
@@ -161,15 +162,24 @@ fn runGenerationLoop(
     );
     defer decode_exe.deinit();
 
-    const grid_thw = vision_grid_thw;
-    const t = grid_thw[0];
-    const h = grid_thw[1];
-    const w = grid_thw[2];
+    const grid_thw = image_grid_thw;
+    const t = image_grid_thw[0];
+    const h = image_grid_thw[1];
+    const w = image_grid_thw[2];
     const patch_flat_dim: i64 = model.config.vision_config.in_channels *
         model.config.vision_config.temporal_patch_size *
         model.config.vision_config.patch_size *
         model.config.vision_config.patch_size;
     const pixel_rows: i64 = t * h * w;
+
+    const pixel_shape = pixel_values_buffer.shape();
+    if (pixel_shape.rank() != 2 or pixel_shape.dim(0) != pixel_rows or pixel_shape.dim(1) != patch_flat_dim) {
+        log.err(
+            "pixel_values shape mismatch: got {f}, expected {{n={d}, f={d}}}",
+            .{ pixel_shape, pixel_rows, patch_flat_dim },
+        );
+        return error.InvalidPixelValuesShape;
+    }
 
     const vision_prefill_exe = try platform.compile(
         allocator,
@@ -358,15 +368,21 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
     return parsed_config;
 }
 
-fn loadPixelValuesBuffer(
+const VisionInputs = struct {
+    pixel_values: zml.Buffer,
+    image_grid_thw: [3]i64,
+};
+
+fn loadVisionInputs(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const zml.Platform,
     sharding: zml.sharding.Sharding,
     path: []const u8,
-) !zml.Buffer {
+) !VisionInputs {
     const PixelValuesOnly = struct {
         pixel_values: Tensor,
+        image_grid_thw: Tensor,
     };
 
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
@@ -377,6 +393,7 @@ fn loadPixelValuesBuffer(
 
     const model: PixelValuesOnly = .{
         .pixel_values = store.view().createTensor("pixel_values", null, null),
+        .image_grid_thw = store.view().createTensor("image_grid_thw", null, null),
     };
     var loaded = try zml.io.load(PixelValuesOnly, &model, allocator, io, platform, .{
         .parallelism = 1,
@@ -386,5 +403,16 @@ fn loadPixelValuesBuffer(
         .dma_chunks = 1,
         .dma_chunk_size = 4 * zml.MiB,
     });
-    return loaded.pixel_values;
+    var grid_slice: zml.Slice = try .alloc(allocator, loaded.image_grid_thw.shape());
+    defer grid_slice.free(allocator);
+    try loaded.image_grid_thw.toSlice(io, grid_slice);
+    loaded.image_grid_thw.deinit();
+
+    const grid = grid_slice.items(i64);
+    if (grid.len < 3) return error.InvalidImageGrid;
+
+    return .{
+        .pixel_values = loaded.pixel_values,
+        .image_grid_thw = .{ grid[0], grid[1], grid[2] },
+    };
 }
