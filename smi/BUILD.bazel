@@ -4,6 +4,7 @@ load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//bazel:strip_debug.bzl", "strip_debug")
 
 # tpu grpc
 
@@ -40,6 +41,16 @@ cc_library(
 
 # smi
 
+strip_debug(
+    name = "libnrt.stripped",
+    src = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+)
+
+strip_debug(
+    name = "libncfw.stripped",
+    src = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = select({
@@ -47,14 +58,14 @@ copy_to_directory(
         "//conditions:default": [
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1//:libdrm_amdgpu",
-            "@aws-neuronx-runtime-lib//:libnrt.patchelf",
-            "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+            ":libnrt.stripped",
+            ":libncfw.stripped",
         ],
     }),
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
-        "libnrt.patchelf": "lib",
-        "libncfw.patchelf": "lib",
+        "libnrt.stripped": "lib",
+        "libncfw.stripped": "lib",
     },
     include_external_repositories = ["**"],
 )
