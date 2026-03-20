@@ -129,7 +129,7 @@ cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "cuda_compat", "cuda_nvml_dev", "libpjrt_cuda")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm-amdgpu-common", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -247,6 +247,8 @@ single_version_override(
 
 git_override(
     module_name = "rules_zig",
-    commit = "7b205b78fb21e11efe5adcc9ec1c37fa5852dc77",
+    commit = "6c5d6a07b4ef48be894e7418bcae37bac54e1c2e",
+    patch_strip = 1,
+    patches = ["//:.patches/absolute.patch"],
     remote = "https://github.com/zml/rules_zig.git",
 )

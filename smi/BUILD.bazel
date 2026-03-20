@@ -1,9 +1,13 @@
 load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
 load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("//bazel:patchelf.bzl", "patchelf")
 load("//bazel:strip_debug.bzl", "strip_debug")
 
 # tpu grpc
@@ -34,12 +38,17 @@ cc_library(
     strip_include_prefix = "bindings/tpu/libtpu",
     deps = [
         ":tpu_metric_service_cc_grpc",
-        ":tpu_metric_service_cc_proto",
         "@grpc//:grpc++",
     ],
 )
 
 # smi
+
+patchelf(
+    name = "libdrm_amdgpu.patchelf",
+    src = "@libdrm-amdgpu-amdgpu1//:libdrm_amdgpu",
+    set_rpath = "$ORIGIN",
+)
 
 strip_debug(
     name = "libnrt.stripped",
@@ -57,13 +66,15 @@ copy_to_directory(
         "@platforms//os:macos": [],
         "//conditions:default": [
             "@amd-smi-lib//:libamd_smi",
-            "@libdrm-amdgpu-amdgpu1//:libdrm_amdgpu",
+            ":libdrm_amdgpu.patchelf",
+            "@libdrm2-amdgpu//:libdrm2-amdgpu",
             ":libnrt.stripped",
             ":libncfw.stripped",
         ],
     }),
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
+        "libdrm_amdgpu.patchelf": "lib",
         "libnrt.stripped": "lib",
         "libncfw.stripped": "lib",
     },
@@ -107,7 +118,6 @@ zig_binary(
     deps = [
         "//bazel",
         "//stdx",
-        "//zml",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
     ] + select({
@@ -119,4 +129,54 @@ zig_binary(
             "@amd-smi-lib//:amdsmi",
         ],
     }),
+)
+
+# docker image
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":zml-smi"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":zml-smi"],
+    args = [
+        "--options",
+        ",".join([
+            "zstd:compression-level=9",
+            "zstd:threads=16",
+        ]),
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+tar(
+    name = "amdgpu_ids",
+    srcs = ["@libdrm-amdgpu-common//:amdgpu_ids"],
+)
+
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["/{}/zml-smi".format(package_name())],
+    tars = [
+        ":archive",
+        ":amdgpu_ids",
+    ],
+)
+
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = ["zmlai/zml-smi:latest"],
+    tags = ["manual"],
 )
