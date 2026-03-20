@@ -147,7 +147,6 @@ numpy==2.4.3 \
     --hash=sha256:e7dd01a46700b1967487141a66ac1a3cf0dd8ebf1f08db37d46389401512ca97 \
     --hash=sha256:eb610595dd91560905c132c709412b512135a60f1851ccbd2c959e136431ff67
     # via
-    #   -r platforms/tpu/requirements.in
     #   jax
     #   jaxlib
     #   ml-dtypes
