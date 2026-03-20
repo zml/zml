@@ -3,6 +3,7 @@ load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "tokenizer",
+    tags = ["manual"],
     srcs = ["homemade.zig"],
     import_name = "zml/tokenizer",
     main = "tokenizer.zig",

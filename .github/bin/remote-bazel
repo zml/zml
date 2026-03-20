@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+bazel_bin="$(command -v bazel || true)"
+if [[ -z "${bazel_bin}" || -d "${bazel_bin}" ]]; then
+    echo "bazel is not available as an executable: ${bazel_bin:-<not found>}" >&2
+    exit 1
+fi
+
+api_key="${BUILDBUDDY_CI_API_KEY:-}"
+command="${1:?missing bazel command}"
+shift
+
+remote_args=()
+if [[ -n "${api_key}" ]]; then
+    remote_args=(
+        --config=remote
+        --remote_header="x-buildbuddy-api-key=${api_key}"
+        --remote_download_outputs=minimal
+    )
+fi
+
+exec "${bazel_bin}" \
+    "${command}" \
+    "${remote_args[@]}" \
+    "$@"

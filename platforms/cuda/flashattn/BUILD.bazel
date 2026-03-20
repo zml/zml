@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "flashattn",
+    tags = ["manual"],
     import_name = "platforms/cuda/flashattn",
     main = "flashattn.zig",
     visibility = ["//visibility:public"],

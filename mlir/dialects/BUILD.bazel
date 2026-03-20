@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "dialects",
+    tags = ["manual"],
     srcs = [
         "func.zig",
     ],

@@ -18,44 +18,17 @@ jobs:
         runtimes:
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
-            enable_cache: false
-            user: actions
             runs-on: ["self-hosted", "platform=cuda"]
           - target: rocm
             bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
-            enable_cache: false
-            user: actions
             runs-on: ["self-hosted", "platform=rocm"]
-          - target: cpu
-            bazel_opts: "--@zml//platforms:cpu=true"
-            enable_cache: true
-            user: runner
-            runs-on:
-              [
-                "runs-on",
-                "runner=4cpu-linux-x64",
-                "image=ubuntu24-amd64",
-                "run-id=${{ github.run_id }}",
-                "extras=s3-cache",
-              ]
     runs-on: ${{ matrix.runtimes.runs-on }}
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: runs-on/snapshot@v1
-        if: ${{ matrix.runtimes.enable_cache }}
-        with:
-          path: /home/${{ matrix.runtimes.user }}/.cache/bazel-disk
-          volume_size: 350
-
-      - name: TMP fix for the mount user
-        if: ${{ matrix.runtimes.enable_cache }}
-        run: sudo chown -R ${{ matrix.runtimes.user }}:${{ matrix.runtimes.user }} /home/${{ matrix.runtimes.user }}/.cache/
-
       - name: Ensure self hosted cache permissions
-        if: ${{ !matrix.runtimes.enable_cache }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
       - uses: bazel-contrib/setup-bazel@0.18.0
@@ -70,20 +43,54 @@ jobs:
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk_cache=/home/${{ matrix.runtimes.user }}/.cache/bazel-disk
+            common --disk_cache=/home/actions/.cache/bazel-disk
             common --strip=always
 
-      - name: ZML / bazel build //zml/...
-        run: bazel build ${{ matrix.runtimes.bazel_opts }} //zml/...
+      - run: bazel mod explain
+      - run: bazel mod graph
+      - run: bazel query ${{ matrix.runtimes.bazel_opts }} //...
+      - run: bazel build ${{ matrix.runtimes.bazel_opts }} //...
+      - run: bazel test ${{ matrix.runtimes.bazel_opts }} //...
 
-      - name: ZML / bazel test //zml/...
-        run: bazel test ${{ matrix.runtimes.bazel_opts }} //zml/...
+  platform-cpu:
+    runs-on:
+      [
+        "runs-on",
+        "runner=4cpu-linux-x64",
+        "image=ubuntu24-amd64",
+        "run-id=${{ github.run_id }}",
+        "extras=s3-cache",
+      ]
+    env:
+      BUILDBUDDY_CI_API_KEY: ${{ secrets.BUILDBUDDY_CI_API_KEY }}
+      CI_BAZEL_CACHE: ~/.cache/bazel-repo
+    steps:
+      - uses: runs-on/action@v1
+      - name: Checkout
+        uses: actions/checkout@v6
 
-      - name: ZML / bazel test //mlir/...
-        run: bazel test ${{ matrix.runtimes.bazel_opts }} //mlir/...
+      - uses: bazel-contrib/setup-bazel@0.18.0
+        with:
+          bazelisk-version: 1.28.1
+          bazelisk-cache: true
+          repository-cache: true
+          external-cache: true
+          bazelrc: |
+            common --verbose_failures
+            common --keep_going
+            common --test_output=streamed
+            common --color=yes
+            common --show_timestamps
+            common --remote_download_outputs=minimal
 
-      - name: ZML / bazel test //stdx/...
-        run: bazel test ${{ matrix.runtimes.bazel_opts }} //stdx/...
+      - name: Add .github/bin to PATH (remote-bazel)
+        run: echo "$GITHUB_WORKSPACE/.github/bin" >> "$GITHUB_PATH"
+
+      - run: remote-bazel mod explain
+      - run: remote-bazel mod graph
+      - run: remote-bazel query //...
+      - run: remote-bazel build //...
+      - run: remote-bazel test //...
 
   zig-lint:
     runs-on:
@@ -110,43 +117,3 @@ jobs:
 
       - name: No autofix in Zig code
         run: bash -c "! git grep -l '// autofix' -- '*.zig'"
-
-  ci:
-    runs-on:
-      [
-        "runs-on",
-        "runner=4cpu-linux-x64",
-        "image=ubuntu24-amd64",
-        "run-id=${{ github.run_id }}",
-        "extras=s3-cache",
-      ]
-    steps:
-      - uses: runs-on/action@v1
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: bazel-contrib/setup-bazel@0.18.0
-        with:
-          bazelisk-version: 1.28.1
-          bazelisk-cache: true
-          # Both cache are useful even with the remote execution.
-          # no cache 5min6s build
-          # repository-cache: 37s cache load + 4m3s build
-          # external-cache: 2m29s cache load + 1m25s build
-          # As of this comment, we're also limited by the runner's CPU with only 4 cores.
-          repository-cache: true
-          bazelrc: |
-            common --config=remote
-            common --remote_header=x-buildbuddy-api-key=${{ secrets.BUILDBUDDY_CI_API_KEY }}
-            common --verbose_failures
-            common --keep_going
-            common --test_output=streamed
-            common --color=yes
-            common --show_timestamps
-            common --remote_download_outputs=minimal
-
-      - run: bazel mod explain
-      - run: bazel mod graph
-      - run: bazel query //...
-      - run: bazel build //...
-      - run: bazel test //...

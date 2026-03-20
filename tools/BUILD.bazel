@@ -10,6 +10,7 @@ py_library(
 
 cc_library(
     name = "xspace_to_perfetto_lib",
+    tags = ["manual"],
     srcs = ["xspace_to_perfetto_lib.cc"],
     hdrs = ["xspace_to_perfetto.h"],
     visibility = ["//visibility:public"],

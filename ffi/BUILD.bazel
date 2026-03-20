@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "cc",
+    tags = ["manual"],
     hdrs = [
         "zig_allocator.h",
         "zig_slice.h",
@@ -12,6 +13,7 @@ cc_library(
 
 zig_library(
     name = "zig",
+    tags = ["manual"],
     srcs = [
         "zig_allocator.zig",
         "zig_slice.zig",

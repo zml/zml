@@ -3,17 +3,20 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "empty",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_TPU_DISABLED"],
 )
 
 cc_library(
     name = "libpjrt_tpu",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_TPU"],
     deps = ["@libpjrt_tpu"],
 )
 
 zig_library(
     name = "tpu",
+    tags = ["manual"],
     import_name = "platforms/tpu",
     main = "tpu.zig",
     visibility = ["//visibility:public"],
