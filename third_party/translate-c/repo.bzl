@@ -1,10 +1,9 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 
 def repo():
-    http_archive(
+    new_git_repository(
         name = "translate-c",
+        remote = "https://codeberg.org/ziglang/translate-c",
+        commit = "5ac39f77661a216b75b195fe74ce7d0a04b33b7d",
         build_file = "//third_party/translate-c:translate-c.bazel",
-        sha256 = "506643ec817620025d341efd87169d90013aa369db28780e853cf18bff174326",
-        url = "https://codeberg.org/ziglang/translate-c/archive/d2be2f19ef7c9caa1561d38c96581ac79dd4c654.tar.gz",
-        strip_prefix = "translate-c",
     )
