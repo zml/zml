@@ -43,6 +43,9 @@ filegroup(
 zig_binary(
     name = "workspace_printer",
     main = "workspace_printer.zig",
+    deps = [
+        "@rules_zig//zig/runfiles",
+    ],
 )
 
 zig_binary(
