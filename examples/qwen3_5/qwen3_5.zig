@@ -164,7 +164,7 @@ pub const Qwen35 = struct {
         const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i64);
 
         // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.scalar(0, .i64).broad(reshape_shape).add(text_pre_image_token_count); // NB: This was modified to match Python empirically
+        const t_index = zml.Tensor.iota(iota_shape, .t).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
         const h_index = zml.Tensor.iota(iota_shape, .h).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
         const w_index = zml.Tensor.iota(iota_shape, .w).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
 
@@ -267,7 +267,7 @@ pub const Qwen35 = struct {
             .d = token_embed.dim(.d),
         });
         const position_ids = buildVisionDecodePositionIds(token_index, mrope_position_deltas);
-        const text_model_output, const updated_kv_cache = self.text_model.vision_test_forward(
+        const text_model_output, const updated_kv_cache = self.text_model.vision_test_decode_forward(
             token_embed_batched,
             token_index,
             kv_cache,
@@ -798,6 +798,24 @@ pub const TextModel = struct {
         hidden_states = self.norm.forward(hidden_states);
         return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
     }
+
+    pub fn vision_test_decode_forward(
+        self: TextModel,
+        input_embeds: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache,
+        position_ids: Tensor,
+    ) struct { Tensor, KvCache } {
+        var hidden_states = input_embeds;
+
+        var updated_kv_cache = kv_cache;
+        for (self.layers, 0..) |layer, i| {
+            hidden_states, updated_kv_cache = layer.vision_test_decode_forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
+        }
+
+        hidden_states = self.norm.forward(hidden_states);
+        return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
+    }
 };
 
 pub const TransformerLayer = struct {
@@ -882,6 +900,40 @@ pub const TransformerLayer = struct {
         switch (self.attn) {
             .self_attn => |*self_attn| {
                 const result = self_attn.vision_test_forward(normalized_x0, token_index, kv_cache.cache.self_attn, position_ids);
+                attention_output = result[0];
+                updated_kv_cache.self_attn = result[1];
+            },
+            .linear_attn => |*linear_attn| {
+                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn);
+                attention_output = result[0];
+                updated_kv_cache.gated_delta_net = result[1];
+            },
+        }
+
+        const x1 = attention_output.add(residual0);
+        const residual1 = x1;
+        const normalized_hidden = self.post_attention_layernorm.forward(x1);
+
+        const mlp_output = self.mlp.forward(normalized_hidden);
+
+        return .{ mlp_output.add(residual1), updated_kv_cache };
+    }
+
+    pub fn vision_test_decode_forward(
+        self: TransformerLayer,
+        x0: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.LayerView,
+        position_ids: Tensor,
+    ) struct { Tensor, KvCache } {
+        const residual0 = x0;
+        const normalized_x0 = self.input_layernorm.forward(x0);
+
+        var attention_output: Tensor = undefined;
+        var updated_kv_cache: KvCache = kv_cache.parent;
+        switch (self.attn) {
+            .self_attn => |*self_attn| {
+                const result = self_attn.vision_test_decode_forward(normalized_x0, token_index, kv_cache.cache.self_attn, position_ids);
                 attention_output = result[0];
                 updated_kv_cache.self_attn = result[1];
             },
@@ -1038,6 +1090,45 @@ pub const SelfAttn = struct {
     }
 
     pub fn vision_test_forward(
+        self: SelfAttn,
+        x: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.SelfAttnCache,
+        position_ids: Tensor,
+    ) struct { Tensor, KvCache.SelfAttnCache } {
+        var q, const gate = self.projectQAndGate(x);
+        var k, var v = self.projectKV(x);
+        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
+
+        const dtype = q.dtype();
+        const cos, const sin = if (position_ids.shape().rank() == 3)
+            self.rotary_embed.getCosAndSinInterleaved(position_ids.convert(.i64), dtype)
+        else
+            self.rotary_embed.getCosAndSin(position_ids.convert(.i64), dtype);
+        q = self.rotary_embed.applyRope(q, cos, sin);
+        k = self.rotary_embed.applyRope(k, cos, sin);
+
+        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
+        k = new_kv_cache.keys().convert(dtype);
+        v = new_kv_cache.values().convert(dtype);
+
+        const attn_output = zml.attention.attention.attention(
+            q.rename(.{ .s = .q }),
+            k.rename(.{ .s = .k }),
+            v.rename(.{ .s = .k }),
+            token_index,
+            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
+            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+        ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
+
+        const gated_output = attn_output.mul(gate.sigmoid());
+        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d });
+
+        return .{ projected_output, new_kv_cache };
+    }
+
+    pub fn vision_test_decode_forward(
         self: SelfAttn,
         x: Tensor,
         token_index: Tensor,

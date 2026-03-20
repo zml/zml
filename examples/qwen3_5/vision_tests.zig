@@ -146,6 +146,7 @@ fn runGenerationLoop(
     defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
     const prefill_len = input_token_ids.len;
+    const total_seq_len: i64 = prompt_shape_values[0] + prompt_shape_values[1] + prompt_shape_values[2];
     const decode_exe = try platform.compile(
         allocator,
         io,
@@ -271,7 +272,7 @@ fn runGenerationLoop(
         var token_index_buffer = try zml.Buffer.scalar(
             io,
             platform,
-            @as(u32, @intCast(input_token_ids.len + i)),
+            @as(u32, @intCast(total_seq_len - 1 + @as(i64, @intCast(i)))),
             .u32,
             sharding,
         );
