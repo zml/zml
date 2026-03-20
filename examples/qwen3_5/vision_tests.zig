@@ -68,18 +68,24 @@ pub fn main(init: std.process.Init) !void {
 
     var pixel_values = try loadBufferFromStore(allocator, io, platform, replicated_sharding, &vision_store, "pixel_values");
     defer pixel_values.deinit();
-    var expected_output = try loadBufferFromStore(allocator, io, platform, replicated_sharding, &vision_store, "output");
+    var input_ids = try loadInputIdsFromStore(allocator, io, platform, replicated_sharding, &vision_store, "input_ids");
+    defer input_ids.deinit();
+    var expected_output = try loadExpectedOutputFromStore(allocator, io, platform, replicated_sharding, &vision_store, "output");
     defer expected_output.deinit();
     const grid_thw = try loadGridThwFromStore(allocator, io, &vision_store, "grid_thw");
 
+    const input_ids_tensor = Tensor.fromShape(input_ids.shape());
     const pixel_values_tensor = Tensor.fromShape(pixel_values.shape());
+    var prompt_shape = try buildPromptShapeBufferFromMmTokenTypeIds(allocator, io, platform, replicated_sharding, &vision_store, "mm_token_type_ids");
+    defer prompt_shape.deinit();
+    const prompt_shape_tensor = Tensor.fromShape(prompt_shape.shape());
 
-    const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ pixel_values_tensor, grid_thw }, .{ .shardings = &.{replicated_sharding} });
+    const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ input_ids_tensor, pixel_values_tensor, grid_thw, prompt_shape_tensor }, .{ .shardings = &.{replicated_sharding} });
     defer exe.deinit();
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
-    exe_args.set(.{ qwen35_buffers, pixel_values });
+    exe_args.set(.{ qwen35_buffers, input_ids, pixel_values, prompt_shape });
 
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
@@ -144,6 +150,124 @@ fn loadBufferFromStore(
     _ = try reader.interface.readSliceAll(host_bytes);
 
     return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+}
+
+fn loadInputIdsFromStore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    store: *zml.io.TensorStore,
+    key: []const u8,
+) !zml.Buffer {
+    const shape = store.view().getShape(key) orelse return error.NotFound;
+    const flat_shape = if (shape.rank() == 2 and shape.dim(0) == 1)
+        zml.Shape.init(.{shape.dim(1)}, shape.dtype())
+    else if (shape.rank() == 1)
+        shape
+    else
+        return error.InvalidInputIds;
+
+    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(host_bytes);
+
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try store.view().getReader(key, io, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(host_bytes);
+
+    return zml.Buffer.fromBytes(io, platform, flat_shape, sharding, host_bytes);
+}
+
+fn loadExpectedOutputFromStore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    store: *zml.io.TensorStore,
+    key: []const u8,
+) !zml.Buffer {
+    const shape = store.view().getShape(key) orelse return error.NotFound;
+    const normalized_shape = if (shape.rank() == 3 and shape.dim(0) == 1)
+        zml.Shape.init(.{ shape.dim(1), shape.dim(2) }, shape.dtype())
+    else if (shape.rank() == 2)
+        shape
+    else
+        shape;
+
+    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(host_bytes);
+
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try store.view().getReader(key, io, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(host_bytes);
+
+    return zml.Buffer.fromBytes(io, platform, normalized_shape, sharding, host_bytes);
+}
+
+fn buildPromptShapeBufferFromMmTokenTypeIds(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    store: *zml.io.TensorStore,
+    key: []const u8,
+) !zml.Buffer {
+    const shape = store.view().getShape(key) orelse return error.NotFound;
+    if (shape.rank() != 2 or shape.dim(0) != 1) return error.InvalidMmTokenTypeIds;
+    const seq_len_local: usize = @intCast(shape.dim(1));
+
+    const host_bytes = try allocator.alloc(u8, shape.byteSize());
+    defer allocator.free(host_bytes);
+
+    var io_buffer: [1024]u8 = undefined;
+    var reader = try store.view().getReader(key, io, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(host_bytes);
+
+    const slice = zml.Slice.init(shape, host_bytes);
+
+    const Local = struct {
+        fn tokenType(shape_: zml.Shape, slice_: zml.Slice, i: usize) !i64 {
+            return switch (shape_.dtype()) {
+                .i32 => @intCast(slice_.constItems(i32)[i]),
+                .i64 => slice_.constItems(i64)[i],
+                .u32 => @intCast(slice_.constItems(u32)[i]),
+                .u64 => std.math.cast(i64, slice_.constItems(u64)[i]) orelse error.InvalidMmTokenTypeIds,
+                else => error.InvalidMmTokenTypeIds,
+            };
+        }
+    };
+
+    var first_image: ?usize = null;
+    var last_image: ?usize = null;
+    for (0..seq_len_local) |i| {
+        if (try Local.tokenType(shape, slice, i) == 1) {
+            if (first_image == null) first_image = i;
+            last_image = i;
+        }
+    }
+
+    const text_before_image: i32, const image_tokens: i32, const text_after_image: i32 = if (first_image) |start| blk: {
+        const end = last_image.?;
+        for (start..end + 1) |i| {
+            if (try Local.tokenType(shape, slice, i) != 1) return error.InvalidMmTokenTypeIds;
+        }
+        break :blk .{
+            @intCast(start),
+            @intCast(end - start + 1),
+            @intCast(seq_len_local - end - 1),
+        };
+    } else .{ @intCast(seq_len_local), 0, 0 };
+
+    const prompt_shape_data = [3]i32{
+        text_before_image,
+        image_tokens,
+        text_after_image,
+    };
+    const prompt_shape = zml.Shape.init(.{3}, .i32);
+    return zml.Buffer.fromBytes(io, platform, prompt_shape, sharding, std.mem.sliceAsBytes(&prompt_shape_data));
 }
 
 fn loadGridThwFromStore(

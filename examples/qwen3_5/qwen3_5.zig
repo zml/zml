@@ -163,7 +163,7 @@ pub const Qwen35 = struct {
         const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i32);
 
         // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.iota(iota_shape, .t).reshape(reshape_shape).add(text_pre_image_token_count);
+        const t_index = zml.Tensor.scalar(0, .i32).broad(reshape_shape).add(text_pre_image_token_count); // NB: This was modified to match Python empirically
         const h_index = zml.Tensor.iota(iota_shape, .h).reshape(reshape_shape).add(text_pre_image_token_count);
         const w_index = zml.Tensor.iota(iota_shape, .w).reshape(reshape_shape).add(text_pre_image_token_count);
 
@@ -191,22 +191,6 @@ pub const Qwen35 = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-
-        // Extract embeddings
-
-        // Update the embedding with the vision model embedding
-
-        // Build the 3D positional ids
-        // const position_ids, const mrope_position_deltas = self.build3dPositionIds(
-        //     1,
-        //     tokens.dim(.s),
-        //     .fromShape(zml.Shape.init(.{ .p = 3 }, .i32)),
-        //     .{ 1, 16, 16 },
-        // );
-
-        // log.info("position_ids shape {any}", .{position_ids.shape()});
-        // log.info("mrope_position_deltas shape {any}", .{mrope_position_deltas.shape()});
-
         const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
@@ -214,11 +198,32 @@ pub const Qwen35 = struct {
 
     pub fn vision_test_forward(
         self: Qwen35,
+        tokens: Tensor,
         pixel_values: Tensor,
         grid_thw: [3]i64,
+        prompt_shape: Tensor,
     ) struct { Tensor } {
-        const vision_output = self.vision_model.forward(pixel_values, grid_thw);
-        return .{vision_output};
+        const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
+        const vision_embed = self.vision_model.forward(pixel_values, grid_thw);
+
+        const text_before_image = prompt_shape.choose1d(0, 0).convert(.i32);
+        const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i32);
+        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i32);
+        const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
+        _ = real_seq_len; // autofix
+
+        const text_with_image = token_embed.dynamicUpdateSlice(.{ .s = text_before_image }, vision_embed.convert(token_embed.dtype()));
+        const seq_len = text_with_image.dim(.s);
+
+        const position_ids, const mrope_position_deltas = self.build3dPositionIds(
+            1,
+            seq_len,
+            prompt_shape,
+            grid_thw,
+        );
+        _ = mrope_position_deltas; // autofix
+
+        return .{position_ids};
     }
 };
 
@@ -660,7 +665,7 @@ pub const VisionPatchMerger = struct {
     pub fn forward(self: VisionPatchMerger, x: Tensor) Tensor {
         const merged_seq_len = @divExact(x.dim(0), self.spatial_merge_unit);
         const merged_hidden_size = x.dim(1) * self.spatial_merge_unit;
-        const x1 = self.norm.forward(x).reshape(.{ merged_seq_len, merged_hidden_size }).withTags(.{ .seq, .d });
+        const x1 = self.norm.forward(x).reshape(.{ merged_seq_len, merged_hidden_size }).withTags(.{ .s, .d });
         const x2 = self.linear_fc1.forward(x1).rename(.{ .dout = .d });
         const x3 = x2.gelu();
         const x4 = self.linear_fc2.forward(x3).rename(.{ .dout = .d });
