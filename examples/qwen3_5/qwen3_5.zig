@@ -206,7 +206,7 @@ pub const Qwen35 = struct {
         grid_thw: [3]i64,
         prompt_shape: Tensor,
         rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor.Rng } {
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
         const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
         const vision_embed = self.vision_model.forward(pixel_values, grid_thw);
 
@@ -214,7 +214,6 @@ pub const Qwen35 = struct {
         const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i64);
         const text_after_image = prompt_shape.choose1d(0, 2).convert(.i64);
         const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
-        _ = real_seq_len; // autofix
 
         const text_with_image_embed = token_embed.dynamicUpdateSlice(.{ .s = text_before_image }, vision_embed.convert(token_embed.dtype()));
         const seq_len = text_with_image_embed.dim(.s);
@@ -225,7 +224,6 @@ pub const Qwen35 = struct {
             prompt_shape,
             grid_thw,
         );
-        _ = mrope_position_deltas; // autofix
 
         const text_with_image_embed_batched = text_with_image_embed.reshape(.{
             .b = 1,
@@ -239,8 +237,44 @@ pub const Qwen35 = struct {
             position_ids,
         );
 
-        const sampled_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
-        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, new_rng };
+        const last_pos = real_seq_len.addConstant(-1).asScalar();
+        const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
+        const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
+        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
+    }
+
+    fn buildVisionDecodePositionIds(cache_position: Tensor, mrope_position_deltas: Tensor) Tensor {
+        const cache_pos = cache_position.convert(.i64).reshape(.{ .b = 1, .s = 1 });
+        const deltas = mrope_position_deltas.convert(.i64).reshape(.{ .b = 1, .s = 1 });
+        const pos = cache_pos.add(deltas);
+        return zml.Tensor.stack(&.{ pos, pos, pos }, 0, .g).withTags(.{ .g, .b, .s });
+    }
+
+    pub fn vision_test_decode_forward(
+        self: Qwen35,
+        tokens_: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache,
+        mrope_position_deltas: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor.Rng } {
+        const tokens = tokens_.withPartialTags(.{.s});
+        const token_embed = self.text_model.embed_tokens.forward(tokens);
+        const seq_len = token_embed.dim(.s);
+        const token_embed_batched = token_embed.reshape(.{
+            .b = 1,
+            .s = seq_len,
+            .d = token_embed.dim(.d),
+        });
+        const position_ids = buildVisionDecodePositionIds(token_index, mrope_position_deltas);
+        const text_model_output, const updated_kv_cache = self.text_model.vision_test_forward(
+            token_embed_batched,
+            token_index,
+            kv_cache,
+            position_ids,
+        );
+        const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 };
 

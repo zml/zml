@@ -149,11 +149,12 @@ fn runGenerationLoop(
         allocator,
         io,
         model,
-        .forward,
+        .vision_test_decode_forward,
         .{
             Tensor.init(.{ .b = 1, .s = 1 }, .u32),
             Tensor.init(.{}, .u32),
             kv_cache,
+            Tensor.init(.{ .s = 1 }, .i64),
             zml.Tensor.Rng.init(),
         },
         .{ .shardings = &.{sharding} },
@@ -223,13 +224,16 @@ fn runGenerationLoop(
         rng_buffers,
     });
     vision_prefill_exe.call(vision_prefill_args, &vision_prefill_results);
-    vision_prefill_results.fill(.{ &prompt_tokens_buffer, &kv_cache_buffers, &rng_buffers });
-    try prompt_tokens_buffer.toSlice(io, prompt_tokens_slice);
-    log.info("vision_test_forward output shape: {any}", .{prompt_tokens_buffer.shape()});
+    var prefill_generated_token_buffer: zml.Buffer = undefined;
+    var mrope_position_deltas_buffer: zml.Buffer = undefined;
+    vision_prefill_results.fill(.{ &prefill_generated_token_buffer, &kv_cache_buffers, &mrope_position_deltas_buffer, &rng_buffers });
+    defer prefill_generated_token_buffer.deinit();
+    defer mrope_position_deltas_buffer.deinit();
+    log.info("vision_test_forward output shape: {any}", .{prefill_generated_token_buffer.shape()});
 
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
-    generated_token_slice.items(u32)[0] = prompt_tokens_slice.items(u32)[input_token_ids.len - 1];
+    try prefill_generated_token_buffer.toSlice(io, generated_token_slice);
 
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
     defer current_token_buffer.deinit();
@@ -268,7 +272,7 @@ fn runGenerationLoop(
         var decode_results = try decode_exe.results(allocator);
         defer decode_results.deinit(allocator);
 
-        decode_args.set(.{ model_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{ model_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, mrope_position_deltas_buffer, rng_buffers });
         decode_exe.call(decode_args, &decode_results);
 
         decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
