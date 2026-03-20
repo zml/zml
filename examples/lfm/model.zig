@@ -67,6 +67,7 @@ pub const Model = struct {
             });
         }
 
+        const sharding = try zml.sharding.replicatedSharding(platform);
         return zml.io.load(Model, self, allocator, io, platform, .{
             .dma_chunks = 8,
             .dma_chunk_size = 128 * zml.MiB,
@@ -74,6 +75,7 @@ pub const Model = struct {
             .store = store,
             .parallelism = 16,
             .total_bytes = &total_bytes,
+            .shardings = &.{sharding},
         });
     }
 
@@ -123,7 +125,7 @@ pub const TokenEmbedding = struct {
     weight: Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
-        return .{ .weight = store.createTensor("weight").withTags(.{ .voc, .d }) };
+        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, null) };
     }
 
     pub fn forward(self: TokenEmbedding, tokens: Tensor) Tensor {
@@ -267,7 +269,7 @@ pub const ShortConv = struct {
 
     pub fn init(config: Config, store: zml.io.TensorStore.View) ShortConv {
         stdx.debug.assert(!config.conv_bias, "conv_bias is not supported.", .{});
-        return ShortConv{ .in_proj = initLinear(store.withPrefix("in_proj"), .d), .out_proj = initLinear(store.withPrefix("out_proj"), .d), .kernel = store.createTensorWithTags("conv.weight", .{ .out, .in, .kernel_size }), .config = config };
+        return ShortConv{ .in_proj = initLinear(store.withPrefix("in_proj"), .d), .out_proj = initLinear(store.withPrefix("out_proj"), .d), .kernel = store.createTensor("conv.weight", .{ .out, .in, .kernel_size }, null), .config = config };
     }
 
     pub fn forward(
@@ -372,8 +374,7 @@ pub const Attention = struct {
             .num_key_value_groups = num_key_value_groups,
             .rope_opts = .{
                 .layout = .sequential,
-                .freq_base = config.rope_theta,
-                .scaling = .{ .default = .{} },
+                .scaling = .{ .default = .{ .rope_theta = config.rope_theta } },
             },
         };
     }
@@ -448,10 +449,10 @@ pub const Cache = struct {
     conv: ConvCache,
     kv: KvCache,
 
-    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Cache) {
+    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Cache) {
         return .{
-            .conv = try self.conv.initBuffers(allocator, io, platform),
-            .kv = try self.kv.initBuffers(io, platform),
+            .conv = try self.conv.initBuffers(allocator, io, platform, sharding),
+            .kv = try self.kv.initBuffers(io, platform, sharding),
         };
     }
 
@@ -477,13 +478,13 @@ pub const ConvCache = struct {
         };
     }
 
-    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(ConvCache) {
+    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(ConvCache) {
         const sh = self.state.shape();
         const host = try allocator.alloc(u8, sh.byteSize());
         defer allocator.free(host);
         @memset(host, 0);
 
-        return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, host) };
+        return .{ .state = try zml.Buffer.fromBytes(io, platform, sh, sharding, host) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(ConvCache)) void {
@@ -508,10 +509,10 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(KvCache) {
+    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
         return .{
-            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), .{}),
-            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), .{}),
+            .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}),
+            .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}),
         };
     }
 
@@ -555,7 +556,7 @@ pub const KvCache = struct {
 };
 
 fn initLinear(store: zml.io.TensorStore.View, tag: anytype) Linear {
-    return .init(store.createTensorWithTags("weight", .{ .out, tag }), null, tag);
+    return .init(store.createTensor("weight", .{ .out, tag }, null), null, tag);
 }
 
 pub const Linear = struct {
@@ -619,7 +620,7 @@ const RmsNorm = struct {
     tag: Shape.Tag,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensorWithTags("weight", .{tag}), .eps = eps, .tag = zml.Shape.toTag(tag) };
+        return .{ .weight = store.createTensor("weight", .{tag}, null), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {

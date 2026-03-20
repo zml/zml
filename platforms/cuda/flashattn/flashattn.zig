@@ -94,8 +94,8 @@ pub var fa2_mha_varlen_fwd: Fa2MhaVarlenFwdFunc = undefined;
 pub var fa3_mha_fwd: Fa3MhaFwdFunc = undefined;
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
-    _ = io; // autofix
-    _ = allocator; // autofix
+    _ = io;
+    _ = allocator;
 
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 

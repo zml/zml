@@ -14,8 +14,8 @@ const init_array_section = switch (builtin.object_format) {
 
 export const _ linksection(init_array_section) = &struct {
     fn call(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
-        _ = argc; // autofix
-        _ = envp; // autofix
+        _ = argc;
+        _ = envp;
         var threaded: std.Io.Threaded = .init_single_threaded;
         runfiles_global = bazel_runfiles.Runfiles.create(.{
             .allocator = std.heap.c_allocator,

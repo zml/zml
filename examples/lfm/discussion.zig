@@ -27,6 +27,7 @@ pub const Context = struct {
     generated_token_slice: zml.Slice,
     token_pos: u32,
     all_tokens: std.ArrayList(u32),
+    sharding: zml.sharding.Sharding,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -39,6 +40,7 @@ pub const Context = struct {
         tokenizer: zml.tokenizer.Tokenizer,
         config: model.Config,
         seqlen: u32,
+        sharding: zml.sharding.Sharding,
     ) !Context {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
         return .{
@@ -50,12 +52,13 @@ pub const Context = struct {
             .tokenizer = tokenizer,
             .config = config,
             .seqlen = seqlen,
-            .cache_buffers = try cache.initBuffers(allocator, io, platform),
-            .attention_metadata_buffers = try attention_metadata.initBuffer(io, platform),
-            .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io),
+            .cache_buffers = try cache.initBuffers(allocator, io, platform, sharding),
+            .attention_metadata_buffers = try attention_metadata.initBuffer(io, platform, sharding),
+            .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, sharding),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
             .token_pos = 0,
             .all_tokens = try .initCapacity(allocator, seqlen),
+            .sharding = sharding,
         };
     }
 
@@ -164,16 +167,16 @@ pub const Context = struct {
         @memset(tokens, self.config.pad_token_id);
         @memcpy(tokens[0..self.all_tokens.items.len], self.all_tokens.items);
 
-        var tokens_buf: zml.Buffer = try .fromSlice(self.io, self.platform, tokens_slice);
+        var tokens_buf: zml.Buffer = try .fromSlice(self.io, self.platform, tokens_slice, self.sharding);
         defer tokens_buf.deinit();
 
         // Always prefill from position 0 with all accumulated tokens.
         const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
-        var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice);
+        var tokens_pos_buf: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, self.sharding);
         defer tokens_pos_buf.deinit();
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(self.all_tokens.items.len)}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
+        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, self.sharding);
         defer actual_seq_len_buf.deinit();
 
         try self.exe.prefill.run(.{
@@ -187,6 +190,7 @@ pub const Context = struct {
             .rng_buf = &self.rng_buf,
             .cache_buffers = &self.cache_buffers,
             .attention_metadata_buffers = self.attention_metadata_buffers,
+            .sharding = self.sharding,
         });
 
         try tokens_buf.toSlice(self.io, tokens_slice);
@@ -198,11 +202,11 @@ pub const Context = struct {
         var tokenizer_decoder = try self.tokenizer.decoder();
         defer tokenizer_decoder.deinit();
 
-        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice);
+        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice, self.sharding);
         defer current_token_buffer.deinit();
 
         const actual_seq_len_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{0}));
-        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice);
+        var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, self.sharding);
         defer actual_seq_len_buf.deinit();
 
         const think_start = self.tokenizer.tokenToId("<think>") orelse unreachable;
@@ -228,7 +232,7 @@ pub const Context = struct {
 
             if (self.remainingTokens() == 0) break :generation;
             const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{ .batch = 1 }, .u32), std.mem.sliceAsBytes(&[_]u32{self.token_pos}));
-            var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice);
+            var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, self.sharding);
             defer token_pos_buffer.deinit();
 
             try self.exe.decode.run(.{
@@ -242,6 +246,7 @@ pub const Context = struct {
                 .rng_buf = &self.rng_buf,
                 .cache_buffers = &self.cache_buffers,
                 .attention_metadata_buffers = self.attention_metadata_buffers,
+                .sharding = self.sharding,
             });
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
