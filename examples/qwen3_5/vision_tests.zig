@@ -50,11 +50,22 @@ pub fn main(init: std.process.Init) !void {
 
     var qwen_model: Qwen35 = try .init(allocator, store.view(), config, options);
     defer qwen_model.deinit(allocator);
+    const model_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+    const kv_cache = qwen35.KvCache.init(
+        config,
+        1,
+        options.max_seq_len,
+        model_dtype,
+        .f32,
+    );
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
     log.info("\n{f}", .{platform.fmtVerbose()});
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
+    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
+    try zeroKvCacheBuffers(allocator, io, platform, replicated_sharding, &kv_cache_buffers);
 
     var progress = std.Progress.start(io, .{ .root_name = "vision_tests" });
     defer progress.end();
@@ -79,13 +90,16 @@ pub fn main(init: std.process.Init) !void {
     var prompt_shape = try buildPromptShapeBufferFromMmTokenTypeIds(allocator, io, platform, replicated_sharding, &vision_store, "mm_token_type_ids");
     defer prompt_shape.deinit();
     const prompt_shape_tensor = Tensor.fromShape(prompt_shape.shape());
+    var token_index = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
+    defer token_index.deinit();
+    const token_index_tensor = Tensor.fromShape(token_index.shape());
 
-    const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ input_ids_tensor, pixel_values_tensor, grid_thw, prompt_shape_tensor }, .{ .shardings = &.{replicated_sharding} });
+    const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ input_ids_tensor, token_index_tensor, kv_cache, pixel_values_tensor, grid_thw, prompt_shape_tensor }, .{ .shardings = &.{replicated_sharding} });
     defer exe.deinit();
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
-    exe_args.set(.{ qwen35_buffers, input_ids, pixel_values, prompt_shape });
+    exe_args.set(.{ qwen35_buffers, input_ids, token_index, kv_cache_buffers, pixel_values, prompt_shape });
 
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
@@ -104,6 +118,31 @@ pub fn main(init: std.process.Init) !void {
 
     try zml.testing.expectClose(io, output, expected_output, .{ .absolute_tolerance = 5 * 1e-2, .minimum_close_fraction = 0.9 });
     log.info("vision_test_forward output matches expected tensor", .{});
+}
+
+fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, buffer: *zml.Buffer) !void {
+    const shape = buffer.shape();
+    const zero_slice: zml.Slice = try .alloc(allocator, shape);
+    defer zero_slice.free(allocator);
+    @memset(zero_slice.data(), 0);
+
+    var zeroed = try zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
+    errdefer zeroed.deinit();
+    buffer.deinit();
+    buffer.* = zeroed;
+}
+
+fn zeroKvCacheBuffers(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    cache: *zml.Bufferized(qwen35.KvCache),
+) !void {
+    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.k);
+    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.v);
+    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.conv_state);
+    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.recurrent_state);
 }
 
 //======================= Load and parse setup ========================
