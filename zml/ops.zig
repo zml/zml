@@ -16,7 +16,7 @@ pub const ReduceArgs = struct {
     right: Tensor,
 };
 
-pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -119,7 +119,7 @@ pub const ReduceWindowOpts = struct {
     padding: []const [2]i64,
 };
 
-pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -411,7 +411,7 @@ pub fn scatter(
     comptime func: anytype,
     context: anytype,
     opts: Tensor.ScatterOpts,
-) stdx.meta.FnResult(func) {
+) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -1199,7 +1199,7 @@ fn manualComputationInternal(
 }
 
 fn manualComputationReturnType(comptime body_fn: anytype) type {
-    const ReturnT = stdx.meta.FnResult(body_fn);
+    const ReturnT = stdx.meta.FnReturn(body_fn);
     if (ReturnT == void or ReturnT == Tensor) return ReturnT;
 
     return switch (@typeInfo(ReturnT)) {

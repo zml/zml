@@ -507,7 +507,7 @@ fn parseSafetensorsIndex(
             const map_entry = try safetensors_index.map.getOrPut(arena_allocator, filename);
 
             if (!map_entry.found_existing) {
-                map_entry.value_ptr.* = .{};
+                map_entry.value_ptr.* = .empty;
             }
 
             try map_entry.value_ptr.append(arena_allocator, try arena_allocator.dupe(u8, weight_name));

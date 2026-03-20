@@ -15,7 +15,6 @@ zig_library(
         "process.zig",
         "queue.zig",
         "segmented_list.zig",
-        "signature.zig",
         "time.zig",
         "unicode.zig",
     ],
