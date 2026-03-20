@@ -168,85 +168,29 @@ class Qwen3_5VisionMLP(nn.Module):
         return self.linear_fc2(self.act_fn(self.linear_fc1(hidden_state)))
 
 
-
-
-#========================Test setup========================
-
-class TestVisionModel(nn.Module):
-    def __init__(self, model_path: str, weights: dict[str, torch.Tensor], device: str = DEVICE) -> None:
+class Qwen3_5VisionModel(nn.Module):
+    def __init__(self, config) -> None:
         super().__init__()
-        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
-        vision_config = config.vision_config
-        self.device = torch.device(device)
-        self.patch_embed = Qwen3_5VisionPatchEmbed(vision_config)
-        self.spatial_merge_size = vision_config.spatial_merge_size
-        self.pos_embed = nn.Embedding(vision_config.num_position_embeddings, vision_config.hidden_size)
-        self.blocks = nn.ModuleList([Qwen3_5VisionBlock(vision_config) for _ in range(vision_config.depth)])
-        self.merger = Qwen3_5VisionPatchMerger(vision_config, use_postshuffle_norm=False)
-        self.num_grid_per_side = int(vision_config.num_position_embeddings**0.5)
-        self.to(self.device)
-        self._copy_param(self.patch_embed.proj.weight, weights["model.visual.patch_embed.proj.weight"])
-        self._copy_param(self.patch_embed.proj.bias, weights["model.visual.patch_embed.proj.bias"])
-        self._copy_param(self.pos_embed.weight, weights["model.visual.pos_embed.weight"])
-        self.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(vision_config.hidden_size // vision_config.num_heads // 2)
-        self.rotary_pos_emb.to(self.device)
-        self._load_block_weights(weights)
-        self._load_merger_weights(weights)
+        self.config = config
+        self.spatial_merge_size = config.spatial_merge_size
+        self.patch_size = config.patch_size
+        self.spatial_merge_unit = self.spatial_merge_size * self.spatial_merge_size
 
-    @staticmethod
-    def _copy_param(param: torch.Tensor, src: torch.Tensor) -> None:
-        # Keep checkpoint dtype (bf16/f32/...) instead of forcing module default dtype.
-        param.data = src.to(device=param.device).clone().contiguous()
-
-    def _load_block_weights(self, weights: dict[str, torch.Tensor]) -> None:
-        for i, block in enumerate(self.blocks):
-            prefix = f"model.visual.blocks.{i}"
-            self._copy_param(block.norm1.weight, weights[f"{prefix}.norm1.weight"])
-            self._copy_param(block.norm1.bias, weights[f"{prefix}.norm1.bias"])
-            self._copy_param(block.norm2.weight, weights[f"{prefix}.norm2.weight"])
-            self._copy_param(block.norm2.bias, weights[f"{prefix}.norm2.bias"])
-            self._copy_param(block.attn.qkv.weight, weights[f"{prefix}.attn.qkv.weight"])
-            self._copy_param(block.attn.qkv.bias, weights[f"{prefix}.attn.qkv.bias"])
-            self._copy_param(block.attn.proj.weight, weights[f"{prefix}.attn.proj.weight"])
-            self._copy_param(block.attn.proj.bias, weights[f"{prefix}.attn.proj.bias"])
-            self._copy_param(block.mlp.linear_fc1.weight, weights[f"{prefix}.mlp.linear_fc1.weight"])
-            self._copy_param(block.mlp.linear_fc1.bias, weights[f"{prefix}.mlp.linear_fc1.bias"])
-            self._copy_param(block.mlp.linear_fc2.weight, weights[f"{prefix}.mlp.linear_fc2.weight"])
-            self._copy_param(block.mlp.linear_fc2.bias, weights[f"{prefix}.mlp.linear_fc2.bias"])
-
-    def _load_merger_weights(self, weights: dict[str, torch.Tensor]) -> None:
-        self._copy_param(self.merger.norm.weight, weights["model.visual.merger.norm.weight"])
-        self._copy_param(self.merger.norm.bias, weights["model.visual.merger.norm.bias"])
-        self._copy_param(self.merger.linear_fc1.weight, weights["model.visual.merger.linear_fc1.weight"])
-        self._copy_param(self.merger.linear_fc1.bias, weights["model.visual.merger.linear_fc1.bias"])
-        self._copy_param(self.merger.linear_fc2.weight, weights["model.visual.merger.linear_fc2.weight"])
-        self._copy_param(self.merger.linear_fc2.bias, weights["model.visual.merger.linear_fc2.bias"])
-
-
-    def forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
-        hidden_states = self.patch_embed(pixel_values)
-
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
-        hidden_states = hidden_states + pos_embeds
-
-        rotary_pos_emb = self.rot_pos_emb(grid_thw)
-        rotary_pos_emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
-        cos = rotary_pos_emb.cos()
-        sin = rotary_pos_emb.sin()
-
-        grid_thw_list = grid_thw.tolist()
-        lengths = [t * h * w for t, h, w in grid_thw_list]
-        cu_seqlens = torch.tensor(
-            [0] + list(torch.cumsum(torch.tensor(lengths, dtype=torch.int64), dim=0).tolist()),
-            dtype=torch.int64,
-            device=hidden_states.device,
+        self.patch_embed = Qwen3_5VisionPatchEmbed(
+            config=config,
         )
 
-        for block in self.blocks:
-            hidden_states = block(hidden_states, cu_seqlens=cu_seqlens, position_embeddings=(cos, sin))
-        hidden_states = self.merger(hidden_states)
-        return hidden_states
+        self.pos_embed = nn.Embedding(config.num_position_embeddings, config.hidden_size)
+        self.num_grid_per_side = int(config.num_position_embeddings**0.5)
 
+        head_dim = config.hidden_size // config.num_heads
+        self.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(head_dim // 2)
+
+        self.blocks = nn.ModuleList([Qwen3_5VisionBlock(config) for _ in range(config.depth)])
+        self.merger = Qwen3_5VisionPatchMerger(
+            config=config,
+            use_postshuffle_norm=False,
+        )
 
     def rot_pos_emb(self, grid_thw: torch.Tensor) -> torch.Tensor:
         merge_size = self.spatial_merge_size
@@ -288,8 +232,7 @@ class TestVisionModel(nn.Module):
         embeddings = embeddings.flatten(1)
         return embeddings
 
-
-    def fast_pos_embed_interpolate(self, grid_thw: torch.Tensor) -> torch.Tensor:
+    def fast_pos_embed_interpolate(self, grid_thw):
         grid_thw_list = grid_thw.tolist()
         grid_ts = [row[0] for row in grid_thw_list]
         grid_hs = [row[1] for row in grid_thw_list]
@@ -340,7 +283,7 @@ class TestVisionModel(nn.Module):
         patch_pos_embeds = patch_pos_embeds.split([h * w for h, w in zip(grid_hs, grid_ws)])
 
         patch_pos_embeds_permute = []
-        merge_size = self.spatial_merge_size
+        merge_size = self.config.spatial_merge_size
         for pos_embed, t, h, w in zip(patch_pos_embeds, grid_ts, grid_hs, grid_ws):
             pos_embed = pos_embed.repeat(t, 1)
             pos_embed = (
@@ -351,6 +294,81 @@ class TestVisionModel(nn.Module):
             patch_pos_embeds_permute.append(pos_embed)
         patch_pos_embeds = torch.cat(patch_pos_embeds_permute)
         return patch_pos_embeds
+
+    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, **kwargs) -> torch.Tensor:
+        """
+        Args:
+            hidden_states (`torch.Tensor` of shape `(seq_len, hidden_size)`):
+                The final hidden states of the model.
+            grid_thw (`torch.Tensor` of shape `(num_images_or_videos, 3)`):
+                The temporal, height and width of feature shape of each image in LLM.
+
+        Returns:
+            `torch.Tensor`: hidden_states.
+        """
+        hidden_states = self.patch_embed(hidden_states)
+
+        pos_embeds = self.fast_pos_embed_interpolate(grid_thw)
+        hidden_states = hidden_states + pos_embeds
+
+        rotary_pos_emb = self.rot_pos_emb(grid_thw)
+
+        seq_len, _ = hidden_states.size()
+        hidden_states = hidden_states.reshape(seq_len, -1)
+        rotary_pos_emb = rotary_pos_emb.reshape(seq_len, -1)
+        emb = torch.cat((rotary_pos_emb, rotary_pos_emb), dim=-1)
+        position_embeddings = (emb.cos(), emb.sin())
+
+        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+            dim=0,
+            # Select dtype based on the following factors:
+            #  - FA2 requires that cu_seqlens_q must have dtype int32
+            #  - torch.onnx.export requires that cu_seqlens_q must have same dtype as grid_thw
+            # See https://github.com/huggingface/transformers/pull/34852 for more information
+            dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
+        )
+        cu_seqlens = F.pad(cu_seqlens, (1, 0), value=0)
+
+        for blk in self.blocks:
+            hidden_states = blk(
+                hidden_states,
+                cu_seqlens=cu_seqlens,
+                position_embeddings=position_embeddings,
+                **kwargs,
+            )
+
+        merged_hidden_states = self.merger(hidden_states)
+
+        return merged_hidden_states
+
+
+
+#========================Test setup========================
+
+class TestVisionModel(nn.Module):
+    def __init__(self, model_path: str, weights: dict[str, torch.Tensor], device: str = DEVICE) -> None:
+        super().__init__()
+        config = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+        vision_config = config.vision_config
+        self.device = torch.device(device)
+        self.model = Qwen3_5VisionModel(vision_config).to(self.device)
+        self._load_model_weights(weights)
+
+    @staticmethod
+    def _copy_param(param: torch.Tensor, src: torch.Tensor) -> None:
+        # Keep checkpoint dtype (bf16/f32/...) instead of forcing module default dtype.
+        param.data = src.to(device=param.device).clone().contiguous()
+
+    def _load_model_weights(self, weights: dict[str, torch.Tensor]) -> None:
+        for name, param in self.model.named_parameters():
+            key = f"model.visual.{name}"
+            if key not in weights:
+                raise KeyError(f"Missing checkpoint tensor: {key}")
+            self._copy_param(param, weights[key])
+
+
+    def forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
+        return self.model(pixel_values, grid_thw)
 
 
 def resolve_single_checkpoint_file(model_path: str) -> Path:
