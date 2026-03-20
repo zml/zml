@@ -26,7 +26,7 @@ bazel_dep(name = "llvm", version = "0.6.8")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 
-bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
+bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
 # BSDTar toolchains
 tar_toolchains = use_extension("@tar.bzl//tar:extensions.bzl", "toolchains")
