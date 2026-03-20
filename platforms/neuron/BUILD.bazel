@@ -42,6 +42,7 @@ runfiles_to_default(
 
 cc_library(
     name = "libpython",
+    tags = ["manual"],
     hdrs = ["libpython.h"],
     deps = [
         "@rules_python//python/cc:current_py_cc_headers",
@@ -51,16 +52,19 @@ cc_library(
 
 cc_library(
     name = "empty",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON_DISABLED"],
 )
 
 cc_library(
     name = "zmlxneuron",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_NEURON"],
 )
 
 cc_library(
     name = "libnrt_headers",
+    tags = ["manual"],
     hdrs = ["nrt.h"],
     deps = ["@libpjrt_neuron//:libnrt_headers"],
 )
@@ -68,11 +72,13 @@ cc_library(
 upb_c_proto_library(
     name = "xla_data_upb",
     deps = ["@xla//xla:xla_data_proto"],
+    tags = ["manual"],
 )
 
 upb_c_proto_library(
     name = "hlo_proto_upb",
     deps = ["@xla//xla/service:hlo_proto"],
+    tags = ["manual"],
 )
 
 zig_shared_library(
@@ -110,6 +116,7 @@ uv_lock(
 
 zig_library(
     name = "neuron",
+    tags = ["manual"],
     import_name = "platforms/neuron",
     main = "neuron.zig",
     visibility = ["//visibility:public"],

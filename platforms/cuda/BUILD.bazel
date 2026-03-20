@@ -20,11 +20,13 @@ zig_shared_library(
 
 cc_library(
     name = "empty",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_CUDA_DISABLED"],
 )
 
 cc_library(
     name = "libpjrt_cuda",
+    tags = ["manual"],
     hdrs = ["libpjrt_cuda.h"],
     defines = ["ZML_RUNTIME_CUDA"],
     deps = ["@libpjrt_cuda"],
@@ -32,6 +34,7 @@ cc_library(
 
 zig_library(
     name = "cuda",
+    tags = ["manual"],
     data = select({
         "//platforms:cuda.enabled": [
             "@flashattn//:libflashattn",

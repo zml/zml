@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "stdx",
+    tags = ["manual"],
     srcs = [
         "Io.zig",
         "bounded_array.zig",
