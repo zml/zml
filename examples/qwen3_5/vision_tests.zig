@@ -12,14 +12,22 @@ const stdx = zml.stdx;
 const qwen35 = @import("qwen3_5.zig");
 const Qwen35 = qwen35.Qwen35;
 
-const model = "/var/models/Qwen/Qwen3.5-0.8B";
-const safetensors_file = "/home/tristan/zml/examples/qwen3_5/safetensors/vision_tests.safetensors";
-const seq_len = 128;
+const CliArgs = struct {
+    model: []const u8,
+    prompt: []const u8 = "What is in this picture?",
+    pixel_values_file: []const u8 = "/home/tristan/zml/examples/qwen3_5/safetensors/vision_input.safetensors",
+    len: i64 = 64,
+    gen_tokens: usize = 128,
+};
+
+const vision_grid_thw: [3]i64 = .{ 1, 16, 16 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+    const args = stdx.flags.parse(init.minimal.args, CliArgs);
+
     const options = Qwen35.GenOptions{
-        .max_seq_len = seq_len,
+        .max_seq_len = args.len,
         .sampling_strategy = .{
             .topk = 1,
             .temperature = 1.0,
@@ -31,12 +39,10 @@ pub fn main(init: std.process.Init) !void {
 
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
-
     try vfs.register("file", vfs_file.io());
 
     const io = vfs.io();
-
-    const repo = try zml.safetensors.resolveModelRepo(io, model);
+    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
 
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
     defer registry.deinit();
@@ -44,114 +50,296 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
+    var platform: *zml.Platform = try .auto(allocator, io, .{});
+    defer platform.deinit(allocator);
+    log.info("\n{f}", .{platform.fmtVerbose()});
+
     const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
     const config = parsed_config.value;
 
     var qwen_model: Qwen35 = try .init(allocator, store.view(), config, options);
     defer qwen_model.deinit(allocator);
-    const model_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
-    const kv_cache = qwen35.KvCache.init(
-        config,
-        1,
-        options.max_seq_len,
-        model_dtype,
-        .f32,
-    );
 
-    var platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
-    log.info("\n{f}", .{platform.fmtVerbose()});
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
-    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
-    try zeroKvCacheBuffers(allocator, io, platform, replicated_sharding, &kv_cache_buffers);
 
-    var progress = std.Progress.start(io, .{ .root_name = "vision_tests" });
-    defer progress.end();
-    var qwen35_buffers = try qwen_model.load(allocator, io, platform, &store, &.{replicated_sharding}, &progress);
-    defer Qwen35.unloadBuffers(&qwen35_buffers, allocator);
+    var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var vision_registry = try openVisionTestRegistry(allocator, io);
-    defer vision_registry.deinit();
-    var vision_store: zml.io.TensorStore = .fromRegistry(allocator, &vision_registry);
-    defer vision_store.deinit();
+    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
+    defer tokenizer.deinit();
 
-    var pixel_values = try loadBufferFromStore(allocator, io, platform, replicated_sharding, &vision_store, "pixel_values");
-    defer pixel_values.deinit();
-    var input_ids = try loadInputIdsFromStore(allocator, io, platform, replicated_sharding, &vision_store, "input_ids");
-    defer input_ids.deinit();
-    var expected_output = try loadExpectedOutputFromStore(allocator, io, platform, replicated_sharding, &vision_store, "output");
-    defer expected_output.deinit();
-    const grid_thw = try loadGridThwFromStore(allocator, io, &vision_store, "grid_thw");
+    var qwen_buffers = try qwen35.Qwen35.load(
+        &qwen_model,
+        allocator,
+        io,
+        platform,
+        &store,
+        &.{replicated_sharding},
+        &progress,
+    );
+    defer Qwen35.unloadBuffers(&qwen_buffers, allocator);
 
-    const input_ids_tensor = Tensor.fromShape(input_ids.shape());
-    const pixel_values_tensor = Tensor.fromShape(pixel_values.shape());
-    var prompt_shape = try buildPromptShapeBufferFromMmTokenTypeIds(allocator, io, platform, replicated_sharding, &vision_store, "mm_token_type_ids");
-    defer prompt_shape.deinit();
-    const prompt_shape_tensor = Tensor.fromShape(prompt_shape.shape());
-    var token_index = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
-    defer token_index.deinit();
-    const token_index_tensor = Tensor.fromShape(token_index.shape());
+    progress.end();
 
-    const exe = try platform.compile(allocator, io, qwen_model, .vision_test_forward, .{ input_ids_tensor, token_index_tensor, kv_cache, pixel_values_tensor, grid_thw, prompt_shape_tensor }, .{ .shardings = &.{replicated_sharding} });
-    defer exe.deinit();
+    var pixel_values_buffer = try loadPixelValuesBuffer(
+        allocator,
+        io,
+        platform,
+        replicated_sharding,
+        args.pixel_values_file,
+    );
+    defer pixel_values_buffer.deinit();
 
-    var exe_args = try exe.args(allocator);
-    defer exe_args.deinit(allocator);
-    exe_args.set(.{ qwen35_buffers, input_ids, token_index, kv_cache_buffers, pixel_values, prompt_shape });
+    const merge_size = qwen_model.config.vision_config.spatial_merge_size;
+    const number_image_pad_tokens: u32 = @intCast(
+        vision_grid_thw[0] *
+            @divExact(vision_grid_thw[1], merge_size) *
+            @divExact(vision_grid_thw[2], merge_size),
+    );
+    const prompt_tokens, const prompt_shape = try applyVisionChatTemplate(
+        allocator,
+        tokenizer,
+        args.prompt,
+        number_image_pad_tokens,
+    );
+    defer allocator.free(prompt_tokens);
 
-    var exe_results = try exe.results(allocator);
-    defer exe_results.deinit(allocator);
-    exe.call(exe_args, &exe_results);
-
-    var output = exe_results.get(zml.Buffer);
-    defer output.deinit();
-
-    const output_slice = try output.toSliceAlloc(allocator, io);
-    defer output_slice.free(allocator);
-    const expected_slice = try expected_output.toSliceAlloc(allocator, io);
-    defer expected_slice.free(allocator);
-
-    logSliceChunk("output", output_slice, 8, 8);
-    logSliceChunk("expected", expected_slice, 8, 8);
-
-    try zml.testing.expectClose(io, output, expected_output, .{ .absolute_tolerance = 5 * 1e-2, .minimum_close_fraction = 0.99 });
-    log.info("vision_test_forward output matches expected tensor", .{});
+    // ----------------------------------------------------------------
+    // First pass: Qwen35.vision_test_forward, then decode with Qwen35.forward.
+    // ----------------------------------------------------------------
+    try runGenerationLoop(
+        allocator,
+        io,
+        platform,
+        qwen_model,
+        qwen_buffers,
+        replicated_sharding,
+        tokenizer,
+        prompt_tokens,
+        prompt_shape,
+        pixel_values_buffer,
+        args.gen_tokens,
+    );
 }
 
-fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, buffer: *zml.Buffer) !void {
-    const shape = buffer.shape();
-    const zero_slice: zml.Slice = try .alloc(allocator, shape);
-    defer zero_slice.free(allocator);
-    @memset(zero_slice.data(), 0);
-
-    var zeroed = try zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
-    errdefer zeroed.deinit();
-    buffer.deinit();
-    buffer.* = zeroed;
-}
-
-fn zeroKvCacheBuffers(
+fn runGenerationLoop(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
+    model: Qwen35,
+    model_buffers: zml.Bufferized(Qwen35),
     sharding: zml.sharding.Sharding,
-    cache: *zml.Bufferized(qwen35.KvCache),
+    tokenizer: zml.tokenizer.Tokenizer,
+    input_token_ids: []const u32,
+    prompt_shape_values: [3]i64,
+    pixel_values_buffer: zml.Buffer,
+    gen_tokens: usize,
 ) !void {
-    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.k);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.v);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.conv_state);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.recurrent_state);
+    if (input_token_ids.len == 0) return;
+
+    const cache_dtype = model.text_model.embed_tokens.weight.dtype();
+    const required_seq_len: i64 = @intCast(input_token_ids.len + gen_tokens + 1);
+    const generation_cache_seq_len = @max(model.gen_options.max_seq_len, required_seq_len);
+    const kv_cache = qwen35.KvCache.init(model.config, 1, generation_cache_seq_len, cache_dtype, .f32);
+    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
+    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
+
+    const prefill_len = input_token_ids.len;
+    const decode_exe = try platform.compile(
+        allocator,
+        io,
+        model,
+        .forward,
+        .{
+            Tensor.init(.{ .b = 1, .s = 1 }, .u32),
+            Tensor.init(.{}, .u32),
+            kv_cache,
+            zml.Tensor.Rng.init(),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer decode_exe.deinit();
+
+    const grid_thw = vision_grid_thw;
+    const t = grid_thw[0];
+    const h = grid_thw[1];
+    const w = grid_thw[2];
+    const patch_flat_dim: i64 = model.config.vision_config.in_channels *
+        model.config.vision_config.temporal_patch_size *
+        model.config.vision_config.patch_size *
+        model.config.vision_config.patch_size;
+    const pixel_rows: i64 = t * h * w;
+
+    const vision_prefill_exe = try platform.compile(
+        allocator,
+        io,
+        model,
+        .vision_test_forward,
+        .{
+            Tensor.init(.{ .b = 1, .s = prefill_len }, .u32),
+            Tensor.init(.{}, .u32),
+            kv_cache,
+            Tensor.init(.{ .n = pixel_rows, .f = patch_flat_dim }, .f32),
+            grid_thw,
+            Tensor.init(.{3}, .i64),
+            zml.Tensor.Rng.init(),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer vision_prefill_exe.deinit();
+
+    const prompt_tokens_shape = zml.Shape.init(.{ .b = 1, .s = prefill_len }, .u32);
+    var prompt_tokens_slice: zml.Slice = try .alloc(allocator, prompt_tokens_shape);
+    defer prompt_tokens_slice.free(allocator);
+    @memcpy(prompt_tokens_slice.items(u32), input_token_ids);
+    var prompt_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_tokens_slice, sharding);
+    defer prompt_tokens_buffer.deinit();
+
+    var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, sharding);
+    defer prefill_token_index_buffer.deinit();
+
+    const prompt_shape_shape = zml.Shape.init(.{3}, .i64);
+    var prompt_shape_slice: zml.Slice = try .alloc(allocator, prompt_shape_shape);
+    defer prompt_shape_slice.free(allocator);
+    @memcpy(prompt_shape_slice.items(i64), &prompt_shape_values);
+    var prompt_shape_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_shape_slice, sharding);
+    defer prompt_shape_buffer.deinit();
+
+    var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
+    defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
+
+    var vision_prefill_args = try vision_prefill_exe.args(allocator);
+    defer vision_prefill_args.deinit(allocator);
+    var vision_prefill_results = try vision_prefill_exe.results(allocator);
+    defer vision_prefill_results.deinit(allocator);
+
+    vision_prefill_args.set(.{
+        model_buffers,
+        prompt_tokens_buffer,
+        prefill_token_index_buffer,
+        kv_cache_buffers,
+        pixel_values_buffer,
+        prompt_shape_buffer,
+        rng_buffers,
+    });
+    vision_prefill_exe.call(vision_prefill_args, &vision_prefill_results);
+    vision_prefill_results.fill(.{ &prompt_tokens_buffer, &kv_cache_buffers, &rng_buffers });
+    try prompt_tokens_buffer.toSlice(io, prompt_tokens_slice);
+    log.info("vision_test_forward output shape: {any}", .{prompt_tokens_buffer.shape()});
+
+    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
+    defer generated_token_slice.free(allocator);
+    generated_token_slice.items(u32)[0] = prompt_tokens_slice.items(u32)[input_token_ids.len - 1];
+
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
+    defer current_token_buffer.deinit();
+
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+    var generated_ids: std.ArrayList(u32) = try .initCapacity(allocator, gen_tokens);
+    defer generated_ids.deinit(allocator);
+
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    try stdout.interface.writeAll("generated token ids: ");
+
+    for (0..gen_tokens) |i| {
+        try current_token_buffer.toSlice(io, generated_token_slice);
+        const generated_token = generated_token_slice.items(u32)[0];
+        try generated_ids.append(allocator, generated_token);
+
+        var id_buf: [32]u8 = undefined;
+        const token_text = try std.fmt.bufPrint(&id_buf, "{d}", .{generated_token});
+        try stdout.interface.writeAll(token_text);
+        try stdout.interface.writeAll(if (i + 1 == gen_tokens) "\n" else " ");
+
+        if (generated_token == model.special_tokens.end_of_text_token_id) break;
+
+        var token_index_buffer = try zml.Buffer.scalar(
+            io,
+            platform,
+            @as(u32, @intCast(input_token_ids.len + i)),
+            .u32,
+            sharding,
+        );
+        defer token_index_buffer.deinit();
+
+        var decode_args = try decode_exe.args(allocator);
+        defer decode_args.deinit(allocator);
+        var decode_results = try decode_exe.results(allocator);
+        defer decode_results.deinit(allocator);
+
+        decode_args.set(.{ model_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
+        decode_exe.call(decode_args, &decode_results);
+
+        decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
+    }
+
+    try stdout.interface.writeAll("generated text: ");
+    for (generated_ids.items) |generated_token| {
+        if (generated_token == model.special_tokens.end_of_text_token_id) break;
+        if (try tokenizer_decoder.next(generated_token)) |chunk| {
+            try stdout.interface.writeAll(chunk);
+        }
+    }
+    try stdout.interface.writeAll("\n");
+    try stdout.interface.flush();
 }
 
-//======================= Load and parse setup ========================
+fn applyVisionChatTemplate(
+    allocator: std.mem.Allocator,
+    tokenizer: zml.tokenizer.Tokenizer,
+    prompt: []const u8,
+    number_image_pad_tokens: u32,
+) !struct { []u32, [3]i64 } {
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+    const im_start_id = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+    const im_end_id = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+    const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+    const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+    const vision_start_id = tokenizer.tokenToId("<|vision_start|>") orelse return error.NoSuchToken;
+    const vision_end_id = tokenizer.tokenToId("<|vision_end|>") orelse return error.NoSuchToken;
+    const image_pad_id = tokenizer.tokenToId("<|image_pad|>") orelse return error.NoSuchToken;
+    const newline = (try encoder.encode("\n"))[0];
+
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len + @as(usize, @intCast(number_image_pad_tokens)) + 16);
+    try tokens.appendSlice(allocator, &.{ im_start_id, user, newline });
+    try tokens.append(allocator, vision_start_id);
+    for (0..number_image_pad_tokens) |_| {
+        try tokens.append(allocator, image_pad_id);
+    }
+    try tokens.append(allocator, vision_end_id);
+    try tokens.appendSlice(allocator, try encoder.encode(prompt));
+    try tokens.appendSlice(allocator, &.{ im_end_id, newline });
+    try tokens.appendSlice(allocator, &.{ im_start_id, assistant, newline });
+
+    const prompt_tokens_only = try encoder.encode(prompt);
+    const prompt_shape: [3]i64 = .{
+        4,
+        @intCast(number_image_pad_tokens),
+        @as(i64, @intCast(prompt_tokens_only.len)) + 6,
+    };
+
+    return .{ try tokens.toOwnedSlice(allocator), prompt_shape };
+}
+
+fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start("Loading tokenizer...", 1);
+    defer node.end();
+
+    const bytes = b: {
+        const file = try dir.openFile(io, "tokenizer.json", .{});
+        defer file.close(io);
+        var reader = file.reader(io, &.{});
+        break :b try reader.interface.readAlloc(allocator, try file.length(io));
+    };
+    defer allocator.free(bytes);
+
+    return try .fromBytes(allocator, io, bytes);
+}
 
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(qwen35.Qwen35.Config) {
-    const now: std.Io.Timestamp = .now(io, .awake);
-    log.info("Loading model config", .{});
-    defer log.info("Loaded model config [{f}]", .{now.untilNow(io, .awake)});
-
     const parsed_config = blk: {
         const config_json_file = try dir.openFile(io, "config.json", .{});
         defer config_json_file.close(io);
@@ -166,238 +354,33 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
     return parsed_config;
 }
 
-fn openVisionTestRegistry(allocator: std.mem.Allocator, io: std.Io) !zml.safetensors.TensorRegistry {
-    return zml.safetensors.TensorRegistry.fromPath(allocator, io, safetensors_file);
-}
-
-fn loadBufferFromStore(
+fn loadPixelValuesBuffer(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     sharding: zml.sharding.Sharding,
-    store: *zml.io.TensorStore,
-    key: []const u8,
+    path: []const u8,
 ) !zml.Buffer {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
-}
-
-fn loadInputIdsFromStore(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
-    store: *zml.io.TensorStore,
-    key: []const u8,
-) !zml.Buffer {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-    const flat_shape = if (shape.rank() == 2 and shape.dim(0) == 1)
-        zml.Shape.init(.{shape.dim(1)}, shape.dtype())
-    else if (shape.rank() == 1)
-        shape
-    else
-        return error.InvalidInputIds;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, flat_shape, sharding, host_bytes);
-}
-
-fn loadExpectedOutputFromStore(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
-    store: *zml.io.TensorStore,
-    key: []const u8,
-) !zml.Buffer {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-    const normalized_shape = if (shape.rank() == 3 and shape.dim(0) == 1)
-        zml.Shape.init(.{ shape.dim(1), shape.dim(2) }, shape.dtype())
-    else if (shape.rank() == 2)
-        shape
-    else
-        shape;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [8 * 1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    return zml.Buffer.fromBytes(io, platform, normalized_shape, sharding, host_bytes);
-}
-
-fn buildPromptShapeBufferFromMmTokenTypeIds(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
-    store: *zml.io.TensorStore,
-    key: []const u8,
-) !zml.Buffer {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-    if (shape.rank() != 2 or shape.dim(0) != 1) return error.InvalidMmTokenTypeIds;
-    const seq_len_local: usize = @intCast(shape.dim(1));
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    const slice = zml.Slice.init(shape, host_bytes);
-
-    const Local = struct {
-        fn tokenType(shape_: zml.Shape, slice_: zml.Slice, i: usize) !i64 {
-            return switch (shape_.dtype()) {
-                .i32 => @intCast(slice_.constItems(i32)[i]),
-                .i64 => slice_.constItems(i64)[i],
-                .u32 => @intCast(slice_.constItems(u32)[i]),
-                .u64 => std.math.cast(i64, slice_.constItems(u64)[i]) orelse error.InvalidMmTokenTypeIds,
-                else => error.InvalidMmTokenTypeIds,
-            };
-        }
+    const PixelValuesOnly = struct {
+        pixel_values: Tensor,
     };
 
-    var first_image: ?usize = null;
-    var last_image: ?usize = null;
-    for (0..seq_len_local) |i| {
-        if (try Local.tokenType(shape, slice, i) == 1) {
-            if (first_image == null) first_image = i;
-            last_image = i;
-        }
-    }
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, path);
+    defer registry.deinit();
 
-    const text_before_image: i64, const image_tokens: i64, const text_after_image: i64 = if (first_image) |start| blk: {
-        const end = last_image.?;
-        for (start..end + 1) |i| {
-            if (try Local.tokenType(shape, slice, i) != 1) return error.InvalidMmTokenTypeIds;
-        }
-        break :blk .{
-            @intCast(start),
-            @intCast(end - start + 1),
-            @intCast(seq_len_local - end - 1),
-        };
-    } else .{ @intCast(seq_len_local), 0, 0 };
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
 
-    const prompt_shape_data = [3]i64{
-        text_before_image,
-        image_tokens,
-        text_after_image,
+    const model: PixelValuesOnly = .{
+        .pixel_values = store.view().createTensor("pixel_values", null, null),
     };
-    const prompt_shape = zml.Shape.init(.{3}, .i64);
-    return zml.Buffer.fromBytes(io, platform, prompt_shape, sharding, std.mem.sliceAsBytes(&prompt_shape_data));
-}
-
-fn loadGridThwFromStore(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    store: *zml.io.TensorStore,
-    key: []const u8,
-) ![3]i64 {
-    const shape = store.view().getShape(key) orelse return error.NotFound;
-    if (shape.count() != 3) return error.InvalidGridThw;
-
-    const host_bytes = try allocator.alloc(u8, shape.byteSize());
-    defer allocator.free(host_bytes);
-
-    var io_buffer: [1024]u8 = undefined;
-    var reader = try store.view().getReader(key, io, &io_buffer);
-    defer reader.deinit();
-    _ = try reader.interface.readSliceAll(host_bytes);
-
-    const slice = zml.Slice.init(shape, host_bytes);
-    return switch (shape.dtype()) {
-        .u32 => blk: {
-            const items = slice.constItems(u32);
-            break :blk .{
-                @intCast(items[0]),
-                @intCast(items[1]),
-                @intCast(items[2]),
-            };
-        },
-        .u64 => blk: {
-            const items = slice.constItems(u64);
-            break :blk .{
-                std.math.cast(i64, items[0]) orelse return error.InvalidGridThw,
-                std.math.cast(i64, items[1]) orelse return error.InvalidGridThw,
-                std.math.cast(i64, items[2]) orelse return error.InvalidGridThw,
-            };
-        },
-        .i32 => blk: {
-            const items = slice.constItems(i32);
-            break :blk .{
-                @intCast(items[0]),
-                @intCast(items[1]),
-                @intCast(items[2]),
-            };
-        },
-        .i64 => blk: {
-            const items = slice.constItems(i64);
-            break :blk .{ items[0], items[1], items[2] };
-        },
-        else => return error.InvalidGridThw,
-    };
-}
-
-fn logSliceChunk(name: []const u8, slice: zml.Slice, max_rows: usize, max_cols: usize) void {
-    const shape = slice.shape;
-    if (shape.rank() != 2) {
-        log.info("{s} shape {f} (non-2D tensor, skipping detailed dump)", .{ name, shape });
-        return;
-    }
-
-    const rows_total: usize = @intCast(shape.dim(0));
-    const cols_total: usize = @intCast(shape.dim(1));
-    const rows: usize = @min(max_rows, rows_total);
-    const cols: usize = @min(max_cols, cols_total);
-
-    log.info("{s} shape {f}, showing first {d}x{d} values:", .{ name, shape, rows, cols });
-    switch (shape.dtype()) {
-        .f32 => dumpFloatChunk(f32, name, slice.constItems(f32), cols_total, rows, cols),
-        .f16 => dumpFloatChunk(f16, name, slice.constItems(f16), cols_total, rows, cols),
-        .bf16 => dumpFloatChunk(zml.floats.BFloat16, name, slice.constItems(zml.floats.BFloat16), cols_total, rows, cols),
-        else => log.info("{s}: chunk dump supports only f32/f16/bf16, got {}", .{ name, shape.dtype() }),
-    }
-}
-
-fn dumpFloatChunk(comptime T: type, name: []const u8, data: []const T, cols_total: usize, rows: usize, cols: usize) void {
-    for (0..rows) |r| {
-        var line_buf: [512]u8 = undefined;
-        var used: usize = 0;
-
-        used += (std.fmt.bufPrint(line_buf[used..], "{s}[{d},0:{d}] ", .{ name, r, cols }) catch break).len;
-        used += (std.fmt.bufPrint(line_buf[used..], "[", .{}) catch break).len;
-        for (0..cols) |c| {
-            const idx = r * cols_total + c;
-            const v = zml.floats.floatCast(f32, data[idx]);
-            if (c + 1 < cols) {
-                used += (std.fmt.bufPrint(line_buf[used..], "{d:.6} ", .{v}) catch break).len;
-            } else {
-                used += (std.fmt.bufPrint(line_buf[used..], "{d:.6}", .{v}) catch break).len;
-            }
-        }
-        used += (std.fmt.bufPrint(line_buf[used..], "]", .{}) catch break).len;
-        log.info("{s}", .{line_buf[0..used]});
-    }
+    var loaded = try zml.io.load(PixelValuesOnly, &model, allocator, io, platform, .{
+        .parallelism = 1,
+        .store = &store,
+        .shardings = &.{sharding},
+        .progress = null,
+        .dma_chunks = 1,
+        .dma_chunk_size = 4 * zml.MiB,
+    });
+    return loaded.pixel_values;
 }

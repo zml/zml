@@ -205,7 +205,8 @@ pub const Qwen35 = struct {
         pixel_values: Tensor,
         grid_thw: [3]i64,
         prompt_shape: Tensor,
-    ) struct { Tensor } {
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor.Rng } {
         const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
         const vision_embed = self.vision_model.forward(pixel_values, grid_thw);
 
@@ -231,14 +232,15 @@ pub const Qwen35 = struct {
             .s = seq_len,
             .d = text_with_image_embed.dim(.d),
         });
-        const text_model_output, _ = self.text_model.vision_test_forward(
+        const text_model_output, const updated_kv_cache = self.text_model.vision_test_forward(
             text_with_image_embed_batched,
             token_index,
             kv_cache,
             position_ids,
         );
 
-        return .{text_model_output.squeeze(.b)};
+        const sampled_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
+        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, new_rng };
     }
 };
 
