@@ -1,4 +1,4 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 
 def _tpu_impl(mctx):
     # https://storage.googleapis.com/jax-releases/libtpu_releases.html

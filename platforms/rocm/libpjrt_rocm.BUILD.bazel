@@ -1,5 +1,4 @@
-load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@aspect_bazel_lib//lib:tar.bzl", "tar")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
@@ -83,12 +82,6 @@ copy_to_directory(
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
-)
-
-tar(
-    name = "amdgpu_ids_layer",
-    srcs = ["@libdrm-amdgpu-common//:amdgpu_ids"],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(

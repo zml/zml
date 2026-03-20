@@ -3,7 +3,7 @@ module(
 )
 
 bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
-bazel_dep(name = "aspect_bazel_lib", version = "2.22.5")
+bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
@@ -21,11 +21,25 @@ bazel_dep(name = "rules_python", version = "1.8.4")
 bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
+bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.6.8")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.2.0.2", dev_dependency = True)
+
+# BSDTar toolchains
+tar_toolchains = use_extension("@tar.bzl//tar:extensions.bzl", "toolchains")
+use_repo(
+    tar_toolchains,
+    "bsd_tar_toolchains_darwin_amd64",
+    "bsd_tar_toolchains_darwin_arm64",
+    "bsd_tar_toolchains_linux_amd64",
+    "bsd_tar_toolchains_linux_arm64",
+    "bsd_tar_toolchains_windows_amd64",
+    "bsd_tar_toolchains_windows_arm64",
+)
+###
 
 ### Zig toolchain
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")

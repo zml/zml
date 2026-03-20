@@ -1,6 +1,6 @@
 """Implementation of the zls_completion macro."""
 
-load("@aspect_bazel_lib//lib:utils.bzl", "utils")
+load("@bazel_lib//lib:utils.bzl", "utils")
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 load(":zls_write_build_config.bzl", "zls_write_build_config")
