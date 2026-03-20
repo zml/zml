@@ -165,7 +165,38 @@ def ragged_paged_attention_on_tpu(kernel_params: dict) -> str | None:
     cu_q_lens = jax.ShapeDtypeStruct((kernel_params["max_num_seqs"] + 1,), jnp.int32)
     num_seqs = jax.ShapeDtypeStruct((1,), jnp.int32)
 
-    lowered = ragged_paged_attention.lower(
+    # lowered = ragged_paged_attention.lower(
+    #     q,
+    #     kv_pages,
+    #     kv_lens,
+    #     page_indices,
+    #     cu_q_lens,
+    #     num_seqs,
+    #     sm_scale=kernel_params.get("sm_scale", 1.0),
+    #     sliding_window=kernel_params.get("sliding_window"),
+    #     soft_cap=kernel_params.get("soft_cap"),
+    #     mask_value=kernel_params.get("mask_value"),
+    #     k_scale=kernel_params.get("k_scale"),
+    #     v_scale=kernel_params.get("v_scale"),
+    #     num_kv_pages_per_block=kernel_params.get("num_kv_pages_per_block"),
+    #     num_queries_per_block=kernel_params.get("num_queries_per_block"),
+    #     vmem_limit_bytes=kernel_params.get("vmem_limit_bytes"),
+    # )
+    lowered = jax.jit(
+        ragged_paged_attention,
+        backend="cpu",
+        static_argnames=[
+            "sm_scale",
+            "sliding_window",
+            "soft_cap",
+            "mask_value",
+            "k_scale",
+            "v_scale",
+            "num_kv_pages_per_block",
+            "num_queries_per_block",
+            "vmem_limit_bytes",
+        ],
+    ).lower(
         q,
         kv_pages,
         kv_lens,
