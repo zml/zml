@@ -1901,32 +1901,58 @@ pub const mosaic_tpu = struct {
     }
 
     pub fn raggedPagedAttention(parameters: @This().Parameters, context: @This().Context, q: zml.Tensor, kv_cache: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(
+            q.shape().hasTags(.{ .b, .h, .hd }) or q.shape().hasTags(.{ .q, .h, .hd }),
+            "mosaic_tpu ragged paged attention expects q to have tags (.b|.q, .h, .hd), got {f}",
+            .{q.shape()},
+        );
+        stdx.debug.assert(
+            kv_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }),
+            "mosaic_tpu ragged paged attention expects kv_cache to have tags (.page, .k_chunk, .hkv, .hd), got {f}",
+            .{kv_cache.shape()},
+        );
+
         var threaded: std.Io.Threaded = .init_single_threaded;
         threaded.allocator = zml.module.CompilationContext.current().allocator;
         defer threaded.deinit();
 
-        const q_token_count = if (q.shape().hasTag(.q) != null) q.dim(.q) else q.dim(.b);
-        const padded_head_dim = q.dim(.hd);
+        // Mirror shard_map-like semantics: explicit in/out partition specs around the custom call.
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const kv_cache_sharded = kv_cache.withPartitioning(.{ .hkv = .model });
+        const kv_lens = parameters.kv_lens.withPartitioning(.{ ._0 = .replicated });
+        const page_indices = parameters.page_indices.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated });
+        const cu_seqlens_q = parameters.cu_seqlens_q.withPartitioning(.{ .n = .replicated });
+
+        const q_token_count = if (q_sharded.shape().hasTag(.q) != null) q_sharded.dim(.q) else q_sharded.dim(.b);
+        const padded_head_dim = q_sharded.dim(.hd);
         const model_head_dim: i64 = @intCast(parameters.opts.head_dim);
-        const num_q_heads = q.dim(.h);
-        const num_kv_heads = @divExact(kv_cache.dim(.hkv), 2);
+        const num_q_heads = q_sharded.dim(.h);
+        const num_kv_heads = @divExact(kv_cache_sharded.dim(.hkv), 2);
         const max_num_seqs: i64 = @intCast(parameters.opts.batch_size);
-        const total_num_pages: i64 = kv_cache.dim(.page);
+        const total_num_pages: i64 = kv_cache_sharded.dim(.page);
+
+        const compilation_ctx = zml.module.CompilationContext.current();
+        const model_partitions = compilation_ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
+        stdx.debug.assert(model_partitions > 0, "Expected positive model partition count, got {}", .{model_partitions});
+        stdx.debug.assert(@mod(num_q_heads, model_partitions) == 0, "mosaic_tpu ragged paged attention expects q heads divisible by model partitions, got q_heads={} model_partitions={}", .{ num_q_heads, model_partitions });
+        stdx.debug.assert(@mod(num_kv_heads, model_partitions) == 0, "mosaic_tpu ragged paged attention expects kv heads divisible by model partitions, got kv_heads={} model_partitions={}", .{ num_kv_heads, model_partitions });
+        const num_q_heads_per_shard = @divExact(num_q_heads, model_partitions);
+        const num_kv_heads_per_shard = @divExact(num_kv_heads, model_partitions);
 
         const num_queries_per_block: i64 = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
 
         const ragged_params: AttentionParams = .{
             .ragged_paged = .{
                 .num_q_tokens = q_token_count,
-                .num_q_heads = num_q_heads,
-                .num_kv_heads = num_kv_heads,
+                .num_q_heads = num_q_heads_per_shard,
+                .num_kv_heads = num_kv_heads_per_shard,
                 .head_dim = padded_head_dim,
-                .q_dtype = jnpDTypeExpr(q.dtype()),
-                .kv_dtype = jnpDTypeExpr(kv_cache.dtype()),
+                .q_dtype = jnpDTypeExpr(q_sharded.dtype()),
+                .kv_dtype = jnpDTypeExpr(kv_cache_sharded.dtype()),
                 .max_num_seqs = max_num_seqs,
                 .pages_per_seq = context.max_num_pages,
                 .total_num_pages = total_num_pages,
-                .page_size = kv_cache.dim(.k_chunk),
+                .page_size = kv_cache_sharded.dim(.k_chunk),
                 .sm_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(model_head_dim))),
                 .num_kv_pages_per_block = context.pages_per_compute_block,
                 .num_queries_per_block = @intCast(num_queries_per_block),
@@ -1935,8 +1961,36 @@ pub const mosaic_tpu = struct {
         const backend_config = renderBackendConfig(threaded.allocator, threaded.io(), ragged_params);
         defer threaded.allocator.free(backend_config);
 
-        const num_seqs = activeSequenceCount(parameters.cu_seqlens_q);
+        const num_seqs = activeSequenceCount(cu_seqlens_q).withPartitioning(.{ ._0 = .replicated });
+        const output_shape = q_sharded.shape();
 
-        return raggedPagedKernelCall(q, kv_cache, parameters.kv_lens, parameters.page_indices, parameters.cu_seqlens_q, num_seqs, backend_config);
+        return zml.ops.manualComputation(
+            .{
+                q_sharded,
+                kv_cache_sharded,
+                kv_lens,
+                page_indices,
+                cu_seqlens_q,
+                num_seqs,
+            },
+            output_shape,
+            .{ .backend_config = backend_config },
+            (struct {
+                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+                    stdx.debug.assert(sharded_inputs.len == 6, "mosaic_tpu ragged paged manualComputation expects 6 sharded inputs, got {}", .{sharded_inputs.len});
+                    const output_ = raggedPagedKernelCall(
+                        sharded_inputs[0],
+                        sharded_inputs[1],
+                        sharded_inputs[2],
+                        sharded_inputs[3],
+                        sharded_inputs[4],
+                        sharded_inputs[5],
+                        ctx_.backend_config,
+                    );
+                    stdx.debug.assert(output_.shape().eql(output), "mosaic_tpu ragged paged manualComputation output shape mismatch, got {f}, expected {f}", .{ output_.shape(), output });
+                    return output_;
+                }
+            }).body,
+        );
     }
 };
