@@ -12,6 +12,22 @@ DEVICE = "cuda"
 
 #========================Qwen3.5 classes========================
 
+class Qwen3_5VisionPatchMerger(nn.Module):
+    def __init__(self, config, use_postshuffle_norm=False) -> None:
+        super().__init__()
+        self.hidden_size = config.hidden_size * (config.spatial_merge_size**2)
+        self.use_postshuffle_norm = use_postshuffle_norm
+        self.norm = nn.LayerNorm(self.hidden_size if use_postshuffle_norm else config.hidden_size, eps=1e-6)
+        self.linear_fc1 = nn.Linear(self.hidden_size, self.hidden_size)
+        self.act_fn = nn.GELU()
+        self.linear_fc2 = nn.Linear(self.hidden_size, config.out_hidden_size)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.norm(x.view(-1, self.hidden_size) if self.use_postshuffle_norm else x).view(-1, self.hidden_size)
+        x = self.linear_fc2(self.act_fn(self.linear_fc1(x)))
+        return x
+
+
 class Qwen3_5VisionPatchEmbed(nn.Module):
     def __init__(self, config) -> None:
         super().__init__()
@@ -166,6 +182,7 @@ class TestVisionModel(nn.Module):
         self.spatial_merge_size = vision_config.spatial_merge_size
         self.pos_embed = nn.Embedding(vision_config.num_position_embeddings, vision_config.hidden_size)
         self.blocks = nn.ModuleList([Qwen3_5VisionBlock(vision_config) for _ in range(vision_config.depth)])
+        self.merger = Qwen3_5VisionPatchMerger(vision_config, use_postshuffle_norm=False)
         self.num_grid_per_side = int(vision_config.num_position_embeddings**0.5)
         self.to(self.device)
         self._copy_param(self.patch_embed.proj.weight, weights["model.visual.patch_embed.proj.weight"])
@@ -174,6 +191,7 @@ class TestVisionModel(nn.Module):
         self.rotary_pos_emb = Qwen3_5VisionRotaryEmbedding(vision_config.hidden_size // vision_config.num_heads // 2)
         self.rotary_pos_emb.to(self.device)
         self._load_block_weights(weights)
+        self._load_merger_weights(weights)
 
     @staticmethod
     def _copy_param(param: torch.Tensor, src: torch.Tensor) -> None:
@@ -195,6 +213,14 @@ class TestVisionModel(nn.Module):
             self._copy_param(block.mlp.linear_fc1.bias, weights[f"{prefix}.mlp.linear_fc1.bias"])
             self._copy_param(block.mlp.linear_fc2.weight, weights[f"{prefix}.mlp.linear_fc2.weight"])
             self._copy_param(block.mlp.linear_fc2.bias, weights[f"{prefix}.mlp.linear_fc2.bias"])
+
+    def _load_merger_weights(self, weights: dict[str, torch.Tensor]) -> None:
+        self._copy_param(self.merger.norm.weight, weights["model.visual.merger.norm.weight"])
+        self._copy_param(self.merger.norm.bias, weights["model.visual.merger.norm.bias"])
+        self._copy_param(self.merger.linear_fc1.weight, weights["model.visual.merger.linear_fc1.weight"])
+        self._copy_param(self.merger.linear_fc1.bias, weights["model.visual.merger.linear_fc1.bias"])
+        self._copy_param(self.merger.linear_fc2.weight, weights["model.visual.merger.linear_fc2.weight"])
+        self._copy_param(self.merger.linear_fc2.bias, weights["model.visual.merger.linear_fc2.bias"])
 
 
     def forward(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
@@ -218,6 +244,7 @@ class TestVisionModel(nn.Module):
 
         for block in self.blocks:
             hidden_states = block(hidden_states, cu_seqlens=cu_seqlens, position_embeddings=(cos, sin))
+        hidden_states = self.merger(hidden_states)
         return hidden_states
 
 

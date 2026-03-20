@@ -228,7 +228,7 @@ pub const VisionModel = struct {
     vision_patch_embed: VisionPatchEmbed,
     pos_embed: zml.nn.TokenEmbedding,
     blocks: []VisionBlock,
-    // patch_merger: PatchMerger,
+    patch_merger: VisionPatchMerger,
 
     hidden_size: i64,
     num_heads: i64,
@@ -248,6 +248,7 @@ pub const VisionModel = struct {
             .vision_patch_embed = .init(allocator, config, store.withPrefix("patch_embed")),
             .pos_embed = .{ .weight = store.withPrefix("pos_embed").createTensor("weight", .{ .voc, .d }, null) },
             .blocks = blocks,
+            .patch_merger = .init(store.withPrefix("merger"), config),
             .hidden_size = config.vision_config.hidden_size,
             .num_heads = config.vision_config.num_heads,
             .spatial_merge_size = config.vision_config.spatial_merge_size,
@@ -270,6 +271,7 @@ pub const VisionModel = struct {
             VisionBlock.unloadBuffers(block);
         }
         allocator.free(self.blocks);
+        VisionPatchMerger.unloadBuffers(&self.patch_merger);
     }
 
     pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]i64) Tensor {
@@ -288,7 +290,7 @@ pub const VisionModel = struct {
             hidden_states = block.forward(hidden_states, cos, sin);
         }
 
-        return hidden_states;
+        return self.patch_merger.forward(hidden_states);
     }
 
     // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
@@ -626,6 +628,44 @@ pub const VisionAttention = struct {
         const k_embed = k_dtype.mul(cos_k).add(rotate_half(k_dtype).mul(sin_k)).withTags(.{ .bs, .k, .h, .hd });
 
         return .{ q_embed.convert(q.dtype()), k_embed.convert(k.dtype()) };
+    }
+};
+
+pub const VisionPatchMerger = struct {
+    norm: zml.nn.LayerNorm,
+    linear_fc1: zml.nn.Linear,
+    linear_fc2: zml.nn.Linear,
+    spatial_merge_unit: i64,
+    out_hidden_size: i64,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionPatchMerger {
+        return .{
+            .norm = .{ .weight = store.createTensor("norm.weight", .{.d}, null), .bias = store.createTensor("norm.bias", .{.d}, null), .eps = 1e-6 },
+            .linear_fc1 = .init(store.withPrefix("linear_fc1").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("linear_fc1").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .linear_fc2 = .init(store.withPrefix("linear_fc2").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("linear_fc2").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .spatial_merge_unit = config.vision_config.spatial_merge_size * config.vision_config.spatial_merge_size,
+            .out_hidden_size = config.vision_config.hidden_size,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(VisionPatchMerger)) void {
+        self.norm.weight.deinit();
+        if (self.norm.bias) |*bias| bias.deinit();
+        self.linear_fc1.weight.deinit();
+        if (self.linear_fc1.bias) |*bias| bias.deinit();
+        self.linear_fc2.weight.deinit();
+        if (self.linear_fc2.bias) |*bias| bias.deinit();
+    }
+
+    pub fn forward(self: VisionPatchMerger, x: Tensor) Tensor {
+        const merged_seq_len = @divExact(x.dim(0), self.spatial_merge_unit);
+        const merged_hidden_size = x.dim(1) * self.spatial_merge_unit;
+        const x1 = self.norm.forward(x).reshape(.{ merged_seq_len, merged_hidden_size }).withTags(.{ .seq, .d });
+        const x2 = self.linear_fc1.forward(x1).rename(.{ .dout = .d });
+        const x3 = x2.gelu();
+        const x4 = self.linear_fc2.forward(x3).rename(.{ .dout = .d });
+
+        return x4;
     }
 };
 
