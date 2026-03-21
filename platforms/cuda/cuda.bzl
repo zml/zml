@@ -19,7 +19,7 @@ CUDA_VARIANT = "cuda13.1"
 CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a9ecb1f0d422"
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
-CUDNN_VERSION = "9.19.0"
+CUDNN_VERSION = "9.19.1"
 CUDNN_REDIST_JSON_SHA256 = "6ad4f2c047ee03131d1efb95db56f78c24953cb30880a2edcf99407ff9362a04"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
@@ -119,10 +119,6 @@ CUDA_PACKAGES = {
                 "nvvm/bin/cicc",
                 "nvvm/libdevice/libdevice.10.bc",
             ],
-        ),
-        packages.cc_import(
-            name = "nvptxcompiler",
-            static_library = "lib/libnvptxcompiler_static.a",
         ),
     ]),
     "cuda_nvrtc": "\n".join([
@@ -261,17 +257,20 @@ def _cuda_impl(mctx):
         urls = ["https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_x86_64.whl"],
         type = "zip",
         sha256 = "2a321629f49490e4e0122ecb578a4b4a6f89e72740dd988e04dfa4758fab7fc3",
-        build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
-            name = "nccl",
-            srcs = ["nvidia/nccl/lib/libnccl.so.2"],
-        ),
+        build_file_content = "\n".join([
+            _BUILD_FILE_DEFAULT_VISIBILITY,
+            packages.filegroup(
+                name = "nccl",
+                srcs = ["nvidia/nccl/lib/libnccl.so.2"],
+            ),
+        ]),
     )
 
     http_archive(
         name = "libpjrt_cuda",
         build_file = "libpjrt_cuda.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v15.0.2/pjrt-cuda_linux-amd64.tar.gz",
-        sha256 = "ebc5f0fa54d38ec85346f0f02b29a6497ee394b9e5fa4832da5db16d3296ae84",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-03-21/pjrt-cuda_linux-amd64.tar.gz",
+        sha256 = "854b2cabc162dd56ed38548062b5d2ce6bfc33cc21851789de8fcc346a82cb07",
     )
 
     return mctx.extension_metadata(
