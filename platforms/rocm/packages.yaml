@@ -40,3 +40,4 @@ packages:
   - "hipblaslt"
   - "hipblaslt-dev"
   - "hip-runtime-amd"
+  - "rocsparse"

@@ -4,7 +4,7 @@ load("@zml//bazel:patchelf.bzl", "patchelf")
 
 bool_flag(
     name = "hipblaslt",
-    build_setting_default = False,
+    build_setting_default = True,
     visibility = ["//visibility:public"],
 )
 
@@ -57,6 +57,7 @@ copy_to_directory(
         "@rocprofiler-sdk//:rocprofiler-sdk",
         "@rocprofiler-sdk-rocpd//:rocprofiler-sdk-rocpd",
         "@rocprofiler-sdk-roctx//:rocprofiler-sdk-roctx",
+        "@rocsparse",
         "@rocsolver",
         "@roctracer",
         "@roctracer//:roctx",

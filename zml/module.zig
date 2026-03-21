@@ -571,29 +571,18 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
             },
             .rocm => {
-                // enable only on CDNA
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", gemm_blk: {
-                    const supported: std.StaticStringMap(void) = .initComptime(.{
-                        .{ "gfx950", {} },
-                        .{ "gfx950", {} },
-                        .{ "gfx942", {} },
-                        .{ "gfx942", {} },
-                        .{ "gfx942", {} },
-                        .{ "gfx90a", {} },
-                        .{ "gfx90a", {} },
-                        .{ "gfx90a", {} },
-                        .{ "gfx908", {} },
-                        .{ "gfx906", {} },
-                        .{ "gfx900", {} },
-                    });
-                    break :gemm_blk supported.has(platform.devices[0].pjrt_desc.attribute(platform.pjrt_api, "compute_capability").?.string);
-                }, upb_arena);
+                // Use hipBLASLt only
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_cublaslt", true, upb_arena);
+
                 // Use lld from libllvm instead of invoking the ld.lld binary.
                 // This saves us from having to sandbox it.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_use_inprocess_lld", true, upb_arena);
-                // Disable command buffer to avoid some weird crashes.
-                // This is what AMD recommended in the meantime.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "", upb_arena);
+
+                // Do not enable the FUSION command buffer to avoid some weird crashes.
+                // This is what AMD recommendeds in the meantime.
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
             else => {},
         }

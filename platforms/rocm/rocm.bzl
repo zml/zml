@@ -6,7 +6,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "opt/rocm-7.2.0"
+_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.0"
 
 _UBUNTU_PACKAGES = {
     "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
@@ -120,6 +120,7 @@ _ROCM_PACKAGES = {
         packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.7", "lib/libhiprtc-builtins.so.7"]),
     ]),
     "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.1"]),
+    "rocsparse": packages.filegroup(name = "rocsparse", srcs = ["lib/librocsparse.so.1"]),
 }
 
 def _rocm_impl(mctx):
@@ -149,8 +150,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/v16.0.0/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "6a70cf6a5a8330809f173072dd5fae5332c3ec8fba80acb9b77ddd97bda6572b",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-03-21/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "fd324748258192fe9dd1b830f97b619365407362bf2bdb80b8d68bec7baba7ea",
     )
 
     return mctx.extension_metadata(
