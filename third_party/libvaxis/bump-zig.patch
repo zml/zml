@@ -1,3 +1,626 @@
+diff --git a/build.zig.zon b/build.zig.zon
+index 6192c1a..4ca04f8 100644
+--- a/build.zig.zon
++++ b/build.zig.zon
+@@ -2,15 +2,15 @@
+     .name = .vaxis,
+     .fingerprint = 0x14fbbb94fc556305,
+     .version = "0.5.1",
+-    .minimum_zig_version = "0.15.1",
++    .minimum_zig_version = "0.16.0-dev.2261+d6b3dd25a",
+     .dependencies = .{
+         .zigimg = .{
+-            .url = "git+https://github.com/zigimg/zigimg#eab2522c023b9259db8b13f2f90d609b7437e5f6",
+-            .hash = "zigimg-0.1.0-8_eo2vUZFgAAtN1c6dAO5DdqL0d4cEWHtn6iR5ucZJti",
++            .url = "https://github.com/unexge/zigimg/archive/refs/heads/master.zip",
++            .hash = "zigimg-0.1.0-8_eo2tGrFwD-VzWa_E8HuIuNenM2US7PRXBj5EJdGfrw",
+         },
+         .uucode = .{
+-            .url = "git+https://github.com/jacobsandlund/uucode#5f05f8f83a75caea201f12cc8ea32a2d82ea9732",
+-            .hash = "uucode-0.1.0-ZZjBPj96QADXyt5sqwBJUnhaDYs_qBeeKijZvlRa0eqM",
++            .url = "https://github.com/jacobsandlund/uucode/archive/refs/heads/zig-0.16.zip",
++            .hash = "uucode-0.2.0-ZZjBPkJiVABQGPdyw9BOtU2sflHv3vovBzmYtPRj2hvm",
+         },
+     },
+     .paths = .{
+diff --git a/examples/cli.zig b/examples/cli.zig
+index 3b44676..2b9a288 100644
+--- a/examples/cli.zig
++++ b/examples/cli.zig
+@@ -4,30 +4,23 @@ const Cell = vaxis.Cell;
+ const TextInput = vaxis.widgets.TextInput;
+ 
+ const log = std.log.scoped(.main);
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, tty.writer());
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+ 
+     try loop.start();
+     defer loop.stop();
+ 
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 1 * std.time.ns_per_s);
+ 
+     var text_input = TextInput.init(alloc);
+     defer text_input.deinit();
+diff --git a/examples/counter.zig b/examples/counter.zig
+index d19af42..e68420b 100644
+--- a/examples/counter.zig
++++ b/examples/counter.zig
+@@ -111,13 +111,10 @@ const Model = struct {
+     }
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer _ = gpa.deinit();
++pub fn main(init: std.process.Init) !void {
++    const allocator = init.gpa;
+ 
+-    const allocator = gpa.allocator();
+-
+-    var app = try vxfw.App.init(allocator);
++    var app = try vxfw.App.init(allocator, init.io);
+     defer app.deinit();
+ 
+     // We heap allocate our model because we will require a stable pointer to it in our Button
+diff --git a/examples/fuzzy.zig b/examples/fuzzy.zig
+index 6ffbe6a..7fef980 100644
+--- a/examples/fuzzy.zig
++++ b/examples/fuzzy.zig
+@@ -11,7 +11,6 @@ const Model = struct {
+ 
+     /// Used for filtered RichText Spans and result
+     arena: std.heap.ArenaAllocator,
+-    filtered: std.ArrayList(vxfw.RichText),
+     result: []const u8,
+ 
+     pub fn init(gpa: std.mem.Allocator) !*Model {
+@@ -201,31 +200,24 @@ fn toLower(arena: std.mem.Allocator, src: []const u8) std.mem.Allocator.Error![]
+     return lower;
+ }
+ 
+-pub fn main() !void {
+-    var debug_allocator = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer _ = debug_allocator.deinit();
+-
+-    const gpa = debug_allocator.allocator();
++pub fn main(init: std.process.Init) !void {
++    const gpa = init.gpa;
+ 
+-    var app = try vxfw.App.init(gpa);
++    var app = try vxfw.App.init(gpa, init.io);
+     errdefer app.deinit();
+ 
+     const model = try Model.init(gpa);
+     defer model.deinit(gpa);
+ 
+     // Run the command
+-    var fd = std.process.Child.init(&.{"fd"}, gpa);
+-    fd.stdout_behavior = .Pipe;
+-    fd.stderr_behavior = .Pipe;
+-    var stdout = std.ArrayList(u8).empty;
+-    var stderr = std.ArrayList(u8).empty;
+-    defer stdout.deinit(gpa);
+-    defer stderr.deinit(gpa);
+-    try fd.spawn();
+-    try fd.collectOutput(gpa, &stdout, &stderr, 10_000_000);
+-    _ = try fd.wait();
+-
+-    var iter = std.mem.splitScalar(u8, stdout.items, '\n');
++    const result = try std.process.run(gpa, init.io, .{
++        .argv = &.{"fd"},
++        .stdout_limit = .limited(10_000_000),
++    });
++    defer gpa.free(result.stdout);
++    defer gpa.free(result.stderr);
++
++    var iter = std.mem.splitScalar(u8, result.stdout, '\n');
+     while (iter.next()) |line| {
+         if (line.len == 0) continue;
+         try model.list.append(gpa, .{ .text = line });
+@@ -235,8 +227,8 @@ pub fn main() !void {
+     app.deinit();
+ 
+     if (model.result.len > 0) {
+-        _ = try std.posix.write(std.posix.STDOUT_FILENO, model.result);
+-        _ = try std.posix.write(std.posix.STDOUT_FILENO, "\n");
++        try std.Io.File.stdout().writeStreamingAll(init.io, model.result);
++        try std.Io.File.stdout().writeStreamingAll(init.io, "\n");
+     } else {
+         std.process.exit(130);
+     }
+diff --git a/examples/image.zig b/examples/image.zig
+index c14bbdb..af62862 100644
+--- a/examples/image.zig
++++ b/examples/image.zig
+@@ -8,41 +8,34 @@ const Event = union(enum) {
+     winsize: vaxis.Winsize,
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, tty.writer());
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+ 
+     try loop.start();
+     defer loop.stop();
+ 
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 1 * std.time.ns_per_s);
+ 
+     var read_buffer: [1024 * 1024]u8 = undefined; // 1MB buffer
+-    var img1 = try vaxis.zigimg.Image.fromFilePath(alloc, "examples/zig.png", &read_buffer);
++    var img1 = try vaxis.zigimg.Image.fromFilePath(alloc, init.io, "examples/zig.png", &read_buffer);
+     defer img1.deinit(alloc);
+ 
+     const imgs = [_]vaxis.Image{
+         try vx.transmitImage(alloc, tty.writer(), &img1, .rgba),
+         // var img1 = try vaxis.zigimg.Image.fromFilePath(alloc, "examples/zig.png");
+-        // try vx.loadImage(alloc, tty.writer(), .{ .path = "examples/zig.png" }),
+-        try vx.loadImage(alloc, tty.writer(), .{ .path = "examples/vaxis.png" }),
++        // try vx.loadImage(alloc, init.io, tty.writer(), .{ .path = "examples/zig.png" }),
++        try vx.loadImage(alloc, init.io, tty.writer(), .{ .path = "examples/vaxis.png" }),
+     };
+     defer vx.freeImage(tty.writer(), imgs[0].id);
+     defer vx.freeImage(tty.writer(), imgs[1].id);
+diff --git a/examples/list_view.zig b/examples/list_view.zig
+index 24cbf8d..5b961e9 100644
+--- a/examples/list_view.zig
++++ b/examples/list_view.zig
+@@ -52,13 +52,10 @@ const Model = struct {
+     }
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer _ = gpa.deinit();
++pub fn main(init: std.process.Init) !void {
++    const allocator = init.gpa;
+ 
+-    const allocator = gpa.allocator();
+-
+-    var app = try vxfw.App.init(allocator);
++    var app = try vxfw.App.init(allocator, init.io);
+     defer app.deinit();
+ 
+     const model = try allocator.create(Model);
+diff --git a/examples/main.zig b/examples/main.zig
+index 2a4b96b..3caa7d9 100644
+--- a/examples/main.zig
++++ b/examples/main.zig
+@@ -3,25 +3,17 @@ const vaxis = @import("vaxis");
+ const Cell = vaxis.Cell;
+ 
+ const log = std.log.scoped(.main);
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        //fail test; can't try in defer as defer is executed after we return
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, tty.writer());
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+ 
+     try loop.start();
+@@ -29,7 +21,7 @@ pub fn main() !void {
+ 
+     // Optionally enter the alternate screen
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 1 * std.time.ns_per_s);
+ 
+     // We'll adjust the color index every keypress
+     var color_idx: u8 = 0;
+diff --git a/examples/scroll.zig b/examples/scroll.zig
+index 0f92573..adf1f44 100644
+--- a/examples/scroll.zig
++++ b/examples/scroll.zig
+@@ -151,13 +151,10 @@ const Model = struct {
+     }
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer _ = gpa.deinit();
++pub fn main(init: std.process.Init) !void {
++    const allocator = init.gpa;
+ 
+-    const allocator = gpa.allocator();
+-
+-    var app = try vxfw.App.init(allocator);
++    var app = try vxfw.App.init(allocator, init.io);
+     errdefer app.deinit();
+ 
+     var arena = std.heap.ArenaAllocator.init(allocator);
+diff --git a/examples/split_view.zig b/examples/split_view.zig
+index 78d4e6f..5c48432 100644
+--- a/examples/split_view.zig
++++ b/examples/split_view.zig
+@@ -49,13 +49,10 @@ const Model = struct {
+     }
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer _ = gpa.deinit();
++pub fn main(init: std.process.Init) !void {
++    const allocator = init.gpa;
+ 
+-    const allocator = gpa.allocator();
+-
+-    var app = try vxfw.App.init(allocator);
++    var app = try vxfw.App.init(allocator, init.io);
+     defer app.deinit();
+ 
+     const model = try allocator.create(Model);
+diff --git a/examples/table.zig b/examples/table.zig
+index 430c3d5..c489828 100644
+--- a/examples/table.zig
++++ b/examples/table.zig
+@@ -14,16 +14,14 @@ const ActiveSection = enum {
+     btm,
+ };
+ 
+-pub fn main() !void {
+-    var gpa = heap.GeneralPurposeAllocator(.{}){};
+-    defer if (gpa.detectLeaks()) log.err("Memory leak detected!", .{});
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     // Users set up below the main function
+     const users_buf = try alloc.dupe(User, users[0..]);
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+     const tty_writer = tty.writer();
+     var vx = try vaxis.init(alloc, .{
+@@ -35,12 +33,12 @@ pub fn main() !void {
+         key_press: vaxis.Key,
+         winsize: vaxis.Winsize,
+         table_upd,
+-    }) = .{ .tty = &tty, .vaxis = &vx };
++    }) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+     try loop.start();
+     defer loop.stop();
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 250 * std.time.ns_per_ms);
++    try vx.queryTerminal(tty.writer(), init.io, 250 * std.time.ns_per_ms);
+ 
+     const logo =
+         \\░█░█░█▀█░█░█░▀█▀░█▀▀░░░▀█▀░█▀█░█▀▄░█░░░█▀▀░
+diff --git a/examples/text_input.zig b/examples/text_input.zig
+index cea0466..5c3c6c6 100644
+--- a/examples/text_input.zig
++++ b/examples/text_input.zig
+@@ -18,20 +18,12 @@ const Event = union(enum) {
+     foo: u8,
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        //fail test; can't try in defer as defer is executed after we return
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     // Initalize a tty
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     // Use a buffered writer for better performance. There are a lot of writes
+@@ -47,6 +39,8 @@ pub fn main() !void {
+     var loop: vaxis.Loop(Event) = .{
+         .vaxis = &vx,
+         .tty = &tty,
++        .io = init.io,
++        .queue = .{ .io = init.io },
+     };
+     try loop.init();
+ 
+@@ -71,7 +65,7 @@ pub fn main() !void {
+     try writer.flush();
+     // Sends queries to terminal to detect certain features. This should
+     // _always_ be called, but is left to the application to decide when
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 1 * std.time.ns_per_s);
+ 
+     // The main event loop. Vaxis provides a thread safe, blocking, buffered
+     // queue which can serve as the primary event queue for an application
+@@ -94,8 +88,10 @@ pub fn main() !void {
+                 } else if (key.matches('n', .{ .ctrl = true })) {
+                     try vx.notify(tty.writer(), "vaxis", "hello from vaxis");
+                     loop.stop();
+-                    var child = std.process.Child.init(&.{"nvim"}, alloc);
+-                    _ = try child.spawnAndWait();
++                    var child = try std.process.spawn(init.io, .{
++                        .argv = &.{"nvim"},
++                    });
++                    _ = try child.wait(init.io);
+                     try loop.start();
+                     try vx.enterAltScreen(tty.writer());
+                     vx.queueRefresh();
+diff --git a/examples/text_view.zig b/examples/text_view.zig
+index 73e8e54..d49cb5b 100644
+--- a/examples/text_view.zig
++++ b/examples/text_view.zig
+@@ -9,31 +9,24 @@ const Event = union(enum) {
+     winsize: vaxis.Winsize,
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, tty.writer());
+     var loop: vaxis.Loop(Event) = .{
+         .vaxis = &vx,
+         .tty = &tty,
++        .io = init.io,
++        .queue = .{ .io = init.io },
+     };
+     try loop.init();
+     try loop.start();
+     defer loop.stop();
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 20 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 20 * std.time.ns_per_s);
+     var text_view = TextView{};
+     var text_view_buffer = TextView.Buffer{};
+     defer text_view_buffer.deinit(alloc);
+@@ -61,6 +54,6 @@ pub fn main() !void {
+         win.clear();
+         text_view.draw(win, text_view_buffer);
+         try vx.render(tty.writer());
+-        try tty.writer.flush();
++        try tty.writer().flush();
+     }
+ }
+diff --git a/examples/vaxis.zig b/examples/vaxis.zig
+index 5ca566c..8a12a66 100644
+--- a/examples/vaxis.zig
++++ b/examples/vaxis.zig
+@@ -9,32 +9,24 @@ const Event = union(enum) {
+ 
+ pub const panic = vaxis.panic_handler;
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        //fail test; can't try in defer as defer is executed after we return
+-        if (deinit_status == .leak) {
+-            std.log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, tty.writer());
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+ 
+     try loop.start();
+     defer loop.stop();
+ 
+     try vx.enterAltScreen(tty.writer());
+-    try vx.queryTerminal(tty.writer(), 1 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 1 * std.time.ns_per_s);
+ 
+     try vx.queryColor(tty.writer(), .fg);
+     try vx.queryColor(tty.writer(), .bg);
+@@ -84,7 +76,7 @@ pub fn main() !void {
+         // try vx.render(bw.writer().any());
+         // try bw.flush();
+         try vx.render(tty.writer());
+-        std.Thread.sleep(16 * std.time.ns_per_ms);
++        try std.Io.sleep(init.io, std.Io.Duration.fromMilliseconds(16), .real);
+         switch (dir) {
+             .up => {
+                 pct += 1;
+diff --git a/examples/view.zig b/examples/view.zig
+index 1b01dfd..3f5108a 100644
+--- a/examples/view.zig
++++ b/examples/view.zig
+@@ -13,15 +13,8 @@ const Event = union(enum) {
+     winsize: vaxis.Winsize,
+ };
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        if (deinit_status == .leak) {
+-            log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var world_map: []const u8 = lg_world_map;
+     var map_width = lg_map_width;
+@@ -45,7 +38,7 @@ pub fn main() !void {
+     });
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     defer tty.deinit();
+ 
+     const writer = tty.writer();
+@@ -58,13 +51,15 @@ pub fn main() !void {
+     var loop: vaxis.Loop(Event) = .{
+         .vaxis = &vx,
+         .tty = &tty,
++        .io = init.io,
++        .queue = .{ .io = init.io },
+     };
+     try loop.init();
+     try loop.start();
+     defer loop.stop();
+     try vx.enterAltScreen(writer);
+     try writer.flush();
+-    try vx.queryTerminal(tty.writer(), 20 * std.time.ns_per_s);
++    try vx.queryTerminal(tty.writer(), init.io, 20 * std.time.ns_per_s);
+ 
+     // Initialize Views
+     // - Large Map
+diff --git a/examples/vt.zig b/examples/vt.zig
+index fc13149..6d7f647 100644
+--- a/examples/vt.zig
++++ b/examples/vt.zig
+@@ -9,33 +9,24 @@ const Event = union(enum) {
+ 
+ pub const panic = vaxis.panic_handler;
+ 
+-pub fn main() !void {
+-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+-    defer {
+-        const deinit_status = gpa.deinit();
+-        //fail test; can't try in defer as defer is executed after we return
+-        if (deinit_status == .leak) {
+-            std.log.err("memory leak", .{});
+-        }
+-    }
+-    const alloc = gpa.allocator();
++pub fn main(init: std.process.Init) !void {
++    const alloc = init.gpa;
+ 
+     var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(&buffer);
++    var tty = try vaxis.Tty.init(init.io, &buffer);
+     const writer = tty.writer();
+     var vx = try vaxis.init(alloc, .{});
+     defer vx.deinit(alloc, writer);
+ 
+-    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx };
++    var loop: vaxis.Loop(Event) = .{ .tty = &tty, .vaxis = &vx, .io = init.io, .queue = .{ .io = init.io } };
+     try loop.init();
+ 
+     try loop.start();
+     defer loop.stop();
+ 
+     try vx.enterAltScreen(writer);
+-    try vx.queryTerminal(writer, 1 * std.time.ns_per_s);
+-    var env = try std.process.getEnvMap(alloc);
+-    defer env.deinit();
++    try vx.queryTerminal(writer, init.io, 1 * std.time.ns_per_s);
++    const env = init.environ_map;
+ 
+     const vt_opts: vaxis.widgets.Terminal.Options = .{
+         .winsize = .{
+@@ -52,8 +43,9 @@ pub fn main() !void {
+     var write_buf: [4096]u8 = undefined;
+     var vt = try vaxis.widgets.Terminal.init(
+         alloc,
++        init.io,
+         &argv,
+-        &env,
++        env,
+         vt_opts,
+         &write_buf,
+     );
+@@ -62,7 +54,7 @@ pub fn main() !void {
+ 
+     var redraw: bool = false;
+     while (true) {
+-        std.Thread.sleep(8 * std.time.ns_per_ms);
++        std.Io.sleep(init.io, .fromMilliseconds(8), .awake) catch {};
+         // try vt events first
+         while (vt.tryEvent()) |event| {
+             redraw = true;
 diff --git a/src/Loop.zig b/src/Loop.zig
 index a11e2f7..cd7e9d9 100644
 --- a/src/Loop.zig
@@ -68,7 +691,7 @@ index 6358269..1b125dd 100644
                  if (result.is_break) {
                      // Found the first grapheme boundary
 diff --git a/src/Vaxis.zig b/src/Vaxis.zig
-index a6a3830..2b2ee49 100644
+index a6a3830..2e24e9b 100644
 --- a/src/Vaxis.zig
 +++ b/src/Vaxis.zig
 @@ -3,7 +3,7 @@ const builtin = @import("builtin");
@@ -80,70 +703,7 @@ index a6a3830..2b2ee49 100644
  
  const Cell = @import("Cell.zig");
  const Image = @import("Image.zig");
-@@ -127,14 +127,13 @@ pub fn deinit(self: *Vaxis, alloc: ?std.mem.Allocator, tty: *IoWriter) void {
-     }
- }
- 
--/// resets enabled features, sends cursor to home and clears below cursor
--pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
--    // always show the cursor on state reset
-+/// Resets enabled terminal features without clearing screen content.
-+/// Use this for non-interactive / single-shot rendering where the
-+/// output should remain visible after exit.
-+pub fn resetModes(self: *Vaxis, tty: *IoWriter) !void {
-     tty.writeAll(ctlseqs.show_cursor) catch {};
-     tty.writeAll(ctlseqs.sgr_reset) catch {};
-     if (self.screen.cursor_shape != .default) {
--        // In many terminals, `.default` will set to the configured cursor shape. Others, it will
--        // change to a blinking block.
-         tty.print(ctlseqs.cursor_shape, .{@intFromEnum(Cell.CursorShape.default)}) catch {};
-     }
-     if (self.state.kitty_keyboard) {
-@@ -147,18 +146,6 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
-     if (self.state.bracketed_paste) {
-         try self.setBracketedPaste(tty, false);
-     }
--    if (self.state.alt_screen) {
--        try tty.writeAll(ctlseqs.home);
--        try tty.writeAll(ctlseqs.erase_below_cursor);
--        try self.exitAltScreen(tty);
--    } else {
--        try tty.writeByte('\r');
--        var i: u16 = 0;
--        while (i < self.state.cursor.row) : (i += 1) {
--            try tty.writeAll(ctlseqs.ri);
--        }
--        try tty.writeAll(ctlseqs.erase_below_cursor);
--    }
-     if (self.state.color_scheme_updates) {
-         try tty.writeAll(ctlseqs.color_scheme_reset);
-         self.state.color_scheme_updates = false;
-@@ -179,7 +166,24 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
-         try tty.writeAll(ctlseqs.osc12_reset);
-         self.state.changed_cursor_color = false;
-     }
-+    try tty.flush();
-+}
- 
-+/// resets enabled features, sends cursor to home and clears below cursor
-+pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
-+    self.resetModes(tty) catch {};
-+    if (self.state.alt_screen) {
-+        try tty.writeAll(ctlseqs.home);
-+        try tty.writeAll(ctlseqs.erase_below_cursor);
-+        try self.exitAltScreen(tty);
-+    } else {
-+        try tty.writeByte('\r');
-+        var i: u16 = 0;
-+        while (i < self.state.cursor.row) : (i += 1) {
-+            try tty.writeAll(ctlseqs.ri);
-+        }
-+        try tty.writeAll(ctlseqs.erase_below_cursor);
-+    }
-     try tty.flush();
- }
- 
-@@ -250,10 +254,10 @@ pub fn exitAltScreen(self: *Vaxis, tty: *IoWriter) !void {
+@@ -250,10 +250,10 @@ pub fn exitAltScreen(self: *Vaxis, tty: *IoWriter) !void {
  ///
  /// This call will block until Vaxis.query_futex is woken up, or the timeout.
  /// Event loops can wake up this futex when cap_da1 is received
@@ -156,7 +716,7 @@ index a6a3830..2b2ee49 100644
      self.queries_done.store(true, .unordered);
      try self.enableDetectedFeatures(tty);
  }
-@@ -265,7 +269,7 @@ pub fn queryTerminalSend(vx: *Vaxis, tty: *IoWriter) !void {
+@@ -265,7 +265,7 @@ pub fn queryTerminalSend(vx: *Vaxis, tty: *IoWriter) !void {
      vx.queries_done.store(false, .unordered);
  
      // TODO: re-enable this
@@ -165,7 +725,7 @@ index a6a3830..2b2ee49 100644
      // if (std.mem.eql(u8, colorterm, "truecolor") or
      //     std.mem.eql(u8, colorterm, "24bit"))
      // {
-@@ -320,22 +324,22 @@ pub fn enableDetectedFeatures(self: *Vaxis, tty: *IoWriter) !void {
+@@ -320,22 +320,22 @@ pub fn enableDetectedFeatures(self: *Vaxis, tty: *IoWriter) !void {
          },
          else => {
              // Apply any environment variables
@@ -195,56 +755,7 @@ index a6a3830..2b2ee49 100644
                  self.caps.unicode = .unicode;
  
              // enable detected features
-@@ -943,19 +947,19 @@ pub fn transmitLocalImagePath(
-     switch (format) {
-         .rgb => {
-             try tty.print(
--                "\x1b_Gf=24,s={d},v={d},i={d},t={c};{s}\x1b\\",
-+                "\x1b_Gf=24,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
-                 .{ width, height, id, medium_char, encoded },
-             );
-         },
-         .rgba => {
-             try tty.print(
--                "\x1b_Gf=32,s={d},v={d},i={d},t={c};{s}\x1b\\",
-+                "\x1b_Gf=32,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
-                 .{ width, height, id, medium_char, encoded },
-             );
-         },
-         .png => {
-             try tty.print(
--                "\x1b_Gf=100,i={d},t={c};{s}\x1b\\",
-+                "\x1b_Gf=100,i={d},t={c},q=2;{s}\x1b\\",
-                 .{ id, medium_char, encoded },
-             );
-         },
-@@ -991,7 +995,7 @@ pub fn transmitPreEncodedImage(
- 
-     if (bytes.len < 4096) {
-         try tty.print(
--            "\x1b_Gf={d},s={d},v={d},i={d};{s}\x1b\\",
-+            "\x1b_Gf={d},s={d},v={d},i={d},q=2;{s}\x1b\\",
-             .{
-                 fmt,
-                 width,
-@@ -1004,14 +1008,14 @@ pub fn transmitPreEncodedImage(
-         var n: usize = 4096;
- 
-         try tty.print(
--            "\x1b_Gf={d},s={d},v={d},i={d},m=1;{s}\x1b\\",
-+            "\x1b_Gf={d},s={d},v={d},i={d},m=1,q=2;{s}\x1b\\",
-             .{ fmt, width, height, id, bytes[0..n] },
-         );
-         while (n < bytes.len) : (n += 4096) {
-             const end: usize = @min(n + 4096, bytes.len);
-             const m: u2 = if (end == bytes.len) 0 else 1;
-             try tty.print(
--                "\x1b_Gm={d};{s}\x1b\\",
-+                "\x1b_Gm={d},q=2;{s}\x1b\\",
-                 .{
-                     m,
-                     bytes[n..end],
-@@ -1067,6 +1071,7 @@ pub fn transmitImage(
+@@ -1067,6 +1067,7 @@ pub fn transmitImage(
  pub fn loadImage(
      self: *Vaxis,
      alloc: std.mem.Allocator,
@@ -252,7 +763,7 @@ index a6a3830..2b2ee49 100644
      tty: *IoWriter,
      src: Image.Source,
  ) !Image {
-@@ -1074,7 +1079,7 @@ pub fn loadImage(
+@@ -1074,7 +1075,7 @@ pub fn loadImage(
  
      var read_buffer: [1024 * 1024]u8 = undefined; // 1MB buffer
      var img = switch (src) {
@@ -261,7 +772,7 @@ index a6a3830..2b2ee49 100644
          .mem => |bytes| try zigimg.Image.fromMemory(alloc, bytes),
      };
      defer img.deinit(alloc);
-@@ -1481,7 +1486,7 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
+@@ -1481,7 +1482,7 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
          return error.InvalidAbsolutePath;
      const hostname = switch (builtin.os.tag) {
          .windows => null,
@@ -270,7 +781,7 @@ index a6a3830..2b2ee49 100644
      } orelse "localhost";
  
      const uri: std.Uri = .{
-@@ -1495,11 +1500,11 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
+@@ -1495,11 +1496,11 @@ pub fn setTerminalWorkingDirectory(_: *Vaxis, tty: *IoWriter, path: []const u8)
  
  test "render: no output when no changes" {
      var vx = try Vaxis.init(std.testing.allocator, .{});
@@ -284,21 +795,6 @@ index a6a3830..2b2ee49 100644
      defer render_writer.deinit();
      try vx.render(&render_writer.writer);
      const output = try render_writer.toOwnedSlice();
-diff --git a/src/ctlseqs.zig b/src/ctlseqs.zig
-index ab415c6..4baa496 100644
---- a/src/ctlseqs.zig
-+++ b/src/ctlseqs.zig
-@@ -138,8 +138,8 @@ pub const osc52_clipboard_copy = "\x1b]52;c;{s}\x1b\\";
- pub const osc52_clipboard_request = "\x1b]52;c;?\x1b\\";
- 
- // Kitty graphics
--pub const kitty_graphics_clear = "\x1b_Ga=d\x1b\\";
--pub const kitty_graphics_preamble = "\x1b_Ga=p,i={d}";
-+pub const kitty_graphics_clear = "\x1b_Ga=d,q=2\x1b\\";
-+pub const kitty_graphics_preamble = "\x1b_Ga=p,q=2,i={d}";
- pub const kitty_graphics_closing = ",C=1\x1b\\";
- 
- // Color control sequences
 diff --git a/src/gwidth.zig b/src/gwidth.zig
 index 194139f..ecffaf7 100644
 --- a/src/gwidth.zig
@@ -628,7 +1124,7 @@ index 6d847ea..908cf70 100644
      const t2 = try Thread.spawn(cfg, writerThread, .{&queue});
  
 diff --git a/src/tty.zig b/src/tty.zig
-index 4a3c142..7f6a303 100644
+index 4a3c142..c1da795 100644
 --- a/src/tty.zig
 +++ b/src/tty.zig
 @@ -33,8 +33,11 @@ pub const PosixTty = struct {
@@ -644,7 +1140,7 @@ index 4a3c142..7f6a303 100644
  
      pub const SignalHandler = struct {
          context: *anyopaque,
-@@ -43,17 +46,22 @@ pub const PosixTty = struct {
+@@ -43,7 +46,8 @@ pub const PosixTty = struct {
  
      /// global signal handlers
      var handlers: [8]SignalHandler = undefined;
@@ -654,11 +1150,7 @@ index 4a3c142..7f6a303 100644
      var handler_idx: usize = 0;
  
      var handler_installed: bool = false;
- 
-+    /// Atomic flag set by the SIGWINCH signal handler. Checked and cleared
-+    /// by pollWinch() from a non-signal context to avoid deadlocks.
-+    var winch_pending: std.atomic.Value(bool) = .{ .raw = false };
-+
+@@ -51,9 +55,9 @@ pub const PosixTty = struct {
      /// initializes a Tty instance by opening /dev/tty and "making it raw". A
      /// signal handler is installed for SIGWINCH. No callbacks are installed, be
      /// sure to register a callback when initializing the event loop
@@ -670,7 +1162,7 @@ index 4a3c142..7f6a303 100644
  
          // Set the termios of the tty
          const termios = try makeRaw(fd);
-@@ -69,13 +77,8 @@ pub const PosixTty = struct {
+@@ -69,13 +73,8 @@ pub const PosixTty = struct {
          posix.sigaction(posix.SIG.WINCH, &act, null);
          handler_installed = true;
  
@@ -686,7 +1178,7 @@ index 4a3c142..7f6a303 100644
  
          global_tty = self;
  
-@@ -88,7 +91,7 @@ pub const PosixTty = struct {
+@@ -88,7 +87,7 @@ pub const PosixTty = struct {
              std.log.err("couldn't restore terminal: {}", .{err});
          };
          if (builtin.os.tag != .macos) // closing /dev/tty may block indefinitely on macos
@@ -695,7 +1187,7 @@ index 4a3c142..7f6a303 100644
      }
  
      /// Resets the signal handler to it's default
-@@ -107,7 +110,12 @@ pub const PosixTty = struct {
+@@ -107,7 +106,12 @@ pub const PosixTty = struct {
      }
  
      pub fn writer(self: *PosixTty) *std.Io.Writer {
@@ -709,7 +1201,7 @@ index 4a3c142..7f6a303 100644
      }
  
      pub fn read(self: *const PosixTty, buf: []u8) !usize {
-@@ -117,16 +125,29 @@ pub const PosixTty = struct {
+@@ -117,16 +121,16 @@ pub const PosixTty = struct {
      /// Install a signal handler for winsize. A maximum of 8 handlers may be
      /// installed
      pub fn notifyWinsize(handler: SignalHandler) !void {
@@ -726,25 +1218,12 @@ index 4a3c142..7f6a303 100644
 -        handler_mutex.lock();
 -        defer handler_mutex.unlock();
 +    fn handleWinch(_: posix.SIG) callconv(.c) void {
-+        // Only set an atomic flag. Calling mutex.lock() or queue.push()
-+        // from a signal handler is not async-signal-safe and causes
-+        // deadlocks when the signal is delivered to a thread that already
-+        // holds one of those locks. Registered handlers are dispatched
-+        // from pollWinch() instead.
-+        winch_pending.store(true, .release);
-+    }
-+
-+    /// Check if a SIGWINCH was received and dispatch registered handlers.
-+    /// Must be called from a non-signal context (e.g., the main event loop)
-+    /// to avoid the async-signal-safety issues with the old approach.
-+    pub fn pollWinch() void {
-+        if (!winch_pending.swap(false, .acquire)) return;
-+        handler_mutex.lockUncancelable(handler_io);
++        if (!handler_mutex.tryLock()) return;
 +        defer handler_mutex.unlock(handler_io);
          var i: usize = 0;
          while (i < handler_idx) : (i += 1) {
              const handler = handlers[i];
-@@ -189,6 +210,7 @@ pub const PosixTty = struct {
+@@ -189,6 +193,7 @@ pub const PosixTty = struct {
  pub const WindowsTty = struct {
      stdin: windows.HANDLE,
      stdout: windows.HANDLE,
@@ -752,7 +1231,7 @@ index 4a3c142..7f6a303 100644
  
      initial_codepage: c_uint,
      initial_input_mode: CONSOLE_MODE_INPUT,
-@@ -198,7 +220,8 @@ pub const WindowsTty = struct {
+@@ -198,7 +203,8 @@ pub const WindowsTty = struct {
      buf: [4]u8 = undefined,
  
      /// File.Writer for efficient buffered writing
@@ -762,7 +1241,7 @@ index 4a3c142..7f6a303 100644
  
      /// The last mouse button that was pressed. We store the previous state of button presses on each
      /// mouse event so we can detect which button was released
-@@ -221,7 +244,7 @@ pub const WindowsTty = struct {
+@@ -221,7 +227,7 @@ pub const WindowsTty = struct {
          .ENABLE_LVB_GRID_WORLDWIDE = 1, // enables reverse video and underline
      };
  
@@ -771,7 +1250,7 @@ index 4a3c142..7f6a303 100644
          const stdin: std.fs.File = .stdin();
          const stdout: std.fs.File = .stdout();
  
-@@ -237,12 +260,12 @@ pub const WindowsTty = struct {
+@@ -237,12 +243,12 @@ pub const WindowsTty = struct {
              return windows.unexpectedError(windows.kernel32.GetLastError());
  
          const self: Tty = .{
@@ -785,7 +1264,7 @@ index 4a3c142..7f6a303 100644
          };
  
          // save a copy of this tty as the global_tty for panic handling
-@@ -298,7 +321,12 @@ pub const WindowsTty = struct {
+@@ -298,7 +304,12 @@ pub const WindowsTty = struct {
      }
  
      pub fn writer(self: *Tty) *std.Io.Writer {
@@ -799,7 +1278,7 @@ index 4a3c142..7f6a303 100644
      }
  
      pub fn read(self: *const Tty, buf: []u8) !usize {
-@@ -694,20 +722,20 @@ pub const WindowsTty = struct {
+@@ -694,20 +705,20 @@ pub const WindowsTty = struct {
  pub const TestTty = struct {
      /// Used for API compat
      fd: posix.fd_t,
@@ -824,7 +1303,7 @@ index 4a3c142..7f6a303 100644
              .pipe_read = r,
              .pipe_write = w,
              .tty_writer = list,
-@@ -715,8 +743,9 @@ pub const TestTty = struct {
+@@ -715,8 +726,9 @@ pub const TestTty = struct {
      }
  
      pub fn deinit(self: TestTty) void {
@@ -854,16 +1333,10 @@ index a5253ac..4ff2e4c 100644
              }
  
 diff --git a/src/vxfw/App.zig b/src/vxfw/App.zig
-index 6d394a9..2661cf4 100644
+index 6d394a9..fc3962f 100644
 --- a/src/vxfw/App.zig
 +++ b/src/vxfw/App.zig
-@@ -1,4 +1,5 @@
- const std = @import("std");
-+const builtin = @import("builtin");
- const vaxis = @import("../main.zig");
- const vxfw = @import("vxfw.zig");
- 
-@@ -16,7 +17,7 @@ tty: vaxis.Tty,
+@@ -16,7 +16,7 @@ tty: vaxis.Tty,
  vx: vaxis.Vaxis,
  timers: std.ArrayList(vxfw.Tick),
  wants_focus: ?vxfw.Widget,
@@ -872,7 +1345,7 @@ index 6d394a9..2661cf4 100644
  
  /// Runtime options
  pub const Options = struct {
-@@ -27,10 +28,10 @@ pub const Options = struct {
+@@ -27,10 +27,10 @@ pub const Options = struct {
  /// Create an application. We require stable pointers to do the set up, so this will create an App
  /// object on the heap. Call destroy when the app is complete to reset terminal state and release
  /// resources
@@ -886,7 +1359,7 @@ index 6d394a9..2661cf4 100644
          .vx = try vaxis.init(allocator, .{
              .system_clipboard_allocator = allocator,
              .kitty_keyboard_flags = .{
-@@ -39,10 +40,8 @@ pub fn init(allocator: Allocator) !App {
+@@ -39,10 +39,8 @@ pub fn init(allocator: Allocator) !App {
          }),
          .timers = std.ArrayList(vxfw.Tick){},
          .wants_focus = null,
@@ -898,7 +1371,7 @@ index 6d394a9..2661cf4 100644
  }
  
  pub fn deinit(self: *App) void {
-@@ -55,7 +54,8 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+@@ -55,7 +53,8 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
      const tty = &self.tty;
      const vx = &self.vx;
  
@@ -908,7 +1381,7 @@ index 6d394a9..2661cf4 100644
      try loop.start();
      defer loop.stop();
  
-@@ -65,7 +65,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+@@ -65,7 +64,7 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
      loop.postEvent(.focus_in);
  
      try vx.enterAltScreen(tty.writer());
@@ -917,7 +1390,7 @@ index 6d394a9..2661cf4 100644
      try vx.setBracketedPaste(tty.writer(), true);
      try vx.subscribeToColorSchemeUpdates(tty.writer());
  
-@@ -97,13 +97,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+@@ -97,13 +96,14 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
      defer focus_handler.deinit(self.allocator);
  
      // Timestamp of our next frame
@@ -933,7 +1406,7 @@ index 6d394a9..2661cf4 100644
          .consume_event = false,
          .redraw = false,
          .quit = false,
-@@ -111,18 +112,25 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+@@ -111,13 +111,13 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
      defer ctx.cmds.deinit(self.allocator);
  
      while (true) {
@@ -949,19 +1422,7 @@ index 6d394a9..2661cf4 100644
              next_frame_ms += tick_ms;
          }
  
-         try self.checkTimers(&ctx);
- 
-+        // Poll for pending SIGWINCH outside of queue lock.
-+        // The signal handler only sets an atomic flag; we dispatch
-+        // the registered callbacks here where mutex operations are safe.
-+        if (builtin.os.tag != .windows and !builtin.is_test) {
-+            if (!vx.state.in_band_resize) vaxis.Tty.pollWinch();
-+        }
-+
-         {
-             loop.queue.lock();
-             defer loop.queue.unlock();
-@@ -296,7 +304,7 @@ fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
+@@ -296,7 +296,7 @@ fn handleCommand(self: *App, cmds: *vxfw.CommandList) Allocator.Error!void {
  }
  
  fn checkTimers(self: *App, ctx: *vxfw.EventContext) anyerror!void {
@@ -970,7 +1431,7 @@ index 6d394a9..2661cf4 100644
  
      // timers are always sorted descending
      while (self.timers.pop()) |tick| {
-@@ -349,12 +357,16 @@ const MouseHandler = struct {
+@@ -349,12 +349,16 @@ const MouseHandler = struct {
              .surface = last_frame,
              .z_index = 0,
          };
@@ -993,7 +1454,7 @@ index 6d394a9..2661cf4 100644
          }
  
          // We store the hit list from the last mouse event to determine mouse_enter and mouse_leave
-@@ -408,12 +420,16 @@ const MouseHandler = struct {
+@@ -408,12 +412,16 @@ const MouseHandler = struct {
              .surface = last_frame,
              .z_index = 0,
          };
@@ -1016,7 +1477,7 @@ index 6d394a9..2661cf4 100644
          }
  
          // Handle mouse_enter and mouse_leave events
-@@ -602,3 +618,8 @@ const FocusHandler = struct {
+@@ -602,3 +610,8 @@ const FocusHandler = struct {
          }
      }
  };
@@ -1037,101 +1498,6 @@ index d4b2a9c..075627e 100644
      };
      defer ctx.cmds.deinit(ctx.alloc);
  
-diff --git a/src/vxfw/Image.zig b/src/vxfw/Image.zig
-new file mode 100644
-index 0000000..0f0b99f
---- /dev/null
-+++ b/src/vxfw/Image.zig
-@@ -0,0 +1,89 @@
-+const std = @import("std");
-+const vaxis = @import("../main.zig");
-+const vxfw = @import("vxfw.zig");
-+
-+const Allocator = std.mem.Allocator;
-+
-+const Image = @This();
-+
-+/// The loaded image to display.
-+image: vaxis.Image,
-+/// Desired height in cell rows. Width is computed to maintain aspect ratio.
-+/// If null, uses max constraint height (or 1 if unbounded).
-+rows: ?u16 = null,
-+
-+pub fn widget(self: *const Image) vxfw.Widget {
-+    return .{
-+        .userdata = @constCast(self),
-+        .drawFn = typeErasedDrawFn,
-+    };
-+}
-+
-+fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
-+    const self: *const Image = @ptrCast(@alignCast(ptr));
-+    return self.draw(ctx);
-+}
-+
-+pub fn draw(self: *const Image, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
-+    const target_rows = self.rows orelse ctx.max.height orelse 1;
-+    if (target_rows == 0 or self.image.width == 0 or self.image.height == 0) {
-+        return .{
-+            .size = .{ .width = 0, .height = 0 },
-+            .widget = self.widget(),
-+            .buffer = &.{},
-+            .children = &.{},
-+        };
-+    }
-+
-+    // Compute cell columns from image aspect ratio and terminal cell pixel size
-+    const cell_h: u32 = if (ctx.cell_size.height > 0) ctx.cell_size.height else 20;
-+    const cell_w: u32 = if (ctx.cell_size.width > 0) ctx.cell_size.width else 10;
-+    const height_px = @as(u32, target_rows) * cell_h;
-+    const scale_f = @as(f64, @floatFromInt(height_px)) / @as(f64, @floatFromInt(self.image.height));
-+    const width_px: u32 = @intFromFloat(@as(f64, @floatFromInt(self.image.width)) * scale_f);
-+    const cols: u16 = @intCast((width_px + cell_w - 1) / cell_w);
-+
-+    const size: vxfw.Size = .{ .width = cols, .height = target_rows };
-+    var surf = try vxfw.Surface.init(ctx.arena, self.widget(), size);
-+    surf.writeCell(0, 0, .{
-+        .image = .{
-+            .img_id = self.image.id,
-+            .options = .{
-+                .size = .{ .rows = target_rows },
-+            },
-+        },
-+    });
-+    return surf;
-+}
-+
-+test Image {
-+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
-+    defer arena.deinit();
-+    vxfw.DrawContext.init(.unicode);
-+
-+    const img: Image = .{
-+        .image = .{ .id = 1, .width = 100, .height = 50 },
-+        .rows = 5,
-+    };
-+    const w = img.widget();
-+
-+    const draw_ctx: vxfw.DrawContext = .{
-+        .arena = arena.allocator(),
-+        .min = .{},
-+        .max = .{ .width = 40, .height = 10 },
-+        .cell_size = .{ .width = 10, .height = 20 },
-+    };
-+
-+    const surface = try w.draw(draw_ctx);
-+    try std.testing.expectEqual(@as(u16, 5), surface.size.height);
-+    // 5 rows * 20px = 100px height. scale = 100/50 = 2.0. width = 100*2 = 200px. cols = 200/10 = 20
-+    try std.testing.expectEqual(@as(u16, 20), surface.size.width);
-+    // Image cell should be at (0, 0)
-+    const cell = surface.buffer[0];
-+    try std.testing.expect(cell.image != null);
-+    try std.testing.expectEqual(@as(u32, 1), cell.image.?.img_id);
-+}
-+
-+test "refAllDecls" {
-+    std.testing.refAllDecls(@This());
-+}
 diff --git a/src/vxfw/ListView.zig b/src/vxfw/ListView.zig
 index 8ff9551..de93d5d 100644
 --- a/src/vxfw/ListView.zig
@@ -1152,19 +1518,6 @@ index 8ff9551..de93d5d 100644
      };
      defer ctx.cmds.deinit(ctx.alloc);
  
-diff --git a/src/vxfw/Padding.zig b/src/vxfw/Padding.zig
-index e60162f..a9039ba 100644
---- a/src/vxfw/Padding.zig
-+++ b/src/vxfw/Padding.zig
-@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
- const vxfw = @import("vxfw.zig");
- 
- const Padding = @This();
--const PadValues = struct {
-+pub const PadValues = struct {
-     left: u16 = 0,
-     right: u16 = 0,
-     top: u16 = 0,
 diff --git a/src/vxfw/ScrollView.zig b/src/vxfw/ScrollView.zig
 index 36319a4..38859ea 100644
 --- a/src/vxfw/ScrollView.zig
@@ -1283,18 +1636,10 @@ index 6ad108b..e5a4d5b 100644
  
      // Enough boiler plate...Create the text field
 diff --git a/src/vxfw/vxfw.zig b/src/vxfw/vxfw.zig
-index 1510e71..e78dd7f 100644
+index 1510e71..f768d56 100644
 --- a/src/vxfw/vxfw.zig
 +++ b/src/vxfw/vxfw.zig
-@@ -16,6 +16,7 @@ pub const Button = @import("Button.zig");
- pub const Center = @import("Center.zig");
- pub const FlexColumn = @import("FlexColumn.zig");
- pub const FlexRow = @import("FlexRow.zig");
-+pub const Image = @import("Image.zig");
- pub const ListView = @import("ListView.zig");
- pub const Padding = @import("Padding.zig");
- pub const RichText = @import("RichText.zig");
-@@ -61,8 +62,8 @@ pub const Tick = struct {
+@@ -61,8 +61,8 @@ pub const Tick = struct {
          return lhs.deadline_ms > rhs.deadline_ms;
      }
  
@@ -1305,7 +1650,7 @@ index 1510e71..e78dd7f 100644
          return .{ .tick = .{
              .deadline_ms = now + ms,
              .widget = widget,
-@@ -101,6 +102,7 @@ pub const EventContext = struct {
+@@ -101,6 +101,7 @@ pub const EventContext = struct {
      phase: Phase = .at_target,
      alloc: Allocator,
      cmds: CommandList,
@@ -1313,7 +1658,7 @@ index 1510e71..e78dd7f 100644
  
      /// The event was handled, do not pass it on
      consume_event: bool = false,
-@@ -120,7 +122,7 @@ pub const EventContext = struct {
+@@ -120,7 +121,7 @@ pub const EventContext = struct {
      }
  
      pub fn tick(self: *EventContext, ms: u32, widget: Widget) Allocator.Error!void {
@@ -1322,7 +1667,7 @@ index 1510e71..e78dd7f 100644
      }
  
      pub fn consumeAndRedraw(self: *EventContext) void {
-@@ -541,10 +543,10 @@ test "All widgets have a doctest and refAllDecls test" {
+@@ -541,10 +542,10 @@ test "All widgets have a doctest and refAllDecls test" {
      // it easy to fail CI early, or spot bad tests vs non-existant tests
      const excludes = &[_][]const u8{ "vxfw.zig", "App.zig" };
  
@@ -1336,7 +1681,7 @@ index 1510e71..e78dd7f 100644
          if (file.kind != .file) continue;
          for (excludes) |ex| if (std.mem.eql(u8, ex, file.name)) continue :outer;
  
-@@ -552,7 +554,7 @@ test "All widgets have a doctest and refAllDecls test" {
+@@ -552,7 +553,7 @@ test "All widgets have a doctest and refAllDecls test" {
              file.name[0..idx]
          else
              continue;

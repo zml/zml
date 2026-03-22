@@ -1,0 +1,231 @@
+diff --git a/examples/table.zig b/examples/table.zig
+index c489828..16aefdc 100644
+--- a/examples/table.zig
++++ b/examples/table.zig
+@@ -20,8 +20,8 @@ pub fn main(init: std.process.Init) !void {
+     // Users set up below the main function
+     const users_buf = try alloc.dupe(User, users[0..]);
+ 
+-    var buffer: [1024]u8 = undefined;
+-    var tty = try vaxis.Tty.init(init.io, &buffer);
++    // var buffer: [1024]u8 = undefined;
++    var tty = try vaxis.Tty.init(init.io);
+     defer tty.deinit();
+     const tty_writer = tty.writer();
+     var vx = try vaxis.init(alloc, .{
+diff --git a/src/Vaxis.zig b/src/Vaxis.zig
+index 2e24e9b..2b2ee49 100644
+--- a/src/Vaxis.zig
++++ b/src/Vaxis.zig
+@@ -127,14 +127,13 @@ pub fn deinit(self: *Vaxis, alloc: ?std.mem.Allocator, tty: *IoWriter) void {
+     }
+ }
+ 
+-/// resets enabled features, sends cursor to home and clears below cursor
+-pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+-    // always show the cursor on state reset
++/// Resets enabled terminal features without clearing screen content.
++/// Use this for non-interactive / single-shot rendering where the
++/// output should remain visible after exit.
++pub fn resetModes(self: *Vaxis, tty: *IoWriter) !void {
+     tty.writeAll(ctlseqs.show_cursor) catch {};
+     tty.writeAll(ctlseqs.sgr_reset) catch {};
+     if (self.screen.cursor_shape != .default) {
+-        // In many terminals, `.default` will set to the configured cursor shape. Others, it will
+-        // change to a blinking block.
+         tty.print(ctlseqs.cursor_shape, .{@intFromEnum(Cell.CursorShape.default)}) catch {};
+     }
+     if (self.state.kitty_keyboard) {
+@@ -147,18 +146,6 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+     if (self.state.bracketed_paste) {
+         try self.setBracketedPaste(tty, false);
+     }
+-    if (self.state.alt_screen) {
+-        try tty.writeAll(ctlseqs.home);
+-        try tty.writeAll(ctlseqs.erase_below_cursor);
+-        try self.exitAltScreen(tty);
+-    } else {
+-        try tty.writeByte('\r');
+-        var i: u16 = 0;
+-        while (i < self.state.cursor.row) : (i += 1) {
+-            try tty.writeAll(ctlseqs.ri);
+-        }
+-        try tty.writeAll(ctlseqs.erase_below_cursor);
+-    }
+     if (self.state.color_scheme_updates) {
+         try tty.writeAll(ctlseqs.color_scheme_reset);
+         self.state.color_scheme_updates = false;
+@@ -179,7 +166,24 @@ pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
+         try tty.writeAll(ctlseqs.osc12_reset);
+         self.state.changed_cursor_color = false;
+     }
++    try tty.flush();
++}
+ 
++/// resets enabled features, sends cursor to home and clears below cursor
++pub fn resetState(self: *Vaxis, tty: *IoWriter) !void {
++    self.resetModes(tty) catch {};
++    if (self.state.alt_screen) {
++        try tty.writeAll(ctlseqs.home);
++        try tty.writeAll(ctlseqs.erase_below_cursor);
++        try self.exitAltScreen(tty);
++    } else {
++        try tty.writeByte('\r');
++        var i: u16 = 0;
++        while (i < self.state.cursor.row) : (i += 1) {
++            try tty.writeAll(ctlseqs.ri);
++        }
++        try tty.writeAll(ctlseqs.erase_below_cursor);
++    }
+     try tty.flush();
+ }
+ 
+@@ -943,19 +947,19 @@ pub fn transmitLocalImagePath(
+     switch (format) {
+         .rgb => {
+             try tty.print(
+-                "\x1b_Gf=24,s={d},v={d},i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=24,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
+                 .{ width, height, id, medium_char, encoded },
+             );
+         },
+         .rgba => {
+             try tty.print(
+-                "\x1b_Gf=32,s={d},v={d},i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=32,s={d},v={d},i={d},t={c},q=2;{s}\x1b\\",
+                 .{ width, height, id, medium_char, encoded },
+             );
+         },
+         .png => {
+             try tty.print(
+-                "\x1b_Gf=100,i={d},t={c};{s}\x1b\\",
++                "\x1b_Gf=100,i={d},t={c},q=2;{s}\x1b\\",
+                 .{ id, medium_char, encoded },
+             );
+         },
+@@ -991,7 +995,7 @@ pub fn transmitPreEncodedImage(
+ 
+     if (bytes.len < 4096) {
+         try tty.print(
+-            "\x1b_Gf={d},s={d},v={d},i={d};{s}\x1b\\",
++            "\x1b_Gf={d},s={d},v={d},i={d},q=2;{s}\x1b\\",
+             .{
+                 fmt,
+                 width,
+@@ -1004,14 +1008,14 @@ pub fn transmitPreEncodedImage(
+         var n: usize = 4096;
+ 
+         try tty.print(
+-            "\x1b_Gf={d},s={d},v={d},i={d},m=1;{s}\x1b\\",
++            "\x1b_Gf={d},s={d},v={d},i={d},m=1,q=2;{s}\x1b\\",
+             .{ fmt, width, height, id, bytes[0..n] },
+         );
+         while (n < bytes.len) : (n += 4096) {
+             const end: usize = @min(n + 4096, bytes.len);
+             const m: u2 = if (end == bytes.len) 0 else 1;
+             try tty.print(
+-                "\x1b_Gm={d};{s}\x1b\\",
++                "\x1b_Gm={d},q=2;{s}\x1b\\",
+                 .{
+                     m,
+                     bytes[n..end],
+diff --git a/src/ctlseqs.zig b/src/ctlseqs.zig
+index ab415c6..4baa496 100644
+--- a/src/ctlseqs.zig
++++ b/src/ctlseqs.zig
+@@ -138,8 +138,8 @@ pub const osc52_clipboard_copy = "\x1b]52;c;{s}\x1b\\";
+ pub const osc52_clipboard_request = "\x1b]52;c;?\x1b\\";
+ 
+ // Kitty graphics
+-pub const kitty_graphics_clear = "\x1b_Ga=d\x1b\\";
+-pub const kitty_graphics_preamble = "\x1b_Ga=p,i={d}";
++pub const kitty_graphics_clear = "\x1b_Ga=d,q=2\x1b\\";
++pub const kitty_graphics_preamble = "\x1b_Ga=p,q=2,i={d}";
+ pub const kitty_graphics_closing = ",C=1\x1b\\";
+ 
+ // Color control sequences
+diff --git a/src/tty.zig b/src/tty.zig
+index c1da795..7f6a303 100644
+--- a/src/tty.zig
++++ b/src/tty.zig
+@@ -52,6 +52,10 @@ pub const PosixTty = struct {
+ 
+     var handler_installed: bool = false;
+ 
++    /// Atomic flag set by the SIGWINCH signal handler. Checked and cleared
++    /// by pollWinch() from a non-signal context to avoid deadlocks.
++    var winch_pending: std.atomic.Value(bool) = .{ .raw = false };
++
+     /// initializes a Tty instance by opening /dev/tty and "making it raw". A
+     /// signal handler is installed for SIGWINCH. No callbacks are installed, be
+     /// sure to register a callback when initializing the event loop
+@@ -129,7 +133,20 @@ pub const PosixTty = struct {
+     }
+ 
+     fn handleWinch(_: posix.SIG) callconv(.c) void {
+-        if (!handler_mutex.tryLock()) return;
++        // Only set an atomic flag. Calling mutex.lock() or queue.push()
++        // from a signal handler is not async-signal-safe and causes
++        // deadlocks when the signal is delivered to a thread that already
++        // holds one of those locks. Registered handlers are dispatched
++        // from pollWinch() instead.
++        winch_pending.store(true, .release);
++    }
++
++    /// Check if a SIGWINCH was received and dispatch registered handlers.
++    /// Must be called from a non-signal context (e.g., the main event loop)
++    /// to avoid the async-signal-safety issues with the old approach.
++    pub fn pollWinch() void {
++        if (!winch_pending.swap(false, .acquire)) return;
++        handler_mutex.lockUncancelable(handler_io);
+         defer handler_mutex.unlock(handler_io);
+         var i: usize = 0;
+         while (i < handler_idx) : (i += 1) {
+diff --git a/src/vxfw/App.zig b/src/vxfw/App.zig
+index fc3962f..2661cf4 100644
+--- a/src/vxfw/App.zig
++++ b/src/vxfw/App.zig
+@@ -1,4 +1,5 @@
+ const std = @import("std");
++const builtin = @import("builtin");
+ const vaxis = @import("../main.zig");
+ const vxfw = @import("vxfw.zig");
+ 
+@@ -123,6 +124,13 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
+ 
+         try self.checkTimers(&ctx);
+ 
++        // Poll for pending SIGWINCH outside of queue lock.
++        // The signal handler only sets an atomic flag; we dispatch
++        // the registered callbacks here where mutex operations are safe.
++        if (builtin.os.tag != .windows and !builtin.is_test) {
++            if (!vx.state.in_band_resize) vaxis.Tty.pollWinch();
++        }
++
+         {
+             loop.queue.lock();
+             defer loop.queue.unlock();
+diff --git a/src/vxfw/Padding.zig b/src/vxfw/Padding.zig
+index e60162f..6e5f40b 100644
+--- a/src/vxfw/Padding.zig
++++ b/src/vxfw/Padding.zig
+@@ -6,7 +6,7 @@ const Allocator = std.mem.Allocator;
+ const vxfw = @import("vxfw.zig");
+ 
+ const Padding = @This();
+-const PadValues = struct {
++pub const PadValues = struct {
+     left: u16 = 0,
+     right: u16 = 0,
+     top: u16 = 0,
+@@ -54,10 +54,6 @@ fn typeErasedDrawFn(ptr: *anyopaque, ctx: vxfw.DrawContext) Allocator.Error!vxfw
+ 
+ pub fn draw(self: *const Padding, ctx: vxfw.DrawContext) Allocator.Error!vxfw.Surface {
+     const pad = self.padding;
+-    if (pad.left > 0 or pad.right > 0)
+-        std.debug.assert(ctx.max.width != null);
+-    if (pad.top > 0 or pad.bottom > 0)
+-        std.debug.assert(ctx.max.height != null);
+     const inner_min: vxfw.Size = .{
+         .width = ctx.min.width -| (pad.right + pad.left),
+         .height = ctx.min.height -| (pad.top + pad.bottom),

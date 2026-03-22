@@ -6,6 +6,14 @@ const ui = @import("lib/ui.zig");
 const image_cache = @import("image_cache.zig");
 const Overview = @import("pages/overview.zig");
 
+fn silentResize(vx: *vaxis.Vaxis, allocator: std.mem.Allocator, winsize: vaxis.Winsize) !void {
+    vx.screen.deinit(allocator);
+    vx.screen = try vaxis.Screen.init(allocator, winsize);
+    vx.screen.width_method = vx.caps.unicode;
+    vx.screen_last.deinit(allocator);
+    vx.screen_last = try vaxis.AllocatingScreen.init(allocator, winsize.cols, winsize.rows);
+}
+
 pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !void {
     var tty = try vaxis.Tty.init(io);
     defer tty.deinit();
@@ -20,7 +28,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     }
 
     const ws = try vaxis.Tty.getWinsize(tty.fd);
-    try vx.resize(allocator, tty.writer(), ws);
+    try silentResize(&vx, allocator, ws);
 
     {
         const EventLoop = vaxis.Loop(vxfw.Event);
@@ -28,7 +36,14 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
         try loop.start();
         defer loop.stop();
 
-        try vx.queryTerminal(tty.writer(), io, 1 * std.time.ns_per_s);
+        // queryTerminal sends cursor home (\x1b[H) for capability detection.
+        // Save/restore cursor so we stay at the current position.
+        const writer = tty.writer();
+        try writer.writeAll("\x1b7"); // DECSC: save cursor
+        try writer.flush();
+        try vx.queryTerminal(writer, io, 1 * std.time.ns_per_s);
+        try writer.writeAll("\x1b8"); // DECRC: restore cursor
+        try writer.flush();
     }
 
     image_cache.global.loadAll(&vx, allocator, tty.writer());
@@ -42,11 +57,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     const content_w: u16 = @intCast(vx.screen.width);
 
     var viewing_device: ?u8 = null;
-    var overview: Overview = .{
-        .state = state,
-        .viewing_device = &viewing_device,
-    };
-    try overview.init(allocator);
+    var overview = try Overview.init(allocator, state, null, &viewing_device);
     defer overview.deinit(allocator);
 
     const draw_ctx: vxfw.DrawContext = .{
@@ -61,7 +72,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
 
     const surface = try overview.draw(draw_ctx);
 
-    try vx.resize(allocator, tty.writer(), .{
+    try silentResize(&vx, allocator, .{
         .rows = surface.size.height,
         .cols = ws.cols,
         .x_pixel = ws.x_pixel,
@@ -69,23 +80,11 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     });
 
     const win = vx.window();
-    win.clear();
     const root_win = win.child(.{
         .width = surface.size.width,
         .height = surface.size.height,
     });
     surface.render(root_win, ui.widget(&overview));
 
-    // Scroll terminal to make room for content
-    const writer = tty.writer();
-    for (0..surface.size.height) |_| {
-        try writer.writeByte('\n');
-    }
-    try writer.flush();
-
-    vx.state.cursor.row = surface.size.height -| 1;
-
-    // Force full render
-    vx.queueRefresh();
-    try vx.render(tty.writer());
+    try vx.prettyPrint(tty.writer());
 }

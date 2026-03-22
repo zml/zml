@@ -18,25 +18,17 @@ const ProcessTable = @This();
 
 const max_visible_rows: u16 = 20;
 
-scroll_bars: vxfw.ScrollBars,
+scroll_bars: vxfw.ScrollBars = .{
+    .scroll_view = .{
+        .children = .{ .builder = .{ .userdata = undefined, .buildFn = buildRow } },
+        .draw_cursor = false,
+    },
+    .draw_horizontal_scrollbar = false,
+},
 merged: std.ArrayList(ProcessInfo) = .{},
 
-pub fn init(self: *ProcessTable) void {
-    self.scroll_bars = .{
-        .scroll_view = .{
-            .children = .{
-                .builder = .{
-                    .userdata = self,
-                    .buildFn = buildRow,
-                },
-            },
-            .draw_cursor = false,
-        },
-        .draw_horizontal_scrollbar = false,
-    };
-}
-
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) void {
+    self.scroll_bars.scroll_view.children.builder.userdata = self;
     self.merged.clearRetainingCapacity();
 
     for (state.process_lists) |pl| {
@@ -96,12 +88,11 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     }
 
     const content: ColumnLayout = .{ .children = children.items };
-    const content_h: u16 = @intCast(children.items.len);
     const tb: TitledBorder = .{
         .child = ui.widget(&content),
         .title = "Processes",
     };
-    return tb.draw(ui.fixedSize(ctx, w, content_h + max_visible_rows + 4));
+    return tb.draw(ui.fixedWidth(ctx, w));
 }
 
 /// Builds only data rows (no header) for the scroll view.

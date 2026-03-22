@@ -3,6 +3,7 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
 const ui = @import("../lib/ui.zig");
+const Image = @import("../lib/image.zig");
 
 const Text = vxfw.Text;
 
@@ -52,7 +53,7 @@ pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.
     // Image icon overlay
     if (has_image) {
         const img = self.title_image.?;
-        const img_widget: vxfw.Image = .{ .image = img, .rows = 1 };
+        const img_widget: Image = .{ .image = img, .rows = 1 };
         const img_surf = try img_widget.draw(ctx);
         new_children[idx] = .{
             .origin = .{ .row = 0, .col = 2 },
