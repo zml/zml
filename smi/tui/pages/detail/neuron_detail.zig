@@ -18,8 +18,6 @@ pub fn draw(
     nc: *data.NeuronInfo,
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
-    const content_w: u16 = w -| 4;
-
     // ── Header ──────────────────────────────────────────────
     const header = try common.headerText(ctx.arena, id, utils.strSlice(&nc.name));
 
@@ -77,5 +75,5 @@ pub fn draw(
             ui.widget(process_table),
         },
         .gap = 1,
-    }, w, content_w, parent_widget);
+    }, w, w -| 4, parent_widget);
 }

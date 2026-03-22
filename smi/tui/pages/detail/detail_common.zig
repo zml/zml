@@ -8,6 +8,7 @@ const ui = @import("../../lib/ui.zig");
 const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
+
 pub fn headerText(arena: std.mem.Allocator, id: u8, name: []const u8) std.mem.Allocator.Error!vxfw.Text {
     return .{
         .text = try std.fmt.allocPrint(arena, "Device {d}: {s}", .{ id, name }),

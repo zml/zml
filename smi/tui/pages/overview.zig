@@ -24,33 +24,25 @@ process_table: ?*ProcessTable = null,
 viewing_device: *?u8 = undefined,
 use_braille: bool = false,
 
-pub fn init(self: *Overview, allocator: std.mem.Allocator) !void {
-    const count = self.state.deviceCount();
+pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u8) !Overview {
+    const count = state.deviceCount();
     const cards = try allocator.alloc(DeviceCard, count);
     for (cards, 0..) |*card, i| {
         card.* = .{
             .device_id = @intCast(i),
-            .state = self.state,
-            .viewing_device = self.viewing_device,
+            .state = state,
         };
     }
-    self.device_cards = cards;
+    return .{
+        .state = state,
+        .device_cards = cards,
+        .process_table = process_table,
+        .viewing_device = viewing_device,
+    };
 }
 
 pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
     allocator.free(self.device_cards);
-}
-
-pub fn handleEvent(self: *Overview, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
-    switch (event) {
-        .key_press => |key| {
-            if (key.matches('v', .{})) {
-                self.use_braille = !self.use_braille;
-                return ctx.consumeAndRedraw();
-            }
-        },
-        else => {},
-    }
 }
 
 pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -94,6 +86,7 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     // ── Device Grid ─────────────────────────────────────────
     for (self.device_cards) |*card| {
         card.use_braille = self.use_braille;
+        card.viewing_device = self.viewing_device;
     }
 
     const card_widgets = try ctx.arena.alloc(vxfw.Widget, self.device_cards.len);

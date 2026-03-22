@@ -12,7 +12,6 @@ const Chart = @This();
 const x_axis_h: u16 = 1; // x-axis line
 const time_labels_h: u16 = 1; // time labels below x-axis
 const info_line_h: u16 = 1; // info text below time labels
-const border_h: u16 = 3; // TitledBorder overhead (border + padding)
 
 title: []const u8,
 data: []const u8, // 0-100 normalized
@@ -25,17 +24,12 @@ chart_height: u16 = 6,
 tui_refresh_rate: u16,
 
 pub fn draw(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
-    const content_h: u16 = self.chart_height + x_axis_h + time_labels_h + info_line_h;
-    const total_h: u16 = content_h + border_h;
     const tb: TitledBorder = .{
         .child = ui.drawWidget(self, drawContent),
         .title = self.title,
         .value_label = self.value_label,
     };
-    return tb.draw(ctx.withConstraints(ctx.min, .{
-        .width = ctx.max.width,
-        .height = if (ctx.max.height) |h| h else total_h,
-    }));
+    return tb.draw(ctx);
 }
 
 fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
@@ -49,10 +43,12 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
         .{ .row = self.chart_height, .val = self.y_min },
     };
     var y_strs: [3][]const u8 = undefined;
+    var y_str_widths: [3]u16 = undefined;
     var y_label_w: u16 = 0;
-    for (&y_strs, y_labels) |*s, lbl| {
+    for (&y_strs, &y_str_widths, y_labels) |*s, *sw, lbl| {
         s.* = try std.fmt.allocPrint(ctx.arena, "{d}{s}", .{ lbl.val, self.y_unit });
-        y_label_w = @max(y_label_w, @as(u16, @intCast(ctx.stringWidth(s.*))));
+        sw.* = @intCast(ctx.stringWidth(s.*));
+        y_label_w = @max(y_label_w, sw.*);
     }
 
     // ── Column layout ────────────────────────────────────────
@@ -63,9 +59,8 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     if (chart_w == 0) return surface;
 
     // ── Y-axis labels + axis line ────────────────────────────
-    for (y_strs, y_labels) |text, lbl| {
-        const w: u16 = @intCast(ctx.stringWidth(text));
-        writeStr(&surface, y_label_w - w, lbl.row, text, theme.dim_style);
+    for (y_strs, y_str_widths, y_labels) |text, sw, lbl| {
+        writeStr(&surface, y_label_w - sw, lbl.row, text, theme.dim_style);
     }
     for (0..self.chart_height + 1) |r| {
         const row: u16 = @intCast(r);

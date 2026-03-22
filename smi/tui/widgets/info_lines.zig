@@ -49,9 +49,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     for (entries, 0..) |entry, i| {
         if (w == 0) continue;
 
-        const label_len = entry.label.len;
-        const value_len = entry.value.len;
-        const total_len = label_len + value_len;
+        const total_len = entry.label.len + entry.value.len;
         const segments = if (total_len < w) blk: {
             const pad_len = w - total_len;
             const pad = try ctx.arena.alloc(u8, pad_len);
