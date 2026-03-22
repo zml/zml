@@ -9,7 +9,11 @@ pub const SurfaceBuilder = struct {
     children: std.ArrayList(vxfw.SubSurface),
 
     pub fn add(self: *SurfaceBuilder, row: i17, col: i17, surface: vxfw.Surface) !void {
-        try self.children.append(self.arena, .{ .origin = .{ .row = row, .col = col }, .surface = surface });
+        try self.addZ(row, col, surface, 0);
+    }
+
+    pub fn addZ(self: *SurfaceBuilder, row: i17, col: i17, surface: vxfw.Surface, z_index: u8) !void {
+        try self.children.append(self.arena, .{ .origin = .{ .row = row, .col = col }, .surface = surface, .z_index = z_index });
     }
 
     pub fn finish(self: *SurfaceBuilder, size: vxfw.Size, wgt: vxfw.Widget) vxfw.Surface {

@@ -4,6 +4,7 @@ const vxfw = vaxis.vxfw;
 
 const data = @import("data.zig");
 const ui = @import("lib/ui.zig");
+const compose = @import("lib/compose.zig");
 const image_cache = @import("image_cache.zig");
 const Logo = @import("widgets/logo.zig");
 const ProcessTable = @import("widgets/process_table.zig");
@@ -44,12 +45,18 @@ const Model = struct {
     scroll: ScrollState = .{},
     vx: *vaxis.Vaxis,
     tty: *vaxis.Tty,
-    process_table: ProcessTable,
+    process_table: ProcessTable = .{},
     overview: Overview = undefined,
+
+    fn deinit(self: *Model) void {
+        self.overview.deinit(self.allocator);
+        image_cache.global.deinit(self.allocator);
+    }
 
     pub fn handleEvent(self: *Model, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
         switch (event) {
             .init => {
+                self.overview = try Overview.init(self.allocator, self.state, &self.process_table, &self.viewing_device);
                 image_cache.global.loadAll(self.vx, self.allocator, self.tty.writer());
                 try ctx.tick(1000, ui.widget(self));
             },
@@ -66,29 +73,24 @@ const Model = struct {
                 if (self.viewing_device != null) {
                     if (key.matches(vaxis.Key.escape, .{}) or key.matches(vaxis.Key.backspace, .{})) {
                         self.viewing_device = null;
-                        ctx.redraw = true;
-                        return;
+                        return ctx.consumeAndRedraw();
+                    }
+                } else {
+                    if (key.matches('v', .{})) {
+                        self.overview.use_braille = !self.overview.use_braille;
+                        return ctx.consumeAndRedraw();
                     }
                 }
                 if (key.matches(vaxis.Key.down, .{})) {
                     self.scroll.scrollBy(1, 0);
-                    ctx.redraw = true;
                 } else if (key.matches(vaxis.Key.up, .{})) {
                     self.scroll.scrollBy(-1, 0);
-                    ctx.redraw = true;
                 } else if (key.matches(vaxis.Key.right, .{})) {
                     self.scroll.scrollBy(0, 1);
-                    ctx.redraw = true;
                 } else if (key.matches(vaxis.Key.left, .{})) {
                     self.scroll.scrollBy(0, -1);
-                    ctx.redraw = true;
-                }
-
-                if (!ctx.consume_event) {
-                    if (self.viewing_device == null) {
-                        try self.overview.handleEvent(ctx, event);
-                    }
-                }
+                } else return;
+                return ctx.consumeAndRedraw();
             },
             .mouse => |mouse| {
                 switch (mouse.button) {
@@ -98,7 +100,7 @@ const Model = struct {
                     .wheel_right => self.scroll.scrollBy(0, -3),
                     else => return,
                 }
-                ctx.redraw = true;
+                return ctx.consumeAndRedraw();
             },
             else => {},
         }
@@ -140,16 +142,10 @@ const Model = struct {
         };
         const status_surf = try status_line.draw(ui.fixedSize(ctx, screen.width, 1));
 
-        const children = try ctx.arena.alloc(vxfw.SubSurface, 2);
-        children[0] = .{ .origin = .{ .row = -self.scroll.row, .col = -self.scroll.col }, .surface = content_surf };
-        children[1] = .{ .origin = .{ .row = @intCast(content_h), .col = 0 }, .surface = status_surf, .z_index = 1 };
-
-        return .{
-            .size = screen,
-            .widget = ui.widget(self),
-            .buffer = &.{},
-            .children = children,
-        };
+        var sb = compose.surfaceBuilder(ctx.arena);
+        try sb.add(-self.scroll.row, -self.scroll.col, content_surf);
+        try sb.addZ(@intCast(content_h), 0, status_surf, 1);
+        return sb.finish(screen, ui.widget(self));
     }
 };
 
@@ -162,19 +158,8 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
         .state = state,
         .vx = &app.vx,
         .tty = &app.tty,
-        .process_table = .{ .scroll_bars = undefined },
     };
-
-    defer image_cache.global.deinit(allocator);
-    model.process_table.init();
-
-    model.overview = .{
-        .state = state,
-        .process_table = &model.process_table,
-        .viewing_device = &model.viewing_device,
-    };
-    try model.overview.init(allocator);
-    defer model.overview.deinit(allocator);
+    defer model.deinit();
 
     try app.run(ui.widget(&model), .{});
 }

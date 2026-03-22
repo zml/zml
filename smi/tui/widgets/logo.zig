@@ -4,6 +4,7 @@ const vxfw = vaxis.vxfw;
 const theme = @import("../theme.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
+const Image = @import("../lib/image.zig");
 
 const Logo = @This();
 
@@ -30,7 +31,8 @@ pub const compact_image_height: u16 = 8;
 pub fn draw(self: *const Logo, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     if (self.image) |img| {
         const h = if (self.compact) compact_image_height else image_height;
-        return (vxfw.Image{ .image = img, .rows = h }).draw(ctx);
+        const img_w: Image = .{ .image = img, .rows = h };
+        return img_w.draw(ctx);
     }
 
     const lines: []const []const u8 = if (self.compact) ascii_lines[1..] else &ascii_lines;
