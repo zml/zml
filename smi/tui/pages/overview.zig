@@ -17,8 +17,8 @@ const Overview = @This();
 const two_col_breakpoint: u16 = 120;
 const narrow_breakpoint: u16 = 80;
 const max_info_width: u16 = 50;
-/// Total width of the wide banner: logo box + info lines + page padding.
-pub const host_line_width: u16 = (Logo.logo_width + 4) + max_info_width + 4;
+/// Total width of the wide banner: logo box (incl. left margin) + info lines + right margin.
+pub const host_line_width: u16 = (Logo.logo_width + 6) + max_info_width + 2;
 
 state: *const data.SystemState,
 device_cards: []DeviceCard = &.{},
@@ -65,12 +65,12 @@ fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) 
     const info_lines: InfoLines = .{ .state = self.state };
 
     const logo_h: u16 = if (logo.image != null) Logo.image_height else Logo.logo_height;
-    const logo_box_w = Logo.logo_width + 4;
+    const logo_box_w = Logo.logo_width + 6; // +4 centering + 2 absorbed page margin
     const info_max_w = @min(content_w -| logo_box_w, max_info_width);
     const banner_h = @max(logo_h, InfoLines.entry_count);
 
     const flex_items = [2]vxfw.FlexItem{
-        .{ .widget = try compose.sized(ctx.arena, ui.widget(&logo), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },
+        .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },
         .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&info_lines)), .{ .width = info_max_w, .height = banner_h }), .flex = 0 },
     };
     const sized_banner = try compose.sized(ctx.arena, (vxfw.FlexRow{ .children = &flex_items }).widget(), .{ .width = content_w, .height = banner_h });
@@ -87,8 +87,8 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
     var row: i17 = 1; // top margin
 
     // ── Banner (Logo + Info Lines) ─────────────────────────
-    const banner_surf = try if (narrow) self.drawNarrowBanner(ctx, content_w) else self.drawWideBanner(ctx, content_w);
-    try sb.add(row, 2, banner_surf);
+    const banner_surf = try if (narrow) self.drawNarrowBanner(ctx, content_w) else self.drawWideBanner(ctx, content_w + 2);
+    try sb.add(row, if (narrow) @as(i17, 2) else 0, banner_surf);
     row += @intCast(banner_surf.size.height + 1);
 
     // ── Device Grid ─────────────────────────────────────────

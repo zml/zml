@@ -75,5 +75,5 @@ pub fn draw(
             ui.widget(process_table),
         },
         .gap = 1,
-    }, w, w -| 4, parent_widget);
+    }, w, parent_widget);
 }
