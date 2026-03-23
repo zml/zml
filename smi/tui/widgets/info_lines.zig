@@ -47,7 +47,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});
     const values = [entry_count][]const u8{
-        "v0.1",
+        "v0.2",
         utils.strSlice(&host.hostname),
         utils.strSlice(&host.kernel),
         utils.strSlice(&host.cpu_name),
@@ -72,7 +72,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
             const pad_len = w - total_len;
             const pad = try ctx.arena.alloc(u8, pad_len);
             @memset(pad, '-');
-	    pad[pad_len - 1] = ' ';
+            pad[pad_len - 1] = ' ';
             break :blk try ctx.arena.dupe(vaxis.Cell.Segment, &.{
                 .{ .text = entry.label, .style = theme.header_style },
                 .{ .text = pad, .style = theme.dim_style },
