@@ -5,6 +5,7 @@ const data = @import("../../data.zig");
 const theme = @import("../../theme.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
+const compose = @import("../../lib/compose.zig");
 const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
@@ -46,16 +47,10 @@ pub fn historyChart(
     };
 }
 
-/// Draws a page-level layout with standard margin (row=1, col=2) inside a full-width surface.
-pub fn pageFrame(ctx: vxfw.DrawContext, layout: ColumnLayout, w: u16, content_w: u16, parent_widget: vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
-    const layout_surf = try ui.widget(&layout).draw(ui.fixedWidth(ctx, content_w));
-
-    const children = try ctx.arena.alloc(vxfw.SubSurface, 1);
-    children[0] = .{ .origin = .{ .row = 1, .col = 2 }, .surface = layout_surf };
-    return .{
-        .size = .{ .width = w, .height = layout_surf.size.height + 1 },
-        .widget = parent_widget,
-        .buffer = &.{},
-        .children = children,
-    };
+/// Draws a page-level layout with standard margin (top=1, left/right=2) inside a full-width surface.
+pub fn pageFrame(ctx: vxfw.DrawContext, layout: ColumnLayout, w: u16, parent_widget: vxfw.Widget) std.mem.Allocator.Error!vxfw.Surface {
+    const padded = try compose.pad(ctx.arena, ui.widget(&layout), .{ .top = 1, .left = 2, .right = 2 });
+    var surf = try padded.draw(ui.fixedWidth(ctx, w));
+    surf.widget = parent_widget;
+    return surf;
 }

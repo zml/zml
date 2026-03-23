@@ -72,7 +72,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const mem_used_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{mem_used_mb});
 
     const mem_pad = try utils.repeatStr(ctx.arena, " ", @intCast(mem_total_str.len -| mem_used_str.len));
-    const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{s}{s}/{s} MB", .{
+    const mem_suffix = try std.fmt.allocPrint(ctx.arena, "{s}{s} / {s} MB", .{
         mem_pad, mem_used_str, mem_total_str,
     });
 

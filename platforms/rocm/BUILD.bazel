@@ -5,7 +5,10 @@ zig_shared_library(
     name = "zmlxrocm",
     main = "zmlxrocm.zig",
     shared_lib_name = "libzmlxrocm.so.0",
-    visibility = ["@libpjrt_rocm//:__subpackages__"],
+    visibility = [
+        "//smi:__pkg__",
+        "@libpjrt_rocm//:__subpackages__",
+    ],
     # Use Clang's compiler-rt, but disable stack checking
     # to avoid requiring on the _zig_probe_stack symbol.
     zigopts = ["-fno-stack-check"],

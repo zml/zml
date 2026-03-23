@@ -44,12 +44,6 @@ cc_library(
 
 # smi
 
-patchelf(
-    name = "libdrm_amdgpu.patchelf",
-    src = "@libdrm-amdgpu-amdgpu1//:libdrm_amdgpu",
-    set_rpath = "$ORIGIN",
-)
-
 strip_debug(
     name = "libnrt.stripped",
     src = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
@@ -66,15 +60,19 @@ copy_to_directory(
         "@platforms//os:macos": [],
         "//conditions:default": [
             "@amd-smi-lib//:libamd_smi",
-            ":libdrm_amdgpu.patchelf",
+            "@libdrm-amdgpu-amdgpu1",
+            "@libdrm-amdgpu-common//:amdgpu_ids",
             "@libdrm2-amdgpu//:libdrm2-amdgpu",
+            "//platforms/rocm:zmlxrocm",
             ":libnrt.stripped",
             ":libncfw.stripped",
         ],
     }),
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
-        "libdrm_amdgpu.patchelf": "lib",
+        "opt/amdgpu/share": "share",
+        "libdrm-amdgpu-amdgpu1": "lib",
+        "platforms/rocm": "lib",
         "libnrt.stripped": "lib",
         "libncfw.stripped": "lib",
     },
@@ -152,18 +150,12 @@ tar(
     mtree = ":mtree",
 )
 
-tar(
-    name = "amdgpu_ids",
-    srcs = ["@libdrm-amdgpu-common//:amdgpu_ids"],
-)
-
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ["/{}/zml-smi".format(package_name())],
     tars = [
         ":archive",
-        ":amdgpu_ids",
     ],
 )
 
