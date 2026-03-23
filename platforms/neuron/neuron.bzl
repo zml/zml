@@ -1,4 +1,4 @@
-load("@python_versions//3.11:defs.bzl", _py_binary = "py_binary")
+load("@python_versions//3.12:defs.bzl", _py_binary = "py_binary")
 load("@rules_python//python:defs.bzl", "PyInfo")
 load("@with_cfg.bzl", "with_cfg")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
@@ -6,7 +6,7 @@ load("//bazel:simple_repository.bzl", "simple_repository")
 load("//platforms:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
-STRIP_PREFIX = "opt/aws/neuron"
+STRIP_PREFIX = "./opt/aws/neuron"
 
 _BUILD_FILE_PRELUDE = """\
 package(default_visibility = ["//visibility:public"])
@@ -101,4 +101,4 @@ neuron_packages = module_extension(
 py_binary_with_script, _py_binary_internal = with_cfg(
     kind = _py_binary,
     extra_providers = [PyInfo],
-).set(Label("@rules_python//python/config_settings:bootstrap_impl"), "script").build()
+).build()
