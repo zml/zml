@@ -33,6 +33,10 @@ zig_library(
         "moe/triton/triton_kernels/config.json",
     ]),
     tags = ["manual"],
+    data = glob([
+        "ttir_moe_kernels_tensorized/decode/*.ttir",
+        "moe/triton/triton_kernels/config.json",
+    ]),
     srcs = [
         "attention.zig",
         "attention/attention.zig",
