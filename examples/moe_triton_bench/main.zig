@@ -52,7 +52,7 @@ const RandomGen = struct {
         defer results.deinit(allocator);
         exe.callOpts(io, args, &results, .{ .wait = true });
 
-        var output: zml.Bufferized(stdx.meta.FnResult(GenTensor.gen)) = undefined;
+        var output: zml.Bufferized(stdx.meta.FnReturn(GenTensor.gen)) = undefined;
         results.fill(.{&output});
         defer Tensor.Rng.deinitBuffer(&output.@"0");
 

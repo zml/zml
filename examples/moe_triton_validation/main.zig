@@ -17,7 +17,9 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *zml.
     defer reader.deinit();
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, host_bytes);
+    const sharding_replicated = try zml.sharding.replicatedSharding(platform);
+
+    return zml.Buffer.fromBytes(io, platform, shape, sharding_replicated, host_bytes);
 }
 
 const Fwd = struct {
@@ -75,6 +77,8 @@ pub fn main(init: std.process.Init) !void {
     log.info("topk_ids shape: {f}", .{topk_ids.shape()});
     log.info("expected output shape: {f}", .{expected.shape()});
 
+    const sharding_replicated = try zml.sharding.replicatedSharding(platform);
+
     var exe = try zml.module.compile(
         allocator,
         io,
@@ -87,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
             Tensor.fromShape(topk_ids.shape()),
         },
         platform,
+        .{ .shardings = &.{sharding_replicated} },
     );
     defer exe.deinit();
 
