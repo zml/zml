@@ -616,7 +616,7 @@ pub const VisionMlp = struct {
 
     pub fn forward(self: VisionMlp, x: Tensor) Tensor {
         const x_tagged = x.withTags(.{ .s, .d });
-        const x1 = self.linear_fc1.forward(x_tagged).silu();
+        const x1 = self.linear_fc1.forward(x_tagged).gelu();
         const x2 = self.linear_fc2.forward(x1);
 
         return x2;
