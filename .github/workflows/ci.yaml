@@ -12,87 +12,79 @@ concurrency:
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
-  platforms:
+  ci:
+    name: ci-${{ matrix.target }}
     strategy:
+      fail-fast: false
       matrix:
-        runtimes:
+        include:
+          - target: cpu
+            bazel_opts: ""
+            self_hosted: false
+            run_tests: true
+            runner_labels:
+              - runs-on
+              - runner=4cpu-linux-x64
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
+          - target: neuron
+            bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
+            self_hosted: false
+            run_tests: false
+            runner_labels:
+              - runs-on
+              - runner=4cpu-linux-x64
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
-            runs-on: ["self-hosted", "platform=cuda"]
+            self_hosted: true
+            run_tests: true
+            runner_labels: ["self-hosted", "platform=cuda"]
           - target: rocm
             bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
-            runs-on: ["self-hosted", "platform=rocm"]
-    runs-on: ${{ matrix.runtimes.runs-on }}
+            self_hosted: true
+            run_tests: true
+            runner_labels: ["self-hosted", "platform=rocm"]
+    runs-on: ${{ matrix.runner_labels }}
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Ensure self hosted cache permissions
+        if: ${{ matrix.self_hosted }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
-      - uses: bazel-contrib/setup-bazel@0.18.0
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.18.0
         with:
           bazelisk-version: 1.28.1
-          bazelisk-cache: false
-          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
+          bazelisk-cache: ${{ !matrix.self_hosted }}
+          repository-cache: ${{ !matrix.self_hosted }}
+          external-cache: ${{ !matrix.self_hosted }}
           bazelrc: |
-            common -c opt
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk_cache=/home/actions/.cache/bazel-disk
-            common --strip=always
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
+            ${{ matrix.self_hosted && 'common -c opt' || '' }}
+            ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
+            ${{ matrix.self_hosted && 'common --strip=always' || '' }}
 
-      - run: bazel mod explain
       - run: bazel mod graph
-      - run: bazel query ${{ matrix.runtimes.bazel_opts }} //...
-      - run: bazel build ${{ matrix.runtimes.bazel_opts }} //...
-      - run: bazel test ${{ matrix.runtimes.bazel_opts }} //...
+      - run: bazel query ${{ matrix.bazel_opts }} //...
+      - run: bazel build ${{ matrix.bazel_opts }} //...
+      - if: ${{ matrix.run_tests }}
+        run: bazel test ${{ matrix.bazel_opts }} //...
 
-  platform-cpu:
-    runs-on:
-      [
-        "runs-on",
-        "runner=4cpu-linux-x64",
-        "image=ubuntu24-amd64",
-        "run-id=${{ github.run_id }}",
-        "extras=s3-cache",
-      ]
-    env:
-      BUILDBUDDY_CI_API_KEY: ${{ secrets.BUILDBUDDY_CI_API_KEY }}
-      CI_BAZEL_CACHE: ~/.cache/bazel-repo
-    steps:
-      - uses: runs-on/action@v1
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - uses: bazel-contrib/setup-bazel@0.18.0
-        with:
-          bazelisk-version: 1.28.1
-          bazelisk-cache: true
-          repository-cache: true
-          external-cache: true
-          bazelrc: |
-            common --verbose_failures
-            common --keep_going
-            common --test_output=streamed
-            common --color=yes
-            common --show_timestamps
-            common --remote_download_outputs=minimal
-
-      - name: Add .github/bin to PATH (remote-bazel)
-        run: echo "$GITHUB_WORKSPACE/.github/bin" >> "$GITHUB_PATH"
-
-      - run: remote-bazel mod explain
-      - run: remote-bazel mod graph
-      - run: remote-bazel query //...
-      - run: remote-bazel build //...
-      - run: remote-bazel test //...
-
-  zig-lint:
+  lint:
     runs-on:
       [
         "runs-on",
