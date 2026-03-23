@@ -84,9 +84,7 @@ jobs:
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
             ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
-            ${{ matrix.self_hosted && 'common -c opt' || '' }}
             ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
-            ${{ matrix.self_hosted && 'common --strip=always' || '' }}
 
       - run: bazel mod graph
       - run: bazel query ${{ matrix.bazel_opts }} //...
