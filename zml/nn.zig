@@ -320,7 +320,7 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
 }
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
-fn invFreq(N: i64, opts: RopeOpts) Tensor {
+pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const allocator = zml.module.CompilationContext.current().allocator;
     const N_half: usize = @intCast(@divExact(N, 2));
     const inv_freq = allocator.alloc(f32, N_half) catch @panic("OOM");
