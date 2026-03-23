@@ -38,6 +38,16 @@ jobs:
               - image=ubuntu24-amd64
               - run-id=${{ github.run_id }}
               - extras=s3-cache
+          - target: tpu
+            bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
+            self_hosted: false
+            run_tests: false
+            runner_labels:
+              - runs-on
+              - runner=4cpu-linux-x64
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
             self_hosted: true
