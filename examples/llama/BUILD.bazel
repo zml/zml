@@ -19,6 +19,7 @@ zig_binary(
 mtree_spec(
     name = "mtree",
     srcs = [":llama"],
+    tags = ["manual"]
 )
 
 tar(
@@ -33,6 +34,7 @@ tar(
     ],
     compress = "zstd",
     mtree = ":mtree",
+    tags = ["manual"]
 )
 
 oci_image(
@@ -43,6 +45,7 @@ oci_image(
         "@platforms//os:linux",
     ],
     tars = [":archive"],
+    tags = ["manual"]
 )
 
 platform_transition_filegroup(

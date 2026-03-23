@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "pjrt",
+    tags = ["manual"],
     srcs = ["ffi.zig"],
     main = "pjrt.zig",
     visibility = ["//visibility:public"],

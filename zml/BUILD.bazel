@@ -5,20 +5,24 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 upb_c_proto_library(
     name = "xla_data_upb",
     deps = ["@xla//xla:xla_data_proto"],
+    tags = ["manual"],
 )
 
 upb_c_proto_library(
     name = "xla_compile_options_upb",
     deps = ["@xla//xla/pjrt/proto:compile_options_proto"],
+    tags = ["manual"],
 )
 
 upb_c_proto_library(
     name = "profiler_options",
     deps = ["@tsl//tsl/profiler/protobuf:profiler_options_proto"],
+    tags = ["manual"],
 )
 
 cc_library(
     name = "posix",
+    tags = ["manual"],
     hdrs = ["posix.h"],
 )
 
@@ -28,6 +32,7 @@ zig_library(
         "ttir_moe_kernels_tensorized/decode/*.ttir",
         "moe/triton/triton_kernels/config.json",
     ]),
+    tags = ["manual"],
     srcs = [
         "attention.zig",
         "attention/attention.zig",

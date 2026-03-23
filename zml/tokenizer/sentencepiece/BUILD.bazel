@@ -5,6 +5,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 swig_cc_library(
     name = "sentencepiece_swig",
+    tags = ["manual"],
     interface = "sentencepiece.i",
     module = "sentencepiece",
     deps = [
@@ -15,6 +16,7 @@ swig_cc_library(
 
 zig_library(
     name = "sentencepiece",
+    tags = ["manual"],
     import_name = "sentencepiece",
     main = "sentencepiece.zig",
     visibility = ["//visibility:public"],
