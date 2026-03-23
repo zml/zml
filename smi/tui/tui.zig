@@ -57,6 +57,7 @@ const Model = struct {
         switch (event) {
             .init => {
                 self.overview = try Overview.init(self.allocator, self.state, &self.process_table, &self.viewing_device);
+                self.overview.use_braille = true;
                 image_cache.global.loadAll(self.vx, self.allocator, self.tty.writer());
                 try ctx.tick(1000, ui.widget(self));
             },

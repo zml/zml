@@ -11,6 +11,20 @@ const InfoLines = @This();
 
 state: *const data.SystemState,
 
+const labels = [_][]const u8{
+    "zml-smi ",
+    "Hostname ",
+    "Kernel ",
+    "CPU ",
+    "Cores ",
+    "Memory ",
+    "Uptime ",
+    "Load ",
+    "Devices ",
+};
+
+pub const entry_count: u16 = labels.len;
+
 const Entry = struct {
     label: []const u8,
     value: []const u8,
@@ -32,17 +46,21 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const total_gb = total_kib / (1024 * 1024);
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});
-    const entries = [_]Entry{
-        .{ .label = "zml-smi ", .value = "v0.1" },
-        .{ .label = "Hostname ", .value = utils.strSlice(&host.hostname) },
-        .{ .label = "Kernel ", .value = utils.strSlice(&host.kernel) },
-        .{ .label = "CPU ", .value = utils.strSlice(&host.cpu_name) },
-        .{ .label = "Cores ", .value = cores_str },
-        .{ .label = "Memory ", .value = mem_str },
-        .{ .label = "Uptime ", .value = uptime_str },
-        .{ .label = "Load ", .value = load_str },
-        .{ .label = "Devices ", .value = devices_str },
+    const values = [entry_count][]const u8{
+        "v0.1",
+        utils.strSlice(&host.hostname),
+        utils.strSlice(&host.kernel),
+        utils.strSlice(&host.cpu_name),
+        cores_str,
+        mem_str,
+        uptime_str,
+        load_str,
+        devices_str,
     };
+    var entries: [entry_count]Entry = undefined;
+    for (&entries, labels, values) |*e, label, value| {
+        e.* = .{ .label = label, .value = value };
+    }
 
     var sb = compose.surfaceBuilder(ctx.arena);
 
