@@ -1470,6 +1470,26 @@ pub fn forwardBlock0Attn2(x: Tensor, context: Tensor, params: Attention.Params) 
     return attn.forward(x, params, kindNumHeads(.attn2), .{ .context = context });
 }
 
+pub fn forwardBlock0Attn2WithContextMask(x: Tensor, context: Tensor, context_mask: Tensor, params: Attention.Params) Tensor {
+    const attn = Attention{};
+    return attn.forward(x, params, kindNumHeads(.attn2), .{ .context = context, .mask = context_mask });
+}
+
+/// M2 residual algebra-only check using precomputed text cross-attn delta from fixture.
+///
+/// Tests: vx_after_self_attn + text_ca_out == vx_after_text_ca
+/// without re-running text cross-attention internals.
+pub fn forwardBlock0VideoTextCaResidualFromDelta(vx: Tensor, text_ca_out: Tensor) Tensor {
+    return vx.withPartialTags(.{ .b, .t, .d }).add(text_ca_out.withPartialTags(.{ .b, .t, .d }));
+}
+
+/// M3 residual algebra-only check using precomputed FF output from fixture.
+///
+/// Tests: vx_before_ff + ff_out * vgate_mlp == vx_after_ff
+pub fn forwardBlock0VideoFFResidualFromFFOut(vx: Tensor, ff_out: Tensor, vgate_mlp: Tensor) Tensor {
+    return vx.withPartialTags(.{ .b, .t, .d }).add(ff_out.withPartialTags(.{ .b, .t, .d }).mul(vgate_mlp.broad(ff_out.shape())));
+}
+
 pub fn forwardBlock0AudioAttn1(x: Tensor, params: Attention.Params) Tensor {
     const attn = Attention{};
     return attn.forward(x, params, kindNumHeads(.audio_attn1), .{});

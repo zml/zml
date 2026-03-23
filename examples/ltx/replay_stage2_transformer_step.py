@@ -30,6 +30,7 @@ Notes:
 """
 
 import argparse
+import types
 from typing import Any
 from pathlib import Path
 
@@ -291,6 +292,7 @@ def main() -> None:
     kwargs_handles: list = []
     captured_aux: dict[str, torch.Tensor] = {}
     aux_handles: list = []
+    text_ca_method_patches: list[tuple[torch.nn.Module, Any]] = []
     captured_sdpa: dict[str, torch.Tensor] = {}
     sdpa_call_shapes: list[dict[str, Any]] = []
     orig_sdpa = None
@@ -447,8 +449,16 @@ def main() -> None:
                             video.timesteps,
                             slice(0, 3),
                         )
+                        _, _, vgate_mlp = module.get_ada_values(
+                            module.scale_shift_table,
+                            batch_size,
+                            video.timesteps,
+                            slice(3, 6),
+                        )
                         if isinstance(vgate_msa, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.vgate_msa"] = vgate_msa.detach().cpu().contiguous()
+                        if isinstance(vgate_mlp, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.vgate_mlp"] = vgate_mlp.detach().cpu().contiguous()
                         if isinstance(video.timesteps, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.video_timesteps"] = video.timesteps.detach().cpu().contiguous()
                     except Exception as exc:
@@ -466,6 +476,73 @@ def main() -> None:
             except Exception as exc:
                 print(f"WARNING: could not register aux hook for {name}: {exc}")
 
+            # M2 capture: wrap _apply_text_cross_attention to capture the exact
+            # residual delta returned by Python block logic.
+            if hasattr(mod, "_apply_text_cross_attention"):
+                orig_text_ca = getattr(mod, "_apply_text_cross_attention")
+
+                def _make_text_ca_wrapper(mod_name: str, orig_fn: Any):
+                    def _wrapped(
+                        self,
+                        x,
+                        context,
+                        attn,
+                        scale_shift_table,
+                        prompt_scale_shift_table,
+                        timestep,
+                        prompt_timestep,
+                        context_mask,
+                        cross_attention_adaln=False,
+                    ):
+                        out = orig_fn(
+                            x,
+                            context,
+                            attn,
+                            scale_shift_table,
+                            prompt_scale_shift_table,
+                            timestep,
+                            prompt_timestep,
+                            context_mask,
+                            cross_attention_adaln=cross_attention_adaln,
+                        )
+                        try:
+                            is_video_text_ca = hasattr(self, "attn2") and (attn is self.attn2)
+                            is_audio_text_ca = hasattr(self, "audio_attn2") and (attn is self.audio_attn2)
+
+                            if isinstance(x, torch.Tensor):
+                                if is_video_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.text_ca_vx_in"] = x.detach().cpu().contiguous()
+                                elif is_audio_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.audio_text_ca_ax_in"] = x.detach().cpu().contiguous()
+                            if isinstance(out, torch.Tensor):
+                                if is_video_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.text_ca_out"] = out.detach().cpu().contiguous()
+                                elif is_audio_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.audio_text_ca_out"] = out.detach().cpu().contiguous()
+                            if isinstance(context, torch.Tensor):
+                                if is_video_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.text_ca_context"] = context.detach().cpu().contiguous()
+                                elif is_audio_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.audio_text_ca_context"] = context.detach().cpu().contiguous()
+                            if isinstance(context_mask, torch.Tensor):
+                                if is_video_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.text_ca_context_mask"] = context_mask.detach().cpu().contiguous()
+                                elif is_audio_text_ca:
+                                    captured_aux[f"{mod_name}.__aux__.audio_text_ca_context_mask"] = context_mask.detach().cpu().contiguous()
+                        except Exception as exc:
+                            print(f"WARNING: failed to capture text-ca aux tensors: {exc}")
+                        return out
+
+                    return _wrapped
+
+                try:
+                    wrapped = types.MethodType(_make_text_ca_wrapper(name, orig_text_ca), mod)
+                    setattr(mod, "_apply_text_cross_attention", wrapped)
+                    text_ca_method_patches.append((mod, orig_text_ca))
+                    print(f"text-ca wrapper installed for: {name}")
+                except Exception as exc:
+                    print(f"WARNING: could not install text-ca wrapper for {name}: {exc}")
+
     print("Starting transformer forward + activation collection...")
     try:
         (denoised_video, denoised_audio), activations = collector(
@@ -476,6 +553,11 @@ def main() -> None:
     finally:
         if orig_sdpa is not None:
             F.scaled_dot_product_attention = orig_sdpa
+        for mod, orig_fn in text_ca_method_patches:
+            try:
+                setattr(mod, "_apply_text_cross_attention", orig_fn)
+            except Exception as exc:
+                print(f"WARNING: failed restoring text-ca wrapper: {exc}")
 
     # Remove kwargs pre-hooks and merge their captures into activations.
     for h in kwargs_handles:
