@@ -103,6 +103,10 @@ def main() -> None:
     keep_exact = {
         "transformer_blocks.0.scale_shift_table",
         "transformer_blocks.0.audio_scale_shift_table",
+        "transformer_blocks.0.scale_shift_table_a2v_ca_video",
+        "transformer_blocks.0.scale_shift_table_a2v_ca_audio",
+        "transformer_blocks.0.prompt_scale_shift_table",
+        "transformer_blocks.0.audio_prompt_scale_shift_table",
     }
 
     tensors: dict[str, torch.Tensor] = {}

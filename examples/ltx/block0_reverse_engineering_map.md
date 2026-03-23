@@ -9,6 +9,8 @@ Two checker paths are currently maintained:
 - Legacy FF-boundary surrogate parity (`block0_ff_boundary_*`).
 - Full stream parity for block0 video+audio composition (`block0_full_*`, M6).
 
+For post-block0 work (model-level threading and multi-block validation), continue tracking in [examples/ltx/transformer_threading_progress.md](examples/ltx/transformer_threading_progress.md).
+
 - Current canonical block full-forward API: [examples/ltx/model.zig](examples/ltx/model.zig#L402)
 - Current FF-boundary entrypoint: [examples/ltx/model.zig](examples/ltx/model.zig#L506)
 - Checker callsite: [examples/ltx/block0_forward_check.zig](examples/ltx/block0_forward_check.zig#L96)

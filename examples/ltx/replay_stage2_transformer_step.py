@@ -467,6 +467,12 @@ def main() -> None:
                             captured_aux[f"{mod_name}.__aux__.vgate_mlp"] = vgate_mlp.detach().cpu().contiguous()
                         if isinstance(video.timesteps, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.video_timesteps"] = video.timesteps.detach().cpu().contiguous()
+                        if hasattr(video, "prompt_timestep") and isinstance(video.prompt_timestep, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.v_prompt_timestep"] = video.prompt_timestep.detach().cpu().contiguous()
+                        if hasattr(video, "cross_scale_shift_timestep") and isinstance(video.cross_scale_shift_timestep, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.v_cross_ss_ts"] = video.cross_scale_shift_timestep.detach().cpu().contiguous()
+                        if hasattr(video, "cross_gate_timestep") and isinstance(video.cross_gate_timestep, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.v_cross_gate_ts"] = video.cross_gate_timestep.detach().cpu().contiguous()
 
                         audio = kwargs.get("audio") if isinstance(kwargs, dict) else None
                         if audio is None and len(args_tup) > 1:
@@ -507,6 +513,12 @@ def main() -> None:
                                 captured_aux[f"{mod_name}.__aux__.agate_mlp"] = agate_mlp.detach().cpu().contiguous()
                             if isinstance(audio.timesteps, torch.Tensor):
                                 captured_aux[f"{mod_name}.__aux__.audio_timesteps"] = audio.timesteps.detach().cpu().contiguous()
+                            if hasattr(audio, "prompt_timestep") and isinstance(audio.prompt_timestep, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.a_prompt_timestep"] = audio.prompt_timestep.detach().cpu().contiguous()
+                            if hasattr(audio, "cross_scale_shift_timestep") and isinstance(audio.cross_scale_shift_timestep, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.a_cross_ss_ts"] = audio.cross_scale_shift_timestep.detach().cpu().contiguous()
+                            if hasattr(audio, "cross_gate_timestep") and isinstance(audio.cross_gate_timestep, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.a_cross_gate_ts"] = audio.cross_gate_timestep.detach().cpu().contiguous()
 
                         # M5 gates/masks: AV cross-attn branches A->V and V->A.
                         if (
