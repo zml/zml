@@ -20,7 +20,7 @@ CUDA_REDIST_JSON_SHA256 = "97cf605ccc4751825b1865f4af571c9b50dd29ffd13e9a38b296a
 
 CUDNN_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/cudnn/redist/"
 CUDNN_VERSION = "9.19.1"
-CUDNN_REDIST_JSON_SHA256 = "6ad4f2c047ee03131d1efb95db56f78c24953cb30880a2edcf99407ff9362a04"
+CUDNN_REDIST_JSON_SHA256 = "ee7bd6872b8611017bfc9ac99a4a71932652d1851b5917aa2c66bf29a12f8fd4"
 
 NVSHMEM_REDIST_PREFIX = "https://developer.download.nvidia.com/compute/nvshmem/redist/"
 NVSHMEM_VERSION = "3.5.19"
