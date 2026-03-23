@@ -38,6 +38,7 @@ import torch
 import torch.nn.functional as F
 import zml_utils
 
+from ltx_core.guidance.perturbations import PerturbationType
 from ltx_core.loader import LoraPathStrengthAndSDOps, LTXV_LORA_COMFY_RENAMING_MAP
 from ltx_pipelines.utils.helpers import modality_from_latent_state
 from ltx_core.types import LatentState
@@ -292,6 +293,7 @@ def main() -> None:
     kwargs_handles: list = []
     captured_aux: dict[str, torch.Tensor] = {}
     aux_handles: list = []
+    current_block_args: dict[str, dict[str, Any]] = {}
     text_ca_method_patches: list[tuple[torch.nn.Module, Any]] = []
     captured_sdpa: dict[str, torch.Tensor] = {}
     sdpa_call_shapes: list[dict[str, Any]] = []
@@ -442,6 +444,10 @@ def main() -> None:
                         if not hasattr(module, "get_ada_values") or not hasattr(module, "scale_shift_table"):
                             return None
 
+                        # M6: capture initial vx_in / ax_in at block entry.
+                        if isinstance(video.x, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.vx_in"] = video.x.detach().cpu().contiguous()
+
                         batch_size = int(video.x.shape[0])
                         _, _, vgate_msa = module.get_ada_values(
                             module.scale_shift_table,
@@ -461,6 +467,97 @@ def main() -> None:
                             captured_aux[f"{mod_name}.__aux__.vgate_mlp"] = vgate_mlp.detach().cpu().contiguous()
                         if isinstance(video.timesteps, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.video_timesteps"] = video.timesteps.detach().cpu().contiguous()
+
+                        audio = kwargs.get("audio") if isinstance(kwargs, dict) else None
+                        if audio is None and len(args_tup) > 1:
+                            audio = args_tup[1]
+                        perturbations = kwargs.get("perturbations") if isinstance(kwargs, dict) else None
+                        if perturbations is None and len(args_tup) > 2:
+                            perturbations = args_tup[2]
+
+                        if audio is not None and hasattr(audio, "x") and isinstance(audio.x, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.ax_in"] = audio.x.detach().cpu().contiguous()
+
+                        current_block_args[mod_name] = {
+                            "video": video,
+                            "audio": audio,
+                            "perturbations": perturbations,
+                        }
+
+                        if (
+                            audio is not None
+                            and hasattr(audio, "timesteps")
+                            and hasattr(module, "audio_scale_shift_table")
+                        ):
+                            _, _, agate_msa = module.get_ada_values(
+                                module.audio_scale_shift_table,
+                                batch_size,
+                                audio.timesteps,
+                                slice(0, 3),
+                            )
+                            _, _, agate_mlp = module.get_ada_values(
+                                module.audio_scale_shift_table,
+                                batch_size,
+                                audio.timesteps,
+                                slice(3, 6),
+                            )
+                            if isinstance(agate_msa, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.agate_msa"] = agate_msa.detach().cpu().contiguous()
+                            if isinstance(agate_mlp, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.agate_mlp"] = agate_mlp.detach().cpu().contiguous()
+                            if isinstance(audio.timesteps, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.audio_timesteps"] = audio.timesteps.detach().cpu().contiguous()
+
+                        # M5 gates/masks: AV cross-attn branches A->V and V->A.
+                        if (
+                            video is not None
+                            and audio is not None
+                            and hasattr(module, "get_av_ca_ada_values")
+                            and hasattr(module, "scale_shift_table_a2v_ca_video")
+                            and hasattr(module, "scale_shift_table_a2v_ca_audio")
+                            and hasattr(video, "cross_scale_shift_timestep")
+                            and hasattr(video, "cross_gate_timestep")
+                            and hasattr(audio, "cross_scale_shift_timestep")
+                            and hasattr(audio, "cross_gate_timestep")
+                            and hasattr(video, "x")
+                            and hasattr(audio, "x")
+                        ):
+                            _, _, gate_out_a2v = module.get_av_ca_ada_values(
+                                module.scale_shift_table_a2v_ca_video,
+                                video.x.shape[0],
+                                video.cross_scale_shift_timestep,
+                                video.cross_gate_timestep,
+                                slice(0, 2),
+                            )
+                            _, _, gate_out_v2a = module.get_av_ca_ada_values(
+                                module.scale_shift_table_a2v_ca_audio,
+                                audio.x.shape[0],
+                                audio.cross_scale_shift_timestep,
+                                audio.cross_gate_timestep,
+                                slice(2, 4),
+                            )
+
+                            if perturbations is not None:
+                                try:
+                                    a2v_mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, module.idx, video.x)
+                                except Exception:
+                                    a2v_mask = torch.ones_like(video.x)
+                                try:
+                                    v2a_mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, module.idx, audio.x)
+                                except Exception:
+                                    v2a_mask = torch.ones_like(audio.x)
+                            else:
+                                a2v_mask = torch.ones_like(video.x)
+                                v2a_mask = torch.ones_like(audio.x)
+
+                            if isinstance(gate_out_a2v, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.a2v_gate"] = gate_out_a2v.detach().cpu().contiguous()
+                            if isinstance(a2v_mask, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.a2v_mask"] = a2v_mask.detach().cpu().contiguous()
+                            if isinstance(gate_out_v2a, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.v2a_gate"] = gate_out_v2a.detach().cpu().contiguous()
+                            if isinstance(v2a_mask, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.v2a_mask"] = v2a_mask.detach().cpu().contiguous()
                     except Exception as exc:
                         print(f"WARNING: failed to capture block0 aux tensors: {exc}")
                     return None
@@ -475,6 +572,138 @@ def main() -> None:
                 print(f"aux hook registered for: {name}")
             except Exception as exc:
                 print(f"WARNING: could not register aux hook for {name}: {exc}")
+
+            # M6: post-hook to capture final vx_out / ax_out at block exit.
+            def _make_block0_out_hook(mod_name: str):
+                def _hook(module, args_tup, kwargs, out):
+                    try:
+                        video_out = out[0] if isinstance(out, (tuple, list)) else out
+                        audio_out = out[1] if isinstance(out, (tuple, list)) and len(out) > 1 else None
+                        if video_out is not None and hasattr(video_out, "x") and isinstance(video_out.x, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.vx_out"] = video_out.x.detach().cpu().contiguous()
+                        if audio_out is not None and hasattr(audio_out, "x") and isinstance(audio_out.x, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.ax_out"] = audio_out.x.detach().cpu().contiguous()
+                    except Exception as exc:
+                        print(f"WARNING: failed to capture block0 output tensors: {exc}")
+                    return None
+                return _hook
+
+            try:
+                h = mod.register_forward_hook(
+                    _make_block0_out_hook(name), with_kwargs=True
+                )
+                aux_handles.append(h)
+                print(f"out hook registered for: {name}")
+            except Exception as exc:
+                print(f"WARNING: could not register out hook for {name}: {exc}")
+
+            # M5 capture: AV cross-attn branch deltas and gates for A->V / V->A.
+            # NOTE: `block_mod` is passed explicitly to avoid the Python late-binding
+            # closure bug where `mod` would refer to whatever the loop variable holds
+            # at hook invocation time (a later submodule that lacks get_av_ca_ada_values).
+            def _make_av_attn_hook(mod_name: str, direction: str, block_mod):
+                def _hook(attn_module, args_tup, kwargs, out):
+                    try:
+                        if not isinstance(out, torch.Tensor):
+                            return None
+
+                        x = args_tup[0] if len(args_tup) > 0 else None
+                        if not isinstance(x, torch.Tensor):
+                            return None
+
+                        state = current_block_args.get(mod_name, {})
+                        video = state.get("video")
+                        audio = state.get("audio")
+                        perturbations = state.get("perturbations")
+
+                        gate = None
+                        mask = None
+
+                        if direction == "a2v":
+                            if (
+                                video is not None
+                                and hasattr(block_mod, "get_av_ca_ada_values")
+                                and hasattr(block_mod, "scale_shift_table_a2v_ca_video")
+                                and hasattr(video, "cross_scale_shift_timestep")
+                                and hasattr(video, "cross_gate_timestep")
+                            ):
+                                _, _, gate = block_mod.get_av_ca_ada_values(
+                                    block_mod.scale_shift_table_a2v_ca_video,
+                                    x.shape[0],
+                                    video.cross_scale_shift_timestep,
+                                    video.cross_gate_timestep,
+                                    slice(0, 2),
+                                )
+                            if perturbations is not None:
+                                try:
+                                    mask = perturbations.mask_like(PerturbationType.SKIP_A2V_CROSS_ATTN, block_mod.idx, out)
+                                except Exception:
+                                    mask = None
+                        else:
+                            if (
+                                audio is not None
+                                and hasattr(block_mod, "get_av_ca_ada_values")
+                                and hasattr(block_mod, "scale_shift_table_a2v_ca_audio")
+                                and hasattr(audio, "cross_scale_shift_timestep")
+                                and hasattr(audio, "cross_gate_timestep")
+                            ):
+                                _, _, gate = block_mod.get_av_ca_ada_values(
+                                    block_mod.scale_shift_table_a2v_ca_audio,
+                                    x.shape[0],
+                                    audio.cross_scale_shift_timestep,
+                                    audio.cross_gate_timestep,
+                                    slice(2, 4),
+                                )
+                            if perturbations is not None:
+                                try:
+                                    mask = perturbations.mask_like(PerturbationType.SKIP_V2A_CROSS_ATTN, block_mod.idx, out)
+                                except Exception:
+                                    mask = None
+
+                        if gate is None:
+                            return None
+                        if mask is None:
+                            mask = torch.ones_like(out)
+
+                        delta = out * gate * mask
+
+                        if direction == "a2v":
+                            captured_aux[f"{mod_name}.__aux__.a2v_attn_out"] = out.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.a2v_gate"] = gate.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.a2v_mask"] = mask.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.a2v_delta"] = delta.detach().cpu().contiguous()
+                        else:
+                            captured_aux[f"{mod_name}.__aux__.v2a_attn_out"] = out.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.v2a_gate"] = gate.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.v2a_mask"] = mask.detach().cpu().contiguous()
+                            captured_aux[f"{mod_name}.__aux__.v2a_delta"] = delta.detach().cpu().contiguous()
+                    except Exception as exc:
+                        print(f"WARNING: failed to capture AV cross-attn aux tensors: {exc}")
+                    return None
+
+                return _hook
+
+            if hasattr(mod, "audio_to_video_attn"):
+                try:
+                    h = mod.audio_to_video_attn.register_forward_hook(
+                        _make_av_attn_hook(name, "a2v", mod),
+                        with_kwargs=True,
+                    )
+                    aux_handles.append(h)
+                    print(f"a2v aux hook registered for: {name}.audio_to_video_attn")
+                except Exception as exc:
+                    print(f"WARNING: could not register a2v aux hook for {name}: {exc}")
+
+            if hasattr(mod, "video_to_audio_attn"):
+                try:
+                    h = mod.video_to_audio_attn.register_forward_hook(
+                        _make_av_attn_hook(name, "v2a", mod),
+                        with_kwargs=True,
+                    )
+                    aux_handles.append(h)
+                    print(f"v2a aux hook registered for: {name}.video_to_audio_attn")
+                except Exception as exc:
+                    print(f"WARNING: could not register v2a aux hook for {name}: {exc}")
 
             # M2 capture: wrap _apply_text_cross_attention to capture the exact
             # residual delta returned by Python block logic.

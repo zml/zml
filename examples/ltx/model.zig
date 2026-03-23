@@ -1541,3 +1541,252 @@ pub fn forwardBlock0VideoToAudioAttnWithContextPeKPe(x: Tensor, context: Tensor,
         .k_pe_sin = k_pe_sin,
     });
 }
+
+// ── M4: Audio branch parity entrypoints ────────────────────────────────────
+
+/// M4-A – audio self-attn given pre-computed AdaLN-normalised input.
+///
+/// Tests: audio_attn1(norm_ax, pe_cos, pe_sin) == reference audio_attn1 output.
+///
+/// Python source (transformer.py):
+///     ashift_msa, ascale_msa, agate_msa = self.get_ada_values(
+///         self.audio_scale_shift_table, B, audio.timesteps, slice(0, 3))
+///     norm_ax = rms_norm(ax) * (1 + ascale_msa) + ashift_msa
+///     ax = ax + self.audio_attn1(norm_ax, pe=audio.positional_embeddings, ...) * agate_msa
+pub fn forwardBlock0AudioSelfAttn(norm_ax: Tensor, pe_cos: Tensor, pe_sin: Tensor, params: Attention.Params) Tensor {
+    const attn = Attention{};
+    return attn.forward(norm_ax, params, kindNumHeads(.audio_attn1), .{
+        .pe_cos = pe_cos,
+        .pe_sin = pe_sin,
+    });
+}
+
+/// M4-A residual algebra-only check using precomputed audio self-attn output from fixture.
+///
+/// Tests: ax + audio_attn1_out * agate_msa == ax_out
+pub fn forwardBlock0AudioSelfAttnResidualFromAttnOut(ax: Tensor, attn_out: Tensor, agate_msa: Tensor) Tensor {
+    return ax.withPartialTags(.{ .b, .t, .d }).add(attn_out.withPartialTags(.{ .b, .t, .d }).mul(agate_msa.broad(attn_out.shape())));
+}
+
+/// M4-B residual algebra-only check using precomputed audio text-ca delta from fixture.
+///
+/// Tests: ax_after_self_attn + audio_text_ca_out == ax_after_text_ca
+///
+/// Python source (transformer.py, _apply_text_cross_attention for audio):
+///     ax = ax + self._apply_text_cross_attention(ax, audio.context, self.audio_attn2, ...)
+pub fn forwardBlock0AudioTextCaResidualFromDelta(ax: Tensor, audio_text_ca_out: Tensor) Tensor {
+    return ax.withPartialTags(.{ .b, .t, .d }).add(audio_text_ca_out.withPartialTags(.{ .b, .t, .d }));
+}
+
+/// M4-C audio FF given pre-computed AdaLN-normalised input.
+///
+/// Tests: audio_ff(ax_scaled) == reference audio_ff_out.
+///
+/// Python source (transformer.py):
+///     ashift_mlp, ascale_mlp, agate_mlp = self.get_ada_values(
+///         self.audio_scale_shift_table, B, audio.timesteps, slice(3, 6))
+///     ax_scaled = rms_norm(ax) * (1 + ascale_mlp) + ashift_mlp
+///     ax = ax + self.audio_ff(ax_scaled) * agate_mlp
+pub fn forwardBlock0AudioFF(ax_scaled: Tensor, params: FeedForward.Params) Tensor {
+    const ff = FeedForward{};
+    return ff.forward(ax_scaled, params);
+}
+
+/// M4-C residual algebra-only check using precomputed audio FF output from fixture.
+///
+/// Tests: ax_before_ff + audio_ff_out * agate_mlp == ax_after_ff
+pub fn forwardBlock0AudioFFResidualFromFFOut(ax: Tensor, ff_out: Tensor, agate_mlp: Tensor) Tensor {
+    return ax.withPartialTags(.{ .b, .t, .d }).add(ff_out.withPartialTags(.{ .b, .t, .d }).mul(agate_mlp.broad(ff_out.shape())));
+}
+
+// ── M5: AV cross-attn parity entrypoints ──────────────────────────────────
+
+/// M5-A gated residual delta for A->V branch.
+///
+/// Tests: a2v_delta == audio_to_video_attn_out * gate_out_a2v * a2v_mask
+pub fn forwardBlock0A2VDeltaFromAttnOut(attn_out: Tensor, gate: Tensor, mask: Tensor) Tensor {
+    return attn_out.withPartialTags(.{ .b, .t, .d })
+        .mul(gate.broad(attn_out.shape()))
+        .mul(mask.broad(attn_out.shape()));
+}
+
+/// M5-B gated residual delta for V->A branch.
+///
+/// Tests: v2a_delta == video_to_audio_attn_out * gate_out_v2a * v2a_mask
+pub fn forwardBlock0V2ADeltaFromAttnOut(attn_out: Tensor, gate: Tensor, mask: Tensor) Tensor {
+    return attn_out.withPartialTags(.{ .b, .t, .d })
+        .mul(gate.broad(attn_out.shape()))
+        .mul(mask.broad(attn_out.shape()));
+}
+
+// ── M6: full block-0 stream parity entrypoints ────────────────────────────
+
+/// Combined params for full block-0 parity check (M6).
+/// Holds all eight attention param sets and two FF param sets for both streams.
+pub const Block0FullParams = struct {
+    // Video stream
+    attn1: Attention.Params, // M1: video self-attn
+    attn2: Attention.Params, // M2: video text cross-attn
+    ff: FeedForward.Params, // M3: video feed-forward
+    // Audio stream
+    audio_attn1: Attention.Params, // M4-A: audio self-attn
+    audio_attn2: Attention.Params, // M4-B: audio text cross-attn
+    audio_ff: FeedForward.Params, // M4-C: audio feed-forward
+    // AV cross-attn
+    audio_to_video_attn: Attention.Params, // M5-A: A->V cross-attn
+    video_to_audio_attn: Attention.Params, // M5-B: V->A cross-attn
+};
+
+pub fn initBlock0FullParams(store: zml.io.TensorStore.View) Block0FullParams {
+    const root = selectTransformerRoot(store);
+    const block = root.withPrefix("transformer_blocks").withLayer(0);
+    return .{
+        .attn1 = Attention.initParams(block, .attn1),
+        .attn2 = Attention.initParams(block, .attn2),
+        .ff = FeedForward.initParams(block.withPrefix("ff")),
+        .audio_attn1 = Attention.initParams(block, .audio_attn1),
+        .audio_attn2 = Attention.initParams(block, .audio_attn2),
+        .audio_ff = FeedForward.initParams(block.withPrefix("audio_ff")),
+        .audio_to_video_attn = Attention.initParams(block, .audio_to_video_attn),
+        .video_to_audio_attn = Attention.initParams(block, .video_to_audio_attn),
+    };
+}
+
+pub fn unloadBlock0FullBuffers(params: *zml.Bufferized(Block0FullParams)) void {
+    Attention.unloadBuffers(&params.attn1);
+    Attention.unloadBuffers(&params.attn2);
+    FeedForward.unloadBuffers(&params.ff);
+    Attention.unloadBuffers(&params.audio_attn1);
+    Attention.unloadBuffers(&params.audio_attn2);
+    FeedForward.unloadBuffers(&params.audio_ff);
+    Attention.unloadBuffers(&params.audio_to_video_attn);
+    Attention.unloadBuffers(&params.video_to_audio_attn);
+}
+
+/// M6 – full video stream forward.
+///
+/// Composes M1 → M2 → M5-A → M3 for the video token stream:
+///   vx = vx_in + attn1(norm_vx, pe) * vgate_msa          // M1
+///   vx = vx   + attn2(v_text_x, v_text_ctx)              // M2
+///   vx = vx   + a2v_attn(a2v_x, a2v_ctx, pe, k_pe)
+///                   * a2v_gate * a2v_mask                 // M5-A
+///   vx = vx   + ff(vx_scaled) * vgate_mlp                // M3
+///
+/// `norm_vx`, `v_text_x`, `a2v_x`, and `vx_scaled` are exact per-module inputs
+/// captured from Python to preserve hidden preprocessing in text/AV cross-attn.
+pub fn forwardBlock0VideoStream(
+    vx_in: Tensor,
+    norm_vx: Tensor,
+    v_text_x: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    vgate_msa: Tensor,
+    v_text_ctx: Tensor,
+    a2v_x: Tensor,
+    a2v_ctx: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_gate: Tensor,
+    a2v_mask: Tensor,
+    vx_scaled: Tensor,
+    vgate_mlp: Tensor,
+    params: Block0FullParams,
+) Tensor {
+    const attn = Attention{};
+    const ff = FeedForward{};
+
+    // M1: video self-attn residual
+    const attn1_out = attn.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
+        .pe_cos = v_pe_cos, .pe_sin = v_pe_sin,
+    });
+    var h = vx_in.withPartialTags(.{ .b, .t, .d })
+        .add(attn1_out.mul(vgate_msa.broad(attn1_out.shape())));
+
+    // M2: video text cross-attn residual (query from captured module input)
+    const text_ca_out = attn.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
+        .context = v_text_ctx,
+    });
+    h = h.add(text_ca_out);
+
+    // M5-A: A->V cross-attn residual (query from captured module input)
+    const a2v_out = attn.forward(a2v_x, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
+        .context = a2v_ctx,
+        .pe_cos = a2v_pe_cos,
+        .pe_sin = a2v_pe_sin,
+        .k_pe_cos = a2v_k_pe_cos,
+        .k_pe_sin = a2v_k_pe_sin,
+    });
+    h = h.add(a2v_out.mul(a2v_gate.broad(a2v_out.shape())).mul(a2v_mask.broad(a2v_out.shape())));
+
+    // M3: video FF residual
+    const ff_out = ff.forward(vx_scaled, params.ff);
+    h = h.add(ff_out.mul(vgate_mlp.broad(ff_out.shape())));
+
+    return h;
+}
+
+/// M6 – full audio stream forward.
+///
+/// Composes M4-A → M4-B → M5-B → M4-C for the audio token stream:
+///   ax = ax_in + audio_attn1(norm_ax, pe) * agate_msa    // M4-A
+///   ax = ax   + audio_attn2(a_text_x, a_text_ctx)        // M4-B
+///   ax = ax   + v2a_attn(v2a_x, v2a_ctx, pe, k_pe)
+///                   * v2a_gate * v2a_mask                 // M5-B
+///   ax = ax   + audio_ff(ax_scaled) * agate_mlp          // M4-C
+///
+/// `norm_ax`, `a_text_x`, `v2a_x`, and `ax_scaled` are exact per-module inputs
+/// captured from Python to preserve hidden preprocessing in text/AV cross-attn.
+pub fn forwardBlock0AudioStream(
+    ax_in: Tensor,
+    norm_ax: Tensor,
+    a_text_x: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    agate_msa: Tensor,
+    a_text_ctx: Tensor,
+    v2a_x: Tensor,
+    v2a_ctx: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_gate: Tensor,
+    v2a_mask: Tensor,
+    ax_scaled: Tensor,
+    agate_mlp: Tensor,
+    params: Block0FullParams,
+) Tensor {
+    const attn = Attention{};
+    const ff = FeedForward{};
+
+    // M4-A: audio self-attn residual
+    const attn1_out = attn.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
+        .pe_cos = a_pe_cos, .pe_sin = a_pe_sin,
+    });
+    var h = ax_in.withPartialTags(.{ .b, .t, .d })
+        .add(attn1_out.mul(agate_msa.broad(attn1_out.shape())));
+
+    // M4-B: audio text cross-attn residual (query from captured module input)
+    const text_ca_out = attn.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
+        .context = a_text_ctx,
+    });
+    h = h.add(text_ca_out);
+
+    // M5-B: V->A cross-attn residual (query from captured module input)
+    const v2a_out = attn.forward(v2a_x, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
+        .context = v2a_ctx,
+        .pe_cos = v2a_pe_cos,
+        .pe_sin = v2a_pe_sin,
+        .k_pe_cos = v2a_k_pe_cos,
+        .k_pe_sin = v2a_k_pe_sin,
+    });
+    h = h.add(v2a_out.mul(v2a_gate.broad(v2a_out.shape())).mul(v2a_mask.broad(v2a_out.shape())));
+
+    // M4-C: audio FF residual
+    const ff_out = ff.forward(ax_scaled, params.audio_ff);
+    h = h.add(ff_out.mul(agate_mlp.broad(ff_out.shape())));
+
+    return h;
+}

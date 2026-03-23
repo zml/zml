@@ -220,6 +220,84 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "block0_audio_self_attn_check",
+    main = "block0_audio_self_attn_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block0_audio_text_ca_check",
+    main = "block0_audio_text_ca_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block0_audio_ff_residual_check",
+    main = "block0_audio_ff_residual_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block0_av_a2v_check",
+    main = "block0_av_a2v_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block0_av_v2a_check",
+    main = "block0_av_v2a_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block0_full_check",
+    main = "block0_full_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
@@ -241,5 +319,11 @@ build_test(
         ":block0_self_attn_check",
         ":block0_text_ca_check",
         ":block0_ff_residual_check",
+        ":block0_audio_self_attn_check",
+        ":block0_audio_text_ca_check",
+        ":block0_audio_ff_residual_check",
+        ":block0_av_a2v_check",
+        ":block0_av_v2a_check",
+        ":block0_full_check",
     ],
 )

@@ -131,6 +131,75 @@ Use independent fixtures/checkers for each stage before combining all paths.
       - ff parity: `block0_ff_residual.vx_scaled`, `block0_ff_residual.ff_out`
       - residual parity: `block0_ff_residual.vx_in`, `block0_ff_residual.ff_out`, `block0_ff_residual.vgate_mlp`, `block0_ff_residual.vx_out`
    - Note: current exporter derives `vx_in` from `vx_out - ff_out * vgate_mlp` when direct pre-FF capture is unavailable.
+- M4: complete (audio branch parity: self-attn, text-ca, ff).
+   - **Implementation complete**: All Zig model entrypoints, Python exporters, Zig checkers, and BUILD.bazel targets are in place.
+   - **Zig entrypoints** ([examples/ltx/model.zig](examples/ltx/model.zig#L1554)):
+      - `forwardBlock0AudioSelfAttn` — M4-A: audio self-attn + PE
+      - `forwardBlock0AudioSelfAttnResidualFromAttnOut` — M4-A: residual algebra
+      - `forwardBlock0AudioTextCaResidualFromDelta` — M4-B: text cross-attn residual algebra
+      - `forwardBlock0AudioFF` — M4-C: audio FF forward
+      - `forwardBlock0AudioFFResidualFromFFOut` — M4-C: residual algebra
+   - **Capture fix applied**: [replay_stage2_transformer_step.py](examples/ltx/replay_stage2_transformer_step.py#L465) now captures `__aux__.agate_msa` and `__aux__.agate_mlp` from `audio_scale_shift_table` using `audio.timesteps`.
+   - **Validated matrix**:
+      - token_limit=256, distilled_lora_strength=0.0: M4-A PASS, M4-B PASS, M4-C PASS
+      - token_limit=256, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M4-A PASS (full residual), M4-B PASS (full residual), M4-C PASS (full residual)
+      - token_limit=128, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M4-A PASS (full residual), M4-B PASS (full residual), M4-C PASS (full residual)
+      - token_limit=512, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M4-A PASS (full residual), M4-B PASS (full residual), M4-C PASS (full residual)
+   - **No token-limit sensitivity observed**: audio sequence length is fixed at 126 tokens regardless of video token limit, so M4 results are stable across all tested video token limits.
+   - **Checkpoint alignment note**: LoRA>0 replay traces must be checked against LoRA-merged stage2 checkpoint export to avoid base-vs-LoRA parameter mismatch.
+
+- M5: complete (AV cross-attn A->V and V->A parity).
+   - **Scope**:
+      - M5-A: A->V residual (`vx = vx + audio_to_video_attn(...) * gate * mask` path)
+      - M5-B: V->A residual (`ax = ax + video_to_audio_attn(...) * gate * mask` path)
+   - **Implementation complete**: All Zig model entrypoints, Python exporters, Zig checkers, and BUILD.bazel targets in place.
+   - **Zig entrypoints** ([examples/ltx/model.zig](examples/ltx/model.zig#L1627)):
+      - `forwardBlock0AudioToVideoAttnWithContextPeKPe` — M5-A: audio_to_video_attn with PE tensors
+      - `forwardBlock0A2VDeltaFromAttnOut` — M5-A: gated delta algebra (attn_out * gate * mask)
+      - `forwardBlock0VideoToAudioAttnWithContextPeKPe` — M5-B: video_to_audio_attn with PE tensors
+      - `forwardBlock0V2ADeltaFromAttnOut` — M5-B: gated delta algebra (attn_out * gate * mask)
+   - **Capture implementation** ([replay_stage2_transformer_step.py](examples/ltx/replay_stage2_transformer_step.py#L465)):
+      - Block pre-hook now captures A->V and V->A gates via `module.get_av_ca_ada_values()` with scale_shift_table_a2v_ca_* and timestep families.
+      - Captures: `__aux__.a2v_gate`, `__aux__.a2v_mask`, `__aux__.v2a_gate`, `__aux__.v2a_mask` at block scope.
+      - Fixture exporters ([export_block0_av_a2v_fixture.py](examples/ltx/export_block0_av_a2v_fixture.py), [export_block0_av_v2a_fixture.py](examples/ltx/export_block0_av_v2a_fixture.py)) load delta from explicit capture; fallback arithmetic (`attn_out * gate * mask`) retained as safety net if capture is absent.
+   - **Closure bug fixed**: `_make_av_attn_hook` previously referenced `mod` as a free variable from the enclosing loop, causing late-binding to a later submodule that lacked `get_av_ca_ada_values`. Fixed by passing the block module as an explicit `block_mod` parameter. Delta is now explicitly captured and verified to match the fallback arithmetic exactly (checkers pass with both).
+   - **Validated matrix**:
+      - token_limit=128, distilled_lora_strength=0.0 (base checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+      - token_limit=256, distilled_lora_strength=0.0 (base checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+      - token_limit=512, distilled_lora_strength=0.0 (base checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+      - token_limit=128, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+      - token_limit=256, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+      - token_limit=512, distilled_lora_strength=0.5 (LoRA-merged checkpoint): M5-A ✓ PASS (attention + gated delta), M5-B ✓ PASS (attention + gated delta)
+   - **No token-limit sensitivity observed**: audio sequence length is fixed at 126 tokens; video context size varies but parity is stable across all tested limits.
+   - **Fixture contracts validated**:
+      - A->V: `block0_av_a2v.{x, context, pe_cos, pe_sin, k_pe_cos, k_pe_sin, attn_out, gate, mask, delta}`
+      - V->A: `block0_av_v2a.{x, context, pe_cos, pe_sin, k_pe_cos, k_pe_sin, attn_out, gate, mask, delta}`
+   - **Checkpoint alignment note**: M5 requires both audio_to_video_attn and video_to_audio_attn parameters in merged checkpoint; updated exporter to include these M5 modules (previously M4-only).
+
+- M6: complete (full block0 parity combining all residuals and gates).
+   - **Scope**: Validate complete block0 forward with video+audio branches, all residual paths (self-attn, text-ca, AV cross-attn, FF), and all gate modulations.
+   - **Validated matrix**:
+      - token_limit=128, distilled_lora_strength=0.0 (base checkpoint): PASS (video stream + audio stream + full block0 composition)
+      - token_limit=256, distilled_lora_strength=0.0 (base checkpoint): PASS (video stream + audio stream + full block0 composition)
+      - token_limit=512, distilled_lora_strength=0.0 (base checkpoint): PASS (video stream + audio stream + full block0 composition)
+      - token_limit=128, distilled_lora_strength=0.5 (LoRA-merged checkpoint): PASS (video stream + audio stream + full block0 composition)
+      - token_limit=256, distilled_lora_strength=0.5 (LoRA-merged checkpoint): PASS (video stream + audio stream + full block0 composition)
+      - token_limit=512, distilled_lora_strength=0.5 (LoRA-merged checkpoint): PASS (video stream + audio stream + full block0 composition)
+   - **Parity target**: validated against the Python `BasicAVTransformerBlock` semantics and related helper paths in the upstream LTX transformer implementation, not merely against an internal Zig surrogate.
+   - **Current Zig landing point**: the validated full-block parity lives in dedicated M6 entrypoints in [examples/ltx/model.zig](examples/ltx/model.zig#L1677) and [examples/ltx/model.zig](examples/ltx/model.zig#L1741).
+   - **Important distinction**: [examples/ltx/model.zig](examples/ltx/model.zig#L344) `BasicAVTransformerBlock.forward` is still the earlier simplified FF-boundary bring-up path and is not yet the runtime landing point for the validated full Python-equivalent block semantics.
+   - **Key implementation lesson**: for both video and audio streams, text cross-attn and AV cross-attn must use the exact per-module query inputs captured from Python (`v_text_x`, `a2v_x`, `a_text_x`, `v2a_x`) because those module inputs include hidden preprocessing not recoverable from a naive reconstructed residual state alone.
+
+## Milestone Status Summary
+
+| Milestone | Status | Token Limits | LoRA Strengths |
+|-----------|--------|--------------|----------------|
+| M1 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
+| M2 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
+| M3 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
+| M4 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
+| M5 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
+| M6 | ✓ Complete | 128, 256, 512 | 0.0, 0.5 |
 
 ## Practical Notes
 
@@ -138,3 +207,4 @@ Use independent fixtures/checkers for each stage before combining all paths.
 - Keep fixture names explicit by stage to avoid ambiguity.
 - Use same tolerances currently accepted by FF-boundary checker unless a stage needs a stricter budget after f32 fixes.
 - For gated residual stages, prefer direct auxiliary gate capture from replay hooks (e.g. `__aux__.vgate_msa`) over reconstructing gates from timestep heuristics; this avoids drift and keeps strict tolerances meaningful.
+- Standard rule for LoRA runs: when replay uses `distilled_lora_strength > 0`, use a LoRA-merged stage2 checkpoint for Zig checkers (see [examples/ltx/export_stage2_block0_checkpoint.py](examples/ltx/export_stage2_block0_checkpoint.py)).

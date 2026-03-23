@@ -1,9 +1,10 @@
-"""Export a LoRA-merged stage-2 block0 checkpoint for simplified Zig parity checks.
+"""Export a LoRA-merged stage-2 block0 checkpoint for Zig parity checks.
 
-This exports only the tensors currently consumed by examples/ltx/block0_forward_check.zig:
-  - transformer_blocks.0.attn1.*
-  - transformer_blocks.0.ff.*
-  - transformer_blocks.0.audio_ff.*
+This exports block-0 tensors consumed by stage-wise parity checkers, including:
+  - M1-M3: video branch (attn1, attn2, ff)
+  - M4: audio branch (audio_attn1, audio_attn2, audio_ff)
+  - M5: AV cross-attn (audio_to_video_attn, video_to_audio_attn)
+  - Scale and shift tables (video and audio)
 
 Typical usage:
   uv run python examples/ltx/export_stage2_block0_checkpoint.py \
@@ -91,13 +92,22 @@ def main() -> None:
 
     keep_prefixes = (
         "transformer_blocks.0.attn1.",
+        "transformer_blocks.0.attn2.",
         "transformer_blocks.0.ff.",
+        "transformer_blocks.0.audio_attn1.",
+        "transformer_blocks.0.audio_attn2.",
         "transformer_blocks.0.audio_ff.",
+        "transformer_blocks.0.audio_to_video_attn.",
+        "transformer_blocks.0.video_to_audio_attn.",
     )
+    keep_exact = {
+        "transformer_blocks.0.scale_shift_table",
+        "transformer_blocks.0.audio_scale_shift_table",
+    }
 
     tensors: dict[str, torch.Tensor] = {}
     for key, value in state_dict.items():
-        if not any(key.startswith(prefix) for prefix in keep_prefixes):
+        if not (any(key.startswith(prefix) for prefix in keep_prefixes) or key in keep_exact):
             continue
         if not torch.is_tensor(value):
             continue
@@ -113,7 +123,7 @@ def main() -> None:
         metadata={
             "source": "TI2VidTwoStagesPipeline stage_2_model_ledger.transformer().velocity_model",
             "distilled_lora_strength": str(args.distilled_lora_strength),
-            "tensor_scope": "block0 simplified parity modules (attn1, ff, audio_ff)",
+            "tensor_scope": "block0 parity modules (attn1/attn2/ff/audio_attn1/audio_attn2/audio_ff + scale tables)",
         },
     )
 
