@@ -20,6 +20,7 @@ resolved_toolchain(
 exports_files(
     [
         "workspace_printer.zig",
+        "workspace_printer_test.zig",
         "zls_build_runner.zig",
         "zls_runner.zig",
         "zls.completion.tpl",
@@ -31,6 +32,7 @@ filegroup(
     name = "all_files",
     srcs = [
         ":BUILD.bazel",
+        ":workspace_printer_test.zig",
         ":zls.completion.tpl",
         ":zls_build_runner.zig",
         ":zls_completion.bzl",

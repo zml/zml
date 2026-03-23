@@ -123,14 +123,19 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena.allocator());
 
     const build_workspace_directory = init.environ_map.get("BUILD_WORKSPACE_DIRECTORY").?;
-    const output_base_result = try std.process.run(arena.allocator(), init.io, .{
-        .argv = &.{
-            "bazel",
-            "info",
-            "execution_root",
-        },
-        .cwd = .{ .path = build_workspace_directory },
-    });
+    const execution_root = if (init.environ_map.get("BAZEL_EXECUTION_ROOT")) |value|
+        value
+    else blk: {
+        const output_base_result = try std.process.run(arena.allocator(), init.io, .{
+            .argv = &.{
+                "bazel",
+                "info",
+                "execution_root",
+            },
+            .cwd = .{ .path = build_workspace_directory },
+        });
+        break :blk std.mem.trimEnd(u8, output_base_result.stdout, "\n");
+    };
 
     var output = try readBuildConfig(
         arena.allocator(),
@@ -145,7 +150,6 @@ pub fn main(init: std.process.Init) !void {
         "@@__BUILD_WORKSPACE_DIRECTORY__@@",
         build_workspace_directory,
     );
-    const execution_root = std.mem.trimEnd(u8, output_base_result.stdout, "\n");
     output = try std.mem.replaceOwned(
         u8,
         arena.allocator(),
