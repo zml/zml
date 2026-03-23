@@ -48,7 +48,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.Unavailable;
     }
 
-    const r = try bazel.runfiles(io, bazel_builtin.current_repository);
+    const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = try r.rlocation("libpjrt_neuron/sandbox", &sandbox_path_buf) orelse {

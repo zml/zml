@@ -6,7 +6,7 @@ load("//bazel:simple_repository.bzl", "simple_repository")
 load("//platforms:packages.bzl", "packages")
 
 BASE_URL = "https://apt.repos.neuron.amazonaws.com"
-STRIP_PREFIX = "opt/aws/neuron"
+STRIP_PREFIX = "./opt/aws/neuron"
 
 _BUILD_FILE_PRELUDE = """\
 package(default_visibility = ["//visibility:public"])
