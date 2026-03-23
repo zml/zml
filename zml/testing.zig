@@ -320,7 +320,7 @@ pub fn testLayer(
 
     const input_name = try std.fmt.allocPrint(arena.allocator(), "{s}.in", .{name});
     const input_count = zml.meta.count(zml.Tensor, &args);
-    const expected_input_count = countWithPrefix(activation_store, input_name);
+    const expected_input_count = countWithPrefix(activation_store, try std.fmt.allocPrint(arena.allocator(), "{s}.", .{input_name}));
     if (input_count != expected_input_count) {
         log.warn("Reference models uses {d} inputs, but implementation uses {d}", .{ expected_input_count, input_count });
     }
@@ -331,7 +331,6 @@ pub fn testLayer(
         fn cb(ctx_: *LocalContext, tensor: *zml.Tensor) !void {
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
-
             tensor.* = ctx_.activation_store.createTensor(subkey, null, null);
             ctx_.index += 1;
         }
@@ -345,7 +344,7 @@ pub fn testLayer(
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
     const output_count = exe.output_shapes.len;
     const store_output = activation_store.withPrefix(output_name);
-    const expected_output_count = countWithPrefix(store_output, output_name);
+    const expected_output_count = countWithPrefix(store_output, try std.fmt.allocPrint(arena.allocator(), "{s}.", .{output_name}));
     if (output_count != expected_output_count) {
         log.warn("Reference models produces {d} outputs, but implementation produces {d}", .{ expected_output_count, output_count });
     }
