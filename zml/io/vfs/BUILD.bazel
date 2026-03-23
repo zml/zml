@@ -2,6 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_binary")
 
 zig_library(
     name = "vfs",
+    tags = ["manual"],
     srcs = [
         "base.zig",
         "file.zig",

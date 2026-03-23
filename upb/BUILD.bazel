@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "upb_c",
+    tags = ["manual"],
     hdrs = ["upb.h"],
     deps = [
         "@com_google_protobuf//upb/message:copy",
@@ -11,6 +12,7 @@ cc_library(
 
 zig_library(
     name = "upb",
+    tags = ["manual"],
     main = "upb.zig",
     visibility = ["//visibility:public"],
     deps = [":upb_c"],

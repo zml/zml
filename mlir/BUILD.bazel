@@ -3,6 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 cc_library(
     name = "c",
+    tags = ["manual"],
     srcs = ["register.cc"],
     hdrs = ["mlir.h"],
     visibility = ["//mlir:__subpackages__"],
@@ -18,6 +19,7 @@ cc_library(
 
 zig_library(
     name = "mlir",
+    tags = ["manual"],
     main = "mlir.zig",
     visibility = ["//visibility:public"],
     deps = [

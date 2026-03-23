@@ -11,11 +11,17 @@ fn pyStatusCheck(status: c.PyStatus) void {
     }
 }
 
-pub fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MAX - 1:0]c.wchar_t {
-    if (file_path.len >= std.posix.PATH_MAX) return error.NameTooLong;
+pub fn toPosixPathW(file_path: []const u8) error{ InvalidUtf8, NameTooLong, CodepointTooLarge }![std.posix.PATH_MAX - 1:0]c.wchar_t {
+    var view = std.unicode.Utf8View.init(file_path) catch return error.InvalidUtf8;
+    var it = view.iterator();
 
     var path_with_null: [std.posix.PATH_MAX - 1:0]c.wchar_t = undefined;
-    const len = c.mbstowcs(&path_with_null, file_path.ptr, file_path.len);
+    var len: usize = 0;
+    while (it.nextCodepoint()) |cp| {
+        if (len + 1 >= path_with_null.len) return error.NameTooLong;
+        path_with_null[len] = std.math.cast(c.wchar_t, cp) orelse return error.CodepointTooLarge;
+        len += 1;
+    }
     path_with_null[len] = 0;
     return path_with_null;
 }

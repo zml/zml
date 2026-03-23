@@ -13,6 +13,7 @@ rust_static_library(
 
 cc_library(
     name = "hftokenizers_cc",
+    tags = ["manual"],
     hdrs = ["hftokenizers.h"],
     visibility = ["//visibility:public"],
     deps = [
@@ -23,6 +24,7 @@ cc_library(
 
 zig_library(
     name = "hftokenizers",
+    tags = ["manual"],
     main = "hftokenizers.zig",
     visibility = ["//visibility:public"],
     deps = [
