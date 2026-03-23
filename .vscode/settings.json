@@ -22,7 +22,6 @@
     "C_Cpp.formatting": "clangFormat",
     "C_Cpp.clang_format_style": "Microsoft",
     "zig.formattingProvider": "zls",
-    "zig.zls.path": "${workspaceFolder}/tools/zls.sh",
     "[zig]": {
         "editor.suggest.insertMode": "replace",
         "editor.stickyScroll.defaultModel": "foldingProviderModel",
