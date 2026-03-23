@@ -12,6 +12,9 @@ pub const pjrt = @import("pjrt");
 const runfiles = @import("runfiles");
 pub const stdx = @import("stdx");
 pub const tokenizer = @import("zml/tokenizer");
+pub const flashinfer_moe = @import("moe/flashinfer_moe.zig");
+pub const general_triton_moe = @import("moe/triton_moe.zig");
+pub const moe = @import("moe/moe.zig");
 
 pub const attention = @import("attention.zig");
 pub const Buffer = @import("buffer.zig").Buffer;

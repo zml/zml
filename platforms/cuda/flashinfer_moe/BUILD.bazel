@@ -1,0 +1,12 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "flashinfer_moe",
+    import_name = "platforms/cuda/flashinfer_moe",
+    main = "flashinfer_moe.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "@rules_zig//zig/runfiles",
+    ],
+)
