@@ -12,6 +12,7 @@ load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 zig_shared_library(
     name = "libpjrt_neuron",
     main = "libpjrt_neuron.zig",
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     zigopts = ["-fno-stack-check"],
     deps = [
@@ -24,6 +25,7 @@ zig_shared_library(
 
 zig_binary(
     name = "neuronx-cc",
+    target_compatible_with = ["@platforms//os:linux"],
     data = ["@neuron_py_deps//neuronx_cc"],
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "neuronx-cc.zig",
@@ -33,6 +35,7 @@ zig_binary(
 
 runfiles_to_default(
     name = "neuronx-cc_files",
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     deps = [":neuronx-cc"],
 )
@@ -76,6 +79,7 @@ zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
     shared_lib_name = "libneuronxla.so",
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     zigopts = [
         "-fno-stack-check",
@@ -101,7 +105,6 @@ uv_lock(
         "--upgrade",
         "--python-platform=x86_64-unknown-linux-gnu",
     ],
-    python_version = "3.12",
     tags = ["manual"],
 )
 

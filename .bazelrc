@@ -28,6 +28,8 @@ common          --enable_runfiles
 
 # Ensure the local env doesn't leak into the build
 common          --incompatible_strict_action_env
+# Ensure rules_python doesn't rely on the system's Python for stage-1 bootstrap
+common          --@rules_python//python/config_settings:bootstrap_impl=script
 
 # We don't to check the built files in the sandbox or repositories
 common          --experimental_check_output_files=false

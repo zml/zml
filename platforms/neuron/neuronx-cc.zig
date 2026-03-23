@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const c = @import("c");
-const runfiles = @import("runfiles");
 
 fn pyStatusCheck(status: c.PyStatus) void {
     if (c.PyStatus_Exception(status) != 0) {
@@ -21,16 +20,9 @@ pub fn toPosixPathW(file_path: []const u8) error{NameTooLong}![std.posix.PATH_MA
     return path_with_null;
 }
 
-pub fn main() !void {
-    const allocator = std.heap.c_allocator;
-
-    var threaded: std.Io.Threaded = .init(allocator, .{});
-    defer threaded.deinit();
-
-    const io = threaded.io();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
+pub fn main(init: std.process.Init) !void {
+    const arena = init.arena;
+    const io = init.io;
 
     {
         var preconfig: c.PyPreConfig = undefined;
@@ -47,7 +39,12 @@ pub fn main() !void {
     config.optimization_level = 2;
     config.write_bytecode = 0;
 
-    _ = c.PyConfig_SetBytesArgv(&config, @intCast(std.os.argv.len), @ptrCast(std.os.argv));
+    const args = try init.minimal.args.toSlice(arena.allocator());
+    const cArgs = try arena.allocator().alloc([*:0]const u8, args.len);
+    for (args, 0..) |arg, i| {
+        cArgs[i] = (try arena.allocator().dupeZ(u8, arg)).ptr;
+    }
+    pyStatusCheck(c.PyConfig_SetBytesArgv(&config, @intCast(cArgs.len), @ptrCast(cArgs.ptr)));
 
     var self_exe_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const self_exe_dir = blk: {

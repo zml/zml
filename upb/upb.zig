@@ -34,7 +34,6 @@ pub const ParseError = error{
     BadUtf8,
     MaxDepthExceeded,
     MissingRequired,
-    UnlinkedSubMessage,
     Unknown,
 } || std.mem.Allocator.Error;
 
@@ -102,7 +101,6 @@ pub fn parseEx(comptime UpbType: type, arena: *c.upb_Arena, data: []const u8, op
         c.kUpb_DecodeStatus_BadUtf8 => ParseError.BadUtf8,
         c.kUpb_DecodeStatus_MaxDepthExceeded => ParseError.MaxDepthExceeded,
         c.kUpb_DecodeStatus_MissingRequired => ParseError.MissingRequired,
-        c.kUpb_DecodeStatus_UnlinkedSubMessage => ParseError.UnlinkedSubMessage,
         else => ParseError.Unknown,
     };
 }
