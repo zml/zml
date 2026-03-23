@@ -4,8 +4,7 @@ zls_completion(
     name = "completion",
     visibility = ["//visibility:public"],
     deps = [
-        "//examples/lfm",
-        "//examples/llama",
+        "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
         "//stdx",
