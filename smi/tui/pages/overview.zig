@@ -17,10 +17,12 @@ const Overview = @This();
 const two_col_breakpoint: u16 = 120;
 const narrow_breakpoint: u16 = 80;
 const max_info_width: u16 = 50;
+/// Total width of the wide banner: logo box + info lines + page padding.
+pub const host_line_width: u16 = (Logo.logo_width + 4) + max_info_width + 4;
 
 state: *const data.SystemState,
 device_cards: []DeviceCard = &.{},
-process_table: ?*ProcessTable = null,
+process_table: ?*ProcessTable = null, // maybe null if we decide not to print the process table in print mode
 viewing_device: *?u8 = undefined,
 use_braille: bool = false,
 
@@ -45,50 +47,55 @@ pub fn deinit(self: *Overview, allocator: std.mem.Allocator) void {
     allocator.free(self.device_cards);
 }
 
+fn drawNarrowBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
+    const logo: Logo = .{ .image = image_cache.global.get("logo"), .compact = true };
+    const info_lines: InfoLines = .{ .state = self.state };
+
+    const logo_h: u16 = if (logo.image != null) Logo.compact_image_height else Logo.compact_height;
+    const children = [2]vxfw.Widget{
+        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = logo_h }),
+        ui.widget(&info_lines),
+    };
+    const layout: ColumnLayout = .{ .children = &children, .gap = 1 };
+    return ui.widget(&layout).draw(ui.fixedWidth(ctx, content_w));
+}
+
+fn drawWideBanner(self: *const Overview, ctx: vxfw.DrawContext, content_w: u16) !vxfw.Surface {
+    const logo: Logo = .{ .image = image_cache.global.get("logo"), .compact = false };
+    const info_lines: InfoLines = .{ .state = self.state };
+
+    const logo_h: u16 = if (logo.image != null) Logo.image_height else Logo.logo_height;
+    const logo_box_w = Logo.logo_width + 4;
+    const info_max_w = @min(content_w -| logo_box_w, max_info_width);
+    const banner_h = @max(logo_h, InfoLines.entry_count);
+
+    const flex_items = [2]vxfw.FlexItem{
+        .{ .widget = try compose.sized(ctx.arena, ui.widget(&logo), .{ .width = logo_box_w, .height = banner_h }), .flex = 0 },
+        .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&info_lines)), .{ .width = info_max_w, .height = banner_h }), .flex = 0 },
+    };
+    const sized_banner = try compose.sized(ctx.arena, (vxfw.FlexRow{ .children = &flex_items }).widget(), .{ .width = content_w, .height = banner_h });
+    return sized_banner.draw(ui.fixedWidth(ctx, content_w));
+}
+
 pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
     const narrow = w < narrow_breakpoint;
     const content_w: u16 = w -| 4;
+    const content_ctx = ui.fixedWidth(ctx, content_w);
 
-    // We use an ArrayList because the number of widgets depends on device count.
-    var widgets: std.ArrayList(vxfw.Widget) = .empty;
+    var sb = compose.surfaceBuilder(ctx.arena);
+    var row: i17 = 1; // top margin
 
-    // ── Logo + Info Lines ────────────────────────────────────
-    const logo: Logo = .{ .image = image_cache.global.get("logo"), .compact = narrow };
-    const info_lines: InfoLines = .{ .state = self.state };
-
-    // Compute logo height (differs for image vs ASCII)
-    const has_image = logo.image != null;
-    const logo_h: u16 = if (has_image)
-        (if (narrow) Logo.compact_image_height else Logo.image_height)
-    else
-        (if (narrow) Logo.compact_height else Logo.logo_height);
-
-    // Narrow: logo centered, info lines below.
-    const narrow_children = [2]vxfw.Widget{
-        try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&logo)), .{ .width = content_w, .height = logo_h }),
-        ui.widget(&info_lines),
-    };
-    const narrow_layout: ColumnLayout = .{ .children = &narrow_children, .gap = 1 };
-
-    // Wide: logo left, info lines vertically centered right.
-    const info_max_w = @min(w -| (Logo.logo_width + 6), max_info_width);
-    const banner_h = @max(logo_h, 9); // info lines need at least 9 rows
-    const wide_flex_items = [2]vxfw.FlexItem{
-        .{ .widget = try compose.sized(ctx.arena, ui.widget(&logo), .{ .width = Logo.logo_width + 4, .height = banner_h }), .flex = 0 },
-        .{ .widget = try compose.sized(ctx.arena, try compose.center(ctx.arena, ui.widget(&info_lines)), .{ .width = info_max_w, .height = banner_h }), .flex = 0 },
-    };
-    const wide_flex_row: vxfw.FlexRow = .{ .children = &wide_flex_items };
-
-    const banner = if (narrow) ui.widget(&narrow_layout) else try compose.sized(ctx.arena, wide_flex_row.widget(), .{ .width = content_w, .height = banner_h });
-    try widgets.append(ctx.arena, banner);
+    // ── Banner (Logo + Info Lines) ─────────────────────────
+    const banner_surf = try if (narrow) self.drawNarrowBanner(ctx, content_w) else self.drawWideBanner(ctx, content_w);
+    try sb.add(row, 2, banner_surf);
+    row += @intCast(banner_surf.size.height + 1);
 
     // ── Device Grid ─────────────────────────────────────────
     for (self.device_cards) |*card| {
         card.use_braille = self.use_braille;
         card.viewing_device = self.viewing_device;
     }
-
     const card_widgets = try ctx.arena.alloc(vxfw.Widget, self.device_cards.len);
     for (self.device_cards, card_widgets) |*card, *cw| {
         cw.* = ui.widget(card);
@@ -99,16 +106,16 @@ pub fn draw(self: *Overview, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw
         .col_gap = 2,
         .gap = 1,
     };
-    try widgets.append(ctx.arena, ui.widget(&device_grid));
+    const grid_surf = try ui.widget(&device_grid).draw(content_ctx);
+    try sb.add(row, 2, grid_surf);
+    row += @intCast(grid_surf.size.height + 1);
 
     // ── Process Table ────────────────────────────────────────
     if (self.process_table) |pt| {
-        try widgets.append(ctx.arena, ui.widget(pt));
+        const pt_surf = try ui.widget(pt).draw(content_ctx);
+        try sb.add(row, 2, pt_surf);
+        row += @intCast(pt_surf.size.height);
     }
 
-    // ── Compose with ColumnLayout ────────────────────────────
-    return common.pageFrame(ctx, .{
-        .children = widgets.items,
-        .gap = 1,
-    }, w, content_w, ui.widget(self));
+    return sb.finish(.{ .width = w, .height = @intCast(row) }, ui.widget(self));
 }
