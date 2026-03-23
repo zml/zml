@@ -4,9 +4,12 @@ This map defines where each Block-0 operation comes from in LTX Python and where
 
 ## Scope
 
-Current checker path validates a simplified FF-boundary surrogate, not full BasicAVTransformerBlock equivalence.
+Two checker paths are currently maintained:
 
-- Current Zig block forward: [examples/ltx/model.zig](examples/ltx/model.zig#L344)
+- Legacy FF-boundary surrogate parity (`block0_ff_boundary_*`).
+- Full stream parity for block0 video+audio composition (`block0_full_*`, M6).
+
+- Current canonical block full-forward API: [examples/ltx/model.zig](examples/ltx/model.zig#L402)
 - Current FF-boundary entrypoint: [examples/ltx/model.zig](examples/ltx/model.zig#L506)
 - Checker callsite: [examples/ltx/block0_forward_check.zig](examples/ltx/block0_forward_check.zig#L96)
 - Fixture keys: [examples/ltx/export_block0_fixture.py](examples/ltx/export_block0_fixture.py#L75)
@@ -48,7 +51,8 @@ Audio stream mirrors the same pattern with audio tensors and audio modules.
 ## Zig Mapping (Current vs Target)
 
 - Current block struct and params: [examples/ltx/model.zig](examples/ltx/model.zig#L315)
-- Current simplified forward (attn result ignored, returns ff(x)): [examples/ltx/model.zig](examples/ltx/model.zig#L344)
+- Current canonical full forward API (`video+audio` inputs/outputs): [examples/ltx/model.zig](examples/ltx/model.zig#L402)
+- Current legacy simplified FF-boundary forward: [examples/ltx/model.zig](examples/ltx/model.zig#L409)
 - Block-0 params entrypoint: [examples/ltx/model.zig](examples/ltx/model.zig#L565)
 - Legacy alias for checker compatibility: [examples/ltx/model.zig](examples/ltx/model.zig#L512)
 
@@ -66,19 +70,25 @@ Target semantic landing in Zig for full parity:
    - vx <- vx + ff(vx_scaled) * vgate_mlp
 7. Implement audio branch only when running audio tensors, never feed video tensor into audio_ff.
 
-## Verified Current Boundary
+## Verified Checker Boundaries
 
-Current fixture/check path validates only the FF-boundary surrogate:
+Two fixture/check contracts are validated and maintained:
 
-- Fixture tensors:
-  - block0_ff_boundary.input0
-  - block0_ff_boundary.output0
-- Loader prefers new keys and can fallback to legacy keys in checker.
+1. FF-boundary surrogate checker (legacy bring-up path)
+    - Fixture tensors:
+       - block0_ff_boundary.input0
+       - block0_ff_boundary.output0
+    - Loader prefers new keys and can fallback to legacy keys in checker.
+    - References:
+       - Fixture export: [examples/ltx/export_block0_fixture.py](examples/ltx/export_block0_fixture.py#L75)
+       - Checker key map: [examples/ltx/block0_forward_check.zig](examples/ltx/block0_forward_check.zig#L188)
 
-References:
-
-- Fixture export: [examples/ltx/export_block0_fixture.py](examples/ltx/export_block0_fixture.py#L75)
-- Checker key map: [examples/ltx/block0_forward_check.zig](examples/ltx/block0_forward_check.zig#L188)
+2. Full block0 stream checker (M6 canonical parity path)
+    - Fixture tensors are under `block0_full.*` and include both video and audio stream inputs/outputs.
+    - Checker validates:
+       - `forwardBlock0VideoStream(...) == block0_full.vx_out`
+       - `forwardBlock0AudioStream(...) == block0_full.ax_out`
+    - Reference checker: [examples/ltx/block0_full_check.zig](examples/ltx/block0_full_check.zig#L1)
 
 ## Recommended Stagewise Bring-up Milestones
 
@@ -186,8 +196,9 @@ Use independent fixtures/checkers for each stage before combining all paths.
       - token_limit=256, distilled_lora_strength=0.5 (LoRA-merged checkpoint): PASS (video stream + audio stream + full block0 composition)
       - token_limit=512, distilled_lora_strength=0.5 (LoRA-merged checkpoint): PASS (video stream + audio stream + full block0 composition)
    - **Parity target**: validated against the Python `BasicAVTransformerBlock` semantics and related helper paths in the upstream LTX transformer implementation, not merely against an internal Zig surrogate.
-   - **Current Zig landing point**: the validated full-block parity lives in dedicated M6 entrypoints in [examples/ltx/model.zig](examples/ltx/model.zig#L1677) and [examples/ltx/model.zig](examples/ltx/model.zig#L1741).
-   - **Important distinction**: [examples/ltx/model.zig](examples/ltx/model.zig#L344) `BasicAVTransformerBlock.forward` is still the earlier simplified FF-boundary bring-up path and is not yet the runtime landing point for the validated full Python-equivalent block semantics.
+   - **Current Zig landing point**: full M6 semantics are now implemented in `BasicAVTransformerBlock` stream methods and canonical full-forward API in [examples/ltx/model.zig](examples/ltx/model.zig#L402), with free-function M6 entrypoints delegating to those methods.
+   - **Important distinction**: runtime stack iteration in `LTXModel.forward` still uses the legacy single-stream FF-boundary method for compatibility; full-stream inputs (contexts/PE/gates for both video+audio) are not yet threaded through the model loop.
+   - **Post-integration revalidation (2026-03-23)**: re-ran `block0_full_check` across all six combinations (token limits 128/256/512 × lora 0.0/0.5); all video+audio stream checks PASS. Note: lora=0.5 t256 fixture was stale (missing `v_text_x`) and required re-export from `acts_stage2_transformer_step_000_m6_lora0.5_t256.pt` before passing.
    - **Key implementation lesson**: for both video and audio streams, text cross-attn and AV cross-attn must use the exact per-module query inputs captured from Python (`v_text_x`, `a2v_x`, `a_text_x`, `v2a_x`) because those module inputs include hidden preprocessing not recoverable from a naive reconstructed residual state alone.
 
 ## Milestone Status Summary
