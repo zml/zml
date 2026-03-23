@@ -584,6 +584,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // This is what AMD recommendeds in the meantime.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
+            .tpu => {
+                // Match the TPU collective matmul tuning used by vLLM's TPU backend.
+                try setXlaOverrideFlag(overrides_map, "xla_tpu_all_gather_collective_matmul_mode", "post_spmd_conservative", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_tpu_reduce_scatter_collective_matmul_mode", "post_spmd_conservative", upb_arena);
+            },
             else => {},
         }
 
