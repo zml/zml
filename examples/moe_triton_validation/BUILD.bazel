@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "moe_triton_validation",
+    srcs = ["main.zig"],
+    main = "main.zig",
+    data = [
+        "//zml/moe/triton:sandbox",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
