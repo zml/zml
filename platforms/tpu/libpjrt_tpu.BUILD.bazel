@@ -31,6 +31,8 @@ copy_to_directory(
         "lib/python*/**",
         "site-packages/**",
     ],
+    allow_overwrites = True,
+    add_directory_to_runfiles = False,
     include_external_repositories = ["**"],
     hardlink = "auto",
 )

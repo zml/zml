@@ -43,6 +43,7 @@ zig_library(
     }),
 )
 
+# bazel run //platforms/tpu:requirements.update
 uv_lock(
     name = "requirements",
     srcs = ["requirements.in"],
@@ -62,7 +63,10 @@ uv_lock(
 py_binary(
     name = "gen_ir",
     srcs = ["gen_ir.py"],
-    deps = ["@tpu_py_deps//jax"],
+    deps = [
+        "@tpu_py_deps//jax",
+        "@tpu_py_deps//tpu_inference",
+    ],
 )
 
 runfiles_to_default(
@@ -95,4 +99,3 @@ cc_library(
         "@rules_python//python/cc:current_py_cc_libs",
     ],
 )
-
