@@ -1183,7 +1183,7 @@ pub const GatedDeltaNet = struct {
 
         const v_hat = state.s.dot(inputs.k, .k).mul(inputs.alpha.insertAxes(.last, .{.v}));
         const delta = inputs.v.sub(v_hat).mul(inputs.beta.insertAxes(.last, .{.v}));
-        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(1, .{.v}).broad(state.s.shape()));
+        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(.k, .{.v}).broad(state.s.shape()));
         const s_new = state.s.mul(inputs.alpha.insertAxes(.last, .{ .v, .k })).add(delta_k);
         const y = s_new.dot(inputs.q, .k);
 
@@ -1286,13 +1286,6 @@ pub const GatedDeltaNet = struct {
         };
     }
 };
-
-pub const GatedDeltaNetState = GatedDeltaNet.State;
-pub const GatedDeltaNetStepInputs = GatedDeltaNet.StepInputs;
-pub const GatedDeltaNetStepOutput = GatedDeltaNet.StepOutput;
-pub const GatedDeltaNetOutput = GatedDeltaNet.Output;
-pub const gatedDeltaNetStep = GatedDeltaNet.step;
-pub const gatedDeltaNet = GatedDeltaNet.forward;
 
 test "gated delta net" {
     const platform = zml.testing.env();
