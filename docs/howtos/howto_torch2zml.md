@@ -247,8 +247,6 @@ pub fn main(init: std.process.Init) !void {
 }
 ```
 
-TODO: Explain the load parameters ? Or find sane defaults to not have to worry about it ?
-
 
 ## Testing an individual layer
 
