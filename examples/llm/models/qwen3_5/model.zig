@@ -46,7 +46,9 @@ pub const RopeParameters = struct {
 pub const Buffers = zml.Bufferized(Model);
 
 pub const Model = struct {
-    pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{}, max_seq_len: i64 };
+    pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{
+        .topk = 4,
+    }, max_seq_len: i64 };
 
     pub const SpecialTokens = struct {
         im_start_token_id: u32,

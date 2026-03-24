@@ -37,7 +37,9 @@ pub const Model = struct {
     lm_head: ?zml.nn.Linear,
     model: Llama,
 
-    gen_opts: zml.nn.SamplingStrategy = .{},
+    gen_opts: zml.nn.SamplingStrategy = .{
+        .topk = 4,
+    },
     config: Config,
 
     pub fn init(

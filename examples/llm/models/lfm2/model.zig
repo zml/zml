@@ -199,7 +199,9 @@ pub const LmHead = struct {
 
     pub fn forward(self: LmHead, hidden: Tensor, embed_tokens: TokenEmbedding, tokens: Tensor, rng: Tensor.Rng) struct { Tensor, Tensor.Rng } {
         const logits = embed_tokens.unembed(self.embedding_norm.forward(hidden));
-        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, .{}, rng);
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, .{
+            .topk = 4,
+        }, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
     }
 
