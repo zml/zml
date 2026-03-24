@@ -254,7 +254,7 @@ fn BufferizedWithArgs(comptime T: type) type {
 /// Automatically calls the executable with the given arguments, taking care of arguments and results allocation.
 /// This helper can be used in tests to make the code a bit less verbose.
 /// It doesn't handle pointers in inputs/outputs structs.
-pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(std.meta.ArgsTuple(func))) !zml.Bufferized(stdx.meta.FnReturn(func)) {
+pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(std.meta.ArgsTuple(@TypeOf(func)))) !zml.Bufferized(stdx.meta.FnReturn(func)) {
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
 
@@ -309,7 +309,7 @@ pub fn testLayer(
     defer arena.deinit();
 
     const forward = @field(@TypeOf(layer), @tagName(func));
-    const ArgsT = stdx.meta.Tail(stdx.meta.FnArgs(forward));
+    const ArgsT = stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(forward)));
 
     var args: ArgsT = undefined;
 
