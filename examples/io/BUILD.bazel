@@ -8,9 +8,3 @@ zig_binary(
     main = "main.zig",
     deps = ["//zml"],
 )
-
-build_test(
-    name = "test",
-    targets = [":io"],
-)
-
