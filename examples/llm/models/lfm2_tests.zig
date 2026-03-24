@@ -3,9 +3,9 @@ const std = @import("std");
 const zml = @import("zml");
 const attention = zml.attention.attention;
 
+const common = @import("common.zig");
 const lfm2 = @import("lfm2.zig");
 const model = @import("lfm2/model.zig");
-const Shardings = @import("common.zig").Shardings;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -43,22 +43,22 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var repo_model = try lfm2.Repository.init(allocator, io, repo, store.view());
+    var repo_model = try lfm2.LoadedModel.init(allocator, io, repo, store.view());
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
     const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
-    const shardings: Shardings = .{
+    const shardings: common.Shardings = .{
         .replicated = try zml.sharding.replicatedSharding(platform),
         .model = try .initFromStrategy(platform, tp_mesh, tp_strategy),
     };
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer lfm2.Repository.unloadBuffers(&model_buffers, allocator);
+    defer repo_model.unloadBuffers(&model_buffers, allocator);
 
     const backend = args.backend orelse attention.Backend.auto(platform);
-    const params = lfm2.CompilationOptions.init(repo_model.inner, repo_model.parsed_config.value, repo_model.parsed_config.value.max_position_embeddings, backend, false);
+    const params = lfm2.CompilationParameters.init(repo_model.inner, repo_model.parsed_config.value, repo_model.parsed_config.value.max_position_embeddings, backend, false, shardings);
     progress.end();
 
     try run(allocator, io, platform, args.activations, repo_model.parsed_config.value, repo_model.inner, &model_buffers, params.attention_metadata, params.attention_parameters);

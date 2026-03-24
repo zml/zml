@@ -63,16 +63,25 @@ pub fn main(init: std.process.Init) !void {
 
     const io = vfs.io();
 
+    //
+    // Platform and Backend Selection
+    //
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
+    const backend = args.backend orelse b: {
+        const selected = zml.attention.attention.Backend.auto(platform);
+        log.info("Selected backend: {}", .{selected});
+        break :b selected;
+    };
+
+    //
+    // Model initialization
+    //
     log.info("Resolving model repository..", .{});
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
-
-    const model_type = try models.detectModelType(allocator, io, repo);
-    log.info("Detected model type: {}", .{model_type});
 
     log.info("Initializing model..", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -81,65 +90,55 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var model = try models.Repository.init(model_type, allocator, io, repo, store.view());
+    var model = try models.LoadedModel.load(allocator, io, repo, store.view());
     defer model.deinit(allocator);
 
-    const backend = args.backend orelse b: {
-        const selected = zml.attention.attention.Backend.auto(platform);
-        log.info("Selected backend: {}", .{selected});
-        break :b selected;
-    };
+    // Defines how the model's tensors are sharded across the available devices.
+    const shardings: models.Shardings = try .init(platform);
 
+    //
+    // Load the model and compile it
+    //
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     errdefer progress.end();
 
-    const tokenizer = try loadTokenizer(allocator, io, repo, &progress);
-    defer {
-        var tk = tokenizer;
-        tk.deinit();
-    }
+    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
+    defer tokenizer.deinit();
 
-    const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
-    const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
-    const shardings: models.Shardings = .{
-        .replicated = try zml.sharding.replicatedSharding(platform),
-        .model = try .initFromStrategy(platform, tp_mesh, tp_strategy),
-    };
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    defer model.unloadBuffers(&model_buffers, allocator);
 
-    var model_buffers = try model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer model_buffers.deinit(allocator);
-
-    var session = try model.initSession(
-        allocator,
-        io,
-        platform,
-        &model_buffers,
-        tokenizer,
-        .{
-            .seqlen = args.seqlen,
-            .backend = backend,
-            .single = args.single,
-        },
-        &progress,
-        shardings,
-    );
-    defer session.deinit();
+    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    defer compiled_model.deinit();
 
     progress.end();
 
-    try printLogo(io);
+    //
+    // We're ready to go! Let's start a chat...
+    //
+    try printZmlLogo(io);
 
     const interactive = args.prompt == null;
-    const prompt = if (args.prompt) |p| try allocator.dupe(u8, p) else blk: {
+    const prompt = if (args.prompt) |prompt| b: {
+        break :b try allocator.dupe(u8, prompt);
+    } else b: {
         chat.initHistory();
         const line = c.linenoise(chat.prompt_prefix) orelse return;
         defer c.linenoiseFree(line);
         chat.rememberPrompt(line);
-        break :blk try allocator.dupe(u8, std.mem.sliceTo(line, 0));
+        break :b try allocator.dupe(u8, std.mem.sliceTo(line, 0));
     };
     defer allocator.free(prompt);
 
-    var llm_chat = try chat.Chat.init(allocator, io, tokenizer, &model, &session);
+    var llm_chat = try chat.Chat.init(
+        allocator,
+        io,
+        platform,
+        tokenizer,
+        &model,
+        &compiled_model,
+        &model_buffers,
+    );
     defer llm_chat.deinit();
 
     if (interactive) {
@@ -166,7 +165,7 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     return try .fromBytes(allocator, io, bytes);
 }
 
-pub fn printLogo(io: std.Io) !void {
+pub fn printZmlLogo(io: std.Io) !void {
     const LOGO =
         \\
         \\
