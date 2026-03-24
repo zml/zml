@@ -1,10 +1,6 @@
 const std = @import("std");
 const log = std.log;
 
-pub const std_options: std.Options = .{
-    .log_level = .info,
-};
-
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 const stdx = zml.stdx;
@@ -12,10 +8,14 @@ const stdx = zml.stdx;
 const qwen35 = @import("qwen3_5.zig");
 const Qwen35 = qwen35.Qwen35;
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 const CliArgs = struct {
     model: []const u8,
     prompt: []const u8 = "Write me a long story about a cat",
-    len: i64 = 512,
+    len: i64 = 2048,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -65,16 +65,16 @@ pub fn main(init: std.process.Init) !void {
     defer qwen_model.deinit(allocator);
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
 
-    // const model_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
-    // const kv_cache = qwen35.KvCache.init(
-    //     config,
-    //     1,
-    //     options.max_seq_len,
-    //     model_dtype,
-    //     .f32,
-    // );
-    // var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
-    // defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
+    const model_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+    const kv_cache = qwen35.KvCache.init(
+        config,
+        1,
+        options.max_seq_len,
+        model_dtype,
+        .f32,
+    );
+    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
+    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
     //======================= Progress tracking setup ========================
 
@@ -82,11 +82,11 @@ pub fn main(init: std.process.Init) !void {
 
     //======================= Loading tokenizer (async) ========================
 
-    // var tokenizer_future = try io.concurrent(loadTokenizer, .{ allocator, io, repo, &progress });
-    // errdefer blk: {
-    //     var v = tokenizer_future.cancel(io) catch break :blk;
-    //     v.deinit();
-    // }
+    var tokenizer_future = try io.concurrent(loadTokenizer, .{ allocator, io, repo, &progress });
+    errdefer blk: {
+        var v = tokenizer_future.cancel(io) catch break :blk;
+        v.deinit();
+    }
 
     //======================= Loading weights (async) ========================
 
@@ -104,38 +104,38 @@ pub fn main(init: std.process.Init) !void {
         Qwen35.unloadBuffers(&v, allocator);
     }
 
-    // var tokenizer = try tokenizer_future.await(io);
-    // const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
-    // defer allocator.free(input_token_ids);
-    // const prefill_len: usize = @intCast(options.max_seq_len);
+    var tokenizer = try tokenizer_future.await(io);
+    const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
+    defer allocator.free(input_token_ids);
+    const prefill_len: usize = @intCast(options.max_seq_len);
 
     //======================= Model compilation (async) ========================
 
-    // var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
-    // defer if (compile_result_future.cancel(io)) |v| {
-    //     v.prefill_exe.deinit();
-    //     v.decode_exe.deinit();
-    // } else |_| {};
+    var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
+    defer if (compile_result_future.cancel(io)) |v| {
+        v.prefill_exe.deinit();
+        v.decode_exe.deinit();
+    } else |_| {};
 
     //======================= Awaiting futures ========================
 
-    // const compile_result = try compile_result_future.await(io);
+    const compile_result = try compile_result_future.await(io);
     const qwen35_buffers = try qwen35_buffers_future.await(io);
 
     progress.end();
 
     //======================= Running model for prompt ========================
 
-    // log.info("\n🕹️ ZML 🕹️ running model {s} on following prompt:\n{s}\n", .{ args.model, args.prompt });
+    log.info("\n🕹️ ZML 🕹️ running model {s} on following prompt:\n{s}\n", .{ args.model, args.prompt });
 
-    // var stdout = std.Io.File.stdout().writer(io, &.{});
-    // var tokenizer_decoder = try tokenizer.decoder();
-    // defer tokenizer_decoder.deinit();
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
 
-    // try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
+    try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
 
     //======================= Output check (panics if fail) ========================
-    try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
+    // try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
 }
 
 const CompileModelResult = struct {
