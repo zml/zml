@@ -15,9 +15,11 @@
 
 # About
 
-ZML is a production inference stack built close to the hardware.
+ZML is a production inference stack, purpose-built to decouple AI workloads from proprietary hardware.
 
-It lowers models directly onto NVIDIA, AMD, TPU, and Trainium targets from a single codebase, without depending on and suffering from the Python-heavy runtime layers that most of the ecosystem is built around.
+Any model, many hardwares, one codebase, peak performance.
+
+Compiled directly to NVIDIA, AMD, TPU, Trainium for peak hardware performance on any accelerator. No rewriting.
 
 It is built using the
 [Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
