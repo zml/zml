@@ -3,12 +3,13 @@ const std = @import("std");
 const zml = @import("zml");
 
 const common = @import("models/common.zig");
-const SessionOptions = common.SessionOptions;
 pub const Shardings = common.Shardings;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
 pub const qwen3_5 = @import("models/qwen3_5.zig");
+
+const log = std.log.scoped(.llm);
 
 pub const ModelType = enum {
     lfm2,
@@ -20,26 +21,29 @@ const RawConfig = struct {
     model_type: []const u8,
 };
 
-pub const Repository = union(ModelType) {
-    lfm2: lfm2.Repository,
-    llama: llama.Repository,
-    qwen3_5: qwen3_5.Repository,
+pub const LoadedModel = union(ModelType) {
+    lfm2: lfm2.LoadedModel,
+    llama: llama.LoadedModel,
+    qwen3_5: qwen3_5.LoadedModel,
 
-    pub fn init(model_type: ModelType, allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !Repository {
+    pub fn load(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+        const model_type = try detectModelType(allocator, io, repo);
+        log.info("Detected model type: {}", .{model_type});
+
         return switch (model_type) {
-            .lfm2 => .{ .lfm2 = try lfm2.Repository.init(allocator, io, repo, store) },
-            .llama => .{ .llama = try llama.Repository.init(allocator, io, repo, store) },
-            .qwen3_5 => .{ .qwen3_5 = try qwen3_5.Repository.init(allocator, io, repo, store) },
+            .lfm2 => .{ .lfm2 = try lfm2.LoadedModel.init(allocator, io, repo, store) },
+            .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store) },
+            .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store) },
         };
     }
 
-    pub fn deinit(self: *Repository, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
         switch (self.*) {
             inline else => |*m| m.deinit(allocator),
         }
     }
 
-    pub fn loadBuffers(self: *Repository, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings) !Buffers {
+    pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings) !Buffers {
         return switch (self.*) {
             .lfm2 => |*m| .{ .lfm2 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
@@ -47,65 +51,128 @@ pub const Repository = union(ModelType) {
         };
     }
 
-    pub fn tokenizePrompt(self: *const Repository, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
+    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .lfm2 => |*loaded_model| switch (buffers.*) {
+                .lfm2 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+                else => unreachable,
+            },
+            .llama => |*loaded_model| switch (buffers.*) {
+                .llama => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+                else => unreachable,
+            },
+            .qwen3_5 => |*loaded_model| switch (buffers.*) {
+                .qwen3_5 => |*loaded_buffers| loaded_model.unloadBuffers(loaded_buffers, allocator),
+                else => unreachable,
+            },
+        }
+    }
+
+    pub fn tokenizePrompt(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
         return switch (self.*) {
             inline else => |*m| m.tokenizePrompt(allocator, tokenizer, prompt),
         };
     }
 
-    pub fn tokenizeTurn(self: *const Repository, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
+    pub fn tokenizeTurn(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
         return switch (self.*) {
             inline else => |*m| m.tokenizeTurn(allocator, tokenizer, prompt),
         };
     }
 
-    pub fn initSession(
-        self: *const Repository,
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
+        shardings: Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !CompiledModel {
+        return switch (self.*) {
+            .lfm2 => |*m| .{ .lfm2 = try m.compile(
+                allocator,
+                io,
+                platform,
+                backend,
+                shardings,
+                seqlen,
+                progress,
+            ) },
+            .llama => |*m| .{ .llama = try m.compile(
+                allocator,
+                io,
+                platform,
+                backend,
+                shardings,
+                seqlen,
+                progress,
+            ) },
+            .qwen3_5 => |*m| .{ .qwen3_5 = try m.compile(allocator, io, platform, backend, shardings, seqlen, progress) },
+        };
+    }
+};
+
+pub const CompiledModel = union(ModelType) {
+    lfm2: lfm2.inference.CompiledModel,
+    llama: llama.inference.CompiledModel,
+    qwen3_5: qwen3_5.inference.CompiledModel,
+
+    pub fn deinit(self: *CompiledModel) void {
+        switch (self.*) {
+            .lfm2 => |*b| b.deinit(),
+            .llama => |*b| b.deinit(),
+            .qwen3_5 => |*b| b.deinit(),
+        }
+    }
+
+    pub fn newSession(
+        self: *CompiledModel,
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *zml.Platform,
         model_buffers: *Buffers,
         tokenizer: zml.tokenizer.Tokenizer,
-        opts: SessionOptions,
-        progress: *std.Progress.Node,
-        shardings: Shardings,
     ) !Session {
-        const inner: Session.Inner = switch (self.*) {
-            .lfm2 => |repo| .{ .lfm2 = try lfm2.Session.init(
-                allocator,
-                io,
-                platform,
-                &model_buffers.lfm2,
-                tokenizer,
-                repo,
-                opts,
-                progress,
-                shardings,
-            ) },
-            .llama => |repo| .{ .llama = try llama.Session.init(
-                allocator,
-                io,
-                platform,
-                &model_buffers.llama,
-                tokenizer,
-                repo,
-                opts,
-                progress,
-                shardings,
-            ) },
-            .qwen3_5 => |repo| .{ .qwen3_5 = try qwen3_5.Session.init(
-                allocator,
-                io,
-                platform,
-                &model_buffers.qwen3_5,
-                tokenizer,
-                repo,
-                opts,
-                progress,
-                shardings,
-            ) },
+        return switch (self.*) {
+            .lfm2 => |*compiled| .{
+                .inner = .{ .lfm2 = try lfm2.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    &model_buffers.lfm2,
+                    tokenizer,
+                    compiled.loaded_model.*,
+                    compiled,
+                ) },
+                .seqlen = compiled.params.seqlen,
+            },
+            .llama => |*compiled| .{
+                .inner = .{ .llama = try llama.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    &model_buffers.llama,
+                    tokenizer,
+                    compiled.loaded_model.parsed_config.value,
+                    compiled,
+                ) },
+                .seqlen = @intCast(compiled.params.seqlen),
+            },
+            .qwen3_5 => |*compiled| .{
+                .inner = .{ .qwen3_5 = try qwen3_5.Session.init(
+                    allocator,
+                    io,
+                    platform,
+                    &model_buffers.qwen3_5,
+                    tokenizer,
+                    compiled.loaded_model.inner,
+                    compiled,
+                ) },
+                .seqlen = compiled.params.seqlen,
+            },
         };
-        return .{ .inner = inner, .seqlen = opts.seqlen };
     }
 };
 
@@ -113,14 +180,6 @@ pub const Buffers = union(ModelType) {
     lfm2: lfm2.Buffers,
     llama: llama.Buffers,
     qwen3_5: qwen3_5.Buffers,
-
-    pub fn deinit(self: *Buffers, allocator: std.mem.Allocator) void {
-        switch (self.*) {
-            .lfm2 => |*b| lfm2.Repository.unloadBuffers(b, allocator),
-            .llama => |*b| llama.Repository.unloadBuffers(b, allocator),
-            .qwen3_5 => |*b| qwen3_5.Repository.unloadBuffers(b, allocator),
-        }
-    }
 };
 
 pub const Session = struct {

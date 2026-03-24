@@ -3,19 +3,15 @@ const std = @import("std");
 const zml = @import("zml");
 const attention = zml.attention.attention;
 
-const common = @import("../common.zig");
-const Shardings = common.Shardings;
-const SessionOptions = common.SessionOptions;
 const inference = @import("inference.zig");
 const model = @import("model.zig");
-const repository = @import("repository.zig");
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     model_buffers: *model.Buffers,
-    exe: inference.Inference,
+    compiled_model: *inference.CompiledModel,
     config: model.Config,
     seqlen: u32,
     cache_buffers: zml.Bufferized(model.Cache),
@@ -32,28 +28,22 @@ pub const Session = struct {
         platform: *zml.Platform,
         model_buffers: *model.Buffers,
         tokenizer: zml.tokenizer.Tokenizer,
-        repo: repository.Repository,
-        opts: SessionOptions,
-        progress: *std.Progress.Node,
-        shardings: Shardings,
+        loaded_model: model.LoadedModel,
+        compiled_model: *inference.CompiledModel,
     ) !Session {
-        const params = inference.CompilationOptions.init(repo.inner, repo.parsed_config.value, opts.seqlen, opts.backend, opts.single);
-        const exe = try inference.Inference.init(allocator, io, platform, repo.inner, params, opts.seqlen, progress, shardings);
-        errdefer exe.deinit();
-
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
         return .{
             .allocator = allocator,
             .io = io,
             .platform = platform,
             .model_buffers = model_buffers,
-            .exe = exe,
+            .compiled_model = compiled_model,
             .tokenizer = tokenizer,
-            .config = repo.parsed_config.value,
-            .seqlen = opts.seqlen,
-            .cache_buffers = try params.cache.initBuffers(allocator, io, platform, shardings.replicated),
-            .attention_metadata_buffers = try params.attention_metadata.initBuffer(io, platform, shardings.model),
-            .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, shardings.replicated),
+            .config = loaded_model.parsed_config.value,
+            .seqlen = compiled_model.params.seqlen,
+            .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.replicated),
+            .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
+            .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, compiled_model.params.shardings.replicated),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
             .think_start = tokenizer.tokenToId("<think>") orelse unreachable,
             .think_end = tokenizer.tokenToId("</think>") orelse unreachable,
@@ -61,7 +51,6 @@ pub const Session = struct {
     }
 
     pub fn deinit(self: *Session) void {
-        self.exe.deinit();
         model.Cache.unloadBuffers(&self.cache_buffers);
         attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buf);
@@ -88,7 +77,7 @@ pub const Session = struct {
         var actual_seq_len_buf: zml.Buffer = try .fromSlice(self.io, self.platform, actual_seq_len_slice, sharding);
         defer actual_seq_len_buf.deinit();
 
-        try self.exe.prefill.run(.{
+        try self.compiled_model.prefill.run(.{
             .allocator = self.allocator,
             .io = self.io,
             .platform = self.platform,
@@ -141,7 +130,7 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, sharding);
             defer token_pos_buffer.deinit();
 
-            try self.exe.decode.run(.{
+            try self.compiled_model.decode.run(.{
                 .allocator = self.allocator,
                 .io = self.io,
                 .platform = self.platform,
