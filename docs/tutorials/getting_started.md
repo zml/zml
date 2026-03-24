@@ -21,14 +21,14 @@ through `bazelisk`, a version manager for `bazel`.
 **macOs:**
 
 ```
-    brew install bazelisk
+brew install bazelisk
 ```
 
 **Linux:**
 
 ```
-    curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.1/bazelisk-linux-amd64'
-    chmod +x /usr/local/bin/bazel
+curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.1/bazelisk-linux-amd64'
+chmod +x /usr/local/bin/bazel
 ```
 
 
