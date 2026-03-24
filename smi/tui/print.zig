@@ -54,7 +54,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width);
+    const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
 
     // Neuron util% is delta-based; wait for 2 poll cycles to get a real sample.
     if (state.targets.contains(.neuron)) {
