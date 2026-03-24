@@ -5,6 +5,10 @@ zig_binary(
     name = "qwen3_5",
     srcs = ["qwen3_5.zig"],
     main = "main.zig",
+    data = [
+        "//zml/moe/triton:sandbox",
+        "//zml/moe/triton:triton_kernels/config.json",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//bazel",

@@ -309,14 +309,29 @@ pub fn moe(
                 output = top_output.reshape(.{ .expert = num_experts_per_tok, .s = input.dim(.s), .d = hidden_size_orig });
                 output = output.sum(.expert).squeeze(0);
             }
-
             break :b output;
         },
         .triton => b: {
             _ = metadata;
-            const routing = router.forward(input).topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
+            const router_logits = router.forward(input);
+            const routing = router_logits.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
             const topk_ids = routing.indices.convert(.i32);
-            const topk_weights = routing.values.softmax(.top_expert);
+            const renormalize = true;
+            const topk_weights = if (renormalize)
+                routing.values.softmax(.top_expert)
+            else blk: {
+                const logZ = router_logits.logSumExp(.expert);
+                break :blk routing.values.sub(
+                    logZ.rename(.{ .expert = .top_expert }).broad(routing.values.shape()),
+                ).exp();
+            };
+
+            std.log.info("input shape: {f}", .{input.shape()});
+            std.log.info("weights_gate_up shape: {f}", .{weights_gate_up.shape()});
+            std.log.info("weights_down shape: {f}", .{weights_down.shape()});
+            std.log.info("topk_ids shape: {f}", .{topk_ids.shape()});
+            std.log.info("topk_weights shape: {f}", .{topk_weights.shape()});
+
             break :b try triton_moe.fusedExpertsImpl(
                 input,
                 weights_gate_up,

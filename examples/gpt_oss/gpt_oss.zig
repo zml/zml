@@ -673,7 +673,7 @@ pub const Model = struct {
         var updated_kv_cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
-            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i), tokens_mask, moe_metadata, moe_parameters);
+            hidden, updated_kv_cache = layer.forward(hidden, token_index, updated_kv_cache.atLayer(i), tokens_mask, moe_metadata, moe_parameters, i);
         }
         const output = self.norm.forward(hidden);
 
@@ -715,23 +715,49 @@ pub const TransformerLayer = struct {
         tokens_mask: ?Tensor,
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
+        i: usize,
     ) struct { Tensor, KvCache } {
 
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
         stdx.debug.assert(x0.rank() >= 2 and x0.shape().hasTags(.{ .s, .d }), "TransformerLayer expected input shape: {{..., .s, .d}}, received: {f}", .{x0});
+        if (i == 0 or i == 1) {
+            x0.print("layer.0.x0");
+        }
 
         // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
         const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
+        if (i == 0 or i == 1) {
+            x0_replicated.print("layer.0.x0_replicated");
+        }
         const x0_normalized = self.input_layernorm.forward(x0_replicated);
+        // The "drift" is here
+        if (i == 0 or i == 1) {
+            x0_normalized.print("layer.0.x0_normalized");
+        }
 
         const delta0, const updated_kv_cache = self.self_attn.forward(x0_normalized, token_index, kv_cache);
+        if (i == 0 or i == 1) {
+            delta0.print("layer.0.delta0_self_attn");
+        }
         const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
+        if (i == 0 or i == 1) {
+            x1.print("layer.0.x1_residual_after_attn");
+        }
 
         // Fully Connected
         const x1_normalized = self.post_attention_layernorm.forward(x1);
-        var x2 = self.mlp.forward(x1_normalized, tokens_mask, moe_metadata, moe_parameters);
-        x2 = x2.withPartitioning(.{ .d = .replicated }).add(x1).withPartitioning(.{ .d = .replicated });
+        if (i == 0 or i == 1) {
+            x1_normalized.print("layer.0.x1_normalized");
+        }
+        var mlp_out = self.mlp.forward(x1_normalized, tokens_mask, moe_metadata, moe_parameters);
+        if (i == 0 or i == 1) {
+            mlp_out.print("layer.0.mlp_out");
+        }
+        var x2 = mlp_out.withPartitioning(.{ .d = .replicated }).add(x1).withPartitioning(.{ .d = .replicated });
+        if (i == 0 or i == 1) {
+            x2.print("layer.0.x2_block_output");
+        }
         //const x2 = self.moe.forward(x1_normalized).add(x1).rename(.{ .dout = .d });
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
@@ -851,7 +877,7 @@ pub const SelfAttn = struct {
     }
 };
 
-const RmsNorm = struct {
+pub const RmsNorm = struct {
     weight: Tensor,
     eps: f32 = 1e-6,
 
@@ -867,10 +893,52 @@ const RmsNorm = struct {
     pub fn forward(self: RmsNorm, input: Tensor) Tensor {
         const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
         // Note: contrary to Llama here the full layer is done in .f32, not just the variance computation.
-        const normalized = zml.nn.rmsNorm(x.convert(.f32), .d, self.eps);
-        return normalized.mul(self.weight.convert(.f32).withTags(.{.d}).broad(x.shape())).convert(input.dtype());
+        const x_f32 = x;
+        //.convert(.f32)
+        x_f32.print("rmsnorm.x_f32");
+
+        const variance = x_f32.powByConst(2).mean(.d);
+        variance.print("rmsnorm.variance");
+
+        const variance_plus_eps = variance.addConstant(self.eps);
+        variance_plus_eps.print("rmsnorm.variance_plus_eps");
+
+        const rsqrt = Tensor.rsqrt(variance_plus_eps);
+        rsqrt.print("rmsnorm.rsqrt");
+
+        const normalized = x_f32.mul(rsqrt.broad(x.shape()));
+        normalized.print("rmsnorm.normalized");
+
+        const weight_broadcast = self.weight.convert(.bf16).withTags(.{.d}).broad(x.shape());
+        weight_broadcast.print("rmsnorm.weight_broadcast");
+
+        const output_f32 = normalized.mul(weight_broadcast);
+        output_f32.print("rmsnorm.output_f32");
+
+        return output_f32.convert(input.dtype());
     }
 };
+
+// pub const RmsNorm = struct {
+//     weight: Tensor,
+//     eps: f32 = 1e-6,
+
+//     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
+//         return .{ .weight = store.createTensor("weight", .{.d}, null), .eps = eps };
+//     }
+
+//     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+//         self.weight.deinit();
+//     }
+
+//     pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+//         const x_f32 = x.convert(.f32);
+//         const weight_f32 = self.weight.convert(.f32);
+
+//         const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
+//         return normalized.mul(weight_f32.broad(x.shape())).add(normalized).convert(x.dtype());
+//     }
+// };
 
 const MoE = struct {
     experts: Mlp,

@@ -15,7 +15,8 @@ const Qwen35 = qwen35.Qwen35;
 const CliArgs = struct {
     model: []const u8,
     prompt: []const u8 = "What is the capital of France ?",
-    len: i64 = 128,
+    len: i64 = 256,
+    moe_backend: ?[]const u8 = null,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -24,7 +25,7 @@ pub fn main(init: std.process.Init) !void {
     const options = Qwen35.GenOptions{
         .max_seq_len = args.len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = 3,
             .temperature = 1.0,
         },
     };
@@ -76,6 +77,32 @@ pub fn main(init: std.process.Init) !void {
     var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
     defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
+    //======================= Moe backend init ========================
+
+    const dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+
+    const moe_backend: zml.moe.Backend = if (args.moe_backend) |name| b: {
+        if (std.mem.eql(u8, name, "flashinfer")) return error.FlashInferMoeBackendUnsupported;
+        if (std.mem.eql(u8, name, "triton")) break :b .triton;
+        log.err("Unknown MoE backend: {s}", .{name});
+        return;
+    } else try zml.moe.Backend.auto(platform, dtype);
+
+    moe_backend.load(allocator) catch |err| {
+        log.err("Failed to load MoE backend: {}", .{err});
+        return err;
+    };
+
+    moe_backend.register(platform) catch |err| {
+        log.err("Failed to register MoE backend: {}", .{err});
+        return err;
+    };
+
+    const moe_metadata: zml.moe.Metadata = .init(.fromBackend(moe_backend));
+    _ = moe_metadata; // autofix
+    const moe_parameters: zml.moe.Parameters = .init(.fromBackend(moe_backend));
+    _ = moe_parameters; // autofix
+
     //======================= Progress tracking setup ========================
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
@@ -106,6 +133,7 @@ pub fn main(init: std.process.Init) !void {
 
     var tokenizer = try tokenizer_future.await(io);
     const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
+
     defer allocator.free(input_token_ids);
     const prefill_len = input_token_ids.len;
 
@@ -216,17 +244,29 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeniz
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const encoded_prompt = try encoder.encode(prompt);
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 1);
+    _ = qwen_model; // prompt already contains special tokens
+    const rendered = try std.fmt.allocPrint(
+        allocator,
+        "<|im_start|>user\n{s}<|im_end|>\n<|im_start|>assistant\n<think>\n",
+        .{prompt},
+    );
+    defer allocator.free(rendered);
 
-    try tokens.append(allocator, qwen_model.special_tokens.im_start_token_id);
+    const encoded_prompt = try encoder.encode(rendered);
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len);
     try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.append(allocator, qwen_model.special_tokens.im_end_token_id);
-
     return tokens.toOwnedSlice(allocator);
 }
 
 fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, tokenizer_decoder: *zml.tokenizer.Tokenizer.Decoder, qwen35_buffers: zml.Bufferized(Qwen35), kv_cache_buffers: *zml.Bufferized(qwen35.KvCache), compile_result: CompileModelResult, input_token_ids: []u32, writer: *std.Io.Writer, qwen_model: Qwen35, prefill_len: usize) !void {
+    for (input_token_ids) |token_id| {
+        if (try tokenizer_decoder.*.next(token_id)) |chunk| {
+            try writer.writeAll(chunk);
+        }
+    }
+    try writer.flush();
+    log.info("After writing prompt tokens\n", .{});
+
     const max_seq_len: usize = @intCast(qwen_model.gen_options.max_seq_len);
     if (input_token_ids.len > max_seq_len) return error.PromptTooLong;
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);

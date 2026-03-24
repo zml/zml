@@ -10,3 +10,16 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "inspect_layers",
+    srcs = [
+        "gpt_oss.zig",
+        "main.zig",
+    ],
+    main = "inspect_layers.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)

@@ -11,7 +11,19 @@ const log = std.log.scoped(.qwen3_5);
 
 pub const Qwen35 = struct {
     pub const Config = struct {
+        model_type: []const u8,
         text_config: TextConfig,
+
+        pub const ModelKind = enum {
+            qwen3_5,
+            qwen3_5_moe,
+        };
+
+        pub fn kind(self: Config) !ModelKind {
+            if (std.mem.eql(u8, self.model_type, "qwen3_5")) return .qwen3_5;
+            if (std.mem.eql(u8, self.model_type, "qwen3_5_moe")) return .qwen3_5_moe;
+            return error.UnsupportedModelType;
+        }
     };
 
     pub const TextConfig = struct {
@@ -32,6 +44,9 @@ pub const Qwen35 = struct {
         linear_num_key_heads: i64,
         linear_num_value_heads: i64,
         linear_value_head_dim: i64,
+        // MoE
+        num_experts: ?i64 = null,
+        num_experts_per_tok: ?u32 = null,
     };
 
     // Each layer uses either: full attention (SelfAttn) or linear attention (GatedDeltaNet).
@@ -121,7 +136,7 @@ pub const Qwen35 = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
+        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache, self.config);
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -181,12 +196,13 @@ pub const TextModel = struct {
         tokens: Tensor,
         token_index: Tensor,
         kv_cache: KvCache,
+        config: Qwen35.Config,
     ) struct { Tensor, KvCache } {
         var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i));
+            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i), config);
         }
 
         hidden_states = self.norm.forward(hidden_states);
@@ -200,9 +216,14 @@ pub const TransformerLayer = struct {
         linear_attn: GatedDeltaNet,
     };
 
+    const Ffn = union(enum) {
+        dense: Mlp,
+        sparse: Moe,
+    };
+
     input_layernorm: RmsNorm,
     attn: Attn,
-    mlp: Mlp,
+    ffn: Ffn,
     post_attention_layernorm: RmsNorm,
 
     pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config, layer_index: usize) !TransformerLayer {
@@ -213,7 +234,10 @@ pub const TransformerLayer = struct {
                 .{ .self_attn = try .init(store.withPrefix("self_attn"), config) }
             else
                 .{ .linear_attn = .init(store.withPrefix("linear_attn"), config) },
-            .mlp = .init(store.withPrefix("mlp")),
+            .ffn = switch (try config.kind()) {
+                .qwen3_5 => .{ .dense = Mlp.init(store.withPrefix("mlp")) },
+                .qwen3_5_moe => .{ .sparse = try Moe.init(store.withPrefix("mlp"), config) },
+            },
             .post_attention_layernorm = RmsNorm.init(store.withPrefix("post_attention_layernorm"), config.text_config.rms_norm_eps),
         };
     }
@@ -224,7 +248,10 @@ pub const TransformerLayer = struct {
             .self_attn => |*self_attn| SelfAttn.unloadBuffers(self_attn),
             .linear_attn => |*linear_attn| GatedDeltaNet.unloadBuffers(linear_attn),
         }
-        Mlp.unloadBuffers(&self.mlp);
+        switch (self.ffn) {
+            .dense => |*dense| Mlp.unloadBuffers(dense),
+            .sparse => |*sparse| Moe.unloadBuffers(sparse),
+        }
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
@@ -233,6 +260,7 @@ pub const TransformerLayer = struct {
         x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache.LayerView,
+        config: Qwen35.Config,
     ) struct { Tensor, KvCache } {
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
@@ -256,7 +284,10 @@ pub const TransformerLayer = struct {
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const mlp_output = self.mlp.forward(normalized_hidden);
+        const mlp_output = switch (self.ffn) {
+            .dense => |*dense| dense.forward(normalized_hidden),
+            .sparse => |*sparse| sparse.forward(normalized_hidden, config),
+        };
 
         return .{ mlp_output.add(residual1), updated_kv_cache };
     }
@@ -291,6 +322,64 @@ pub const Mlp = struct {
 
         const output = self.down_proj.forward(hidden);
         return output;
+    }
+};
+
+pub const Moe = struct {
+    shared_expert: Mlp,
+    shared_expert_gate: zml.nn.Linear,
+    gate_up_proj: Tensor,
+    down_proj: Tensor,
+    router: zml.nn.Linear,
+
+    pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) !Moe {
+        _ = config; // autofix
+        return .{
+            .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
+            .shared_expert_gate = .init(store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.out}, null), .d),
+            .gate_up_proj = store.withPrefix("experts").createTensor("gate_up_proj", .{ .expert, .dout, .d }, null),
+            .down_proj = store.withPrefix("experts").createTensor("down_proj", .{ .expert, .d, .dout }, null),
+            .router = .init(store.withPrefix("gate").createTensor("weight", .{ .expert, .d }, null), null, .d),
+        };
+    }
+
+    pub fn forward(self: Moe, x: Tensor, config: Qwen35.Config) Tensor {
+        const moe_metadata: zml.moe.Metadata = .init(.fromBackend(.triton));
+        const moe_parameters: zml.moe.Parameters = .init(.fromBackend(.triton));
+        const num_experts_per_tok: u32 = config.text_config.num_experts_per_tok.?;
+
+        // const down_weight = self.down_proj.weight.rename(.{ .d = .out, .dout = .d });
+        // const down_bias = if (self.down_proj.bias) |b| b.rename(.{ .d = .out }) else null;
+
+        const routed = zml.moe.moe(
+            x,
+            null,
+            self.router,
+            self.gate_up_proj,
+            null,
+            null,
+            self.down_proj,
+            null,
+            null,
+            num_experts_per_tok,
+            moe_metadata,
+            moe_parameters,
+        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+
+        const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
+        const shared = self.shared_expert.forward(x).mul(shared_gate);
+
+        return routed.reshape(shared.shape()).add(shared);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Moe)) void {
+        Mlp.unloadBuffers(&self.shared_expert);
+        self.shared_expert_gate.weight.deinit();
+        if (self.shared_expert_gate.bias) |*bias| bias.deinit();
+        self.gate_up_proj.deinit();
+        self.down_proj.deinit();
+        self.router.weight.deinit();
+        if (self.router.bias) |*bias| bias.deinit();
     }
 };
 

@@ -656,11 +656,14 @@ pub fn fusedExpertsImpl(
         break :fallback applyTokenBasedLaunchConfig(opts, hidden_states.dim(0), w1.dim(0));
     };
 
-    const hidden = hidden_states.withTags(.{ .token, .in });
+    const b = hidden_states.dim(.b);
+    const s = hidden_states.dim(.s);
+
+    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
     const gate_up = w1.withTags(.{ .expert, .out, .in });
     const down = w2.withTags(.{ .expert, .out, .mid });
-    const weights = topk_weights.withTags(.{ .token, .topk });
-    const ids = topk_ids.withTags(.{ .token, .topk });
+    const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     if (hidden.dtype() != .bf16) return error.UnsupportedType;
     if (gate_up.dtype() != .bf16 or down.dtype() != .bf16) return error.UnsupportedType;
@@ -768,5 +771,8 @@ pub fn fusedExpertsImpl(
     );
 
     const weighted = second_out.mul(weights.convert(second_out.dtype()).broad(second_out.shape()));
-    return weighted.sum(.topk).squeeze(.topk);
+    log.info("Completed fused MoE kernels. Starting reduction across top-k experts. Weighted output shape: {f}", .{weighted.shape()});
+    const output = weighted.sum(.topk).squeeze(.topk);
+    log.info("Completed MoE forward pass. Output shape: {f}", .{output.shape()});
+    return output;
 }
