@@ -354,6 +354,34 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
 
 //======================= Activation check setup ========================
 
+fn testLayerTimed(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    layer: anytype,
+    comptime func: std.meta.DeclEnum(@TypeOf(layer)),
+    activation_store: zml.io.TensorStore.View,
+    name: []const u8,
+    layer_weights: zml.Bufferized(@TypeOf(layer)),
+    shardings: []const zml.sharding.Sharding,
+    opts: zml.testing.CompareOpts,
+) !void {
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Layer test {s} [{f}]", .{ name, now.untilNow(io, .awake) });
+    try zml.testing.testLayer(
+        allocator,
+        io,
+        platform,
+        layer,
+        func,
+        activation_store,
+        name,
+        layer_weights,
+        shardings,
+        opts,
+    );
+}
+
 fn checkLayers(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -361,7 +389,7 @@ fn checkLayers(
     qwen_model: Qwen35,
     qwen35_buffers: zml.Bufferized(Qwen35),
 ) !void {
-    var activations_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/home/tristan/zml/examples/qwen3_5/safetensors/Qwen3.5-0.8B.activations-bf16-with-caches.safetensors");
+    var activations_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/home/tristan/zml/examples/qwen3_5/safetensors/Qwen3.5-0.8B.activations-compiltest-1.safetensors");
     defer activations_registry.deinit();
 
     var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
@@ -390,7 +418,7 @@ fn checkLayers(
     const embedTokensHarnessBuffers: zml.Bufferized(EmbedTokensHarness) = .{
         .embedTokens = qwen35_buffers.text_model.embed_tokens,
     };
-    try zml.testing.testLayer(
+    try testLayerTimed(
         allocator,
         io,
         platform,
@@ -501,7 +529,7 @@ fn checkLayers(
         }
     };
 
-    const layers_to_test = .{ 0, 3 };
+    const layers_to_test = .{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23 };
     for (qwen_model.text_model.layers, qwen35_buffers.text_model.layers, 0..) |layer, layer_buffers, layer_index| {
         const should_test = inline for (layers_to_test) |test_idx| {
             if (layer_index == test_idx) break true;
@@ -518,7 +546,7 @@ fn checkLayers(
         const layerHarnessBuffers: zml.Bufferized(LayerHarness) = .{
             .layer = layer_buffers,
         };
-        try zml.testing.testLayer(
+        try testLayerTimed(
             allocator,
             io,
             platform,
@@ -536,7 +564,7 @@ fn checkLayers(
         const input_layernorm_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.input_layernorm", .{layer_index});
         const inputLayerNormHarness: InputLayerNormHarness = .{ .inputLayerNorm = layer.input_layernorm };
         const inputLayerNormHarnessBuffers: zml.Bufferized(InputLayerNormHarness) = .{ .inputLayerNorm = layer_buffers.input_layernorm };
-        try zml.testing.testLayer(
+        try testLayerTimed(
             allocator,
             io,
             platform,
@@ -563,7 +591,7 @@ fn checkLayers(
                         else => unreachable,
                     },
                 };
-                try zml.testing.testLayer(
+                try testLayerTimed(
                     allocator,
                     io,
                     platform,
@@ -587,7 +615,7 @@ fn checkLayers(
                         else => unreachable,
                     },
                 };
-                try zml.testing.testLayer(
+                try testLayerTimed(
                     allocator,
                     io,
                     platform,
@@ -609,7 +637,7 @@ fn checkLayers(
         const postAttentionLayerNormHarnessBuffers: zml.Bufferized(PostAttentionLayerNormHarness) = .{
             .postAttentionLayerNorm = layer_buffers.post_attention_layernorm,
         };
-        try zml.testing.testLayer(
+        try testLayerTimed(
             allocator,
             io,
             platform,
@@ -625,7 +653,7 @@ fn checkLayers(
         const mlp_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.mlp", .{layer_index});
         const mlpHarness: MlpHarness = .{ .mlp = layer.mlp };
         const mlpHarnessBuffers: zml.Bufferized(MlpHarness) = .{ .mlp = layer_buffers.mlp };
-        try zml.testing.testLayer(
+        try testLayerTimed(
             allocator,
             io,
             platform,
@@ -653,7 +681,7 @@ fn checkLayers(
     const modelNormHarnessBuffers: zml.Bufferized(ModelNormHarness) = .{
         .norm = qwen35_buffers.text_model.norm,
     };
-    try zml.testing.testLayer(
+    try testLayerTimed(
         allocator,
         io,
         platform,
@@ -698,7 +726,7 @@ fn checkLayers(
         .model = qwen35_buffers.text_model,
         .cache = modelHarnessCacheBuffers,
     };
-    try zml.testing.testLayer(
+    try testLayerTimed(
         allocator,
         io,
         platform,
