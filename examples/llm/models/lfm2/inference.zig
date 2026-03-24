@@ -5,6 +5,7 @@ const stdx = zml.stdx;
 const attention = zml.attention.attention;
 
 const model = @import("model.zig");
+const Shardings = @import("../common.zig").Shardings;
 
 const log = std.log.scoped(.lfm);
 
@@ -51,14 +52,13 @@ pub const Args = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
-    model_buffers: *zml.Bufferized(model.Model),
+    model_buffers: *model.Buffers,
     tokens_buf: *zml.Buffer,
     tokens_pos_buf: *zml.Buffer,
     actual_seq_len_buf: *zml.Buffer,
     rng_buf: *zml.Bufferized(zml.Tensor.Rng),
     cache_buffers: *zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
-    sharding: zml.sharding.Sharding,
 };
 
 pub const Inference = struct {
@@ -73,19 +73,20 @@ pub const Inference = struct {
         opts: CompilationOptions,
         seqlen: u32,
         progress: *std.Progress.Node,
-        sharding: zml.sharding.Sharding,
+        shardings: Shardings,
     ) !Inference {
         if (opts.single) {
-            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, sharding);
-            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, sharding);
+            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, shardings);
+            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, shardings);
 
             return .{
                 .prefill = .{ .single = prefill_exe },
                 .decode = .{ .single = decode_exe },
             };
         } else {
-            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, sharding);
-            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, sharding);
+            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, shardings);
+            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, shardings);
+
             return .{
                 .prefill = .{ .composed = prefill_exe },
                 .decode = .{ .composed = decode_exe },
@@ -154,7 +155,17 @@ pub const SingleKernelExe = struct {
     }
 };
 
-fn compileSingleKernelExe(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, opts: CompilationOptions, seqlen: u32, is_prefill: bool, progress: *std.Progress.Node, sharding: zml.sharding.Sharding) !SingleKernelExe {
+fn compileSingleKernelExe(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    opts: CompilationOptions,
+    seqlen: u32,
+    is_prefill: bool,
+    progress: *std.Progress.Node,
+    shardings: Shardings,
+) !SingleKernelExe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling single kernel...", 1);
     defer node.end();
@@ -165,13 +176,23 @@ fn compileSingleKernelExe(allocator: std.mem.Allocator, io: std.Io, platform: *z
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
     const token_position_offset: zml.Tensor = .init(.{ .batch = opts.batch_dim }, .u32);
 
+    const all_shardings = shardings.all();
     const exe = try platform.compile(
         allocator,
         io,
         mdl,
         .forward,
-        .{ tokens, token_position_offset, actual_seq_len, opts.rng, opts.cache, opts.attention_metadata, opts.attention_parameters, model.ConvParameters{ .is_prefill = is_prefill } },
-        .{ .shardings = &.{sharding} },
+        .{
+            tokens,
+            token_position_offset,
+            actual_seq_len,
+            opts.rng,
+            opts.cache,
+            opts.attention_metadata,
+            opts.attention_parameters,
+            model.ConvParameters{ .is_prefill = is_prefill },
+        },
+        .{ .shardings = &all_shardings },
     );
 
     return .{ .exe = exe };
@@ -190,13 +211,7 @@ pub const ComposedKernelExe = struct {
         self.lm_head.deinit();
     }
 
-    /// Orchestrates the 4 sub-executables to replicate Model.forward behavior.
-    ///
-    /// Inputs and outputs mirror the monolithic Model.forward signature:
-    /// - Inputs: model_buffers, tokens, position_offset, actual_seq_len, rng, cache, attention_metadata
-    /// - Outputs: tokens (mutated), cache (mutated), rng (mutated)
     pub fn run(self: *const ComposedKernelExe, args: Args) !void {
-        // Step 1: embed_tokens — inputs: [weight, tokens] → output: [hidden]
         var hidden_buf: zml.Buffer = b: {
             var exe_args = try self.embed_tokens.args(args.allocator);
             defer exe_args.deinit(args.allocator);
@@ -209,10 +224,10 @@ pub const ComposedKernelExe = struct {
         };
         defer hidden_buf.deinit();
 
-        // Step 2: iterate over layers, dispatching to conv_layer or attn_layer exe.
-        var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, args.sharding);
+        const replicated_sharding = try zml.sharding.replicatedSharding(args.platform);
+        var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, replicated_sharding);
         defer conv_cache_index_buf.deinit();
-        var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, args.sharding);
+        var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, replicated_sharding);
         defer kv_cache_index_buf.deinit();
 
         for (args.model_buffers.layers) |layer_bufs| {
@@ -226,10 +241,18 @@ pub const ComposedKernelExe = struct {
             var results = try exe.results(args.allocator);
             defer results.deinit(args.allocator);
 
-            exe_args.set(.{ layer_bufs, &hidden_buf, args.tokens_pos_buf, args.actual_seq_len_buf, args.cache_buffers, &conv_cache_index_buf, &kv_cache_index_buf, args.attention_metadata_buffers });
+            exe_args.set(.{
+                layer_bufs,
+                &hidden_buf,
+                args.tokens_pos_buf,
+                args.actual_seq_len_buf,
+                args.cache_buffers,
+                &conv_cache_index_buf,
+                &kv_cache_index_buf,
+                args.attention_metadata_buffers,
+            });
             exe.call(exe_args, &results);
 
-            // Outputs: { hidden, cache, conv_cache_index, kv_cache_index }
             var new_hidden, var new_cache, var new_conv_cache_index, var new_kv_cache_index = results.get(struct {
                 zml.Buffer,
                 zml.Bufferized(model.Cache),
@@ -242,7 +265,6 @@ pub const ComposedKernelExe = struct {
             replaceBuffer(&kv_cache_index_buf, &new_kv_cache_index);
         }
 
-        // Step 3: lm_head — inputs: [lm_head buffers, hidden, embed_tokens.weight, tokens, rng] → outputs: [tokens, rng]
         {
             var exe_args = try self.lm_head.args(args.allocator);
             defer exe_args.deinit(args.allocator);
@@ -251,7 +273,10 @@ pub const ComposedKernelExe = struct {
 
             exe_args.set(.{ args.model_buffers.lm_head, hidden_buf, args.model_buffers.embed_tokens, args.tokens_buf, args.rng_buf });
             self.lm_head.call(exe_args, &results);
-            var new_tokens, var new_rng = results.get(struct { zml.Buffer, zml.Bufferized(zml.Tensor.Rng) });
+            var new_tokens, var new_rng = results.get(struct {
+                zml.Buffer,
+                zml.Bufferized(zml.Tensor.Rng),
+            });
             replaceBuffer(args.tokens_buf, &new_tokens);
             replaceBuffer(&args.rng_buf._state, &new_rng._state);
         }
@@ -279,7 +304,7 @@ fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
     return true;
 }
 
-pub fn compileComposedKernelExe(
+fn compileComposedKernelExe(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
@@ -288,13 +313,12 @@ pub fn compileComposedKernelExe(
     seqlen: u32,
     is_prefill: bool,
     progress: *std.Progress.Node,
-    sharding: zml.sharding.Sharding,
+    shardings: Shardings,
 ) !ComposedKernelExe {
-    const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, sharding);
-    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, sharding);
-    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, sharding);
-    const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, sharding);
-
+    const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings);
+    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
+    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
+    const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, shardings);
     return .{
         .embed_tokens = embed_tokens_exe,
         .conv_layer = conv_layer_exe,
@@ -303,7 +327,16 @@ pub fn compileComposedKernelExe(
     };
 }
 
-fn compileEmbedTokens(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, embed_tokens: model.TokenEmbedding, opts: CompilationOptions, seqlen: u32, progress: *std.Progress.Node, sharding: zml.sharding.Sharding) !zml.Exe {
+fn compileEmbedTokens(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    embed_tokens: model.TokenEmbedding,
+    opts: CompilationOptions,
+    seqlen: u32,
+    progress: *std.Progress.Node,
+    shardings: Shardings,
+) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling embed_tokens...", 1);
     defer node.end();
@@ -311,17 +344,27 @@ fn compileEmbedTokens(allocator: std.mem.Allocator, io: std.Io, platform: *zml.P
     defer log.info("Compiled embed_tokens [{f}]", .{now.untilNow(io, .awake)});
 
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
-    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &.{sharding} });
+    const all_shardings = shardings.all();
+    return platform.compile(allocator, io, embed_tokens, .forward, .{tokens}, .{ .shardings = &all_shardings });
 }
 
-fn compileConvLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, opts: CompilationOptions, seqlen: u32, is_prefill: bool, progress: *std.Progress.Node, sharding: zml.sharding.Sharding) !zml.Exe {
+fn compileConvLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    opts: CompilationOptions,
+    seqlen: u32,
+    is_prefill: bool,
+    progress: *std.Progress.Node,
+    shardings: Shardings,
+) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling conv layer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled conv layer [{f}]", .{now.untilNow(io, .awake)});
 
-    // Find the first conv layer as a representative for compilation.
     const conv_layer = for (mdl.layers) |layer| {
         if (layer.operator == .conv) break layer;
     } else unreachable;
@@ -332,6 +375,7 @@ fn compileConvLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     const conv_cache_index: zml.Tensor = .init(.{}, .u32);
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
+    const all_shardings = shardings.all();
     return platform.compile(allocator, io, conv_layer, .forward, .{
         hidden,
         token_position_offset,
@@ -342,17 +386,26 @@ fn compileConvLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &.{sharding} });
+    }, .{ .shardings = &all_shardings });
 }
 
-fn compileAttnLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, opts: CompilationOptions, seqlen: u32, is_prefill: bool, progress: *std.Progress.Node, sharding: zml.sharding.Sharding) !zml.Exe {
+fn compileAttnLayer(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    opts: CompilationOptions,
+    seqlen: u32,
+    is_prefill: bool,
+    progress: *std.Progress.Node,
+    shardings: Shardings,
+) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling attn layer...", 1);
     defer node.end();
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled attn layer [{f}]", .{now.untilNow(io, .awake)});
 
-    // Find the first attention layer as a representative for compilation.
     const attn_layer = for (mdl.layers) |layer| {
         if (layer.operator == .self_attn) break layer;
     } else unreachable;
@@ -363,6 +416,7 @@ fn compileAttnLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
     const conv_cache_index: zml.Tensor = .init(.{}, .u32);
     const kv_cache_index: zml.Tensor = .init(.{}, .u32);
 
+    const all_shardings = shardings.all();
     return platform.compile(allocator, io, attn_layer, .forward, .{
         hidden,
         token_position_offset,
@@ -373,10 +427,19 @@ fn compileAttnLayer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Pla
         opts.attention_metadata,
         opts.attention_parameters,
         model.ConvParameters{ .is_prefill = is_prefill },
-    }, .{ .shardings = &.{sharding} });
+    }, .{ .shardings = &all_shardings });
 }
 
-fn compileLmHead(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, mdl: model.Model, opts: CompilationOptions, seqlen: u32, progress: *std.Progress.Node, sharding: zml.sharding.Sharding) !zml.Exe {
+fn compileLmHead(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    mdl: model.Model,
+    opts: CompilationOptions,
+    seqlen: u32,
+    progress: *std.Progress.Node,
+    shardings: Shardings,
+) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling lm_head...", 1);
     defer node.end();
@@ -385,6 +448,6 @@ fn compileLmHead(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfo
 
     const hidden: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen, .d = opts.hidden_dim }, mdl.embed_tokens.weight.dtype());
     const tokens: zml.Tensor = .init(.{ .batch = opts.batch_dim, .seq = seqlen }, .u32);
-
-    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &.{sharding} });
+    const all_shardings = shardings.all();
+    return platform.compile(allocator, io, mdl.lm_head, .forward, .{ hidden, mdl.embed_tokens, tokens, opts.rng }, .{ .shardings = &all_shardings });
 }

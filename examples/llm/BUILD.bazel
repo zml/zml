@@ -1,0 +1,31 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "llm",
+    srcs = glob(["**/*.zig"]),
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml", "@linenoise"],
+)
+
+zig_binary(
+    name = "lfm2_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/lfm2_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+zig_binary(
+    name = "llama_tests",
+    srcs = glob(["**/*.zig"]),
+    main = "models/llama_tests.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [":llm"],
+)

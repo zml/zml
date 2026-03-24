@@ -7,6 +7,7 @@
     bazelisk
     python3
     uv
+    zig
   ];
   env.ZLS_CMD = "${config.devenv.root}/tools/zls.sh";
   scripts.bazel.exec = ''bazelisk "$@"'';
