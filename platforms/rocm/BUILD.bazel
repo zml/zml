@@ -1,5 +1,6 @@
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 
 exports_files(
     ["merge_amdgpu_ids.zig"],
@@ -37,6 +38,27 @@ cc_library(
     tags = ["manual"],
     defines = ["ZML_RUNTIME_ROCM"],
     deps = ["@libpjrt_rocm"],
+)
+
+zig_binary(
+    name = "merge_amdgpu_ids",
+    main = "merge_amdgpu_ids.zig",
+)
+
+run_binary(
+    name = "amdgpu_ids",
+    srcs = [
+        "@libdrm-amdgpu-common//:amdgpu_ids",
+        "@libdrm_mesa_amdgpu_ids//file:amdgpu.ids",
+    ],
+    outs = ["amdgpu.ids"],
+    args = [
+        "$(location @libdrm-amdgpu-common//:amdgpu_ids)",
+        "$(location @libdrm_mesa_amdgpu_ids//file:amdgpu.ids)",
+        "$(location amdgpu.ids)",
+    ],
+    tool = ":merge_amdgpu_ids",
+    visibility = ["//smi:__pkg__"],
 )
 
 zig_library(
