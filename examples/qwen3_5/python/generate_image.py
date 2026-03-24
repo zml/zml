@@ -29,6 +29,7 @@ def main() -> None:
 
     processor = AutoProcessor.from_pretrained(str(args.model), trust_remote_code=True)
     image = Image.open(args.image).convert("RGB")
+    image = image.resize((512, 512), resample=Image.Resampling.BICUBIC)
 
     # Use the exact vision preprocessor path (avoid processor text/chat template path).
     processed = processor.image_processor(images=[image], return_tensors="pt")

@@ -17,7 +17,7 @@ const CliArgs = struct {
     prompt: []const u8 = "What is in this picture?",
     pixel_values_file: []const u8 = "/home/tristan/zml/examples/qwen3_5/safetensors/vision_input.safetensors",
     len: i64 = 64,
-    gen_tokens: usize = 128,
+    gen_tokens: usize = 2048,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -63,10 +63,13 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
-    defer tokenizer.deinit();
+    var tokenizer_future = try io.concurrent(loadTokenizer, .{ allocator, io, repo, &progress });
+    errdefer blk: {
+        var v = tokenizer_future.cancel(io) catch break :blk;
+        v.deinit();
+    }
 
-    var qwen_buffers = try qwen35.Qwen35.load(
+    var qwen_buffers_future = try io.concurrent(qwen35.Qwen35.load, .{
         &qwen_model,
         allocator,
         io,
@@ -74,10 +77,14 @@ pub fn main(init: std.process.Init) !void {
         &store,
         &.{replicated_sharding},
         &progress,
-    );
-    defer Qwen35.unloadBuffers(&qwen_buffers, allocator);
+    });
+    errdefer blk: {
+        var v = qwen_buffers_future.cancel(io) catch break :blk;
+        Qwen35.unloadBuffers(&v, allocator);
+    }
 
-    progress.end();
+    var tokenizer = try tokenizer_future.await(io);
+    defer tokenizer.deinit();
 
     var vision_inputs = try loadVisionInputs(
         allocator,
@@ -103,9 +110,42 @@ pub fn main(init: std.process.Init) !void {
     );
     defer allocator.free(prompt_tokens);
 
-    // ----------------------------------------------------------------
-    // First pass: Qwen35.vision_test_forward, then decode with Qwen35.forward.
-    // ----------------------------------------------------------------
+    const cache_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+    const required_seq_len: i64 = @intCast(prompt_tokens.len + args.gen_tokens + 1);
+    const generation_cache_seq_len = @max(qwen_model.gen_options.max_seq_len, required_seq_len);
+    const kv_cache = qwen35.KvCache.init(qwen_model.config, 1, generation_cache_seq_len, cache_dtype, .f32);
+
+    var compile_result_future = try io.concurrent(compileModel, .{
+        allocator,
+        io,
+        platform,
+        qwen_model,
+        kv_cache,
+        &progress,
+        prompt_tokens.len,
+        vision_inputs.image_grid_thw,
+        replicated_sharding,
+    });
+    errdefer if (compile_result_future.cancel(io)) |v| {
+        v.prefill_exe.deinit();
+        v.decode_exe.deinit();
+    } else |_| {};
+
+    var compile_result = try compile_result_future.await(io);
+    var qwen_buffers = try qwen_buffers_future.await(io);
+    defer Qwen35.unloadBuffers(&qwen_buffers, allocator);
+
+    defer {
+        compile_result.prefill_exe.deinit();
+        compile_result.decode_exe.deinit();
+    }
+    progress.end();
+
+    log.info(
+        "\nRunning vision model {s} with image inputs {f} grid_thw={any} on prompt:\n{s}\n",
+        .{ args.model, vision_inputs.pixel_values.shape(), vision_inputs.image_grid_thw, args.prompt },
+    );
+
     try runGenerationLoop(
         allocator,
         io,
@@ -114,12 +154,120 @@ pub fn main(init: std.process.Init) !void {
         qwen_buffers,
         replicated_sharding,
         tokenizer,
+        compile_result,
         prompt_tokens,
         prompt_shape,
         vision_inputs.image_grid_thw,
         vision_inputs.pixel_values,
         args.gen_tokens,
+        kv_cache,
     );
+}
+
+const CompileModelResult = struct {
+    prefill_exe: zml.Exe,
+    decode_exe: zml.Exe,
+};
+
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, qwen35_model: Qwen35, kv_cache: qwen35.KvCache, progress: *std.Progress.Node, prefill_len: usize, grid_thw: [3]i64, sharding: zml.sharding.Sharding) !CompileModelResult {
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
+    log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_len });
+
+    const t = grid_thw[0];
+    const h = grid_thw[1];
+    const w = grid_thw[2];
+    const patch_flat_dim: i64 = qwen35_model.config.vision_config.in_channels *
+        qwen35_model.config.vision_config.temporal_patch_size *
+        qwen35_model.config.vision_config.patch_size *
+        qwen35_model.config.vision_config.patch_size;
+    const pixel_rows: i64 = t * h * w;
+
+    var prefill_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            qwen35_model_: Qwen35,
+            kv_cache_: qwen35.KvCache,
+            prefill_len_: usize,
+            grid_thw_: [3]i64,
+            pixel_rows_: i64,
+            patch_flat_dim_: i64,
+            sharding_: zml.sharding.Sharding,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node = progress_.start("Compiling prefill...", 1);
+            defer node.end();
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
+
+            return platform_.compile(
+                allocator_,
+                io_,
+                qwen35_model_,
+                .vision_test_forward,
+                .{
+                    Tensor.init(.{ .b = 1, .s = prefill_len_ }, .u32),
+                    Tensor.init(.{}, .u32),
+                    kv_cache_,
+                    Tensor.init(.{ .n = pixel_rows_, .f = patch_flat_dim_ }, .f32),
+                    grid_thw_,
+                    Tensor.init(.{3}, .i64),
+                    zml.Tensor.Rng.init(),
+                },
+                .{ .shardings = &.{sharding_} },
+            );
+        }
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_len, grid_thw, pixel_rows, patch_flat_dim, sharding, progress });
+    errdefer if (prefill_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
+
+    var decode_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            qwen35_model_: Qwen35,
+            kv_cache_: qwen35.KvCache,
+            sharding_: zml.sharding.Sharding,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node = progress_.start("Compiling decode...", 1);
+            defer node.end();
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
+
+            return platform_.compile(
+                allocator_,
+                io_,
+                qwen35_model_,
+                .vision_test_decode_forward,
+                .{
+                    Tensor.init(.{ .b = 1, .s = 1 }, .u32),
+                    Tensor.init(.{}, .u32),
+                    kv_cache_,
+                    Tensor.init(.{ .s = 1 }, .i64),
+                    zml.Tensor.Rng.init(),
+                },
+                .{ .shardings = &.{sharding_} },
+            );
+        }
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, sharding, progress });
+    errdefer if (decode_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
+
+    const vision_prefill_exe = try prefill_future.await(io);
+    const decode_exe = try decode_future.await(io);
+
+    return .{
+        .prefill_exe = vision_prefill_exe,
+        .decode_exe = decode_exe,
+    };
 }
 
 fn runGenerationLoop(
@@ -130,40 +278,19 @@ fn runGenerationLoop(
     model_buffers: zml.Bufferized(Qwen35),
     sharding: zml.sharding.Sharding,
     tokenizer: zml.tokenizer.Tokenizer,
+    compile_result: CompileModelResult,
     input_token_ids: []const u32,
     prompt_shape_values: [3]i64,
     image_grid_thw: [3]i64,
     pixel_values_buffer: zml.Buffer,
     gen_tokens: usize,
+    kv_cache: qwen35.KvCache,
 ) !void {
-    if (input_token_ids.len == 0) return;
-
-    const cache_dtype = model.text_model.embed_tokens.weight.dtype();
-    const required_seq_len: i64 = @intCast(input_token_ids.len + gen_tokens + 1);
-    const generation_cache_seq_len = @max(model.gen_options.max_seq_len, required_seq_len);
-    const kv_cache = qwen35.KvCache.init(model.config, 1, generation_cache_seq_len, cache_dtype, .f32);
     var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
     defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
-    const prefill_len = input_token_ids.len;
     const total_seq_len: i64 = prompt_shape_values[0] + prompt_shape_values[1] + prompt_shape_values[2];
-    const decode_exe = try platform.compile(
-        allocator,
-        io,
-        model,
-        .vision_test_decode_forward,
-        .{
-            Tensor.init(.{ .b = 1, .s = 1 }, .u32),
-            Tensor.init(.{}, .u32),
-            kv_cache,
-            Tensor.init(.{ .s = 1 }, .i64),
-            zml.Tensor.Rng.init(),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer decode_exe.deinit();
 
-    const grid_thw = image_grid_thw;
     const t = image_grid_thw[0];
     const h = image_grid_thw[1];
     const w = image_grid_thw[2];
@@ -182,25 +309,7 @@ fn runGenerationLoop(
         return error.InvalidPixelValuesShape;
     }
 
-    const vision_prefill_exe = try platform.compile(
-        allocator,
-        io,
-        model,
-        .vision_test_forward,
-        .{
-            Tensor.init(.{ .b = 1, .s = prefill_len }, .u32),
-            Tensor.init(.{}, .u32),
-            kv_cache,
-            Tensor.init(.{ .n = pixel_rows, .f = patch_flat_dim }, .f32),
-            grid_thw,
-            Tensor.init(.{3}, .i64),
-            zml.Tensor.Rng.init(),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer vision_prefill_exe.deinit();
-
-    const prompt_tokens_shape = zml.Shape.init(.{ .b = 1, .s = prefill_len }, .u32);
+    const prompt_tokens_shape = zml.Shape.init(.{ .b = 1, .s = input_token_ids.len }, .u32);
     var prompt_tokens_slice: zml.Slice = try .alloc(allocator, prompt_tokens_shape);
     defer prompt_tokens_slice.free(allocator);
     @memcpy(prompt_tokens_slice.items(u32), input_token_ids);
@@ -220,27 +329,18 @@ fn runGenerationLoop(
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var vision_prefill_args = try vision_prefill_exe.args(allocator);
+    var vision_prefill_args = try compile_result.prefill_exe.args(allocator);
     defer vision_prefill_args.deinit(allocator);
-    var vision_prefill_results = try vision_prefill_exe.results(allocator);
+    var vision_prefill_results = try compile_result.prefill_exe.results(allocator);
     defer vision_prefill_results.deinit(allocator);
 
-    vision_prefill_args.set(.{
-        model_buffers,
-        prompt_tokens_buffer,
-        prefill_token_index_buffer,
-        kv_cache_buffers,
-        pixel_values_buffer,
-        prompt_shape_buffer,
-        rng_buffers,
-    });
-    vision_prefill_exe.call(vision_prefill_args, &vision_prefill_results);
+    vision_prefill_args.set(.{ model_buffers, prompt_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, pixel_values_buffer, prompt_shape_buffer, rng_buffers });
+    compile_result.prefill_exe.call(vision_prefill_args, &vision_prefill_results);
     var prefill_generated_token_buffer: zml.Buffer = undefined;
     var mrope_position_deltas_buffer: zml.Buffer = undefined;
     vision_prefill_results.fill(.{ &prefill_generated_token_buffer, &kv_cache_buffers, &mrope_position_deltas_buffer, &rng_buffers });
     defer prefill_generated_token_buffer.deinit();
     defer mrope_position_deltas_buffer.deinit();
-    log.info("vision_test_forward output shape: {any}", .{prefill_generated_token_buffer.shape()});
 
     var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
@@ -249,23 +349,17 @@ fn runGenerationLoop(
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
     defer current_token_buffer.deinit();
 
+    var stdout = std.Io.File.stdout().writer(io, &.{});
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
-    var generated_ids: std.ArrayList(u32) = try .initCapacity(allocator, gen_tokens);
-    defer generated_ids.deinit(allocator);
-
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    try stdout.interface.writeAll("generated token ids: ");
 
     for (0..gen_tokens) |i| {
         try current_token_buffer.toSlice(io, generated_token_slice);
         const generated_token = generated_token_slice.items(u32)[0];
-        try generated_ids.append(allocator, generated_token);
-
-        var id_buf: [32]u8 = undefined;
-        const token_text = try std.fmt.bufPrint(&id_buf, "{d}", .{generated_token});
-        try stdout.interface.writeAll(token_text);
-        try stdout.interface.writeAll(if (i + 1 == gen_tokens) "\n" else " ");
+        if (try tokenizer_decoder.next(generated_token)) |chunk| {
+            try stdout.interface.writeAll(chunk);
+            try stdout.interface.flush();
+        }
 
         if (generated_token == model.special_tokens.end_of_text_token_id) break;
 
@@ -278,23 +372,15 @@ fn runGenerationLoop(
         );
         defer token_index_buffer.deinit();
 
-        var decode_args = try decode_exe.args(allocator);
+        var decode_args = try compile_result.decode_exe.args(allocator);
         defer decode_args.deinit(allocator);
-        var decode_results = try decode_exe.results(allocator);
+        var decode_results = try compile_result.decode_exe.results(allocator);
         defer decode_results.deinit(allocator);
 
         decode_args.set(.{ model_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, mrope_position_deltas_buffer, rng_buffers });
-        decode_exe.call(decode_args, &decode_results);
+        compile_result.decode_exe.call(decode_args, &decode_results);
 
         decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
-    }
-
-    try stdout.interface.writeAll("generated text: ");
-    for (generated_ids.items) |generated_token| {
-        if (generated_token == model.special_tokens.end_of_text_token_id) break;
-        if (try tokenizer_decoder.next(generated_token)) |chunk| {
-            try stdout.interface.writeAll(chunk);
-        }
     }
     try stdout.interface.writeAll("\n");
     try stdout.interface.flush();
@@ -396,9 +482,8 @@ fn loadVisionInputs(
         .pixel_values = store.view().createTensor("pixel_values", null, null),
         .image_grid_thw = store.view().createTensor("image_grid_thw", null, null),
     };
-    var loaded = try zml.io.load(PixelValuesOnly, &model, allocator, io, platform, .{
+    var loaded = try zml.io.load(PixelValuesOnly, &model, allocator, io, platform, &store, .{
         .parallelism = 1,
-        .store = &store,
         .shardings = &.{sharding},
         .progress = null,
         .dma_chunks = 1,
