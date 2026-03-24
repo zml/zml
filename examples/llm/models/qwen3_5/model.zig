@@ -1,8 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const Buffer = zml.Buffer;
-const Tensor = zml.Tensor;
 const stdx = zml.stdx;
 
 const log = std.log.scoped(.qwen3_5);
@@ -117,11 +115,11 @@ pub const Model = struct {
 
     pub fn forward(
         self: Model,
-        tokens_: Tensor,
-        token_index: Tensor,
+        tokens_: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor.Rng } {
+        rng: zml.Tensor.Rng,
+    ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
         const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
@@ -130,9 +128,9 @@ pub const Model = struct {
 
     pub fn sampleTokens(
         self: Model,
-        out: Tensor,
-        rng: Tensor.Rng,
-    ) struct { Tensor, Tensor.Rng } {
+        out: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    ) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = self.lm_head.forward(out.withPartialTags(.{.d})).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
         return .{ next_tokens, new_rng };
@@ -180,10 +178,10 @@ pub const TextModel = struct {
 
     pub fn forward(
         self: TextModel,
-        tokens: Tensor,
-        token_index: Tensor,
+        tokens: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache,
-    ) struct { Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache } {
         var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
 
         var updated_kv_cache = kv_cache;
@@ -232,14 +230,14 @@ pub const TransformerLayer = struct {
 
     pub fn forward(
         self: TransformerLayer,
-        x0: Tensor,
-        token_index: Tensor,
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache.LayerView,
-    ) struct { Tensor, KvCache } {
+    ) struct { zml.Tensor, KvCache } {
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
 
-        var attention_output: Tensor = undefined;
+        var attention_output: zml.Tensor = undefined;
         var updated_kv_cache: KvCache = kv_cache.parent;
         switch (self.attn) {
             .self_attn => |*self_attn| {
@@ -286,7 +284,7 @@ pub const Mlp = struct {
         if (self.down_proj.bias) |*bias| bias.deinit();
     }
 
-    pub fn forward(self: Mlp, x: Tensor) Tensor {
+    pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const up_projed = self.up_proj.forward(x);
         const gate = self.gate_proj.forward(x);
         const hidden = gate.silu().mul(up_projed);
@@ -346,14 +344,14 @@ pub const SelfAttn = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    fn projectQAndGate(self: SelfAttn, x: Tensor) struct { Tensor, Tensor } {
+    fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q_proj = self.q_proj.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
         const q, var gate = q_proj.chunkExact(.hd, 2);
         gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
         return .{ q, gate };
     }
 
-    fn projectKV(self: SelfAttn, x: Tensor) struct { Tensor, Tensor } {
+    fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
         const k = self.k_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         const v = self.v_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
@@ -362,17 +360,17 @@ pub const SelfAttn = struct {
 
     pub fn forward(
         self: SelfAttn,
-        x: Tensor,
-        token_index: Tensor,
+        x: zml.Tensor,
+        token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
-    ) struct { Tensor, KvCache.SelfAttnCache } {
+    ) struct { zml.Tensor, KvCache.SelfAttnCache } {
         var q, const gate = self.projectQAndGate(x);
         var k, var v = self.projectKV(x);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
         const dtype = q.dtype();
-        const position_ids = Tensor.arange(.{ .end = x.dim(.s) }, .i64)
+        const position_ids = zml.Tensor.arange(.{ .end = x.dim(.s) }, .i64)
             .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64))
             .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64)));
 
@@ -416,20 +414,20 @@ pub const TextRotaryEmbedding = struct {
         };
     }
 
-    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: Tensor, dtype: zml.DataType) struct { Tensor, Tensor } {
+    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } {
         const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
 
         const freqs_t = position_ids.convert(.f32).outer(inv_freq);
 
-        const emb = Tensor.concatenate(&.{ freqs_t, freqs_t }, -1);
+        const emb = zml.Tensor.concatenate(&.{ freqs_t, freqs_t }, -1);
         const cos = emb.cos().convert(dtype);
         const sin = emb.sin().convert(dtype);
 
         return .{ cos, sin };
     }
 
-    pub fn getCosAndSinInterleaved(self: TextRotaryEmbedding, position_ids: Tensor, dtype: zml.DataType) struct { Tensor, Tensor } { // To be used later in image extension
-        const stacked_position_ids = Tensor.stack(&.{ position_ids, position_ids, position_ids }, 0, .g).convert(.f32);
+    pub fn getCosAndSinInterleaved(self: TextRotaryEmbedding, position_ids: zml.Tensor, dtype: zml.DataType) struct { zml.Tensor, zml.Tensor } { // To be used later in image extension
+        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids, position_ids, position_ids }, 0, .g).convert(.f32);
         const inv_freq = zml.nn.InvFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
 
         var freqs = stacked_position_ids.outer(inv_freq);
@@ -438,29 +436,29 @@ pub const TextRotaryEmbedding = struct {
         freqs_h = freqs_h.squeeze(.g);
         freqs_w = freqs_w.squeeze(.g);
 
-        const h_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[1] }, .i32), .h).scale(3).addConstant(1);
-        const w_indices = Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[2] }, .i32), .h).scale(3).addConstant(2);
+        const h_indices = zml.Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[1] }, .i32), .h).scale(3).addConstant(1);
+        const w_indices = zml.Tensor.iota(zml.Shape.init(.{ .h = self.mrope_section[2] }, .i32), .h).scale(3).addConstant(2);
 
         const h_input = freqs_h.gather(.{ .dh = h_indices }, .{ .indices_are_sorted = true });
         const w_input = freqs_w.gather(.{ .dh = w_indices }, .{ .indices_are_sorted = true });
         freqs_t = freqs_t.scatterSlices(.{ .dh = h_indices }, h_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
         freqs = freqs_t.scatterSlices(.{ .dh = w_indices }, w_input, .{ .update_fn = zml.Tensor.ScatterOpts.override });
 
-        const emb = Tensor.concatenate(&.{ freqs, freqs }, -1);
+        const emb = zml.Tensor.concatenate(&.{ freqs, freqs }, -1);
         const cos = emb.cos().convert(dtype);
         const sin = emb.sin().convert(dtype);
 
         return .{ cos, sin };
     }
 
-    fn rotateHalf(x: Tensor) Tensor {
+    fn rotateHalf(x: zml.Tensor) zml.Tensor {
         const half_dim = @divExact(x.dim(-1), 2);
         const x1 = x.slice1d(-1, .{ .start = 0, .end = half_dim });
         const x2 = x.slice1d(-1, .{ .start = half_dim, .end = x.dim(-1) });
-        return Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
+        return zml.Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     }
 
-    pub fn applyRope(self: TextRotaryEmbedding, x: Tensor, cos: Tensor, sin: Tensor) Tensor {
+    pub fn applyRope(self: TextRotaryEmbedding, x: zml.Tensor, cos: zml.Tensor, sin: zml.Tensor) zml.Tensor {
         const x_rot = x.slice1d(-1, .{ .start = 0, .end = self.rotary_dim });
         const x_pass = x.slice1d(-1, .{ .start = self.rotary_dim, .end = x.dim(-1) });
 
@@ -469,7 +467,7 @@ pub const TextRotaryEmbedding = struct {
 
         const rotated = x_rot.mul(cos_x).add(rotateHalf(x_rot).mul(sin_x));
 
-        return Tensor.concatenate(&.{ rotated, x_pass }, -1);
+        return zml.Tensor.concatenate(&.{ rotated, x_pass }, -1);
     }
 };
 
@@ -479,9 +477,9 @@ pub const GatedDeltaNet = struct {
     in_proj_b: zml.nn.Linear,
     in_proj_a: zml.nn.Linear,
     out_proj: zml.nn.Linear,
-    conv1d_weight: Tensor,
-    dt_bias: Tensor,
-    aLog: Tensor,
+    conv1d_weight: zml.Tensor,
+    dt_bias: zml.Tensor,
+    aLog: zml.Tensor,
     norm: RmsNormGated,
 
     num_k_heads: i64,
@@ -529,7 +527,7 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
-    fn recurrent_gated_delta_rule(query: Tensor, key: Tensor, value: Tensor, g: Tensor, beta: Tensor, initial_state: ?Tensor) struct { Tensor, Tensor } {
+    fn recurrent_gated_delta_rule(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, initial_state: ?zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
@@ -545,7 +543,7 @@ pub const GatedDeltaNet = struct {
         const initial_recurrent_state = if (initial_state) |state|
             state.convert(.f32).transpose(.{ .b, .vh, .vhd, .khd }).rename(.{ .vh = .h, .vhd = .v, .khd = .k })
         else
-            Tensor.constant(zml.DataType.zero(.f32)).broad(zml.Shape.init(.{
+            zml.Tensor.constant(zml.DataType.zero(.f32)).broad(zml.Shape.init(.{
                 .b = value.dim(.b),
                 .h = value.dim(.vh),
                 .v = value.dim(.vhd),
@@ -567,17 +565,17 @@ pub const GatedDeltaNet = struct {
         };
     }
 
-    fn buildUpdatedConvState(input: Tensor, left_pad: i64) Tensor {
+    fn buildUpdatedConvState(input: zml.Tensor, left_pad: i64) zml.Tensor {
         const copy_len = @min(input.dim(.s), left_pad);
         const tail = input.slice1d(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
         if (copy_len == left_pad) return tail;
 
         const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad - copy_len, .mix = input.dim(.mix) }, input.dtype());
-        const padding = Tensor.constant(input.dtype().zero()).broad(padding_shape);
-        return Tensor.concatenate(&.{ padding, tail }, .s);
+        const padding = zml.Tensor.constant(input.dtype().zero()).broad(padding_shape);
+        return zml.Tensor.concatenate(&.{ padding, tail }, .s);
     }
 
-    pub fn forward(self: GatedDeltaNet, x: Tensor, cache: KvCache.GatedDeltaNetCache) struct { Tensor, KvCache.GatedDeltaNetCache } {
+    pub fn forward(self: GatedDeltaNet, x: zml.Tensor, cache: KvCache.GatedDeltaNetCache) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
         const key_dim = self.num_k_heads * self.head_k_dim;
         const value_dim = self.num_v_heads * self.head_v_dim;
         const conv_dim = 2 * key_dim + value_dim;
@@ -586,12 +584,12 @@ pub const GatedDeltaNet = struct {
         const projected_qkv = self.in_proj_qkv.forward(x).rename(.{ .dout = .mix });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
         const conv_input = if (use_cached_state)
-            Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
+            zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
         else
             projected_qkv;
 
         const kernel = self.conv1d_weight;
-        var mixed_qkv = Tensor.conv1d(
+        var mixed_qkv = zml.Tensor.conv1d(
             conv_input,
             kernel,
             .{
@@ -661,7 +659,7 @@ pub const GatedDeltaNet = struct {
 };
 
 pub const RmsNorm = struct {
-    weight: Tensor,
+    weight: zml.Tensor,
     eps: f32 = 1e-6,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
@@ -672,7 +670,7 @@ pub const RmsNorm = struct {
         self.weight.deinit();
     }
 
-    pub fn forward(self: RmsNorm, x: Tensor) Tensor {
+    pub fn forward(self: RmsNorm, x: zml.Tensor) zml.Tensor {
         const x_f32 = x.convert(.f32);
         const weight_f32 = self.weight.convert(.f32);
 
@@ -682,7 +680,7 @@ pub const RmsNorm = struct {
 };
 
 pub const RmsNormGated = struct {
-    weight: Tensor,
+    weight: zml.Tensor,
     eps: f32 = 1e-6,
 
     pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNormGated {
@@ -693,7 +691,7 @@ pub const RmsNormGated = struct {
         self.weight.deinit();
     }
 
-    pub fn forward(self: RmsNormGated, x: Tensor, gate: Tensor) Tensor {
+    pub fn forward(self: RmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {
         const x_f32 = x.convert(.f32);
         const gate_f32 = gate.convert(.f32);
 
@@ -711,9 +709,9 @@ pub const KvCache = struct {
     gated_delta_net: GatedDeltaNetCache,
 
     pub const SelfAttnCache = struct {
-        k: Tensor,
-        v: Tensor,
-        layer_index: Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        layer_index: zml.Tensor,
 
         pub fn init(config: Config, batch_dim: i64, max_seq_len: i64, dtype: zml.DataType) SelfAttnCache {
             const num_self_attn_layers = countLayers(config.text_config.layer_types, .full_attention);
@@ -746,15 +744,15 @@ pub const KvCache = struct {
             self.layer_index.deinit();
         }
 
-        pub fn keys(self: SelfAttnCache) Tensor {
-            return self.k.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        pub fn keys(self: SelfAttnCache) zml.Tensor {
+            return self.k.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
-        pub fn values(self: SelfAttnCache) Tensor {
-            return self.v.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        pub fn values(self: SelfAttnCache) zml.Tensor {
+            return self.v.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
-        pub fn update(self: SelfAttnCache, new_k: Tensor, new_v: Tensor, token_index: ?Tensor) SelfAttnCache {
+        pub fn update(self: SelfAttnCache, new_k: zml.Tensor, new_v: zml.Tensor, token_index: ?zml.Tensor) SelfAttnCache {
             const k_shape = self.k.shape().drop(.layer);
             var layer = self.layer_index;
             layer = if (token_index) |idx| layer.broad(idx.shape()) else layer;
@@ -790,7 +788,7 @@ pub const KvCache = struct {
             return .{
                 .k = self.k,
                 .v = self.v,
-                .layer_index = Tensor.scalar(layer_index, .u32),
+                .layer_index = zml.Tensor.scalar(layer_index, .u32),
             };
         }
 
@@ -804,9 +802,9 @@ pub const KvCache = struct {
     };
 
     pub const GatedDeltaNetCache = struct {
-        conv_state: Tensor,
-        recurrent_state: Tensor,
-        layer_index: Tensor,
+        conv_state: zml.Tensor,
+        recurrent_state: zml.Tensor,
+        layer_index: zml.Tensor,
 
         pub fn init(config: Config, batch_dim: i64, conv_dtype: zml.DataType, recurrent_dtype: zml.DataType) GatedDeltaNetCache {
             const num_linear_attn_layers = countLayers(config.text_config.layer_types, .linear_attention);
@@ -846,15 +844,15 @@ pub const KvCache = struct {
             self.layer_index.deinit();
         }
 
-        pub fn convState(self: GatedDeltaNetCache) Tensor {
-            return self.conv_state.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        pub fn convState(self: GatedDeltaNetCache) zml.Tensor {
+            return self.conv_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
-        pub fn recurrentState(self: GatedDeltaNetCache) Tensor {
-            return self.recurrent_state.dynamicSlice(.{ .layer = Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
+        pub fn recurrentState(self: GatedDeltaNetCache) zml.Tensor {
+            return self.recurrent_state.dynamicSlice(.{ .layer = zml.Tensor.DynSlice{ .start = self.layer_index, .len = 1 } }).squeeze(.layer);
         }
 
-        pub fn update(self: GatedDeltaNetCache, new_conv_state: ?Tensor, new_recurrent_state: ?Tensor) GatedDeltaNetCache {
+        pub fn update(self: GatedDeltaNetCache, new_conv_state: ?zml.Tensor, new_recurrent_state: ?zml.Tensor) GatedDeltaNetCache {
             const conv_state = if (new_conv_state) |state|
                 self.conv_state.scatterSlices(
                     .{ .layer = self.layer_index },
@@ -884,7 +882,7 @@ pub const KvCache = struct {
             return .{
                 .conv_state = self.conv_state,
                 .recurrent_state = self.recurrent_state,
-                .layer_index = Tensor.scalar(layer_index, .u32),
+                .layer_index = zml.Tensor.scalar(layer_index, .u32),
             };
         }
 
@@ -981,6 +979,6 @@ pub const KvCache = struct {
 
 //========================Utils========================
 
-fn softplus(x: Tensor) Tensor {
+fn softplus(x: zml.Tensor) zml.Tensor {
     return x.exp().addConstant(1).log();
 }
