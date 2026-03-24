@@ -1,7 +1,7 @@
 
 # ZML Style Guide
 
-We prefer to keep it simple and adhere to the [Zig Style Guide](https://ziglang.org/documentation/0.13.0/#Style-Guide).
+We prefer to keep it simple and adhere to the [Zig Style Guide](https://ziglang.org/documentation/0.15.1/#Style-Guide).
 
 We use ZLS to auto-format code.
 

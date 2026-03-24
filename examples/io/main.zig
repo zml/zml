@@ -206,8 +206,7 @@ pub fn main(init: std.process.Init) !void {
                 log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
-            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, .{
-                .store = &store,
+            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{ replicated_sharding, sharded_sharding },
                 .parallelism = 16,
                 .dma_chunks = 16,

@@ -44,8 +44,7 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
         shardings: []const zml.sharding.Sharding,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, .{
-            .store = store,
+        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .shardings = shardings,
             .parallelism = 1,
             .dma_chunks = 1,
