@@ -532,34 +532,37 @@ pub const GatedDeltaNet = struct {
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
 
-        const query_f32, const key_f32, const value_f32, const g_f32, const beta_f32 = .{ query_norm.convert(.f32).scale(scale), key_norm.convert(.f32), value.convert(.f32), g.convert(.f32), beta.convert(.f32) };
+        const query_f32, const key_f32, const value_f32, const alpha_f32, const beta_f32 = .{
+            query_norm.convert(.f32).scale(scale).rename(.{ .vh = .h, .khd = .k }),
+            key_norm.convert(.f32).rename(.{ .vh = .h, .khd = .k }),
+            value.convert(.f32).rename(.{ .vh = .h, .vhd = .v }),
+            g.convert(.f32).exp().rename(.{ .vh = .h }),
+            beta.convert(.f32).rename(.{ .vh = .h }),
+        };
 
-        const zero = Tensor.constant(zml.DataType.zero(.f32));
-        var core_attn_out = zero.broad(zml.Shape.init(.{ .b = value.dim(.b), .s = value.dim(.s), .vh = value.dim(.vh), .vhd = value.dim(.vhd) }, .f32));
-        var last_recurrent_state = if (initial_state) |state|
-            state.convert(.f32)
+        const initial_recurrent_state = if (initial_state) |state|
+            state.convert(.f32).transpose(.{ .b, .vh, .vhd, .khd }).rename(.{ .vh = .h, .vhd = .v, .khd = .k })
         else
-            zero.broad(zml.Shape.init(.{ .b = value.dim(.b), .vh = value.dim(.vh), .khd = query.dim(.khd), .vhd = value.dim(.vhd) }, .f32));
+            Tensor.constant(zml.DataType.zero(.f32)).broad(zml.Shape.init(.{
+                .b = value.dim(.b),
+                .h = value.dim(.vh),
+                .v = value.dim(.vhd),
+                .k = query.dim(.khd),
+            }, .f32));
 
-        const seq_len: usize = @intCast(value.dim(.s));
-        for (0..seq_len) |i| {
-            const token_slice: Tensor.Slice = .single(@intCast(i));
-            const q_t = query_f32.slice1d(.s, token_slice); // { .b, .vh, .khd }
-            const k_t = key_f32.slice1d(.s, token_slice); // { .b, .vh, .khd }
-            const v_t = value_f32.slice1d(.s, token_slice); // { .b, .vh, .vhd }
-            const g_t = g_f32.slice1d(.s, token_slice).exp().appendAxes(.{ .khd, .vhd }); // { .b, .vh, .khd = 1, .vhd = 1 }
-            const beta_t = beta_f32.slice1d(.s, token_slice).appendAxes(.{.vhd}); // { .b, .vh, .vhd = 1 }
+        const result = zml.nn.GatedDeltaNet.forward(
+            query_f32,
+            key_f32,
+            value_f32,
+            alpha_f32,
+            beta_f32,
+            .{ .s = initial_recurrent_state },
+        );
 
-            last_recurrent_state = last_recurrent_state.mul(g_t); // { .b, .vh, .khd, .vhd }
-            const kv_mem = last_recurrent_state.dot(k_t, .khd); // { .b, .vh, .vhd }
-            const delta = v_t.sub(kv_mem).mul(beta_t); // { .b, .vh, .vhd }
-            last_recurrent_state = last_recurrent_state.add(k_t.appendAxes(.{.vhd}).broad(last_recurrent_state.shape()).mul(delta.insertAxes(.vhd, .{.khd})));
-            const out_t = last_recurrent_state.dot(q_t, .khd); // { .b, .vh, .vhd }
-
-            core_attn_out = core_attn_out.dynamicUpdateSlice(.{ .s = Tensor.scalar(@as(i32, @intCast(i)), .i32) }, out_t);
-        }
-
-        return .{ core_attn_out.convert(query.dtype()), last_recurrent_state };
+        return .{
+            result.outputs.rename(.{ .h = .vh, .v = .vhd }).convert(query.dtype()),
+            result.state.s.transpose(.{ .b, .h, .k, .v }).rename(.{ .h = .vh, .k = .khd, .v = .vhd }),
+        };
     }
 
     fn buildUpdatedConvState(input: Tensor, left_pad: i64) Tensor {
