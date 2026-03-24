@@ -375,9 +375,10 @@ pub fn main(init: std.process.Init) !void {
     var attn_output = results.get(zml.Buffer);
     defer attn_output.deinit();
 
-    // Stage-by-stage diagnostic comparison if reference is available
-    // Stage-by-stage diagnostic comparison (attn1 with pe_cos/pe_sin only)
-    if (mode == .attn1) {
+    // Stage-by-stage diagnostic comparison if reference is available.
+    // The attn1 diagnostic helpers operate on generic Attention.Params and also
+    // work for audio_attn1 because shapes are taken from runtime tensors.
+    if (mode == .attn1 or mode == .audio_attn1) {
         if (attn_pe_cos) |pe_cos_buf| {
             const pe_sin_buf = attn_pe_sin.?;
             const pe_cos_t = zml.Tensor.fromShape(pe_cos_buf.shape());
@@ -1258,7 +1259,7 @@ fn parseAblation(v: []const u8) !Ablation {
     }
 
     std.log.err(
-        "Invalid ablation: {s}. Expected one of: pre_to_out_f32_sdpa, pre_to_out_no_gate, pre_to_out_sigmoid_gate, pre_to_out_manual_sdpa_f32, pre_to_out_alt_merge_transpose, pre_to_out_head_first_sdpa, no_mask",
+        "Invalid ablation: {s}. Expected one of: pre_to_out_f32_sdpa, pre_to_out_no_gate, pre_to_out_sigmoid_gate, pre_to_out_manual_sdpa_f32, pre_to_out_alt_merge_transpose, pre_to_out_head_first_sdpa, pre_to_out_head_first_only, pre_to_out_manual_sdpa_head_first, no_mask",
         .{v},
     );
     return error.InvalidArgs;

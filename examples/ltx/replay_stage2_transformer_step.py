@@ -40,6 +40,7 @@ import zml_utils
 
 from ltx_core.guidance.perturbations import PerturbationType
 from ltx_core.loader import LoraPathStrengthAndSDOps, LTXV_LORA_COMFY_RENAMING_MAP
+from ltx_core.model.transformer.attention import AttentionFunction
 from ltx_pipelines.utils.helpers import modality_from_latent_state
 from ltx_core.types import LatentState
 from ltx_pipelines.ti2vid_two_stages import TI2VidTwoStagesPipeline
@@ -125,6 +126,14 @@ def parse_args() -> argparse.Namespace:
             "Optional token prefix length applied at replay time to video/audio latent states "
             "and text contexts before transformer forward. "
             "Useful to generate context-consistent token-limited traces."
+        ),
+    )
+    parser.add_argument(
+        "--force-pytorch-attention",
+        action="store_true",
+        help=(
+            "Force all transformer Attention modules to use PyTorch SDPA backend "
+            "(AttentionFunction.PYTORCH) for this replay."
         ),
     )
     return parser.parse_args()
@@ -235,6 +244,14 @@ def main() -> None:
     pos_audio = modality_from_latent_state(audio_state, a_context_p, sigma)
 
     transformer = pipeline.stage_2_model_ledger.transformer()
+
+    if args.force_pytorch_attention:
+        forced = 0
+        for _name, mod in transformer.named_modules():
+            if hasattr(mod, "attention_function"):
+                mod.attention_function = AttentionFunction.PYTORCH
+                forced += 1
+        print(f"force-pytorch-attention enabled: patched {forced} modules")
 
     # For debug
     # seen = {}
@@ -423,15 +440,15 @@ def main() -> None:
             except Exception as exc:
                 print(f"WARNING: could not register {proj} hook for {name}: {exc}")
 
-        # Capture block-level AdaLN gate directly from the model implementation.
-        # This avoids reconstructing vgate_msa from heuristics on flattened inputs.
+        # Capture block-level AdaLN gates/timesteps directly from the model implementation.
+        # This avoids reconstructing values from heuristics on flattened inputs.
         for name, mod in transformer.named_modules():
-            if name != "velocity_model.transformer_blocks.0":
+            if not _re.match(r"^velocity_model\.transformer_blocks\.\d+$", name):
                 continue
             if not any(_re.search(rx, name) for rx in include_regexes):
                 continue
 
-            def _make_block0_aux_hook(mod_name: str):
+            def _make_block_aux_hook(mod_name: str):
                 def _hook(module, args_tup, kwargs):
                     try:
                         video = kwargs.get("video") if isinstance(kwargs, dict) else None
@@ -461,10 +478,18 @@ def main() -> None:
                             video.timesteps,
                             slice(3, 6),
                         )
+                        _, _, vgate_text_ca = module.get_ada_values(
+                            module.scale_shift_table,
+                            batch_size,
+                            video.timesteps,
+                            slice(6, 9),
+                        )
                         if isinstance(vgate_msa, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.vgate_msa"] = vgate_msa.detach().cpu().contiguous()
                         if isinstance(vgate_mlp, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.vgate_mlp"] = vgate_mlp.detach().cpu().contiguous()
+                        if isinstance(vgate_text_ca, torch.Tensor):
+                            captured_aux[f"{mod_name}.__aux__.vgate_text_ca"] = vgate_text_ca.detach().cpu().contiguous()
                         if isinstance(video.timesteps, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.video_timesteps"] = video.timesteps.detach().cpu().contiguous()
                         if hasattr(video, "prompt_timestep") and isinstance(video.prompt_timestep, torch.Tensor):
@@ -507,10 +532,18 @@ def main() -> None:
                                 audio.timesteps,
                                 slice(3, 6),
                             )
+                            _, _, agate_text_ca = module.get_ada_values(
+                                module.audio_scale_shift_table,
+                                batch_size,
+                                audio.timesteps,
+                                slice(6, 9),
+                            )
                             if isinstance(agate_msa, torch.Tensor):
                                 captured_aux[f"{mod_name}.__aux__.agate_msa"] = agate_msa.detach().cpu().contiguous()
                             if isinstance(agate_mlp, torch.Tensor):
                                 captured_aux[f"{mod_name}.__aux__.agate_mlp"] = agate_mlp.detach().cpu().contiguous()
+                            if isinstance(agate_text_ca, torch.Tensor):
+                                captured_aux[f"{mod_name}.__aux__.agate_text_ca"] = agate_text_ca.detach().cpu().contiguous()
                             if isinstance(audio.timesteps, torch.Tensor):
                                 captured_aux[f"{mod_name}.__aux__.audio_timesteps"] = audio.timesteps.detach().cpu().contiguous()
                             if hasattr(audio, "prompt_timestep") and isinstance(audio.prompt_timestep, torch.Tensor):
@@ -571,22 +604,22 @@ def main() -> None:
                             if isinstance(v2a_mask, torch.Tensor):
                                 captured_aux[f"{mod_name}.__aux__.v2a_mask"] = v2a_mask.detach().cpu().contiguous()
                     except Exception as exc:
-                        print(f"WARNING: failed to capture block0 aux tensors: {exc}")
+                        print(f"WARNING: failed to capture block aux tensors for {mod_name}: {exc}")
                     return None
 
                 return _hook
 
             try:
                 h = mod.register_forward_pre_hook(
-                    _make_block0_aux_hook(name), with_kwargs=True, prepend=True
+                    _make_block_aux_hook(name), with_kwargs=True, prepend=True
                 )
                 aux_handles.append(h)
                 print(f"aux hook registered for: {name}")
             except Exception as exc:
                 print(f"WARNING: could not register aux hook for {name}: {exc}")
 
-            # M6: post-hook to capture final vx_out / ax_out at block exit.
-            def _make_block0_out_hook(mod_name: str):
+            # Post-hook to capture final vx_out / ax_out at block exit.
+            def _make_block_out_hook(mod_name: str):
                 def _hook(module, args_tup, kwargs, out):
                     try:
                         video_out = out[0] if isinstance(out, (tuple, list)) else out
@@ -596,13 +629,13 @@ def main() -> None:
                         if audio_out is not None and hasattr(audio_out, "x") and isinstance(audio_out.x, torch.Tensor):
                             captured_aux[f"{mod_name}.__aux__.ax_out"] = audio_out.x.detach().cpu().contiguous()
                     except Exception as exc:
-                        print(f"WARNING: failed to capture block0 output tensors: {exc}")
+                        print(f"WARNING: failed to capture block output tensors for {mod_name}: {exc}")
                     return None
                 return _hook
 
             try:
                 h = mod.register_forward_hook(
-                    _make_block0_out_hook(name), with_kwargs=True
+                    _make_block_out_hook(name), with_kwargs=True
                 )
                 aux_handles.append(h)
                 print(f"out hook registered for: {name}")

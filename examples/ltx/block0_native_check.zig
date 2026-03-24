@@ -266,5 +266,71 @@ pub fn main(init: std.process.Init) !void {
     });
     std.log.info("Native audio parity PASSED", .{});
 
+    std.log.info("Compiling native combined graph...", .{});
+    var full_exe = try platform.compileFn(
+        allocator,
+        io,
+        model.forwardBlock0Native,
+        .{
+            zml.Tensor.fromShape(vx_in_buf.shape()),
+            zml.Tensor.fromShape(ax_in_buf.shape()),
+            zml.Tensor.fromShape(video_timesteps_buf.shape()),
+            zml.Tensor.fromShape(audio_timesteps_buf.shape()),
+            zml.Tensor.fromShape(v_prompt_timestep_buf.shape()),
+            zml.Tensor.fromShape(a_prompt_timestep_buf.shape()),
+            zml.Tensor.fromShape(v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(a_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(a_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(v_text_ctx_buf.shape()),
+            zml.Tensor.fromShape(a_text_ctx_buf.shape()),
+            zml.Tensor.fromShape(v_cross_ss_ts_buf.shape()),
+            zml.Tensor.fromShape(v_cross_gate_ts_buf.shape()),
+            zml.Tensor.fromShape(a_cross_ss_ts_buf.shape()),
+            zml.Tensor.fromShape(a_cross_gate_ts_buf.shape()),
+            zml.Tensor.fromShape(a2v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(a2v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(a2v_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(a2v_k_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(v2a_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(v2a_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(v2a_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(v2a_k_pe_sin_buf.shape()),
+            params_shape,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer full_exe.deinit();
+
+    var full_args = try full_exe.args(allocator);
+    defer full_args.deinit(allocator);
+    var full_res = try full_exe.results(allocator);
+    defer full_res.deinit(allocator);
+
+    full_args.set(.{
+        vx_in_buf, ax_in_buf, video_timesteps_buf, audio_timesteps_buf,
+        v_prompt_timestep_buf, a_prompt_timestep_buf,
+        v_pe_cos_buf, v_pe_sin_buf, a_pe_cos_buf, a_pe_sin_buf,
+        v_text_ctx_buf, a_text_ctx_buf,
+        v_cross_ss_ts_buf, v_cross_gate_ts_buf, a_cross_ss_ts_buf, a_cross_gate_ts_buf,
+        a2v_pe_cos_buf, a2v_pe_sin_buf, a2v_k_pe_cos_buf, a2v_k_pe_sin_buf,
+        v2a_pe_cos_buf, v2a_pe_sin_buf, v2a_k_pe_cos_buf, v2a_k_pe_sin_buf,
+        params_bufs,
+    });
+    full_exe.call(full_args, &full_res);
+
+    const out = full_res.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+    try zml.testing.expectClose(io, out.vx_out, vx_out_ref_buf, .{
+        .absolute_tolerance = 0.2,
+        .relative_tolerance = 0.01,
+        .minimum_close_fraction = 0.999,
+    });
+    try zml.testing.expectClose(io, out.ax_out, ax_out_ref_buf, .{
+        .absolute_tolerance = 0.2,
+        .relative_tolerance = 0.01,
+        .minimum_close_fraction = 0.999,
+    });
+    std.log.info("Native combined parity PASSED", .{});
+
     std.log.info("Native block0 full stream parity PASSED", .{});
 }

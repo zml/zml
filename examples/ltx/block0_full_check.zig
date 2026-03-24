@@ -86,6 +86,8 @@ pub fn main(init: std.process.Init) !void {
     defer v_pe_sin_buf.deinit();
     var vgate_msa_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.vgate_msa", sharding);
     defer vgate_msa_buf.deinit();
+    var vgate_text_ca_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.vgate_text_ca", sharding);
+    defer vgate_text_ca_buf.deinit();
     var v_text_ctx_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.v_text_ctx", sharding);
     defer v_text_ctx_buf.deinit();
     var a2v_x_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.a2v_x", sharding);
@@ -124,6 +126,8 @@ pub fn main(init: std.process.Init) !void {
     defer a_pe_sin_buf.deinit();
     var agate_msa_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.agate_msa", sharding);
     defer agate_msa_buf.deinit();
+    var agate_text_ca_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.agate_text_ca", sharding);
+    defer agate_text_ca_buf.deinit();
     var a_text_ctx_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.a_text_ctx", sharding);
     defer a_text_ctx_buf.deinit();
     var v2a_x_buf = try loadBuf(allocator, io, platform, &fix_store, "block0_full.v2a_x", sharding);
@@ -164,6 +168,7 @@ pub fn main(init: std.process.Init) !void {
             zml.Tensor.fromShape(v_pe_cos_buf.shape()),
             zml.Tensor.fromShape(v_pe_sin_buf.shape()),
             zml.Tensor.fromShape(vgate_msa_buf.shape()),
+            zml.Tensor.fromShape(vgate_text_ca_buf.shape()),
             zml.Tensor.fromShape(v_text_ctx_buf.shape()),
             zml.Tensor.fromShape(a2v_x_buf.shape()),
             zml.Tensor.fromShape(a2v_ctx_buf.shape()),
@@ -197,7 +202,7 @@ pub fn main(init: std.process.Init) !void {
 
     video_args.set(.{
         vx_in_buf, norm_vx_buf, v_text_x_buf, v_pe_cos_buf, v_pe_sin_buf, vgate_msa_buf,
-        v_text_ctx_buf, a2v_x_buf, a2v_ctx_buf, a2v_pe_cos_buf, a2v_pe_sin_buf,
+        vgate_text_ca_buf, v_text_ctx_buf, a2v_x_buf, a2v_ctx_buf, a2v_pe_cos_buf, a2v_pe_sin_buf,
         a2v_k_pe_cos_buf, a2v_k_pe_sin_buf, a2v_gate_buf, a2v_mask_buf,
         vx_scaled_buf, vgate_mlp_buf, params_bufs,
     });
@@ -225,6 +230,7 @@ pub fn main(init: std.process.Init) !void {
             zml.Tensor.fromShape(a_pe_cos_buf.shape()),
             zml.Tensor.fromShape(a_pe_sin_buf.shape()),
             zml.Tensor.fromShape(agate_msa_buf.shape()),
+            zml.Tensor.fromShape(agate_text_ca_buf.shape()),
             zml.Tensor.fromShape(a_text_ctx_buf.shape()),
             zml.Tensor.fromShape(v2a_x_buf.shape()),
             zml.Tensor.fromShape(v2a_ctx_buf.shape()),
@@ -249,7 +255,7 @@ pub fn main(init: std.process.Init) !void {
 
     audio_args.set(.{
         ax_in_buf, norm_ax_buf, a_text_x_buf, a_pe_cos_buf, a_pe_sin_buf, agate_msa_buf,
-        a_text_ctx_buf, v2a_x_buf, v2a_ctx_buf, v2a_pe_cos_buf, v2a_pe_sin_buf,
+        agate_text_ca_buf, a_text_ctx_buf, v2a_x_buf, v2a_ctx_buf, v2a_pe_cos_buf, v2a_pe_sin_buf,
         v2a_k_pe_cos_buf, v2a_k_pe_sin_buf, v2a_gate_buf, v2a_mask_buf,
         ax_scaled_buf, agate_mlp_buf, params_bufs,
     });

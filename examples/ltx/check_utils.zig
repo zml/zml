@@ -29,6 +29,25 @@ pub const CompareMetrics = struct {
     close_fraction: f64,
 };
 
+pub const ExtendedCompareMetrics = struct {
+    max_abs_error: f64,
+    mean_abs_error: f64,
+    rmse_error: f64,
+    rel_l2_error: f64,
+    cosine_similarity: f64,
+    close_fraction: f64,
+    abs_err_p50: f64,
+    abs_err_p90: f64,
+    abs_err_p99: f64,
+    abs_err_p999: f64,
+    positive_diff_fraction: f64,
+    negative_diff_fraction: f64,
+    zero_diff_fraction: f64,
+    frac_abs_err_gt_1e3: f64,
+    frac_abs_err_gt_1e2: f64,
+    frac_abs_err_gt_1e1: f64,
+};
+
 /// Compares two buffers element-wise and produces metrics.
 pub fn compareBuffers(
     io: std.Io,
@@ -69,7 +88,7 @@ pub fn compareBuffers(
 
         const comp_val = switch (dtype) {
             .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(comp_ptr)).*)),
-            .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(exp_ptr)).*),
+            .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(comp_ptr)).*),
             .bf16 => bf16_to_f32(@as(*align(1) const u16, @ptrCast(comp_ptr)).*),
             else => return error.UnsupportedDtype,
         };
@@ -99,6 +118,158 @@ pub fn compareBuffers(
         .mean_abs_error = mean_abs_err,
         .close_fraction = close_fraction,
     };
+}
+
+fn quantileFromSorted(data: []const f64, q: f64) f64 {
+    if (data.len == 0) return 0.0;
+    const qq = std.math.clamp(q, 0.0, 1.0);
+    const last_idx: f64 = @floatFromInt(data.len - 1);
+    const idx_f = qq * last_idx;
+    const idx_low: usize = @intFromFloat(@floor(idx_f));
+    const idx_high: usize = @intFromFloat(@ceil(idx_f));
+    if (idx_low == idx_high) return data[idx_low];
+
+    const w = idx_f - @as(f64, @floatFromInt(idx_low));
+    return data[idx_low] * (1.0 - w) + data[idx_high] * w;
+}
+
+/// Compares two buffers with distribution-aware diagnostics to disambiguate
+/// global rounding drift from sparse outliers.
+pub fn compareBuffersExtended(
+    io: std.Io,
+    computed: zml.Buffer,
+    expected: zml.Buffer,
+    absolute_tolerance: f32,
+    relative_tolerance: f32,
+) !ExtendedCompareMetrics {
+    var computed_slice = try computed.toSliceAlloc(std.heap.smp_allocator, io);
+    defer computed_slice.free(std.heap.smp_allocator);
+
+    var expected_slice = try expected.toSliceAlloc(std.heap.smp_allocator, io);
+    defer expected_slice.free(std.heap.smp_allocator);
+
+    const computed_bytes = computed_slice.data();
+    const expected_bytes = expected_slice.data();
+
+    if (computed.shape().byteSize() != expected.shape().byteSize()) {
+        return error.ShapeMismatch;
+    }
+
+    const dtype = computed.shape().dtype();
+    if (dtype != expected.shape().dtype()) {
+        return error.DtypeMismatch;
+    }
+
+    const elem_size = dtype.sizeOf();
+    const num_elems = computed.shape().byteSize() / elem_size;
+    if (num_elems == 0) return error.EmptyBuffer;
+
+    var abs_errors = try std.heap.smp_allocator.alloc(f64, num_elems);
+    defer std.heap.smp_allocator.free(abs_errors);
+
+    var max_abs_err: f64 = 0.0;
+    var sum_abs_err: f64 = 0.0;
+    var sum_sq_err: f64 = 0.0;
+    var sum_sq_exp: f64 = 0.0;
+    var sum_sq_comp: f64 = 0.0;
+    var dot_comp_exp: f64 = 0.0;
+
+    var close_count: u64 = 0;
+    var pos_count: u64 = 0;
+    var neg_count: u64 = 0;
+    var zero_count: u64 = 0;
+    var gt_1e3_count: u64 = 0;
+    var gt_1e2_count: u64 = 0;
+    var gt_1e1_count: u64 = 0;
+
+    var i: usize = 0;
+    while (i < num_elems) : (i += 1) {
+        const comp_ptr = computed_bytes.ptr + i * elem_size;
+        const exp_ptr = expected_bytes.ptr + i * elem_size;
+
+        const comp_val = switch (dtype) {
+            .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(comp_ptr)).*)),
+            .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(comp_ptr)).*),
+            .bf16 => bf16_to_f32(@as(*align(1) const u16, @ptrCast(comp_ptr)).*),
+            else => return error.UnsupportedDtype,
+        };
+
+        const exp_val = switch (dtype) {
+            .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(exp_ptr)).*)),
+            .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(exp_ptr)).*),
+            .bf16 => bf16_to_f32(@as(*align(1) const u16, @ptrCast(exp_ptr)).*),
+            else => return error.UnsupportedDtype,
+        };
+
+        const diff = comp_val - exp_val;
+        const abs_err = @abs(diff);
+        abs_errors[i] = abs_err;
+
+        max_abs_err = @max(max_abs_err, abs_err);
+        sum_abs_err += abs_err;
+        sum_sq_err += diff * diff;
+        sum_sq_exp += exp_val * exp_val;
+        sum_sq_comp += comp_val * comp_val;
+        dot_comp_exp += comp_val * exp_val;
+
+        if (diff > 0.0) {
+            pos_count += 1;
+        } else if (diff < 0.0) {
+            neg_count += 1;
+        } else {
+            zero_count += 1;
+        }
+
+        if (abs_err > 1e-3) gt_1e3_count += 1;
+        if (abs_err > 1e-2) gt_1e2_count += 1;
+        if (abs_err > 1e-1) gt_1e1_count += 1;
+
+        const rel_err = if (exp_val != 0.0) abs_err / @abs(exp_val) else abs_err;
+        if (abs_err <= absolute_tolerance or rel_err <= relative_tolerance) {
+            close_count += 1;
+        }
+    }
+
+    std.mem.sort(f64, abs_errors, {}, std.sort.asc(f64));
+
+    const n: f64 = @floatFromInt(num_elems);
+    const mean_abs_err = sum_abs_err / n;
+    const close_fraction = @as(f64, @floatFromInt(close_count)) / n;
+    const rmse_error = @sqrt(sum_sq_err / n);
+    const rel_l2_error = if (sum_sq_exp > 0.0) @sqrt(sum_sq_err) / @sqrt(sum_sq_exp) else 0.0;
+
+    const denom = @sqrt(sum_sq_comp) * @sqrt(sum_sq_exp);
+    const cosine_similarity = if (denom > 0.0) dot_comp_exp / denom else 1.0;
+
+    return .{
+        .max_abs_error = max_abs_err,
+        .mean_abs_error = mean_abs_err,
+        .rmse_error = rmse_error,
+        .rel_l2_error = rel_l2_error,
+        .cosine_similarity = cosine_similarity,
+        .close_fraction = close_fraction,
+        .abs_err_p50 = quantileFromSorted(abs_errors, 0.50),
+        .abs_err_p90 = quantileFromSorted(abs_errors, 0.90),
+        .abs_err_p99 = quantileFromSorted(abs_errors, 0.99),
+        .abs_err_p999 = quantileFromSorted(abs_errors, 0.999),
+        .positive_diff_fraction = @as(f64, @floatFromInt(pos_count)) / n,
+        .negative_diff_fraction = @as(f64, @floatFromInt(neg_count)) / n,
+        .zero_diff_fraction = @as(f64, @floatFromInt(zero_count)) / n,
+        .frac_abs_err_gt_1e3 = @as(f64, @floatFromInt(gt_1e3_count)) / n,
+        .frac_abs_err_gt_1e2 = @as(f64, @floatFromInt(gt_1e2_count)) / n,
+        .frac_abs_err_gt_1e1 = @as(f64, @floatFromInt(gt_1e1_count)) / n,
+    };
+}
+
+pub fn copyBuffer(
+    io: std.Io,
+    platform: *zml.Platform,
+    src: zml.Buffer,
+    sharding: zml.sharding.Sharding,
+) !zml.Buffer {
+    var src_slice = try src.toSliceAlloc(std.heap.smp_allocator, io);
+    defer src_slice.free(std.heap.smp_allocator);
+    return zml.Buffer.fromSlice(io, platform, src_slice, sharding);
 }
 
 /// Converts bfloat16 to f32.

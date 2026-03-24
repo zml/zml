@@ -46,7 +46,7 @@ Track work related to:
 
 ### T3 - Multi-block slice parity
 
-- Status: TODO
+- Status: IN PROGRESS
 - Target:
   - Validate contiguous block slices (for example 0-7, 8-15) with replay traces.
 - Exit criteria:
@@ -103,3 +103,4 @@ The Zig implementation mirrors this with `.convert(ts.dtype())` to ensure dtype 
 - 2026-03-23: Initialized post-block0 tracking file and milestone framework.
 - 2026-03-23: Added native checker/export/capture wiring for cross-attention AdaLN (rows 6..8 + prompt modulation) and recorded first runtime PASS (t128, LoRA 0.0).
 - 2026-03-23: Fixed `adaValueAt` dtype mismatch: SST is now explicitly cast to timestep dtype via `.convert(ts.dtype())` (iso with Python `get_ada_values` .to(dtype=timestep.dtype)). Deployed `run_native_t2_matrix.sh` batch script with checkpoint validation. T2 matrix validation complete: all 6 combos (LoRA 0.0/0.5 × t128/256/512) PASS.
+- 2026-03-24: Started T3 scaffolding: generalized replay block-aux capture from block0-only to any matched transformer block; added `export_stage2_block_slice_checkpoint.py` (reindexed local 0..N-1), `export_block_slice_native_fixture.py`, `block_slice_native_check.zig`, and fixed-size 8-block native entrypoints (`forwardBlockSlice8NativeVideo/Audio`) in `model.zig`.

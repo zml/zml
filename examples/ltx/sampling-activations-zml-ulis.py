@@ -212,5 +212,10 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Use bf16 accumulation in matmuls to match XLA dot_precision=.fast used by ZML.
+    # Without this, PyTorch defaults to TF32 accumulation for bf16 ops on CUDA,
+    # which produces ~0.5% more elements outside the tolerance band when checked
+    # against a ZML implementation using fast bf16 accumulation.
+    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
     with torch.inference_mode():
         main()

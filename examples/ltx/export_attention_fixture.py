@@ -272,25 +272,41 @@ def main() -> None:
         except Exception as e:
             print(f"WARNING: could not extract diagnostic to_gate_logits: {e}")
 
-    # Export to_out input if captured: this is the merged pre-to_out tensor [B, T, D_V]
-    if resolved_key is not None and "fallback: input=" in resolved_key:
-        try:
-            # Extract out_key from fallback marker: "... output=<out_key>]"
+    # Export to_out input if captured: this is the merged pre-to_out tensor [B, T, D_V].
+    try:
+        out_key_candidates: list[str] = []
+        if activation_key is not None:
+            out_key_candidates.extend([
+                activation_key + ".to_out.0",
+                activation_key + ".to_out",
+            ])
+
+        if resolved_key is not None and "fallback: input=" in resolved_key:
             marker = "output="
             idx = resolved_key.rfind(marker)
             if idx != -1:
-                out_key = resolved_key[idx + len(marker):].rstrip("]")
-                out_entry = acts.get(out_key)
-                if isinstance(out_entry, dict):
-                    out_inputs = out_entry.get("input", [])
-                    if out_inputs and isinstance(out_inputs[0], torch.Tensor):
-                        tensor = out_inputs[0].detach().cpu().contiguous()
-                        tensor_name = f"{args.mode}.to_out_input_diag0"
-                        tensors[tensor_name] = tensor
-                        diagnostic_keys["to_out_input"] = f"shape={tuple(tensor.shape)} dtype={tensor.dtype}"
-                        print(f"diagnostic to_out_input captured: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
-        except Exception as e:
-            print(f"WARNING: could not extract diagnostic to_out_input: {e}")
+                out_key_candidates.append(resolved_key[idx + len(marker):].rstrip("]"))
+
+        seen_out_keys: set[str] = set()
+        for out_key in out_key_candidates:
+            if out_key in seen_out_keys:
+                continue
+            seen_out_keys.add(out_key)
+
+            out_entry = acts.get(out_key)
+            if not isinstance(out_entry, dict):
+                continue
+
+            out_inputs = out_entry.get("input", [])
+            if out_inputs and isinstance(out_inputs[0], torch.Tensor):
+                tensor = out_inputs[0].detach().cpu().contiguous()
+                tensor_name = f"{args.mode}.to_out_input_diag0"
+                tensors[tensor_name] = tensor
+                diagnostic_keys["to_out_input"] = f"shape={tuple(tensor.shape)} dtype={tensor.dtype}"
+                print(f"diagnostic to_out_input captured: shape={tuple(tensor.shape)} dtype={tensor.dtype}")
+                break
+    except Exception as e:
+        print(f"WARNING: could not extract diagnostic to_out_input: {e}")
 
     if args.token_limit is not None:
         token_limit = args.token_limit
