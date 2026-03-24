@@ -345,6 +345,60 @@ pub const Buffer = struct {
         }
     }
 
+    /// Async version of toPrefix1dSlice. Starts device-to-host copies without blocking.
+    /// Returns events that must be awaited using awaitD2HEvents() before the destination
+    /// data is valid.
+    pub const D2HEvents = stdx.BoundedArray(?*pjrt.Event, MAX_NUM_SHARDS);
+
+    pub fn startPrefix1dCopy(self: Buffer, slice: Slice) !D2HEvents {
+        stdx.debug.assert(self._shape.rank() == 1, "startPrefix1dCopy expects a rank-1 buffer, got {}", .{self._shape.rank()});
+        stdx.debug.assert(slice.shape.rank() == 1, "startPrefix1dCopy expects a rank-1 destination slice, got {}", .{slice.shape.rank()});
+        stdx.debug.assert(self._shape.dtype() == slice.shape.dtype(), "startPrefix1dCopy dtype mismatch: buffer={} destination={}", .{ self._shape.dtype(), slice.shape.dtype() });
+
+        const prefix_len: i64 = slice.shape.dim(0);
+        stdx.debug.assert(prefix_len <= self._shape.dim(0), "startPrefix1dCopy prefix length {} exceeds buffer length {}", .{ prefix_len, self._shape.dim(0) });
+
+        var events: D2HEvents = .{};
+        if (prefix_len == 0) return events;
+
+        const elem_size = self._shape.dtype().sizeOf();
+        for (self.placement().shards.constSlice(), 0..) |shard, shard_index| {
+            var shard_start: i64 = 0;
+            var shard_size: i64 = self._shape.dim(0);
+            switch (shard.slices.len) {
+                0 => {},
+                1 => {
+                    const shard_slice = shard.slices.get(0);
+                    stdx.debug.assert(shard_slice.axis == 0, "startPrefix1dCopy expects a rank-1 shard along axis 0, got axis {}", .{shard_slice.axis});
+                    shard_start = shard_slice.start;
+                    shard_size = shard_slice.size;
+                },
+                else => stdx.debug.panic("startPrefix1dCopy got unsupported shard slicing for rank-1 buffer: {} slices", .{shard.slices.len}),
+            }
+
+            const overlap_start = @max(@as(i64, 0), shard_start);
+            const overlap_end = @min(prefix_len, shard_start + shard_size);
+            if (overlap_start >= overlap_end) continue;
+
+            const byte_len: usize = @intCast((overlap_end - overlap_start) * elem_size);
+            const dst_offset: usize = @intCast(overlap_start * elem_size);
+            const src_offset: i64 = (overlap_start - shard_start) * elem_size;
+            const destination = slice.data()[dst_offset..][0..byte_len];
+            const maybe_event = try self._shards.get(shard_index).copyRawToHost(self._platform.pjrt_api, destination, src_offset);
+            events.appendAssumeCapacity(maybe_event);
+        }
+
+        return events;
+    }
+
+    pub fn awaitD2HEvents(self: Buffer, io: std.Io, events: D2HEvents) !void {
+        for (events.constSlice()) |maybe_event| {
+            if (maybe_event) |event| {
+                try event.await(self._platform.pjrt_api, io);
+            }
+        }
+    }
+
     /// Copies the content of the Buffer to the provided slice.
     /// The returned slice owns the memory.
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
