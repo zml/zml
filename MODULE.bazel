@@ -2,7 +2,7 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20250512.1")
+bazel_dep(name = "abseil-cpp", version = "20250512.1", repo_name = "com_google_absl")
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
@@ -240,15 +240,14 @@ use_repo(
     "distroless_cc_debian12_linux_amd64",
 )
 
-single_version_override(
-    module_name = "grpc-java",
-    version = "1.74.0",
-)
-
 git_override(
     module_name = "rules_zig",
-    commit = "6c5d6a07b4ef48be894e7418bcae37bac54e1c2e",
-    patch_strip = 1,
-    patches = ["//:.patches/absolute.patch"],
+    commit = "7b205b78fb21e11efe5adcc9ec1c37fa5852dc77",
     remote = "https://github.com/zml/rules_zig.git",
+)
+
+single_version_override(
+    module_name = "grpc",
+    patches = ["//third_party/grpc:protobuf_compat.patch"],
+    patch_strip = 1,
 )
