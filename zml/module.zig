@@ -565,9 +565,16 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         const overrides_map = c._xla_CompileOptionsProto_env_option_overrides_mutable_upb_map(options, upb_arena);
         switch (platform.target) {
             .cuda => {
-                // NVIDIA recommends these settings
-                // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
+                // Enable cuBLASLt, and disable autotuning and triton as it is unstable on some platforms (e.g. Nvidia 4090).
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_cublaslt", true, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 0, upb_arena);
+                try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_triton_gemm", false, upb_arena);
+
+                // NVIDIA recommends this setting, which allows XLA to move communication collectives to increase overlap with compute kernels.
+                // See https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
+
+                // Compile in parallel.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
             },
             .rocm => {
