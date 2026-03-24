@@ -407,7 +407,6 @@ pub fn main(init: std.process.Init) !void {
 
 ## Where to go from here
 
-- [Add some weights files to your model](../howtos/add_weights.md)
 - [Run the model on GPU](../tutorials/getting_started.md)
 - [Deploy the model on a server](../howtos/deploy_on_server.md)
 - [Dockerize this model](../howtos/dockerize_models.md)
