@@ -1115,6 +1115,308 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 
+pub const GatedDeltaNet = struct {
+    pub const State = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        s: Tensor,
+    };
+
+    pub const StepInputs = struct {
+        /// Query tensor with shape .{ .h, .k }.
+        q: Tensor,
+        /// Key tensor with shape .{ .h, .k }.
+        k: Tensor,
+        /// Value tensor with shape .{ .h, .v }.
+        v: Tensor,
+        /// Forget gate with shape .{ .h }.
+        alpha: Tensor,
+        /// Delta gate with shape .{ .h }.
+        beta: Tensor,
+    };
+
+    pub const StepOutput = struct {
+        state: State,
+        output: Tensor,
+    };
+
+    pub const Output = struct {
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+        state: State,
+    };
+
+    fn sliceStep(input: Tensor, step_: Tensor) Tensor {
+        return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
+    }
+
+    fn validateStep(state: State, inputs: StepInputs) void {
+        const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
+        const err_args = .{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta };
+
+        stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
+        stdx.debug.assert(inputs.q.shape().hasTags(.{ .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(inputs.k.shape().hasTags(.{ .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(inputs.v.shape().hasTags(.{ .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
+        stdx.debug.assert(inputs.alpha.shape().hasTags(.{.h}), err_template ++ "alpha is missing tag {{.h}}", err_args);
+        stdx.debug.assert(inputs.beta.shape().hasTags(.{.h}), err_template ++ "beta is missing tag {{.h}}", err_args);
+
+        _ = collectDims(.{.h}, &.{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta }, .strict) catch {
+            stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ state.s, inputs.q, inputs.k }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ state.s, inputs.v }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
+        };
+    }
+
+    /// Single-step recurrent update for Gated Delta Net.
+    ///
+    /// Shapes:
+    /// - `state.s`: .{ .h, .v, .k }
+    /// - `inputs.q`, `inputs.k`: .{ .h, .k }
+    /// - `inputs.v`: .{ .h, .v }
+    /// - `inputs.alpha`, `inputs.beta`: .{ .h }
+    pub fn step(state: State, inputs: StepInputs) StepOutput {
+        validateStep(state, inputs);
+
+        const v_hat = state.s.dot(inputs.k, .k).mul(inputs.alpha.insertAxes(.last, .{.v}));
+        const delta = inputs.v.sub(v_hat).mul(inputs.beta.insertAxes(.last, .{.v}));
+        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(1, .{.v}).broad(state.s.shape()));
+        const s_new = state.s.mul(inputs.alpha.insertAxes(.last, .{ .v, .k })).add(delta_k);
+        const y = s_new.dot(inputs.q, .k);
+
+        return .{
+            .state = .{ .s = s_new },
+            .output = y,
+        };
+    }
+
+    /// Processes a sequence with Gated Delta Net recurrence using `stablehlo.while`.
+    ///
+    /// Shapes:
+    /// - `queries`, `keys`: .{ .s, .h, .k }
+    /// - `values`, `outputs`: .{ .s, .h, .v }
+    /// - `alphas`, `betas`: .{ .s, .h }
+    /// - `initial_state.s`: .{ .h, .v, .k }
+    pub fn forward(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        alphas: Tensor,
+        betas: Tensor,
+        initial_state: State,
+    ) Output {
+        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, state: {f}) is invalid ! ";
+        const err_args = .{ queries, keys, values, alphas, betas, initial_state.s };
+
+        stdx.debug.assert(queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "queries is missing tags {{.s, .h, .k}}", err_args);
+        stdx.debug.assert(keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "keys is missing tags {{.s, .h, .k}}", err_args);
+        stdx.debug.assert(values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "values is missing tags {{.s, .h, .v}}", err_args);
+        stdx.debug.assert(alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tags {{.s, .h}}", err_args);
+        stdx.debug.assert(betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tags {{.s, .h}}", err_args);
+        stdx.debug.assert(initial_state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "initial_state.s is missing tags {{.h, .v, .k}}", err_args);
+
+        _ = collectDims(.{ .s, .h }, &.{ queries, keys, values, alphas, betas }, .strict) catch {
+            stdx.debug.panic(err_template ++ "sequence/head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ queries, keys, initial_state.s }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ values, initial_state.s }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
+        };
+
+        const WhileContext = struct {
+            queries: Tensor,
+            keys: Tensor,
+            values: Tensor,
+            alphas: Tensor,
+            betas: Tensor,
+            seq_len: Tensor,
+        };
+        const while_context: WhileContext = .{
+            .queries = queries,
+            .keys = keys,
+            .values = values,
+            .alphas = alphas,
+            .betas = betas,
+            .seq_len = Tensor.scalar(queries.dim(.s), .i32),
+        };
+
+        const Local = struct {
+            fn cond(step_: Tensor, _: Tensor, _: Tensor, ctx: WhileContext) Tensor {
+                return step_.cmp(.LT, ctx.seq_len);
+            }
+
+            fn body(step_: Tensor, s_prev: Tensor, outputs_prev: Tensor, ctx: WhileContext) [3]Tensor {
+                const step_out = step(
+                    .{ .s = s_prev },
+                    .{
+                        .q = sliceStep(ctx.queries, step_),
+                        .k = sliceStep(ctx.keys, step_),
+                        .v = sliceStep(ctx.values, step_),
+                        .alpha = sliceStep(ctx.alphas, step_),
+                        .beta = sliceStep(ctx.betas, step_),
+                    },
+                );
+                const outputs_new = outputs_prev.dynamicUpdateSlice(.{ .s = step_ }, step_out.output);
+
+                return .{
+                    step_.add(Tensor.scalar(1, .i32)),
+                    step_out.state.s,
+                    outputs_new,
+                };
+            }
+        };
+
+        const step0 = Tensor.scalar(0, .i32);
+        const outputs0 = Tensor.zeroes(values.shape());
+        const loop_state = ops.@"while"(
+            .{ step0, initial_state.s, outputs0 },
+            Local.cond,
+            Local.body,
+            .{while_context},
+        );
+
+        return .{
+            .outputs = loop_state[2],
+            .state = .{ .s = loop_state[1] },
+        };
+    }
+};
+
+pub const GatedDeltaNetState = GatedDeltaNet.State;
+pub const GatedDeltaNetStepInputs = GatedDeltaNet.StepInputs;
+pub const GatedDeltaNetStepOutput = GatedDeltaNet.StepOutput;
+pub const GatedDeltaNetOutput = GatedDeltaNet.Output;
+pub const gatedDeltaNetStep = GatedDeltaNet.step;
+pub const gatedDeltaNet = GatedDeltaNet.forward;
+
+test "gated delta net" {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
+
+    const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const values: zml.Tensor = .init(.{ .s = 2, .h = 2, .v = 2 }, .f32);
+    const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+
+    var exe = try zml.module.compile(
+        std.testing.allocator,
+        std.testing.io,
+        GatedDeltaNet.forward,
+        .{ queries, keys, values, alphas, betas, GatedDeltaNet.State{ .s = initial_s } },
+        platform,
+        .{ .shardings = &.{replicated_sharding} },
+    );
+    defer exe.deinit();
+
+    var queries_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        queries.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
+        }),
+    );
+    defer queries_buffer.deinit();
+    var keys_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        keys.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer keys_buffer.deinit();
+    var values_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        values.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
+            .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
+        }),
+    );
+    defer values_buffer.deinit();
+    var alphas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        alphas.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 0.5, 0.25 },
+            .{ 0.8, 0.6 },
+        }),
+    );
+    defer alphas_buffer.deinit();
+    var betas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        betas.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 1.0, 0.5 },
+            .{ 0.75, 1.0 },
+        }),
+    );
+    defer betas_buffer.deinit();
+    var initial_s_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        initial_s.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer initial_s_buffer.deinit();
+
+    var result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        GatedDeltaNet.forward,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+    );
+    defer result.outputs.deinit();
+    defer result.state.s.deinit();
+
+    const expected_outputs: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
+            .{ .{ -11.15, 10.75 }, .{ 2.325, -1.2 } },
+        }),
+    );
+    const expected_final_s: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ -9.3, -1.85 }, .{ 6.9, 3.85 } },
+            .{ .{ 3.0, 0.675 }, .{ 0.0, 1.2 } },
+        }),
+    );
+
+    try zml.testing.expectClose(std.testing.io, expected_outputs, result.outputs, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+}
+
 /// Options controlling generation. The default values correspond to greedy decoding.
 pub const SamplingStrategy = struct {
     topk: u32 = 1,
