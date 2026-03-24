@@ -25,6 +25,7 @@ packages:
   - "libdw1"
   - "liblzma5"
   # - "rocm-smi-lib"
+  - "amd-smi-lib"
   - "libdrm-amdgpu-common"
   # Do not use hsa-rocr from amdgpu repo because it is overriden by hsa-runtime-rocr4wsl-amdgpu
   - "hsa-rocr (<< 20)"

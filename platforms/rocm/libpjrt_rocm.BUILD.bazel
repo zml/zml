@@ -54,6 +54,7 @@ copy_to_directory(
         "@rocfft",
         "@rocm-core",
         "@rocm-device-libs//:runfiles",
+        "@amd-smi-lib//:amdsmi",
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
         "@rocprofiler-sdk//:rocprofiler-sdk",

@@ -63,6 +63,7 @@ _ROCM_PACKAGES = {
         name = "rocm_smi",
         src = "lib/librocm_smi64.so.1",
     ),
+    "amd-smi-lib": packages.filegroup(name = "amdsmi", srcs = ["lib/libamd_smi.so"]),
     "rocprofiler-sdk": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
@@ -131,7 +132,7 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = glob(["lib/rocblas/library/**"]),
         )
-        """
+        """,
     ]),
     "rocfft": packages.filegroup(name = "rocfft", srcs = ["lib/librocfft.so.0"]),
     "rocsolver": _rocm_dlopen_patchelf(
@@ -182,7 +183,7 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = glob(["lib/hipblaslt/library/**"]),
         )
-        """
+        """,
     ]),
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
@@ -247,7 +248,7 @@ def _rocm_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libpjrt_rocm", "hipblaslt", "rocblas"],
+        root_module_direct_deps = ["libpjrt_rocm", "hipblaslt", "rocblas", "amd-smi-lib"],
         root_module_direct_dev_deps = [],
     )
 

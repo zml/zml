@@ -1,0 +1,7 @@
+exports_files(
+    [
+        "metrics.zig",
+        "tpuinfo.zig",
+    ],
+    visibility = ["//examples/zml-smi:__pkg__"],
+)
