@@ -385,7 +385,6 @@ pub fn @"while"(operands: anytype, comptime cond: anytype, comptime body: anytyp
 pub const while_ = @"while";
 
 test @"while" {
-    const zml = @import("zml.zig");
     const platform = zml.testing.env();
     const replicated_sharding = zml.testing.replicatedSharding();
 
