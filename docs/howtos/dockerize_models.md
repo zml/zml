@@ -109,7 +109,7 @@ Creating the actual image is a two-step process:
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
-    entrypoint = ["/{}/simple_layer".format(package_name())],
+    entrypoint = ["./{}/simple_layer".format(package_name())],
     tars = [":archive"],
 )
 ```
@@ -312,7 +312,7 @@ expand_template(
         ":data": "$(rlocationpath @mnist//:t10k-images.idx3-ubyte)",
     },
     template = [
-        "/{}/mnist".format(package_name()),
+        "./{}/mnist".format(package_name()),
         "/{}/mnist.runfiles/:model".format(package_name()),
         "/{}/mnist.runfiles/:data".format(package_name()),
     ],

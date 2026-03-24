@@ -51,7 +51,7 @@ expand_template(
         ":data": "$(rlocationpath @mnist//:t10k-images.idx3-ubyte)",
     },
     template = [
-        "/{}/mnist".format(package_name()),
+        "./{}/mnist".format(package_name()),
         "/{}/mnist.runfiles/:model".format(package_name()),
         "/{}/mnist.runfiles/:data".format(package_name()),
     ],
