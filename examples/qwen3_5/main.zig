@@ -1,16 +1,16 @@
 const std = @import("std");
 const log = std.log;
 
-pub const std_options: std.Options = .{
-    .log_level = .info,
-};
-
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 const stdx = zml.stdx;
 
 const qwen35 = @import("qwen3_5.zig");
 const Qwen35 = qwen35.Qwen35;
+
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
 
 const CliArgs = struct {
     model: []const u8,
@@ -135,7 +135,7 @@ pub fn main(init: std.process.Init) !void {
     const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
 
     defer allocator.free(input_token_ids);
-    const prefill_len = input_token_ids.len;
+    const prefill_len: usize = @intCast(options.max_seq_len);
 
     //======================= Model compilation (async) ========================
 
