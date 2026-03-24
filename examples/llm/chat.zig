@@ -26,16 +26,33 @@ pub const Chat = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     tokenizer: zml.tokenizer.Tokenizer,
-    repo: *models.Repository,
-    session: *models.Session,
+    loaded_model: *models.LoadedModel,
+    session: models.Session,
     tokens: std.ArrayList(u32),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, tokenizer: zml.tokenizer.Tokenizer, repo: *models.Repository, session: *models.Session) !Chat {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *zml.Platform,
+        tokenizer: zml.tokenizer.Tokenizer,
+        loaded_model: *models.LoadedModel,
+        compiled_model: *models.CompiledModel,
+        model_buffers: *models.Buffers,
+    ) !Chat {
+        var session = try compiled_model.newSession(
+            allocator,
+            io,
+            platform,
+            model_buffers,
+            tokenizer,
+        );
+        errdefer session.deinit();
+
         return .{
             .allocator = allocator,
             .io = io,
             .tokenizer = tokenizer,
-            .repo = repo,
+            .loaded_model = loaded_model,
             .session = session,
             .tokens = try .initCapacity(allocator, session.maxTokens()),
         };
@@ -43,10 +60,11 @@ pub const Chat = struct {
 
     pub fn deinit(self: *Chat) void {
         self.tokens.deinit(self.allocator);
+        self.session.deinit();
     }
 
     pub fn runOnce(self: *Chat, prompt: []const u8) !void {
-        const prompt_tokens = try self.repo.tokenizePrompt(self.allocator, self.tokenizer, prompt);
+        const prompt_tokens = try self.loaded_model.tokenizePrompt(self.allocator, self.tokenizer, prompt);
         defer self.allocator.free(prompt_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -63,7 +81,7 @@ pub const Chat = struct {
     }
 
     pub fn runInteractive(self: *Chat, initial_prompt: []const u8) !void {
-        var turn_tokens = try self.repo.tokenizePrompt(self.allocator, self.tokenizer, initial_prompt);
+        var turn_tokens = try self.loaded_model.tokenizePrompt(self.allocator, self.tokenizer, initial_prompt);
         defer self.allocator.free(turn_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -130,7 +148,7 @@ pub const Chat = struct {
             if (input.len == 0) continue;
 
             self.allocator.free(previous_turn_tokens);
-            return try self.repo.tokenizeTurn(self.allocator, self.tokenizer, input);
+            return try self.loaded_model.tokenizeTurn(self.allocator, self.tokenizer, input);
         }
     }
 };

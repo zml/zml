@@ -1,10 +1,11 @@
 pub const inference = @import("qwen3_5/inference.zig");
-pub const CompilationOptions = inference.CompilationOptions;
+pub const CompilationParameters = inference.CompilationParameters;
+pub const CompilationOptions = inference.CompilationParameters;
+pub const CompiledModel = inference.CompiledModel;
 pub const model = @import("qwen3_5/model.zig");
 pub const Config = model.Config;
 pub const Buffers = model.Buffers;
 pub const Model = model.Model;
-pub const repository = @import("qwen3_5/repository.zig");
-pub const Repository = repository.Repository;
+pub const LoadedModel = model.LoadedModel;
 pub const session = @import("qwen3_5/session.zig");
 pub const Session = session.Session;

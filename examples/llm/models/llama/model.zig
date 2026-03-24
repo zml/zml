@@ -3,6 +3,9 @@ const std = @import("std");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
+const common = @import("../common.zig");
+const inference = @import("inference.zig");
+
 pub const Config = struct {
     bos_token_id: u32,
     eos_token_id: stdx.json.Union(union(enum) {
@@ -25,6 +28,120 @@ pub const Config = struct {
 pub const Options = struct {
     sampling_strategy: ?zml.nn.SamplingStrategy,
     max_seq_len: u32,
+};
+
+pub const LoadedModel = struct {
+    inner: Model,
+    parsed_config: std.json.Parsed(Config),
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+        const parsed_config = try common.parseConfig(Config, allocator, io, repo);
+        errdefer parsed_config.deinit();
+
+        const options: Options = .{
+            .sampling_strategy = .{},
+            .max_seq_len = parsed_config.value.max_position_embeddings,
+        };
+
+        return .{
+            .inner = try .init(allocator, store, parsed_config.value, options),
+            .parsed_config = parsed_config,
+        };
+    }
+
+    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
+        self.inner.deinit(allocator);
+        self.parsed_config.deinit();
+    }
+
+    pub fn tokenizePrompt(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
+        var encoder = try tokenizer.encoder();
+        defer encoder.deinit();
+
+        const start_header = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const eot = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ self.parsed_config.value.bos_token_id, start_header, user, end_header, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    pub fn tokenizeTurn(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
+        _ = self;
+        var encoder = try tokenizer.encoder();
+        defer encoder.deinit();
+
+        const start_header = tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const eot = tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, user, end_header, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    pub fn loadBuffers(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        progress.increaseEstimatedTotalItems(store.view().count());
+        const now: std.Io.Timestamp = .now(io, .awake);
+        var total_bytes: usize = 0;
+        defer {
+            const took = now.untilNow(io, .awake);
+            const bytes_per_sec: u64 = @intFromFloat(
+                @as(f64, @floatFromInt(total_bytes)) /
+                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
+            );
+            std.log.scoped(.llama).info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+        }
+
+        const all_shardings = shardings.all();
+        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .shardings = &all_shardings,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
+    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
+        _ = self;
+        if (buffers.lm_head) |*lm_head| lm_head.weight.deinit();
+        Llama.unloadBuffers(&buffers.model, allocator);
+    }
+
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
+        shardings: common.Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !inference.CompiledModel {
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+        return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
+    }
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -103,7 +220,6 @@ pub const Model = struct {
         if (self.lm_head) |*lm_head| lm_head.weight.deinit();
         Llama.unloadBuffers(&self.model, allocator);
     }
-
     /// Predicts the token at `token_index` position.
     /// Returns:
     ///  - updated `tokens`,

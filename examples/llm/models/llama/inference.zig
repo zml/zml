@@ -3,12 +3,12 @@ const std = @import("std");
 const zml = @import("zml");
 const attention = zml.attention.attention;
 
-const Shardings = @import("../common.zig").Shardings;
+const common = @import("../common.zig");
 const model = @import("model.zig");
 
 const log = std.log.scoped(.llama);
 
-pub const CompilationOptions = struct {
+pub const CompilationParameters = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
@@ -16,8 +16,10 @@ pub const CompilationOptions = struct {
     rng: zml.Tensor.Rng,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
+    seqlen: usize,
+    shardings: common.Shardings,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend) CompilationOptions {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
@@ -31,28 +33,32 @@ pub const CompilationOptions = struct {
             .rng = .init(),
             .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
             .attention_parameters = .init(.fromBackend(backend)),
+            .seqlen = seqlen,
+            .shardings = shardings,
         };
     }
 };
 
-pub const Inference = struct {
+pub const CompiledModel = struct {
+    loaded_model: *const model.LoadedModel,
     prefill_exe: zml.Exe,
     decode_exe: zml.Exe,
+    params: CompilationParameters,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
+        loaded_model: *const model.LoadedModel,
         llama_model: model.Model,
-        parameters: CompilationOptions,
-        shardings: Shardings,
+        parameters: CompilationParameters,
         progress: *std.Progress.Node,
-    ) !Inference {
-        const compiled = try compileModel(allocator, io, platform, llama_model, parameters, shardings, progress);
-        return .{ .prefill_exe = compiled.prefill_exe, .decode_exe = compiled.decode_exe };
+    ) !CompiledModel {
+        const compiled = try compileModel(allocator, io, platform, llama_model, parameters, progress);
+        return .{ .loaded_model = loaded_model, .prefill_exe = compiled.prefill_exe, .decode_exe = compiled.decode_exe, .params = parameters };
     }
 
-    pub fn deinit(self: *Inference) void {
+    pub fn deinit(self: *CompiledModel) void {
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
     }
@@ -68,14 +74,13 @@ fn compileModel(
     io: std.Io,
     platform: *const zml.Platform,
     llama_model: model.Model,
-    parameters: CompilationOptions,
-    shardings: Shardings,
+    parameters: CompilationParameters,
     progress: *std.Progress.Node,
 ) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
 
-    const all_shardings = shardings.all();
+    const all_shardings = parameters.shardings.all();
 
     var prefill_future = try io.concurrent(struct {
         fn call(
@@ -83,7 +88,7 @@ fn compileModel(
             io_: std.Io,
             platform_: *const zml.Platform,
             llama_model_: model.Model,
-            parameters_: CompilationOptions,
+            parameters_: CompilationParameters,
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
@@ -108,7 +113,8 @@ fn compileModel(
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
-    errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
+    var prefill_future_awaited = false;
+    errdefer if (!prefill_future_awaited) if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_future = try io.concurrent(struct {
         fn call(
@@ -116,7 +122,7 @@ fn compileModel(
             io_: std.Io,
             platform_: *const zml.Platform,
             llama_model_: model.Model,
-            parameters_: CompilationOptions,
+            parameters_: CompilationParameters,
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
@@ -141,10 +147,18 @@ fn compileModel(
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
-    errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
+    var decode_future_awaited = false;
+    errdefer if (!decode_future_awaited) if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
+
+    const prefill_exe = try prefill_future.await(io);
+    prefill_future_awaited = true;
+    errdefer prefill_exe.deinit();
+
+    const decode_exe = try decode_future.await(io);
+    decode_future_awaited = true;
 
     return .{
-        .prefill_exe = try prefill_future.await(io),
-        .decode_exe = try decode_future.await(io),
+        .prefill_exe = prefill_exe,
+        .decode_exe = decode_exe,
     };
 }

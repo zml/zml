@@ -4,12 +4,12 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 const attention = zml.attention.attention;
 
+const common = @import("../common.zig");
 const model = @import("model.zig");
-const Shardings = @import("../common.zig").Shardings;
 
 const log = std.log.scoped(.lfm);
 
-pub const CompilationOptions = struct {
+pub const CompilationParameters = struct {
     hidden_dim: usize,
     batch_dim: usize,
     single: bool,
@@ -17,8 +17,10 @@ pub const CompilationOptions = struct {
     cache: model.Cache,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
+    seqlen: u32,
+    shardings: common.Shardings,
 
-    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool) CompilationOptions {
+    pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
             .kv = .init(.init(.{
@@ -44,9 +46,13 @@ pub const CompilationOptions = struct {
             .cache = cache,
             .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
             .attention_parameters = .init(.fromBackend(backend)),
+            .seqlen = seqlen,
+            .shardings = shardings,
         };
     }
 };
+
+pub const CompilationOptions = CompilationParameters;
 
 pub const Args = struct {
     allocator: std.mem.Allocator,
@@ -61,44 +67,51 @@ pub const Args = struct {
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
 };
 
-pub const Inference = struct {
+pub const CompiledModel = struct {
+    loaded_model: *const model.LoadedModel,
     prefill: KernelExe,
     decode: KernelExe,
+    params: CompilationParameters,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *zml.Platform,
+        loaded_model: *const model.LoadedModel,
         mdl: model.Model,
-        opts: CompilationOptions,
-        seqlen: u32,
+        opts: CompilationParameters,
         progress: *std.Progress.Node,
-        shardings: Shardings,
-    ) !Inference {
+    ) !CompiledModel {
         if (opts.single) {
-            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, shardings);
-            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, shardings);
+            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
+            const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
 
             return .{
+                .loaded_model = loaded_model,
                 .prefill = .{ .single = prefill_exe },
                 .decode = .{ .single = decode_exe },
+                .params = opts,
             };
         } else {
-            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, seqlen, true, progress, shardings);
-            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, shardings);
+            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
+            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
 
             return .{
+                .loaded_model = loaded_model,
                 .prefill = .{ .composed = prefill_exe },
                 .decode = .{ .composed = decode_exe },
+                .params = opts,
             };
         }
     }
 
-    pub fn deinit(self: Inference) void {
+    pub fn deinit(self: *CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
     }
 };
+
+pub const Inference = CompiledModel;
 
 pub const KernelExe = union(enum) {
     single: SingleKernelExe,
@@ -164,7 +177,7 @@ fn compileSingleKernelExe(
     seqlen: u32,
     is_prefill: bool,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !SingleKernelExe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling single kernel...", 1);
@@ -313,7 +326,7 @@ fn compileComposedKernelExe(
     seqlen: u32,
     is_prefill: bool,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !ComposedKernelExe {
     const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings);
     const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
@@ -335,7 +348,7 @@ fn compileEmbedTokens(
     opts: CompilationOptions,
     seqlen: u32,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling embed_tokens...", 1);
@@ -357,7 +370,7 @@ fn compileConvLayer(
     seqlen: u32,
     is_prefill: bool,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling conv layer...", 1);
@@ -398,7 +411,7 @@ fn compileAttnLayer(
     seqlen: u32,
     is_prefill: bool,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling attn layer...", 1);
@@ -438,7 +451,7 @@ fn compileLmHead(
     opts: CompilationOptions,
     seqlen: u32,
     progress: *std.Progress.Node,
-    shardings: Shardings,
+    shardings: common.Shardings,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Compiling lm_head...", 1);
