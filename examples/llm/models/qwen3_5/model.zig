@@ -97,11 +97,10 @@ pub const Model = struct {
             const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
-        return zml.io.load(Model, self, allocator, io, platform, .{
+        return zml.io.load(Model, self, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .store = store,
             .shardings = shardings,
             .parallelism = 16,
             .total_bytes = &total_bytes,

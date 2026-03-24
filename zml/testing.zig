@@ -356,13 +356,7 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{
-        .dma_chunks = 1,
-        .dma_chunk_size = 4096,
-        .store = activation_store.store,
-        .parallelism = 1,
-        .shardings = shardings,
-    });
+    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();

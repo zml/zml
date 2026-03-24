@@ -104,11 +104,10 @@ pub const Model = struct {
             });
         }
         const all_shardings = shardings.all();
-        return zml.io.load(Model, self, allocator, io, platform, .{
+        return zml.io.load(Model, self, allocator, io, platform, store, .{
             .dma_chunks = 8,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .store = store,
             .parallelism = 16,
             .total_bytes = &total_bytes,
             .shardings = &all_shardings,

@@ -243,7 +243,7 @@ pub fn main(init: std.process.Init) !void {
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
-    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, .{ .parallelism = 1, .store = &model_store, .dma_chunks = 2, .dma_chunk_size = 4096, .shardings = &.{}});
+    var mlp_weights = try zml.io.load(Mlp, &mlp, allocator, io, platform, &model_store, .auto);
 }
 ```
 
