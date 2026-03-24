@@ -122,7 +122,7 @@ There are more things to observe:
     - more advanced use-cases are passing in / returning structs or tuples, like
       `struct { Tensor, Tensor }` as an example for a tuple of two tensors.
       You can see such use-cases, for example in the
-      [Llama Model](https://github.com/zml/zml/tree/master/examples/llama)
+      [LLM CLI](https://github.com/zml/zml/tree/master/examples/llm)
 - in the model, tensors may be optional. As is the case with `bias`.
 
 

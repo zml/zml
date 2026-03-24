@@ -24,7 +24,7 @@ So, to run the Llama model from above **on your development machine**
 housing an NVIDIA GPU, run the following:
 
 ```
-bazel run --config=release //examples/llama             \
+bazel run --config=release //examples/llm               \
           --@zml//platforms:cuda=true                   \
           --                                            \
           --model=hf://meta-llama/Llama-3.2-1B-Instruct \
@@ -44,7 +44,7 @@ architectures:
 As an example, here is how you build above Llama for CUDA on Linux X86_64:
 
 ```
-bazel build --config=release //examples/llama  \
+bazel build --config=release //examples/llm    \
     --@zml//platforms:cuda=true                \
     --@zml//platforms:cpu=false                \
     --platforms=@zml//platforms:linux_amd64

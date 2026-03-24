@@ -74,7 +74,7 @@ Once you've been granted access, you're ready to download a gated model like
 # Authenticate on Huggingface.
 bazel run //tools/hf -- auth login
 # Run the model, loading directly from HF.
-bazel run --config=release //examples/llama -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -86,7 +86,7 @@ Like the 8B model above, this model also requires approval. See
 
 ```
 bazel run //tools/hf -- auth login
-bazel run --config=release //examples/llama -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
+bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
@@ -116,7 +116,7 @@ So, to run the Llama model from above on your host sporting an NVIDIA GPU,
 run the following:
 
 ```
-bazel run --config=release //examples/llama             \
+bazel run --config=release //examples/llm               \
           --@zml//platforms:cuda=true                   \
           --                                            \
           --model=hf://meta-llama/Llama-3.1-8B-Instruct \
