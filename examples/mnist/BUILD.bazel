@@ -1,5 +1,9 @@
-load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_lib//lib:expand_template.bzl", "expand_template")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
 
 zig_binary(
     name = "mnist",
@@ -19,7 +23,69 @@ zig_binary(
     ],
 )
 
-build_test(
-    name = "test",
-    targets = [":mnist"],
+mtree_spec(
+    name = "mtree",
+    srcs = [":mnist"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":mnist"],
+    args = [
+        "--options",
+        "zstd:compression-level=9",
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+expand_template(
+    name = "entrypoint",
+    data = [
+        ":mnist",
+        "@mnist//:mnist.safetensors",
+        "@mnist//:t10k-images.idx3-ubyte",
+    ],
+    substitutions = {
+        ":model": "$(rlocationpath @mnist//:mnist.safetensors)",
+        ":data": "$(rlocationpath @mnist//:t10k-images.idx3-ubyte)",
+    },
+    template = [
+        "./{}/mnist".format(package_name()),
+        "/{}/mnist.runfiles/:model".format(package_name()),
+        "/{}/mnist.runfiles/:data".format(package_name()),
+    ],
+)
+
+# The actual docker image, with entrypoint, created from tar archive
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ":entrypoint",
+    tars = [":archive"],
+)
+
+# We always want to create the image for Linux
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    target_platform = "@zml//platforms:linux_amd64",
+)
+
+# Load will immediately load the image (eg: docker load)
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = [
+        "distroless/mnist:latest",
+    ],
+)
+
+# Bazel target for pushing the Linux image to our docker registry
+oci_push(
+    name = "push",
+    image = ":image",
+    remote_tags = ["latest"],
+    # override with -- --repository foo.bar/org/image
+    repository = "index.docker.io/steeve/mnist",
 )

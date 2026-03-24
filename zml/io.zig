@@ -1058,8 +1058,14 @@ pub const DirectMemoryWriter = struct {
 };
 
 pub const LoadOpts = struct {
+    pub const auto: LoadOpts = .{
+        .parallelism = 1,
+        .shardings = &.{},
+        .dma_chunks = 2,
+        .dma_chunk_size = 4096,
+    };
+
     parallelism: usize,
-    store: *const TensorStore,
     shardings: []const Sharding,
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
@@ -1073,6 +1079,7 @@ pub fn load(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *const Platform,
+    store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
     var bufferized = try mem.bufferize(allocator, ModelType, model);
@@ -1112,7 +1119,7 @@ pub fn load(
     var walk_ctx: Ctx = .{
         .platform = platform,
         .buffers = try allocator.alloc(*Buffer, meta.count(Tensor, model)),
-        .store = opts.store,
+        .store = store,
         .allocator = allocator,
         .dma_allocators = dma_allocators,
         .pinned_buffer_pools = buffer_pools,
