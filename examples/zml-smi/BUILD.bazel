@@ -1,0 +1,68 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+cc_library(
+    name = "cuda_defines",
+    defines = select({
+        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
+        "//conditions:default": ["ZML_RUNTIME_CUDA_DISABLED"],
+    }),
+)
+
+cc_library(
+    name = "rocm_defines",
+    hdrs = ["bindings/amdsmi/amdsmi.h"],
+    defines = select({
+        "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
+        "//conditions:default": ["ZML_RUNTIME_ROCM_DISABLED"],
+    }),
+    includes = ["bindings/amdsmi"],
+)
+
+cc_library(
+    name = "tpu_defines",
+    defines = select({
+        "//platforms:tpu.enabled": ["ZML_RUNTIME_TPU"],
+        "//conditions:default": ["ZML_RUNTIME_TPU_DISABLED"],
+    }),
+)
+
+zig_binary(
+    name = "zml-smi",
+    srcs = [
+        "bindings/amdsmi/amdsmi.zig",
+        "bindings/amdsmi/metrics.zig",
+        "bindings/linux/metrics.zig",
+        "bindings/neuron/metrics.zig",
+        "bindings/neuron/schema.zig",
+        "bindings/nvml/metrics.zig",
+        "bindings/nvml/nvml.zig",
+        "device_info.zig",
+        "display.zig",
+        "host_info.zig",
+        "sysfs.zig",
+        "worker.zig",
+        "//examples/zml-smi/bindings/tpu:metrics.zig",
+        "//examples/zml-smi/bindings/tpu:tpuinfo.zig",
+    ],
+    main = "main.zig",
+    deps = [
+        ":cuda_defines",
+        ":rocm_defines",
+        ":tpu_defines",
+        "//bazel",
+        "//stdx",
+        "//zml",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "//platforms:tpu.enabled": [
+            "//examples/zml-smi/bindings/tpu/libtpu:tpuinfo",
+        ],
+        "//conditions:default": [],
+    }) + select({
+        "//platforms:cuda.enabled": [
+            "@cuda_nvml_dev//:nvml",
+        ],
+        "//conditions:default": [],
+    }),
+)
