@@ -620,6 +620,28 @@ pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, upda
     });
 }
 
+pub fn while_(
+    ctx: *mlir.Context,
+    operands: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    cond_block: *mlir.Block,
+    body_block: *mlir.Block,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    _ = ctx;
+    var state = mlir.OperationState.init("stablehlo.while", location);
+    state.addOperands(operands);
+    state.addResults(result_types);
+
+    const cond_region = mlir.Region.init();
+    cond_region.appendOwnedBlock(cond_block);
+    const body_region = mlir.Region.init();
+    body_region.appendOwnedBlock(body_block);
+    state.addOwnedRegions(&.{ cond_region, body_region });
+
+    return mlir.Operation.init(&state) catch @panic("Failed to create stablehlo.while operation");
+}
+
 pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
         .operands = .{ .flat = &.{tuple_value} },
