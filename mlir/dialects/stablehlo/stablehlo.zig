@@ -397,6 +397,30 @@ pub fn scatter(
     );
 }
 
+/// On-device while loop. Executes `body_block` repeatedly while `cond_block` returns true.
+/// Each region gets its own set of block arguments matching the init_values types.
+/// The cond block must return a scalar pred (i1). The body block returns the updated state.
+pub fn while_loop(
+    ctx: *mlir.Context,
+    init_values: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    cond_block: *mlir.Block,
+    body_block: *mlir.Block,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    return mlir.Operation.make(
+        ctx,
+        "stablehlo.while",
+        .{
+            .operands = .{ .flat = init_values },
+            .results = .{ .flat = result_types },
+            .regions = &.{ &.{cond_block}, &.{body_block} },
+            .verify = true,
+            .location = location,
+        },
+    );
+}
+
 pub fn iota(ctx: *mlir.Context, dimension: i64, result_type: *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.iota", .{
         .operands = .{ .flat = &.{} },
