@@ -2,55 +2,27 @@
   <img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/zml-banner.png" style="width:100%; height:120px;">
   <a href="https://zml.ai">Website</a>
   | <a href="#getting-started">Getting Started</a>
-  | <a href="https://docs.zml.ai">Documentation</a>
+  | <a href="./docs/README.md">Documentation</a>
   | <a href="https://discord.gg/6y72SN2E7H">Discord</a>
   | <a href="./CONTRIBUTING.md">Contributing</a>
 </div>
 
 [ZML]: https://zml.ai/
 [Getting Started]: #getting-started
-[Documentation]: https://docs.zml.ai
+[Documentation]: ./docs/README.md
 [Contributing]: ./CONTRIBUTING.md
 [Discord]: https://discord.gg/6y72SN2E7H
 
-# Bonjour 👋
+# About
 
-At ZML, we are creating exciting AI products on top of our high-performance
-AI inference stack. Our stack is built for production, using the amazing
-[Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and the
-power of [Bazel](https://bazel.build).
+ZML is a production inference stack built close to the hardware.
 
-<div align="center">
-  <div>Take me straight to <a href="#getting-started">getting started</a> or <a href="#a-taste-of-zml">give me a taste</a> 🥐!</div>
-</div>
+It lowers models directly onto NVIDIA, AMD, TPU, and Trainium targets from a single codebase, without depending on and suffering from the Python-heavy runtime layers that most of the ecosystem is built around.
 
----
-
-&nbsp;
-
-# We're happy to share!
-We're very happy to share our inference stack with the World and hope it allows
-you, too, to build cool and exciting AI projects.
-
-To give you a glimpse of what you can do with ZML, here is an early demo:
-
-<div align="center"><img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/ZML.gif" style="width:75%"></div>
-
-It shows a prototype running a LLama3 model sharded on 1 NVIDIA RTX 4090, 1 AMD
-6800XT, and 1 Google Cloud TPU v2.  All accelerators were hosted in different
-locations, with activations being passed over a VPN.
-
-All processes used the same model code, cross-compiled on a Mac, and copied onto
-the servers.
-
-For more inspiration, see also the examples below or check out the
-[examples](./examples) folder.
-
-
+It is built using the
+[Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
 
 # Getting started
-
-
 
 ## Prerequisites
 
@@ -58,33 +30,19 @@ We use `bazel` to build ZML and its dependencies. The only prerequisite is
 `bazel`, which we recommend to download through `bazelisk`, a version manager
 for `bazel`.
 
-**Please note: If you do not wish to install `bazel`** system-wide, we provide
-[bazel.sh](bazel.sh) which downloads it to your home folder
-and runs it.
-
 **Install Bazel** (recommended):
 
-<details><summary>
-
 ### macOS
-</summary>
-
 ```
 brew install bazelisk
 ```
-</details>
-
-<details><summary>
 
 ### Linux
-</summary>
 
 ```
-curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64'
+curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.0/bazelisk-linux-amd64'
 chmod +x /usr/local/bin/bazel
 ```
-</details>
-
 
 ## Run a pre-packaged model
 
@@ -103,52 +61,40 @@ compile it, and classify a randomly picked example from the test dataset.
 On the command line:
 
 ```
-bazel run --config=release //examples/mnist
-
-# or
-./bazel.sh run --config=release //examples/mnist
+bazel run //examples/mnist
 ```
 
+### Meta Llama 3.2 1B
+
+This model has restrictions, see
+[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct). It **requires
+approval from Meta on Hugging Face**, which can take a few hours to get granted.
+
+Ensure you are authenticated with the Hugging Face CLI:
+```
+hf auth login
+```
+Alternatively, set the `HF_TOKEN` environment variable.
+
+Now, you can run the model like so:
+```
+bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
+```
+
+For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 
 ### Meta Llama 3.1 8B
 
-This model has restrictions, see
-[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct). It **requires
-approval from Meta on Huggingface**, which can take a few hours to get granted.
+Like the 1B model above, this model also requires approval. See
+[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) for access requirements.
 
-Once you've been granted access, you're ready to download a gated model like
-`Llama-3.1-8B-Instruct`!
-
-First, you need to download the model using the [hf](https://huggingface.co/docs/huggingface_hub/en/guides/cli) CLI.
-Note you don't need to install it yourself,
-you can just use the packaged version `bazel run //tools/hf --`.
 
 ```
-bazel run //tools/hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
-```
-
-Then, you can run the model.
-
-```
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
-
-### Meta Llama 3.2 1B
-
-Like the 8B model above, this model also requires approval. See
-[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
-
-```
-bazel run //tools/hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
-```
-
-For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
 
 ## Running Models on GPU / TPU
 
@@ -163,16 +109,20 @@ following arguments to the command line when compiling / running a model:
 
 The latter, avoiding compilation for CPU, cuts down compilation time.
 
-So, to run the Llama 3.1 8B model from above on your host sporting an NVIDIA GPU,
+So, to run the Llama 3.1 8B model from above on your host supporting an NVIDIA GPU,
 run the following:
 
 ```
-bazel run --config=release //examples/llama                       \
-          --@zml//platforms:cuda=true                     \
-          -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct \
-          --prompt="What is the capital of France?"
+bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
 ```
 
+And on your host supporting an AMD GPU:
+
+```
+bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
+```
+
+Same goes for all supported platforms.
 
 ## Run Tests
 
@@ -180,19 +130,12 @@ bazel run --config=release //examples/llama                       \
 bazel test //zml:test
 ```
 
-
 # A taste of ZML
-
-
 
 ## MNIST
 
 
 ```zig
-const std = @import("std");
-const zml = @import("zml");
-
-/// Model definition
 const Mnist = struct {
     fc1: Layer,
     fc2: Layer,
@@ -201,63 +144,72 @@ const Mnist = struct {
         weight: zml.Tensor,
         bias: zml.Tensor,
 
+        pub fn init(store: zml.io.TensorStore.View) Layer {
+            return .{
+                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
+                .bias = store.createTensor("bias", .{.d_out}, null),
+            };
+        }
+
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input).add(self.bias).relu();
+            return self.weight.dot(input, .d).add(self.bias).relu().withTags(.{.d});
         }
     };
 
+    pub fn init(store: zml.io.TensorStore.View) Mnist {
+        return .{
+            .fc1 = .init(store.withPrefix("fc1")),
+            .fc2 = .init(store.withPrefix("fc2")),
+        };
+    }
+
+    pub fn load(
+        self: *const Mnist,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *const zml.io.TensorStore,
+        shardings: []const zml.sharding.Sharding,
+    ) !zml.Bufferized(Mnist) {
+        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
+            .shardings = shardings,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        });
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
+        self.fc1.weight.deinit();
+        self.fc1.bias.deinit();
+        self.fc2.weight.deinit();
+        self.fc2.bias.deinit();
+    }
+
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
-        std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
-        var x = input.flattenAll().convert(.f32);
+        var x = input.flatten().convert(.f32).withTags(.{.d});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
-            x = zml.call(layer, .forward, .{x});
+            x = layer.forward(x);
         }
-        return x.argMax(0, .u8).indices;
+        return x.argMax(0).indices.convert(.u8);
     }
 };
 ```
-
-
-
-## Tagged Tensors
-
-```zig
-const Sdpa = struct {
-    pub fn forward(_: Sdpa, ctx: *zml.Context, q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
-        const q = q_.withTags(.{ .b, .h, .q, .hd });
-        const k = k_.withTags(.{ .b, .h, .k, .hd });
-        const v = v_.withTags(.{ .b, .h, .k, .hd });
-        const attn_mask = zml.nn.causalAttnMask(ctx, .{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null);
-        return zml.nn.sdpa(ctx, q, k, v, .{ .attn_mask = attn_mask });
-    }
-};
-```
-
-
-
 
 # Where to go next:
 
 You might want to check out more [examples](./examples), read through the
-[documentation directly on GitHub](./docs/README.md), or, for the full rendering
-experience, browse the
-[online documentation with included API reference](https://docs.zml.ai).
-
-
+[documentation directly on GitHub](./docs/README.md).
 
 # Contributing
 
 See [here][Contributing].
 
-
-
 # License
 
 ZML is licensed under the [Apache 2.0 license](./LICENSE).
-
-
 
 # Thanks to our contributors
 
