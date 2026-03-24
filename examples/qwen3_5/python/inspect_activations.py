@@ -20,4 +20,4 @@ for k in activations.keys():
     if not k.startswith(prefix):
         continue
     print(k, ":", activations[k].shape, str(activations[k].dtype).split(".")[-1])
-    print(activations[k])
+    #print(activations[k])
