@@ -1,3 +1,4 @@
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive", "http_file")
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 load("//platforms:packages.bzl", "packages")
@@ -243,6 +244,13 @@ def _rocm_impl(mctx):
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
         )
 
+    http_file(
+        name = "libdrm_mesa_amdgpu_ids",
+        url = "https://cgit.freedesktop.org/mesa/drm/plain/data/amdgpu.ids?id=b9dea73dfa310bc945ae6f09004a08fd624952ec",
+        sha256 = "ffd2a8f1bfa755f4d90f537b4969fc4676f116e5af051ce2f18ef93a96d8beb6",
+        downloaded_file_path = "amdgpu.ids",
+    )
+
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
@@ -252,7 +260,7 @@ def _rocm_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libdrm-amdgpu-amdgpu1", "libdrm-amdgpu-common", "libdrm2-amdgpu", "libpjrt_rocm", "hipblaslt", "rocblas", "amd-smi-lib"],
+        root_module_direct_deps = ["libdrm-amdgpu-amdgpu1", "libdrm-amdgpu-common", "libdrm2-amdgpu", "libdrm_mesa_amdgpu_ids", "libpjrt_rocm", "hipblaslt", "rocblas", "amd-smi-lib"],
         root_module_direct_dev_deps = [],
     )
 

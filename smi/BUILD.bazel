@@ -61,7 +61,7 @@ copy_to_directory(
         "//conditions:default": [
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1",
-            "@libdrm-amdgpu-common//:amdgpu_ids",
+            "//platforms/rocm:amdgpu_ids",
             "@libdrm2-amdgpu//:libdrm2-amdgpu",
             "//platforms/rocm:zmlxrocm",
             ":libnrt.stripped",
@@ -70,7 +70,7 @@ copy_to_directory(
     }),
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
-        "opt/amdgpu/share": "share",
+        "platforms/rocm/amdgpu.ids": "share/libdrm/amdgpu.ids",
         "libdrm-amdgpu-amdgpu1": "lib",
         "platforms/rocm": "lib",
         "libnrt.stripped": "lib",
