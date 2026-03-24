@@ -3,10 +3,9 @@ const std = @import("std");
 const zml = @import("zml");
 
 const common = @import("../common.zig");
-const model = @import("model.zig");
-
 const parseConfig = common.parseConfig;
 const Shardings = common.Shardings;
+const model = @import("model.zig");
 
 pub const Repository = struct {
     inner: model.Model,
@@ -17,7 +16,7 @@ pub const Repository = struct {
         errdefer parsed_config.deinit();
 
         const options: model.Options = .{
-            .sampling_strategy = .{ .topk = 1, .temperature = 1.0 },
+            .sampling_strategy = .{},
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 

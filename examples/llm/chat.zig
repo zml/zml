@@ -37,7 +37,7 @@ pub const Chat = struct {
             .tokenizer = tokenizer,
             .repo = repo,
             .session = session,
-            .tokens = try .initCapacity(allocator, session.maxSeqLen()),
+            .tokens = try .initCapacity(allocator, session.maxTokens()),
         };
     }
 
@@ -68,20 +68,27 @@ pub const Chat = struct {
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
 
-        while (self.session.remainingTokens() > 0) {
+        while (self.tokens.items.len <= self.session.maxTokens()) {
             try self.runPrefill(turn_tokens, &stdout.interface);
             try self.runDecodeTurn(&stdout.interface);
 
-            turn_tokens = try self.readNextTurn(turn_tokens, &stdout.interface) orelse return;
-            if (turn_tokens.len > self.session.remainingTokens()) {
-                log.warn("Not enough tokens remaining ({} available, {} needed). Consider using a higher seqlen, for example: `--seqlen={d}`.", .{ self.session.remainingTokens(), turn_tokens.len, std.math.ceilPowerOfTwo(u32, self.session.maxSeqLen() + 1) catch std.math.maxInt(u32) });
+            turn_tokens = if (self.tokens.items.len >= self.session.maxTokens()) b: {
+                self.allocator.free(turn_tokens);
+                break :b try self.allocator.alloc(u32, 0);
+            } else try self.readNextTurn(turn_tokens, &stdout.interface) orelse return;
+            if (self.tokens.items.len + turn_tokens.len >= self.session.maxTokens()) {
+                log.warn("Not enough tokens remaining ({} available, {} needed). Consider using a higher seqlen, for example: `--seqlen={d}`.", .{
+                    self.session.maxTokens() -| self.tokens.items.len,
+                    turn_tokens.len,
+                    std.math.ceilPowerOfTwo(u32, self.session.maxTokens() + 1) catch std.math.maxInt(u32),
+                });
                 return;
             }
         }
     }
 
     fn runPrefill(self: *Chat, prompt_tokens: []const u32, stdout: *std.Io.Writer) !void {
-        if (prompt_tokens.len + self.tokens.items.len > self.session.maxSeqLen()) {
+        if (prompt_tokens.len + self.tokens.items.len > self.session.maxTokens()) {
             return error.PromptTooLong;
         }
         try stdout.writeAll("\x1b[2mprefill...\x1b[0m");
@@ -96,10 +103,10 @@ pub const Chat = struct {
 
     fn runDecodeTurn(self: *Chat, stdout: *std.Io.Writer) !void {
         const decode_start: std.Io.Timestamp = .now(self.io, .awake);
-        const decode_pos_before = self.session.tokenPos();
+        const decode_pos_before = self.tokens.items.len;
         try self.session.runDecode(&self.tokens, stdout);
         const decode_duration = decode_start.untilNow(self.io, .awake);
-        const decode_tokens: u64 = self.session.tokenPos() - decode_pos_before;
+        const decode_tokens: u64 = self.tokens.items.len - decode_pos_before;
 
         try stdout.writeAll("\n\n");
         try stdout.print("\x1b[36mdecode\x1b[0m \x1b[2m{f} · {:.1}tok/s\x1b[0m\n\n\n", .{
@@ -109,10 +116,10 @@ pub const Chat = struct {
         try stdout.flush();
     }
 
-    fn readNextTurn(self: *Chat, previous_turn_tokens: []u32, stdout: *std.Io.Writer) !?[]u32 {
+    fn readNextTurn(self: *Chat, previous_turn_tokens: []const u32, stdout: *std.Io.Writer) !?[]const u32 {
         while (true) {
             const line = c.linenoise(prompt_prefix.ptr) orelse {
-                try stdout.print("\x1b[2m{}/{} tokens used\x1b[0m\n\n", .{ self.session.tokenPos(), self.session.maxSeqLen() });
+                try stdout.print("\x1b[2m{}/{} tokens used\x1b[0m\n\n", .{ self.tokens.items.len, self.session.maxTokens() });
                 try stdout.flush();
                 return null;
             };

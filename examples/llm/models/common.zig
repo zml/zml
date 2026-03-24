@@ -2,6 +2,12 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+pub const SessionOptions = struct {
+    seqlen: u32,
+    backend: zml.attention.attention.Backend,
+    single: bool,
+};
+
 pub const Shardings = struct {
     replicated: zml.sharding.Sharding,
     model: zml.sharding.Sharding,

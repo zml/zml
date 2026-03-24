@@ -4,16 +4,12 @@ const zml = @import("zml");
 const Buffer = zml.Buffer;
 const attention = zml.attention.attention;
 
-const Shardings = @import("../common.zig").Shardings;
+const common = @import("../common.zig");
+const Shardings = common.Shardings;
+const SessionOptions = common.SessionOptions;
 const inference = @import("inference.zig");
 const model = @import("model.zig");
 const repository = @import("repository.zig");
-
-pub const SessionOptions = struct {
-    seqlen: u32,
-    backend: attention.Backend,
-    single: bool,
-};
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -28,7 +24,6 @@ pub const Session = struct {
     tokenizer: zml.tokenizer.Tokenizer,
     config: model.Config,
     seqlen: u32,
-    token_pos_: u32,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -70,7 +65,6 @@ pub const Session = struct {
             .tokenizer = tokenizer,
             .config = repo.parsed_config.value,
             .seqlen = opts.seqlen,
-            .token_pos_ = 0,
         };
     }
 
@@ -80,18 +74,6 @@ pub const Session = struct {
         attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
         self.generated_token_slice.free(self.allocator);
-    }
-
-    pub fn remainingTokens(self: *const Session) u32 {
-        return self.seqlen -| self.token_pos_;
-    }
-
-    pub fn tokenPos(self: *const Session) u32 {
-        return self.token_pos_;
-    }
-
-    pub fn maxSeqLen(self: *const Session) u32 {
-        return self.seqlen;
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
@@ -127,7 +109,6 @@ pub const Session = struct {
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
         self.generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
-        self.token_pos_ = @intCast(all_tokens.len);
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
@@ -145,7 +126,7 @@ pub const Session = struct {
         var current_token_buffer: Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
         defer current_token_buffer.deinit();
 
-        generation: while (self.remainingTokens() > 0) {
+        generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
 
             if (isEosToken(self.config, token_id)) break :generation;
@@ -156,9 +137,9 @@ pub const Session = struct {
             }
 
             try all_tokens.append(self.allocator, token_id);
-            if (self.remainingTokens() == 0) break :generation;
+            if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{self.token_pos_}));
+            const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.items.len)}));
             var token_pos_buffer: Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, replicated_sharding);
             defer token_pos_buffer.deinit();
 
@@ -174,7 +155,6 @@ pub const Session = struct {
 
             decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
-            self.token_pos_ += 1;
         }
     }
 };

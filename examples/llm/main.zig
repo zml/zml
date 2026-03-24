@@ -37,9 +37,31 @@ const Args = struct {
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
-
     const args = stdx.flags.parse(init.minimal.args, Args);
+
+    //
+    // Virtual File Systems
+    //
+    var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
+    defer vfs_file.deinit();
+
+    var http_client: std.http.Client = .{ .allocator = allocator, .io = init.io };
+    defer http_client.deinit();
+
+    var hf_vfs: zml.io.VFS.HF = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer hf_vfs.deinit();
+
+    var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer s3_vfs.deinit();
+
+    var vfs: zml.io.VFS = try .init(allocator, init.io);
+    defer vfs.deinit();
+
+    try vfs.register("file", vfs_file.io());
+    try vfs.register("hf", hf_vfs.io());
+    try vfs.register("s3", s3_vfs.io());
+
+    const io = vfs.io();
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
@@ -93,9 +115,11 @@ pub fn main(init: std.process.Init) !void {
         platform,
         &model_buffers,
         tokenizer,
-        args.seqlen,
-        backend,
-        args.single,
+        .{
+            .seqlen = args.seqlen,
+            .backend = backend,
+            .single = args.single,
+        },
         &progress,
         shardings,
     );
