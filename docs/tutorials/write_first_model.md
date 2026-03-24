@@ -177,8 +177,9 @@ var executable = try platform.compile(allocator, io, layer, .forward, .{input}, 
 defer executable.deinit();
 ```
 
-You might wonder what this `sharding` variable is for ?
-TODO: explain things about sharding ?
+You might wonder what this `sharding` variable is for ? ZML supports sharding tensors across multiple devices,
+and the `compile()` function needs to know how the tensors are sharded in order to compile the module correctly.
+For this simple example, we just replicate the tensors across all devices for simplicity.
 
 
 ### Creating the "bufferized" Model
