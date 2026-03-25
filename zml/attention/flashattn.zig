@@ -1709,34 +1709,6 @@ pub const paged_fa3 = struct {
 };
 
 pub const mosaic_tpu = struct {
-    const FlashAttentionParams = struct {
-        batch_size: i64,
-        num_heads: i64,
-        q_seq_len: i64,
-        kv_seq_len: i64,
-        d_model: i64,
-        sm_scale: f32,
-    };
-    const PagedAttentionParams = struct {
-        batch_size: i64,
-        num_q_heads: i64,
-        num_kv_heads: i64,
-        head_dim: i64,
-        pages_per_sequence: i64,
-        total_num_pages: i64,
-        page_size: i64,
-        pages_per_compute_block: u32,
-    };
-    const DecodeAttentionParams = struct {
-        batch_size: i64,
-        num_q_heads: i64,
-        num_kv_heads: i64,
-        head_dim: i64,
-        pages_per_sequence: i64,
-        total_num_pages: i64,
-        page_size: i64,
-        pages_per_compute_block: u32,
-    };
     const RaggedPagedAttentionParams = struct {
         num_q_tokens: i64,
         num_q_heads: i64,
@@ -1751,12 +1723,6 @@ pub const mosaic_tpu = struct {
         sm_scale: f32,
         num_kv_pages_per_block: u32,
         num_queries_per_block: u32,
-    };
-    pub const AttentionParams = union(enum) {
-        paged: PagedAttentionParams,
-        flash: FlashAttentionParams,
-        decode: DecodeAttentionParams,
-        ragged_paged: RaggedPagedAttentionParams,
     };
 
     fn kernelFrontendAttrs(comp_ctx: anytype) *const mlir.Attribute {
@@ -1881,13 +1847,12 @@ pub const mosaic_tpu = struct {
         };
     }
 
-    fn renderBackendConfig(allocator: std.mem.Allocator, io: std.Io, params: AttentionParams) []u8 {
-        const json_string = switch (params) {
-            .paged => |paged_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(paged_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate paged attention TPU params: {}", .{err}),
-            .decode => |decode_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"paged\",\"params\":{f}}}", .{std.json.fmt(decode_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate decode attention TPU params: {}", .{err}),
-            .ragged_paged => |ragged_paged_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"ragged_paged\",\"params\":{f}}}", .{std.json.fmt(ragged_paged_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate ragged paged attention TPU params: {}", .{err}),
-            .flash => |flash_params| std.fmt.allocPrint(allocator, "{{\"backend_config\":\"flash\",\"params\":{f}}}", .{std.json.fmt(flash_params, .{})}) catch |err| stdx.debug.panic("Failed to allocate flash attention TPU params: {}", .{err}),
-        };
+    fn renderBackendConfig(allocator: std.mem.Allocator, io: std.Io, params: RaggedPagedAttentionParams) []u8 {
+        const json_string = std.fmt.allocPrint(
+            allocator,
+            "{{\"backend_config\":\"ragged_paged\",\"params\":{f}}}",
+            .{std.json.fmt(params, .{})},
+        ) catch |err| stdx.debug.panic("Failed to allocate ragged paged attention TPU params: {}", .{err});
         defer allocator.free(json_string);
 
         const compilation_context = zml.module.CompilationContext.current();
@@ -1940,22 +1905,20 @@ pub const mosaic_tpu = struct {
 
         const num_queries_per_block: i64 = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
 
-        const ragged_params: AttentionParams = .{
-            .ragged_paged = .{
-                .num_q_tokens = q_token_count,
-                .num_q_heads = num_q_heads_per_shard,
-                .num_kv_heads = num_kv_heads_per_shard,
-                .head_dim = padded_head_dim,
-                .q_dtype = jnpDTypeExpr(q_sharded.dtype()),
-                .kv_dtype = jnpDTypeExpr(kv_cache_sharded.dtype()),
-                .max_num_seqs = max_num_seqs,
-                .pages_per_seq = context.max_num_pages,
-                .total_num_pages = total_num_pages,
-                .page_size = kv_cache_sharded.dim(.k_chunk),
-                .sm_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(model_head_dim))),
-                .num_kv_pages_per_block = context.pages_per_compute_block,
-                .num_queries_per_block = @intCast(num_queries_per_block),
-            },
+        const ragged_params: RaggedPagedAttentionParams = .{
+            .num_q_tokens = q_token_count,
+            .num_q_heads = num_q_heads_per_shard,
+            .num_kv_heads = num_kv_heads_per_shard,
+            .head_dim = padded_head_dim,
+            .q_dtype = jnpDTypeExpr(q_sharded.dtype()),
+            .kv_dtype = jnpDTypeExpr(kv_cache_sharded.dtype()),
+            .max_num_seqs = max_num_seqs,
+            .pages_per_seq = context.max_num_pages,
+            .total_num_pages = total_num_pages,
+            .page_size = kv_cache_sharded.dim(.k_chunk),
+            .sm_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(model_head_dim))),
+            .num_kv_pages_per_block = context.pages_per_compute_block,
+            .num_queries_per_block = @intCast(num_queries_per_block),
         };
         const backend_config = renderBackendConfig(threaded.allocator, threaded.io(), ragged_params);
         defer threaded.allocator.free(backend_config);
