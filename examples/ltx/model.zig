@@ -104,6 +104,162 @@ pub const Patchify = struct {
     }
 };
 
+/// Sinusoidal timestep embedding.
+/// Matches Python: get_timestep_embedding(sigma, dim=256, flip_sin_to_cos=True, downscale_freq_shift=0)
+/// https://github.com/Lightricks/LTX-2/blob/ae855f8538843825f9015a419cf4ba5edaf5eec2/packages/ltx-core/src/ltx_core/model/transformer/timestep_embedding.py#L6
+/// 
+/// Input:  sigma [.b] f32
+/// Output: [.b, .d_sin=256] f32
+fn sinusoidalTimestepEmbedding(sigma: Tensor) Tensor {
+    const half: i64 = 128;
+    // freq[i] = exp(-ln(10000) * i / 128)
+    const log_max = comptime std.math.log(f64, std.math.e, 10000.0);
+    const idx = Tensor.arange(.{ .end = half }, .f32); // [128] f32
+    const freq = idx.scale(-log_max / 128.0).exp(); // [128] f32
+
+    // Outer product: sigma[b] * freq[i] → emb[b, i]
+    const sigma_b = sigma.convert(.f32).withTags(.{.b});
+    const freq_hf = freq.withTags(.{.hf});
+    const target_sh = sigma_b.shape().append(.{ .hf = half });
+    const emb = sigma_b.appendAxes(.{.hf}) // [.b=B, .hf=1]
+        .broad(target_sh) // [.b=B, .hf=128]
+        .mul(freq_hf.broad(target_sh)); // [.b=B, .hf=128]
+
+    // cat([cos(emb), sin(emb)], axis=.hf) → [.b=B, .hf=256], then retag as .d_sin
+    // flip_sin_to_cos=True → cos first, then sin
+    const out = Tensor.concatenate(&.{ emb.cos(), emb.sin() }, .hf);
+    return out.withPartialTags(.{ .b, .d_sin }); // [.b=B, .d_sin=256]
+}
+
+/// Adaptive layer norm single (adaLN-single), as used in LTX video/audio streams.
+///
+/// Python reference: AdaLayerNormSingle in adaln.py.
+/// Full chain: sigma → sinusoidal(256) → linear_1(D) → silu → linear_2(D) → silu → linear_out(N*D)
+///
+/// Returns both:
+///   - modulation [.b, .d_ada=N*D] — per-block modulation coefficients
+///   - embedded_timestep [.b, .d_emb=D] — used by prompt adaln
+pub const AdaLayerNormSingle = struct {
+    pub const Params = struct {
+        linear_1: zml.nn.Linear, // d_sin=256 → d=D
+        linear_2: zml.nn.Linear, // d=D       → d_emb=D  (same dim, different tag for chaining)
+        linear_out: zml.nn.Linear, // d_emb=D → d_ada=N*D
+
+        pub fn unloadBuffers(self: *zml.Bufferized(Params)) void {
+            self.linear_1.weight.deinit();
+            if (self.linear_1.bias) |*b| b.deinit();
+            self.linear_2.weight.deinit();
+            if (self.linear_2.bias) |*b| b.deinit();
+            self.linear_out.weight.deinit();
+            if (self.linear_out.bias) |*b| b.deinit();
+        }
+    };
+
+    /// `store` should point to the adaln_single prefix (e.g. `velocity_model.adaln_single`).
+    /// Checkpoint keys consumed:
+    ///   emb.timestep_embedder.linear_1.{weight,bias}
+    ///   emb.timestep_embedder.linear_2.{weight,bias}
+    ///   linear.{weight,bias}
+    pub fn initParams(store: zml.io.TensorStore.View) Params {
+        const emb_store = store.withPrefix("emb").withPrefix("timestep_embedder");
+        const l1_store = emb_store.withPrefix("linear_1");
+        const l2_store = emb_store.withPrefix("linear_2");
+        const lo_store = store.withPrefix("linear");
+
+        return .{
+            // linear_1: [D, 256] weight — contracts over .d_sin, produces .d
+            .linear_1 = .init(
+                l1_store.createTensor("weight", .{ .d, .d_sin }, null),
+                l1_store.createTensor("bias", .{.d}, null),
+                .d_sin,
+            ),
+            // linear_2: [D, D] weight — contracts over .d, produces .d_emb
+            .linear_2 = .init(
+                l2_store.createTensor("weight", .{ .d_emb, .d }, null),
+                l2_store.createTensor("bias", .{.d_emb}, null),
+                .d,
+            ),
+            // linear_out: [N*D, D] weight — contracts over .d_emb, produces .d_ada
+            .linear_out = .init(
+                lo_store.createTensor("weight", .{ .d_ada, .d_emb }, null),
+                lo_store.createTensor("bias", .{.d_ada}, null),
+                .d_emb,
+            ),
+        };
+    }
+
+    pub const ForwardResult = struct {
+        modulation: Tensor, // [.b, .d_ada = N*D]
+        embedded_timestep: Tensor, // [.b, .d_emb = D]
+    };
+
+    /// sigma: [.b] noise level (will be converted to f32 for the sinusoidal step).
+    pub fn forward(sigma: Tensor, params: Params) ForwardResult {
+        const wdtype = params.linear_1.weight.dtype();
+
+        // 1. Sinusoidal embedding: [.b] → [.b, .d_sin=256] (f32) → cast to weight dtype
+        const t_proj = sinusoidalTimestepEmbedding(sigma).convert(wdtype);
+
+        // 2. TimestepEmbedding: linear_1 → silu → linear_2
+        const h1 = params.linear_1.forward(t_proj); // [.b, .d]
+        const h2 = h1.silu(); // [.b, .d]
+        const h3 = params.linear_2.forward(h2); // [.b, .d_emb]
+        // h3 is the embedded_timestep returned to callers
+
+        // 3. adaLN-single part: silu → linear_out
+        const h4 = h3.silu(); // [.b, .d_emb]
+        const modulation = params.linear_out.forward(h4); // [.b, .d_ada]
+
+        return .{ .modulation = modulation, .embedded_timestep = h3 };
+    }
+};
+
+/// Final output projection applied after all transformer blocks.
+///
+/// Implements Python's `velocity_model._process_output`:
+///   scale_shift_values = scale_shift_table[2, D] + embedded_timestep[B, D]
+///   shift, scale = scale_shift_values[0], scale_shift_values[1]
+///   out = proj_out(layernorm(x) * (1 + scale) + shift)
+///
+/// `scale_shift_table` [.n_ssv=2, .d] is a model-level parameter (f32 in checkpoint).
+/// `norm_out` is PyTorch LayerNorm(eps=1e-6, elementwise_affine=False) — no learned params.
+pub const OutputProjection = struct {
+    pub const Params = struct {
+        scale_shift_table: Tensor, // [.n_ssv=2, .d] — f32 in checkpoint
+        proj_out: zml.nn.Linear, // contracts .d → .d_out (e.g. 4096 → 128)
+
+        pub fn unloadBuffers(self: *zml.Bufferized(Params)) void {
+            self.scale_shift_table.deinit();
+            self.proj_out.weight.deinit();
+            if (self.proj_out.bias) |*b| b.deinit();
+        }
+    };
+
+    /// x: [.b, .t, .d], embedded_timestep: [.b, .d_emb] — from adaln_single.forward
+    /// Returns: [.b, .t, .d_out=128]
+    pub fn forward(x_in: Tensor, embedded_timestep: Tensor, params: Params) Tensor {
+        const x = x_in.withPartialTags(.{ .b, .t, .d });
+        // Rename .d_emb → .d and cast to activation dtype for broadcasting
+        const emb = embedded_timestep.rename(.{ .d_emb = .d }).convert(x.dtype());
+
+        // scale_shift_table is f32 in checkpoint; cast to activation dtype
+        const sst = params.scale_shift_table.convert(x.dtype());
+        const sst_shift = sst.slice1d(.n_ssv, .{ .start = 0, .end = 1 }).squeeze(.n_ssv); // [.d]
+        const sst_scale = sst.slice1d(.n_ssv, .{ .start = 1, .end = 2 }).squeeze(.n_ssv); // [.d]
+
+        // shift/scale: sst_row[d] + emb[b, d] → [.b, .d]
+        const shift = sst_shift.broad(emb.shape()).add(emb);
+        const scale = sst_scale.broad(emb.shape()).add(emb);
+
+        // LayerNorm (no affine params, eps=1e-6), then scale-shift, then project
+        const normed = zml.nn.normalizeVariance(x, 1e-6);
+        const modulated = normed
+            .mul(scale.addConstant(1.0).broad(x.shape()))
+            .add(shift.broad(x.shape()));
+        return params.proj_out.forward(modulated);
+    }
+};
+
 pub const AttentionKind = enum {
     attn1,
     attn2,
@@ -362,9 +518,13 @@ fn kindNumHeads(kind: AttentionKind) usize {
 /// Returns    – [B, 1, .d]
 fn adaValueAt(sst: Tensor, timestep: Tensor, idx: i64) Tensor {
     const d = sst.dim(.d);
-    // Slice the flat timestep to isolate the idx-th block of D values: [B, 1, D]
+    // Slice the flat timestep to isolate the idx-th block of D values: [B, T, D]
+    // Tag the token dimension as .t so it matches the activation tensor's .t tag
+    // during broadcasting. With per-token timesteps (e.g. [1, 512, 36864]), using
+    // .t=512 aligns correctly with vx/ax [.b, .t, .d]. With broadcast timesteps
+    // (e.g. [1, 1, 36864]), .t=1 naturally broadcasts to any .t size.
     const ts = timestep
-        .withPartialTags(.{ .b, ._1, .tsflat })
+        .withPartialTags(.{ .b, .t, .tsflat })
         .slice1d(.tsflat, .{ .start = idx * d, .end = (idx + 1) * d })
         .rename(.{ .tsflat = .d });
     // Extract the sst row and collapse the leading size-1 axis: [D]
@@ -648,14 +808,20 @@ pub const BasicAVTransformerBlock = struct {
     ///
     /// For parity checkers that operate on pre-captured per-module inputs, use
     /// `forward(FullInputs, Params)` instead.
-    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         const vx = vx_in.withPartialTags(.{ .b, .t, .d });
         const ax = ax_in.withPartialTags(.{ .b, .t, .d });
+        // In f32-carry mode, vx/ax arrive as f32 while adaValueAt returns ts.dtype() = bf16.
+        // Convert all stream-facing ada values to match the activation dtype so that the
+        // subsequent mul/add operations don't panic on dtype mismatch.
+        // In normal bf16 mode, convert(bf16) on a bf16 tensor is a no-op in XLA.
+        const vd = vx.dtype();
+        const ad = ax.dtype();
 
         // ── Video: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const vshift_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 0);
-        const vscale_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 1);
-        const vgate_msa  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 2);
+        const vshift_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 0).convert(vd);
+        const vscale_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 1).convert(vd);
+        const vgate_msa  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 2).convert(vd);
         const norm_vx = zml.nn.rmsNorm(vx, .d, 1e-6)
             .mul(vscale_msa.addConstant(1.0).broad(vx.shape()))
             .add(vshift_msa.broad(vx.shape()));
@@ -665,15 +831,20 @@ pub const BasicAVTransformerBlock = struct {
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
         });
-        var h_v = vx.add(attn1_out.mul(vgate_msa.broad(attn1_out.shape())));
+        const video_msa_delta = attn1_out.mul(vgate_msa.broad(attn1_out.shape()));
+        var h_v = if (video_all_residuals_f32) blk: {
+            const video_dtype = vx.dtype();
+            break :blk vx.convert(.f32).add(video_msa_delta.convert(.f32)).convert(video_dtype);
+        } else vx.add(video_msa_delta);
 
         // M2: video text cross-attn residual (cross-attention AdaLN path).
-        const v_shift_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 6);
-        const v_scale_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 7);
-        const v_gate_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 8);
+        const v_shift_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 6).convert(vd);
+        const v_scale_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 7).convert(vd);
+        const v_gate_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 8).convert(vd);
         const v_text_x = zml.nn.rmsNorm(h_v, .d, 1e-6)
             .mul(v_scale_q.addConstant(1.0).broad(h_v.shape()))
             .add(v_shift_q.broad(h_v.shape()));
+        // v_shift_kv/v_scale_kv are applied to v_text_ctx (always bf16), not the f32 stream.
         const v_shift_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 0);
         const v_scale_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 1);
         const v_text_ctx_mod = inputs.v_text_ctx
@@ -683,12 +854,18 @@ pub const BasicAVTransformerBlock = struct {
             .context = v_text_ctx_mod,
             .mask = inputs.v_text_ctx_mask,
         });
-        h_v = h_v.add(v_text_ca_out.mul(v_gate_q.broad(v_text_ca_out.shape())));
+        const video_text_ca_delta = v_text_ca_out.mul(v_gate_q.broad(v_text_ca_out.shape()));
+        if (video_all_residuals_f32) {
+            const video_dtype = h_v.dtype();
+            h_v = h_v.convert(.f32).add(video_text_ca_delta.convert(.f32)).convert(video_dtype);
+        } else {
+            h_v = h_v.add(video_text_ca_delta);
+        }
 
         // ── Audio: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const ashift_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 0);
-        const ascale_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 1);
-        const agate_msa  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 2);
+        const ashift_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 0).convert(ad);
+        const ascale_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 1).convert(ad);
+        const agate_msa  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 2).convert(ad);
         const norm_ax = zml.nn.rmsNorm(ax, .d, 1e-6)
             .mul(ascale_msa.addConstant(1.0).broad(ax.shape()))
             .add(ashift_msa.broad(ax.shape()));
@@ -705,12 +882,13 @@ pub const BasicAVTransformerBlock = struct {
         } else ax.add(audio_msa_delta);
 
         // M4-B: audio text cross-attn residual (cross-attention AdaLN path).
-        const a_shift_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 6);
-        const a_scale_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 7);
-        const a_gate_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 8);
+        const a_shift_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 6).convert(ad);
+        const a_scale_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 7).convert(ad);
+        const a_gate_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 8).convert(ad);
         const a_text_x = zml.nn.rmsNorm(h_a, .d, 1e-6)
             .mul(a_scale_q.addConstant(1.0).broad(h_a.shape()))
             .add(a_shift_q.broad(h_a.shape()));
+        // a_shift_kv/a_scale_kv are applied to a_text_ctx (always bf16), not the f32 stream.
         const a_shift_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 0);
         const a_scale_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 1);
         const a_text_ctx_mod = inputs.a_text_ctx
@@ -736,9 +914,9 @@ pub const BasicAVTransformerBlock = struct {
         // Video query: sst_a2v_ca_video rows 0,1 (scale/shift); gate from row 4.
         const sst_v_ss   = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 0, .end = 4 });
         const sst_v_gate = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 4, .end = 5 });
-        const scale_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   0);
-        const shift_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   1);
-        const gate_a2v    = adaValueAt(sst_v_gate,  inputs.v_cross_gate_ts, 0);
+        const scale_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   0).convert(vd);
+        const shift_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   1).convert(vd);
+        const gate_a2v    = adaValueAt(sst_v_gate,  inputs.v_cross_gate_ts, 0).convert(vd);
         const vx_scaled_a2v = vx_norm3
             .mul(scale_v_a2v.addConstant(1.0).broad(vx_norm3.shape()))
             .add(shift_v_a2v.broad(vx_norm3.shape()));
@@ -746,8 +924,8 @@ pub const BasicAVTransformerBlock = struct {
         // Audio context: sst_a2v_ca_audio rows 0,1 (scale/shift).
         const sst_a_ss   = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 0, .end = 4 });
         const sst_a_gate = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 4, .end = 5 });
-        const scale_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 0);
-        const shift_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 1);
+        const scale_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 0).convert(ad);
+        const shift_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 1).convert(ad);
         const ax_scaled_a2v = ax_norm3
             .mul(scale_a_a2v.addConstant(1.0).broad(ax_norm3.shape()))
             .add(shift_a_a2v.broad(ax_norm3.shape()));
@@ -761,22 +939,27 @@ pub const BasicAVTransformerBlock = struct {
         });
         var a2v_delta = a2v_out.mul(gate_a2v.broad(a2v_out.shape()));
         if (inputs.a2v_mask) |mask| {
-            a2v_delta = a2v_delta.mul(mask.broad(a2v_delta.shape()));
+            a2v_delta = a2v_delta.mul(mask.convert(a2v_delta.dtype()).broad(a2v_delta.shape()));
         }
-        h_v = h_v.add(a2v_delta);
+        if (video_all_residuals_f32) {
+            const video_dtype = h_v.dtype();
+            h_v = h_v.convert(.f32).add(a2v_delta.convert(.f32)).convert(video_dtype);
+        } else {
+            h_v = h_v.add(a2v_delta);
+        }
 
         // ── V→A branch ─────────────────────────────────────────────────────────────
         // Audio query: sst_a2v_ca_audio rows 2,3 (scale/shift); gate from row 4.
-        const scale_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   2);
-        const shift_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   3);
-        const gate_v2a    = adaValueAt(sst_a_gate,  inputs.a_cross_gate_ts, 0);
+        const scale_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   2).convert(ad);
+        const shift_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   3).convert(ad);
+        const gate_v2a    = adaValueAt(sst_a_gate,  inputs.a_cross_gate_ts, 0).convert(ad);
         const ax_scaled_v2a = ax_norm3
             .mul(scale_a_v2a.addConstant(1.0).broad(ax_norm3.shape()))
             .add(shift_a_v2a.broad(ax_norm3.shape()));
 
         // Video context: sst_a2v_ca_video rows 2,3 (scale/shift).
-        const scale_v_v2a = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 2);
-        const shift_v_v2a = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 3);
+        const scale_v_v2a = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 2).convert(vd);
+        const shift_v_v2a = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 3).convert(vd);
         const vx_scaled_v2a = vx_norm3
             .mul(scale_v_v2a.addConstant(1.0).broad(vx_norm3.shape()))
             .add(shift_v_v2a.broad(vx_norm3.shape()));
@@ -790,7 +973,7 @@ pub const BasicAVTransformerBlock = struct {
         });
         var v2a_delta = v2a_out.mul(gate_v2a.broad(v2a_out.shape()));
         if (inputs.v2a_mask) |mask| {
-            v2a_delta = v2a_delta.mul(mask.broad(v2a_delta.shape()));
+            v2a_delta = v2a_delta.mul(mask.convert(v2a_delta.dtype()).broad(v2a_delta.shape()));
         }
         if (audio_all_residuals_f32) {
             const audio_dtype = h_a.dtype();
@@ -800,22 +983,38 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Video FF: AdaLN rows 3,4,5 (shift, scale, gate) ─────────────────────────
-        const vshift_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 3);
-        const vscale_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 4);
-        const vgate_mlp  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 5);
+        const vshift_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 3).convert(vd);
+        const vscale_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 4).convert(vd);
+        const vgate_mlp  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 5).convert(vd);
         const vx_scaled_ff = zml.nn.rmsNorm(h_v, .d, 1e-6)
             .mul(vscale_mlp.addConstant(1.0).broad(h_v.shape()))
             .add(vshift_mlp.broad(h_v.shape()));
-        h_v = h_v.add(self.ff.forward(vx_scaled_ff, params.ff).mul(vgate_mlp.broad(h_v.shape())));
+        const video_ff_out = if (video_all_residuals_f32)
+            forwardAudioFFPrecise(vx_scaled_ff, params.ff)
+        else
+            self.ff.forward(vx_scaled_ff, params.ff);
+        const video_ff_delta = video_ff_out.mul(vgate_mlp.broad(video_ff_out.shape()));
+        if (video_all_residuals_f32) {
+            const video_dtype = h_v.dtype();
+            h_v = h_v.convert(.f32).add(video_ff_delta.convert(.f32)).convert(video_dtype);
+        } else {
+            h_v = h_v.add(video_ff_delta);
+        }
 
         // ── Audio FF: AdaLN rows 3,4,5 ─────────────────────────────────────────────
-        const ashift_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 3);
-        const ascale_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 4);
-        const agate_mlp  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 5);
+        const ashift_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 3).convert(ad);
+        const ascale_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 4).convert(ad);
+        const agate_mlp  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 5).convert(ad);
         const ax_scaled_ff = zml.nn.rmsNorm(h_a, .d, 1e-6)
             .mul(ascale_mlp.addConstant(1.0).broad(h_a.shape()))
             .add(ashift_mlp.broad(h_a.shape()));
-        const audio_ff_out = self.audio_ff.forward(ax_scaled_ff, params.audio_ff);
+        // Use forwardAudioFFPrecise (f32 matmuls) when the audio stream is f32 (f32-carry mode)
+        // or when an explicit audio-precision flag is set. Plain forward() uses zml.nn.Linear
+        // which panics if x is f32 and weight is bf16.
+        const audio_ff_out = if (audio_ff_residual_f32 or audio_all_residuals_f32 or ax.dtype() == .f32)
+            forwardAudioFFPrecise(ax_scaled_ff, params.audio_ff)
+        else
+            self.audio_ff.forward(ax_scaled_ff, params.audio_ff);
         const audio_ff_delta = audio_ff_out.mul(agate_mlp.broad(audio_ff_out.shape()));
         if (audio_ff_residual_f32 or audio_all_residuals_f32) {
             const audio_dtype = h_a.dtype();
@@ -830,19 +1029,25 @@ pub const BasicAVTransformerBlock = struct {
     }
 
     pub fn forwardNative(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: only the final audio FF residual add is computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioFFResidualF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(true, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(true, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: all audio residual adds are computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, true, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, true, false, vx_in, ax_in, inputs, params);
+    }
+
+    /// Checker-only experimental path: all video residual adds are computed in f32, and video FF uses f32 matmul.
+    /// Outputs are converted back to the original stream dtype.
+    pub fn forwardNativeVideoAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+        return self.forwardNativeImpl(false, false, true, vx_in, ax_in, inputs, params);
     }
 };
 
@@ -852,6 +1057,23 @@ pub const LTXModel = struct {
 
     pub const Params = struct {
         blocks: []BasicAVTransformerBlock.Params,
+        // AdaLN-single modules — one per stream/role.
+        // Video stream base modulation (N=9 coefficients → d_ada=9*4096=36864)
+        adaln_single: AdaLayerNormSingle.Params,
+        // Audio stream base modulation (N=9 → d_ada=9*2048=18432)
+        audio_adaln_single: AdaLayerNormSingle.Params,
+        // Prompt / text-conditioning modulation (N=2 each)
+        prompt_adaln_single: AdaLayerNormSingle.Params, // video, d_ada=2*4096=8192
+        audio_prompt_adaln_single: AdaLayerNormSingle.Params, // audio, d_ada=2*2048=4096
+        // A/V cross-attention scale-shift (N=4 each)
+        av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle.Params, // d_ada=4*4096=16384
+        av_ca_audio_scale_shift_adaln_single: AdaLayerNormSingle.Params, // d_ada=4*2048=8192
+        // A/V cross-attention gate (N=1 each)
+        av_ca_a2v_gate_adaln_single: AdaLayerNormSingle.Params, // d_ada=4096
+        av_ca_v2a_gate_adaln_single: AdaLayerNormSingle.Params, // d_ada=2048
+        // Output projection (norm + scale-shift + linear) applied after all transformer blocks.
+        norm_proj_out: OutputProjection.Params, // video: scale_shift_table[2,4096] + proj_out(4096→128)
+        audio_norm_proj_out: OutputProjection.Params, // audio: scale_shift_table[2,2048] + proj_out(2048→128)
 
         pub fn deinit(self: *Params, allocator: std.mem.Allocator) void {
             allocator.free(self.blocks);
@@ -862,6 +1084,16 @@ pub const LTXModel = struct {
                 BasicAVTransformerBlock.unloadBuffers(bp);
             }
             allocator.free(self.blocks);
+            self.adaln_single.unloadBuffers();
+            self.audio_adaln_single.unloadBuffers();
+            self.prompt_adaln_single.unloadBuffers();
+            self.audio_prompt_adaln_single.unloadBuffers();
+            self.av_ca_video_scale_shift_adaln_single.unloadBuffers();
+            self.av_ca_audio_scale_shift_adaln_single.unloadBuffers();
+            self.av_ca_a2v_gate_adaln_single.unloadBuffers();
+            self.av_ca_v2a_gate_adaln_single.unloadBuffers();
+            self.norm_proj_out.unloadBuffers();
+            self.audio_norm_proj_out.unloadBuffers();
         }
     };
 
@@ -884,7 +1116,33 @@ pub const LTXModel = struct {
             bp.* = BasicAVTransformerBlock.initParams(blocks_store.withLayer(i));
         }
 
-        return .{ .blocks = blocks };
+        return .{
+            .blocks = blocks,
+            .adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("adaln_single")),
+            .audio_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("audio_adaln_single")),
+            .prompt_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("prompt_adaln_single")),
+            .audio_prompt_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("audio_prompt_adaln_single")),
+            .av_ca_video_scale_shift_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_video_scale_shift_adaln_single")),
+            .av_ca_audio_scale_shift_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_audio_scale_shift_adaln_single")),
+            .av_ca_a2v_gate_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_a2v_gate_adaln_single")),
+            .av_ca_v2a_gate_adaln_single = AdaLayerNormSingle.initParams(store.withPrefix("av_ca_v2a_gate_adaln_single")),
+            .norm_proj_out = .{
+                .scale_shift_table = store.createTensor("scale_shift_table", .{ .n_ssv, .d }, null),
+                .proj_out = .init(
+                    store.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, null),
+                    store.withPrefix("proj_out").createTensor("bias", .{.d_out}, null),
+                    .d,
+                ),
+            },
+            .audio_norm_proj_out = .{
+                .scale_shift_table = store.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, null),
+                .proj_out = .init(
+                    store.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, null),
+                    store.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, null),
+                    .d,
+                ),
+            },
+        };
     }
 
     pub fn forward(self: LTXModel, x: Tensor, params: Params) Tensor {
@@ -989,7 +1247,7 @@ pub fn initActiveParams(
     };
 }
 
-fn selectTransformerRoot(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
+pub fn selectTransformerRoot(store: zml.io.TensorStore.View) zml.io.TensorStore.View {
     if (store.hasKey("model.velocity_model.transformer_blocks.0.ff.net.0.proj.weight")) {
         return store.withPrefix("model").withPrefix("velocity_model");
     }
@@ -1004,6 +1262,21 @@ fn selectTransformerRoot(store: zml.io.TensorStore.View) zml.io.TensorStore.View
     }
     // Keep previous behavior as a fallback.
     return store.withPrefix("velocity_model");
+}
+
+/// Free-function entrypoint to run one AdaLayerNormSingle module.
+/// Returns modulation [.b, .d_ada] — the full outputs (modulation + embedded_timestep)
+/// are available via AdaLayerNormSingle.forward; this helper returns both as a named struct
+/// compatible with zml compiled-function result extraction.
+pub fn forwardAdalnSingle(sigma: Tensor, params: AdaLayerNormSingle.Params) AdaLayerNormSingle.ForwardResult {
+    return AdaLayerNormSingle.forward(sigma, params);
+}
+
+/// Free-function entrypoint for parity tooling: output projection after all transformer blocks.
+/// x: [.b, .t, .d], embedded_timestep: [.b, .d_emb]
+/// Returns: [.b, .t, .d_out=128]
+pub fn forwardOutputProjection(x: Tensor, embedded_timestep: Tensor, params: OutputProjection.Params) Tensor {
+    return OutputProjection.forward(x, embedded_timestep, params);
 }
 
 /// Free-function entrypoint for parity tooling: block0 FF only.
@@ -1030,6 +1303,11 @@ pub fn forwardBlock0(x: Tensor, params: BasicAVTransformerBlock.Params) Tensor {
 pub fn forwardFF(x: Tensor, params: FeedForward.Params) Tensor {
     const ff = FeedForward{};
     return ff.forward(x, params);
+}
+
+/// Cast a single tensor to f32. Used by block_slice_48_check for f32-carry chain init.
+pub fn castToF32(x: Tensor) Tensor {
+    return x.convert(.f32);
 }
 
 /// Focused FF net.0 (Linear 4096->16384) entrypoint.
@@ -2256,6 +2534,79 @@ pub fn forwardBlock0AudioStream(
     }, params);
 }
 
+pub const Block0VideoStageOutputs = struct {
+    vx_after_msa: Tensor,
+    vx_after_text_ca: Tensor,
+    vx_after_a2v: Tensor,
+    ff_proj_out: Tensor,
+    ff_gelu_out: Tensor,
+    ff_out: Tensor,
+    vx_out: Tensor,
+};
+
+/// Debug path for block-0 video stream that returns intermediate residual states.
+pub fn forwardBlock0VideoStreamStages(
+    vx_in: Tensor,
+    norm_vx: Tensor,
+    v_text_x: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    vgate_msa: Tensor,
+    vgate_text_ca: Tensor,
+    v_text_ctx: Tensor,
+    a2v_x: Tensor,
+    a2v_ctx: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_gate: Tensor,
+    a2v_mask: Tensor,
+    vx_scaled: Tensor,
+    vgate_mlp: Tensor,
+    params: Block0FullParams,
+) Block0VideoStageOutputs {
+    const block = BasicAVTransformerBlock.init();
+
+    const attn1_out = block.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
+        .pe_cos = v_pe_cos,
+        .pe_sin = v_pe_sin,
+    });
+    const vx_after_msa = vx_in.withPartialTags(.{ .b, .t, .d })
+        .add(attn1_out.mul(vgate_msa.broad(attn1_out.shape())));
+
+    const text_ca_out = block.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
+        .context = v_text_ctx,
+    });
+    const vx_after_text_ca = vx_after_msa.add(text_ca_out.mul(vgate_text_ca.broad(text_ca_out.shape())));
+
+    const a2v_out = block.audio_to_video_attn.forward(a2v_x, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
+        .context = a2v_ctx,
+        .pe_cos = a2v_pe_cos,
+        .pe_sin = a2v_pe_sin,
+        .k_pe_cos = a2v_k_pe_cos,
+        .k_pe_sin = a2v_k_pe_sin,
+    });
+    const vx_after_a2v = vx_after_text_ca.add(
+        a2v_out.mul(a2v_gate.broad(a2v_out.shape())).mul(a2v_mask.broad(a2v_out.shape())),
+    );
+
+    const ff_proj_out = linearForwardF32(vx_scaled.withPartialTags(.{ .b, .t, .d }), params.ff.proj);
+    const ff_gelu_out = ff_proj_out.gelu();
+    const ff_out = linearForwardF32(ff_gelu_out.withPartialTags(.{ .b, .t, .d_ff }), params.ff.out).convert(vx_in.dtype());
+    const vx_out = vx_after_a2v.add(ff_out.mul(vgate_mlp.broad(ff_out.shape())));
+
+    return .{
+        .vx_after_msa = vx_after_msa,
+        .vx_after_text_ca = vx_after_text_ca,
+        .vx_after_a2v = vx_after_a2v,
+        .ff_proj_out = ff_proj_out.convert(vx_in.dtype()),
+        .ff_gelu_out = ff_gelu_out.convert(vx_in.dtype()),
+        .ff_out = ff_out,
+        .vx_out = vx_out,
+    };
+}
+
 pub const Block0AudioStageOutputs = struct {
     ax_after_msa: Tensor,
     ax_after_text_ca: Tensor,
@@ -2445,12 +2796,231 @@ pub fn forwardBlock0NativeWithAVMasks(
     }, params);
 }
 
+/// Checker-only experimental entrypoint: same as forwardBlock0NativeWithAVMasks,
+/// but computes all video residual adds in f32 and video FF uses f32 matmul.
+pub fn forwardBlock0NativeWithAVMasksVideoAllResidualsF32(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeVideoAllResidualsF32(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .a2v_mask = a2v_mask,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .v2a_mask = v2a_mask,
+    }, params);
+}
+
 pub const Block0NativeAudioIntermediates = struct {
     norm_ax: Tensor,
     a_text_x: Tensor,
     v2a_x: Tensor,
     ax_scaled_ff: Tensor,
 };
+
+pub const Block0NativeVideoIntermediates = struct {
+    norm_vx: Tensor,
+    v_text_x: Tensor,
+    vx_norm3: Tensor,
+    a2v_x: Tensor,
+    a2v_ctx: Tensor,
+    a2v_gate: Tensor,
+    vx_scaled_ff: Tensor,
+};
+
+/// Debug helper: returns native-computed video intermediates used by the block path.
+pub fn forwardBlock0NativeVideoIntermediatesWithAVMasks(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) Block0NativeVideoIntermediates {
+    const block = BasicAVTransformerBlock.init();
+
+    const vx = vx_in.withPartialTags(.{ .b, .t, .d });
+    const ax = ax_in.withPartialTags(.{ .b, .t, .d });
+
+    const vshift_msa = adaValueAt(params.scale_shift_table, video_timesteps, 0);
+    const vscale_msa = adaValueAt(params.scale_shift_table, video_timesteps, 1);
+    const vgate_msa = adaValueAt(params.scale_shift_table, video_timesteps, 2);
+    const norm_vx = zml.nn.rmsNorm(vx, .d, 1e-6)
+        .mul(vscale_msa.addConstant(1.0).broad(vx.shape()))
+        .add(vshift_msa.broad(vx.shape()));
+    const attn1_out = block.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{ .pe_cos = v_pe_cos, .pe_sin = v_pe_sin });
+    var h_v = vx.add(attn1_out.mul(vgate_msa.broad(attn1_out.shape())));
+
+    const v_shift_q = adaValueAt(params.scale_shift_table, video_timesteps, 6);
+    const v_scale_q = adaValueAt(params.scale_shift_table, video_timesteps, 7);
+    const v_gate_q = adaValueAt(params.scale_shift_table, video_timesteps, 8);
+    const v_text_x = zml.nn.rmsNorm(h_v, .d, 1e-6)
+        .mul(v_scale_q.addConstant(1.0).broad(h_v.shape()))
+        .add(v_shift_q.broad(h_v.shape()));
+    const v_shift_kv = adaValueAt(params.prompt_scale_shift_table, v_prompt_timestep, 0);
+    const v_scale_kv = adaValueAt(params.prompt_scale_shift_table, v_prompt_timestep, 1);
+    const v_text_ctx_mod = v_text_ctx
+        .mul(v_scale_kv.addConstant(1.0).broad(v_text_ctx.shape()))
+        .add(v_shift_kv.broad(v_text_ctx.shape()));
+    const v_text_ca_out = block.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{ .context = v_text_ctx_mod });
+    h_v = h_v.add(v_text_ca_out.mul(v_gate_q.broad(v_text_ca_out.shape())));
+
+    const ashift_msa = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 0);
+    const ascale_msa = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 1);
+    const agate_msa = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 2);
+    const norm_ax = zml.nn.rmsNorm(ax, .d, 1e-6)
+        .mul(ascale_msa.addConstant(1.0).broad(ax.shape()))
+        .add(ashift_msa.broad(ax.shape()));
+    const audio_attn1_out = block.audio_attn1.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{ .pe_cos = a_pe_cos, .pe_sin = a_pe_sin });
+    var h_a = ax.add(audio_attn1_out.mul(agate_msa.broad(audio_attn1_out.shape())));
+
+    const a_shift_q = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 6);
+    const a_scale_q = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 7);
+    const a_gate_q = adaValueAt(params.audio_scale_shift_table, audio_timesteps, 8);
+    const a_text_x = zml.nn.rmsNorm(h_a, .d, 1e-6)
+        .mul(a_scale_q.addConstant(1.0).broad(h_a.shape()))
+        .add(a_shift_q.broad(h_a.shape()));
+    const a_shift_kv = adaValueAt(params.audio_prompt_scale_shift_table, a_prompt_timestep, 0);
+    const a_scale_kv = adaValueAt(params.audio_prompt_scale_shift_table, a_prompt_timestep, 1);
+    const a_text_ctx_mod = a_text_ctx
+        .mul(a_scale_kv.addConstant(1.0).broad(a_text_ctx.shape()))
+        .add(a_shift_kv.broad(a_text_ctx.shape()));
+    const a_text_ca_out = block.audio_attn2.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{ .context = a_text_ctx_mod });
+    h_a = h_a.add(a_text_ca_out.mul(a_gate_q.broad(a_text_ca_out.shape())));
+
+    const vx_norm3 = zml.nn.rmsNorm(h_v, .d, 1e-6);
+    const ax_norm3 = zml.nn.rmsNorm(h_a, .d, 1e-6);
+
+    const sst_v_ss = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 0, .end = 4 });
+    const sst_v_gate = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 4, .end = 5 });
+    const scale_v_a2v = adaValueAt(sst_v_ss, v_cross_ss_ts, 0);
+    const shift_v_a2v = adaValueAt(sst_v_ss, v_cross_ss_ts, 1);
+    const gate_a2v = adaValueAt(sst_v_gate, v_cross_gate_ts, 0);
+    const vx_scaled_a2v = vx_norm3
+        .mul(scale_v_a2v.addConstant(1.0).broad(vx_norm3.shape()))
+        .add(shift_v_a2v.broad(vx_norm3.shape()));
+
+    const sst_a_ss = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 0, .end = 4 });
+    const sst_a_gate = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 4, .end = 5 });
+    const scale_a_a2v = adaValueAt(sst_a_ss, a_cross_ss_ts, 0);
+    const shift_a_a2v = adaValueAt(sst_a_ss, a_cross_ss_ts, 1);
+    const ax_scaled_a2v = ax_norm3
+        .mul(scale_a_a2v.addConstant(1.0).broad(ax_norm3.shape()))
+        .add(shift_a_a2v.broad(ax_norm3.shape()));
+
+    const a2v_out = block.audio_to_video_attn.forward(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
+        .context = ax_scaled_a2v,
+        .pe_cos = a2v_pe_cos,
+        .pe_sin = a2v_pe_sin,
+        .k_pe_cos = a2v_k_pe_cos,
+        .k_pe_sin = a2v_k_pe_sin,
+    });
+    h_v = h_v.add(a2v_out.mul(gate_a2v.broad(a2v_out.shape())).mul(a2v_mask.broad(a2v_out.shape())));
+
+    const scale_a_v2a = adaValueAt(sst_a_ss, a_cross_ss_ts, 2);
+    const shift_a_v2a = adaValueAt(sst_a_ss, a_cross_ss_ts, 3);
+    const gate_v2a = adaValueAt(sst_a_gate, a_cross_gate_ts, 0);
+    const ax_scaled_v2a = ax_norm3
+        .mul(scale_a_v2a.addConstant(1.0).broad(ax_norm3.shape()))
+        .add(shift_a_v2a.broad(ax_norm3.shape()));
+
+    const scale_v_v2a = adaValueAt(sst_v_ss, v_cross_ss_ts, 2);
+    const shift_v_v2a = adaValueAt(sst_v_ss, v_cross_ss_ts, 3);
+    const vx_scaled_v2a = vx_norm3
+        .mul(scale_v_v2a.addConstant(1.0).broad(vx_norm3.shape()))
+        .add(shift_v_v2a.broad(vx_norm3.shape()));
+
+    const v2a_out = block.video_to_audio_attn.forward(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
+        .context = vx_scaled_v2a,
+        .pe_cos = v2a_pe_cos,
+        .pe_sin = v2a_pe_sin,
+        .k_pe_cos = v2a_k_pe_cos,
+        .k_pe_sin = v2a_k_pe_sin,
+    });
+    h_a = h_a.add(v2a_out.mul(gate_v2a.broad(v2a_out.shape())).mul(v2a_mask.broad(v2a_out.shape())));
+
+    const vshift_mlp = adaValueAt(params.scale_shift_table, video_timesteps, 3);
+    const vscale_mlp = adaValueAt(params.scale_shift_table, video_timesteps, 4);
+    const vx_scaled_ff = zml.nn.rmsNorm(h_v, .d, 1e-6)
+        .mul(vscale_mlp.addConstant(1.0).broad(h_v.shape()))
+        .add(vshift_mlp.broad(h_v.shape()));
+
+    return .{
+        .norm_vx = norm_vx,
+        .v_text_x = v_text_x,
+        .vx_norm3 = vx_norm3,
+        .a2v_x = vx_scaled_a2v,
+        .a2v_ctx = ax_scaled_a2v,
+        .a2v_gate = gate_a2v,
+        .vx_scaled_ff = vx_scaled_ff,
+    };
+}
 
 /// Debug helper: returns native-computed audio intermediates used by the block path.
 pub fn forwardBlock0NativeAudioIntermediatesWithAVMasks(
@@ -2736,10 +3306,31 @@ pub fn unloadBlockSlice8FullBuffers(params: *zml.Bufferized(BlockSlice8FullParam
     }
 }
 
+pub const BlockSlice48FullParams = struct {
+    blocks: [48]Block0FullParams,
+};
+
+pub fn initBlockSlice48FullParams(store: zml.io.TensorStore.View) BlockSlice48FullParams {
+    var out: BlockSlice48FullParams = undefined;
+    const root = selectTransformerRoot(store);
+    const blocks_store = root.withPrefix("transformer_blocks");
+    inline for (0..48) |i| {
+        out.blocks[i] = BasicAVTransformerBlock.initParams(blocks_store.withLayer(i));
+    }
+    return out;
+}
+
+pub fn unloadBlockSlice48FullBuffers(params: *zml.Bufferized(BlockSlice48FullParams)) void {
+    inline for (0..48) |i| {
+        unloadBlock0FullBuffers(&params.blocks[i]);
+    }
+}
+
 /// Native 8-block full stream forward using inline AdaLN computation.
 fn forwardBlockSlice8NativeImpl(
     comptime audio_ff_residual_f32: bool,
     comptime audio_all_residuals_f32: bool,
+    comptime video_all_residuals_f32: bool,
     vx_in: Tensor,
     ax_in: Tensor,
     video_timesteps: Tensor,
@@ -2817,6 +3408,8 @@ fn forwardBlockSlice8NativeImpl(
             block.forwardNativeAudioAllResidualsF32(h_v, h_a, shared, block_params)
         else if (audio_ff_residual_f32)
             block.forwardNativeAudioFFResidualF32(h_v, h_a, shared, block_params)
+        else if (video_all_residuals_f32)
+            block.forwardNativeVideoAllResidualsF32(h_v, h_a, shared, block_params)
         else
             block.forwardNative(h_v, h_a, shared, block_params);
         h_v = out.vx_out;
@@ -2853,6 +3446,7 @@ pub fn forwardBlockSlice8Native(
     params: BlockSlice8FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     return forwardBlockSlice8NativeImpl(
+        false,
         false,
         false,
         vx_in,
@@ -2919,6 +3513,7 @@ pub fn forwardBlockSlice8NativeWithTextMasks(
     return forwardBlockSlice8NativeImpl(
         false,
         false,
+        false,
         vx_in,
         ax_in,
         video_timesteps,
@@ -2981,6 +3576,7 @@ pub fn forwardBlockSlice8NativeWithAVMasks(
     params: BlockSlice8FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     return forwardBlockSlice8NativeImpl(
+        false,
         false,
         false,
         vx_in,
@@ -3047,6 +3643,7 @@ pub fn forwardBlockSlice8NativeWithAllMasks(
     params: BlockSlice8FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     return forwardBlockSlice8NativeImpl(
+        false,
         false,
         false,
         vx_in,
@@ -3117,6 +3714,7 @@ pub fn forwardBlockSlice8NativeWithAllMasksAudioFFResidualF32(
     return forwardBlockSlice8NativeImpl(
         true,
         false,
+        false,
         vx_in,
         ax_in,
         video_timesteps,
@@ -3185,6 +3783,7 @@ pub fn forwardBlockSlice8NativeWithAllMasksAudioAllResidualsF32(
     return forwardBlockSlice8NativeImpl(
         false,
         true,
+        false,
         vx_in,
         ax_in,
         video_timesteps,
@@ -3338,3 +3937,51 @@ pub fn forwardBlockSlice8NativeAudio(
         params,
     ).ax_out;
 }
+
+// ---------------------------------------------------------------------------
+// Full transformer step: 48 blocks + OutputProjection (Step 1 parity)
+// ---------------------------------------------------------------------------
+
+/// Parameters for a full velocity_model forward pass (blocks + output projection).
+/// Adaln modules are NOT included — their outputs are provided as inputs (SharedInputs).
+pub const FullStepParams = struct {
+    blocks: [48]Block0FullParams,
+    norm_proj_out: OutputProjection.Params,
+    audio_norm_proj_out: OutputProjection.Params,
+};
+
+pub fn initFullStepParams(store: zml.io.TensorStore.View) FullStepParams {
+    var out: FullStepParams = undefined;
+    const root = selectTransformerRoot(store);
+    const blocks_store = root.withPrefix("transformer_blocks");
+    inline for (0..48) |i| {
+        out.blocks[i] = BasicAVTransformerBlock.initParams(blocks_store.withLayer(i));
+    }
+    out.norm_proj_out = .{
+        .scale_shift_table = root.createTensor("scale_shift_table", .{ .n_ssv, .d }, null),
+        .proj_out = .init(
+            root.withPrefix("proj_out").createTensor("weight", .{ .d_out, .d }, null),
+            root.withPrefix("proj_out").createTensor("bias", .{.d_out}, null),
+            .d,
+        ),
+    };
+    out.audio_norm_proj_out = .{
+        .scale_shift_table = root.createTensor("audio_scale_shift_table", .{ .n_ssv, .d }, null),
+        .proj_out = .init(
+            root.withPrefix("audio_proj_out").createTensor("weight", .{ .d_out, .d }, null),
+            root.withPrefix("audio_proj_out").createTensor("bias", .{.d_out}, null),
+            .d,
+        ),
+    };
+    return out;
+}
+
+pub fn unloadFullStepBuffers(params: *zml.Bufferized(FullStepParams)) void {
+    inline for (0..48) |i| {
+        unloadBlock0FullBuffers(&params.blocks[i]);
+    }
+    OutputProjection.Params.unloadBuffers(&params.norm_proj_out);
+    OutputProjection.Params.unloadBuffers(&params.audio_norm_proj_out);
+}
+
+

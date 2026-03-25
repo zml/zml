@@ -157,6 +157,22 @@ def main() -> None:
         vx_block_in = aux(block_key, "vx_in")
         ax_block_out = aux(block_key, "ax_out")
         ax_block_in = aux(block_key, "ax_in")
+        norm_vx = mod_input(block_key, "attn1")
+        v_text_x = mod_input(block_key, "attn2")
+        text_ca_vx_in = aux(block_key, "text_ca_vx_in")
+        v_text_ctx = _tensor(mod_kwargs(block_key, "attn2").get("context"))
+        text_ca_out = aux(block_key, "text_ca_out")
+        a2v_delta = aux(block_key, "a2v_delta")
+        a2v_x = mod_input(block_key, "audio_to_video_attn")
+        a2v_ctx = _tensor(mod_kwargs(block_key, "audio_to_video_attn").get("context"))
+        a2v_gate = aux(block_key, "a2v_gate")
+        vx_scaled = mod_input(block_key, "ff")
+        vgate_msa = aux(block_key, "vgate_msa")
+        vgate_mlp = aux(block_key, "vgate_mlp")
+        vgate_text_ca = aux(block_key, "vgate_text_ca")
+        video_ff_net0_proj_out = mod_output(block_key, "ff.net.0.proj")
+        video_ff_net0_out = mod_output(block_key, "ff.net.0")
+        video_ff_out = mod_output(block_key, "ff")
         norm_ax = mod_input(block_key, "audio_attn1")
         a_text_x = mod_input(block_key, "audio_attn2")
         # For forwardBlock0AudioStream exact-input parity we need the context tensor
@@ -184,6 +200,40 @@ def main() -> None:
             tensors[f"block_slice_native.ax_out_block_{local_idx}"] = ax_block_out
         if ax_block_in is not None:
             tensors[f"block_slice_native.ax_in_block_{local_idx}"] = ax_block_in
+        if norm_vx is not None:
+            tensors[f"block_slice_native.norm_vx_block_{local_idx}"] = norm_vx
+        if v_text_x is not None:
+            tensors[f"block_slice_native.v_text_x_block_{local_idx}"] = v_text_x
+        if text_ca_vx_in is not None and text_ca_out is not None:
+            h_after_text_ca = text_ca_vx_in + text_ca_out
+            vx_norm3 = torch.nn.functional.rms_norm(
+                h_after_text_ca,
+                h_after_text_ca.shape[-1:],
+                eps=1e-6,
+            )
+            tensors[f"block_slice_native.vx_norm3_block_{local_idx}"] = _owned_tensor(vx_norm3)
+        if v_text_ctx is not None:
+            tensors[f"block_slice_native.v_text_ctx_block_{local_idx}"] = v_text_ctx
+        if a2v_x is not None:
+            tensors[f"block_slice_native.a2v_x_block_{local_idx}"] = a2v_x
+        if a2v_ctx is not None:
+            tensors[f"block_slice_native.a2v_ctx_block_{local_idx}"] = a2v_ctx
+        if a2v_gate is not None:
+            tensors[f"block_slice_native.a2v_gate_block_{local_idx}"] = a2v_gate
+        if vx_scaled is not None:
+            tensors[f"block_slice_native.vx_scaled_block_{local_idx}"] = vx_scaled
+        if video_ff_out is not None:
+            tensors[f"block_slice_native.video_ff_out_block_{local_idx}"] = video_ff_out
+        if video_ff_net0_proj_out is not None:
+            tensors[f"block_slice_native.video_ff_net0_proj_out_block_{local_idx}"] = video_ff_net0_proj_out
+        if video_ff_net0_out is not None:
+            tensors[f"block_slice_native.video_ff_net0_out_block_{local_idx}"] = video_ff_net0_out
+        if vgate_msa is not None:
+            tensors[f"block_slice_native.vgate_msa_block_{local_idx}"] = vgate_msa
+        if vgate_mlp is not None:
+            tensors[f"block_slice_native.vgate_mlp_block_{local_idx}"] = vgate_mlp
+        if vgate_text_ca is not None:
+            tensors[f"block_slice_native.vgate_text_ca_block_{local_idx}"] = vgate_text_ca
         if norm_ax is not None:
             tensors[f"block_slice_native.norm_ax_block_{local_idx}"] = norm_ax
         if a_text_x is not None:
@@ -210,6 +260,30 @@ def main() -> None:
             tensors[f"block_slice_native.agate_mlp_block_{local_idx}"] = agate_mlp
         if agate_text_ca is not None:
             tensors[f"block_slice_native.agate_text_ca_block_{local_idx}"] = agate_text_ca
+
+        if (
+            local_idx == 0
+            and vx_block_in is not None
+            and text_ca_out is not None
+            and a2v_delta is not None
+            and vgate_msa is not None
+        ):
+            attn1_out = mod_output(block_key, "attn1")
+            if attn1_out is not None:
+                h_after_msa = vx_block_in + attn1_out * vgate_msa
+                tensors["block_slice_native.vx_after_msa_block_0"] = _owned_tensor(h_after_msa)
+
+                if vgate_text_ca is not None:
+                    h_after_text_ca = h_after_msa + text_ca_out * vgate_text_ca
+                else:
+                    h_after_text_ca = h_after_msa + text_ca_out
+                h_after_a2v = h_after_text_ca + a2v_delta
+                tensors["block_slice_native.vx_after_text_ca_block_0"] = _owned_tensor(h_after_text_ca)
+                tensors["block_slice_native.vx_after_a2v_block_0"] = _owned_tensor(h_after_a2v)
+
+                if video_ff_out is not None and vgate_mlp is not None:
+                    h_after_ff = h_after_a2v + video_ff_out * vgate_mlp
+                    tensors["block_slice_native.vx_after_ff_block_0"] = _owned_tensor(h_after_ff)
 
         # Block-0 only: export reference intermediate audio states to localize where
         # native math diverges from Python.

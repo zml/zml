@@ -78,6 +78,21 @@ const CheckContext = struct {
     ax_out_ref_buf: zml.Buffer,
     vx_block_out_ref_bufs: [8]?zml.Buffer,
     ax_block_out_ref_bufs: [8]?zml.Buffer,
+    vx_in_block_bufs: [8]?zml.Buffer,
+    norm_vx_block_bufs: [8]?zml.Buffer,
+    v_text_x_block_bufs: [8]?zml.Buffer,
+    vx_norm3_block_bufs: [8]?zml.Buffer,
+    v_text_ctx_block_bufs: [8]?zml.Buffer,
+    a2v_x_block_bufs: [8]?zml.Buffer,
+    a2v_ctx_block_bufs: [8]?zml.Buffer,
+    a2v_gate_block_bufs: [8]?zml.Buffer,
+    vx_scaled_block_bufs: [8]?zml.Buffer,
+    vgate_msa_block_bufs: [8]?zml.Buffer,
+    vgate_mlp_block_bufs: [8]?zml.Buffer,
+    vgate_text_ca_block_bufs: [8]?zml.Buffer,
+    video_ff_out_block_bufs: [8]?zml.Buffer,
+    video_ff_net0_proj_out_block_bufs: [8]?zml.Buffer,
+    video_ff_net0_out_block_bufs: [8]?zml.Buffer,
     ax_in_block_bufs: [8]?zml.Buffer,
     norm_ax_block_bufs: [8]?zml.Buffer,
     a_text_x_block_bufs: [8]?zml.Buffer,
@@ -92,6 +107,10 @@ const CheckContext = struct {
     audio_ff_out_block_bufs: [8]?zml.Buffer,
     audio_ff_net0_proj_out_block_bufs: [8]?zml.Buffer,
     audio_ff_net0_out_block_bufs: [8]?zml.Buffer,
+    vx_after_msa_block0_ref_buf: ?zml.Buffer,
+    vx_after_text_ca_block0_ref_buf: ?zml.Buffer,
+    vx_after_a2v_block0_ref_buf: ?zml.Buffer,
+    vx_after_ff_block0_ref_buf: ?zml.Buffer,
     ax_after_msa_block0_ref_buf: ?zml.Buffer,
     ax_after_text_ca_block0_ref_buf: ?zml.Buffer,
     ax_after_v2a_block0_ref_buf: ?zml.Buffer,
@@ -140,6 +159,51 @@ const CheckContext = struct {
         for (&self.ax_block_out_ref_bufs) |*buf| {
             if (buf.*) |*b| b.deinit();
         }
+        for (&self.vx_in_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.norm_vx_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.v_text_x_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.vx_norm3_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.v_text_ctx_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.a2v_x_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.a2v_ctx_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.a2v_gate_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.vx_scaled_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.vgate_msa_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.vgate_mlp_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.vgate_text_ca_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.video_ff_out_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.video_ff_net0_proj_out_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
+        for (&self.video_ff_net0_out_block_bufs) |*buf| {
+            if (buf.*) |*b| b.deinit();
+        }
         for (&self.ax_in_block_bufs) |*buf| {
             if (buf.*) |*b| b.deinit();
         }
@@ -182,6 +246,10 @@ const CheckContext = struct {
         for (&self.audio_ff_net0_out_block_bufs) |*buf| {
             if (buf.*) |*b| b.deinit();
         }
+        if (self.vx_after_msa_block0_ref_buf) |*b| b.deinit();
+        if (self.vx_after_text_ca_block0_ref_buf) |*b| b.deinit();
+        if (self.vx_after_a2v_block0_ref_buf) |*b| b.deinit();
+        if (self.vx_after_ff_block0_ref_buf) |*b| b.deinit();
         if (self.ax_after_msa_block0_ref_buf) |*b| b.deinit();
         if (self.ax_after_text_ca_block0_ref_buf) |*b| b.deinit();
         if (self.ax_after_v2a_block0_ref_buf) |*b| b.deinit();
@@ -341,6 +409,36 @@ const CheckContext = struct {
                 if (buf.*) |*b| b.deinit();
             }
         }
+        var vx_in_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vx_in_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var norm_vx_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&norm_vx_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var v_text_x_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&v_text_x_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var vx_norm3_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vx_norm3_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var v_text_ctx_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&v_text_ctx_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var a2v_x_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&a2v_x_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var a2v_ctx_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&a2v_ctx_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var a2v_gate_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&a2v_gate_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var vx_scaled_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vx_scaled_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var vgate_msa_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vgate_msa_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var vgate_mlp_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vgate_mlp_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var vgate_text_ca_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&vgate_text_ca_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var video_ff_out_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&video_ff_out_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var video_ff_net0_proj_out_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&video_ff_net0_proj_out_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
+        var video_ff_net0_out_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
+        errdefer for (&video_ff_net0_out_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
         var ax_in_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
         errdefer for (&ax_in_block_bufs) |*buf| if (buf.*) |*b| b.deinit();
         var norm_ax_block_bufs: [8]?zml.Buffer = .{null, null, null, null, null, null, null, null};
@@ -380,6 +478,96 @@ const CheckContext = struct {
             defer allocator.free(key);
             if (fix_store.view().hasKey(key)) {
                 ax_block_out_ref_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, key, sharding);
+            }
+
+            const vx_in_key = try std.fmt.allocPrint(allocator, "block_slice_native.vx_in_block_{d}", .{i});
+            defer allocator.free(vx_in_key);
+            if (fix_store.view().hasKey(vx_in_key)) {
+                vx_in_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vx_in_key, sharding);
+            }
+
+            const norm_vx_key = try std.fmt.allocPrint(allocator, "block_slice_native.norm_vx_block_{d}", .{i});
+            defer allocator.free(norm_vx_key);
+            if (fix_store.view().hasKey(norm_vx_key)) {
+                norm_vx_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, norm_vx_key, sharding);
+            }
+
+            const v_text_x_key = try std.fmt.allocPrint(allocator, "block_slice_native.v_text_x_block_{d}", .{i});
+            defer allocator.free(v_text_x_key);
+            if (fix_store.view().hasKey(v_text_x_key)) {
+                v_text_x_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, v_text_x_key, sharding);
+            }
+
+            const vx_norm3_key = try std.fmt.allocPrint(allocator, "block_slice_native.vx_norm3_block_{d}", .{i});
+            defer allocator.free(vx_norm3_key);
+            if (fix_store.view().hasKey(vx_norm3_key)) {
+                vx_norm3_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vx_norm3_key, sharding);
+            }
+
+            const v_text_ctx_key = try std.fmt.allocPrint(allocator, "block_slice_native.v_text_ctx_block_{d}", .{i});
+            defer allocator.free(v_text_ctx_key);
+            if (fix_store.view().hasKey(v_text_ctx_key)) {
+                v_text_ctx_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, v_text_ctx_key, sharding);
+            }
+
+            const a2v_x_key = try std.fmt.allocPrint(allocator, "block_slice_native.a2v_x_block_{d}", .{i});
+            defer allocator.free(a2v_x_key);
+            if (fix_store.view().hasKey(a2v_x_key)) {
+                a2v_x_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, a2v_x_key, sharding);
+            }
+
+            const a2v_ctx_key = try std.fmt.allocPrint(allocator, "block_slice_native.a2v_ctx_block_{d}", .{i});
+            defer allocator.free(a2v_ctx_key);
+            if (fix_store.view().hasKey(a2v_ctx_key)) {
+                a2v_ctx_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, a2v_ctx_key, sharding);
+            }
+
+            const a2v_gate_key = try std.fmt.allocPrint(allocator, "block_slice_native.a2v_gate_block_{d}", .{i});
+            defer allocator.free(a2v_gate_key);
+            if (fix_store.view().hasKey(a2v_gate_key)) {
+                a2v_gate_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, a2v_gate_key, sharding);
+            }
+
+            const vx_scaled_key = try std.fmt.allocPrint(allocator, "block_slice_native.vx_scaled_block_{d}", .{i});
+            defer allocator.free(vx_scaled_key);
+            if (fix_store.view().hasKey(vx_scaled_key)) {
+                vx_scaled_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vx_scaled_key, sharding);
+            }
+
+            const video_ff_out_key = try std.fmt.allocPrint(allocator, "block_slice_native.video_ff_out_block_{d}", .{i});
+            defer allocator.free(video_ff_out_key);
+            if (fix_store.view().hasKey(video_ff_out_key)) {
+                video_ff_out_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, video_ff_out_key, sharding);
+            }
+
+            const video_ff_net0_proj_out_key = try std.fmt.allocPrint(allocator, "block_slice_native.video_ff_net0_proj_out_block_{d}", .{i});
+            defer allocator.free(video_ff_net0_proj_out_key);
+            if (fix_store.view().hasKey(video_ff_net0_proj_out_key)) {
+                video_ff_net0_proj_out_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, video_ff_net0_proj_out_key, sharding);
+            }
+
+            const video_ff_net0_out_key = try std.fmt.allocPrint(allocator, "block_slice_native.video_ff_net0_out_block_{d}", .{i});
+            defer allocator.free(video_ff_net0_out_key);
+            if (fix_store.view().hasKey(video_ff_net0_out_key)) {
+                video_ff_net0_out_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, video_ff_net0_out_key, sharding);
+            }
+
+            const vgate_msa_key = try std.fmt.allocPrint(allocator, "block_slice_native.vgate_msa_block_{d}", .{i});
+            defer allocator.free(vgate_msa_key);
+            if (fix_store.view().hasKey(vgate_msa_key)) {
+                vgate_msa_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vgate_msa_key, sharding);
+            }
+
+            const vgate_mlp_key = try std.fmt.allocPrint(allocator, "block_slice_native.vgate_mlp_block_{d}", .{i});
+            defer allocator.free(vgate_mlp_key);
+            if (fix_store.view().hasKey(vgate_mlp_key)) {
+                vgate_mlp_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vgate_mlp_key, sharding);
+            }
+
+            const vgate_text_ca_key = try std.fmt.allocPrint(allocator, "block_slice_native.vgate_text_ca_block_{d}", .{i});
+            defer allocator.free(vgate_text_ca_key);
+            if (fix_store.view().hasKey(vgate_text_ca_key)) {
+                vgate_text_ca_block_bufs[i] = try loadBuf(allocator, io, platform, &fix_store, vgate_text_ca_key, sharding);
             }
 
             const ax_in_key = try std.fmt.allocPrint(allocator, "block_slice_native.ax_in_block_{d}", .{i});
@@ -473,6 +661,30 @@ const CheckContext = struct {
             ax_after_msa_block0_ref_buf = try loadBuf(allocator, io, platform, &fix_store, "block_slice_native.ax_after_msa_block_0", sharding);
         }
 
+        var vx_after_msa_block0_ref_buf: ?zml.Buffer = null;
+        errdefer if (vx_after_msa_block0_ref_buf) |*b| b.deinit();
+        if (fix_store.view().hasKey("block_slice_native.vx_after_msa_block_0")) {
+            vx_after_msa_block0_ref_buf = try loadBuf(allocator, io, platform, &fix_store, "block_slice_native.vx_after_msa_block_0", sharding);
+        }
+
+        var vx_after_text_ca_block0_ref_buf: ?zml.Buffer = null;
+        errdefer if (vx_after_text_ca_block0_ref_buf) |*b| b.deinit();
+        if (fix_store.view().hasKey("block_slice_native.vx_after_text_ca_block_0")) {
+            vx_after_text_ca_block0_ref_buf = try loadBuf(allocator, io, platform, &fix_store, "block_slice_native.vx_after_text_ca_block_0", sharding);
+        }
+
+        var vx_after_a2v_block0_ref_buf: ?zml.Buffer = null;
+        errdefer if (vx_after_a2v_block0_ref_buf) |*b| b.deinit();
+        if (fix_store.view().hasKey("block_slice_native.vx_after_a2v_block_0")) {
+            vx_after_a2v_block0_ref_buf = try loadBuf(allocator, io, platform, &fix_store, "block_slice_native.vx_after_a2v_block_0", sharding);
+        }
+
+        var vx_after_ff_block0_ref_buf: ?zml.Buffer = null;
+        errdefer if (vx_after_ff_block0_ref_buf) |*b| b.deinit();
+        if (fix_store.view().hasKey("block_slice_native.vx_after_ff_block_0")) {
+            vx_after_ff_block0_ref_buf = try loadBuf(allocator, io, platform, &fix_store, "block_slice_native.vx_after_ff_block_0", sharding);
+        }
+
         var ax_after_text_ca_block0_ref_buf: ?zml.Buffer = null;
         errdefer if (ax_after_text_ca_block0_ref_buf) |*b| b.deinit();
         if (fix_store.view().hasKey("block_slice_native.ax_after_text_ca_block_0")) {
@@ -552,6 +764,21 @@ const CheckContext = struct {
             .ax_out_ref_buf = ax_out_ref_buf,
             .vx_block_out_ref_bufs = vx_block_out_ref_bufs,
             .ax_block_out_ref_bufs = ax_block_out_ref_bufs,
+            .vx_in_block_bufs = vx_in_block_bufs,
+            .norm_vx_block_bufs = norm_vx_block_bufs,
+            .v_text_x_block_bufs = v_text_x_block_bufs,
+            .vx_norm3_block_bufs = vx_norm3_block_bufs,
+            .v_text_ctx_block_bufs = v_text_ctx_block_bufs,
+            .a2v_x_block_bufs = a2v_x_block_bufs,
+            .a2v_ctx_block_bufs = a2v_ctx_block_bufs,
+            .a2v_gate_block_bufs = a2v_gate_block_bufs,
+            .vx_scaled_block_bufs = vx_scaled_block_bufs,
+            .vgate_msa_block_bufs = vgate_msa_block_bufs,
+            .vgate_mlp_block_bufs = vgate_mlp_block_bufs,
+            .vgate_text_ca_block_bufs = vgate_text_ca_block_bufs,
+            .video_ff_out_block_bufs = video_ff_out_block_bufs,
+            .video_ff_net0_proj_out_block_bufs = video_ff_net0_proj_out_block_bufs,
+            .video_ff_net0_out_block_bufs = video_ff_net0_out_block_bufs,
             .ax_in_block_bufs = ax_in_block_bufs,
             .norm_ax_block_bufs = norm_ax_block_bufs,
             .a_text_x_block_bufs = a_text_x_block_bufs,
@@ -566,6 +793,10 @@ const CheckContext = struct {
             .audio_ff_out_block_bufs = audio_ff_out_block_bufs,
             .audio_ff_net0_proj_out_block_bufs = audio_ff_net0_proj_out_block_bufs,
             .audio_ff_net0_out_block_bufs = audio_ff_net0_out_block_bufs,
+            .vx_after_msa_block0_ref_buf = vx_after_msa_block0_ref_buf,
+            .vx_after_text_ca_block0_ref_buf = vx_after_text_ca_block0_ref_buf,
+            .vx_after_a2v_block0_ref_buf = vx_after_a2v_block0_ref_buf,
+            .vx_after_ff_block0_ref_buf = vx_after_ff_block0_ref_buf,
             .ax_after_msa_block0_ref_buf = ax_after_msa_block0_ref_buf,
             .ax_after_text_ca_block0_ref_buf = ax_after_text_ca_block0_ref_buf,
             .ax_after_v2a_block0_ref_buf = ax_after_v2a_block0_ref_buf,
@@ -701,6 +932,138 @@ fn logAudioBlock0StageDiagnostics(ctx: *CheckContext) !void {
         const ff_gelu_metrics = try check_utils.compareBuffers(ctx.io, out.ff_gelu_out, ff_gelu_ref, 0.2, 0.01);
         std.log.info(
             "Audio block 0 stage ff_gelu_out: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ ff_gelu_metrics.close_fraction, ff_gelu_metrics.max_abs_error, ff_gelu_metrics.mean_abs_error },
+        );
+    }
+}
+
+fn logVideoBlock0StageDiagnostics(ctx: *CheckContext) !void {
+    if (ctx.vx_after_msa_block0_ref_buf == null or
+        ctx.vx_after_text_ca_block0_ref_buf == null or
+        ctx.vx_after_a2v_block0_ref_buf == null or
+        ctx.vx_in_block_bufs[0] == null or
+        ctx.norm_vx_block_bufs[0] == null or
+        ctx.v_text_x_block_bufs[0] == null or
+        ctx.v_text_ctx_block_bufs[0] == null or
+        ctx.a2v_x_block_bufs[0] == null or
+        ctx.a2v_ctx_block_bufs[0] == null or
+        ctx.a2v_gate_block_bufs[0] == null or
+        ctx.a2v_mask_block_bufs[0] == null or
+        ctx.vx_scaled_block_bufs[0] == null or
+        ctx.vgate_msa_block_bufs[0] == null or
+        ctx.vgate_mlp_block_bufs[0] == null or
+        ctx.vgate_text_ca_block_bufs[0] == null)
+    {
+        std.log.info("Block-0 video stage diagnostics unavailable (missing fixture keys)", .{});
+        return;
+    }
+
+    std.log.info("Running block-0 video stage diagnostics...", .{});
+    var exe = try ctx.platform.compileFn(
+        ctx.allocator,
+        ctx.io,
+        model.forwardBlock0VideoStreamStages,
+        .{
+            zml.Tensor.fromShape(ctx.vx_in_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.norm_vx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_text_x_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.vgate_msa_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vgate_text_ca_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_text_ctx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_x_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_ctx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_gate_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_mask_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vx_scaled_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vgate_mlp_block_bufs[0].?.shape()),
+            ctx.params_shape.blocks[0],
+        },
+        .{ .shardings = &.{ctx.sharding} },
+    );
+    defer exe.deinit();
+
+    var args = try exe.args(ctx.allocator);
+    defer args.deinit(ctx.allocator);
+    var results = try exe.results(ctx.allocator);
+    defer results.deinit(ctx.allocator);
+
+    args.set(.{
+        ctx.vx_in_block_bufs[0].?,
+        ctx.norm_vx_block_bufs[0].?,
+        ctx.v_text_x_block_bufs[0].?,
+        ctx.v_pe_cos_buf,
+        ctx.v_pe_sin_buf,
+        ctx.vgate_msa_block_bufs[0].?,
+        ctx.vgate_text_ca_block_bufs[0].?,
+        ctx.v_text_ctx_block_bufs[0].?,
+        ctx.a2v_x_block_bufs[0].?,
+        ctx.a2v_ctx_block_bufs[0].?,
+        ctx.a2v_pe_cos_buf,
+        ctx.a2v_pe_sin_buf,
+        ctx.a2v_k_pe_cos_buf,
+        ctx.a2v_k_pe_sin_buf,
+        ctx.a2v_gate_block_bufs[0].?,
+        ctx.a2v_mask_block_bufs[0].?,
+        ctx.vx_scaled_block_bufs[0].?,
+        ctx.vgate_mlp_block_bufs[0].?,
+        ctx.params_bufs.blocks[0],
+    });
+    exe.call(args, &results);
+
+    const out = results.get(zml.Bufferized(model.Block0VideoStageOutputs));
+
+    const msa_metrics = try check_utils.compareBuffers(ctx.io, out.vx_after_msa, ctx.vx_after_msa_block0_ref_buf.?, 0.2, 0.01);
+    std.log.info(
+        "Video block 0 stage after_msa: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+        .{ msa_metrics.close_fraction, msa_metrics.max_abs_error, msa_metrics.mean_abs_error },
+    );
+
+    const text_ca_metrics = try check_utils.compareBuffers(ctx.io, out.vx_after_text_ca, ctx.vx_after_text_ca_block0_ref_buf.?, 0.2, 0.01);
+    std.log.info(
+        "Video block 0 stage after_text_ca: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+        .{ text_ca_metrics.close_fraction, text_ca_metrics.max_abs_error, text_ca_metrics.mean_abs_error },
+    );
+
+    const a2v_metrics = try check_utils.compareBuffers(ctx.io, out.vx_after_a2v, ctx.vx_after_a2v_block0_ref_buf.?, 0.2, 0.01);
+    std.log.info(
+        "Video block 0 stage after_a2v: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+        .{ a2v_metrics.close_fraction, a2v_metrics.max_abs_error, a2v_metrics.mean_abs_error },
+    );
+
+    if (ctx.vx_after_ff_block0_ref_buf) |vx_after_ff_ref| {
+        const ff_metrics = try check_utils.compareBuffers(ctx.io, out.vx_out, vx_after_ff_ref, 0.2, 0.01);
+        std.log.info(
+            "Video block 0 stage after_ff: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ ff_metrics.close_fraction, ff_metrics.max_abs_error, ff_metrics.mean_abs_error },
+        );
+    }
+
+    if (ctx.video_ff_out_block_bufs[0]) |ff_out_ref| {
+        const ff_out_metrics = try check_utils.compareBuffers(ctx.io, out.ff_out, ff_out_ref, 0.2, 0.01);
+        std.log.info(
+            "Video block 0 stage ff_out: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ ff_out_metrics.close_fraction, ff_out_metrics.max_abs_error, ff_out_metrics.mean_abs_error },
+        );
+    }
+
+    if (ctx.video_ff_net0_proj_out_block_bufs[0]) |ff_proj_ref| {
+        const ff_proj_metrics = try check_utils.compareBuffers(ctx.io, out.ff_proj_out, ff_proj_ref, 0.2, 0.01);
+        std.log.info(
+            "Video block 0 stage ff_proj_out: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ ff_proj_metrics.close_fraction, ff_proj_metrics.max_abs_error, ff_proj_metrics.mean_abs_error },
+        );
+    }
+
+    if (ctx.video_ff_net0_out_block_bufs[0]) |ff_gelu_ref| {
+        const ff_gelu_metrics = try check_utils.compareBuffers(ctx.io, out.ff_gelu_out, ff_gelu_ref, 0.2, 0.01);
+        std.log.info(
+            "Video block 0 stage ff_gelu_out: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
             .{ ff_gelu_metrics.close_fraction, ff_gelu_metrics.max_abs_error, ff_gelu_metrics.mean_abs_error },
         );
     }
@@ -1060,6 +1423,102 @@ fn logAudioBlockExactInputs(ctx: *CheckContext, use_extended_error_stats: bool) 
     }
 }
 
+fn logVideoBlockExactInputs(ctx: *CheckContext, use_extended_error_stats: bool) !void {
+    if (ctx.vx_in_block_bufs[0] == null or ctx.vgate_text_ca_block_bufs[0] == null) return;
+
+    std.log.info("Running per-block video exact-input diagnostics...", .{});
+    var video_exe = try ctx.platform.compileFn(
+        ctx.allocator,
+        ctx.io,
+        model.forwardBlock0VideoStream,
+        .{
+            zml.Tensor.fromShape(ctx.vx_in_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.norm_vx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_text_x_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.vgate_msa_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vgate_text_ca_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v_text_ctx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_x_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_ctx_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_gate_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.a2v_mask_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vx_scaled_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.vgate_mlp_block_bufs[0].?.shape()),
+            ctx.params_shape.blocks[0],
+        },
+        .{ .shardings = &.{ctx.sharding} },
+    );
+    defer video_exe.deinit();
+
+    for (0..8) |i| {
+        if (ctx.vx_in_block_bufs[i] == null or
+            ctx.norm_vx_block_bufs[i] == null or
+            ctx.v_text_x_block_bufs[i] == null or
+            ctx.v_text_ctx_block_bufs[i] == null or
+            ctx.a2v_x_block_bufs[i] == null or
+            ctx.a2v_ctx_block_bufs[i] == null or
+            ctx.a2v_gate_block_bufs[i] == null or
+            ctx.a2v_mask_block_bufs[i] == null or
+            ctx.vx_scaled_block_bufs[i] == null or
+            ctx.vgate_msa_block_bufs[i] == null or
+            ctx.vgate_mlp_block_bufs[i] == null or
+            ctx.vgate_text_ca_block_bufs[i] == null or
+            ctx.vx_block_out_ref_bufs[i] == null)
+        {
+            std.log.info("Video block {d} exact-input diagnostics unavailable", .{i});
+            continue;
+        }
+
+        var args = try video_exe.args(ctx.allocator);
+        defer args.deinit(ctx.allocator);
+        var results = try video_exe.results(ctx.allocator);
+        defer results.deinit(ctx.allocator);
+
+        args.set(.{
+            ctx.vx_in_block_bufs[i].?,
+            ctx.norm_vx_block_bufs[i].?,
+            ctx.v_text_x_block_bufs[i].?,
+            ctx.v_pe_cos_buf,
+            ctx.v_pe_sin_buf,
+            ctx.vgate_msa_block_bufs[i].?,
+            ctx.vgate_text_ca_block_bufs[i].?,
+            ctx.v_text_ctx_block_bufs[i].?,
+            ctx.a2v_x_block_bufs[i].?,
+            ctx.a2v_ctx_block_bufs[i].?,
+            ctx.a2v_pe_cos_buf,
+            ctx.a2v_pe_sin_buf,
+            ctx.a2v_k_pe_cos_buf,
+            ctx.a2v_k_pe_sin_buf,
+            ctx.a2v_gate_block_bufs[i].?,
+            ctx.a2v_mask_block_bufs[i].?,
+            ctx.vx_scaled_block_bufs[i].?,
+            ctx.vgate_mlp_block_bufs[i].?,
+            ctx.params_bufs.blocks[i],
+        });
+        video_exe.call(args, &results);
+
+        const out = results.get(zml.Buffer);
+        const metrics = try check_utils.compareBuffers(ctx.io, out, ctx.vx_block_out_ref_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} (exact inputs): close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, metrics.close_fraction, metrics.max_abs_error, metrics.mean_abs_error },
+        );
+        if (use_extended_error_stats) {
+            const ext = try check_utils.compareBuffersExtended(ctx.io, out, ctx.vx_block_out_ref_bufs[i].?, 0.2, 0.01);
+            std.log.info(
+                "Video block {d} exact ext: p50={d:.6} p90={d:.6} p99={d:.6} p99.9={d:.6} rel_l2={d:.6} cos={d:.8}",
+                .{ i, ext.abs_err_p50, ext.abs_err_p90, ext.abs_err_p99, ext.abs_err_p999, ext.rel_l2_error, ext.cosine_similarity },
+            );
+        }
+    }
+}
+
 fn logAudioNativeRecomputedIntermediates(ctx: *CheckContext) !void {
     if (ctx.a2v_mask_block_bufs[0] == null or ctx.v2a_mask_block_bufs[0] == null) return;
     if (ctx.norm_ax_block_bufs[0] == null or ctx.a_text_x_block_bufs[0] == null or ctx.v2a_x_block_bufs[0] == null or ctx.ax_scaled_block_bufs[0] == null) return;
@@ -1174,6 +1633,144 @@ fn logAudioNativeRecomputedIntermediates(ctx: *CheckContext) !void {
         std.log.info(
             "Audio block {d} native ax_scaled_ff: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
             .{ i, ax_scaled_metrics.close_fraction, ax_scaled_metrics.max_abs_error, ax_scaled_metrics.mean_abs_error },
+        );
+    }
+}
+
+fn logVideoNativeRecomputedIntermediates(ctx: *CheckContext) !void {
+    if (ctx.a2v_mask_block_bufs[0] == null or ctx.v2a_mask_block_bufs[0] == null) return;
+    if (ctx.norm_vx_block_bufs[0] == null or ctx.v_text_x_block_bufs[0] == null or ctx.a2v_x_block_bufs[0] == null or ctx.a2v_ctx_block_bufs[0] == null or ctx.a2v_gate_block_bufs[0] == null or ctx.vx_scaled_block_bufs[0] == null) return;
+
+    std.log.info("Running native recomputed video-intermediate diagnostics...", .{});
+    var exe = try ctx.platform.compileFn(
+        ctx.allocator,
+        ctx.io,
+        model.forwardBlock0NativeVideoIntermediatesWithAVMasks,
+        .{
+            zml.Tensor.fromShape(ctx.vx_in_buf.shape()),
+            zml.Tensor.fromShape(ctx.ax_in_buf.shape()),
+            zml.Tensor.fromShape(ctx.video_timesteps_buf.shape()),
+            zml.Tensor.fromShape(ctx.audio_timesteps_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_prompt_timestep_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_prompt_timestep_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_text_ctx_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_text_ctx_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_cross_ss_ts_buf.shape()),
+            zml.Tensor.fromShape(ctx.v_cross_gate_ts_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_cross_ss_ts_buf.shape()),
+            zml.Tensor.fromShape(ctx.a_cross_gate_ts_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_k_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.a2v_mask_block_bufs[0].?.shape()),
+            zml.Tensor.fromShape(ctx.v2a_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.v2a_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.v2a_k_pe_cos_buf.shape()),
+            zml.Tensor.fromShape(ctx.v2a_k_pe_sin_buf.shape()),
+            zml.Tensor.fromShape(ctx.v2a_mask_block_bufs[0].?.shape()),
+            ctx.params_shape.blocks[0],
+        },
+        .{ .shardings = &.{ctx.sharding} },
+    );
+    defer exe.deinit();
+
+    for (0..8) |i| {
+        if (ctx.ax_block_out_ref_bufs[i] == null or ctx.vx_block_out_ref_bufs[i] == null or
+            ctx.norm_vx_block_bufs[i] == null or ctx.v_text_x_block_bufs[i] == null or ctx.a2v_x_block_bufs[i] == null or ctx.a2v_ctx_block_bufs[i] == null or ctx.a2v_gate_block_bufs[i] == null or ctx.vx_scaled_block_bufs[i] == null or
+            ctx.a2v_mask_block_bufs[i] == null or ctx.v2a_mask_block_bufs[i] == null)
+        {
+            std.log.info("Video block {d} native-intermediate diagnostics unavailable", .{i});
+            continue;
+        }
+
+        const ref_vx_in = if (i == 0) ctx.vx_in_buf else ctx.vx_block_out_ref_bufs[i - 1].?;
+        const ref_ax_in = if (i == 0) ctx.ax_in_buf else ctx.ax_block_out_ref_bufs[i - 1].?;
+
+        var args = try exe.args(ctx.allocator);
+        defer args.deinit(ctx.allocator);
+        var results = try exe.results(ctx.allocator);
+        defer results.deinit(ctx.allocator);
+
+        args.set(.{
+            ref_vx_in,
+            ref_ax_in,
+            ctx.video_timesteps_buf,
+            ctx.audio_timesteps_buf,
+            ctx.v_prompt_timestep_buf,
+            ctx.a_prompt_timestep_buf,
+            ctx.v_pe_cos_buf,
+            ctx.v_pe_sin_buf,
+            ctx.a_pe_cos_buf,
+            ctx.a_pe_sin_buf,
+            ctx.v_text_ctx_buf,
+            ctx.a_text_ctx_buf,
+            ctx.v_cross_ss_ts_buf,
+            ctx.v_cross_gate_ts_buf,
+            ctx.a_cross_ss_ts_buf,
+            ctx.a_cross_gate_ts_buf,
+            ctx.a2v_pe_cos_buf,
+            ctx.a2v_pe_sin_buf,
+            ctx.a2v_k_pe_cos_buf,
+            ctx.a2v_k_pe_sin_buf,
+            ctx.a2v_mask_block_bufs[i].?,
+            ctx.v2a_pe_cos_buf,
+            ctx.v2a_pe_sin_buf,
+            ctx.v2a_k_pe_cos_buf,
+            ctx.v2a_k_pe_sin_buf,
+            ctx.v2a_mask_block_bufs[i].?,
+            ctx.params_bufs.blocks[i],
+        });
+        exe.call(args, &results);
+
+        const out = results.get(zml.Bufferized(model.Block0NativeVideoIntermediates));
+
+        const norm_metrics = try check_utils.compareBuffers(ctx.io, out.norm_vx, ctx.norm_vx_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native norm_vx: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, norm_metrics.close_fraction, norm_metrics.max_abs_error, norm_metrics.mean_abs_error },
+        );
+
+        const text_x_metrics = try check_utils.compareBuffers(ctx.io, out.v_text_x, ctx.v_text_x_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native v_text_x: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, text_x_metrics.close_fraction, text_x_metrics.max_abs_error, text_x_metrics.mean_abs_error },
+        );
+
+        if (ctx.vx_norm3_block_bufs[i]) |vx_norm3_ref| {
+            const vx_norm3_metrics = try check_utils.compareBuffers(ctx.io, out.vx_norm3, vx_norm3_ref, 0.2, 0.01);
+            std.log.info(
+                "Video block {d} native vx_norm3: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+                .{ i, vx_norm3_metrics.close_fraction, vx_norm3_metrics.max_abs_error, vx_norm3_metrics.mean_abs_error },
+            );
+        }
+
+        const a2v_x_metrics = try check_utils.compareBuffers(ctx.io, out.a2v_x, ctx.a2v_x_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native a2v_x: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, a2v_x_metrics.close_fraction, a2v_x_metrics.max_abs_error, a2v_x_metrics.mean_abs_error },
+        );
+
+        const a2v_ctx_metrics = try check_utils.compareBuffers(ctx.io, out.a2v_ctx, ctx.a2v_ctx_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native a2v_ctx: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, a2v_ctx_metrics.close_fraction, a2v_ctx_metrics.max_abs_error, a2v_ctx_metrics.mean_abs_error },
+        );
+
+        const a2v_gate_metrics = try check_utils.compareBuffers(ctx.io, out.a2v_gate, ctx.a2v_gate_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native a2v_gate: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, a2v_gate_metrics.close_fraction, a2v_gate_metrics.max_abs_error, a2v_gate_metrics.mean_abs_error },
+        );
+
+        const vx_scaled_metrics = try check_utils.compareBuffers(ctx.io, out.vx_scaled_ff, ctx.vx_scaled_block_bufs[i].?, 0.2, 0.01);
+        std.log.info(
+            "Video block {d} native vx_scaled_ff: close_fraction={d:.8} max_abs={d:.6} mean_abs={d:.6}",
+            .{ i, vx_scaled_metrics.close_fraction, vx_scaled_metrics.max_abs_error, vx_scaled_metrics.mean_abs_error },
         );
     }
 }
@@ -1503,6 +2100,9 @@ fn runCheck(
     });
     std.log.info("Native 8-block video parity PASSED", .{});
 
+    try logVideoBlock0StageDiagnostics(ctx);
+    try logVideoBlockExactInputs(ctx, use_extended_error_stats);
+    try logVideoNativeRecomputedIntermediates(ctx);
     try logAudioBlockLocalization(ctx, use_extended_error_stats);
     try logAudioBlockExactInputs(ctx, use_extended_error_stats);
     try logAudioBlock0StageDiagnostics(ctx);

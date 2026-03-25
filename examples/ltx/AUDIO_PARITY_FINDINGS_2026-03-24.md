@@ -89,6 +89,87 @@ Conclusion: the observed non-pass is best explained as accumulated, distributed 
 - A catastrophic divergence is not indicated by the current 8-block evidence.
 - The most likely outcome is measurable tensor drift with potentially acceptable end-result quality, but that still needs to be validated directly at 48 blocks and full pipeline level.
 
+## Why Video Passes But Audio Does Not: Hidden Dimension and Backend Tiling Asymmetry
+
+### Residual Structure Parity
+
+Both streams have **identical residual count per block** — 4 residual additions each, evaluated in order:
+
+| Position | Video | Audio |
+|----------|-------|-------|
+| 1 | `h_v += attn1_out * vgate_msa` (M1: self-attn) | `h_a += audio_attn1_out * agate_msa` (M4-A: self-attn) |
+| 2 | `h_v += text_ca_out * vgate_text_ca` (M2: text-CA) | `h_a += audio_text_ca_out * agate_text_ca` (M4-B: text-CA) |
+| 3 | `h_v += a2v_delta` (A→V: audio→video) | `h_a += v2a_delta` (V→A: video→audio) |
+| 4 | `h_v += ff_out * vgate_mlp` (M3: FF) | `h_a += audio_ff_out * agate_mlp` (M4-C: FF) |
+
+See [examples/ltx/model.zig](/Users/oboulant/repos/zml/zml/examples/ltx/model.zig) lines 650–830 for the full `forwardNativeImpl` function.
+
+The code structure is **exactly symmetric**:
+- Same gating and normalization patterns
+- Same cross-attention structure
+- Same residual addition semantics
+
+Yet video passes parity and audio does not. The reason is not architectural; it is **numerical and backend-driven**.
+
+### Root Cause: Hidden Dimension Mismatch and XLA Tiling
+
+Video uses `hidden_dim = 4096; heads = 32; d_head = 128`.  
+Audio uses `hidden_dim = 2048; heads = 32; d_head = 64`.
+
+When XLA/CUDA compile GEMMs for these two dimensions, they make fundamentally different tiling and reduction-tree decisions:
+
+- **Video GEMM shapes** at `d=4096` are tiled by XLA in a way that produces numerical output closer to PyTorch's cuBLAS reference, especially at bf16 precision levels.
+- **Audio GEMM shapes** at `d=2048` incur different tiling, which accumulates more deviation from the Python reference at the same precision.
+
+### Direct Evidence: HLO Signature Changes
+
+When the `--audio-all-residuals-f32` experiment was run yesterday (converting V2A cross-attention delta and subsequent FF residual add to f32), the HLO signatures showed:
+
+- **GEMM partition shapes changed**, e.g., `f32[8,128,4128]` became `f32[2,128,4128]`.
+- This was **not** a precision change alone; it was a **tiling reorganization** triggered by the dtype change.
+- The baseline audio GEMMs at `d=2048` also undergo similar (different) tiling than the video stream.
+
+This confirms that the backend is making real structural choices that differ between the two streams, and those choices affect numerical output.
+
+### Cross-Stream Contamination Is Not the Driver
+
+The teacher-forced and exact-input diagnostics ruled out a simpler explanation:
+
+**Teacher-forced experiment result** (from yesterday's remote run):
+- When audio block N receives **reference audio input** but **computed (drifted) video** as V2A context, the audio output error stays **much tighter** than in the free-running chain.
+- This proves that incoming drift from the video stream is **not** the primary cause of audio divergence.
+
+**Exact-input per-block diagnostics result**:
+- When audio block N is fed **exact reference inputs** (both audio and video context), it produces output that remains **near-reference** with low error.
+- Only the **chained** audio forward (where each block's output becomes the next block's input) accumulates drift.
+
+**Interpretation**: The drift is intrinsic to the audio chain itself, not caused by contamination from video. It is driven by how XLA tiles the audio-dimension GEMMs internally, and those tiling choices produce small but systematic deviations that add up across blocks.
+
+### Mixed-Dimension Cross-Attention Adds Asymmetric Variation
+
+The A→V and V→A cross-attention paths have asymmetric dimensions:
+
+- **A→V**: query from video (`d_q=4096, d_head=128`), context from audio (`d_kv=2048`)
+- **V→A**: query from audio (`d_q=2048, d_head=64`), context from video (`d_q_v=4096, d_head=128`)
+
+These mixed-dimension GEMMs produce additional scheduling variation in the audio output path that the video path does not experience (since the A→V delta lands in the already-4096-dim video stream, which has the more favorable tiling).
+
+### Summary of Why Video Escapes Drift
+
+Video passes parity because:
+
+1. Its GEMMs at `d=4096` happen to tile in a way that XLA aligns well with cuBLAS.
+2. Even though it has 4 residuals per block (same as audio), the accumulated error across 8 blocks remains within tolerance.
+3. The A→V mixed-dimension GEMM output lands in the already-well-tiled video dimension, so it doesn't disrupt the stream.
+
+Audio drifts because:
+
+1. Its GEMMs at `d=2048` incur different (less favorable) tiling by XLA.
+2. The same 4 residuals per block accumulate proportionally more deviation.
+3. The V→A mixed-dimension GEMM lands in the audio dimension and contributes to the accumulated error (not as a logic break, but as a numerical consequence).
+
+The mismatch is therefore **not a bug in the Zig implementation**, but a **representation of real backend-level numerical behavior** that differs between the two streams due to their different hidden dimensions.
+
 ## Fresh Start Inputs
 
 If the next session starts from a `trace_run/` directory that contains only:

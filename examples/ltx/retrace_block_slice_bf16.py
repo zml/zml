@@ -1,13 +1,11 @@
-"""Re-trace stage-2 blocks 0-7 with bf16 matmul accumulation enabled.
+"""Re-trace stage-2 blocks 0-7 with configurable CUDA matmul precision.
 
 Avoids loading the full 22B pipeline. Instead:
   1. Reads all input tensors from an existing fixture safetensors file.
   2. Constructs only 8 BasicAVTransformerBlocks with known architecture params.
   3. Loads weights from the already-exported 8-block merged checkpoint.
-  4. Runs the forward pass with:
-         torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-     which makes PyTorch use bf16 accumulation for bf16 matmuls, matching XLA's
-     dot_precision=.fast used by the ZML implementation.
+  4. Runs the forward pass with configurable CUDA backend flags so numerical
+      sensitivity can be compared against the ZML implementation.
   5. Saves a new fixture in the same format as export_block_slice_native_fixture.py.
 
 Usage:
@@ -17,10 +15,7 @@ Usage:
         --output-fixture /root/repos/LTX-2/trace_run/block_slice_native_0_7_lora0.0_t128_maskrefresh11.safetensors
 """
 
-# ── Precision flag: must be set BEFORE any CUDA ops ──────────────────────────
 import torch
-torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = True
-# ─────────────────────────────────────────────────────────────────────────────
 
 import argparse
 from pathlib import Path
@@ -52,13 +47,71 @@ def _prepare_pe_pair(cos: torch.Tensor, sin: torch.Tensor) -> tuple[torch.Tensor
     return cos, sin
 
 
+def _compare_tensors(name: str, actual: torch.Tensor, ref: torch.Tensor) -> None:
+    actual_f32 = actual.float()
+    ref_f32 = ref.float()
+    diff = (actual_f32 - ref_f32).abs()
+    denom = ref_f32.square().sum().sqrt().item()
+    rel_l2 = diff.square().sum().sqrt().item() / denom if denom > 0 else 0.0
+    close = torch.isclose(actual_f32, ref_f32, atol=0.2, rtol=0.01).float().mean().item()
+    p90 = torch.quantile(diff.flatten(), 0.9).item()
+    print(f"  {name}: close={close:.8f} rel_l2={rel_l2:.6f} p90={p90:.6f}")
+
+
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Re-trace blocks 0-7 with bf16 matmul accumulation")
+    p = argparse.ArgumentParser(description="Re-trace blocks 0-7 with configurable CUDA matmul precision")
     p.add_argument("--input-fixture", type=Path, required=True, help="Existing maskrefreshN.safetensors fixture")
     p.add_argument("--checkpoint", type=Path, required=True, help="stage2_blocks_0_7_lora0.0_merged.safetensors")
     p.add_argument("--output-fixture", type=Path, required=True, help="Output fixture path (maskrefresh11)")
     p.add_argument("--n-blocks", type=int, default=8, help="Number of blocks in the checkpoint (default 8)")
+    p.add_argument(
+        "--dtype",
+        choices=("bfloat16", "float32"),
+        default="bfloat16",
+        help="Execution dtype for block weights and activations (default: bfloat16)",
+    )
+    p.add_argument(
+        "--allow-tf32",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable TF32 matmul/cuDNN paths when available (default: true)",
+    )
+    p.add_argument(
+        "--allow-bf16-reduced-reduction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable reduced-precision bf16 reductions when supported (default: true)",
+    )
+    p.add_argument(
+        "--float32-matmul-precision",
+        choices=("highest", "high", "medium"),
+        default="high",
+        help="torch.set_float32_matmul_precision value (default: high)",
+    )
     return p.parse_args()
+
+
+def configure_precision(args: argparse.Namespace) -> torch.dtype:
+    torch.backends.cuda.matmul.allow_tf32 = args.allow_tf32
+    torch.backends.cudnn.allow_tf32 = args.allow_tf32
+
+    if hasattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"):
+        torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = args.allow_bf16_reduced_reduction
+
+    torch.set_float32_matmul_precision(args.float32_matmul_precision)
+
+    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float32
+    print("CUDA precision configuration:")
+    print(f"  dtype={args.dtype}")
+    print(f"  allow_tf32={torch.backends.cuda.matmul.allow_tf32}")
+    print(f"  cudnn_allow_tf32={torch.backends.cudnn.allow_tf32}")
+    if hasattr(torch.backends.cuda.matmul, "allow_bf16_reduced_precision_reduction"):
+        print(
+            "  allow_bf16_reduced_precision_reduction="
+            f"{torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction}"
+        )
+    print(f"  float32_matmul_precision={args.float32_matmul_precision}")
+    return dtype
 
 
 # ── LTX 2.3 stage-2 transformer block architecture (22B AV model) ─────────────
@@ -154,14 +207,13 @@ class FixturePerturbations:
 def main() -> None:
     args = parse_args()
     n_blocks = args.n_blocks
+    dtype = configure_precision(args)
 
     print(f"Loading input fixture: {args.input_fixture}")
     fix = load_file(str(args.input_fixture))
     print(f"  Keys in fixture: {len(fix)}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    dtype = torch.bfloat16
-
     def to_dev(t: torch.Tensor | None) -> torch.Tensor | None:
         return t.to(device=device, dtype=dtype) if t is not None else None
 
@@ -269,6 +321,13 @@ def main() -> None:
 
             vx_out = video_out.x.detach().cpu()
             ax_out = audio_out.x.detach().cpu()
+
+            ref_vx_out = fix.get(f"block_slice_native.vx_out_block_{local_idx}")
+            ref_ax_out = fix.get(f"block_slice_native.ax_out_block_{local_idx}")
+            if isinstance(ref_vx_out, torch.Tensor):
+                _compare_tensors(f"Video block {local_idx:2d}", vx_out, ref_vx_out)
+            if isinstance(ref_ax_out, torch.Tensor):
+                _compare_tensors(f"Audio block {local_idx:2d}", ax_out, ref_ax_out)
 
             # Overwrite vx/ax for next block
             vx = video_out.x.detach().clone()

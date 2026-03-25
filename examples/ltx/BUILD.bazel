@@ -324,6 +324,71 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "adaln_single_check",
+    main = "adaln_single_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "output_projection_check",
+    main = "output_projection_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "block_slice_48_check",
+    main = "block_slice_48_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "live_capture_check",
+    main = "live_capture_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "full_step_check",
+    main = "full_step_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [

@@ -65,17 +65,25 @@ pub fn compareBuffers(
     const computed_bytes = computed_slice.data();
     const expected_bytes = expected_slice.data();
 
-    if (computed.shape().byteSize() != expected.shape().byteSize()) {
-        return error.ShapeMismatch;
-    }
-
     const dtype = computed.shape().dtype();
-    if (dtype != expected.shape().dtype()) {
-        return error.DtypeMismatch;
+    const exp_dtype = expected.shape().dtype();
+    // Allow cross-dtype comparison between float types (e.g. f32 vs bf16).
+    // Both values are converted to f64 for comparison, so different float types are valid.
+    if (dtype != exp_dtype) {
+        const isFloat = struct {
+            fn check(dt: @TypeOf(dtype)) bool {
+                return dt == .f32 or dt == .bf16 or dt == .f64;
+            }
+        }.check;
+        if (!isFloat(dtype) or !isFloat(exp_dtype)) return error.DtypeMismatch;
     }
 
     const elem_size = dtype.sizeOf();
+    const exp_elem_size = exp_dtype.sizeOf();
     const num_elems = computed.shape().byteSize() / elem_size;
+    if (num_elems != expected.shape().byteSize() / exp_elem_size) {
+        return error.ShapeMismatch;
+    }
 
     var max_abs_err: f64 = 0.0;
     var sum_abs_err: f64 = 0.0;
@@ -84,7 +92,7 @@ pub fn compareBuffers(
     var i: usize = 0;
     while (i < num_elems) : (i += 1) {
         const comp_ptr = computed_bytes.ptr + i * elem_size;
-        const exp_ptr = expected_bytes.ptr + i * elem_size;
+        const exp_ptr = expected_bytes.ptr + i * exp_elem_size;
 
         const comp_val = switch (dtype) {
             .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(comp_ptr)).*)),
@@ -93,7 +101,7 @@ pub fn compareBuffers(
             else => return error.UnsupportedDtype,
         };
 
-        const exp_val = switch (dtype) {
+        const exp_val = switch (exp_dtype) {
             .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(exp_ptr)).*)),
             .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(exp_ptr)).*),
             .bf16 => bf16_to_f32(@as(*align(1) const u16, @ptrCast(exp_ptr)).*),
@@ -151,17 +159,22 @@ pub fn compareBuffersExtended(
     const computed_bytes = computed_slice.data();
     const expected_bytes = expected_slice.data();
 
-    if (computed.shape().byteSize() != expected.shape().byteSize()) {
-        return error.ShapeMismatch;
-    }
-
     const dtype = computed.shape().dtype();
-    if (dtype != expected.shape().dtype()) {
-        return error.DtypeMismatch;
+    const exp_dtype = expected.shape().dtype();
+    // Allow cross-dtype comparison between float types (e.g. f32 vs bf16).
+    if (dtype != exp_dtype) {
+        const isFloat = struct {
+            fn check(dt: @TypeOf(dtype)) bool {
+                return dt == .f32 or dt == .bf16 or dt == .f64;
+            }
+        }.check;
+        if (!isFloat(dtype) or !isFloat(exp_dtype)) return error.DtypeMismatch;
     }
 
     const elem_size = dtype.sizeOf();
+    const exp_elem_size = exp_dtype.sizeOf();
     const num_elems = computed.shape().byteSize() / elem_size;
+    if (num_elems != expected.shape().byteSize() / exp_elem_size) return error.ShapeMismatch;
     if (num_elems == 0) return error.EmptyBuffer;
 
     var abs_errors = try std.heap.smp_allocator.alloc(f64, num_elems);
@@ -185,7 +198,7 @@ pub fn compareBuffersExtended(
     var i: usize = 0;
     while (i < num_elems) : (i += 1) {
         const comp_ptr = computed_bytes.ptr + i * elem_size;
-        const exp_ptr = expected_bytes.ptr + i * elem_size;
+        const exp_ptr = expected_bytes.ptr + i * exp_elem_size;
 
         const comp_val = switch (dtype) {
             .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(comp_ptr)).*)),
@@ -194,7 +207,7 @@ pub fn compareBuffersExtended(
             else => return error.UnsupportedDtype,
         };
 
-        const exp_val = switch (dtype) {
+        const exp_val = switch (exp_dtype) {
             .f32 => @as(f64, @floatCast(@as(*align(1) const f32, @ptrCast(exp_ptr)).*)),
             .f64 => @as(f64, @as(*align(1) const f64, @ptrCast(exp_ptr)).*),
             .bf16 => bf16_to_f32(@as(*align(1) const u16, @ptrCast(exp_ptr)).*),
