@@ -283,7 +283,7 @@ def _cuda_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["cuda_compat", "cuda_nvml_dev", "libpjrt_cuda"],
+        root_module_direct_deps = ["cuda_nvml_dev", "libpjrt_cuda"],
         root_module_direct_dev_deps = [],
     )
 
