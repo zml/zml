@@ -90,8 +90,11 @@ pub fn main(init: std.process.Init) !void {
     defer c.Py_Finalize();
 
     const neuronxcc_main = blk: {
-        const module = c.PyImport_ImportModule("neuronxcc.driver.CommandDriver");
-        std.debug.print(">>> MODULE: {any}\n", .{module});
+        const module = c.PyImport_ImportModule("neuronxcc.driver.CommandDriver") orelse {
+            std.log.err("Failed to import neuronxcc.driver.CommandDriver", .{});
+            c.PyErr_Print();
+            return error.FailedToImportModule;
+        };
         defer c.Py_DecRef(module);
         break :blk c.PyObject_GetAttrString(module, "main");
     };

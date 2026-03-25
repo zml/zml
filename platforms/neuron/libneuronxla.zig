@@ -204,7 +204,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
             "--framework=XLA",
             "--target",
             target,
-            "--verbose=user",
+            "--verbose=35",
             "--enable-internal-neff-wrapper",
             "--output",
             neff_file,
@@ -222,8 +222,6 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         .cwd = .{ .path = tmp_dir },
     });
     _ = try child.wait(io);
-
-    std.debug.print(">>>> {s}\n", .{tmp_dir});
 
     const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
