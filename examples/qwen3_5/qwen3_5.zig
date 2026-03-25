@@ -340,10 +340,7 @@ pub const VisionModel = struct {
         const pos_embeds = self.getPosEmbeds(&grid_thw).convert(hidden_states.dtype());
         hidden_states = hidden_states.add(pos_embeds);
 
-        var rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
-        rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1);
-        const cos = rotary_pos_emb.cos();
-        const sin = rotary_pos_emb.sin();
+        const cos, const sin = self.getVisionRopeCosAndSin(&grid_thw);
 
         for (self.blocks) |block| {
             hidden_states = block.forward(hidden_states, cos, sin);
@@ -398,41 +395,31 @@ pub const VisionModel = struct {
     }
 
     // Rotary position embedding for the vision transformer
-    pub fn rotaryPosEmbed(grid_thw: []const i64, m_size: i64, hidden_size: i64, num_heads: i64, rope_opts: zml.nn.RopeOpts) Tensor {
-        log.info(
-            "[VisionModel.rotaryPosEmbed] begin: grid_thw={any} m_size={d} hidden_size={d} num_heads={d}",
-            .{ grid_thw, m_size, hidden_size, num_heads },
-        );
-        const t = grid_thw[0];
-        const h = grid_thw[1];
-        const w = grid_thw[2];
+    pub fn getVisionRopeCosAndSin(self: VisionModel, grid_thw: []const i64) struct { Tensor, Tensor } {
+        const t, const h, const w = .{ grid_thw[0], grid_thw[1], grid_thw[2] };
 
+        // Build the height and width position ids
         const pos_shape = zml.Shape.init(.{ .h = h, .w = w }, .f32);
-        // Build the height position ids
+
         var hpos_ids = zml.Tensor.iota(pos_shape, 0);
+        hpos_ids = hpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, self.spatial_merge_size), .m1 = self.spatial_merge_size }).splitAxis(.w, .{ .w_div = @divExact(w, self.spatial_merge_size), .m2 = self.spatial_merge_size });
+        hpos_ids = hpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 }).reshape(.{ .flat_hw = -1 });
 
-        hpos_ids = hpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, m_size), .m1 = m_size }).splitAxis(.w, .{ .w_div = @divExact(w, m_size), .m2 = m_size });
-        hpos_ids = hpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 });
-        hpos_ids = hpos_ids.reshape(.{ .seq = -1 });
-
-        // Build the width position ids
         var wpos_ids = zml.Tensor.iota(pos_shape, 1);
-        wpos_ids = wpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, m_size), .m1 = m_size }).splitAxis(.w, .{ .w_div = @divExact(w, m_size), .m2 = m_size });
-        wpos_ids = wpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 });
-        wpos_ids = wpos_ids.reshape(.{ .seq = -1 });
+        wpos_ids = wpos_ids.splitAxis(.h, .{ .h_div = @divExact(h, self.spatial_merge_size), .m1 = self.spatial_merge_size }).splitAxis(.w, .{ .w_div = @divExact(w, self.spatial_merge_size), .m2 = self.spatial_merge_size });
+        wpos_ids = wpos_ids.transpose(.{ .h_div, .w_div, .m1, .m2 }).reshape(.{ .flat_hw = -1 });
 
-        // Python does `coords.repeat(num_frames, 1)`: repeat rows (tokens), not columns (coord components).
         const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(0, @as(u63, @intCast(t))).convert(.i64);
 
-        // Compute the inverse frequency
-        const inv_freq = zml.nn.invFreq(@intCast(32), rope_opts).withTags(.{.s});
-        const seq = zml.Tensor.arange(.{ .end = @divExact(@divExact(hidden_size, num_heads), 2) }, .f32).withTags(.{.d});
-        // Compute the outer product of the sequence and the inverse frequency
-        const rotary_pos_emb_full = zml.Tensor.outer(seq, inv_freq);
+        // Compute the inverse frequency tensor
+        const inv_freq = zml.nn.invFreq(@intCast(32), self.rope_opts).withTags(.{.s});
+        const seq = zml.Tensor.arange(.{ .end = @divExact(@divExact(self.hidden_size, self.num_heads), 2) }, .f32).withTags(.{.d});
+        const rotary_pos_emb = zml.Tensor.outer(seq, inv_freq).gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
 
-        const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
-        // Return without reshape to match Python
-        return output;
+        const rotary_pos_emb_double = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1);
+        const cos = rotary_pos_emb_double.cos();
+        const sin = rotary_pos_emb_double.sin();
+        return .{ cos, sin };
     }
 };
 
