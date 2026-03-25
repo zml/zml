@@ -204,7 +204,7 @@ pub const Buffer = struct {
 
         for (res.placement().shards.constSlice()) |shard| {
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
-            const layout: pjrt.MemoryLayout = switch (platform.target) {
+            const layout: pjrt.MemoryLayout = opts.layout orelse switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
                         platform.pjrt_api,
