@@ -130,12 +130,8 @@ download_and_install() {
   success "Installed to ${INSTALL_DIR}/"
 
   mkdir -p "$BIN_DIR"
-  cat > "${BIN_DIR}/${BINARY_NAME}" <<WRAPPER
-#!/usr/bin/env bash
-exec "${INSTALL_DIR}/${BINARY_NAME}" "\$@"
-WRAPPER
-  chmod 755 "${BIN_DIR}/${BINARY_NAME}"
-  success "Wrapper at ${BIN_DIR}/${BINARY_NAME}"
+  ln -sf "${INSTALL_DIR}/${BINARY_NAME}" "${BIN_DIR}/${BINARY_NAME}"
+  success "Symlink at ${BIN_DIR}/${BINARY_NAME}"
 }
 
 check_path() {

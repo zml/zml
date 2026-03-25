@@ -9,9 +9,6 @@ pub const std_options: std.Options = .{
     },
 };
 
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
-
 const Collector = @import("collector.zig").Collector;
 const HostInfo = @import("info/host_info.zig").HostInfo;
 const ProcessEnricher = @import("bindings/linux/process.zig").ProcessEnricher;

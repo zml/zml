@@ -105,6 +105,7 @@ zig_binary(
         "info/host_info.zig",
         "info/process_info.zig",
         "platform.zig",
+        "sandbox.zig",
         "shadow_list.zig",
         "sysfs.zig",
         "worker.zig",
@@ -115,7 +116,6 @@ zig_binary(
     data = [":sandbox"],
     main = "main.zig",
     deps = [
-        "//bazel",
         "//stdx",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
