@@ -135,27 +135,32 @@ pub const VFS = struct {
         if (backend_idx) |idx| return self.backends.entries.items(.value)[idx] else return self.base.inner;
     }
 
-    fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8) !struct { ?usize, std.Io.Dir, std.Io } {
-        if (std.meta.eql(dir, std.Io.Dir.cwd())) {
-            if (sub_path == null) return .{ null, dir, self.base.inner };
-            if (std.fs.path.isAbsolutePosix(sub_path.?)) return .{ null, dir, self.base.inner };
+    fn lookupDir(self: *VFS, dir: std.Io.Dir, sub_path: ?[]const u8, path_buffer: ?[]u8) !struct { ?usize, std.Io.Dir, std.Io, ?[]const u8 } {
+        const resolved_sub_path: ?[]const u8 = if (sub_path) |p|
+            if (path_buffer) |buf| try expandHome(p, buf) else p
+        else
+            null;
 
-            const uri = std.Uri.parse(sub_path.?) catch null;
+        if (std.meta.eql(dir, std.Io.Dir.cwd())) {
+            if (resolved_sub_path == null) return .{ null, dir, self.base.inner, null };
+            if (std.fs.path.isAbsolutePosix(resolved_sub_path.?)) return .{ null, dir, self.base.inner, resolved_sub_path };
+
+            const uri = std.Uri.parse(resolved_sub_path.?) catch null;
             if (uri) |u| {
                 const backend_idx: ?usize = for (self.backends.entries.items(.key), 0..) |s, idx| {
                     if (std.mem.eql(u8, u.scheme, s)) break idx;
                 } else null;
                 if (backend_idx == null) return error.VFSNotRegistered;
-                return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx) };
+                return .{ backend_idx, std.Io.Dir.cwd(), self.getBackend(backend_idx), resolved_sub_path };
             } else {
-                return .{ null, std.Io.Dir.cwd(), self.base.inner };
+                return .{ null, std.Io.Dir.cwd(), self.base.inner, resolved_sub_path };
             }
         } else {
             const handle = self.getDirHandle(dir);
             if (handle.backend_idx) |backend_idx| {
-                return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx) };
+                return .{ backend_idx, .{ .handle = @intCast(handle.handle) }, self.getBackend(backend_idx), resolved_sub_path };
             } else {
-                return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner };
+                return .{ null, .{ .handle = @intCast(handle.handle) }, self.base.inner, resolved_sub_path };
             }
         }
     }
@@ -163,6 +168,19 @@ pub const VFS = struct {
     fn stripScheme(path: []const u8) []const u8 {
         const uri = std.Uri.parse(path) catch return path;
         return path[uri.scheme.len + 3 ..];
+    }
+
+    fn expandHome(path: []const u8, out_buffer: []u8) ![]const u8 {
+        if (!std.mem.eql(u8, path, "~") and !std.mem.startsWith(u8, path, "~/")) return path;
+
+        const home = std.mem.span(std.c.getenv("HOME") orelse return error.EnvironmentVariableNotFound);
+        const suffix = path[1..];
+        const full_len = home.len + suffix.len;
+        if (full_len > out_buffer.len) return error.NameTooLong;
+
+        @memcpy(out_buffer[0..home.len], home);
+        std.mem.copyForwards(u8, out_buffer[home.len..full_len], suffix);
+        return out_buffer[0..full_len];
     }
 
     fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
@@ -183,11 +201,13 @@ pub const VFS = struct {
 
     fn dirOpenDir(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.OpenOptions) std.Io.Dir.OpenError!std.Io.Dir {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const backend_idx, const dir_, const backend, const resolved_sub_path = self.lookupDir(dir, sub_path, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for opening dir '{s}' : {any}", .{ sub_path, err });
             return std.Io.Dir.OpenError.Unexpected;
         };
-        const fs_dir = try backend.vtable.dirOpenDir(backend.userdata, dir_, stripScheme(sub_path), options);
+
+        const fs_dir = try backend.vtable.dirOpenDir(backend.userdata, dir_, stripScheme(resolved_sub_path.?), options);
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
         handle.* = .{
             .handle = @intCast(fs_dir.handle),
@@ -198,7 +218,7 @@ pub const VFS = struct {
 
     fn dirStat(userdata: ?*anyopaque, dir: std.Io.Dir) std.Io.Dir.StatError!std.Io.Dir.Stat {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        _, const dir_, const backend = self.lookupDir(dir, null) catch |err| {
+        _, const dir_, const backend, _ = self.lookupDir(dir, null, null) catch |err| {
             log.err("Failed to lookup backend for dir stat : {any}", .{err});
             return std.Io.Dir.StatError.Unexpected;
         };
@@ -207,30 +227,33 @@ pub const VFS = struct {
 
     pub fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        _, const dir_, const backend, const resolved_sub_path = self.lookupDir(dir, sub_path, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for dir stat file '{s}' : {any}", .{ sub_path, err });
             return std.Io.Dir.StatFileError.Unexpected;
         };
-        return backend.vtable.dirStatFile(backend.userdata, dir_, stripScheme(sub_path), options);
+        return backend.vtable.dirStatFile(backend.userdata, dir_, stripScheme(resolved_sub_path.?), options);
     }
 
     pub fn dirAccess(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, options: std.Io.Dir.AccessOptions) std.Io.Dir.AccessError!void {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        _, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        _, const dir_, const backend, const resolved_sub_path = self.lookupDir(dir, sub_path, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for dir access '{s}' : {any}", .{ sub_path, err });
             return std.Io.Dir.AccessError.Unexpected;
         };
-        return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(sub_path), options);
+        return backend.vtable.dirAccess(backend.userdata, dir_, stripScheme(resolved_sub_path.?), options);
     }
 
     pub fn dirCreateFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.CreateFlags) std.Io.File.OpenError!std.Io.File {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const backend_idx, const dir_, const backend, const resolved_sub_path = self.lookupDir(dir, sub_path, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
             return std.Io.Dir.AccessError.Unexpected;
         };
 
-        const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+        const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(resolved_sub_path.?), flags);
         const idx, const handle = self.openHandle() catch return std.Io.File.OpenError.Unexpected;
         handle.* = .{
             .handle = @intCast(file.handle),
@@ -241,11 +264,12 @@ pub const VFS = struct {
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, flags: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const backend_idx, const dir_, const backend, const resolved_sub_path = self.lookupDir(dir, sub_path, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for opening file '{s}' : {any}", .{ sub_path, err });
             return std.Io.File.OpenError.Unexpected;
         };
-        const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(sub_path), flags);
+        const file = try backend.vtable.dirOpenFile(backend.userdata, dir_, stripScheme(resolved_sub_path.?), flags);
         const idx, const handle = self.openHandle() catch return std.Io.Dir.OpenError.Unexpected;
         handle.* = .{
             .handle = @intCast(file.handle),
@@ -257,7 +281,7 @@ pub const VFS = struct {
     fn dirClose(userdata: ?*anyopaque, dirs: []const std.Io.Dir) void {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         for (dirs) |dir| {
-            _, const dir_, const backend = self.lookupDir(dir, null) catch |err| {
+            _, const dir_, const backend, _ = self.lookupDir(dir, null, null) catch |err| {
                 log.err("Failed to lookup backend for closing dir : {any}", .{err});
                 continue;
             };
@@ -268,7 +292,7 @@ pub const VFS = struct {
 
     fn dirRead(userdata: ?*anyopaque, reader: *std.Io.Dir.Reader, entries: []std.Io.Dir.Entry) std.Io.Dir.Reader.Error!usize {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        _, const dir_, const backend = self.lookupDir(reader.dir, null) catch |err| {
+        _, const dir_, const backend, _ = self.lookupDir(reader.dir, null, null) catch |err| {
             log.err("Failed to lookup backend for dir real path : {any}", .{err});
             return std.Io.Dir.RealPathError.Unexpected;
         };
@@ -282,7 +306,7 @@ pub const VFS = struct {
 
     fn dirRealPath(userdata: ?*anyopaque, dir: std.Io.Dir, out_buffer: []u8) std.Io.Dir.RealPathError!usize {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        const backend_idx, const dir_, const backend = self.lookupDir(dir, null) catch |err| {
+        const backend_idx, const dir_, const backend, _ = self.lookupDir(dir, null, null) catch |err| {
             log.err("Failed to lookup backend for dir real path : {any}", .{err});
             return std.Io.Dir.RealPathError.Unexpected;
         };
@@ -298,17 +322,18 @@ pub const VFS = struct {
 
     fn dirRealPathFile(userdata: ?*anyopaque, dir: std.Io.Dir, path_name: []const u8, out_buffer: []u8) std.Io.Dir.RealPathFileError!usize {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
-        const backend_idx, const dir_, const backend = self.lookupDir(dir, path_name) catch |err| {
+        var path_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        const backend_idx, const dir_, const backend, const resolved_path_name = self.lookupDir(dir, path_name, &path_buffer) catch |err| {
             log.err("Failed to lookup backend for dir real path file '{s}' : {any}", .{ path_name, err });
             return std.Io.Dir.RealPathFileError.Unexpected;
         };
 
         if (self.getScheme(backend_idx)) |s| {
             const prefix = try std.fmt.bufPrint(out_buffer, "{s}://", .{s});
-            const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer[prefix.len..]);
+            const path_len = try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(resolved_path_name.?), out_buffer[prefix.len..]);
             return prefix.len + path_len;
         } else {
-            return try backend.vtable.dirRealPathFile(backend.userdata, dir_, path_name, out_buffer);
+            return try backend.vtable.dirRealPathFile(backend.userdata, dir_, stripScheme(resolved_path_name.?), out_buffer);
         }
     }
 

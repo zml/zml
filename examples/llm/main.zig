@@ -48,6 +48,8 @@ pub fn main(init: std.process.Init) !void {
     }
 
     const args = stdx.flags.parse(init.minimal.args, Args);
+    const model_path = expandHome(allocator, args.model) orelse try allocator.dupe(u8, args.model);
+    defer allocator.free(model_path);
 
     //
     // Virtual File Systems
@@ -91,7 +93,7 @@ pub fn main(init: std.process.Init) !void {
     // Model initialization
     //
     log.info("Resolving model repository..", .{});
-    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    const repo = try zml.safetensors.resolveModelRepo(io, model_path);
 
     log.info("Initializing model..", .{});
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -109,7 +111,7 @@ pub fn main(init: std.process.Init) !void {
     //
     // Load the model and compile it
     //
-    var progress = std.Progress.start(io, .{ .root_name = args.model });
+    var progress = std.Progress.start(io, .{ .root_name = model_path });
     errdefer progress.end();
 
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
@@ -191,4 +193,19 @@ pub fn printZmlLogo(io: std.Io) !void {
     var writer = std.Io.File.stdout().writer(io, &.{});
     try writer.interface.writeAll(LOGO);
     try writer.interface.flush();
+}
+
+fn expandHome(allocator: std.mem.Allocator, path: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, path, "~") and !std.mem.startsWith(u8, path, "~/")) return null;
+
+    const home = std.mem.span(std.c.getenv("HOME").?);
+    const suffix = path[1..];
+    const full_len = home.len + suffix.len;
+
+    var out_buffer = allocator.alloc(u8, full_len) catch return null;
+
+    @memcpy(out_buffer[0..home.len], home);
+    std.mem.copyForwards(u8, out_buffer[home.len..full_len], suffix);
+
+    return out_buffer;
 }
