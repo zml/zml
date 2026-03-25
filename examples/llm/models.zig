@@ -4,6 +4,7 @@ const zml = @import("zml");
 
 const common = @import("models/common.zig");
 pub const Shardings = common.Shardings;
+pub const GenerationOptions = common.GenerationOptions;
 pub const parseConfig = common.parseConfig;
 pub const lfm2 = @import("models/lfm2.zig");
 pub const llama = @import("models/llama.zig");
@@ -26,14 +27,20 @@ pub const LoadedModel = union(ModelType) {
     llama: llama.LoadedModel,
     qwen3_5: qwen3_5.LoadedModel,
 
-    pub fn load(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+    pub fn load(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        generation: GenerationOptions,
+    ) !LoadedModel {
         const model_type = try detectModelType(allocator, io, repo);
         log.info("Detected model type: {}", .{model_type});
 
         return switch (model_type) {
-            .lfm2 => .{ .lfm2 = try lfm2.LoadedModel.init(allocator, io, repo, store) },
-            .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store) },
-            .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store) },
+            .lfm2 => .{ .lfm2 = try lfm2.LoadedModel.init(allocator, io, repo, store, generation) },
+            .llama => .{ .llama = try llama.LoadedModel.init(allocator, io, repo, store, generation) },
+            .qwen3_5 => .{ .qwen3_5 = try qwen3_5.LoadedModel.init(allocator, io, repo, store, generation) },
         };
     }
 

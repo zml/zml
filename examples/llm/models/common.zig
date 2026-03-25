@@ -8,6 +8,10 @@ pub const SessionOptions = struct {
     single: bool,
 };
 
+pub const GenerationOptions = struct {
+    sampling_strategy: zml.nn.SamplingStrategy = .{},
+};
+
 pub const Shardings = struct {
     replicated: zml.sharding.Sharding,
     model: zml.sharding.Sharding,

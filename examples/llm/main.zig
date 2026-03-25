@@ -17,6 +17,7 @@ const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
+    topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
     single: bool = false,
 
@@ -29,6 +30,7 @@ const Args = struct {
         \\   --model=<path>      Path to the model repository (required)
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
+        \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
         \\   --single            Create a single kernel encompassing all the layers when supported 
         \\                       (only used by LFM2 which uses multiple kernels by default)
@@ -100,7 +102,13 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var model = try models.LoadedModel.load(allocator, io, repo, store.view());
+    const generation: models.GenerationOptions = .{
+        .sampling_strategy = .{
+            .topk = args.topk,
+        },
+    };
+
+    var model = try models.LoadedModel.load(allocator, io, repo, store.view(), generation);
     defer model.deinit(allocator);
 
     // Defines how the model's tensors are sharded across the available devices.
