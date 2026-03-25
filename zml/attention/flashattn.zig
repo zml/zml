@@ -1891,10 +1891,9 @@ pub const mosaic_tpu = struct {
         defer allocator.free(json_string);
 
         const compilation_context = zml.module.CompilationContext.current();
-        const runtime = compilation_context.platform.tpu_ir_runtime orelse stdx.debug.panic(
-            "TPU IR runtime is not initialized. Call platform.initTpuIrRuntime() before compiling TPU attention",
-            .{},
-        );
+        const runtime = @constCast(compilation_context.platform).ensureTpuIrRuntime(compilation_context.allocator, io) catch |err| {
+            stdx.debug.panic("Failed to initialize TPU IR runtime: {}", .{err});
+        };
         return runtime.request(allocator, io, json_string) catch |err| {
             stdx.debug.panic("Failed to generate TPU backend config through persistent runtime: {}", .{err});
         };

@@ -271,14 +271,20 @@ pub const Platform = struct {
         } else error.Unavailable;
     }
 
-    pub fn initTpuIrRuntime(self: *Platform, allocator: std.mem.Allocator, io: std.Io) !void {
-        if (self.target != .tpu or self.tpu_ir_runtime != null) return;
+    pub fn ensureTpuIrRuntime(self: *Platform, allocator: std.mem.Allocator, io: std.Io) !*platforms.tpu.gen_ir.Runtime {
+        if (self.target != .tpu) return error.UnsupportedPlatform;
+        if (self.tpu_ir_runtime) |runtime| return runtime;
 
         const runtime = try allocator.create(platforms.tpu.gen_ir.Runtime);
         errdefer allocator.destroy(runtime);
 
         runtime.* = try platforms.tpu.gen_ir.Runtime.init(allocator, io);
         self.tpu_ir_runtime = runtime;
+        return runtime;
+    }
+
+    pub fn initTpuIrRuntime(self: *Platform, allocator: std.mem.Allocator, io: std.Io) !void {
+        _ = try self.ensureTpuIrRuntime(allocator, io);
     }
 
     pub fn formatWithAttributes(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
