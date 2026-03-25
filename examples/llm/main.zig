@@ -21,22 +21,32 @@ const Args = struct {
     single: bool = false,
 
     pub const help =
-        \\Use llm --model=<path> [options]
+        \\ Use llm --model=<path> [options]
         \\
-        \\ Run text generation with a model selected from `config.json.model_type`.
+        \\ Run text generation with a model selected from `model_type` in the `config.json`.
         \\
         \\ Options:
         \\   --model=<path>      Path to the model repository (required)
         \\   --prompt=<string>   Prompt to use for generation (default: none)
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported
+        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\                       (only used by LFM2 which uses multiple kernels by default)
         \\
     ;
 };
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
+
+    // `bazel run` executes binaries from Bazel's runfiles tree by default.
+    // If available, switch back to the shell's original working directory.
+    if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
+        var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
+        defer working_dir.close(init.io);
+        try std.process.setCurrentDir(init.io, working_dir);
+    }
+
     const args = stdx.flags.parse(init.minimal.args, Args);
 
     //
