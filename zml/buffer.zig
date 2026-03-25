@@ -282,9 +282,6 @@ pub const Buffer = struct {
 
     const Prefix1dCopyMode = enum { sync, async };
 
-    /// Async version of toPrefix1dSlice. Starts device-to-host copies without blocking.
-    /// Returns events that must be awaited using awaitD2HEvents() before the destination
-    /// data is valid.
     pub const D2HEvents = stdx.BoundedArray(?*pjrt.Event, MAX_NUM_SHARDS);
 
     fn prefix1dCopyImpl(self: Buffer, slice: Slice, comptime mode: Prefix1dCopyMode, io: if (mode == .sync) std.Io else void) !D2HEvents {
@@ -327,6 +324,7 @@ pub const Buffer = struct {
 
             if (mode == .sync) {
                 if (maybe_event) |event| {
+                    defer event.deinit(self._platform.pjrt_api);
                     try event.await(self._platform.pjrt_api, io);
                 }
             } else {
@@ -337,32 +335,7 @@ pub const Buffer = struct {
         return events;
     }
 
-    /// Copies a prefix of this 1D buffer to a destination slice.
-    ///
-    /// This function extracts the first N elements from a rank-1 buffer and copies them
-    /// to a destination slice, where N is determined by the destination slice's length.
-    /// It handles sharded buffers by iterating through each shard and copying only the
-    /// overlapping portion that falls within the requested prefix range.
-    ///
-    /// The function is needed because PJRT buffers may be distributed across multiple
-    /// shards/devices, requiring element-wise coordination to gather a contiguous prefix
-    /// from the original buffer layout. This is commonly used when exporting partial
-    /// results or checkpointing the initial portion of large tensors without copying
-    /// the entire buffer.
-    ///
-    /// Args:
-    ///   self: The source buffer (must be rank-1)
-    ///   io: Standard I/O context for async operations
-    ///   slice: Destination slice in host memory (must be rank-1 and have same dtype as buffer)
-    ///
-    /// Returns: An error if:
-    ///   - The buffer or destination slice is not rank-1
-    ///   - Data types don't match between buffer and destination
-    ///   - Prefix length exceeds buffer length
-    ///   - Shard slicing is not along axis 0 or uses unsupported configurations
-    ///
-    /// Postcondition: The first `slice.shape.dim(0)` elements of the buffer are copied
-    /// to the destination slice, with all async copy operations awaited.
+
     pub fn toPrefix1dSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         _ = try self.prefix1dCopyImpl(slice, .sync, io);
     }
@@ -374,13 +347,12 @@ pub const Buffer = struct {
     pub fn awaitD2HEvents(self: Buffer, io: std.Io, events: D2HEvents) !void {
         for (events.constSlice()) |maybe_event| {
             if (maybe_event) |event| {
+                defer event.deinit(self._platform.pjrt_api);
                 try event.await(self._platform.pjrt_api, io);
             }
         }
     }
 
-    /// Copies the content of the Buffer to the provided slice.
-    /// The returned slice owns the memory.
     pub fn toSliceAlloc(self: Buffer, allocator: std.mem.Allocator, io: std.Io) !Slice {
         const slice = try Slice.alloc(allocator, self.shape());
         errdefer slice.free(allocator);
