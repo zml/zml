@@ -75,7 +75,7 @@ fn compileModel(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
 
-    const all_shardings = [_]zml.sharding.Sharding{parameters.shardings.replicated};
+    const all_shardings = parameters.shardings.all();
 
     var prefill_future = try io.concurrent(struct {
         fn call(
@@ -84,7 +84,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             qwen_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]zml.sharding.Sharding,
+            shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -118,7 +118,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             qwen_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]zml.sharding.Sharding,
+            shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);

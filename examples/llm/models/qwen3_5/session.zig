@@ -31,7 +31,7 @@ pub const Session = struct {
         model_buffers: *model.Buffers,
     ) !Session {
         const replicated_sharding = compiled_model.params.shardings.replicated;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
