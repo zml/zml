@@ -2,14 +2,14 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
+bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "protobuf", version = "34.0.bcr.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.16")
@@ -247,7 +247,7 @@ git_override(
 )
 
 single_version_override(
-    module_name = "grpc",
-    patches = ["//third_party/grpc:protobuf_compat.patch"],
+    module_name = "protobuf",
+    version = "33.6",
     patch_strip = 1,
 )
