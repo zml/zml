@@ -34,3 +34,15 @@ index f578b0dfca..92170f3502 100644
  
  def grpc_upb_proto_reflection_library(name, deps):
      upb_proto_reflection_library(name = name, deps = deps)
+diff --git a/include/grpc/event_engine/memory_request.h b/include/grpc/event_engine/memory_request.h
+index 76bcbb2036..98a4a70411 100644
+--- a/include/grpc/event_engine/memory_request.h
++++ b/include/grpc/event_engine/memory_request.h
+@@ -16,6 +16,7 @@
+ 
+ #include <grpc/support/port_platform.h>
+ #include <stddef.h>
++#include <string>
+ 
+ #include "absl/strings/string_view.h"
+ 
