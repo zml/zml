@@ -156,6 +156,58 @@ pub const Parameters = union(Backend) {
             inline else => |v| v.allocationSize(),
         };
     }
+
+    /// Returns a copy of these parameters with KV sequence lengths incremented by 1.
+    /// Used inside multi-token decode to let each sub-step's attention see the
+    /// KV entries written by the previous sub-step.
+    pub fn incrementKvLens(self: Parameters) Parameters {
+        return switch (self) {
+            .cuda_fa2 => |fa2| .{ .cuda_fa2 = switch (fa2) {
+                .decode => |d| .{ .decode = .{
+                    .block_table = d.block_table,
+                    .cu_seqlens_q = d.cu_seqlens_q,
+                    .seqused_k = d.seqused_k.addConstant(@as(i32, 1)),
+                    .metadata = d.metadata,
+                    .options = d.options,
+                } },
+                .mixed => |m| .{ .mixed = .{
+                    .block_table_prefill = m.block_table_prefill,
+                    .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
+                    .seqused_k_prefill = m.seqused_k_prefill,
+                    .block_table_decode = m.block_table_decode,
+                    .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
+                    .seqused_k_decode = m.seqused_k_decode.addConstant(@as(i32, 1)),
+                    .metadata = m.metadata,
+                    .options = m.options,
+                } },
+            } },
+            .cuda_fa3 => |fa3| .{ .cuda_fa3 = switch (fa3) {
+                .decode => |d| .{ .decode = .{
+                    .block_table = d.block_table,
+                    .cu_seqlens_q = d.cu_seqlens_q,
+                    .seqused_k = d.seqused_k.addConstant(@as(i32, 1)),
+                    .metadata = d.metadata,
+                    .options = d.options,
+                } },
+                .mixed => |m| .{ .mixed = .{
+                    .block_table_prefill = m.block_table_prefill,
+                    .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
+                    .seqused_k_prefill = m.seqused_k_prefill,
+                    .block_table_decode = m.block_table_decode,
+                    .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
+                    .seqused_k_decode = m.seqused_k_decode.addConstant(@as(i32, 1)),
+                    .metadata = m.metadata,
+                    .options = m.options,
+                } },
+            } },
+            .mosaic_tpu => |tpu| .{ .mosaic_tpu = .{
+                .opts = tpu.opts,
+                .cu_seqlens_q = tpu.cu_seqlens_q,
+                .page_indices = tpu.page_indices,
+                .kv_lens = tpu.kv_lens.addConstant(@as(i32, 1)),
+            } },
+        };
+    }
 };
 
 /// Internal state that can be used inside the model code. It's derived from Parameters and Option.
@@ -180,7 +232,6 @@ pub const AttentionOptions = struct {
 };
 
 pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
         .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),
