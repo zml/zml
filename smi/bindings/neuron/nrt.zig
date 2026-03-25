@@ -1,9 +1,8 @@
 const std = @import("std");
 const c = @import("c");
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
 const stdx = @import("stdx");
 const DynLib = @import("../dynlib.zig");
+const sandbox = @import("../../sandbox.zig");
 
 pub const Error = error{ nrt_error, NrtUnavailable };
 
@@ -22,10 +21,8 @@ const Fns = struct {
 };
 
 pub fn init(io: std.Io) Error!Nrt {
-    const r = bazel.runfiles(bazel_builtin.current_repository) catch return error.NrtUnavailable;
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = (r.rlocation("zml/smi/sandbox", &path_buf) catch return error.NrtUnavailable) orelse
-        return error.NrtUnavailable;
+    const sandbox_path = sandbox.path(&path_buf) orelse return error.NrtUnavailable;
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnrt.so.1" }) catch
