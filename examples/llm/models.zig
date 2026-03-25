@@ -68,18 +68,6 @@ pub const LoadedModel = union(ModelType) {
         }
     }
 
-    pub fn tokenizePrompt(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-        return switch (self.*) {
-            inline else => |*m| m.tokenizePrompt(allocator, tokenizer, prompt),
-        };
-    }
-
-    pub fn tokenizeTurn(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-        return switch (self.*) {
-            inline else => |*m| m.tokenizeTurn(allocator, tokenizer, prompt),
-        };
-    }
-
     pub fn compile(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
@@ -90,7 +78,7 @@ pub const LoadedModel = union(ModelType) {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        return switch (self.*) {
+        const inner: CompiledModel.Inner = switch (self.*) {
             .lfm2 => |*m| .{ .lfm2 = try m.compile(
                 allocator,
                 io,
@@ -109,18 +97,35 @@ pub const LoadedModel = union(ModelType) {
                 seqlen,
                 progress,
             ) },
-            .qwen3_5 => |*m| .{ .qwen3_5 = try m.compile(allocator, io, platform, backend, shardings, seqlen, progress) },
+            .qwen3_5 => |*m| .{ .qwen3_5 = try m.compile(
+                allocator,
+                io,
+                platform,
+                backend,
+                shardings,
+                seqlen,
+                progress,
+            ) },
+        };
+        return .{
+            .inner = inner,
+            .seqlen = @intCast(seqlen),
         };
     }
 };
 
-pub const CompiledModel = union(ModelType) {
-    lfm2: lfm2.inference.CompiledModel,
-    llama: llama.inference.CompiledModel,
-    qwen3_5: qwen3_5.inference.CompiledModel,
+pub const CompiledModel = struct {
+    const Inner = union(ModelType) {
+        lfm2: lfm2.inference.CompiledModel,
+        llama: llama.inference.CompiledModel,
+        qwen3_5: qwen3_5.inference.CompiledModel,
+    };
+
+    inner: Inner,
+    seqlen: u32,
 
     pub fn deinit(self: *CompiledModel) void {
-        switch (self.*) {
+        switch (self.inner) {
             .lfm2 => |*b| b.deinit(),
             .llama => |*b| b.deinit(),
             .qwen3_5 => |*b| b.deinit(),
@@ -128,49 +133,46 @@ pub const CompiledModel = union(ModelType) {
     }
 
     pub fn newSession(
-        self: *CompiledModel,
+        self: *const CompiledModel,
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *zml.Platform,
+        platform: *const zml.Platform,
         model_buffers: *Buffers,
         tokenizer: zml.tokenizer.Tokenizer,
     ) !Session {
-        return switch (self.*) {
+        return switch (self.inner) {
             .lfm2 => |*compiled| .{
                 .inner = .{ .lfm2 = try lfm2.Session.init(
                     allocator,
                     io,
                     platform,
-                    &model_buffers.lfm2,
                     tokenizer,
-                    compiled.loaded_model.*,
                     compiled,
+                    &model_buffers.lfm2,
                 ) },
-                .seqlen = compiled.params.seqlen,
+                .seqlen = self.seqlen,
             },
             .llama => |*compiled| .{
                 .inner = .{ .llama = try llama.Session.init(
                     allocator,
                     io,
                     platform,
-                    &model_buffers.llama,
                     tokenizer,
-                    compiled.loaded_model.parsed_config.value,
                     compiled,
+                    &model_buffers.llama,
                 ) },
-                .seqlen = @intCast(compiled.params.seqlen),
+                .seqlen = self.seqlen,
             },
             .qwen3_5 => |*compiled| .{
                 .inner = .{ .qwen3_5 = try qwen3_5.Session.init(
                     allocator,
                     io,
                     platform,
-                    &model_buffers.qwen3_5,
                     tokenizer,
-                    compiled.loaded_model.inner,
                     compiled,
+                    &model_buffers.qwen3_5,
                 ) },
-                .seqlen = compiled.params.seqlen,
+                .seqlen = self.seqlen,
             },
         };
     }
@@ -210,6 +212,18 @@ pub const Session = struct {
         };
     }
 
+    pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        return switch (self.inner) {
+            inline else => |*s| s.tokenizePrompt(allocator, prompt),
+        };
+    }
+
+    pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        return switch (self.inner) {
+            inline else => |*s| s.tokenizeTurn(allocator, prompt),
+        };
+    }
+
     pub fn maxTokens(self: *const Session) u32 {
         return self.seqlen;
     }
@@ -219,6 +233,5 @@ pub fn detectModelType(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Di
     const parsed = try parseConfig(RawConfig, allocator, io, repo);
     defer parsed.deinit();
     if (std.meta.stringToEnum(ModelType, parsed.value.model_type)) |model_type| return model_type;
-    if (std.mem.eql(u8, parsed.value.model_type, "qwen3_next")) return .qwen3_5;
     return error.UnknownModelType;
 }

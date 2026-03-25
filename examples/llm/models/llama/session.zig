@@ -8,25 +8,24 @@ const model = @import("model.zig");
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     model_buffers: *model.Buffers,
-    compiled_model: *inference.CompiledModel,
+    compiled_model: *const inference.CompiledModel,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
-    config: model.Config,
+    config: *const model.Config,
     seqlen: u32,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *zml.Platform,
-        model_buffers: *model.Buffers,
+        platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        config: model.Config,
-        compiled_model: *inference.CompiledModel,
+        compiled_model: *const inference.CompiledModel,
+        model_buffers: *model.Buffers,
     ) !Session {
         const shardings = compiled_model.params.shardings;
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
@@ -50,7 +49,7 @@ pub const Session = struct {
             .rng_buffers = rng_buffers,
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32)),
             .tokenizer = tokenizer,
-            .config = config,
+            .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = @intCast(compiled_model.params.seqlen),
         };
     }
@@ -60,6 +59,42 @@ pub const Session = struct {
         zml.attention.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
         self.generated_token_slice.free(self.allocator);
+    }
+
+    pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var encoder = try self.tokenizer.encoder();
+        defer encoder.deinit();
+
+        const start_header = self.tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = self.tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const eot = self.tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header, user, end_header, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var encoder = try self.tokenizer.encoder();
+        defer encoder.deinit();
+
+        const start_header = self.tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = self.tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const eot = self.tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, user, end_header, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        return tokens.toOwnedSlice(allocator);
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
@@ -145,7 +180,7 @@ pub const Session = struct {
     }
 };
 
-fn isEosToken(config: model.Config, token_id: u32) bool {
+fn isEosToken(config: *const model.Config, token_id: u32) bool {
     return switch (config.eos_token_id.value) {
         .int => |eos| token_id == eos,
         .ints => |eos_list| for (eos_list) |eos| {

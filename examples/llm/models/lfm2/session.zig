@@ -9,10 +9,10 @@ const model = @import("model.zig");
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     model_buffers: *model.Buffers,
-    compiled_model: *inference.CompiledModel,
-    config: model.Config,
+    compiled_model: *const inference.CompiledModel,
+    config: *const model.Config,
     seqlen: u32,
     cache_buffers: zml.Bufferized(model.Cache),
     attention_metadata_buffers: zml.Bufferized(attention.Metadata),
@@ -25,11 +25,10 @@ pub const Session = struct {
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *zml.Platform,
-        model_buffers: *model.Buffers,
+        platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        loaded_model: model.LoadedModel,
-        compiled_model: *inference.CompiledModel,
+        compiled_model: *const inference.CompiledModel,
+        model_buffers: *model.Buffers,
     ) !Session {
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
         return .{
@@ -39,7 +38,7 @@ pub const Session = struct {
             .model_buffers = model_buffers,
             .compiled_model = compiled_model,
             .tokenizer = tokenizer,
-            .config = loaded_model.parsed_config.value,
+            .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = compiled_model.params.seqlen,
             .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.replicated),
             .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
@@ -55,6 +54,42 @@ pub const Session = struct {
         attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buf);
         self.generated_token_slice.free(self.allocator);
+    }
+
+    pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var encoder = try self.tokenizer.encoder();
+        defer encoder.deinit();
+
+        const im_start = self.tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = self.tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, im_start, user, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ im_end, newline });
+        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
+        return tokens.toOwnedSlice(allocator);
+    }
+
+    pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var encoder = try self.tokenizer.encoder();
+        defer encoder.deinit();
+
+        const im_start = self.tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = self.tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
+        const newline = (try encoder.encode("\n"))[0];
+
+        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
+        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start, user, newline });
+        try tokens.appendSlice(allocator, try encoder.encode(prompt));
+        try tokens.appendSlice(allocator, &.{ im_end, newline });
+        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
+        return tokens.toOwnedSlice(allocator);
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {

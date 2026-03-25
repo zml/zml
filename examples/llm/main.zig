@@ -135,7 +135,6 @@ pub fn main(init: std.process.Init) !void {
         io,
         platform,
         tokenizer,
-        &model,
         &compiled_model,
         &model_buffers,
     );

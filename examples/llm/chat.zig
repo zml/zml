@@ -25,18 +25,15 @@ pub fn rememberPrompt(line: [*:0]const u8) void {
 pub const Chat = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    tokenizer: zml.tokenizer.Tokenizer,
-    loaded_model: *models.LoadedModel,
     session: models.Session,
     tokens: std.ArrayList(u32),
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *zml.Platform,
+        platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        loaded_model: *models.LoadedModel,
-        compiled_model: *models.CompiledModel,
+        compiled_model: *const models.CompiledModel,
         model_buffers: *models.Buffers,
     ) !Chat {
         var session = try compiled_model.newSession(
@@ -51,8 +48,6 @@ pub const Chat = struct {
         return .{
             .allocator = allocator,
             .io = io,
-            .tokenizer = tokenizer,
-            .loaded_model = loaded_model,
             .session = session,
             .tokens = try .initCapacity(allocator, session.maxTokens()),
         };
@@ -64,7 +59,7 @@ pub const Chat = struct {
     }
 
     pub fn runOnce(self: *Chat, prompt: []const u8) !void {
-        const prompt_tokens = try self.loaded_model.tokenizePrompt(self.allocator, self.tokenizer, prompt);
+        const prompt_tokens = try self.session.tokenizePrompt(self.allocator, prompt);
         defer self.allocator.free(prompt_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -81,7 +76,7 @@ pub const Chat = struct {
     }
 
     pub fn runInteractive(self: *Chat, initial_prompt: []const u8) !void {
-        var turn_tokens = try self.loaded_model.tokenizePrompt(self.allocator, self.tokenizer, initial_prompt);
+        var turn_tokens = try self.session.tokenizePrompt(self.allocator, initial_prompt);
         defer self.allocator.free(turn_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -148,7 +143,7 @@ pub const Chat = struct {
             if (input.len == 0) continue;
 
             self.allocator.free(previous_turn_tokens);
-            return try self.loaded_model.tokenizeTurn(self.allocator, self.tokenizer, input);
+            return try self.session.tokenizeTurn(self.allocator, input);
         }
     }
 };

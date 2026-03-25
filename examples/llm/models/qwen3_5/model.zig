@@ -68,14 +68,6 @@ pub const LoadedModel = struct {
         self.parsed_config.deinit();
     }
 
-    pub fn tokenizePrompt(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-        return tokenizeChatPrompt(allocator, tokenizer, prompt, self.inner.special_tokens, true);
-    }
-
-    pub fn tokenizeTurn(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]const u32 {
-        return tokenizeChatPrompt(allocator, tokenizer, prompt, self.inner.special_tokens, false);
-    }
-
     pub fn loadBuffers(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
@@ -348,39 +340,6 @@ pub const TransformerLayer = struct {
         return .{ mlp_output.add(residual1), updated_kv_cache };
     }
 };
-
-fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, special_tokens: Model.SpecialTokens, is_first_turn: bool) ![]u32 {
-    var encoder = try tokenizer.encoder();
-    defer encoder.deinit();
-
-    const im_start = tokenizer.tokenToId("<|im_start|>") orelse special_tokens.im_start_token_id;
-    const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
-    const think = tokenizer.tokenToId("<think>") orelse return error.NoSuchToken;
-    const newline = try encodeSingleToken(&encoder, "\n");
-    const user_prefix = try encoder.encode("user\n");
-    const assistant_prefix = try encoder.encode("assistant\n");
-    const encoded_prompt = try encoder.encode(prompt);
-
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + user_prefix.len + assistant_prefix.len + 8);
-    if (!is_first_turn) {
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
-    }
-
-    try tokens.append(allocator, im_start);
-    try tokens.appendSlice(allocator, user_prefix);
-    try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
-    try tokens.appendSlice(allocator, assistant_prefix);
-    try tokens.appendSlice(allocator, &.{ think, newline });
-
-    return tokens.toOwnedSlice(allocator);
-}
-
-fn encodeSingleToken(encoder: *zml.tokenizer.Tokenizer.Encoder, text: []const u8) !u32 {
-    const encoded = try encoder.encode(text);
-    if (encoded.len != 1) return error.InvalidTokenizerEncoding;
-    return encoded[0];
-}
 
 pub const Mlp = struct {
     up_proj: zml.nn.Linear,

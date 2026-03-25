@@ -67,43 +67,6 @@ pub const LoadedModel = struct {
         self.parsed_config.deinit();
     }
 
-    pub fn tokenizePrompt(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]u32 {
-        var encoder = try tokenizer.encoder();
-        defer encoder.deinit();
-
-        const im_start = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-        const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
-
-        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ self.parsed_config.value.bos_token_id, im_start, user, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
-        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
-        return tokens.toOwnedSlice(allocator);
-    }
-
-    pub fn tokenizeTurn(self: *const LoadedModel, allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]u32 {
-        _ = self;
-        var encoder = try tokenizer.encoder();
-        defer encoder.deinit();
-
-        const im_start = tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-        const user = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
-
-        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start, user, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
-        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
-        return tokens.toOwnedSlice(allocator);
-    }
-
     pub fn loadBuffers(
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
