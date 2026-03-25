@@ -209,7 +209,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 .multimodal_prefill_forward,
                 .{
                     Tensor.init(.{ .b = 1, .s = prefill_len_ }, .u32),
-                    Tensor.init(.{}, .u32),
+                    Tensor.init(.{}, .i64),
                     kv_cache_,
                     Tensor.init(.{ .p = patch_count_, .ps = patch_3d_size_ }, .f32),
                     grid_thw_,
@@ -247,9 +247,9 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 .multimodal_decode_forward,
                 .{
                     Tensor.init(.{ .b = 1, .s = 1 }, .u32),
-                    Tensor.init(.{}, .u32),
+                    Tensor.init(.{}, .i64),
                     kv_cache_,
-                    Tensor.init(.{ .s = 1 }, .i64),
+                    Tensor.init(.{ .b = 1, .s = 1 }, .i64),
                     zml.Tensor.Rng.init(),
                 },
                 .{ .shardings = &.{sharding_} },
@@ -296,7 +296,7 @@ fn runGenerationLoop(
     var prompt_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_tokens_slice, sharding);
     defer prompt_tokens_buffer.deinit();
 
-    var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, sharding);
+    var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, 0), .i64, sharding);
     defer prefill_token_index_buffer.deinit();
 
     const prompt_shape_shape = zml.Shape.init(.{3}, .i64);
@@ -346,8 +346,8 @@ fn runGenerationLoop(
         var token_index_buffer = try zml.Buffer.scalar(
             io,
             platform,
-            @as(u32, @intCast(total_seq_len - 1 + @as(i64, @intCast(i)))),
-            .u32,
+            total_seq_len - 1 + @as(i64, @intCast(i)),
+            .i64,
             sharding,
         );
         defer token_index_buffer.deinit();

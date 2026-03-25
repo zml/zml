@@ -136,56 +136,6 @@ pub const Qwen35 = struct {
         return .{ next_tokens, new_rng };
     }
 
-    pub fn build3dPositionIds(
-        self: Qwen35,
-        batch_count: i64,
-        seq_len: i64,
-        // Prompt shape [text_before_image, num_image_tokens, text_after_image]
-        prompt_shape: Tensor,
-        // Vision patch grid shape [t, h, w]
-        image_grid_thw: [3]i64,
-    ) struct { Tensor, Tensor } {
-        const text_pre_image_token_count = prompt_shape.choose1d(0, 0).convert(.i64);
-        const image_token_count = prompt_shape.choose1d(0, 1).convert(.i64);
-        const text_post_image_token_count = prompt_shape.choose1d(0, 2).convert(.i64);
-
-        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i64), .s).convert(.i64);
-
-        const t = image_grid_thw[0];
-        const h = @divExact(image_grid_thw[1], self.config.vision_config.spatial_merge_size);
-        const w = @divExact(image_grid_thw[2], self.config.vision_config.spatial_merge_size);
-
-        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i64), .s)
-            .convert(.i64)
-            .sub(image_token_count)
-            .addConstant(@max(w, h, t));
-        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i64) }, pre_image_positions);
-
-        // Define the shape of the iota tensor
-        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i64);
-        const reshape_shape = zml.Shape.init(.{ .b = batch_count, .s = t * h * w }, .i64);
-
-        // Repeat the index along the 3 dimensions based on grid size (after the text (+4 tokens according to the chat template))
-        const t_index = zml.Tensor.iota(iota_shape, .t).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
-        const h_index = zml.Tensor.iota(iota_shape, .h).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
-        const w_index = zml.Tensor.iota(iota_shape, .w).convert(.i64).reshape(reshape_shape).add(text_pre_image_token_count);
-
-        // Update the position ids with the 3D positional ids
-        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, t_index);
-        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, h_index);
-        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .s = text_pre_image_token_count }, w_index);
-
-        // Stack the position ids
-        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
-
-        // Position max after 3d compression - real seq len
-        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i64).add(text_post_image_token_count).add(text_pre_image_token_count);
-        const real_seq_len = text_pre_image_token_count.add(text_post_image_token_count).add(image_token_count);
-        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).reshape(.{ .s = 1 });
-
-        return .{ stacked_position_ids, mrope_position_deltas };
-    }
-
     pub fn text_forward(
         self: Qwen35,
         tokens_: Tensor,
@@ -205,51 +155,29 @@ pub const Qwen35 = struct {
         token_index: Tensor,
         kv_cache: KvCache,
         pixel_values: Tensor,
+        // Vision patch grid shape [t, h, w]
         grid_thw: [3]i64,
+        // Prompt shape [num_pre_image_tokens, num_image_tokens, num_post_image_tokens]
         prompt_shape: Tensor,
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
         const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
-        const vision_embed = self.vision_model.forward(pixel_values, grid_thw);
 
-        const text_before_image = prompt_shape.choose1d(0, 0).convert(.i64);
-        const num_image_tokens = prompt_shape.choose1d(0, 1).convert(.i64);
-        const text_after_image = prompt_shape.choose1d(0, 2).convert(.i64);
-        const real_seq_len = text_before_image.add(text_after_image).add(num_image_tokens);
+        const vision_embeds = self.vision_model.forward(pixel_values, grid_thw);
 
-        const text_with_image_embed = token_embed.dynamicUpdateSlice(.{ .s = text_before_image }, vision_embed.convert(token_embed.dtype()));
-        const seq_len = text_with_image_embed.dim(.s);
+        const num_pre_image_tokens, const num_image_tokens, const num_post_image_tokens = .{ prompt_shape.choose1d(0, 0).convert(.i64), prompt_shape.choose1d(0, 1).convert(.i64), prompt_shape.choose1d(0, 2).convert(.i64) };
+        const total_seq_len = num_pre_image_tokens.add(num_post_image_tokens).add(num_image_tokens);
 
-        const position_ids, const mrope_position_deltas = self.build3dPositionIds(
-            1,
-            seq_len,
-            prompt_shape,
-            grid_thw,
-        );
+        const text_with_image_embed = token_embed.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, vision_embeds.convert(token_embed.dtype()));
 
-        const text_with_image_embed_batched = text_with_image_embed.reshape(.{
-            .b = 1,
-            .s = seq_len,
-            .d = text_with_image_embed.dim(.d),
-        });
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
-            text_with_image_embed_batched,
-            token_index,
-            kv_cache,
-            position_ids,
-        );
+        const position_ids, const mrope_position_deltas = self.build3dPositionIds(1, text_with_image_embed.dim(.s), prompt_shape, grid_thw);
+        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(text_with_image_embed, token_index, kv_cache, position_ids);
 
-        const last_pos = real_seq_len.addConstant(-1).asScalar();
+        const last_pos = total_seq_len.addConstant(-1).asScalar();
         const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
+
         const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
         return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
-    }
-
-    fn buildVisionDecodePositionIds(cache_position: Tensor, mrope_position_deltas: Tensor) Tensor {
-        const cache_pos = cache_position.convert(.i64).reshape(.{ .b = 1, .s = 1 });
-        const deltas = mrope_position_deltas.convert(.i64).reshape(.{ .b = 1, .s = 1 });
-        const pos = cache_pos.add(deltas);
-        return zml.Tensor.stack(&.{ pos, pos, pos }, 0, .g).withTags(.{ .g, .b, .s });
     }
 
     pub fn multimodal_decode_forward(
@@ -261,22 +189,59 @@ pub const Qwen35 = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const token_embed = self.text_model.embed_tokens.forward(tokens);
-        const seq_len = token_embed.dim(.s);
-        const token_embed_batched = token_embed.reshape(.{
-            .b = 1,
-            .s = seq_len,
-            .d = token_embed.dim(.d),
-        });
-        const position_ids = buildVisionDecodePositionIds(token_index, mrope_position_deltas);
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
-            token_embed_batched,
-            token_index,
-            kv_cache,
-            position_ids,
-        );
+        const token_embeds = self.text_model.embed_tokens.forward(tokens);
+
+        const position_ids = buildDecode3dPositionIds(token_index, mrope_position_deltas);
+
+        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(token_embeds, token_index, kv_cache, position_ids);
+
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+    }
+
+    pub fn build3dPositionIds(
+        self: Qwen35,
+        batch_count: i64,
+        seq_len: i64,
+        prompt_shape: Tensor,
+        grid_thw: [3]i64,
+    ) struct { Tensor, Tensor } {
+        const num_pre_image_tokens, const num_image_tokens, const num_post_image_tokens = .{ prompt_shape.choose1d(0, 0).convert(.i64), prompt_shape.choose1d(0, 1).convert(.i64), prompt_shape.choose1d(0, 2).convert(.i64) };
+        const t = grid_thw[0];
+        const h = @divExact(grid_thw[1], self.config.vision_config.spatial_merge_size);
+        const w = @divExact(grid_thw[2], self.config.vision_config.spatial_merge_size);
+
+        // Pre image positions
+        // Assumption: num_pre_image_tokens = 4 from the chat template
+        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i64), .s).convert(.i64);
+
+        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i64), .s).convert(.i64)
+            .sub(num_image_tokens).addConstant(@max(w, h, t));
+        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i64) }, pre_image_positions);
+
+        // Image positions
+        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i64);
+        const t_index = zml.Tensor.iota(iota_shape, .t).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
+        const h_index = zml.Tensor.iota(iota_shape, .h).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
+        const w_index = zml.Tensor.iota(iota_shape, .w).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
+
+        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, t_index);
+        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, h_index);
+        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, w_index);
+
+        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
+
+        // Deltas
+        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i64).add(num_post_image_tokens).add(num_pre_image_tokens);
+        const real_seq_len = num_pre_image_tokens.add(num_post_image_tokens).add(num_image_tokens);
+        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).insertAxes(.last, .{ .b, .s });
+
+        return .{ stacked_position_ids, mrope_position_deltas };
+    }
+
+    fn buildDecode3dPositionIds(cache_position: Tensor, mrope_position_deltas: Tensor) Tensor {
+        const pos = cache_position.add(mrope_position_deltas);
+        return zml.Tensor.stack(&.{ pos, pos, pos }, 0, .g).withTags(.{ .g, .b, .s });
     }
 };
 
@@ -346,8 +311,7 @@ pub const VisionModel = struct {
             hidden_states = block.forward(hidden_states, cos, sin);
         }
 
-        const output = self.patch_merger.forward(hidden_states);
-        return output;
+        return self.patch_merger.forward(hidden_states);
     }
 
     // Maps the vision patch grid to the learned positional embeddings of size num_pos_embeds
@@ -416,7 +380,7 @@ pub const VisionModel = struct {
         const seq = zml.Tensor.arange(.{ .end = @divExact(@divExact(self.hidden_size, self.num_heads), 2) }, .f32).withTags(.{.d});
         const rotary_pos_emb = zml.Tensor.outer(seq, inv_freq).gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
 
-        const rotary_pos_emb_double = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1);
+        const rotary_pos_emb_double = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1).withTags(.{ .p, .hd });
         const cos = rotary_pos_emb_double.cos();
         const sin = rotary_pos_emb_double.sin();
         return .{ cos, sin };
@@ -464,8 +428,8 @@ pub const Conv3d = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) Conv3d {
         return .{
-            .weight = store.createTensor("weight", null, null),
-            .bias = store.maybeCreateTensor("bias", null, null),
+            .weight = store.createTensor("weight", .{ .c, .in, .kt, .kh, .kw }, null),
+            .bias = store.maybeCreateTensor("bias", .{.c}, null),
             .temporal_stride = config.vision_config.temporal_patch_size,
             .spatial_stride = config.vision_config.patch_size,
         };
@@ -478,8 +442,10 @@ pub const Conv3d = struct {
 
     pub fn forward(self: Conv3d, input: Tensor) Tensor {
         const x = input;
+        const input_dims = [3]i64{ x.dim(.t), x.dim(.h), x.dim(.w) };
+        const kernel_dims = [3]i64{ self.weight.dim(.kt), self.weight.dim(.kh), self.weight.dim(.kw) };
         var strides: [3]i64 = .{ self.temporal_stride, self.spatial_stride, self.spatial_stride };
-        const padding = getPadding(x.dims()[2..5].*, self.weight.dims()[2..5].*, strides);
+        const padding = getPadding(input_dims, kernel_dims, strides);
         var y = x.convolution(
             self.weight,
             .{
@@ -506,16 +472,15 @@ pub const Conv3d = struct {
     }
 
     fn getPadding(input_dims: [3]i64, kernel_dims: [3]i64, strides: [3]i64) [6]i64 {
-        var res: [6]i64 = undefined;
-        for (0..3) |i| {
-            const output_size = @divFloor(input_dims[i], strides[i]);
-            const total_padding = (output_size - 1) * strides[i] + kernel_dims[i] - input_dims[i];
-            const pad_start = @divFloor(total_padding, 2);
-            const pad_end = total_padding - pad_start;
-            res[2 * i] = pad_start;
-            res[2 * i + 1] = pad_end;
+        var padding: [6]i64 = undefined;
+        inline for (0..3) |i| {
+            const out = @divFloor(input_dims[i], strides[i]);
+            const total = (out - 1) * strides[i] + kernel_dims[i] - input_dims[i];
+            const before = @divFloor(total, 2);
+            padding[2 * i] = before;
+            padding[2 * i + 1] = total - before;
         }
-        return res;
+        return padding;
     }
 };
 
@@ -585,12 +550,14 @@ pub const VisionAttention = struct {
     proj: zml.nn.Linear,
 
     num_heads: i64,
+    head_dim: i64,
 
     pub fn init(store: zml.io.TensorStore.View, config: Qwen35.Config) VisionAttention {
         return .{
             .qkv = .init(store.withPrefix("qkv").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("qkv").maybeCreateTensor("bias", .{.dout}, null), .d),
             .proj = .init(store.withPrefix("proj").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("proj").maybeCreateTensor("bias", .{.dout}, null), .d),
             .num_heads = config.vision_config.num_heads,
+            .head_dim = @divExact(config.vision_config.hidden_size, config.vision_config.num_heads),
         };
     }
 
@@ -602,23 +569,20 @@ pub const VisionAttention = struct {
     }
 
     pub fn forward(self: VisionAttention, hidden_states: Tensor, cos: Tensor, sin: Tensor) Tensor {
-        const qkv = self.qkv.forward(hidden_states.withTags(.{ .s, .d }));
+        const qkv = self.qkv.forward(hidden_states);
 
-        const qkv_reshaped = qkv.reshape(.{
-            hidden_states.dim(0),
-            3,
-            self.num_heads,
-            -1, // head_dim
-        }).withTags(.{ .s, .qkv, .h, .hd });
-        const qkv_permuted = qkv_reshaped.transpose(.{ .qkv, .s, .h, .hd });
-        const q, const k, var v = qkv_permuted.chunkExact(.qkv, 3);
+        const qkv_split = qkv.splitAxis(.dout, .{ .qkv = 3, .h = self.num_heads, .hd = self.head_dim });
+        const qkv_permuted = qkv_split.transpose(.{ .qkv, .p, .h, .hd });
+        const q_, const k_, const v_ = qkv_permuted.chunkExact(.qkv, 3);
+        const q = q_.rename(.{ .qkv = .bs, .p = .q });
+        const k = k_.rename(.{ .qkv = .bs, .p = .k });
+        const v = v_.rename(.{ .qkv = .bs, .p = .k });
 
-        const q_embed, const k_embed = applyRotaryPositionalEmbedding(q, k, cos, sin);
-        v = v.withTags(.{ .bs, .k, .h, .hd });
+        const q_embed, const k_embed = applyRope(q, k, cos, sin);
         const attn_output = zml.nn.sdpa(q_embed, k_embed, v, .{ .allow_cudnn = true });
-        const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const result = self.proj.forward(attn).rename(.{ .dout = .d });
-        const output = result.squeeze(.bs);
+        const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .p }).squeeze(.bs);
+
+        const output = self.proj.forward(attn).rename(.{ .dout = .d });
         return output;
     }
 
@@ -628,20 +592,18 @@ pub const VisionAttention = struct {
         return Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     }
 
-    fn applyRotaryPositionalEmbedding(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) struct { Tensor, Tensor } {
-        // Broadcast cos and sin to the shape of q and k
+    fn applyRope(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) struct { Tensor, Tensor } {
+        const cos_q = cos.rename(.{ .p = .q }).insertAxes(.hd, .{.h}).insertAxes(.q, .{.bs}).broad(q.shape());
+        const sin_q = sin.rename(.{ .p = .q }).insertAxes(.hd, .{.h}).insertAxes(.q, .{.bs}).broad(q.shape());
+        const cos_k = cos.rename(.{ .p = .k }).insertAxes(.hd, .{.h}).insertAxes(.k, .{.bs}).broad(k.shape());
+        const sin_k = sin.rename(.{ .p = .k }).insertAxes(.hd, .{.h}).insertAxes(.k, .{.bs}).broad(k.shape());
 
-        const cos_q = cos.broadcast(q.shape(), &.{ 1, 3 });
-        const sin_q = sin.broadcast(q.shape(), &.{ 1, 3 });
-        const cos_k = cos.broadcast(k.shape(), &.{ 1, 3 });
-        const sin_k = sin.broadcast(k.shape(), &.{ 1, 3 });
+        const q_1 = q.convert(cos.dtype());
+        const k_1 = k.convert(cos.dtype());
+        const q_2 = q_1.mul(cos_q).add(rotate_half(q_1).mul(sin_q));
+        const k_2 = k_1.mul(cos_k).add(rotate_half(k_1).mul(sin_k));
 
-        const q_dtype = q.convert(cos.dtype());
-        const k_dtype = k.convert(cos.dtype());
-        const q_embed = q_dtype.mul(cos_q).add(rotate_half(q_dtype).mul(sin_q)).withTags(.{ .bs, .q, .h, .hd });
-        const k_embed = k_dtype.mul(cos_k).add(rotate_half(k_dtype).mul(sin_k)).withTags(.{ .bs, .k, .h, .hd });
-
-        return .{ q_embed.convert(q.dtype()), k_embed.convert(k.dtype()) };
+        return .{ q_2.convert(q.dtype()), k_2.convert(k.dtype()) };
     }
 };
 
@@ -672,13 +634,13 @@ pub const VisionPatchMerger = struct {
     }
 
     pub fn forward(self: VisionPatchMerger, x: Tensor) Tensor {
-        const merged_seq_len = @divExact(x.dim(0), self.spatial_merge_unit);
-        const merged_hidden_size = x.dim(1) * self.spatial_merge_unit;
-        const x1 = self.norm.forward(x).reshape(.{ merged_seq_len, merged_hidden_size }).withTags(.{ .s, .d });
+        const x1 = self.norm.forward(x)
+            .splitAxis(.p, .{ .p = -1, .merge = self.spatial_merge_unit })
+            .merge(.{ .d = .{ .merge, .d } });
         const x2 = self.linear_fc1.forward(x1).rename(.{ .dout = .d });
         const x3 = x2.gelu();
         const x4 = self.linear_fc2.forward(x3).rename(.{ .dout = .d });
-        return x4;
+        return x4.rename(.{ .p = .s });
     }
 };
 
@@ -731,7 +693,7 @@ pub const TextModel = struct {
 
         const position_ids = Tensor.arange(.{ .end = hidden_states.dim(.s) }, .i64)
             .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64))
-            .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64)));
+            .add(token_index.broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64)));
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {

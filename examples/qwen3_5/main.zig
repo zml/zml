@@ -150,7 +150,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_len });
     const prefill_tokens = Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = Tensor.init(.{ .b = 1, .s = 1 }, .u32);
-    const token_index = Tensor.init(.{}, .u32);
+    const token_index = Tensor.init(.{}, .i64);
 
     const rng = zml.Tensor.Rng.init();
 
@@ -254,7 +254,7 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
-        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
+        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, 0), .i64, replicated_sharding);
         defer prefill_token_index_buffer.deinit();
 
         prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, rng_buffers });
@@ -294,7 +294,7 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         if (i == output_tokens_len) break :generation;
         if (generated_token == qwen_model.special_tokens.end_of_text_token_id) break :generation;
 
-        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(input_token_ids.len + i)), .u32, replicated_sharding);
+        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, @intCast(input_token_ids.len + i)), .i64, replicated_sharding);
         defer token_index_buffer.deinit();
 
         decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
