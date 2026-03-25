@@ -165,23 +165,6 @@ def ragged_paged_attention_on_tpu(kernel_params: dict) -> str | None:
     cu_q_lens = jax.ShapeDtypeStruct((kernel_params["max_num_seqs"] + 1,), jnp.int32)
     num_seqs = jax.ShapeDtypeStruct((1,), jnp.int32)
 
-    # lowered = ragged_paged_attention.lower(
-    #     q,
-    #     kv_pages,
-    #     kv_lens,
-    #     page_indices,
-    #     cu_q_lens,
-    #     num_seqs,
-    #     sm_scale=kernel_params.get("sm_scale", 1.0),
-    #     sliding_window=kernel_params.get("sliding_window"),
-    #     soft_cap=kernel_params.get("soft_cap"),
-    #     mask_value=kernel_params.get("mask_value"),
-    #     k_scale=kernel_params.get("k_scale"),
-    #     v_scale=kernel_params.get("v_scale"),
-    #     num_kv_pages_per_block=kernel_params.get("num_kv_pages_per_block"),
-    #     num_queries_per_block=kernel_params.get("num_queries_per_block"),
-    #     vmem_limit_bytes=kernel_params.get("vmem_limit_bytes"),
-    # )
     lowered = jax.jit(
         ragged_paged_attention,
         backend="cpu",
@@ -242,16 +225,16 @@ def main():
                 raise ValueError("Invalid request: 'params' must be a JSON object")
 
 
+            if backend_kind == "ragged_paged":
+                tpu_code = ragged_paged_attention_on_tpu(params)
+                if tpu_code is None:
+                    raise ValueError("Failed to extract TPU backend config from ragged paged attention IR")
             if backend_kind == "paged":
                 # tpu_code = paged_attention_on_tpu(params)
                 # if tpu_code is None:
                     # raise ValueError("Failed to extract TPU backend config from paged attention IR")
                     raise ValueError("paged Disabled for now")
                 
-            if backend_kind == "ragged_paged":
-                tpu_code = ragged_paged_attention_on_tpu(params)
-                if tpu_code is None:
-                    raise ValueError("Failed to extract TPU backend config from ragged paged attention IR")
             else:
                 # tpu_code = flash_attention_on_tpu(params)
                 # if tpu_code is None:
