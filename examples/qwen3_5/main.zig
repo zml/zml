@@ -15,7 +15,7 @@ pub const std_options: std.Options = .{
 const CliArgs = struct {
     model: []const u8,
     prompt: []const u8 = "What is the capital of France ?",
-    len: i64 = 256,
+    len: i64 = 1024,
     moe_backend: ?[]const u8 = null,
 };
 
@@ -265,7 +265,6 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         }
     }
     try writer.flush();
-    log.info("After writing prompt tokens\n", .{});
 
     const max_seq_len: usize = @intCast(qwen_model.gen_options.max_seq_len);
     if (input_token_ids.len > max_seq_len) return error.PromptTooLong;

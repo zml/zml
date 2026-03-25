@@ -45,6 +45,38 @@ pub const GenerationConfig = struct {
     num_stages: usize,
 };
 
+fn makeGenerationConfigWithTopK(
+    a: Tensor,
+    b: Tensor,
+    c: Tensor,
+    max_num_tokens_padded: i64,
+    num_valid_tokens: i64,
+    opts: Options,
+    naive_block_assignment: bool,
+    top_k: i64,
+) GenerationConfig {
+    return .{
+        .a_dtype = a.dtype(),
+        .b_dtype = b.dtype(),
+        .c_dtype = c.dtype(),
+        .num_tokens = @intCast(a.dim(0)),
+        .top_k = @intCast(top_k),
+        .num_experts = @intCast(b.dim(0)),
+        .out_features = @intCast(b.dim(1)),
+        .in_features = @intCast(b.dim(2)),
+        .max_num_tokens_padded = @intCast(max_num_tokens_padded),
+        .num_valid_tokens = @intCast(num_valid_tokens),
+        .block_size_m = @intCast(opts.block_size_m),
+        .block_size_n = @intCast(opts.block_size_n),
+        .block_size_k = @intCast(opts.block_size_k),
+        .group_size_m = @intCast(opts.group_size_m),
+        .naive_block_assignment = naive_block_assignment,
+        .compute_type = c.dtype(),
+        .num_warps = @intCast(opts.num_warps),
+        .num_stages = @intCast(opts.num_stages),
+    };
+}
+
 const AlignBlockSizeKernel = enum {
     align_block_size,
     count_and_sort,
@@ -510,8 +542,8 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
 
     {
         const inputs = .{
-            sorted_token_ids,
             flat_experts,
+            sorted_token_ids,
             cumsums,
         };
         const outputs = ops.triton(inputs, .{ sorted_token_ids.shape(), cumsums.shape() }, .{
@@ -520,7 +552,7 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
             .grid = .{ @intCast(sort_grid_x), 1, 1 },
             .num_stages = 1,
             .num_warps = 4,
-            .output_operand_aliases = &.{ 0, 2 },
+            .output_operand_aliases = &.{ 1, 2 },
         });
         sorted_token_ids = outputs[0];
         cumsums = outputs[1];
@@ -538,26 +570,7 @@ fn makeGenerationConfig(
     opts: Options,
     naive_block_assignment: bool,
 ) GenerationConfig {
-    return .{
-        .a_dtype = a.dtype(),
-        .b_dtype = b.dtype(),
-        .c_dtype = c.dtype(),
-        .num_tokens = @intCast(a.dim(0)),
-        .top_k = @intCast(c.dim(1)),
-        .num_experts = @intCast(b.dim(0)),
-        .out_features = @intCast(b.dim(1)),
-        .in_features = @intCast(b.dim(2)),
-        .max_num_tokens_padded = @intCast(max_num_tokens_padded),
-        .num_valid_tokens = @intCast(num_valid_tokens),
-        .block_size_m = @intCast(opts.block_size_m),
-        .block_size_n = @intCast(opts.block_size_n),
-        .block_size_k = @intCast(opts.block_size_k),
-        .group_size_m = @intCast(opts.group_size_m),
-        .naive_block_assignment = naive_block_assignment,
-        .compute_type = c.dtype(),
-        .num_warps = @intCast(opts.num_warps),
-        .num_stages = @intCast(opts.num_stages),
-    };
+    return makeGenerationConfigWithTopK(a, b, c, max_num_tokens_padded, num_valid_tokens, opts, naive_block_assignment, c.dim(1));
 }
 
 fn callFusedKernel(
@@ -663,7 +676,15 @@ pub fn fusedExpertsImpl(
     const gate_up = w1.withTags(.{ .expert, .out, .in });
     const down = w2.withTags(.{ .expert, .out, .mid });
     const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    log.info("top weights shape: {f}", .{weights.shape()});
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
+
+    // const hidden = hidden_states.withTags(.{ .token, .in });
+    // hidden.print("hidden content");
+    // const gate_up = w1.withTags(.{ .expert, .out, .in });
+    // const down = w2.withTags(.{ .expert, .out, .mid });
+    // const weights = topk_weights.withTags(.{ .token, .topk });
+    // const ids = topk_ids.withTags(.{ .token, .topk });
 
     if (hidden.dtype() != .bf16) return error.UnsupportedType;
     if (gate_up.dtype() != .bf16 or down.dtype() != .bf16) return error.UnsupportedType;
@@ -742,7 +763,16 @@ pub fn fusedExpertsImpl(
     const activated = gate.silu().mul(up);
 
     var second_out = Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
-    const second_generation_config = makeGenerationConfig(activated, down, second_out, max_num_tokens_padded, num_assignments, effective_opts, naive_block_assignment);
+    const second_generation_config = makeGenerationConfigWithTopK(
+        activated,
+        down,
+        second_out,
+        max_num_tokens_padded,
+        num_assignments,
+        effective_opts,
+        naive_block_assignment,
+        1,
+    );
     const ttir_second_matmul = generateTtir(std.heap.c_allocator, io, second_generation_config) catch |err| {
         log.err("Failed to generate TTIR for second MoE matmul: {}", .{err});
         return err;
@@ -771,8 +801,13 @@ pub fn fusedExpertsImpl(
     );
 
     const weighted = second_out.mul(weights.convert(second_out.dtype()).broad(second_out.shape()));
+    // const weighted = second_out.mul(weights).broad(second_out.shape());
+
     log.info("Completed fused MoE kernels. Starting reduction across top-k experts. Weighted output shape: {f}", .{weighted.shape()});
     const output = weighted.sum(.topk).squeeze(.topk);
+
+    // output.print("Final MoE output");
+
     log.info("Completed MoE forward pass. Output shape: {f}", .{output.shape()});
     return output;
 }

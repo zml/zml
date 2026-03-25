@@ -5,8 +5,6 @@ const Tensor = zml.Tensor;
 
 const log = std.log.scoped(.general_triton_test);
 
-const token_slice: Tensor.Slice = .{ .start = 0, .end = 8 };
-
 fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8) !zml.Buffer {
     const shape = store.view().getShape(key) orelse return error.NotFound;
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
@@ -24,11 +22,7 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *zml.
 
 const Fwd = struct {
     pub fn forward(hidden_states: Tensor, w1: Tensor, w2: Tensor, topk_weights: Tensor, topk_ids: Tensor) Tensor {
-        const hidden_states_slice = hidden_states.slice1d(0, token_slice);
-        const topk_weights_slice = topk_weights.slice1d(0, token_slice);
-        const topk_ids_slice = topk_ids.slice1d(0, token_slice);
-
-        return zml.general_triton_moe.fusedExpertsImpl(hidden_states_slice, w1, w2, topk_weights_slice, topk_ids_slice, .{}) catch |err| {
+        return zml.general_triton_moe.fusedExpertsImpl(hidden_states, w1, w2, topk_weights, topk_ids, .{}) catch |err| {
             std.debug.panic("general Triton MoE failed: {}", .{err});
         };
     }
@@ -109,16 +103,9 @@ pub fn main(init: std.process.Init) !void {
 
     const expected_host = try expected.toSliceAlloc(allocator, io);
     defer expected_host.free(allocator);
-    const expected_token_stride: usize = @intCast(expected_host.shape.computeByteStrides().get(0));
-    const token_start: usize = @intCast(token_slice.start);
-    const token_end: usize = @intCast(token_slice.end);
-    const expected_slice = zml.Slice.init(
-        expected_host.shape.setDim(0, token_slice.end - token_slice.start),
-        expected_host.constData()[token_start * expected_token_stride .. token_end * expected_token_stride],
-    );
 
-    log.info("actual sliced output shape: {f}", .{actual.shape()});
-    log.info("expected sliced output shape: {f}", .{expected_slice.shape});
-    try zml.testing.expectClose(io, actual, expected_slice, .{});
+    log.info("actual output shape: {f}", .{actual.shape()});
+    log.info("expected output shape: {f}", .{expected_host.shape});
+    try zml.testing.expectClose(io, actual, expected_host, .{});
     log.info("validation succeeded for {s}", .{dump_path});
 }

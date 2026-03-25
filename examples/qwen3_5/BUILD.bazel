@@ -15,3 +15,58 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "moe_test",
+    srcs = [
+        "moe_test_helpers.zig",
+        "moe_test.zig",
+        "qwen3_5.zig",
+    ],
+    main = "moe_test.zig",
+    data = [
+        "//zml/moe/triton:sandbox",
+        "//zml/moe/triton:triton_kernels/config.json",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "moe_experts_validation",
+    srcs = [
+        "moe_experts_validation.zig",
+        "qwen3_5.zig",
+    ],
+    main = "moe_experts_validation.zig",
+    data = [
+        "//zml/moe/triton:sandbox",
+        "//zml/moe/triton:triton_kernels/config.json",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "moe_experts_matmul_validation",
+    srcs = [
+        "moe_experts_matmul_validation.zig",
+        "qwen3_5.zig",
+    ],
+    main = "moe_experts_matmul_validation.zig",
+    data = [
+        "//zml/moe/triton:sandbox",
+        "//zml/moe/triton:triton_kernels/config.json",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

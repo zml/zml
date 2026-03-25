@@ -312,19 +312,16 @@ pub fn moe(
             break :b output;
         },
         .triton => b: {
+
+            // To be moved in the model
             _ = metadata;
-            const router_logits = router.forward(input);
-            const routing = router_logits.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
+            const router_logits = router.forward(input).convert(.f32);
+            // Match HF: softmax over all experts, then top-k and renormalize.
+            const router_probs = router_logits.softmax(.expert);
+            const routing = router_probs.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
             const topk_ids = routing.indices.convert(.i32);
-            const renormalize = true;
-            const topk_weights = if (renormalize)
-                routing.values.softmax(.top_expert)
-            else blk: {
-                const logZ = router_logits.logSumExp(.expert);
-                break :blk routing.values.sub(
-                    logZ.rename(.{ .expert = .top_expert }).broad(routing.values.shape()),
-                ).exp();
-            };
+            var topk_weights = routing.values;
+            topk_weights = topk_weights.div(topk_weights.sum(.top_expert).broad(topk_weights.shape())).convert(router_logits.dtype());
 
             std.log.info("input shape: {f}", .{input.shape()});
             std.log.info("weights_gate_up shape: {f}", .{weights_gate_up.shape()});

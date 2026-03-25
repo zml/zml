@@ -112,11 +112,10 @@ pub const Qwen35 = struct {
             const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
-        return zml.io.load(Qwen35, self, allocator, io, platform, .{
+        return zml.io.load(Qwen35, self, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .store = store,
             .shardings = shardings,
             .parallelism = 16,
             .total_bytes = &total_bytes,
@@ -325,6 +324,24 @@ pub const Mlp = struct {
     }
 };
 
+const Router = struct {
+    router: zml.nn.Linear,
+    num_experts_per_tok: u32,
+
+    pub fn forward(self: @This(), x: Tensor) struct { Tensor, Tensor, Tensor } {
+        const hidden_states = x.withTags(.{ .s, .d });
+        const router_logits = self.router.forward(hidden_states).convert(.f32);
+        const router_probs = router_logits.softmax(.expert);
+        const routing = router_probs.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
+        const router_scores = routing.values.div(routing.values.sum(.top_expert).broad(routing.values.shape()));
+        const router_indices = routing.indices.convert(.i64);
+        std.log.info("router_probs: {f}", .{router_probs});
+        std.log.info("router_scores: {f}", .{router_scores});
+        std.log.info("router_indices: {f}", .{router_indices});
+        return .{ router_probs, router_scores, router_indices };
+    }
+};
+
 pub const Moe = struct {
     shared_expert: Mlp,
     shared_expert_gate: zml.nn.Linear,
@@ -369,7 +386,7 @@ pub const Moe = struct {
         const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).mul(shared_gate);
 
-        return routed.reshape(shared.shape()).add(shared);
+        return routed.convert(shared.dtype()).reshape(shared.shape()).add(shared);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Moe)) void {
