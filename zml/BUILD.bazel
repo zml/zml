@@ -28,10 +28,6 @@ cc_library(
 
 zig_library(
     name = "zml",
-    data = glob([
-        "ttir_moe_kernels_tensorized/decode/*.ttir",
-        "moe/triton/triton_kernels/config.json",
-    ]),
     tags = ["manual"],
     data = glob([
         "ttir_moe_kernels_tensorized/decode/*.ttir",
