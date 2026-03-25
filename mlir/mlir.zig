@@ -1157,7 +1157,6 @@ pub const Operation = opaque {
         result_type_inference: bool = false,
         attributes: ?[]const NamedAttribute = null,
         blocks: ?[]const *Block = null,
-        regions: ?[]const []const *Block = null,
         verify: bool = true,
         location: ?*const Location = null,
     };
@@ -1202,17 +1201,6 @@ pub const Operation = opaque {
                 region.appendOwnedBlock(block_);
             }
             state.addOwnedRegions(&.{region});
-        }
-        if (args.regions) |regions_list| {
-            var owned_regions: stdx.BoundedArray(*Region, 8) = .{};
-            for (regions_list) |blocks_in_region| {
-                const region = Region.init();
-                for (blocks_in_region) |block_| {
-                    region.appendOwnedBlock(block_);
-                }
-                owned_regions.appendAssumeCapacity(region);
-            }
-            state.addOwnedRegions(owned_regions.constSlice());
         }
         const new_op = try Operation.init(&state);
         errdefer new_op.deinit();
