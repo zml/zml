@@ -11,7 +11,6 @@ pub export fn zmlxrocm_dlopen(filename: [*c]const u8, flags: c_int) ?*anyopaque 
         .{ "libamd_comgr.so", "libamd_comgr.so.3" },
         .{ "librocprofiler-register.so", "librocprofiler-register.so.0" },
         .{ "libMIOpen.so", "libMIOpen.so.1" },
-        .{ "libMIOpen.so.1", "libMIOpen.so.1" },
         .{ "librccl.so", "librccl.so.1" },
         .{ "librocblas.so.5", "librocblas.so.5" },
         .{ "librocblas.so", "librocblas.so.5" },

@@ -49,11 +49,31 @@ _ROCM_PACKAGES = {
     "rocprofiler-sdk-rocpd": packages.filegroup(name = "rocprofiler-sdk-rocpd", srcs = ["lib/librocprofiler-sdk-rocpd.so.1"]),
     "rocprofiler-sdk-roctx": packages.filegroup(name = "rocprofiler-sdk-roctx", srcs = ["lib/librocprofiler-sdk-roctx.so.1"]),
     "hsa-rocr": packages.filegroup(name = "hsa-runtime", srcs = ["lib/libhsa-runtime64.so.1"]),
-    "hsa-amd-aqlprofile": packages.filegroup(name = "hsa-amd-aqlprofile", srcs = ["lib/libhsa-amd-aqlprofile64.so.1"]),
+    "hsa-amd-aqlprofile": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "hsa-amd-aqlprofile",
+            src = "lib/libhsa-amd-aqlprofile64.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+    ]),
     "comgr": packages.filegroup(name = "amd_comgr", srcs = ["lib/libamd_comgr.so.3"]),
     "rocprofiler-register": packages.filegroup(name = "rocprofiler-register", srcs = ["lib/librocprofiler-register.so.0"]),
     "miopen-hip": "\n".join([
-        packages.filegroup(name = "MIOpen", srcs = ["lib/libMIOpen.so.1"]),
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "MIOpen",
+            src = "lib/libMIOpen.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
         """filegroup(name = "runfiles", srcs = glob(["share/miopen/**"]))""",
     ]),
     "rccl": packages.filegroup(name = "rccl", srcs = ["lib/librccl.so.1"]),

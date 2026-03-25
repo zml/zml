@@ -21,9 +21,37 @@ fn hasRocmDevices(io: std.Io) bool {
     return true;
 }
 
-fn setupRocmEnv(rocm_data_dir: []const u8) !void {
+fn isTraced(io: std.Io) bool {
+    const file = std.Io.Dir.openFileAbsolute(io, "/proc/self/status", .{}) catch return false;
+    defer file.close(io);
+
+    var read_buf: [1024]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    var status_buf: [4096]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&status_buf);
+    _ = reader.interface.streamRemaining(&writer) catch return false;
+
+    var lines = std.mem.splitScalar(u8, writer.buffered(), '\n');
+    while (lines.next()) |line| {
+        if (!std.mem.startsWith(u8, line, "TracerPid:")) continue;
+        const value = std.mem.trim(u8, line["TracerPid:".len..], " \t");
+        const tracer_pid = std.fmt.parseUnsigned(u32, value, 10) catch return false;
+        return tracer_pid != 0;
+    }
+    return false;
+}
+
+fn setupRocmEnv(io: std.Io, rocm_data_dir: []const u8) !void {
     var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     _ = c.setenv("ROCM_PATH", try stdx.Io.Dir.path.bufJoinZ(&buf, &.{rocm_data_dir}), 1); // must be zero terminated
+    if (isTraced(io)) {
+        // ROCm's async execution path is not stable when the process is running under ptrace/strace.
+        _ = c.setenv("HSA_ENABLE_INTERRUPT", "0", 0);
+        _ = c.setenv("HIP_LAUNCH_BLOCKING", "1", 0);
+        _ = c.setenv("AMD_SERIALIZE_KERNEL", "3", 0);
+    }
+    _ = c.setenv("AMD_SERIALIZE_KERNEL", "3", 0);
+
 }
 
 pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
@@ -46,7 +74,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
         return error.FileNotFound;
     };
 
-    try setupRocmEnv(sandbox_path);
+    try setupRocmEnv(io, sandbox_path);
 
     // We must load the PJRT plugin from the main thread.
     //
