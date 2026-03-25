@@ -157,7 +157,6 @@ pub fn main(init: std.process.Init) !void {
         compile_result,
         prompt_tokens,
         prompt_shape,
-        vision_inputs.image_grid_thw,
         vision_inputs.pixel_values,
         args.gen_tokens,
         kv_cache,
@@ -177,11 +176,11 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     const t = grid_thw[0];
     const h = grid_thw[1];
     const w = grid_thw[2];
-    const patch_flat_dim: i64 = qwen35_model.config.vision_config.in_channels *
+    const patch_3d_size: i64 = qwen35_model.config.vision_config.in_channels *
         qwen35_model.config.vision_config.temporal_patch_size *
         qwen35_model.config.vision_config.patch_size *
         qwen35_model.config.vision_config.patch_size;
-    const pixel_rows: i64 = t * h * w;
+    const patch_count: i64 = t * h * w;
 
     var prefill_future = try io.concurrent(struct {
         fn call(
@@ -192,8 +191,8 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             kv_cache_: qwen35.KvCache,
             prefill_len_: usize,
             grid_thw_: [3]i64,
-            pixel_rows_: i64,
-            patch_flat_dim_: i64,
+            patch_count_: i64,
+            patch_3d_size_: i64,
             sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
@@ -212,7 +211,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                     Tensor.init(.{ .b = 1, .s = prefill_len_ }, .u32),
                     Tensor.init(.{}, .u32),
                     kv_cache_,
-                    Tensor.init(.{ .n = pixel_rows_, .f = patch_flat_dim_ }, .f32),
+                    Tensor.init(.{ .p = patch_count_, .ps = patch_3d_size_ }, .f32),
                     grid_thw_,
                     Tensor.init(.{3}, .i64),
                     zml.Tensor.Rng.init(),
@@ -220,7 +219,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 .{ .shardings = &.{sharding_} },
             );
         }
-    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_len, grid_thw, pixel_rows, patch_flat_dim, sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_len, grid_thw, patch_count, patch_3d_size, sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -281,7 +280,6 @@ fn runGenerationLoop(
     compile_result: CompileModelResult,
     input_token_ids: []const u32,
     prompt_shape_values: [3]i64,
-    image_grid_thw: [3]i64,
     pixel_values_buffer: zml.Buffer,
     gen_tokens: usize,
     kv_cache: qwen35.KvCache,
@@ -290,24 +288,6 @@ fn runGenerationLoop(
     defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
     const total_seq_len: i64 = prompt_shape_values[0] + prompt_shape_values[1] + prompt_shape_values[2];
-
-    const t = image_grid_thw[0];
-    const h = image_grid_thw[1];
-    const w = image_grid_thw[2];
-    const patch_flat_dim: i64 = model.config.vision_config.in_channels *
-        model.config.vision_config.temporal_patch_size *
-        model.config.vision_config.patch_size *
-        model.config.vision_config.patch_size;
-    const pixel_rows: i64 = t * h * w;
-
-    const pixel_shape = pixel_values_buffer.shape();
-    if (pixel_shape.rank() != 2 or pixel_shape.dim(0) != pixel_rows or pixel_shape.dim(1) != patch_flat_dim) {
-        log.err(
-            "pixel_values shape mismatch: got {f}, expected {{n={d}, f={d}}}",
-            .{ pixel_shape, pixel_rows, patch_flat_dim },
-        );
-        return error.InvalidPixelValuesShape;
-    }
 
     const prompt_tokens_shape = zml.Shape.init(.{ .b = 1, .s = input_token_ids.len }, .u32);
     var prompt_tokens_slice: zml.Slice = try .alloc(allocator, prompt_tokens_shape);

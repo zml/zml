@@ -140,7 +140,9 @@ pub const Qwen35 = struct {
         self: Qwen35,
         batch_count: i64,
         seq_len: i64,
+        // Prompt shape [text_before_image, num_image_tokens, text_after_image]
         prompt_shape: Tensor,
+        // Vision patch grid shape [t, h, w]
         image_grid_thw: [3]i64,
     ) struct { Tensor, Tensor } {
         const text_pre_image_token_count = prompt_shape.choose1d(0, 0).convert(.i64);
@@ -289,7 +291,8 @@ pub const VisionModel = struct {
     hidden_size: i64,
     num_heads: i64,
     spatial_merge_size: i64,
-    num_position_embeddings: i64,
+    num_pos_embeds: i64,
+    sqrt_num_pos_embeds: f32,
     rope_opts: zml.nn.RopeOpts,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Qwen35.Config) !VisionModel {
@@ -308,7 +311,8 @@ pub const VisionModel = struct {
             .hidden_size = config.vision_config.hidden_size,
             .num_heads = config.vision_config.num_heads,
             .spatial_merge_size = config.vision_config.spatial_merge_size,
-            .num_position_embeddings = config.vision_config.num_position_embeddings,
+            .num_pos_embeds = config.vision_config.num_position_embeddings,
+            .sqrt_num_pos_embeds = std.math.pow(f32, @as(f32, @floatFromInt(config.vision_config.num_position_embeddings)), 0.5),
             .rope_opts = .{
                 .layout = .sequential,
                 .scaling = .{ .default = .{ .rope_theta = 10000.0 } },
@@ -331,11 +335,10 @@ pub const VisionModel = struct {
     }
 
     pub fn forward(self: VisionModel, pixel_values: Tensor, grid_thw: [3]i64) Tensor {
-        var hidden_states = self.vision_patch_embed.forward(pixel_values);
+        var hidden_states = self.vision_patch_embed.forward(pixel_values.withPartialTags(.{ .p, .ps }));
 
-        const pos_embeds = self.posEmbedInterpolate(&grid_thw);
-
-        hidden_states = hidden_states.add(pos_embeds.convert(hidden_states.dtype()));
+        const pos_embeds = self.getPosEmbeds(&grid_thw).convert(hidden_states.dtype());
+        hidden_states = hidden_states.add(pos_embeds);
 
         var rotary_pos_emb = rotaryPosEmbed(&grid_thw, self.spatial_merge_size, self.hidden_size, self.num_heads, self.rope_opts);
         rotary_pos_emb = zml.Tensor.concatenate(&.{ rotary_pos_emb, rotary_pos_emb }, -1);
@@ -346,89 +349,60 @@ pub const VisionModel = struct {
             hidden_states = block.forward(hidden_states, cos, sin);
         }
 
-        return self.patch_merger.forward(hidden_states);
+        const output = self.patch_merger.forward(hidden_states);
+        return output;
     }
 
-    // Positional embedding interpolation (representation of the image in a grid determined by the number of position embeddings 48 x 48)
-    pub fn posEmbedInterpolate(self: VisionModel, grid: []const i64) Tensor {
-        // Calculate the number of grid points per side (sqrt of the number of position embeddings)
-        const num_grid_per_side = std.math.pow(f32, @as(f32, @floatFromInt(self.num_position_embeddings)), 0.5);
+    // Maps the vision patch grid to the learned positional embeddings of size num_pos_embeds
+    pub fn getPosEmbeds(self: VisionModel, grid_thw: []const i64) Tensor {
+        const t, const h, const w = .{ grid_thw[0], grid_thw[1], grid_thw[2] };
 
-        const m_size = self.spatial_merge_size;
-        const embedding_dim = self.hidden_size;
+        // Interpolating coordinates
+        const h_idxs = zml.Tensor.arange(.{ .end = h }, .f32).scale((self.sqrt_num_pos_embeds - 1) / @as(f32, @floatFromInt(h - 1)));
+        const w_idxs = zml.Tensor.arange(.{ .end = w }, .f32).scale((self.sqrt_num_pos_embeds - 1) / @as(f32, @floatFromInt(w - 1)));
 
-        // Retrieve the dims in the image grid
-        const t = grid[0];
-        const h = grid[1];
-        const w = grid[2];
-        const tensor_filled_1_h = zml.Tensor.constant(.{ .f32 = 1 }).broad(zml.Shape.init(.{h}, .f32));
-        const tensor_filled_1_w = zml.Tensor.constant(.{ .f32 = 1 }).broad(zml.Shape.init(.{w}, .f32));
+        const h_floor = h_idxs.floor().add(zml.Tensor.constant(.{ .f32 = 1 }).broad(h_idxs.shape()));
+        const w_floor = w_idxs.floor().add(zml.Tensor.constant(.{ .f32 = 1 }).broad(w_idxs.shape()));
+        const h_ceil = h_floor.clamp(zml.Tensor.scalar(0, .f32), zml.Tensor.scalar(self.sqrt_num_pos_embeds - 1, .f32));
+        const w_ceil = w_floor.clamp(zml.Tensor.scalar(0, .f32), zml.Tensor.scalar(self.sqrt_num_pos_embeds - 1, .f32));
 
-        // Build the indices for the height and width with a local linspace equivalent.
-        // We avoid Tensor.linspace here because this path needs Python-equivalent interpolation coordinates.
-        const h_idxs = if (h == 1)
-            zml.Tensor.constant(.{ .f32 = 0 }).broad(zml.Shape.init(.{1}, .f32))
-        else
-            zml.Tensor.arange(.{ .end = h }, .f32).scale((num_grid_per_side - 1) / @as(f32, @floatFromInt(h - 1)));
-        const w_idxs = if (w == 1)
-            zml.Tensor.constant(.{ .f32 = 0 }).broad(zml.Shape.init(.{1}, .f32))
-        else
-            zml.Tensor.arange(.{ .end = w }, .f32).scale((num_grid_per_side - 1) / @as(f32, @floatFromInt(w - 1)));
-        const h_floor = h_idxs.floor();
-        const w_floor = w_idxs.floor();
-
-        // Build the ceil and floor for the height and width
-        const h_ceil = h_floor.add(tensor_filled_1_h).clamp(
-            zml.Tensor.scalar(0, .f32),
-            zml.Tensor.scalar(num_grid_per_side - 1, .f32),
-        );
-        const w_ceil = w_floor.add(tensor_filled_1_w).clamp(
-            zml.Tensor.scalar(0, .f32),
-            zml.Tensor.scalar(num_grid_per_side - 1, .f32),
-        );
-
-        // Build the difference between the indices and the floor for the height and width -> delta with the grid points
         const dh = h_idxs.sub(h_floor);
         const dw = w_idxs.sub(w_floor);
 
-        // Build the meshgrid for the height and width
-        const tensor_filled_1_h_v = zml.Tensor.constant(.{ .f32 = 1 }).broad(zml.Shape.init(.{ h, w }, .f32));
-        const d_tensors_meshgrid = [2]Tensor{ dh, dw };
-        const floor_tensors_meshgrid = [2]Tensor{ h_floor, w_floor };
-        const ceil_tensors_meshgrid = [2]Tensor{ h_ceil, w_ceil };
-        const dhw_grid = zml.Tensor.cartesianProduct(2, d_tensors_meshgrid);
-        const floorhw_grid = zml.Tensor.cartesianProduct(2, floor_tensors_meshgrid);
-        const ceilhw_grid = zml.Tensor.cartesianProduct(2, ceil_tensors_meshgrid);
+        // Expansion to 2D grid
+        const dh_grid, const dw_grid = zml.Tensor.cartesianProduct(2, .{ dh, dw });
+        const h_floor_grid, const w_floor_grid = zml.Tensor.cartesianProduct(2, .{ h_floor, w_floor });
+        const h_ceil_grid, const w_ceil_grid = zml.Tensor.cartesianProduct(2, .{ h_ceil, w_ceil });
 
-        // Compute the weights for the height and width
-        const w11 = dhw_grid[0].mul(dhw_grid[1]);
-        const w10 = dhw_grid[0].sub(w11);
-        const w01 = dhw_grid[1].sub(w11);
-        const w00 = tensor_filled_1_h_v.sub(dhw_grid[0]).sub(w01);
-        const h_list = [4]Tensor{ floorhw_grid[0], floorhw_grid[0], ceilhw_grid[0], ceilhw_grid[0] };
-        const w_list = [4]Tensor{ floorhw_grid[1], ceilhw_grid[1], floorhw_grid[1], ceilhw_grid[1] };
-
-        // Stack the height and width lists
-        const h_grid = zml.Tensor.stack(&h_list, 0, .layers);
-        const w_grid = zml.Tensor.stack(&w_list, 0, .layers);
-        const h_grid_idx = h_grid.scale(num_grid_per_side);
-        const indices = h_grid_idx.add(w_grid).reshape(.{ 4, -1 }).convert(.i64);
-        var weights = zml.Tensor.stack(&[4]Tensor{ w00, w01, w10, w11 }, 0, .layers).reshape(.{ 4, -1, 1 }).convert(self.pos_embed.weight.dtype());
+        // Get positional embeddings for grid corners
+        const h_grid = zml.Tensor.stack(&.{ h_floor_grid, h_floor_grid, h_ceil_grid, h_ceil_grid }, 0, .corners);
+        const w_grid = zml.Tensor.stack(&.{ w_floor_grid, w_ceil_grid, w_floor_grid, w_ceil_grid }, 0, .corners);
+        const indices = h_grid.scale(self.sqrt_num_pos_embeds).add(w_grid).reshape(.{ 4, -1 }).convert(.i64);
         const embeds = self.pos_embed.forward(indices);
-        const weights_embed = embeds.mul(weights.repeat1d(-1, @intCast(embedding_dim)));
-        const combined = weights_embed.sum(0).withTags(.{ .bs, .hw, .d });
 
-        // Split the combined tensor into the height and width dimensions
-        const combined_reshape = combined.splitAxis(.hw, .{ .h = @divExact(h, m_size), .m1 = m_size, .w = @divExact(w, m_size), .m2 = m_size });
-        const combined_permuted = combined_reshape.transpose(.{ .bs, .h, .w, .m1, .m2, .d });
+        // Compute bilinear interpolation weights
+        const w11 = dh_grid.mul(dw_grid);
+        const w10 = dh_grid.sub(w11);
+        const w01 = dw_grid.sub(w11);
+        const w00 = zml.Tensor.constant(.{ .f32 = 1 }).broad(w01.shape()).sub(dh_grid).sub(w01);
+        var weights = zml.Tensor.stack(&.{ w00, w01, w10, w11 }, 0, .corners).reshape(.{ 4, -1, 1 }).convert(self.pos_embed.weight.dtype());
 
-        // Repeat the combined tensor t times along the temporal dimension
-        const t_u63: u63 = @intCast(t);
-        return combined_permuted.repeat1d(0, t_u63).reshape(.{ -1, embedding_dim });
+        // Interpolate positional embeddings
+        const weights_embed = embeds.mul(weights.repeat1d(-1, @intCast(self.hidden_size))).withTags(.{ .corners, .hw, .d });
+        const combined = weights_embed.sum(.corners).squeeze(.corners);
+        const combined_reshape = combined.splitAxis(.hw, .{ .h = @divExact(h, self.spatial_merge_size), .m1 = self.spatial_merge_size, .w = @divExact(w, self.spatial_merge_size), .m2 = self.spatial_merge_size });
+        const combined_permuted = combined_reshape.transpose(.{ .h, .w, .m1, .m2, .d });
+        const output = combined_permuted.repeat1d(.h, @intCast(t)).merge(.{ .p = .{ .h, .w, .m1, .m2 } });
+
+        return output;
     }
 
     // Rotary position embedding for the vision transformer
     pub fn rotaryPosEmbed(grid_thw: []const i64, m_size: i64, hidden_size: i64, num_heads: i64, rope_opts: zml.nn.RopeOpts) Tensor {
+        log.info(
+            "[VisionModel.rotaryPosEmbed] begin: grid_thw={any} m_size={d} hidden_size={d} num_heads={d}",
+            .{ grid_thw, m_size, hidden_size, num_heads },
+        );
         const t = grid_thw[0];
         const h = grid_thw[1];
         const w = grid_thw[2];
@@ -449,8 +423,6 @@ pub const VisionModel = struct {
 
         // Python does `coords.repeat(num_frames, 1)`: repeat rows (tokens), not columns (coord components).
         const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(0, @as(u63, @intCast(t))).convert(.i64);
-        // Old implem:
-        // const pos_ids = zml.Tensor.stack(&[2]Tensor{ hpos_ids, wpos_ids }, 1, .layers).repeat1d(1, @as(u63, @intCast(t))).convert(.i64);
 
         // Compute the inverse frequency
         const inv_freq = zml.nn.invFreq(@intCast(32), rope_opts).withTags(.{.s});
@@ -461,9 +433,6 @@ pub const VisionModel = struct {
         const output = rotary_pos_emb_full.gather(.{ .d = pos_ids }, .{}).merge(.{ .d = .{ .layers, .s } });
         // Return without reshape to match Python
         return output;
-        // Old implem: Add a bs size for the output for the moment because the image processing is not done in batch but it is needed for the text processing
-        // const output_with_bs = output.reshape(.{ .bs = 1, .s = output.dim(.seq), .d = output.dim(.d) });
-        // return output_with_bs;
     }
 };
 
@@ -492,10 +461,11 @@ pub const VisionPatchEmbed = struct {
     }
 
     pub fn forward(self: VisionPatchEmbed, pixel_values: Tensor) Tensor {
-        const reshaped = pixel_values.reshape(.{ -1, self.in_channels, self.temporal_patch_size, self.patch_size, self.patch_size }); // TODO: add clean tags
+        const reshaped = pixel_values.splitAxis(.ps, .{ .c = self.in_channels, .t = self.temporal_patch_size, .h = self.patch_size, .w = self.patch_size });
         const target_type = self.proj.weight.dtype();
         const conv_output = self.proj.forward(reshaped.convert(target_type));
-        return conv_output.reshape(.{ conv_output.dim(0), conv_output.dim(1) });
+        const output = conv_output.rename(.{ .c = .d }).squeeze(.t).squeeze(.h).squeeze(.w);
+        return output;
     }
 };
 
@@ -592,7 +562,8 @@ pub const VisionBlock = struct {
         const attn_output = self.attn.forward(self.norm1.forward(hidden_states), cos, sin);
         const x = hidden_states.add(attn_output);
         const mlp_output = self.mlp.forward(self.norm2.forward(x));
-        return x.add(mlp_output);
+        const output = x.add(mlp_output);
+        return output;
     }
 };
 
@@ -618,7 +589,6 @@ pub const VisionMlp = struct {
         const x_tagged = x.withTags(.{ .s, .d });
         const x1 = self.linear_fc1.forward(x_tagged).gelu();
         const x2 = self.linear_fc2.forward(x1);
-
         return x2;
     }
 };
@@ -661,7 +631,8 @@ pub const VisionAttention = struct {
         const attn_output = zml.nn.sdpa(q_embed, k_embed, v, .{ .allow_cudnn = true });
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
         const result = self.proj.forward(attn).rename(.{ .dout = .d });
-        return result.squeeze(.bs);
+        const output = result.squeeze(.bs);
+        return output;
     }
 
     fn rotate_half(x: Tensor) Tensor {
@@ -720,7 +691,6 @@ pub const VisionPatchMerger = struct {
         const x2 = self.linear_fc1.forward(x1).rename(.{ .dout = .d });
         const x3 = x2.gelu();
         const x4 = self.linear_fc2.forward(x3).rename(.{ .dout = .d });
-
         return x4;
     }
 };
@@ -869,7 +839,8 @@ pub const TransformerLayer = struct {
 
         const mlp_output = self.mlp.forward(normalized_hidden);
 
-        return .{ mlp_output.add(residual1), updated_kv_cache };
+        const output = mlp_output.add(residual1);
+        return .{ output, updated_kv_cache };
     }
 };
 
@@ -1277,7 +1248,8 @@ pub const RmsNorm = struct {
         const weight_f32 = self.weight.convert(.f32);
 
         const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
-        return normalized.mul(weight_f32.broad(x.shape())).add(normalized).convert(x.dtype());
+        const output = normalized.mul(weight_f32.broad(x.shape())).add(normalized).convert(x.dtype());
+        return output;
     }
 };
 
@@ -1301,7 +1273,8 @@ pub const RmsNormGated = struct {
         const output = normalized.mul(self.weight.broad(x.shape()));
 
         const gated_output = output.mul(gate_f32.silu());
-        return gated_output.convert(x.dtype());
+        const result = gated_output.convert(x.dtype());
+        return result;
     }
 };
 
