@@ -52,8 +52,8 @@ pub const Session = struct {
             .seqlen = compiled_model.params.seqlen,
             .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
             .special_tokens = compiled_model.loaded_model.inner.special_tokens,
-            .think_start = tokenizer.tokenToId("<think>"),
-            .think_end = tokenizer.tokenToId("</think>"),
+            .think_start = tokenizer.tokenId("<think>"),
+            .think_end = tokenizer.tokenId("</think>"),
         };
     }
 
@@ -117,22 +117,24 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            if (try decoder.next(token_id)) |token| {
-                if (self.think_start) |think_start| if (token_id == think_start) {
-                    try stdout.writeAll("\x1b[2m");
-                };
-                try stdout.writeAll(token);
-                if (self.think_end) |think_end| if (token_id == think_end) {
-                    try stdout.writeAll("\x1b[0m");
-                };
-                try stdout.flush();
-            }
+            const token = try decoder.feed_one(token_id);
+            if (self.think_start) |think_start| if (token_id == think_start) {
+                try stdout.writeAll("\x1b[2m");
+            };
+            try stdout.writeAll(token);
+            if (self.think_end) |think_end| if (token_id == think_end) {
+                try stdout.writeAll("\x1b[0m");
+            };
+            try stdout.flush();
 
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
             try self.runDecodeStep(token_id, @intCast(all_tokens.items.len));
         }
+
+        try stdout.writeAll(try decoder.finalize());
+        try stdout.flush();
     }
 
     fn runDecodeStep(self: *Session, token_id: u32, token_index: u32) !void {
@@ -170,9 +172,9 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const im_start = tokenizer.tokenToId("<|im_start|>") orelse special_tokens.im_start_token_id;
-    const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
-    const newline = try encodeSingleToken(&encoder, "\n");
+    const im_start = tokenizer.tokenId("<|im_start|>") orelse special_tokens.im_start_token_id;
+    const im_end = tokenizer.tokenId("<|im_end|>") orelse special_tokens.im_end_token_id;
+    const newline = tokenizer.tokenId("\n") orelse return error.NoSuchToken;
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     if (!is_first_turn) {
@@ -180,16 +182,10 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     }
 
     try tokens.append(allocator, im_start);
-    try tokens.appendSlice(allocator, try encoder.encode("user\n"));
-    try tokens.appendSlice(allocator, try encoder.encode(prompt));
+    try encoder.encodeAppend(allocator, &tokens, "user\n");
+    try encoder.encodeAppend(allocator, &tokens, prompt);
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
-    try tokens.appendSlice(allocator, try encoder.encode("assistant\n"));
+    try encoder.encodeAppend(allocator, &tokens, "assistant\n");
 
     return tokens.toOwnedSlice(allocator);
-}
-
-fn encodeSingleToken(encoder: *zml.tokenizer.Tokenizer.Encoder, text: []const u8) !u32 {
-    const encoded = try encoder.encode(text);
-    if (encoded.len != 1) return error.InvalidTokenizerEncoding;
-    return encoded[0];
 }

@@ -34,6 +34,30 @@ pub const Tokenizer = union(Tokenizers) {
             }
         }
 
+        //
+        // Convenience methods built on top of the stream API
+        //
+
+        pub fn encodeAlloc(self: *Encoder, allocator: std.mem.Allocator, tokens: []const u8) !std.ArrayList(u32) {
+            var token_ids: std.ArrayList(u32) = try .initCapacity(allocator, tokens.len / 4);
+            try self.encodeAppend(allocator, &token_ids, tokens);
+            return token_ids;
+        }
+
+        pub fn encodeAppend(self: *Encoder, allocator: std.mem.Allocator, out: *std.ArrayList(u32), tokens: []const u8) !void {
+            var remaining = tokens;
+            while (remaining.len > 0) {
+                const fout = try self.feed(remaining);
+                try out.appendSlice(allocator, fout.token_ids);
+                remaining = remaining[fout.consumed..];
+            }
+            try out.appendSlice(allocator, try self.finalize());
+        }
+
+        //
+        // Stream API
+        //
+
         pub const FeedOutput = struct {
             consumed: usize,
             /// Only valid until the next feed/finalize call and while the encoder is alive.
@@ -61,33 +85,23 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
-        pub fn encodeAlloc(self: *Encoder, allocator: std.mem.Allocator, tokens: []const u8) !std.ArrayList(u32) {
-            var token_ids: std.ArrayList(u32) = try .initCapacity(allocator, tokens.len / 4);
-            var remaining = tokens;
-            while (remaining.len > 0) {
-                const out = try self.feed(remaining);
-                try token_ids.appendSlice(allocator, out.token_ids);
-                remaining = remaining[out.consumed..];
-            }
-            try token_ids.appendSlice(allocator, try self.finalize());
-            return token_ids;
+        /// Writes the token ids as u8 into the out Writer.
+        /// Remember to call the finalize() method!
+        pub fn writer(self: *Encoder, allocator: std.mem.Allocator, buffer: []u8, out: *std.Io.Writer) !Writer {
+            return try Writer.init(allocator, self, buffer, out);
         }
 
-        pub fn writerAlloc(self: *Encoder, allocator: std.mem.Allocator, buffer: []u8, init_out_capacity: usize) !WriterAllocating {
-            return try WriterAllocating.init(allocator, self, buffer, init_out_capacity);
-        }
-
-        pub const WriterAllocating = struct {
+        pub const Writer = struct {
             _allocator: std.mem.Allocator,
             _encoder: *Tokenizer.Encoder,
-            _token_ids: std.ArrayList(u32),
+            _out: *std.Io.Writer,
             interface: std.Io.Writer,
 
-            pub fn init(allocator: std.mem.Allocator, encoder_: *Encoder, buffer: []u8, init_out_capacity: usize) !WriterAllocating {
+            pub fn init(allocator: std.mem.Allocator, encoder_: *Encoder, buffer: []u8, out: *std.Io.Writer) !Writer {
                 return .{
                     ._allocator = allocator,
                     ._encoder = encoder_,
-                    ._token_ids = try .initCapacity(allocator, init_out_capacity),
+                    ._out = out,
                     .interface = .{
                         .buffer = buffer,
                         .vtable = &.{
@@ -99,29 +113,28 @@ pub const Tokenizer = union(Tokenizers) {
                 };
             }
 
-            pub fn deinit(self: *WriterAllocating) void {
-                self._token_ids.deinit(self._allocator);
-            }
-
-            pub fn finish(self: *WriterAllocating) std.Io.Writer.Error![]u32 {
+            pub fn finalize(self: *Writer) std.Io.Writer.Error!void {
                 try self.interface.flush();
-                self._token_ids.appendSlice(
-                    self._allocator,
-                    self._encoder.finalize() catch return error.WriteFailed,
-                ) catch return error.WriteFailed;
-                return self._token_ids.toOwnedSlice(self._allocator) catch return error.WriteFailed;
+                const token_ids = self._encoder.finalize() catch |err| {
+                    log.err("writer drain finalize failed: {s}", .{@errorName(err)});
+                    return error.WriteFailed;
+                };
+                self._out.writeAll(std.mem.sliceAsBytes(token_ids)) catch |err| {
+                    log.err("writer drain append failed: {s}", .{@errorName(err)});
+                    return err;
+                };
             }
 
-            fn appendChunk(self: *WriterAllocating, chunk: []const u8) std.Io.Writer.Error!void {
+            fn appendChunk(self: *Writer, chunk: []const u8) std.Io.Writer.Error!void {
                 var remaining = chunk;
                 while (remaining.len > 0) {
                     const fout = self._encoder.feed(remaining) catch |err| {
                         log.err("writer drain feed failed: {s}", .{@errorName(err)});
                         return error.WriteFailed;
                     };
-                    self._token_ids.appendSlice(self._allocator, fout.token_ids) catch |err| {
+                    self._out.writeAll(std.mem.sliceAsBytes(fout.token_ids)) catch |err| {
                         log.err("writer drain append failed: {s}", .{@errorName(err)});
-                        return error.WriteFailed;
+                        return err;
                     };
                     remaining = remaining[fout.consumed..];
                 }
@@ -129,13 +142,13 @@ pub const Tokenizer = union(Tokenizers) {
 
             fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
                 if (w.end == 0) return;
-                const self: *WriterAllocating = @alignCast(@fieldParentPtr("interface", w));
+                const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
                 try self.appendChunk(w.buffer[0..w.end]);
                 w.end = 0;
             }
 
             fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-                const self: *WriterAllocating = @alignCast(@fieldParentPtr("interface", w));
+                const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
 
                 if (w.end != 0) {
                     try self.appendChunk(w.buffer[0..w.end]);
@@ -178,6 +191,26 @@ pub const Tokenizer = union(Tokenizers) {
             }
         }
 
+        //
+        // Convenience methods built on top of the stream API
+        //
+
+        pub fn decodeAlloc(self: *Decoder, allocator: std.mem.Allocator, token_ids: []const u32) !std.ArrayList(u8) {
+            var tokens: std.ArrayList(u8) = try .initCapacity(allocator, token_ids.len * 4);
+            var remaining = token_ids;
+            while (remaining.len > 0) {
+                const fout = try self.feed(remaining);
+                try tokens.appendSlice(allocator, fout.tokens);
+                remaining = remaining[fout.consumed..];
+            }
+            try tokens.appendSlice(allocator, try self.finalize());
+            return tokens;
+        }
+
+        //
+        // Stream API
+        //
+
         pub const FeedOutput = struct {
             consumed: usize,
             /// Only valid until the next feed/finalize call and while the decoder is alive.
@@ -197,24 +230,18 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
+        // Only valid until the next decode and while the decoder is alive.
+        pub fn feed_one(self: *Decoder, token_id: u32) ![]const u8 {
+            const fout = try self.feed(&.{token_id});
+            return fout.tokens;
+        }
+
         /// Output is only valid until the next feed/finalize call and while the decoder is alive.
         pub fn finalize(self: *Decoder) ![]const u8 {
             return switch (self.*) {
                 .iree => |*v| v.finalize(),
                 inline else => &.{},
             };
-        }
-
-        pub fn decodeAlloc(self: *Decoder, allocator: std.mem.Allocator, token_ids: []const u32) !std.ArrayList(u8) {
-            var tokens: std.ArrayList(u8) = try .initCapacity(allocator, token_ids.len * 4);
-            var remaining = token_ids;
-            while (remaining.len > 0) {
-                const fout = try self.feed(remaining);
-                try tokens.appendSlice(allocator, fout.tokens);
-                remaining = remaining[fout.consumed..];
-            }
-            try tokens.appendSlice(allocator, try self.finalize());
-            return tokens;
         }
     };
 
@@ -259,9 +286,9 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 
-    pub fn findTokenId(self: *const Tokenizer, token: []const u8) ?u32 {
+    pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         return switch (self.*) {
-            inline else => |v| v.findTokenId(token),
+            inline else => |v| v.tokenId(token),
         };
     }
 };
@@ -303,18 +330,19 @@ test "iree tokenizer smoke: alloc and writer" {
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids_alloc.items);
 
     encoder.reset();
-    var write_buffer: [64]u8 = undefined;
-    var writer = try encoder.writerAlloc(allocator, &write_buffer, 4);
-    defer writer.deinit();
+    var token_ids_writer: std.Io.Writer.Allocating = .initAligned(allocator, std.mem.Alignment.of(u32));
+    defer token_ids_writer.deinit();
+    var writer = try encoder.writer(allocator, &.{}, &token_ids_writer.writer);
     try writer.interface.writeAll(text);
-    const token_ids_writer = try writer.finish();
-    defer allocator.free(token_ids_writer);
-    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids_writer);
+    try writer.finalize();
+
+    const token_ids: []u32 = @alignCast(std.mem.bytesAsSlice(u32, token_ids_writer.written()));
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids);
 
     var decoder = try tokenizer.decoder();
     defer decoder.deinit();
 
-    var tokens = try decoder.decodeAlloc(allocator, token_ids_writer);
+    var tokens = try decoder.decodeAlloc(allocator, token_ids);
     defer tokens.deinit(allocator);
     try std.testing.expectEqualStrings("hello world", tokens.items);
 }

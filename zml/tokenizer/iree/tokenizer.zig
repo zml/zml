@@ -52,7 +52,7 @@ inline fn statusCode(status: c.iree_status_t) u32 {
     return @intCast(@intFromPtr(status.?) & StatusCodeMask);
 }
 
-fn assertOk(status: c.iree_status_t) Error!void {
+fn assertOk(status: c.iree_status_t) !void {
     if (status == null) return;
     const code = statusCode(status);
     _ = c.iree_status_ignore(status);
@@ -85,7 +85,7 @@ pub const Tokenizer = struct {
     allocator: std.mem.Allocator,
     inner: *c.iree_tokenizer_t,
 
-    pub fn fromHuggingFaceJson(allocator: std.mem.Allocator, json: []const u8) Error!Tokenizer {
+    pub fn fromHuggingFaceJson(allocator: std.mem.Allocator, json: []const u8) !Tokenizer {
         var raw: ?*c.iree_tokenizer_t = null;
         try assertOk(c.iree_tokenizer_from_huggingface_json(stringView(json), c.iree_allocator_system(), &raw));
         return .{
@@ -94,13 +94,12 @@ pub const Tokenizer = struct {
         };
     }
 
-    pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) Error!Tokenizer {
+    pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
         return fromHuggingFaceJson(allocator, bytes);
     }
 
-    pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) (Error || std.mem.Allocator.Error || std.fs.File.OpenError || std.fs.File.ReadError)!Tokenizer {
-        _ = io;
-        const json = try std.fs.cwd().readFileAlloc(allocator, model, std.math.maxInt(usize));
+    pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
+        const json = try std.Io.Dir.cwd().readFileAlloc(io, model, allocator, .unlimited);
         defer allocator.free(json);
         return try fromHuggingFaceJson(allocator, json);
     }
@@ -109,15 +108,15 @@ pub const Tokenizer = struct {
         c.iree_tokenizer_free(self.inner);
     }
 
-    pub fn encoder(self: *const Tokenizer) (Error || std.mem.Allocator.Error)!Encoder {
+    pub fn encoder(self: *const Tokenizer) !Encoder {
         return Encoder.init(self);
     }
 
-    pub fn decoder(self: *const Tokenizer) (Error || std.mem.Allocator.Error)!Decoder {
+    pub fn decoder(self: *const Tokenizer) !Decoder {
         return Decoder.init(self);
     }
 
-    pub fn findTokenId(self: *const Tokenizer, token: []const u8) ?u32 {
+    pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
         const vocab = c.iree_tokenizer_vocab(self.inner);
         if (vocab == null) return null;
 
@@ -135,7 +134,7 @@ pub const Tokenizer = struct {
         output: [EncodeBatchSize]c.iree_tokenizer_token_id_t,
         output_token_ids: [EncodeBatchSize]u32,
 
-        fn init(tokenizer: *const Tokenizer) (Error || std.mem.Allocator.Error)!Encoder {
+        fn init(tokenizer: *const Tokenizer) !Encoder {
             var state_size: usize = undefined;
             try assertOk(c.iree_tokenizer_encode_state_calculate_size(tokenizer.inner, &state_size));
             const state_storage = try tokenizer.allocator.alloc(u8, state_size);
@@ -175,7 +174,7 @@ pub const Tokenizer = struct {
             c.iree_tokenizer_encode_state_reset(self.state, c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
         }
 
-        pub fn feed(self: *Encoder, chunk: []const u8) Error!struct {
+        pub fn feed(self: *Encoder, chunk: []const u8) !struct {
             usize,
             []const u32,
         } {
@@ -214,7 +213,7 @@ pub const Tokenizer = struct {
             };
         }
 
-        pub fn finalize(self: *Encoder) Error![]const u32 {
+        pub fn finalize(self: *Encoder) ![]const u32 {
             var produced: usize = 0;
 
             // Finalizes encoding by flushing any buffered data through the pipeline. Must
@@ -268,7 +267,7 @@ pub const Tokenizer = struct {
             self.tokenizer.allocator.free(self.state_storage);
         }
 
-        pub fn reset(self: *Decoder) Error!void {
+        pub fn reset(self: *Decoder) !void {
             c.iree_tokenizer_decode_state_deinitialize(self.state);
             var state: ?*c.iree_tokenizer_decode_state_t = null;
             try assertOk(c.iree_tokenizer_decode_state_initialize(
@@ -280,7 +279,7 @@ pub const Tokenizer = struct {
             self.state = state.?;
         }
 
-        pub fn feed(self: *Decoder, token_ids_: []const u32) Error!struct {
+        pub fn feed(self: *Decoder, token_ids_: []const u32) !struct {
             usize,
             []const u8,
         } {
@@ -324,7 +323,7 @@ pub const Tokenizer = struct {
             };
         }
 
-        pub fn finalize(self: *Decoder) Error![]const u8 {
+        pub fn finalize(self: *Decoder) ![]const u8 {
             var written: usize = 0;
 
             // Finalizes decoding by flushing any buffered data through the pipeline. Must
@@ -383,10 +382,10 @@ test "huggingface json streaming encode/decode" {
 
     try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids.items);
 
-    const token_hello = tokenizer.findTokenId("hello") orelse unreachable;
+    const token_hello = tokenizer.tokenId("hello") orelse unreachable;
     try std.testing.expectEqual(@as(u32, 1), token_hello);
 
-    const unknown = tokenizer.findTokenId("missing");
+    const unknown = tokenizer.tokenId("missing");
     try std.testing.expect(unknown == null);
 
     var decoder = try tokenizer.decoder();
