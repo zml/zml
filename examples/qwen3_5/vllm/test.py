@@ -46,56 +46,6 @@ def post_json(url: str, payload: dict, timeout_s: float) -> dict:
         return json.load(response)
 
 
-def stream_completion(url: str, payload: dict, timeout_s: float) -> tuple[str, int | None, str | None, float]:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-
-    generated_parts: list[str] = []
-    completion_tokens: int | None = None
-    finish_reason: str | None = None
-    generation_start: float | None = None
-    generation_end: float | None = None
-
-    with urllib.request.urlopen(request, timeout=timeout_s) as response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8").strip()
-            if not line or not line.startswith("data: "):
-                continue
-            data = line[6:]
-            if data == "[DONE]":
-                break
-
-            payload_chunk = json.loads(data)
-            if generation_start is None:
-                generation_start = time.perf_counter()
-
-            choice = payload_chunk.get("choices", [{}])[0]
-            text = choice.get("text", "")
-            if text:
-                generated_parts.append(text)
-
-            usage = payload_chunk.get("usage")
-            if isinstance(usage, dict):
-                maybe_completion_tokens = usage.get("completion_tokens")
-                if isinstance(maybe_completion_tokens, int):
-                    completion_tokens = maybe_completion_tokens
-
-            maybe_finish_reason = choice.get("finish_reason")
-            if maybe_finish_reason is not None:
-                finish_reason = maybe_finish_reason
-
-        generation_end = time.perf_counter()
-
-    if generation_start is None:
-        raise RuntimeError("stream completed without any generation chunks")
-
-    return "".join(generated_parts), completion_tokens, finish_reason, generation_end - generation_start
-
-
 def stop_process(process: subprocess.Popen[str]) -> None:
     process.terminate()
     try:
@@ -137,28 +87,28 @@ def main() -> int:
     try:
         models_payload = wait_for_server(base_url, timeout_s=120.0)
         print("server_ready:", json.dumps(models_payload))
+        print(f"requesting_completion: max_tokens={MAX_TOKENS}")
+        sys.stdout.flush()
 
         request_payload = {
             "model": MODEL_PATH,
             "prompt": PROMPT,
             "max_tokens": MAX_TOKENS,
-            "stream": True,
-            "stream_options": {
-                "include_usage": True,
-            },
         }
 
-        generated_text, completion_tokens, finish_reason, elapsed_s = stream_completion(
-            f"{base_url}/v1/completions",
-            request_payload,
-            timeout_s=1800.0,
-        )
+        started_at = time.perf_counter()
+        completion_payload = post_json(f"{base_url}/v1/completions", request_payload, timeout_s=1800.0)
+        elapsed_s = time.perf_counter() - started_at
 
+        usage = completion_payload.get("usage", {})
+        completion_tokens = usage.get("completion_tokens")
         if not isinstance(completion_tokens, int):
-            raise RuntimeError("missing completion_tokens in streamed response")
+            raise RuntimeError(f"missing completion_tokens in response: {completion_payload}")
         if completion_tokens <= 0:
             raise RuntimeError(f"expected positive completion_tokens, got {completion_tokens}")
 
+        generated_text = completion_payload.get("choices", [{}])[0].get("text", "")
+        finish_reason = completion_payload.get("choices", [{}])[0].get("finish_reason")
         tokens_per_second = completion_tokens / elapsed_s
 
         print(f"model: {MODEL_PATH}")
