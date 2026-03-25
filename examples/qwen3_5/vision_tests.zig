@@ -207,7 +207,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 allocator_,
                 io_,
                 qwen35_model_,
-                .vision_test_forward,
+                .multimodal_prefill_forward,
                 .{
                     Tensor.init(.{ .b = 1, .s = prefill_len_ }, .u32),
                     Tensor.init(.{}, .u32),
@@ -245,7 +245,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 allocator_,
                 io_,
                 qwen35_model_,
-                .vision_test_decode_forward,
+                .multimodal_decode_forward,
                 .{
                     Tensor.init(.{ .b = 1, .s = 1 }, .u32),
                     Tensor.init(.{}, .u32),

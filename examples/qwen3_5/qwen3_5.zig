@@ -184,7 +184,7 @@ pub const Qwen35 = struct {
         return .{ stacked_position_ids, mrope_position_deltas };
     }
 
-    pub fn forward(
+    pub fn text_forward(
         self: Qwen35,
         tokens_: Tensor,
         token_index: Tensor,
@@ -197,7 +197,7 @@ pub const Qwen35 = struct {
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
-    pub fn vision_test_forward(
+    pub fn multimodal_prefill_forward(
         self: Qwen35,
         tokens: Tensor,
         token_index: Tensor,
@@ -230,7 +230,7 @@ pub const Qwen35 = struct {
             .s = seq_len,
             .d = text_with_image_embed.dim(.d),
         });
-        const text_model_output, const updated_kv_cache = self.text_model.vision_test_forward(
+        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
             text_with_image_embed_batched,
             token_index,
             kv_cache,
@@ -250,7 +250,7 @@ pub const Qwen35 = struct {
         return zml.Tensor.stack(&.{ pos, pos, pos }, 0, .g).withTags(.{ .g, .b, .s });
     }
 
-    pub fn vision_test_decode_forward(
+    pub fn multimodal_decode_forward(
         self: Qwen35,
         tokens_: Tensor,
         token_index: Tensor,
@@ -267,7 +267,7 @@ pub const Qwen35 = struct {
             .d = token_embed.dim(.d),
         });
         const position_ids = buildVisionDecodePositionIds(token_index, mrope_position_deltas);
-        const text_model_output, const updated_kv_cache = self.text_model.vision_test_decode_forward(
+        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
             token_embed_batched,
             token_index,
             kv_cache,
@@ -772,16 +772,20 @@ pub const TextModel = struct {
     ) struct { Tensor, KvCache } {
         var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
 
+        const position_ids = Tensor.arange(.{ .end = hidden_states.dim(.s) }, .i64)
+            .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64))
+            .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64)));
+
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i));
+            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
         }
 
         hidden_states = self.norm.forward(hidden_states);
         return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
     }
 
-    pub fn vision_test_forward(
+    pub fn multimodal_forward(
         self: TextModel,
         input_embeds: Tensor,
         token_index: Tensor,
@@ -792,25 +796,7 @@ pub const TextModel = struct {
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.vision_test_forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
-        }
-
-        hidden_states = self.norm.forward(hidden_states);
-        return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
-    }
-
-    pub fn vision_test_decode_forward(
-        self: TextModel,
-        input_embeds: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache,
-        position_ids: Tensor,
-    ) struct { Tensor, KvCache } {
-        var hidden_states = input_embeds;
-
-        var updated_kv_cache = kv_cache;
-        for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.vision_test_decode_forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
+            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
         }
 
         hidden_states = self.norm.forward(hidden_states);
@@ -857,39 +843,6 @@ pub const TransformerLayer = struct {
         x0: Tensor,
         token_index: Tensor,
         kv_cache: KvCache.LayerView,
-    ) struct { Tensor, KvCache } {
-        const residual0 = x0;
-        const normalized_x0 = self.input_layernorm.forward(x0);
-
-        var attention_output: Tensor = undefined;
-        var updated_kv_cache: KvCache = kv_cache.parent;
-        switch (self.attn) {
-            .self_attn => |*self_attn| {
-                const result = self_attn.forward(normalized_x0, token_index, kv_cache.cache.self_attn);
-                attention_output = result[0];
-                updated_kv_cache.self_attn = result[1];
-            },
-            .linear_attn => |*linear_attn| {
-                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn);
-                attention_output = result[0];
-                updated_kv_cache.gated_delta_net = result[1];
-            },
-        }
-
-        const x1 = attention_output.add(residual0);
-        const residual1 = x1;
-        const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
-        const mlp_output = self.mlp.forward(normalized_hidden);
-
-        return .{ mlp_output.add(residual1), updated_kv_cache };
-    }
-
-    pub fn vision_test_forward(
-        self: TransformerLayer,
-        x0: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache.LayerView,
         position_ids: Tensor,
     ) struct { Tensor, KvCache } {
         const residual0 = x0;
@@ -899,41 +852,7 @@ pub const TransformerLayer = struct {
         var updated_kv_cache: KvCache = kv_cache.parent;
         switch (self.attn) {
             .self_attn => |*self_attn| {
-                const result = self_attn.vision_test_forward(normalized_x0, token_index, kv_cache.cache.self_attn, position_ids);
-                attention_output = result[0];
-                updated_kv_cache.self_attn = result[1];
-            },
-            .linear_attn => |*linear_attn| {
-                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn);
-                attention_output = result[0];
-                updated_kv_cache.gated_delta_net = result[1];
-            },
-        }
-
-        const x1 = attention_output.add(residual0);
-        const residual1 = x1;
-        const normalized_hidden = self.post_attention_layernorm.forward(x1);
-
-        const mlp_output = self.mlp.forward(normalized_hidden);
-
-        return .{ mlp_output.add(residual1), updated_kv_cache };
-    }
-
-    pub fn vision_test_decode_forward(
-        self: TransformerLayer,
-        x0: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache.LayerView,
-        position_ids: Tensor,
-    ) struct { Tensor, KvCache } {
-        const residual0 = x0;
-        const normalized_x0 = self.input_layernorm.forward(x0);
-
-        var attention_output: Tensor = undefined;
-        var updated_kv_cache: KvCache = kv_cache.parent;
-        switch (self.attn) {
-            .self_attn => |*self_attn| {
-                const result = self_attn.vision_test_decode_forward(normalized_x0, token_index, kv_cache.cache.self_attn, position_ids);
+                const result = self_attn.forward(normalized_x0, token_index, kv_cache.cache.self_attn, position_ids);
                 attention_output = result[0];
                 updated_kv_cache.self_attn = result[1];
             },
@@ -1055,45 +974,6 @@ pub const SelfAttn = struct {
         x: Tensor,
         token_index: Tensor,
         kv_cache: KvCache.SelfAttnCache,
-    ) struct { Tensor, KvCache.SelfAttnCache } {
-        var q, const gate = self.projectQAndGate(x);
-        var k, var v = self.projectKV(x);
-        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-
-        const dtype = q.dtype();
-        const position_ids = Tensor.arange(.{ .end = x.dim(.s) }, .i64)
-            .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64))
-            .add(token_index.convert(.i64).broad(zml.Shape.init(.{ .b = x.dim(.b), .s = x.dim(.s) }, .i64)));
-
-        const cos, const sin = self.rotary_embed.getCosAndSin(position_ids, dtype);
-        q = self.rotary_embed.applyRope(q, cos, sin);
-        k = self.rotary_embed.applyRope(k, cos, sin);
-
-        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
-
-        const attn_output = zml.attention.attention.attention(
-            q.rename(.{ .s = .q }),
-            k.rename(.{ .s = .k }),
-            v.rename(.{ .s = .k }),
-            token_index,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
-        ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
-
-        const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d });
-
-        return .{ projected_output, new_kv_cache };
-    }
-
-    pub fn vision_test_forward(
-        self: SelfAttn,
-        x: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache.SelfAttnCache,
         position_ids: Tensor,
     ) struct { Tensor, KvCache.SelfAttnCache } {
         var q, const gate = self.projectQAndGate(x);
@@ -1102,51 +982,10 @@ pub const SelfAttn = struct {
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
         const dtype = q.dtype();
-        const cos, const sin = if (position_ids.shape().rank() == 3)
-            self.rotary_embed.getCosAndSinInterleaved(position_ids.convert(.i64), dtype)
-        else
-            self.rotary_embed.getCosAndSin(position_ids.convert(.i64), dtype);
-        q = self.rotary_embed.applyRope(q, cos, sin);
-        k = self.rotary_embed.applyRope(k, cos, sin);
 
-        const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
-        k = new_kv_cache.keys().convert(dtype);
-        v = new_kv_cache.values().convert(dtype);
-
-        const attn_output = zml.attention.attention.attention(
-            q.rename(.{ .s = .q }),
-            k.rename(.{ .s = .k }),
-            v.rename(.{ .s = .k }),
-            token_index,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
-        ).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
-
-        const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d });
-
-        return .{ projected_output, new_kv_cache };
-    }
-
-    pub fn vision_test_decode_forward(
-        self: SelfAttn,
-        x: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache.SelfAttnCache,
-        position_ids: Tensor,
-    ) struct { Tensor, KvCache.SelfAttnCache } {
-        var q, const gate = self.projectQAndGate(x);
-        var k, var v = self.projectKV(x);
-        q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-        k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
-
-        const dtype = q.dtype();
-        const cos, const sin = if (position_ids.shape().rank() == 3)
-            self.rotary_embed.getCosAndSinInterleaved(position_ids.convert(.i64), dtype)
-        else
-            self.rotary_embed.getCosAndSin(position_ids.convert(.i64), dtype);
-        q = self.rotary_embed.applyRope(q, cos, sin);
-        k = self.rotary_embed.applyRope(k, cos, sin);
+        const cos, const sin = self.rotary_embed.getMropeCosAndSin(position_ids, dtype);
+        q = self.rotary_embed.applyMrope(q, cos, sin);
+        k = self.rotary_embed.applyMrope(k, cos, sin);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
@@ -1168,6 +1007,7 @@ pub const SelfAttn = struct {
     }
 };
 
+// Handles Multimodal ROPE details
 pub const TextRotaryEmbedding = struct {
     rope_opts: zml.nn.RopeOpts,
     rotary_dim: i64,
@@ -1184,26 +1024,15 @@ pub const TextRotaryEmbedding = struct {
         };
     }
 
-    pub fn getCosAndSin(self: TextRotaryEmbedding, position_ids: Tensor, dtype: zml.DataType) struct { Tensor, Tensor } {
+    pub fn getMropeCosAndSin(self: TextRotaryEmbedding, position_ids: Tensor, dtype: zml.DataType) struct { Tensor, Tensor } {
+        // position_ids can have shape (b, s) or (b, s, 3) depending on whether we are in text-only or multimodal case.
+        // In the multimodal case, the last dimension corresponds to t, h, w dimensions for the 3D rotary embedding.
+        // We handle both cases by stacking the position ids in the text-only case to create a fake 3D rotary embedding.
+        const stacked_position_ids = if (position_ids.shape().rank() == 3) position_ids else Tensor.stack(&.{ position_ids, position_ids, position_ids }, 0, .g);
+
         const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
 
-        const freqs_t = position_ids.convert(.f32).outer(inv_freq);
-
-        const emb = Tensor.concatenate(&.{ freqs_t, freqs_t }, -1);
-        const cos = emb.cos().convert(dtype);
-        const sin = emb.sin().convert(dtype);
-
-        return .{ cos, sin };
-    }
-
-    pub fn getCosAndSinInterleaved(self: TextRotaryEmbedding, position_ids: Tensor, dtype: zml.DataType) struct { Tensor, Tensor } {
-        const stacked_position_ids = if (position_ids.shape().rank() == 3)
-            position_ids.convert(.f32)
-        else
-            Tensor.stack(&.{ position_ids, position_ids, position_ids }, 0, .g).convert(.f32);
-        const inv_freq = zml.nn.invFreq(self.rotary_dim, self.rope_opts).withTags(.{.hd});
-
-        var freqs = stacked_position_ids.outer(inv_freq);
+        var freqs = stacked_position_ids.convert(.f32).outer(inv_freq);
         var freqs_t, var freqs_h, var freqs_w = freqs.chunkExact(.g, 3);
         freqs_t = freqs_t.squeeze(.g);
         freqs_h = freqs_h.squeeze(.g);
@@ -1231,7 +1060,7 @@ pub const TextRotaryEmbedding = struct {
         return Tensor.concatenate(&.{ x2.negate(), x1 }, -1);
     }
 
-    pub fn applyRope(self: TextRotaryEmbedding, x: Tensor, cos: Tensor, sin: Tensor) Tensor {
+    pub fn applyMrope(self: TextRotaryEmbedding, x: Tensor, cos: Tensor, sin: Tensor) Tensor {
         const x_rot = x.slice1d(-1, .{ .start = 0, .end = self.rotary_dim });
         const x_pass = x.slice1d(-1, .{ .start = self.rotary_dim, .end = x.dim(-1) });
 

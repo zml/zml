@@ -172,7 +172,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
     }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
@@ -197,7 +197,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
     }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
     errdefer if (decode_future.cancel(io)) |v| {
