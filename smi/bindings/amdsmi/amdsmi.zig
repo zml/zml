@@ -1,9 +1,8 @@
 const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
-const bazel = @import("bazel");
-const bazel_builtin = @import("bazel_builtin");
 const DynLib = @import("../dynlib.zig");
+const sandbox = @import("../../sandbox.zig");
 
 pub const Handle = c.amdsmi_processor_handle;
 pub const ProcInfo = c.amdsmi_proc_info_t;
@@ -103,11 +102,8 @@ const Fns = struct {
 };
 
 pub fn init(allocator: std.mem.Allocator) !AmdSmi {
-    const r = try bazel.runfiles(bazel_builtin.current_repository);
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("zml/smi/sandbox", &path_buf) orelse {
-        return error.AmdSmiUnavailable;
-    };
+    const sandbox_path = sandbox.path(&path_buf) orelse return error.AmdSmiUnavailable;
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
