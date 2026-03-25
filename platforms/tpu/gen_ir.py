@@ -223,8 +223,9 @@ def main():
                 raise ValueError(f"Unsupported backend_config: {backend_kind}")
             if not isinstance(params, dict):
                 raise ValueError("Invalid request: 'params' must be a JSON object")
-
-
+            
+            tpu_code = None
+            
             if backend_kind == "ragged_paged":
                 tpu_code = ragged_paged_attention_on_tpu(params)
                 if tpu_code is None:
@@ -234,13 +235,14 @@ def main():
                 # if tpu_code is None:
                     # raise ValueError("Failed to extract TPU backend config from paged attention IR")
                     raise ValueError("paged Disabled for now")
-                
-            else:
+            if backend_kind == "flash":
                 # tpu_code = flash_attention_on_tpu(params)
                 # if tpu_code is None:
-                #     raise ValueError("Failed to extract TPU backend config from flash attention IR")
+                    # raise ValueError("Failed to extract TPU backend config from flash attention IR")
                 raise ValueError("flash Disabled for now")
-
+            
+            if tpu_code is None:
+                raise ValueError(f"Unsupported backend_config: {backend_kind}")
             response = {"ok": True, "result": tpu_code}
         except Exception as exc:
             response = {"ok": False, "error": str(exc)}
