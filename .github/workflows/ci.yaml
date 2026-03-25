@@ -24,7 +24,8 @@ jobs:
             run_tests: true
             runner_labels:
               - runs-on
-              - runner=4cpu-linux-x64
+              - runner=16cpu-linux-x64
+              - family=c8+c7
               - image=ubuntu24-amd64
               - run-id=${{ github.run_id }}
               - extras=s3-cache
@@ -34,7 +35,8 @@ jobs:
             run_tests: false
             runner_labels:
               - runs-on
-              - runner=4cpu-linux-x64
+              - runner=16cpu-linux-x64
+              - family=c8+c7
               - image=ubuntu24-amd64
               - run-id=${{ github.run_id }}
               - extras=s3-cache
@@ -44,7 +46,8 @@ jobs:
             run_tests: false
             runner_labels:
               - runs-on
-              - runner=4cpu-linux-x64
+              - runner=16cpu-linux-x64
+              - family=c8+c7
               - image=ubuntu24-amd64
               - run-id=${{ github.run_id }}
               - extras=s3-cache
