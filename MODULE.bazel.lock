@@ -426,7 +426,7 @@
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
         "bzlTransitiveDigest": "twSeB3VPTVkayY0uwqEzDzal5MbnZX45iC6jdheZQRo=",
-        "usagesDigest": "IIGPr69MT/mSUo6fNUffrIiU31EqGjlEYm5qFmNjmUc=",
+        "usagesDigest": "PFMCBQvV3Q+zC654PFY3m911buSFwM1rzl1zow5lOWE=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -457,6 +457,35 @@
                 "@@platforms//cpu:x86_64": "@distroless_cc_debian12_linux_amd64"
               },
               "bzlmod_repository": "distroless_cc_debian12",
+              "reproducible": true
+            }
+          },
+          "debian_12_linux_amd64": {
+            "repoRuleId": "@@rules_oci+//oci/private:pull.bzl%oci_pull",
+            "attributes": {
+              "www_authenticate_challenges": {},
+              "scheme": "https",
+              "registry": "index.docker.io",
+              "repository": "library/debian",
+              "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
+              "platform": "linux/amd64",
+              "target_name": "debian_12_linux_amd64",
+              "bazel_tags": []
+            }
+          },
+          "debian_12": {
+            "repoRuleId": "@@rules_oci+//oci/private:pull.bzl%oci_alias",
+            "attributes": {
+              "target_name": "debian_12",
+              "www_authenticate_challenges": {},
+              "scheme": "https",
+              "registry": "index.docker.io",
+              "repository": "library/debian",
+              "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
+              "platforms": {
+                "@@platforms//cpu:x86_64": "@debian_12_linux_amd64"
+              },
+              "bzlmod_repository": "debian_12",
               "reproducible": true
             }
           },
@@ -577,7 +606,9 @@
         "moduleExtensionMetadata": {
           "explicitRootModuleDirectDeps": [
             "distroless_cc_debian12",
-            "distroless_cc_debian12_linux_amd64"
+            "distroless_cc_debian12_linux_amd64",
+            "debian_12",
+            "debian_12_linux_amd64"
           ],
           "explicitRootModuleDirectDevDeps": [],
           "useAllRepos": "NO",

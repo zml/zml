@@ -87,3 +87,26 @@ oci_push(
     repository = "index.docker.io/zmlai/llm",
     tags = ["manual"],
 )
+
+
+oci_image(
+    name = "image_debug_",
+    base = "@debian_12",
+    entrypoint = ["./examples/llm/llm"],
+    tars = [":archive"],
+    tags = ["manual"],
+)
+
+platform_transition_filegroup(
+    name = "image_debug",
+    srcs = [":image_debug_"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load_debug",
+    image = ":image_debug",
+    repo_tags = ["zmlai/llm:debug"],
+    tags = ["manual"],
+)

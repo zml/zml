@@ -6,9 +6,24 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.0"
+_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.1"
+
+def _rocm_dlopen_patchelf(name, src):
+    return "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = name,
+            src = src,
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+    ])
 
 _UBUNTU_PACKAGES = {
+    "libbz2-1.0": packages.filegroup(name = "libbz2-1.0", srcs = ["lib/x86_64-linux-gnu/libbz2.so.1.0"]),
     "libdrm2-amdgpu": packages.filegroup(name = "libdrm2-amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm.so.2"]),
     "libelf1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
@@ -20,6 +35,7 @@ _UBUNTU_PACKAGES = {
     ]),
     "libdrm-amdgpu-common": packages.filegroup(name = "amdgpu_ids", srcs = ["opt/amdgpu/share/libdrm/amdgpu.ids"]),
     "libnuma1": packages.filegroup(name = "libnuma1", srcs = ["usr/lib/x86_64-linux-gnu/libnuma.so.1"]),
+    "liblzma5": packages.filegroup(name = "liblzma5", srcs = ["lib/x86_64-linux-gnu/liblzma.so.5"]),
     "libzstd1": packages.filegroup(name = "libzstd1", srcs = ["usr/lib/x86_64-linux-gnu/libzstd.so.1"]),
     "libdrm-amdgpu-amdgpu1": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
@@ -35,28 +51,70 @@ _UBUNTU_PACKAGES = {
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
+    "libdw1": packages.filegroup(name = "libdw1", srcs = ["usr/lib/x86_64-linux-gnu/libdw.so.1"]),
 }
 
 _ROCM_PACKAGES = {
-    "rocm-core": packages.filegroup(name = "rocm-core", srcs = ["lib/librocm-core.so.1"]),
-    "rocm-smi-lib": packages.filegroup(name = "rocm_smi", srcs = ["lib/librocm_smi64.so.1"]),
+    "rocm-core": _rocm_dlopen_patchelf(
+        name = "rocm-core",
+        src = "lib/librocm-core.so.1",
+    ),
+    "rocm-smi-lib": _rocm_dlopen_patchelf(
+        name = "rocm_smi",
+        src = "lib/librocm_smi64.so.1",
+    ),
     "rocprofiler-sdk": "\n".join([
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "rocprofiler-sdk_so",
+            src = "lib/librocprofiler-sdk.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+        packages.filegroup(name = "rocprofiler-sdk-attach", srcs = ["lib/librocprofiler-sdk-attach.so.1"]),
         packages.filegroup(name = "rocprofiler-sdk", srcs = [
-            "lib/librocprofiler-sdk.so.1",
-            "lib/librocprofiler-sdk-attach.so.1",
+            ":rocprofiler-sdk_so",
+            ":rocprofiler-sdk-attach",
         ]),
     ]),
     "rocprofiler-sdk-rocpd": packages.filegroup(name = "rocprofiler-sdk-rocpd", srcs = ["lib/librocprofiler-sdk-rocpd.so.1"]),
     "rocprofiler-sdk-roctx": packages.filegroup(name = "rocprofiler-sdk-roctx", srcs = ["lib/librocprofiler-sdk-roctx.so.1"]),
-    "hsa-rocr": packages.filegroup(name = "hsa-runtime", srcs = ["lib/libhsa-runtime64.so.1"]),
-    "hsa-amd-aqlprofile": packages.filegroup(name = "hsa-amd-aqlprofile", srcs = ["lib/libhsa-amd-aqlprofile64.so.1"]),
-    "comgr": packages.filegroup(name = "amd_comgr", srcs = ["lib/libamd_comgr.so.3"]),
-    "rocprofiler-register": packages.filegroup(name = "rocprofiler-register", srcs = ["lib/librocprofiler-register.so.0"]),
+    "hsa-rocr": _rocm_dlopen_patchelf(
+        name = "hsa-runtime",
+        src = "lib/libhsa-runtime64.so.1",
+    ),
+    "hsa-amd-aqlprofile": _rocm_dlopen_patchelf(
+        name = "hsa-amd-aqlprofile",
+        src = "lib/libhsa-amd-aqlprofile64.so.1",
+    ),
+    "comgr": _rocm_dlopen_patchelf(
+        name = "amd_comgr",
+        src = "lib/libamd_comgr.so.3",
+    ),
+    "rocprofiler-register": _rocm_dlopen_patchelf(
+        name = "rocprofiler-register",
+        src = "lib/librocprofiler-register.so.0",
+    ),
     "miopen-hip": "\n".join([
-        packages.filegroup(name = "MIOpen", srcs = ["lib/libMIOpen.so.1"]),
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "MIOpen",
+            src = "lib/libMIOpen.so.1",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
         """filegroup(name = "runfiles", srcs = glob(["share/miopen/**"]))""",
     ]),
-    "rccl": packages.filegroup(name = "rccl", srcs = ["lib/librccl.so.1"]),
+    "rccl": _rocm_dlopen_patchelf(
+        name = "rccl",
+        src = "lib/librccl.so.1",
+    ),
     "rocm-device-libs": """filegroup(name = "runfiles", srcs = glob(["amdgcn/**"]))""",
     "hip-dev": """filegroup(name = "runfiles", srcs = glob(["share/**"]))""",
     "rocblas": "\n".join([
@@ -76,10 +134,30 @@ _ROCM_PACKAGES = {
         """
     ]),
     "rocfft": packages.filegroup(name = "rocfft", srcs = ["lib/librocfft.so.0"]),
-    "rocsolver": packages.filegroup(name = "rocsolver", srcs = ["lib/librocsolver.so.0"]),
+    "rocsolver": _rocm_dlopen_patchelf(
+        name = "rocsolver",
+        src = "lib/librocsolver.so.0",
+    ),
     "roctracer": "\n".join([
-        packages.filegroup(name = "roctracer", srcs = ["lib/libroctracer64.so.4"]),
-        packages.filegroup(name = "roctx", srcs = ["lib/libroctx64.so.4"]),
+        packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
+        packages.patchelf(
+            name = "roctracer",
+            src = "lib/libroctracer64.so.4",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+        packages.patchelf(
+            name = "roctx",
+            src = "lib/libroctx64.so.4",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
     ]),
     "hipblaslt": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
@@ -113,13 +191,26 @@ _ROCM_PACKAGES = {
             name = "amdhip",
             src = "lib/libamdhip64.so.7",
             add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
             rename_dynamic_symbols = {
                 "dlopen": "zmlxrocm_dlopen",
             },
         ),
-        packages.filegroup(name = "hiprtc", srcs = ["lib/libhiprtc.so.7", "lib/libhiprtc-builtins.so.7"]),
+        packages.patchelf(
+            name = "hiprtc_so",
+            src = "lib/libhiprtc.so.7",
+            add_needed = ["libzmlxrocm.so.0"],
+            set_rpath = "$ORIGIN",
+            rename_dynamic_symbols = {
+                "dlopen": "zmlxrocm_dlopen",
+            },
+        ),
+        packages.filegroup(name = "hiprtc", srcs = [":hiprtc_so", "lib/libhiprtc-builtins.so.7"]),
     ]),
-    "hipsolver": packages.filegroup(name = "hipsolver", srcs = ["lib/libhipsolver.so.1"]),
+    "hipsolver": _rocm_dlopen_patchelf(
+        name = "hipsolver",
+        src = "lib/libhipsolver.so.1",
+    ),
     "rocsparse": packages.filegroup(name = "rocsparse", srcs = ["lib/librocsparse.so.1"]),
 }
 
@@ -150,8 +241,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-03-21/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "fd324748258192fe9dd1b830f97b619365407362bf2bdb80b8d68bec7baba7ea",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-03-26T11-30-00Z/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "6649e89831570926bf127f7e57f25dca4f526e22764f2df0d689818badc1d4fe",
     )
 
     return mctx.extension_metadata(
