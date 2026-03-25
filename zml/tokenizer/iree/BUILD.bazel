@@ -1,0 +1,20 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "iree",
+    srcs = ["tokenizer.zig"],
+    main = "tokenizer.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@iree_core//runtime/src/iree/tokenizer",
+        "@iree_core//runtime/src/iree/tokenizer/format/huggingface:tokenizer_json",
+        "@iree_core//runtime/src/iree/tokenizer/vocab:vocab",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [
+        ":iree",
+    ],
+)

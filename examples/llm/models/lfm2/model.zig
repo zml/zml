@@ -2,9 +2,10 @@ const std = @import("std");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
+const attention = zml.attention.attention;
 
-pub const parseConfig = @import("../common.zig").parseConfig;
-pub const Shardings = @import("../common.zig").Shardings;
+const common = @import("../common.zig");
+const inference = @import("inference.zig");
 
 const log = std.log.scoped(.lfm);
 
@@ -45,6 +46,77 @@ pub const Config = struct {
     use_cache: bool,
     use_pos_enc: bool,
     vocab_size: u32,
+};
+
+pub const LoadedModel = struct {
+    inner: Model,
+    parsed_config: std.json.Parsed(Config),
+
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+        const parsed_config = try common.parseConfig(Config, allocator, io, repo);
+        errdefer parsed_config.deinit();
+
+        return .{
+            .inner = .init(allocator, store, parsed_config.value),
+            .parsed_config = parsed_config,
+        };
+    }
+
+    pub fn deinit(self: *LoadedModel, allocator: std.mem.Allocator) void {
+        self.inner.deinit(allocator);
+        self.parsed_config.deinit();
+    }
+
+    pub fn loadBuffers(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        progress: *std.Progress.Node,
+        shardings: common.Shardings,
+    ) !Buffers {
+        const now: std.Io.Timestamp = .now(io, .awake);
+        var total_bytes: usize = 0;
+
+        defer {
+            const took = now.untilNow(io, .awake);
+            const bytes_per_sec: u64 = @intFromFloat(
+                @as(f64, @floatFromInt(total_bytes)) /
+                    (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
+            );
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+        }
+
+        const all_shardings = shardings.all();
+        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = progress,
+            .shardings = &all_shardings,
+            .parallelism = 16,
+            .total_bytes = &total_bytes,
+        });
+    }
+
+    pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
+        _ = self;
+        Model.unloadBuffers(buffers, allocator);
+    }
+
+    pub fn compile(
+        self: *const LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        backend: zml.attention.attention.Backend,
+        shardings: common.Shardings,
+        seqlen: usize,
+        progress: *std.Progress.Node,
+    ) !inference.CompiledModel {
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, false, shardings);
+        return inference.CompiledModel.init(allocator, io, @constCast(platform), self, self.inner, params, progress);
+    }
 };
 
 pub const Buffers = zml.Bufferized(Model);
@@ -89,7 +161,7 @@ pub const Model = struct {
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
         progress: *std.Progress.Node,
-        shardings: Shardings,
+        shardings: common.Shardings,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);

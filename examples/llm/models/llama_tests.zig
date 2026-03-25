@@ -2,10 +2,9 @@ const std = @import("std");
 
 const zml = @import("zml");
 
+const common = @import("common.zig");
 const llama = @import("llama.zig");
 const model = @import("llama/model.zig");
-const Shardings = @import("common.zig").Shardings;
-const parseConfig = @import("common.zig").parseConfig;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -41,19 +40,19 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    var repo_model = try llama.Repository.init(allocator, io, repo, store.view());
+    var repo_model = try llama.LoadedModel.init(allocator, io, repo, store.view());
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
     const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
-    const shardings: Shardings = .{
+    const shardings: common.Shardings = .{
         .replicated = try zml.sharding.replicatedSharding(platform),
         .model = try .initFromStrategy(platform, tp_mesh, tp_strategy),
     };
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
-    defer llama.Repository.unloadBuffers(&model_buffers, allocator);
+    defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 
     try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, shardings.replicated);
