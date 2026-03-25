@@ -1,4 +1,5 @@
 const std = @import("std");
+const c = std.c;
 const AmdSmi = @import("amdsmi.zig");
 const pi = @import("../../info/process_info.zig");
 const ProcessShadowList = @import("../../shadow_list.zig").ShadowList(pi.ProcessInfo);
@@ -36,7 +37,19 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         for (0..device_count) |dev_idx| {
             const handle = amdsmi.getHandleByIndex(@intCast(dev_idx)) catch continue;
 
-            const procs = amdsmi.getProcessList(allocator, handle) catch continue;
+            const procs = blk: {
+                const saved = c.dup(c.STDERR_FILENO);
+                const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+                if (devnull >= 0) {
+                    _ = c.dup2(devnull, c.STDERR_FILENO);
+                    _ = c.close(devnull);
+                }
+                defer if (saved >= 0) {
+                    _ = c.dup2(saved, c.STDERR_FILENO);
+                    _ = c.close(saved);
+                };
+                break :blk amdsmi.getProcessList(allocator, handle) catch continue;
+            };
             defer if (procs.len > 0) allocator.free(procs);
 
             const pci_slot = if (dev_idx < pci_slots.items.len) &pci_slots.items[dev_idx] else continue;
