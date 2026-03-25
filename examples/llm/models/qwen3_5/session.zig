@@ -8,9 +8,9 @@ const model = @import("model.zig");
 pub const Session = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     model_buffers: *model.Buffers,
-    compiled_model: *inference.CompiledModel,
+    compiled_model: *const inference.CompiledModel,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     tokenizer: zml.tokenizer.Tokenizer,
@@ -18,17 +18,17 @@ pub const Session = struct {
     generated_token_slice: zml.Slice,
     seqlen: u32,
     eos_token_id: u32,
+    special_tokens: model.Model.SpecialTokens,
     think_start: ?u32,
     think_end: ?u32,
 
     pub fn init(
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *zml.Platform,
-        model_buffers: *model.Buffers,
+        platform: *const zml.Platform,
         tokenizer: zml.tokenizer.Tokenizer,
-        mdl: model.Model,
-        compiled_model: *inference.CompiledModel,
+        compiled_model: *const inference.CompiledModel,
+        model_buffers: *model.Buffers,
     ) !Session {
         const replicated_sharding = compiled_model.params.shardings.replicated;
         var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform);
@@ -50,7 +50,8 @@ pub const Session = struct {
             .step_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32)),
             .seqlen = compiled_model.params.seqlen,
-            .eos_token_id = mdl.special_tokens.end_of_text_token_id,
+            .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
+            .special_tokens = compiled_model.loaded_model.inner.special_tokens,
             .think_start = tokenizer.tokenToId("<think>"),
             .think_end = tokenizer.tokenToId("</think>"),
         };
@@ -61,6 +62,14 @@ pub const Session = struct {
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
         self.step_token_slice.free(self.allocator);
         self.generated_token_slice.free(self.allocator);
+    }
+
+    pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, true);
+    }
+
+    pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, false);
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
@@ -156,3 +165,36 @@ pub const Session = struct {
         try token_buffer.toSlice(self.io, self.generated_token_slice);
     }
 };
+
+fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, special_tokens: model.Model.SpecialTokens, is_first_turn: bool) ![]const u32 {
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const im_start = tokenizer.tokenToId("<|im_start|>") orelse special_tokens.im_start_token_id;
+    const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
+    const think = tokenizer.tokenToId("<think>") orelse return error.NoSuchToken;
+    const newline = try encodeSingleToken(&encoder, "\n");
+    const user_prefix = try encoder.encode("user\n");
+    const assistant_prefix = try encoder.encode("assistant\n");
+    const encoded_prompt = try encoder.encode(prompt);
+
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + user_prefix.len + assistant_prefix.len + 8);
+    if (!is_first_turn) {
+        try tokens.appendSlice(allocator, &.{ im_end, newline });
+    }
+
+    try tokens.append(allocator, im_start);
+    try tokens.appendSlice(allocator, user_prefix);
+    try tokens.appendSlice(allocator, encoded_prompt);
+    try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
+    try tokens.appendSlice(allocator, assistant_prefix);
+    try tokens.appendSlice(allocator, &.{ think, newline });
+
+    return tokens.toOwnedSlice(allocator);
+}
+
+fn encodeSingleToken(encoder: *zml.tokenizer.Tokenizer.Encoder, text: []const u8) !u32 {
+    const encoded = try encoder.encode(text);
+    if (encoded.len != 1) return error.InvalidTokenizerEncoding;
+    return encoded[0];
+}

@@ -57,7 +57,7 @@ pub const CompilationOptions = CompilationParameters;
 pub const Args = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
+    platform: *const zml.Platform,
     model_buffers: *model.Buffers,
     tokens_buf: *zml.Buffer,
     tokens_pos_buf: *zml.Buffer,
