@@ -385,8 +385,8 @@ pub fn @"while"(operands: anytype, comptime cond: anytype, comptime body: anytyp
 pub const while_ = @"while";
 
 test @"while" {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const initial_i: zml.Tensor = .init(.{}, .i64);
     const initial_sum: zml.Tensor = .init(.{}, .i64);
@@ -543,12 +543,12 @@ test "triton" {
     const a: zml.Tensor = .init(.{}, .f32);
     const b: zml.Tensor = .init(.{}, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{1}));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{1}));
     defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{3}));
+    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
     var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
@@ -810,7 +810,7 @@ test scatterConfig {
         return;
     };
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1567,7 +1567,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
 test customCall {
     const platform = try zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

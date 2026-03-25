@@ -24,13 +24,13 @@ pub fn env() !*const Platform {
     return _platform.?;
 }
 
-pub fn physicalMesh() sharding.PhysicalMesh {
-    return env().physical_mesh;
+pub fn physicalMesh() !sharding.PhysicalMesh {
+    return (try env()).physical_mesh;
 }
 
-pub fn replicatedSharding() sharding.Sharding {
+pub fn replicatedSharding() !sharding.Sharding {
     if (_replicated_sharding == null) {
-        _replicated_sharding = sharding.replicatedSharding(env()) catch unreachable;
+        _replicated_sharding = try sharding.replicatedSharding(try env());
     }
     return _replicated_sharding.?;
 }
