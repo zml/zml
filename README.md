@@ -24,118 +24,108 @@ Compiled directly to NVIDIA, AMD, TPU, Trainium for peak hardware performance on
 It is built using the
 [Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
 
-# Getting started
+# Getting Started
 
 ## Prerequisites
 
 We use `bazel` to build ZML and its dependencies. The only prerequisite is
-`bazel`, which we recommend to download through `bazelisk`, a version manager
-for `bazel`.
-
-**Install Bazel** (recommended):
+`bazel`, which we recommend installing through `bazelisk`.
 
 ### macOS
-```
+
+```bash
 brew install bazelisk
 ```
 
 ### Linux
 
-```
+```bash
 curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.0/bazelisk-linux-amd64'
 chmod +x /usr/local/bin/bazel
 ```
 
-## Run a pre-packaged model
+## 30-Second Smoke Test
 
-We have implemented a variety of example models in ZML. See our reference
-implementations in the
-[examples](https://github.com/zml/zml/tree/master/examples/) folder.
+Run the MNIST example:
 
-### MNIST
-
-The [classic](https://en.wikipedia.org/wiki/MNIST_database) handwritten digits
-recognition task. The model is tasked to recognize a handwritten digit, which
-has been converted to a 28x28 pixel monochrome image. `Bazel` will download a
-pre-trained model, and the test dataset. The program will load the model,
-compile it, and classify a randomly picked example from the test dataset.
-
-On the command line:
-
-```
+```bash
 bazel run //examples/mnist
 ```
 
-### Meta Llama 3.2 1B
+This downloads a small pretrained MNIST model, compiles it, loads the weights, and
+classifies a random handwritten digit.
 
-This model has restrictions, see
-[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct). It **requires
-approval from Meta on Hugging Face**, which can take a few hours to get granted.
+## LLM Quickstart
 
-Ensure you are authenticated with the Hugging Face CLI:
+The main LLM example is [`//examples/llm`](./examples/llm). It currently supports:
+
+- Llama 3.1 / 3.2
+- Qwen 3.5
+- LFM 2.5
+
+Authenticate with Hugging Face if you want to load gated repos such as Meta
+Llama:
+
+```bash
+bazel run //tools/hf -- auth login
 ```
-hf auth login
-```
+
 Alternatively, set the `HF_TOKEN` environment variable.
 
-Now, you can run the model like so:
-```
+Then run a prompt directly:
+
+```bash
 bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
-For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
+Open the interactive chat loop by omitting `--prompt`:
 
-
-### Meta Llama 3.1 8B
-
-Like the 1B model above, this model also requires approval. See
-[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct) for access requirements.
-
-
-```
-bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+```bash
+bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct
 ```
 
-You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
+You can also load from:
+
+- a local directory: `--model=/var/models/meta-llama/Llama-3.2-1B-Instruct`
+- S3: `--model=s3://bucket/path/to/model`
 
 ## Running Models on GPU / TPU
 
-You can compile models for accelerator runtimes by appending one or more of the
-following arguments to the command line when compiling / running a model:
+Append one or more platform flags when compiling or running:
 
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
 - Google TPU: `--@zml//platforms:tpu=true`
-- AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
-- **AVOID CPU:** `--@zml//platforms:cpu=false`
+- AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
+- Disable CPU compilation: `--@zml//platforms:cpu=false`
 
-The latter, avoiding compilation for CPU, cuts down compilation time.
+Example on CUDA:
 
-So, to run the Llama 3.1 8B model from above on your host supporting an NVIDIA GPU,
-run the following:
-
-```
-bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
+```bash
+bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
 ```
 
-And on your host supporting an AMD GPU:
+Example on ROCm:
 
+```bash
+bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
 ```
-bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.1-8B-Instruct
-```
-
-Same goes for all supported platforms.
 
 ## Run Tests
 
-```
+```bash
 bazel test //zml:test
 ```
 
-# A taste of ZML
+# Examples
 
-## MNIST
+- [`examples/llm`](./examples/llm): unified LLM CLI for Llama, Qwen, and LFM
+- [`examples/mnist`](./examples/mnist): smallest end-to-end model run
+- [`examples/sharding`](./examples/sharding): logical mesh, partitioners, shard-local execution, profiler output
+- [`examples/io`](./examples/io): inspect and load local, `hf://`, `https://`, and `s3://` repositories through the VFS layer
+- [`examples/benchmark`](./examples/benchmark): measure loading and execution performance
 
+# A Taste Of ZML
 
 ```zig
 const Mnist = struct {
@@ -200,10 +190,20 @@ const Mnist = struct {
 };
 ```
 
-# Where to go next:
+For a full walkthrough, see:
 
-You might want to check out more [examples](./examples), read through the
-[documentation directly on GitHub](./docs/README.md).
+- [Getting Started](./docs/tutorials/getting_started.md)
+- [Writing your first model](./docs/tutorials/write_first_model.md)
+- [ZML Concepts](./docs/learn/concepts.md)
+- [Deploying on a server](./docs/howtos/deploy_on_server.md)
+
+# Where To Go Next
+
+- Run more examples in [`./examples`](./examples)
+- Read the example-specific notes in [`examples/llm/README.md`](./examples/llm/README.md)
+- Learn tagged dimensions in [`working_with_tensors.md`](./docs/tutorials/working_with_tensors.md)
+- Start building a model with [`write_first_model.md`](./docs/tutorials/write_first_model.md)
+- Explore deployment in [`deploy_on_server.md`](./docs/howtos/deploy_on_server.md)
 
 # Contributing
 
@@ -213,7 +213,7 @@ See [here][Contributing].
 
 ZML is licensed under the [Apache 2.0 license](./LICENSE).
 
-# Thanks to our contributors
+# Thanks To Our Contributors
 
 <a href="https://github.com/zml/zml/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=zml/zml" />
