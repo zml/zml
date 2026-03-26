@@ -389,6 +389,57 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "step2_check",
+    main = "step2_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "step3_check",
+    main = "step3_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "denoise_e2e",
+    main = "denoise_e2e.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "perblock_check",
+    main = "perblock_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [

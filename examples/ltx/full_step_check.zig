@@ -148,8 +148,11 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  audio_out_ref: {any}", .{audio_out_ref.shape()});
 
     // ---- Init param shapes for all 48 blocks + output projection ----
+    // Heap-allocate: FullStepParams contains [48]Block0FullParams, too large for stack.
     std.log.info("Initializing model params...", .{});
-    var params_shape = model.initFullStepParams(ckpt_store.view());
+    var params_shape = try allocator.create(model.FullStepParams);
+    defer allocator.destroy(params_shape);
+    params_shape.* = model.initFullStepParams(ckpt_store.view());
 
     // ---- Compile single-block exe ----
     std.log.info("Compiling single-block exe...", .{});
@@ -212,8 +215,10 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Output projection exes compiled.", .{});
 
     // ---- Load all 48 block weights ----
+    // Heap-allocate: 48 × Bufferized(Block0FullParams) is too large for the default stack.
     std.log.info("Loading 48 block weights...", .{});
-    var block_params_bufs: [48]zml.Bufferized(model.Block0FullParams) = undefined;
+    var block_params_bufs = try allocator.create([48]zml.Bufferized(model.Block0FullParams));
+    defer allocator.destroy(block_params_bufs);
     for (0..48) |i| {
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
@@ -228,7 +233,7 @@ pub fn main(init: std.process.Init) !void {
             },
         );
     }
-    defer for (&block_params_bufs) |*bp| model.unloadBlock0FullBuffers(bp);
+    defer for (&block_params_bufs.*) |*bp| model.unloadBlock0FullBuffers(bp);
     std.log.info("Block weights loaded.", .{});
 
     // ---- Load output projection weights ----

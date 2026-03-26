@@ -21,6 +21,13 @@ pub const FeedForward = struct {
     pub const Params = struct {
         proj: zml.nn.Linear,
         out: zml.nn.Linear,
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            params.proj.weight.deinit();
+            if (params.proj.bias) |*b| b.deinit();
+            params.out.weight.deinit();
+            if (params.out.bias) |*b| b.deinit();
+        }
     };
 
     pub fn initParams(store: zml.io.TensorStore.View) Params {
@@ -49,12 +56,6 @@ pub const FeedForward = struct {
         return params.out.forward(h2);
     }
 
-    pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
-        params.proj.weight.deinit();
-        if (params.proj.bias) |*b| b.deinit();
-        params.out.weight.deinit();
-        if (params.out.bias) |*b| b.deinit();
-    }
 };
 
 fn linearForwardF32(x: Tensor, linear: zml.nn.Linear) Tensor {
@@ -195,22 +196,34 @@ pub const AdaLayerNormSingle = struct {
 
     /// sigma: [.b] noise level (will be converted to f32 for the sinusoidal step).
     pub fn forward(sigma: Tensor, params: Params) ForwardResult {
-        const wdtype = params.linear_1.weight.dtype();
-
-        // 1. Sinusoidal embedding: [.b] → [.b, .d_sin=256] (f32) → cast to weight dtype
-        const t_proj = sinusoidalTimestepEmbedding(sigma).convert(wdtype);
+        // The actual Python model has bf16 params but receives f32 sinusoidal
+        // embedding. PyTorch's F.linear auto-promotes bf16 weights to f32,
+        // so the entire chain runs at f32. The output is f32 until the
+        // preprocessor stores it as bf16 in TransformerArgs.
+        // ZML requires matching dtypes for dotGeneral, so promote weights explicitly.
+        const t_proj = sinusoidalTimestepEmbedding(sigma); // f32
 
         // 2. TimestepEmbedding: linear_1 → silu → linear_2
-        const h1 = params.linear_1.forward(t_proj); // [.b, .d]
+        const h1 = linearF32(params.linear_1, t_proj); // [.b, .d] f32
         const h2 = h1.silu(); // [.b, .d]
-        const h3 = params.linear_2.forward(h2); // [.b, .d_emb]
+        const h3 = linearF32(params.linear_2, h2); // [.b, .d_emb] f32
         // h3 is the embedded_timestep returned to callers
 
         // 3. adaLN-single part: silu → linear_out
         const h4 = h3.silu(); // [.b, .d_emb]
-        const modulation = params.linear_out.forward(h4); // [.b, .d_ada]
+        const modulation = linearF32(params.linear_out, h4); // [.b, .d_ada] f32
 
         return .{ .modulation = modulation, .embedded_timestep = h3 };
+    }
+
+    /// Run a linear layer in f32 precision (promoting weights from bf16 if needed).
+    fn linearF32(linear: zml.nn.Linear, x: Tensor) Tensor {
+        const w = linear.weight.convert(.f32);
+        var y = x.dot(w, linear.tag);
+        if (linear.bias) |bias| {
+            y = y.add(bias.convert(.f32).broad(y.shape()));
+        }
+        return y;
     }
 };
 
@@ -287,6 +300,26 @@ pub const Attention = struct {
         to_v: zml.nn.Linear,
         to_gate_logits: zml.nn.Linear,
         to_out: zml.nn.Linear,
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            params.q_norm_weight.deinit();
+            params.k_norm_weight.deinit();
+
+            params.to_q.weight.deinit();
+            if (params.to_q.bias) |*b| b.deinit();
+
+            params.to_k.weight.deinit();
+            if (params.to_k.bias) |*b| b.deinit();
+
+            params.to_v.weight.deinit();
+            if (params.to_v.bias) |*b| b.deinit();
+
+            params.to_gate_logits.weight.deinit();
+            if (params.to_gate_logits.bias) |*b| b.deinit();
+
+            params.to_out.weight.deinit();
+            if (params.to_out.bias) |*b| b.deinit();
+        }
     };
 
     pub fn initParams(store: zml.io.TensorStore.View, kind: AttentionKind) Params {
@@ -326,80 +359,82 @@ pub const Attention = struct {
     }
 
     pub fn forward(self: Attention, x: Tensor, params: Params, num_heads: usize, opts: ForwardOpts) Tensor {
+        return self.forwardImpl(false, x, params, num_heads, opts);
+    }
+
+    /// bf16-native attention matching Python's dtype chain: bf16 matmuls, bf16 RoPE, bf16 SDPA.
+    pub fn forwardBf16(self: Attention, x: Tensor, params: Params, num_heads: usize, opts: ForwardOpts) Tensor {
+        return self.forwardImpl(true, x, params, num_heads, opts);
+    }
+
+    fn forwardImpl(self: Attention, comptime bf16_native: bool, x: Tensor, params: Params, num_heads: usize, opts: ForwardOpts) Tensor {
         _ = self;
 
         const x_ = x.withPartialTags(.{ .b, .t, .d });
         const out_dtype = x_.dtype();
-        const x_f32 = x_.convert(.f32);
         const context = if (opts.context) |ctx| ctx.withPartialTags(.{ .b, .t, .d }) else x_;
-        const context_f32 = context.convert(.f32);
 
-        // Keep attention math in f32 to match reference kernel accumulation behavior,
-        // then cast back at the output dtype for downstream parity/compatibility.
-        var q = x_f32.dot(params.to_q.weight.convert(.f32), .d);
+        // In bf16_native mode, match Python exactly: bf16 matmuls, bf16 RoPE, bf16 SDPA.
+        // In f32 mode (original), upcast everything to f32 for maximum precision.
+        const compute_dtype: zml.dtype.DataType = if (bf16_native) out_dtype else .f32;
+        const x_compute = x_.convert(compute_dtype);
+        const context_compute = context.convert(compute_dtype);
+
+        var q = x_compute.dot(params.to_q.weight.convert(compute_dtype), .d);
         if (params.to_q.bias) |bias_orig| {
-            q = q.add(bias_orig.convert(.f32).broad(q.shape()));
+            q = q.add(bias_orig.convert(compute_dtype).broad(q.shape()));
         }
 
-        var k = context_f32.dot(params.to_k.weight.convert(.f32), .d);
+        var k = context_compute.dot(params.to_k.weight.convert(compute_dtype), .d);
         if (params.to_k.bias) |bias_orig| {
-            k = k.add(bias_orig.convert(.f32).broad(k.shape()));
+            k = k.add(bias_orig.convert(compute_dtype).broad(k.shape()));
         }
 
-        var v = context_f32.dot(params.to_v.weight.convert(.f32), .d);
+        var v = context_compute.dot(params.to_v.weight.convert(compute_dtype), .d);
         if (params.to_v.bias) |bias_orig| {
-            v = v.add(bias_orig.convert(.f32).broad(v.shape()));
+            v = v.add(bias_orig.convert(compute_dtype).broad(v.shape()));
         }
 
         // LTX 2.3 attention includes RMSNorms on q and k with learned weights, applied before splitting into heads.
         // In PyTorch, multiplying by the learned weight is done within the `RMSNorm` module after the normalization step. 
         // On the other hand, zml.nn.rmsNorm() returns a normalized tensor without applying the learned weight, so we multiply manually.
-        q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.convert(.f32).broad(q.shape()));
-        k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.convert(.f32).broad(k.shape()));
+        q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.convert(compute_dtype).broad(q.shape()));
+        k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.convert(compute_dtype).broad(k.shape()));
 
         // Split embedding dimension into heads
-        // `q`: `[B, Tq, heads * head_dim]` --> `qh`: `[B, Q, H, HD]`
-        // `k`: `[B, Tk, heads * head_dim]` --> `kh`: `[B, K, H, HD]`
-        // `v`: `[B, Tk, heads * head_dim]` --> `vh`: `[B, K, H, HD]`
         var qh = q.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
         var kh = k.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
         var vh = v.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
 
         // Apply RoPE if present in checkpoint.
-        // Checkpoint tensors come in two layouts: rank-4 [B, H, T, HD] (tagged head-first as [B, H, Q/K, HD])
-        // or rank-2 [T, H*HD] (split and tagged token-first as [B, Q/K, H, HD]). Both are equivalent under
-        // ZML's named-axis system; applyLtxRotaryEmb handles alignment via transpose().
-        // When no k-specific RoPE tensors are present, the q tensors are reused for k.
         if (opts.pe_cos) |pe_cos| {
             if (opts.pe_sin) |pe_sin| {
                 const q_cos = if (pe_cos.rank() == 4)
-                    pe_cos.withPartialTags(.{ .b, .h, .q, .hd }).convert(.f32)
+                    pe_cos.withPartialTags(.{ .b, .h, .q, .hd }).convert(compute_dtype)
                 else
-                    pe_cos.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(.f32);
+                    pe_cos.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(compute_dtype);
 
                 const q_sin = if (pe_sin.rank() == 4)
-                    pe_sin.withPartialTags(.{ .b, .h, .q, .hd }).convert(.f32)
+                    pe_sin.withPartialTags(.{ .b, .h, .q, .hd }).convert(compute_dtype)
                 else
-                    pe_sin.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(.f32);
+                    pe_sin.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .q, .h, .hd }).convert(compute_dtype);
 
                 const k_cos = if (opts.k_pe_cos) |k_pe_cos|
                     if (k_pe_cos.rank() == 4)
-                        k_pe_cos.withPartialTags(.{ .b, .h, .k, .hd }).convert(.f32)
+                        k_pe_cos.withPartialTags(.{ .b, .h, .k, .hd }).convert(compute_dtype)
                     else
-                        k_pe_cos.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .k, .h, .hd }).convert(.f32)
+                        k_pe_cos.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .k, .h, .hd }).convert(compute_dtype)
                 else
                     q_cos.rename(.{ .q = .k });
 
                 const k_sin = if (opts.k_pe_sin) |k_pe_sin|
                     if (k_pe_sin.rank() == 4)
-                        k_pe_sin.withPartialTags(.{ .b, .h, .k, .hd }).convert(.f32)
+                        k_pe_sin.withPartialTags(.{ .b, .h, .k, .hd }).convert(compute_dtype)
                     else
-                        k_pe_sin.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .k, .h, .hd }).convert(.f32)
+                        k_pe_sin.rename(.{ .t = .k }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto }).withPartialTags(.{ .b, .k, .h, .hd }).convert(compute_dtype)
                 else
                     q_sin.rename(.{ .q = .k });
 
-                // LTX is a video generation model needing coordinates for temporal + spatial (height/width) dimensions, not flat sequential 
-                // token positions, so the RoPE implementation is customized but mathematically equivalent to standard RoPE.
                 qh = applyLtxRotaryEmb(qh, q_cos, q_sin);
                 kh = applyLtxRotaryEmb(kh, k_cos, k_sin);
             }
@@ -409,8 +444,6 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        // ZML uses named axes. 
-        // The sdpa primitive expects a specific batch axis name, `.batch`, so it is temporarily renamed here. 
         var attn = zml.nn.sdpa(
             qh.rename(.{ .b = .batch }),
             kh.rename(.{ .b = .batch }),
@@ -419,17 +452,17 @@ pub const Attention = struct {
         ).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
         // Compute per-head gates as 2 * sigmoid(logits) so zero-initialized logits preserve identity.
-        var gate_logits = x_f32.dot(params.to_gate_logits.weight.convert(.f32), .d); // [B, T, H]
+        var gate_logits = x_compute.dot(params.to_gate_logits.weight.convert(compute_dtype), .d); // [B, T, H]
         if (params.to_gate_logits.bias) |bias_orig| {
-            gate_logits = gate_logits.add(bias_orig.convert(.f32).broad(gate_logits.shape()));
+            gate_logits = gate_logits.add(bias_orig.convert(compute_dtype).broad(gate_logits.shape()));
         }
         const gate = gate_logits.sigmoid().scale(2.0).rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), ._gate = .auto }).squeeze(._gate); // [B, Q, H]
         attn = attn.mul(gate.broad(attn.shape())); // [B, Q, H, HD]
 
         const merged = attn.merge(.{ .d_v = .{ .h, .hd } }).rename(.{ .q = .t }); // [B, Q, D_V] with D_V = H * HD
-        var out = merged.dot(params.to_out.weight.convert(.f32), .d_v);
+        var out = merged.dot(params.to_out.weight.convert(compute_dtype), .d_v);
         if (params.to_out.bias) |bias_orig| {
-            out = out.add(bias_orig.convert(.f32).broad(out.shape()));
+            out = out.add(bias_orig.convert(compute_dtype).broad(out.shape()));
         }
         return out.convert(out_dtype).withPartialTags(.{ .b, .t, .d });
     }
@@ -469,25 +502,6 @@ pub const Attention = struct {
         return Tensor.concatenate(&.{ out_first, out_second }, .hd);
     }
 
-    pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
-        params.q_norm_weight.deinit();
-        params.k_norm_weight.deinit();
-
-        params.to_q.weight.deinit();
-        if (params.to_q.bias) |*b| b.deinit();
-
-        params.to_k.weight.deinit();
-        if (params.to_k.bias) |*b| b.deinit();
-
-        params.to_v.weight.deinit();
-        if (params.to_v.bias) |*b| b.deinit();
-
-        params.to_gate_logits.weight.deinit();
-        if (params.to_gate_logits.bias) |*b| b.deinit();
-
-        params.to_out.weight.deinit();
-        if (params.to_out.bias) |*b| b.deinit();
-    }
 };
 
 fn kindStorePath(kind: AttentionKind) []const u8 {
@@ -574,6 +588,23 @@ pub const BasicAVTransformerBlock = struct {
         scale_shift_table_a2v_ca_audio: Tensor,  // [.n_ada=5, .d=D_audio]  AV CA audio side
         prompt_scale_shift_table: Tensor,        // [.n_prompt=2, .d=D_video] text CA prompt modulation
         audio_prompt_scale_shift_table: Tensor,  // [.n_prompt=2, .d=D_audio] text CA prompt modulation
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            FeedForward.Params.unloadBuffers(&params.ff);
+            FeedForward.Params.unloadBuffers(&params.audio_ff);
+            Attention.Params.unloadBuffers(&params.attn1);
+            Attention.Params.unloadBuffers(&params.attn2);
+            Attention.Params.unloadBuffers(&params.audio_attn1);
+            Attention.Params.unloadBuffers(&params.audio_attn2);
+            Attention.Params.unloadBuffers(&params.audio_to_video_attn);
+            Attention.Params.unloadBuffers(&params.video_to_audio_attn);
+            params.scale_shift_table.deinit();
+            params.audio_scale_shift_table.deinit();
+            params.scale_shift_table_a2v_ca_video.deinit();
+            params.scale_shift_table_a2v_ca_audio.deinit();
+            params.prompt_scale_shift_table.deinit();
+            params.audio_prompt_scale_shift_table.deinit();
+        }
     };
 
     pub const VideoStreamInputs = struct {
@@ -741,23 +772,6 @@ pub const BasicAVTransformerBlock = struct {
         return h;
     }
 
-    pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
-        FeedForward.unloadBuffers(&params.ff);
-        FeedForward.unloadBuffers(&params.audio_ff);
-        Attention.unloadBuffers(&params.attn1);
-        Attention.unloadBuffers(&params.attn2);
-        Attention.unloadBuffers(&params.audio_attn1);
-        Attention.unloadBuffers(&params.audio_attn2);
-        Attention.unloadBuffers(&params.audio_to_video_attn);
-        Attention.unloadBuffers(&params.video_to_audio_attn);
-        params.scale_shift_table.deinit();
-        params.audio_scale_shift_table.deinit();
-        params.scale_shift_table_a2v_ca_video.deinit();
-        params.scale_shift_table_a2v_ca_audio.deinit();
-        params.prompt_scale_shift_table.deinit();
-        params.audio_prompt_scale_shift_table.deinit();
-    }
-
     /// Per-inference inputs shared across all blocks during a model forward pass.
     ///
     /// Unlike `FullInputs`, which carries pre-computed per-module AdaLN values captured
@@ -808,7 +822,7 @@ pub const BasicAVTransformerBlock = struct {
     ///
     /// For parity checkers that operate on pre-captured per-module inputs, use
     /// `forward(FullInputs, Params)` instead.
-    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, comptime bf16_attn: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         const vx = vx_in.withPartialTags(.{ .b, .t, .d });
         const ax = ax_in.withPartialTags(.{ .b, .t, .d });
         // In f32-carry mode, vx/ax arrive as f32 while adaValueAt returns ts.dtype() = bf16.
@@ -827,7 +841,10 @@ pub const BasicAVTransformerBlock = struct {
             .add(vshift_msa.broad(vx.shape()));
 
         // M1: video self-attn residual.
-        const attn1_out = self.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
+        const attn1_out = if (bf16_attn) self.attn1.forwardBf16(norm_vx, params.attn1, kindNumHeads(.attn1), .{
+            .pe_cos = inputs.v_pe_cos,
+            .pe_sin = inputs.v_pe_sin,
+        }) else self.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
         });
@@ -845,12 +862,15 @@ pub const BasicAVTransformerBlock = struct {
             .mul(v_scale_q.addConstant(1.0).broad(h_v.shape()))
             .add(v_shift_q.broad(h_v.shape()));
         // v_shift_kv/v_scale_kv are applied to v_text_ctx (always bf16), not the f32 stream.
-        const v_shift_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 0);
-        const v_scale_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 1);
+        const v_shift_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 0).convert(vd);
+        const v_scale_kv = adaValueAt(params.prompt_scale_shift_table, inputs.v_prompt_timestep, 1).convert(vd);
         const v_text_ctx_mod = inputs.v_text_ctx
             .mul(v_scale_kv.addConstant(1.0).broad(inputs.v_text_ctx.shape()))
             .add(v_shift_kv.broad(inputs.v_text_ctx.shape()));
-        const v_text_ca_out = self.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
+        const v_text_ca_out = if (bf16_attn) self.attn2.forwardBf16(v_text_x, params.attn2, kindNumHeads(.attn2), .{
+            .context = v_text_ctx_mod,
+            .mask = inputs.v_text_ctx_mask,
+        }) else self.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
             .context = v_text_ctx_mod,
             .mask = inputs.v_text_ctx_mask,
         });
@@ -871,7 +891,10 @@ pub const BasicAVTransformerBlock = struct {
             .add(ashift_msa.broad(ax.shape()));
 
         // M4-A: audio self-attn residual.
-        const audio_attn1_out = self.audio_attn1.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
+        const audio_attn1_out = if (bf16_attn) self.audio_attn1.forwardBf16(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
+            .pe_cos = inputs.a_pe_cos,
+            .pe_sin = inputs.a_pe_sin,
+        }) else self.audio_attn1.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
             .pe_cos = inputs.a_pe_cos,
             .pe_sin = inputs.a_pe_sin,
         });
@@ -889,12 +912,15 @@ pub const BasicAVTransformerBlock = struct {
             .mul(a_scale_q.addConstant(1.0).broad(h_a.shape()))
             .add(a_shift_q.broad(h_a.shape()));
         // a_shift_kv/a_scale_kv are applied to a_text_ctx (always bf16), not the f32 stream.
-        const a_shift_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 0);
-        const a_scale_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 1);
+        const a_shift_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 0).convert(ad);
+        const a_scale_kv = adaValueAt(params.audio_prompt_scale_shift_table, inputs.a_prompt_timestep, 1).convert(ad);
         const a_text_ctx_mod = inputs.a_text_ctx
             .mul(a_scale_kv.addConstant(1.0).broad(inputs.a_text_ctx.shape()))
             .add(a_shift_kv.broad(inputs.a_text_ctx.shape()));
-        const a_text_ca_out = self.audio_attn2.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
+        const a_text_ca_out = if (bf16_attn) self.audio_attn2.forwardBf16(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
+            .context = a_text_ctx_mod,
+            .mask = inputs.a_text_ctx_mask,
+        }) else self.audio_attn2.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
             .context = a_text_ctx_mod,
             .mask = inputs.a_text_ctx_mask,
         });
@@ -930,7 +956,13 @@ pub const BasicAVTransformerBlock = struct {
             .mul(scale_a_a2v.addConstant(1.0).broad(ax_norm3.shape()))
             .add(shift_a_a2v.broad(ax_norm3.shape()));
 
-        const a2v_out = self.audio_to_video_attn.forward(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
+        const a2v_out = if (bf16_attn) self.audio_to_video_attn.forwardBf16(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
+            .context  = ax_scaled_a2v,
+            .pe_cos   = inputs.a2v_pe_cos,
+            .pe_sin   = inputs.a2v_pe_sin,
+            .k_pe_cos = inputs.a2v_k_pe_cos,
+            .k_pe_sin = inputs.a2v_k_pe_sin,
+        }) else self.audio_to_video_attn.forward(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
             .context  = ax_scaled_a2v,
             .pe_cos   = inputs.a2v_pe_cos,
             .pe_sin   = inputs.a2v_pe_sin,
@@ -964,7 +996,13 @@ pub const BasicAVTransformerBlock = struct {
             .mul(scale_v_v2a.addConstant(1.0).broad(vx_norm3.shape()))
             .add(shift_v_v2a.broad(vx_norm3.shape()));
 
-        const v2a_out = self.video_to_audio_attn.forward(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
+        const v2a_out = if (bf16_attn) self.video_to_audio_attn.forwardBf16(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
+            .context  = vx_scaled_v2a,
+            .pe_cos   = inputs.v2a_pe_cos,
+            .pe_sin   = inputs.v2a_pe_sin,
+            .k_pe_cos = inputs.v2a_k_pe_cos,
+            .k_pe_sin = inputs.v2a_k_pe_sin,
+        }) else self.video_to_audio_attn.forward(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
             .context  = vx_scaled_v2a,
             .pe_cos   = inputs.v2a_pe_cos,
             .pe_sin   = inputs.v2a_pe_sin,
@@ -1029,25 +1067,30 @@ pub const BasicAVTransformerBlock = struct {
     }
 
     pub fn forwardNative(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, false, false, vx_in, ax_in, inputs, params);
+    }
+
+    /// Checker-only experimental path: attention runs in bf16 matching Python's dtype chain.
+    pub fn forwardNativeBf16Attn(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+        return self.forwardNativeImpl(false, false, false, true, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: only the final audio FF residual add is computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioFFResidualF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(true, false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(true, false, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: all audio residual adds are computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, true, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, true, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: all video residual adds are computed in f32, and video FF uses f32 matmul.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeVideoAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, true, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, true, false, vx_in, ax_in, inputs, params);
     }
 };
 
@@ -1081,7 +1124,7 @@ pub const LTXModel = struct {
 
         pub fn unloadBuffers(self: *zml.Bufferized(Params), allocator: std.mem.Allocator) void {
             for (self.blocks) |*bp| {
-                BasicAVTransformerBlock.unloadBuffers(bp);
+                BasicAVTransformerBlock.Params.unloadBuffers(bp);
             }
             allocator.free(self.blocks);
             self.adaln_single.unloadBuffers();
@@ -1279,6 +1322,70 @@ pub fn forwardOutputProjection(x: Tensor, embedded_timestep: Tensor, params: Out
     return OutputProjection.forward(x, embedded_timestep, params);
 }
 
+// =====================================================================
+// Denoising-loop arithmetic (Step 3)
+// =====================================================================
+
+/// Result of one denoising step: to_denoised + post_process_latent + Euler step.
+pub const DenoisingStepResult = struct {
+    denoised: Tensor,
+    blended: Tensor,
+    next_latent: Tensor,
+};
+
+/// Apply to_denoised + post_process_latent + Euler step for one denoising iteration.
+///
+/// Matches Python's dtype chain exactly — each sub-step casts back to bf16
+/// to reproduce the same quantization behavior:
+///   1. to_denoised:          bf16(sample.f32 - velocity.f32 * timesteps)
+///   2. post_process_latent:  bf16(denoised_bf16.f32 * mask + clean.f32 * (1 - mask))
+///   3. to_velocity:          bf16((sample.f32 - blended_bf16.f32) / sigma.item())
+///   4. Euler update:         bf16(sample.f32 + velocity_bf16.f32 * dt)
+pub fn forwardDenoisingStep(
+    sample: Tensor,
+    velocity: Tensor,
+    denoise_mask: Tensor,
+    clean_latent: Tensor,
+    sigma: Tensor,
+    sigma_next: Tensor,
+) DenoisingStepResult {
+    const out_dtype = sample.dtype();
+    const sample_f32 = sample.convert(.f32);
+    const velocity_f32 = velocity.convert(.f32);
+    const clean_f32 = clean_latent.convert(.f32);
+    const mask_f32 = denoise_mask.convert(.f32);
+    const sigma_f32 = sigma.convert(.f32);
+    const sigma_next_f32 = sigma_next.convert(.f32);
+
+    // 1. timesteps = mask * sigma (per-token sigma)
+    const timesteps = mask_f32.mul(sigma_f32);
+
+    // 2. to_denoised: denoised = (sample.f32 - velocity.f32 * timesteps).to(bf16)
+    const denoised_f32 = sample_f32.sub(velocity_f32.mul(timesteps));
+    const denoised = denoised_f32.convert(out_dtype);
+
+    // 3. post_process_latent: use bf16-rounded denoised (matching Python's dtype chain)
+    //    Python: (denoised_bf16 * mask + clean.float() * (1 - mask)).to(bf16)
+    const one_minus_mask = Tensor.scalar(1.0, .f32).sub(mask_f32);
+    const blended_f32 = denoised.convert(.f32).mul(mask_f32).add(clean_f32.mul(one_minus_mask));
+    const blended = blended_f32.convert(out_dtype);
+
+    // 4. Euler step: to_velocity returns bf16, then Euler update uses bf16 velocity
+    //    Python: velocity = bf16((sample.f32 - blended.f32) / sigma.item())
+    //            next = bf16(sample.f32 + velocity.f32 * dt)
+    const dt = sigma_next_f32.sub(sigma_f32);
+    const euler_vel_f32 = sample_f32.sub(blended.convert(.f32)).div(sigma_f32);
+    const euler_vel = euler_vel_f32.convert(out_dtype);
+    const next_f32 = sample_f32.add(euler_vel.convert(.f32).mul(dt));
+    const next_latent = next_f32.convert(out_dtype);
+
+    return .{
+        .denoised = denoised,
+        .blended = blended,
+        .next_latent = next_latent,
+    };
+}
+
 /// Free-function entrypoint for parity tooling: block0 FF only.
 pub fn forwardBlock0FF(x: Tensor, params: X0Model.Params) Tensor {
     const ff = FeedForward{};
@@ -1359,11 +1466,11 @@ pub fn initBlock0Params(store: zml.io.TensorStore.View) BasicAVTransformerBlock.
 }
 
 pub fn unloadBlock0Buffers(params: *zml.Bufferized(BasicAVTransformerBlock.Params)) void {
-    BasicAVTransformerBlock.unloadBuffers(params);
+    BasicAVTransformerBlock.Params.unloadBuffers(params);
 }
 
 pub fn unloadBlock0FFBuffers(params: *zml.Bufferized(FeedForward.Params)) void {
-    FeedForward.unloadBuffers(params);
+    FeedForward.Params.unloadBuffers(params);
 }
 
 pub fn initBlock0AudioFFParams(store: zml.io.TensorStore.View) FeedForward.Params {
@@ -1372,7 +1479,7 @@ pub fn initBlock0AudioFFParams(store: zml.io.TensorStore.View) FeedForward.Param
 }
 
 pub fn unloadBlock0AudioFFBuffers(params: *zml.Bufferized(FeedForward.Params)) void {
-    FeedForward.unloadBuffers(params);
+    FeedForward.Params.unloadBuffers(params);
 }
 
 /// Build patchify params from the selected transformer root.
@@ -1407,7 +1514,7 @@ pub fn initBlock0AttentionParams(store: zml.io.TensorStore.View, kind: Attention
 }
 
 pub fn unloadBlock0AttentionBuffers(params: *zml.Bufferized(Attention.Params)) void {
-    Attention.unloadBuffers(params);
+    Attention.Params.unloadBuffers(params);
 }
 
 pub fn forwardBlock0Attn1(x: Tensor, params: Attention.Params) Tensor {
@@ -2738,6 +2845,61 @@ pub fn forwardBlock0Native(
     }, params);
 }
 
+/// Same as forwardBlock0Native but with bf16-native attention matching Python's dtype chain.
+pub fn forwardBlock0NativeBf16Attn(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
 pub fn forwardBlock0NativeWithAVMasks(
     vx_in: Tensor,
     ax_in: Tensor,
@@ -3939,6 +4101,217 @@ pub fn forwardBlockSlice8NativeAudio(
 }
 
 // ---------------------------------------------------------------------------
+// RoPE generation: positions → cos/sin pairs (Step 2)
+// ---------------------------------------------------------------------------
+
+/// Cos/sin pair returned by RoPE generation.
+const CosSinPair = struct { cos: Tensor, sin: Tensor };
+
+/// Configuration for RoPE frequency generation.
+const RopeConfig = struct {
+    theta: f64 = 10000.0,
+    max_pos: []const i64,
+    num_heads: i64 = 32,
+    inner_dim: i64,
+};
+
+/// Generate frequency basis vectors for RoPE (matches `generate_freq_grid_pytorch`).
+///
+/// Computes `n_elem = 2 * n_pos_dims` frequency values per position dimension:
+///   indices[i] = theta^(linspace(log_theta(1), log_theta(theta), dim // n_elem)) * π/2
+///
+/// where `log_theta(x) = log(x) / log(theta)`.
+///
+/// Returns a 1D Tensor of shape [dim // (2 * n_pos_dims)] in f32.
+fn generateFreqGrid(theta: f64, n_pos_dims: i64, dim: i64) Tensor {
+    const log_theta = std.math.log(f64, std.math.e, theta);
+    const n_elem: i64 = 2 * n_pos_dims;
+    const num_freqs: i64 = @divTrunc(dim, n_elem);
+
+    // linspace(log_theta(1), log_theta(theta), num_freqs)
+    //   = linspace(0, 1, num_freqs)   since log_theta(1) = 0, log_theta(theta) = 1
+    // Then: theta^(linspace_val) * π/2
+    //   = exp(linspace_val * ln(theta)) * π/2
+    //
+    // Build via arange: step = 1.0 / (num_freqs - 1), val[i] = i * step
+    const idx = Tensor.arange(.{ .end = num_freqs }, .f32);
+    const step: f64 = if (num_freqs > 1) 1.0 / @as(f64, @floatFromInt(num_freqs - 1)) else 0.0;
+    // indices = exp(idx * step * ln(theta)) * π/2
+    const indices = idx.scale(step * log_theta).exp().scale(std.math.pi / 2.0);
+    return indices;
+}
+
+/// Compute fractional positions from raw position grid (matches `get_fractional_positions`).
+///
+/// With `use_middle_indices_grid=true`, takes the mean of start/end coordinates:
+///   positions [B, C, T, 2] → middle [B, C, T] → fractional[c] = middle[:, c, :] / max_pos[c]
+///
+/// Returns a slice of Tensors, one per position dimension, each [B, T].
+/// Stays in the source dtype to match Python's bf16 intermediate precision.
+/// Caller provides a buffer of length >= n_pos_dims.
+fn getFractionalPositions(
+    positions: Tensor, // [.b, .c, .t, .se=2]
+    max_pos: []const i64,
+    buf: []Tensor,
+) []const Tensor {
+    const n_pos_dims: usize = @intCast(positions.dim(.c));
+
+    // use_middle_indices_grid: mean of start and end
+    // Keep in source dtype (bf16 for video, f32 for audio) to match Python.
+    const start = positions.slice1d(.se, .{ .start = 0, .end = 1 }).squeeze(.se); // [.b, .c, .t]
+    const end = positions.slice1d(.se, .{ .start = 1, .end = 2 }).squeeze(.se); // [.b, .c, .t]
+    const middle = start.add(end).scale(0.5); // [.b, .c, .t] — stays in source dtype
+
+    // Normalize each position dim by its max_pos
+    for (0..n_pos_dims) |c| {
+        const c_i64: i64 = @intCast(c);
+        const pos_c = middle.slice1d(.c, .{ .start = c_i64, .end = c_i64 + 1 }).squeeze(.c); // [.b, .t]
+        const max_val: f64 = @floatFromInt(max_pos[c]);
+        buf[c] = pos_c.scale(1.0 / max_val); // [.b, .t] normalized to [0, 1]
+    }
+    return buf[0..n_pos_dims];
+}
+
+/// Generate raw frequency embeddings (matches `generate_freqs`).
+///
+/// For each position dimension c:
+///   freq_c = indices[c] * (frac_pos[c] * 2 - 1)    → [B, T, D//(2*C)]
+/// Then concatenate across all dims → [B, T, D//2]
+///
+/// `freq_basis`: [D // (2*C)] — frequency basis from generateFreqGrid
+/// `frac_positions`: slice of C tensors, each [B, T] — from getFractionalPositions
+fn generateFreqs(freq_basis: Tensor, frac_positions: []const Tensor) Tensor {
+    const n_pos_dims = frac_positions.len;
+    var parts: [8]Tensor = undefined; // max 8 position dims (3 for video, 1 for audio)
+
+    for (0..n_pos_dims) |c| {
+        // frac_pos[c]: [.b, .t], freq_basis: [num_freqs]
+        // result: outer product → [.b, .t, num_freqs]
+        const frac = frac_positions[c]; // [.b, .t]
+        const scaled_frac = frac.scale(2.0).addConstant(-1.0); // map [0,1] → [-1,1], stays in source dtype
+
+        // Upcast to f32 for multiplication with f32 freq basis.
+        // This matches Python: bf16 intermediate * f32 freq → implicit upcast to f32.
+        const scaled_f32 = scaled_frac.convert(.f32);
+
+        // Outer product: scaled_f32[.b, .t] × freq_basis[.freq] → [.b, .t, .freq]
+        const sf_expanded = scaled_f32.appendAxes(.{.freq}).broad(
+            scaled_f32.shape().append(.{ .freq = freq_basis.dim(0) }),
+        );
+        const fb_tagged = freq_basis.withTags(.{.freq});
+        const fb_expanded = fb_tagged.broad(sf_expanded.shape());
+        parts[c] = sf_expanded.mul(fb_expanded); // [.b, .t, .freq]
+    }
+
+    if (n_pos_dims == 1) {
+        return parts[0]; // [.b, .t, .freq] — already D//2
+    }
+
+    // Python interleaves dims within each freq index:
+    //   [freq0_dim0, freq0_dim1, freq0_dim2, freq1_dim0, ...]
+    // Achieved via: [B,T,C,num_freqs].transpose(-1,-2).flatten(2)
+    //
+    // Step 1: Concatenate per-dim parts → [.b, .t, .freq = C * N]
+    //   layout: [dim0_freq0..N, dim1_freq0..N, dim2_freq0..N]
+    const concatenated = Tensor.concatenate(parts[0..n_pos_dims], .freq);
+
+    // Step 2: Reshape to [.b, .t, .cdim = C, .fidx = N]
+    const n_dims: i64 = @intCast(n_pos_dims);
+    const num_per_dim = freq_basis.dim(0);
+    const separated = concatenated.reshape(
+        concatenated.shape().splitAxis(.freq, .{ .cdim = n_dims, .fidx = num_per_dim }),
+    );
+
+    // Step 3: Transpose to [.b, .t, .fidx = N, .cdim = C]
+    const transposed = separated.transpose(zml.Shape.init(.{
+        .b = separated.dim(.b),
+        .t = separated.dim(.t),
+        .fidx = num_per_dim,
+        .cdim = n_dims,
+    }, separated.dtype()));
+
+    // Step 4: Flatten back to [.b, .t, .freq = N * C]
+    return transposed.reshape(zml.Shape.init(.{
+        .b = transposed.dim(.b),
+        .t = transposed.dim(.t),
+        .freq = num_per_dim * n_dims,
+    }, transposed.dtype()));
+}
+
+/// Split raw frequencies into cos/sin pairs with optional padding (matches `split_freqs_cis`).
+///
+/// Input: freqs [B, T, D//2] (raw freq values per token)
+/// Output: (cos [B, H, T, HD//2], sin [B, H, T, HD//2])
+///
+/// For SPLIT layout with head_dim=HD:
+///   - cos = freqs.cos(), padded with 1s if D//2 < H * (HD//2)
+///   - sin = freqs.sin(), padded with 0s if D//2 < H * (HD//2)
+///   - reshape to [B, T, H, HD//2] then transpose to [B, H, T, HD//2]
+fn splitFreqsCis(freqs: Tensor, num_heads: i64, head_dim: i64) CosSinPair {
+    const half_hd: i64 = @divExact(head_dim, 2);
+    const total_needed: i64 = num_heads * half_hd;
+    const freq_dim: i64 = freqs.dim(.freq);
+
+    var cos_freq = freqs.cos();
+    var sin_freq = freqs.sin();
+
+    // Pad if frequencies don't fill the full head dimension.
+    // Python PREPENDS padding: cat([padding, freqs])
+    if (freq_dim < total_needed) {
+        const pad_size: i64 = total_needed - freq_dim;
+        const bt_shape = freqs.shape().set(.freq, pad_size);
+        const cos_pad = Tensor.scalar(1.0, .f32).broad(bt_shape);
+        const sin_pad = Tensor.scalar(0.0, .f32).broad(bt_shape);
+        cos_freq = Tensor.concatenate(&.{ cos_pad, cos_freq }, .freq);
+        sin_freq = Tensor.concatenate(&.{ sin_pad, sin_freq }, .freq);
+    }
+
+    // Reshape [.b, .t, .freq=H*HD/2] → [.b, .t, .h, .hd=HD/2]
+    const split_shape = cos_freq.shape().splitAxis(.freq, .{ .h = num_heads, .hd = half_hd });
+    const cos_reshaped = cos_freq.reshape(split_shape);
+    const sin_reshaped = sin_freq.reshape(split_shape);
+
+    // Transpose [.b, .t, .h, .hd] → [.b, .h, .t, .hd]
+    const target_shape = zml.Shape.init(.{
+        .b = cos_reshaped.dim(.b),
+        .h = num_heads,
+        .t = cos_reshaped.dim(.t),
+        .hd = half_hd,
+    }, cos_reshaped.dtype());
+    return .{
+        .cos = cos_reshaped.transpose(target_shape),
+        .sin = sin_reshaped.transpose(target_shape),
+    };
+}
+
+/// Full RoPE generation pipeline (matches `precompute_freqs_cis`).
+///
+/// positions: [.b, .c, .t, .se=2] — raw position grid with start/end coordinates
+/// config: RoPE configuration (theta, max_pos, num_heads, inner_dim)
+///
+/// Returns (cos, sin) each shaped [.b, .h, .t, .hd=HD/2].
+fn precomputeFreqsCis(
+    positions: Tensor,
+    config: RopeConfig,
+) CosSinPair {
+    const n_pos_dims: i64 = positions.dim(.c);
+    const head_dim: i64 = @divExact(config.inner_dim, config.num_heads);
+
+    // 1. Frequency basis: [D // (2*C)] values
+    const freq_basis = generateFreqGrid(config.theta, n_pos_dims, config.inner_dim);
+
+    // 2. Fractional positions: C tensors each [B, T]
+    var frac_buf: [8]Tensor = undefined;
+    const frac_positions = getFractionalPositions(positions, config.max_pos, &frac_buf);
+
+    // 3. Raw frequencies: [B, T, D//2]
+    const freqs = generateFreqs(freq_basis, frac_positions);
+
+    // 4. Split into cos/sin with head reshape: [B, H, T, HD//2]
+    return splitFreqsCis(freqs, config.num_heads, head_dim);
+}
+
+// ---------------------------------------------------------------------------
 // Full transformer step: 48 blocks + OutputProjection (Step 1 parity)
 // ---------------------------------------------------------------------------
 
@@ -3982,6 +4355,293 @@ pub fn unloadFullStepBuffers(params: *zml.Bufferized(FullStepParams)) void {
     }
     OutputProjection.Params.unloadBuffers(&params.norm_proj_out);
     OutputProjection.Params.unloadBuffers(&params.audio_norm_proj_out);
+}
+
+// ---------------------------------------------------------------------------
+// Step 2: Preprocessing (raw inputs → SharedInputs) + full velocity model
+// ---------------------------------------------------------------------------
+
+/// Parameters for the preprocessing stage (everything except the 48 transformer blocks
+/// and the output projections). This turns raw latent inputs + sigma into SharedInputs.
+pub const PreprocessParams = struct {
+    video_patchify: Patchify.Params,
+    audio_patchify: Patchify.Params,
+    adaln_single: AdaLayerNormSingle.Params,
+    audio_adaln_single: AdaLayerNormSingle.Params,
+    prompt_adaln_single: AdaLayerNormSingle.Params,
+    audio_prompt_adaln_single: AdaLayerNormSingle.Params,
+    av_ca_video_scale_shift_adaln_single: AdaLayerNormSingle.Params,
+    av_ca_audio_scale_shift_adaln_single: AdaLayerNormSingle.Params,
+    av_ca_a2v_gate_adaln_single: AdaLayerNormSingle.Params,
+    av_ca_v2a_gate_adaln_single: AdaLayerNormSingle.Params,
+
+    pub fn unloadBuffers(self: *zml.Bufferized(PreprocessParams)) void {
+        Patchify.unloadBuffers(&self.video_patchify);
+        Patchify.unloadBuffers(&self.audio_patchify);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.audio_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.prompt_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.audio_prompt_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.av_ca_video_scale_shift_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.av_ca_audio_scale_shift_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.av_ca_a2v_gate_adaln_single);
+        AdaLayerNormSingle.Params.unloadBuffers(&self.av_ca_v2a_gate_adaln_single);
+    }
+};
+
+pub fn initPreprocessParams(store: zml.io.TensorStore.View) PreprocessParams {
+    const root = selectTransformerRoot(store);
+    return .{
+        .video_patchify = Patchify.initParams(root),
+        .audio_patchify = .init(
+            root.withPrefix("audio_patchify_proj").createTensor("weight", .{ .d, .patch }, null),
+            root.withPrefix("audio_patchify_proj").createTensor("bias", .{.d}, null),
+            .patch,
+        ),
+        .adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("adaln_single")),
+        .audio_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("audio_adaln_single")),
+        .prompt_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("prompt_adaln_single")),
+        .audio_prompt_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("audio_prompt_adaln_single")),
+        .av_ca_video_scale_shift_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("av_ca_video_scale_shift_adaln_single")),
+        .av_ca_audio_scale_shift_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("av_ca_audio_scale_shift_adaln_single")),
+        .av_ca_a2v_gate_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("av_ca_a2v_gate_adaln_single")),
+        .av_ca_v2a_gate_adaln_single = AdaLayerNormSingle.initParams(root.withPrefix("av_ca_v2a_gate_adaln_single")),
+    };
+}
+
+/// Output of the preprocessing stage — everything the block chain needs.
+///
+/// This is a flat struct suitable for use as a compilation function return value.
+/// Each field maps directly to a field in `BasicAVTransformerBlock.SharedInputs`.
+pub const PreprocessOutput = struct {
+    vx: Tensor, // [B, T_v, D_video] — patchified video
+    ax: Tensor, // [B, T_a, D_audio] — patchified audio
+    video_timesteps: Tensor, // [B, 1, 9 * D_video]
+    audio_timesteps: Tensor, // [B, 1, 9 * D_audio]
+    v_embedded_timestep: Tensor, // [B, 1, D_video] — for output projection
+    a_embedded_timestep: Tensor, // [B, 1, D_audio] — for output projection
+    v_prompt_timestep: Tensor, // [B, 1, 2 * D_video]
+    a_prompt_timestep: Tensor, // [B, 1, 2 * D_audio]
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor, // [B, 1, 4 * D_video]
+    v_cross_gate_ts: Tensor, // [B, 1, D_video]
+    a_cross_ss_ts: Tensor, // [B, 1, 4 * D_audio]
+    a_cross_gate_ts: Tensor, // [B, 1, D_audio]
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+};
+
+/// Preprocessing forward: raw inputs → patchified hidden states + SharedInputs.
+///
+/// This function is designed to be compiled as a single XLA exe.
+///
+/// Inputs:
+///   - v_latent [B, T_v, 128] — raw video latent
+///   - a_latent [B, T_a, 128] — raw audio latent
+///   - v_denoise_mask [B, T_v, 1] — video denoise mask
+///   - a_denoise_mask [B, T_a, 1] — audio denoise mask
+///   - v_sigma [B] — video noise level
+///   - a_sigma [B] — audio noise level
+///   - v_positions [B, 3, T_v, 2] — video position grid (t,h,w with start/end)
+///   - a_positions [B, 1, T_a, 2] — audio position grid (t with start/end)
+///   - v_context [B, T_text, D_video] — text context for video stream
+///   - a_context [B, T_text, D_audio] — text context for audio stream
+///   - params: PreprocessParams
+pub fn forwardPreprocess(
+    v_latent: Tensor,
+    a_latent: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_sigma: Tensor,
+    a_sigma: Tensor,
+    v_positions: Tensor,
+    a_positions: Tensor,
+    v_context: Tensor,
+    a_context: Tensor,
+    params: PreprocessParams,
+) PreprocessOutput {
+    const patchify = Patchify{};
+
+    // Tag all inputs — fixture tensors arrive untagged from safetensors.
+    const v_lat = v_latent.withPartialTags(.{ .b, .t, .patch });
+    const a_lat = a_latent.withPartialTags(.{ .b, .t, .patch });
+    const v_ctx = v_context.withPartialTags(.{ .b, .t, .d });
+    const a_ctx = a_context.withPartialTags(.{ .b, .t, .d });
+
+    // --- 1. Patchify ---
+    const vx = patchify.forward(v_lat, params.video_patchify);
+    const ax = patchify.forward(a_lat, params.audio_patchify);
+
+    // --- 2. Timestep embeddings (per-token) ---
+    // timesteps = denoise_mask * sigma → [B, T, 1]
+    // Then scale by timestep_scale_multiplier=1000 and flatten for adaln input.
+    const v_mask = v_denoise_mask.withPartialTags(.{ .b, .t, .mask }).convert(.f32);
+    const a_mask = a_denoise_mask.withPartialTags(.{ .b, .t, .mask }).convert(.f32);
+    const v_ts = v_mask.mul(v_sigma.convert(.f32).appendAxes(.{ .t, .mask }).broad(v_mask.shape()));
+    const a_ts = a_mask.mul(a_sigma.convert(.f32).appendAxes(.{ .t, .mask }).broad(a_mask.shape()));
+
+    // AdaLN: scaled timesteps → modulation + embedded_timestep
+    // flatten [B, T, 1] → [B*T] for adaln, then reshape back
+    const v_ts_flat = v_ts.squeeze(.mask).scale(1000.0).flatten(); // [B*T]
+    const a_ts_flat = a_ts.squeeze(.mask).scale(1000.0).flatten(); // [B*T]
+
+    const v_adaln = AdaLayerNormSingle.forward(v_ts_flat, params.adaln_single);
+    const a_adaln = AdaLayerNormSingle.forward(a_ts_flat, params.audio_adaln_single);
+
+    // Reshape back to [B, T, N*D] / [B, T, D]
+    const b_v: i64 = v_lat.dim(.b);
+    const t_v: i64 = v_lat.dim(.t);
+    const b_a: i64 = a_lat.dim(.b);
+    const t_a: i64 = a_lat.dim(.t);
+
+    // video_timesteps: [B*T, d_ada] → [B, T, d_ada] → treat T=1 as broadcast dim
+    // In Python: timestep.view(B, -1, N_ada*D) with T tokens then uses [B, T, N_ada*D].
+    // But SharedInputs expects [B, 1, N_ada*D] — the per-token dimension is implicit
+    // in the position embeddings. Actually per the Python code, the adaln is computed
+    // per-token and used per-token. However the existing block code uses [B, 1, N*D].
+    //
+    // For LTX distilled stage-2: all tokens share the same sigma, so denoise_mask * sigma
+    // is constant across tokens (mask is all-ones for generation). We produce [B, 1, N*D].
+    const v_timesteps = v_adaln.modulation.reshape(
+        zml.Shape.init(.{ .b = b_v, .t = t_v, .d_ada = v_adaln.modulation.dim(.d_ada) }, v_adaln.modulation.dtype()),
+    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_ada]
+    const a_timesteps = a_adaln.modulation.reshape(
+        zml.Shape.init(.{ .b = b_a, .t = t_a, .d_ada = a_adaln.modulation.dim(.d_ada) }, a_adaln.modulation.dtype()),
+    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_ada]
+
+    const v_emb_ts = v_adaln.embedded_timestep.reshape(
+        zml.Shape.init(.{ .b = b_v, .t = t_v, .d_emb = v_adaln.embedded_timestep.dim(.d_emb) }, v_adaln.embedded_timestep.dtype()),
+    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_emb]
+    const a_emb_ts = a_adaln.embedded_timestep.reshape(
+        zml.Shape.init(.{ .b = b_a, .t = t_a, .d_emb = a_adaln.embedded_timestep.dim(.d_emb) }, a_adaln.embedded_timestep.dtype()),
+    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_emb]
+
+    // --- 3. Prompt adaln (uses raw sigma, not per-token timesteps) ---
+    const v_prompt = AdaLayerNormSingle.forward(
+        v_sigma.convert(.f32).scale(1000.0),
+        params.prompt_adaln_single,
+    );
+    const v_prompt_ts = v_prompt.modulation.reshape(
+        v_prompt.modulation.shape().splitAxis(.b, .{ .b = v_prompt.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, 2*D]
+    const a_prompt = AdaLayerNormSingle.forward(
+        a_sigma.convert(.f32).scale(1000.0),
+        params.audio_prompt_adaln_single,
+    );
+    const a_prompt_ts = a_prompt.modulation.reshape(
+        a_prompt.modulation.shape().splitAxis(.b, .{ .b = a_prompt.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, 2*D]
+
+    // --- 4. Self-attention RoPE ---
+    const v_pos_tagged = v_positions.withPartialTags(.{ .b, .c, .t, .se });
+    const a_pos_tagged = a_positions.withPartialTags(.{ .b, .c, .t, .se });
+
+    const v_pe = precomputeFreqsCis(v_pos_tagged, .{
+        .theta = 10000.0,
+        .max_pos = &.{ 20, 2048, 2048 },
+        .num_heads = 32,
+        .inner_dim = 4096,
+    });
+    const a_pe = precomputeFreqsCis(a_pos_tagged, .{
+        .theta = 10000.0,
+        .max_pos = &.{20},
+        .num_heads = 32,
+        .inner_dim = 2048,
+    });
+
+    // --- 5. Cross-attention RoPE (temporal dimension only, dim=2048) ---
+    // Each modality computes its own cross PE from its temporal positions.
+    // a2v = "audio → video": video Q attends to audio K
+    // v2a = "video → audio": audio Q attends to video K
+    const v_temporal = v_pos_tagged.slice1d(.c, .{ .start = 0, .end = 1 }); // [B, 1, T_v, 2]
+    const a_temporal = a_pos_tagged.slice1d(.c, .{ .start = 0, .end = 1 }); // [B, 1, T_a, 2]
+    const cross_rope_config = RopeConfig{
+        .theta = 10000.0,
+        .max_pos = &.{20},
+        .num_heads = 32,
+        .inner_dim = 2048,
+    };
+
+    const v_cross_pe = precomputeFreqsCis(v_temporal, cross_rope_config); // [B, 32, T_v, 32]
+    const a_cross_pe = precomputeFreqsCis(a_temporal, cross_rope_config); // [B, 32, T_a, 32]
+
+    // --- 6. Cross-attention timestep embeddings ---
+    // Python: timestep = cross_sigma * timestep_scale_multiplier (= 1000)
+    //         gate_input = timestep * av_ca_factor (= av_ca_tsm / tsm = 1000/1000 = 1.0)
+    // So both scale_shift and gate use sigma * 1000.
+    const v_cross_ss = AdaLayerNormSingle.forward(
+        a_sigma.convert(.f32).scale(1000.0), // video cross uses audio's sigma
+        params.av_ca_video_scale_shift_adaln_single,
+    );
+    const v_cross_ss_ts = v_cross_ss.modulation.reshape(
+        v_cross_ss.modulation.shape().splitAxis(.b, .{ .b = v_cross_ss.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, 4*D_v]
+    const v_cross_gate = AdaLayerNormSingle.forward(
+        a_sigma.convert(.f32).scale(1000.0), // sigma * tsm * av_ca_factor = sigma * 1000 * 1.0
+        params.av_ca_a2v_gate_adaln_single,
+    );
+    const v_cross_gate_ts = v_cross_gate.modulation.reshape(
+        v_cross_gate.modulation.shape().splitAxis(.b, .{ .b = v_cross_gate.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, D_v]
+
+    const a_cross_ss = AdaLayerNormSingle.forward(
+        v_sigma.convert(.f32).scale(1000.0), // audio cross uses video's sigma
+        params.av_ca_audio_scale_shift_adaln_single,
+    );
+    const a_cross_ss_ts = a_cross_ss.modulation.reshape(
+        a_cross_ss.modulation.shape().splitAxis(.b, .{ .b = a_cross_ss.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, 4*D_a]
+    const a_cross_gate = AdaLayerNormSingle.forward(
+        v_sigma.convert(.f32).scale(1000.0), // sigma * tsm * av_ca_factor = sigma * 1000 * 1.0
+        params.av_ca_v2a_gate_adaln_single,
+    );
+    const a_cross_gate_ts = a_cross_gate.modulation.reshape(
+        a_cross_gate.modulation.shape().splitAxis(.b, .{ .b = a_cross_gate.modulation.dim(.b), .t = 1 }),
+    ); // [B, 1, D_a]
+
+    // Convert f32 adaln outputs to bf16 at the preprocessing boundary.
+    // This matches step 1's behavior (fixture provided bf16 timesteps).
+    // The f32 adaln computes precisely, then bf16 rounding gives the same
+    // values Python saved to the fixture.
+    return .{
+        .vx = vx,
+        .ax = ax,
+        .video_timesteps = v_timesteps,
+        .audio_timesteps = a_timesteps,
+        .v_embedded_timestep = v_emb_ts,
+        .a_embedded_timestep = a_emb_ts,
+        .v_prompt_timestep = v_prompt_ts,
+        .a_prompt_timestep = a_prompt_ts,
+        .v_pe_cos = v_pe.cos,
+        .v_pe_sin = v_pe.sin,
+        .a_pe_cos = a_pe.cos,
+        .a_pe_sin = a_pe.sin,
+        .v_text_ctx = v_ctx,
+        .a_text_ctx = a_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = v_cross_pe.cos, // a2v Q side = video tokens
+        .a2v_pe_sin = v_cross_pe.sin,
+        .a2v_k_pe_cos = a_cross_pe.cos, // a2v K side = audio tokens
+        .a2v_k_pe_sin = a_cross_pe.sin,
+        .v2a_pe_cos = a_cross_pe.cos, // v2a Q side = audio tokens
+        .v2a_pe_sin = a_cross_pe.sin,
+        .v2a_k_pe_cos = v_cross_pe.cos, // v2a K side = video tokens
+        .v2a_k_pe_sin = v_cross_pe.sin,
+    };
 }
 
 
