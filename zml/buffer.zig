@@ -184,7 +184,6 @@ pub const Buffer = struct {
         memory: Memory.Kind = .default,
         layout: ?pjrt.MemoryLayout = null,
     };
-    pub const UnitializedOptions = UninitializedOptions;
 
     pub fn uninitialized(
         _: std.Io,
