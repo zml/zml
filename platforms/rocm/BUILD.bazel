@@ -7,7 +7,7 @@ zig_shared_library(
     main = "zmlxrocm.zig",
     shared_lib_name = "libzmlxrocm.so.0",
     visibility = [
-        "//smi:__pkg__",
+        "//bin/smi:__pkg__",
         "@libpjrt_rocm//:__subpackages__",
     ],
     # Use Clang's compiler-rt, but disable stack checking
@@ -53,7 +53,7 @@ run_binary(
         "$(location amdgpu.ids)",
     ],
     tool = ":merge_amdgpu_ids",
-    visibility = ["//smi:__pkg__"],
+    visibility = ["//bin/smi:__pkg__"],
 )
 
 zig_library(
