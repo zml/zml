@@ -86,19 +86,26 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    const model_mesh: zml.sharding.LogicalMesh = try .init("model", .{ .model = .high_bandwidth });
-    const model_sharding_strategy: zml.sharding.Strategy = try .suggest(model_mesh, platform.physical_mesh);
-    const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, model_mesh, model_sharding_strategy);
+    //const model_mesh: zml.sharding.LogicalMesh = try .init("model", .{ .model = .high_bandwidth });
+    //const model_sharding_strategy: zml.sharding.Strategy = try .suggest(model_mesh, platform.physical_mesh);
+    //const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, model_mesh, model_sharding_strategy);
+    const sharding = try zml.sharding.replicatedSharding(platform);
 
-    const layer: SimplifiedLayer = .init(store.view().withPrefix("model.layers.0"));
+    const layer_count: u32 = 16;
 
-    var layer_buffers = try layer.loadBuffers(allocator, io, platform, &store, &.{sharding});
-    defer SimplifiedLayer.unloadBuffers(&layer_buffers);
+    var layers: Layers = try .init(allocator, layer_count, store.view());
+    defer layers.deinit(allocator);
 
-    const input: zml.Tensor = .init(.{ .b = 1024, .d = 2048 }, .bf16);
+    var layers_buffers = try layers.loadBuffers(allocator, io, platform, &store, &.{sharding});
+    defer Layers.unloadBuffers(&layers_buffers, allocator);
 
-    var exe = try platform.compile(allocator, io, layer, .forward, .{input}, .{ .shardings = &.{sharding}, .program_name = "simplified_layer" });
+    const input_shape = zml.Shape.init(.{ .b = 1024, .d = 2048 }, .bf16).withPartitioning(.{ .b = .replicated, .d = .replicated });
+    const input: zml.Tensor = .fromShape(input_shape);
+
+    var exe = try platform.compile(allocator, io, layers.layers[0], .forward, .{input}, .{ .shardings = &.{sharding}, .program_name = "simplified_layer" });
     defer exe.deinit();
+    //var exe = try platform.compile(allocator, io, layers, .forward, .{input}, .{ .shardings = &.{sharding}, .program_name = "layers" });
+    //defer exe.deinit();
 
     const rng: zml.Tensor.Rng = .init();
     var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
@@ -112,16 +119,25 @@ pub fn main(init: std.process.Init) !void {
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var profiler = try platform.profiler(allocator, io, .{});
+    const session_id = try std.fmt.allocPrint(init.arena.allocator(), "profiling_{d}", .{std.Io.Clock.now(.awake, io)});
+
+    var profiler = try platform.profiler(allocator, io, .{ .session_id = session_id });
     defer profiler.deinit();
 
     try profiler.start();
 
-    for (0..10000) |_| {
-        exe_args.set(.{ layer_buffers, input_buffer });
+    //exe_args.set(.{ layers_buffers, input_buffer });
+    //exe.call(exe_args, &exe_results);
+    //exe_results.fill(.{&input_buffer});
+    for (0..layer_count) |i| {
+        exe_args.set(.{ layers_buffers.layers[i], input_buffer });
         exe.call(exe_args, &exe_results);
         exe_results.fill(.{&input_buffer});
     }
+
+    try std.Io.sleep(io, .fromSeconds(1), .awake);
+
+    try input_buffer.await(io);
 
     const profile = try profiler.stop();
 
@@ -129,7 +145,8 @@ pub fn main(init: std.process.Init) !void {
 }
 
 pub fn generateRandomBufferKernel(rng: zml.Tensor.Rng, shape: zml.Shape) struct { zml.Tensor.Rng, zml.Tensor } {
-    const new_rng, const tensor = rng.uniform(shape, .{});
+    const new_rng, var tensor = rng.uniform(shape, .{});
+    tensor = tensor.withPartitioning(.{ .b = .replicated, .d = .replicated });
 
     return .{ new_rng, tensor };
 }
@@ -161,6 +178,56 @@ pub fn generateRandomBuffer(
     return out;
 }
 
+const Layers = struct {
+    layers: []SimplifiedLayer,
+
+    pub fn init(allocator: std.mem.Allocator, layer_count: u32, store: zml.io.TensorStore.View) !Layers {
+        const layers = try allocator.alloc(SimplifiedLayer, layer_count);
+        errdefer allocator.free(layers);
+
+        for (layers, 0..) |*layer, i| {
+            layer.* = .init(store.withPrefix("model.layers").withLayer(i));
+        }
+
+        return .{ .layers = layers };
+    }
+
+    pub fn deinit(self: *Layers, allocator: std.mem.Allocator) void {
+        allocator.free(self.layers);
+    }
+
+    pub fn loadBuffers(
+        self: *const Layers,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *zml.io.TensorStore,
+        shardings: []const zml.sharding.Sharding,
+    ) !zml.Bufferized(Layers) {
+        return zml.io.load(Layers, self, allocator, io, platform, store, .{
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .shardings = shardings,
+            .parallelism = 16,
+        });
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Layers), allocator: std.mem.Allocator) void {
+        for (self.layers) |*layer| {
+            SimplifiedLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
+    }
+
+    pub fn forward(self: Layers, input: zml.Tensor) zml.Tensor {
+        var x = input;
+        for (self.layers) |*l| {
+            x = l.forward(x);
+        }
+        return x.reuseBuffer(input);
+    }
+};
+
 const SimplifiedLayer = struct {
     mlp: Mlp,
     norm: RmsNorm,
@@ -172,22 +239,6 @@ const SimplifiedLayer = struct {
         };
     }
 
-    pub fn loadBuffers(
-        self: *const SimplifiedLayer,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *zml.io.TensorStore,
-        shardings: []const zml.sharding.Sharding,
-    ) !zml.Bufferized(SimplifiedLayer) {
-        return zml.io.load(SimplifiedLayer, self, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .shardings = shardings,
-            .parallelism = 16,
-        });
-    }
-
     pub fn unloadBuffers(self: *zml.Bufferized(SimplifiedLayer)) void {
         Mlp.unloadBuffers(&self.mlp);
         RmsNorm.unloadBuffers(&self.norm);
@@ -195,8 +246,8 @@ const SimplifiedLayer = struct {
 
     pub fn forward(self: SimplifiedLayer, x: zml.Tensor) zml.Tensor {
         const normalized = self.norm.forward(x);
-        const out = self.mlp.forward(normalized);
-        return out.reuseBuffer(x);
+        const out = self.mlp.forward(normalized).withTags(.{ .b, .d });
+        return out.withPartitioning(.{ .b = .replicated, .d = .replicated }).reuseBuffer(x);
     }
 };
 
@@ -230,9 +281,9 @@ const Mlp = struct {
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
-            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .model }), null, .d),
-            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .model }), null, .d),
+            .up_proj = .init(store.createTensor("up_proj.weight", .{ .dout, .d }, .{ .dout = .replicated }), null, .d),
+            .gate_proj = .init(store.createTensor("gate_proj.weight", .{ .dout, .d }, .{ .dout = .replicated }), null, .d),
+            .down_proj = .init(store.createTensor("down_proj.weight", .{ .dout, .d }, .{ .d = .replicated }), null, .d),
         };
     }
 
