@@ -52,7 +52,9 @@ pub fn draw(
         .title = "Temperature",
         .value_label = try std.fmt.allocPrint(ctx.arena, "{d}\u{00b0}C", .{gpu.temperature orelse 0}),
         .info_line = try std.fmt.allocPrint(ctx.arena, "Fan {d}%", .{gpu.fan_speed_percent orelse 0}),
-        .y_min = 20, .y_max = 100, .y_unit = "\u{00b0}C",
+        .y_min = 20,
+        .y_max = 100,
+        .y_unit = "\u{00b0}C",
     });
 
     const power_limit_mw = gpu.power_limit_mw orelse 0;
