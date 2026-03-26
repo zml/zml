@@ -180,17 +180,18 @@ pub const Buffer = struct {
         }
     }
 
-    pub const UnitializedOptions = struct {
+    pub const UninitializedOptions = struct {
         memory: Memory.Kind = .default,
         layout: ?pjrt.MemoryLayout = null,
     };
+    pub const UnitializedOptions = UninitializedOptions;
 
     pub fn uninitialized(
         _: std.Io,
         platform: *const Platform,
         sh: Shape,
         sharding: Sharding,
-        opts: UnitializedOptions,
+        opts: UninitializedOptions,
     ) !Buffer {
         var res: Buffer = .{
             ._platform = platform,

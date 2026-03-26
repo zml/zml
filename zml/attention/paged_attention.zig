@@ -135,6 +135,32 @@ pub const Parameters = union(Backend) {
     cuda_fa3: flashattn.paged_fa3.Parameters,
     mosaic_tpu: flashattn.mosaic_tpu.Parameters,
 
+    inline fn incrementSequsedK(seqused_k: zml.Tensor) zml.Tensor {
+        return seqused_k.addConstant(@as(i32, 1));
+    }
+
+    inline fn incrementFlashAttentionParams(params: anytype) @TypeOf(params) {
+        return switch (params) {
+            .decode => |d| .{ .decode = .{
+                .block_table = d.block_table,
+                .cu_seqlens_q = d.cu_seqlens_q,
+                .seqused_k = incrementSequsedK(d.seqused_k),
+                .metadata = d.metadata,
+                .options = d.options,
+            } },
+            .mixed => |m| .{ .mixed = .{
+                .block_table_prefill = m.block_table_prefill,
+                .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
+                .seqused_k_prefill = m.seqused_k_prefill,
+                .block_table_decode = m.block_table_decode,
+                .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
+                .seqused_k_decode = incrementSequsedK(m.seqused_k_decode),
+                .metadata = m.metadata,
+                .options = m.options,
+            } },
+        };
+    }
+
     pub fn init(options_: Options) Parameters {
         return switch (options_) {
             .cuda_fa2 => |cuda_fa2_options| .{ .cuda_fa2 = flashattn.paged_fa2.Parameters.init(cuda_fa2_options) },
@@ -162,49 +188,13 @@ pub const Parameters = union(Backend) {
     /// KV entries written by the previous sub-step.
     pub fn incrementKvLens(self: Parameters) Parameters {
         return switch (self) {
-            .cuda_fa2 => |fa2| .{ .cuda_fa2 = switch (fa2) {
-                .decode => |d| .{ .decode = .{
-                    .block_table = d.block_table,
-                    .cu_seqlens_q = d.cu_seqlens_q,
-                    .seqused_k = d.seqused_k.addConstant(@as(i32, 1)),
-                    .metadata = d.metadata,
-                    .options = d.options,
-                } },
-                .mixed => |m| .{ .mixed = .{
-                    .block_table_prefill = m.block_table_prefill,
-                    .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
-                    .seqused_k_prefill = m.seqused_k_prefill,
-                    .block_table_decode = m.block_table_decode,
-                    .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
-                    .seqused_k_decode = m.seqused_k_decode.addConstant(@as(i32, 1)),
-                    .metadata = m.metadata,
-                    .options = m.options,
-                } },
-            } },
-            .cuda_fa3 => |fa3| .{ .cuda_fa3 = switch (fa3) {
-                .decode => |d| .{ .decode = .{
-                    .block_table = d.block_table,
-                    .cu_seqlens_q = d.cu_seqlens_q,
-                    .seqused_k = d.seqused_k.addConstant(@as(i32, 1)),
-                    .metadata = d.metadata,
-                    .options = d.options,
-                } },
-                .mixed => |m| .{ .mixed = .{
-                    .block_table_prefill = m.block_table_prefill,
-                    .cu_seqlens_q_prefill = m.cu_seqlens_q_prefill,
-                    .seqused_k_prefill = m.seqused_k_prefill,
-                    .block_table_decode = m.block_table_decode,
-                    .cu_seqlens_q_decode = m.cu_seqlens_q_decode,
-                    .seqused_k_decode = m.seqused_k_decode.addConstant(@as(i32, 1)),
-                    .metadata = m.metadata,
-                    .options = m.options,
-                } },
-            } },
+            .cuda_fa2 => |fa2| .{ .cuda_fa2 = incrementFlashAttentionParams(fa2) },
+            .cuda_fa3 => |fa3| .{ .cuda_fa3 = incrementFlashAttentionParams(fa3) },
             .mosaic_tpu => |tpu| .{ .mosaic_tpu = .{
                 .opts = tpu.opts,
                 .cu_seqlens_q = tpu.cu_seqlens_q,
                 .page_indices = tpu.page_indices,
-                .kv_lens = tpu.kv_lens.addConstant(@as(i32, 1)),
+                .kv_lens = incrementSequsedK(tpu.kv_lens),
             } },
         };
     }
