@@ -52,12 +52,18 @@ pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        generation: common.GenerationOptions,
+    ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
         return .{
-            .inner = .init(allocator, store, parsed_config.value),
+            .inner = .init(allocator, store, parsed_config.value, generation),
             .parsed_config = parsed_config,
         };
     }
@@ -128,7 +134,12 @@ pub const Model = struct {
     num_attention_layers: usize,
     num_conv_layers: usize,
 
-    pub fn init(allocator: std.mem.Allocator, root_store: zml.io.TensorStore.View, config: Config) Model {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        root_store: zml.io.TensorStore.View,
+        config: Config,
+        generation: common.GenerationOptions,
+    ) Model {
         const store = root_store.withPrefix("model");
         stdx.debug.assert(config.layer_types.len == config.num_hidden_layers, "Expected layer_types len {} to match num_hidden_layers {}", .{ config.layer_types.len, config.num_hidden_layers });
 
@@ -147,7 +158,7 @@ pub const Model = struct {
 
         return .{
             .embed_tokens = .init(store.withPrefix("embed_tokens")),
-            .lm_head = LmHead.init(store, config),
+            .lm_head = LmHead.init(store, config, generation.sampling_strategy),
             .layers = layers,
             .num_attention_layers = num_attention_layers,
             .num_conv_layers = num_conv_layers,
@@ -258,18 +269,18 @@ pub const TokenEmbedding = struct {
 
 pub const LmHead = struct {
     embedding_norm: RmsNorm,
+    sampling_strategy: zml.nn.SamplingStrategy,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) LmHead {
+    pub fn init(store: zml.io.TensorStore.View, config: Config, sampling_strategy: zml.nn.SamplingStrategy) LmHead {
         return .{
             .embedding_norm = RmsNorm.init(store.withPrefix("embedding_norm"), config.norm_eps, .d),
+            .sampling_strategy = sampling_strategy,
         };
     }
 
     pub fn forward(self: LmHead, hidden: zml.Tensor, embed_tokens: TokenEmbedding, tokens: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
         const logits = embed_tokens.unembed(self.embedding_norm.forward(hidden));
-        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, .{
-            .topk = 4,
-        }, rng);
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, self.sampling_strategy, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
     }
 

@@ -34,12 +34,18 @@ pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, repo: std.Io.Dir, store: zml.io.TensorStore.View) !LoadedModel {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        store: zml.io.TensorStore.View,
+        generation: common.GenerationOptions,
+    ) !LoadedModel {
         const parsed_config = try common.parseConfig(Config, allocator, io, repo);
         errdefer parsed_config.deinit();
 
         const options: Options = .{
-            .sampling_strategy = .{},
+            .sampling_strategy = generation.sampling_strategy,
             .max_seq_len = parsed_config.value.max_position_embeddings,
         };
 
@@ -115,9 +121,7 @@ pub const Model = struct {
     lm_head: ?zml.nn.Linear,
     model: Llama,
 
-    gen_opts: zml.nn.SamplingStrategy = .{
-        .topk = 4,
-    },
+    gen_opts: zml.nn.SamplingStrategy = .{},
     config: Config,
 
     pub fn init(

@@ -64,12 +64,8 @@ pub const Chat = struct {
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
 
-        log.info("Running prefill...", .{});
-        try self.tokens.appendSlice(self.allocator, prompt_tokens);
-        try self.session.runPrefill(self.tokens.items);
-
-        log.info("Running decode...", .{});
-        try self.session.runDecode(&self.tokens, &stdout.interface);
+        try self.runPrefill(prompt_tokens, &stdout.interface);
+        try self.runDecodeTurn(&stdout.interface);
 
         try stdout.interface.writeAll("\n\n");
         try stdout.interface.flush();
