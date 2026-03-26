@@ -28,6 +28,13 @@ mtree_spec(
     srcs = [":mnist"],
 )
 
+genrule(
+    name = "mtree_filtered",
+    srcs = [":mtree"],
+    outs = ["mtree.filtered.spec"],
+    cmd = "grep -v 'platforms/tpu/_gen_ir.venv/bin/python3 ' $(location :mtree) > $@",
+)
+
 tar(
     name = "archive",
     srcs = [":mnist"],
@@ -36,7 +43,7 @@ tar(
         "zstd:compression-level=9",
     ],
     compress = "zstd",
-    mtree = ":mtree",
+    mtree = ":mtree_filtered",
 )
 
 expand_template(
