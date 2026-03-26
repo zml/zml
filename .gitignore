@@ -27,6 +27,8 @@ zig-out/
 *.jpg
 *.jpeg
 *.png
+*.mov
+*.mp4
 
 # Python slope
 .venv

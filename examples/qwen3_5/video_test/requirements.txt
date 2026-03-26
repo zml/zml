@@ -1,0 +1,5 @@
+opencv-python-headless
+safetensors
+torch
+transformers
+torchvision
