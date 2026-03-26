@@ -1,0 +1,14 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "uucode",
+    srcs = glob([
+        "src/*.zig",
+        "src/build/*.zig",
+        "src/x/*.zig",
+        "src/x/config_x/*.zig",
+        "src/x/types_x/*.zig",
+    ]),
+    main = "src/root.zig",
+    visibility = ["//visibility:public"],
+)
