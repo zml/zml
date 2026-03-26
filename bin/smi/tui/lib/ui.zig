@@ -8,7 +8,7 @@ pub fn widget(ptr: anytype) vxfw.Widget {
     const Ptr = @TypeOf(ptr);
     const T = @typeInfo(Ptr).pointer.child;
     return .{
-        .userdata = @constCast(@ptrCast(ptr)),
+        .userdata = @ptrCast(@constCast(ptr)),
         .drawFn = struct {
             fn f(p: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
                 const self: *T = @ptrCast(@alignCast(p));
@@ -30,7 +30,7 @@ pub fn drawWidget(ptr: anytype, comptime drawFn: anytype) vxfw.Widget {
     const Ptr = @TypeOf(ptr);
     const T = @typeInfo(Ptr).pointer.child;
     return .{
-        .userdata = @constCast(@ptrCast(ptr)),
+        .userdata = @ptrCast(@constCast(ptr)),
         .drawFn = struct {
             fn f(p: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
                 const self: *T = @ptrCast(@alignCast(p));
