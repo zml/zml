@@ -355,7 +355,6 @@ pub const Buffer = struct {
         return events;
     }
 
-
     pub fn toPrefix1dSlice(self: Buffer, io: std.Io, slice: Slice) !void {
         _ = try self.prefix1dCopyImpl(slice, .sync, io);
     }
