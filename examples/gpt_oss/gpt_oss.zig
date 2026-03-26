@@ -985,10 +985,14 @@ const MoE = struct {
     }
 
     pub fn forward(self: MoE, input: Tensor, tokens_mask: ?Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) Tensor {
+        const routing = self.router.forward(input).topK(.{ .top_expert = .expert }, self.moe_opts.num_experts_per_tok, .{});
+        const topk_ids = routing.indices;
+        const topk_weights = routing.values.softmax(.top_expert);
         return moe.moe(
             input,
             tokens_mask,
-            self.router,
+            topk_ids,
+            topk_weights,
             self.experts.gate_up_proj.blocks,
             self.experts.gate_up_proj.scale,
             self.experts.gate_up_proj.bias,

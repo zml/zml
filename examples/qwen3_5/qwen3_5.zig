@@ -70,10 +70,8 @@ pub const Qwen35 = struct {
     };
 
     text_model: TextModel,
-    lm_head: zml.nn.Linear,
 
     config: Config,
-    gen_options: GenOptions,
     special_tokens: SpecialTokens = .{
         .im_start_token_id = 248045,
         .im_end_token_id = 248046,
@@ -82,12 +80,10 @@ pub const Qwen35 = struct {
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, gen_options: GenOptions) !Qwen35 {
         // For some Qwen3.5 versions, the output projection lm_head has a standalone weight tensor, while for others it's the same as the input embedding layer
-        const lm_head_prefix = if (store.hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
         return .{
-            .text_model = try .init(allocator, store.withPrefix("model.language_model"), config),
-            .lm_head = .init(store.withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
+            .text_model = try .init(allocator, store.withPrefix("model.language_model"), config, gen_options),
+
             .config = config,
-            .gen_options = gen_options,
         };
     }
 
@@ -124,7 +120,6 @@ pub const Qwen35 = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(Qwen35), allocator: std.mem.Allocator) void {
         TextModel.unloadBuffers(&self.text_model, allocator);
-        self.lm_head.weight.deinit();
     }
 
     pub fn forward(
@@ -135,19 +130,8 @@ pub const Qwen35 = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache, self.config);
-        const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
+        const new_tokens, const updated_kv_cache, const new_rng = self.text_model.forward(tokens, token_index, kv_cache, self.config, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
-    }
-
-    pub fn sampleTokens(
-        self: Qwen35,
-        out: Tensor,
-        rng: Tensor.Rng,
-    ) struct { Tensor, Tensor.Rng } {
-        const logits = self.lm_head.forward(out.withPartialTags(.{.d})).rename(.{ .dout = .voc });
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
-        return .{ next_tokens, new_rng };
     }
 };
 
@@ -156,13 +140,29 @@ pub const Qwen35 = struct {
 pub const TextModel = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
+    lm_head: zml.nn.Linear,
     norm: RmsNorm,
+    gen_options: Qwen35.GenOptions,
+
+    pub fn sampleTokens(
+        self: TextModel,
+        out: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, Tensor.Rng } {
+        const x = self.norm.forward(out);
+        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
+        return .{ next_tokens.convert(.u32), new_rng };
+    }
 
     pub fn init(
         allocator: std.mem.Allocator,
         store: zml.io.TensorStore.View,
         config: Qwen35.Config,
+        gen_options: Qwen35.GenOptions,
     ) !TextModel {
+        const lm_head_prefix = if (store.root().hasKey("lm_head.weight")) "lm_head" else "model.language_model.embed_tokens";
+
         const layers = try allocator.alloc(TransformerLayer, @intCast(config.text_config.num_hidden_layers));
         errdefer allocator.free(layers);
 
@@ -173,7 +173,9 @@ pub const TextModel = struct {
         return .{
             .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, null) },
             .layers = layers,
+            .lm_head = .init(store.root().withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
             .norm = RmsNorm.init(store.withPrefix("norm"), config.text_config.rms_norm_eps),
+            .gen_options = gen_options,
         };
     }
 
@@ -186,7 +188,9 @@ pub const TextModel = struct {
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
+
         allocator.free(self.layers);
+        self.lm_head.weight.deinit();
         RmsNorm.unloadBuffers(&self.norm);
     }
 
@@ -196,16 +200,17 @@ pub const TextModel = struct {
         token_index: Tensor,
         kv_cache: KvCache,
         config: Qwen35.Config,
-    ) struct { Tensor, KvCache } {
-        var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor.Rng } {
+        var hidden_states = self.embed_tokens.forward(tokens);
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
             hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i), config);
         }
 
-        hidden_states = self.norm.forward(hidden_states);
-        return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
+        const new_tokens, const new_rng = self.sampleTokens(hidden_states, rng);
+        return .{ new_tokens, updated_kv_cache.reuseBuffer(kv_cache), new_rng };
     }
 };
 
@@ -252,6 +257,64 @@ pub const TransformerLayer = struct {
             .sparse => |*sparse| Moe.unloadBuffers(sparse),
         }
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+    }
+
+    pub fn forwardSelfAttn(
+        self: TransformerLayer,
+        x0: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.SelfAttnCache,
+        config: Qwen35.Config,
+    ) struct { Tensor, KvCache.SelfAttnCache } {
+        const residual0 = x0;
+        const normalized_x0 = self.input_layernorm.forward(x0);
+
+        const self_attn = switch (self.attn) {
+            .self_attn => |self_attn| self_attn,
+            .linear_attn => unreachable,
+        };
+        const attention_output, const updated_kv_cache = self_attn.forward(normalized_x0, token_index, kv_cache);
+
+        const x1 = attention_output.add(residual0);
+        const residual1 = x1;
+        const normalized_hidden = self.post_attention_layernorm.forward(x1);
+
+        const mlp_output = switch (self.ffn) {
+            .dense => |*dense| dense.forward(normalized_hidden),
+            .sparse => |*sparse| sparse.forward(normalized_hidden, config),
+        };
+
+        return .{ mlp_output.add(residual1), updated_kv_cache };
+    }
+
+    pub fn forwardLinearAttn(
+        self: TransformerLayer,
+        x0: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.GatedDeltaNetCache,
+        config: Qwen35.Config,
+    ) struct { Tensor, KvCache.GatedDeltaNetCache } {
+        _ = token_index;
+
+        const residual0 = x0;
+        const normalized_x0 = self.input_layernorm.forward(x0);
+
+        const linear_attn = switch (self.attn) {
+            .linear_attn => |linear_attn| linear_attn,
+            .self_attn => unreachable,
+        };
+        const attention_output, const updated_kv_cache = linear_attn.forward(normalized_x0, kv_cache);
+
+        const x1 = attention_output.add(residual0);
+        const residual1 = x1;
+        const normalized_hidden = self.post_attention_layernorm.forward(x1);
+
+        const mlp_output = switch (self.ffn) {
+            .dense => |*dense| dense.forward(normalized_hidden),
+            .sparse => |*sparse| sparse.forward(normalized_hidden, config),
+        };
+
+        return .{ mlp_output.add(residual1), updated_kv_cache };
     }
 
     pub fn forward(
@@ -368,10 +431,19 @@ pub const Moe = struct {
         // const down_weight = self.down_proj.weight.rename(.{ .d = .out, .dout = .d });
         // const down_bias = if (self.down_proj.bias) |b| b.rename(.{ .d = .out }) else null;
 
+        const router_logits = self.router.forward(x).convert(.f32);
+        // Match HF: softmax over all experts, then top-k and renormalize.
+        const router_probs = router_logits.softmax(.expert);
+        const routing = router_probs.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
+        const topk_ids = routing.indices.convert(.i32);
+        var topk_weights = routing.values;
+        topk_weights = topk_weights.div(topk_weights.sum(.top_expert).broad(topk_weights.shape())).convert(router_logits.dtype());
+
         const routed = zml.moe.moe(
             x,
             null,
-            self.router,
+            topk_ids,
+            topk_weights,
             self.gate_up_proj,
             null,
             null,

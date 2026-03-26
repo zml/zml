@@ -109,7 +109,8 @@ pub const Metadata = union(Backend) {
 pub fn moe(
     input: zml.Tensor,
     tokens_mask: ?zml.Tensor,
-    router: nn.Linear,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
     weights_gate_up: zml.Tensor,
     scales_gate_up: ?zml.Tensor,
     bias_gate_up: ?zml.Tensor,
@@ -127,9 +128,8 @@ pub fn moe(
             const dt = input.dtype();
 
             // Routing of the tokens to the experts
-            const routing = router.forward(input).topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
-            const expert_indices_per_token = routing.indices;
-            var expert_scores_per_token = routing.values.softmax(.top_expert);
+            const expert_indices_per_token = topk_ids;
+            var expert_scores_per_token = topk_weights;
             var output = Tensor.zeroes(input.shape());
 
             const num_experts: u32 = @intCast(weights_gate_up.dim(.expert));
@@ -314,14 +314,6 @@ pub fn moe(
         .triton => b: {
 
             // To be moved in the model
-            _ = metadata;
-            const router_logits = router.forward(input).convert(.f32);
-            // Match HF: softmax over all experts, then top-k and renormalize.
-            const router_probs = router_logits.softmax(.expert);
-            const routing = router_probs.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
-            const topk_ids = routing.indices.convert(.i32);
-            var topk_weights = routing.values;
-            topk_weights = topk_weights.div(topk_weights.sum(.top_expert).broad(topk_weights.shape())).convert(router_logits.dtype());
 
             std.log.info("input shape: {f}", .{input.shape()});
             std.log.info("weights_gate_up shape: {f}", .{weights_gate_up.shape()});

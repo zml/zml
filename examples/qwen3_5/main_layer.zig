@@ -15,7 +15,7 @@ pub const std_options: std.Options = .{
 const CliArgs = struct {
     model: []const u8,
     prompt: []const u8 = "What is the capital of France ?",
-    len: i64 = 1024,
+    len: i64 = 4096,
     moe_backend: ?[]const u8 = null,
 };
 
@@ -141,8 +141,14 @@ pub fn main(init: std.process.Init) !void {
 
     var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
     defer if (compile_result_future.cancel(io)) |v| {
-        v.prefill_exe.deinit();
-        v.decode_exe.deinit();
+        v.prefill_embedding_exe.deinit();
+        v.decode_embedding_exe.deinit();
+        if (v.prefill_full_layer_exe) |exe| exe.deinit();
+        if (v.decode_full_layer_exe) |exe| exe.deinit();
+        if (v.prefill_linear_layer_exe) |exe| exe.deinit();
+        if (v.decode_linear_layer_exe) |exe| exe.deinit();
+        v.prefill_sampling_exe.deinit();
+        v.decode_sampling_exe.deinit();
     } else |_| {};
 
     //======================= Awaiting futures ========================
@@ -167,75 +173,219 @@ pub fn main(init: std.process.Init) !void {
 }
 
 const CompileModelResult = struct {
-    prefill_exe: zml.Exe,
-    decode_exe: zml.Exe,
+    prefill_embedding_exe: zml.Exe,
+    decode_embedding_exe: zml.Exe,
+    prefill_full_layer_exe: ?zml.Exe,
+    decode_full_layer_exe: ?zml.Exe,
+    prefill_linear_layer_exe: ?zml.Exe,
+    decode_linear_layer_exe: ?zml.Exe,
+    prefill_sampling_exe: zml.Exe,
+    decode_sampling_exe: zml.Exe,
 };
+
+fn findFirstLayerIndex(layer_types: []const Qwen35.LayerType, target: Qwen35.LayerType) ?usize {
+    for (layer_types, 0..) |layer_type, index| {
+        if (layer_type == target) return index;
+    }
+    return null;
+}
+
+fn compileSelfAttnLayerExe(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model: qwen35.TransformerLayer,
+    hidden: Tensor,
+    token_index: Tensor,
+    cache: qwen35.KvCache.SelfAttnCache,
+    config: Qwen35.Config,
+    sharding: zml.sharding.Sharding,
+    progress: *std.Progress.Node,
+    label: []const u8,
+) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start(label, 1);
+    defer node.end();
+
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
+
+    return platform.compile(allocator, io, model, .forwardSelfAttn, .{ hidden, token_index, cache, config }, .{ .shardings = &.{sharding} });
+}
+
+fn compileLinearAttnLayerExe(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    model: qwen35.TransformerLayer,
+    hidden: Tensor,
+    token_index: Tensor,
+    cache: qwen35.KvCache.GatedDeltaNetCache,
+    config: Qwen35.Config,
+    sharding: zml.sharding.Sharding,
+    progress: *std.Progress.Node,
+    label: []const u8,
+) !zml.Exe {
+    progress.increaseEstimatedTotalItems(1);
+    var node = progress.start(label, 1);
+    defer node.end();
+
+    const now: std.Io.Timestamp = .now(io, .awake);
+    defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
+
+    return platform.compile(allocator, io, model, .forwardLinearAttn, .{ hidden, token_index, cache, config }, .{ .shardings = &.{sharding} });
+}
 
 fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, qwen35_model: Qwen35, kv_cache: qwen35.KvCache, progress: *std.Progress.Node, prefill_len: usize) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
     defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
     log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_len });
+
     const prefill_tokens = Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = Tensor.init(.{ .b = 1, .s = 1 }, .u32);
+    const prefill_hidden = Tensor.init(.{ .b = 1, .s = prefill_len, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
+    const decode_hidden = Tensor.init(.{ .b = 1, .s = 1, .d = qwen35_model.config.text_config.hidden_size }, qwen35_model.text_model.embed_tokens.weight.dtype());
     const token_index = Tensor.init(.{}, .u32);
+    const self_attn_cache: qwen35.KvCache.SelfAttnCache = .{
+        .k = kv_cache.self_attn.k,
+        .v = kv_cache.self_attn.v,
+        .layer_index = Tensor.init(.{}, .u32),
+    };
+    const linear_attn_cache: qwen35.KvCache.GatedDeltaNetCache = .{
+        .conv_state = kv_cache.gated_delta_net.conv_state,
+        .recurrent_state = kv_cache.gated_delta_net.recurrent_state,
+        .layer_index = Tensor.init(.{}, .u32),
+    };
 
     const rng = zml.Tensor.Rng.init();
 
-    var prefill_future = try io.concurrent(struct {
+    var prefill_embedding_future = try io.concurrent(struct {
         fn call(
             allocator_: std.mem.Allocator,
             io_: std.Io,
             platform_: *const zml.Platform,
-            qwen35_model_: Qwen35,
+            model_: zml.nn.TokenEmbedding,
             prefill_tokens_: Tensor,
-            token_index_: Tensor,
-            kv_cache_: qwen35.KvCache,
-            rng_: zml.Tensor.Rng,
             replicated_sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
-            var node_ = progress_.start("Compiling prefill...", 1);
+            var node_ = progress_.start("Compiling prefill embedding...", 1);
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
-            defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            defer log.info("Compiled prefill embedding [{f}]", .{now_.untilNow(io_, .awake)});
+            return platform_.compile(allocator_, io_, model_, .forward, .{prefill_tokens_}, .{ .shardings = &.{replicated_sharding_} });
         }
-    }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
-    errdefer if (prefill_future.cancel(io)) |v| {
+    }.call, .{ allocator, io, platform, qwen35_model.text_model.embed_tokens, prefill_tokens, replicated_sharding, progress });
+    errdefer if (prefill_embedding_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
 
-    var decode_future = try io.concurrent(struct {
+    var decode_embedding_future = try io.concurrent(struct {
         fn call(
             allocator_: std.mem.Allocator,
             io_: std.Io,
             platform_: *const zml.Platform,
-            qwen35_model_: Qwen35,
+            model_: zml.nn.TokenEmbedding,
             decode_tokens_: Tensor,
-            token_index_: Tensor,
-            kv_cache_: qwen35.KvCache,
+            replicated_sharding_: zml.sharding.Sharding,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node_ = progress_.start("Compiling decode embedding...", 1);
+            defer node_.end();
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled decode embedding [{f}]", .{now_.untilNow(io_, .awake)});
+            return platform_.compile(allocator_, io_, model_, .forward, .{decode_tokens_}, .{ .shardings = &.{replicated_sharding_} });
+        }
+    }.call, .{ allocator, io, platform, qwen35_model.text_model.embed_tokens, decode_tokens, replicated_sharding, progress });
+    errdefer if (decode_embedding_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
+
+    var prefill_full_layer_exe: ?zml.Exe = null;
+    errdefer if (prefill_full_layer_exe) |exe| exe.deinit();
+    var decode_full_layer_exe: ?zml.Exe = null;
+    errdefer if (decode_full_layer_exe) |exe| exe.deinit();
+    var prefill_linear_layer_exe: ?zml.Exe = null;
+    errdefer if (prefill_linear_layer_exe) |exe| exe.deinit();
+    var decode_linear_layer_exe: ?zml.Exe = null;
+    errdefer if (decode_linear_layer_exe) |exe| exe.deinit();
+
+    if (findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .full_attention)) |layer_index| {
+        const layer_model = qwen35_model.text_model.layers[layer_index];
+        prefill_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling prefill full-attention layer...");
+        decode_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling decode full-attention layer...");
+    }
+
+    if (findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .linear_attention)) |layer_index| {
+        const layer_model = qwen35_model.text_model.layers[layer_index];
+        prefill_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling prefill linear-attention layer...");
+        decode_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling decode linear-attention layer...");
+    }
+
+    var prefill_sampling_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            model_: qwen35.TextModel,
+            prefill_hidden_: Tensor,
             rng_: zml.Tensor.Rng,
             replicated_sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
-            var node_ = progress_.start("Compiling decode...", 1);
+            var node_ = progress_.start("Compiling prefill sampling...", 1);
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
-            defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            defer log.info("Compiled prefill sampling [{f}]", .{now_.untilNow(io_, .awake)});
+            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ prefill_hidden_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
-    }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
-    errdefer if (decode_future.cancel(io)) |v| {
+    }.call, .{ allocator, io, platform, qwen35_model.text_model, prefill_hidden, rng, replicated_sharding, progress });
+    errdefer if (prefill_sampling_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
 
-    const prefill_exe = try prefill_future.await(io);
-    const decode_exe = try decode_future.await(io);
+    var decode_sampling_future = try io.concurrent(struct {
+        fn call(
+            allocator_: std.mem.Allocator,
+            io_: std.Io,
+            platform_: *const zml.Platform,
+            model_: qwen35.TextModel,
+            decode_hidden_: Tensor,
+            rng_: zml.Tensor.Rng,
+            replicated_sharding_: zml.sharding.Sharding,
+            progress_: *std.Progress.Node,
+        ) !zml.Exe {
+            progress_.increaseEstimatedTotalItems(1);
+            var node_ = progress_.start("Compiling decode sampling...", 1);
+            defer node_.end();
+            const now_: std.Io.Timestamp = .now(io_, .awake);
+            defer log.info("Compiled decode sampling [{f}]", .{now_.untilNow(io_, .awake)});
+            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ decode_hidden_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+        }
+    }.call, .{ allocator, io, platform, qwen35_model.text_model, decode_hidden, rng, replicated_sharding, progress });
+    errdefer if (decode_sampling_future.cancel(io)) |v| {
+        v.deinit();
+    } else |_| {};
 
-    return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
+    const prefill_embedding_exe = try prefill_embedding_future.await(io);
+    const decode_embedding_exe = try decode_embedding_future.await(io);
+    const prefill_sampling_exe = try prefill_sampling_future.await(io);
+    const decode_sampling_exe = try decode_sampling_future.await(io);
+
+    return .{
+        .prefill_embedding_exe = prefill_embedding_exe,
+        .decode_embedding_exe = decode_embedding_exe,
+        .prefill_full_layer_exe = prefill_full_layer_exe,
+        .decode_full_layer_exe = decode_full_layer_exe,
+        .prefill_linear_layer_exe = prefill_linear_layer_exe,
+        .decode_linear_layer_exe = decode_linear_layer_exe,
+        .prefill_sampling_exe = prefill_sampling_exe,
+        .decode_sampling_exe = decode_sampling_exe,
+    };
 }
 
 //======================= Generation setup ========================
@@ -258,7 +408,19 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeniz
     return tokens.toOwnedSlice(allocator);
 }
 
-fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, tokenizer_decoder: *zml.tokenizer.Tokenizer.Decoder, qwen35_buffers: zml.Bufferized(Qwen35), kv_cache_buffers: *zml.Bufferized(qwen35.KvCache), compile_result: CompileModelResult, input_token_ids: []u32, writer: *std.Io.Writer, qwen_model: Qwen35, prefill_len: usize) !void {
+fn runAndGenerate(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    tokenizer_decoder: *zml.tokenizer.Tokenizer.Decoder,
+    qwen35_buffers: zml.Bufferized(Qwen35),
+    kv_cache_buffers: *zml.Bufferized(qwen35.KvCache),
+    compile_result: CompileModelResult,
+    input_token_ids: []u32,
+    writer: *std.Io.Writer,
+    qwen_model: Qwen35,
+    prefill_len: usize,
+) !void {
     for (input_token_ids) |token_id| {
         if (try tokenizer_decoder.*.next(token_id)) |chunk| {
             try writer.writeAll(chunk);
@@ -272,6 +434,10 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 
     const prefill_tokens_shape = zml.Shape.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens_shape = zml.Shape.init(.{ .b = 1, .s = 1 }, .u32);
+    const prefill_hidden_shape = zml.Shape.init(.{ .b = 1, .s = prefill_len, .d = qwen_model.config.text_config.hidden_size }, qwen_model.text_model.embed_tokens.weight.dtype());
+    const decode_hidden_shape = zml.Shape.init(.{ .b = 1, .s = 1, .d = qwen_model.config.text_config.hidden_size }, qwen_model.text_model.embed_tokens.weight.dtype());
+
+    const layer_types: []const Qwen35.LayerType = qwen_model.config.text_config.layer_types;
 
     const seed: u128 = 0;
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, replicated_sharding);
@@ -279,13 +445,65 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
     var generated_token_slice: zml.Slice = try .alloc(allocator, decode_tokens_shape);
     defer generated_token_slice.free(allocator);
 
+    const LayerIndexBuffer = union(enum) {
+        self_attn: zml.Buffer,
+        linear_attn: zml.Buffer,
+    };
+
+    var layer_cache_buffers = try allocator.alloc(LayerIndexBuffer, qwen_model.text_model.layers.len);
+    defer {
+        for (layer_cache_buffers) |*layer_cache_buffer| {
+            switch (layer_cache_buffer.*) {
+                .self_attn => |*buffer| buffer.deinit(),
+                .linear_attn => |*buffer| buffer.deinit(),
+            }
+        }
+        allocator.free(layer_cache_buffers);
+    }
+
     {
-        var prefill_args = try compile_result.prefill_exe.args(allocator);
-        defer prefill_args.deinit(allocator);
+        var self_attn_layer_index: usize = 0;
+        var linear_attn_layer_index: usize = 0;
+        for (layer_types, 0..) |layer_type, layer_index| {
+            switch (layer_type) {
+                .full_attention => {
+                    const layer_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(self_attn_layer_index)), .u32, replicated_sharding);
+                    layer_cache_buffers[layer_index] = .{ .self_attn = layer_index_buffer };
+                    self_attn_layer_index += 1;
+                },
+                .linear_attention => {
+                    const layer_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(linear_attn_layer_index)), .u32, replicated_sharding);
+                    layer_cache_buffers[layer_index] = .{ .linear_attn = layer_index_buffer };
+                    linear_attn_layer_index += 1;
+                },
+            }
+        }
+    }
 
-        var prefill_results = try compile_result.prefill_exe.results(allocator);
-        defer prefill_results.deinit(allocator);
+    var embedding_decode_args = try compile_result.decode_embedding_exe.args(allocator);
+    defer embedding_decode_args.deinit(allocator);
+    var embedding_decode_results = try compile_result.decode_embedding_exe.results(allocator);
+    defer embedding_decode_results.deinit(allocator);
 
+    var decode_full_layer_args: ?zml.Exe.Arguments = if (compile_result.decode_full_layer_exe) |exe| try exe.args(allocator) else null;
+    defer if (decode_full_layer_args) |*args| args.deinit(allocator);
+    var decode_full_layer_results: ?zml.Exe.Results = if (compile_result.decode_full_layer_exe) |exe| try exe.results(allocator) else null;
+    defer if (decode_full_layer_results) |*results| results.deinit(allocator);
+
+    var decode_linear_layer_args: ?zml.Exe.Arguments = if (compile_result.decode_linear_layer_exe) |exe| try exe.args(allocator) else null;
+    defer if (decode_linear_layer_args) |*args| args.deinit(allocator);
+    var decode_linear_layer_results: ?zml.Exe.Results = if (compile_result.decode_linear_layer_exe) |exe| try exe.results(allocator) else null;
+    defer if (decode_linear_layer_results) |*results| results.deinit(allocator);
+
+    var sampling_decode_args = try compile_result.decode_sampling_exe.args(allocator);
+    defer sampling_decode_args.deinit(allocator);
+    var sampling_decode_results = try compile_result.decode_sampling_exe.results(allocator);
+    defer sampling_decode_results.deinit(allocator);
+
+    var decode_hidden_buffer = try zml.Buffer.uninitialized(io, platform, decode_hidden_shape, replicated_sharding, .{});
+    defer decode_hidden_buffer.deinit();
+
+    {
         const prefill_tokens_slice: zml.Slice = try .alloc(allocator, prefill_tokens_shape);
         defer prefill_tokens_slice.free(allocator);
         @memset(prefill_tokens_slice.items(u32), 0);
@@ -296,27 +514,80 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
         defer prefill_token_index_buffer.deinit();
 
-        prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, rng_buffers });
-        compile_result.prefill_exe.call(prefill_args, &prefill_results);
+        var prefill_hidden_buffer = try zml.Buffer.uninitialized(io, platform, prefill_hidden_shape, replicated_sharding, .{});
+        defer prefill_hidden_buffer.deinit();
 
-        prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
+        var embedding_prefill_args = try compile_result.prefill_embedding_exe.args(allocator);
+        defer embedding_prefill_args.deinit(allocator);
+        var embedding_prefill_results = try compile_result.prefill_embedding_exe.results(allocator);
+        defer embedding_prefill_results.deinit(allocator);
+
+        embedding_prefill_args.set(.{ qwen35_buffers.text_model.embed_tokens, prefill_tokens_buffer });
+        compile_result.prefill_embedding_exe.call(embedding_prefill_args, &embedding_prefill_results);
+        embedding_prefill_results.fill(.{&prefill_hidden_buffer});
+
+        var prefill_full_layer_args: ?zml.Exe.Arguments = if (compile_result.prefill_full_layer_exe) |exe| try exe.args(allocator) else null;
+        defer if (prefill_full_layer_args) |*args| args.deinit(allocator);
+        var prefill_full_layer_results: ?zml.Exe.Results = if (compile_result.prefill_full_layer_exe) |exe| try exe.results(allocator) else null;
+        defer if (prefill_full_layer_results) |*results| results.deinit(allocator);
+
+        var prefill_linear_layer_args: ?zml.Exe.Arguments = if (compile_result.prefill_linear_layer_exe) |exe| try exe.args(allocator) else null;
+        defer if (prefill_linear_layer_args) |*args| args.deinit(allocator);
+        var prefill_linear_layer_results: ?zml.Exe.Results = if (compile_result.prefill_linear_layer_exe) |exe| try exe.results(allocator) else null;
+        defer if (prefill_linear_layer_results) |*results| results.deinit(allocator);
+
+        for (qwen35_buffers.text_model.layers, 0..) |layer_weights, i| {
+            switch (layer_cache_buffers[i]) {
+                .self_attn => |layer_index_buffer| {
+                    const exe = compile_result.prefill_full_layer_exe orelse unreachable;
+                    var layer_cache: zml.Bufferized(qwen35.KvCache.SelfAttnCache) = .{
+                        .k = kv_cache_buffers.self_attn.k,
+                        .v = kv_cache_buffers.self_attn.v,
+                        .layer_index = layer_index_buffer,
+                    };
+                    prefill_full_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config });
+                    exe.call(prefill_full_layer_args.?, &prefill_full_layer_results.?);
+                    prefill_full_layer_results.?.fill(.{ &prefill_hidden_buffer, &layer_cache });
+                    kv_cache_buffers.self_attn.k = layer_cache.k;
+                    kv_cache_buffers.self_attn.v = layer_cache.v;
+                },
+                .linear_attn => |layer_index_buffer| {
+                    const exe = compile_result.prefill_linear_layer_exe orelse unreachable;
+                    var layer_cache: zml.Bufferized(qwen35.KvCache.GatedDeltaNetCache) = .{
+                        .conv_state = kv_cache_buffers.gated_delta_net.conv_state,
+                        .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
+                        .layer_index = layer_index_buffer,
+                    };
+                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config });
+                    exe.call(prefill_linear_layer_args.?, &prefill_linear_layer_results.?);
+                    prefill_linear_layer_results.?.fill(.{ &prefill_hidden_buffer, &layer_cache });
+                    kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
+                    kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                },
+            }
+        }
+
+        var sampling_prefill_args = try compile_result.prefill_sampling_exe.args(allocator);
+        defer sampling_prefill_args.deinit(allocator);
+        var sampling_prefill_results = try compile_result.prefill_sampling_exe.results(allocator);
+        defer sampling_prefill_results.deinit(allocator);
+
+        sampling_prefill_args.set(.{ qwen35_buffers.text_model, prefill_hidden_buffer, rng_buffers });
+        compile_result.prefill_sampling_exe.call(sampling_prefill_args, &sampling_prefill_results);
+        sampling_prefill_results.fill(.{ &prefill_tokens_buffer, &rng_buffers });
+
         try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
         const generated_token = prefill_tokens_slice.items(u32)[input_token_ids.len - 1];
         generated_token_slice.items(u32)[0] = generated_token;
     }
 
-    const now: std.Io.Timestamp = .now(io, .awake);
     const output_tokens_len = max_seq_len - input_token_ids.len - 1;
     var num_tokens_generated: usize = 1;
 
-    var decode_args = try compile_result.decode_exe.args(allocator);
-    defer decode_args.deinit(allocator);
-
-    var decode_results = try compile_result.decode_exe.results(allocator);
-    defer decode_results.deinit(allocator);
-
     var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, replicated_sharding);
     defer current_token_buffer.deinit();
+
+    const now: std.Io.Timestamp = .now(io, .awake);
 
     generation: for (0..output_tokens_len + 1) |i| {
         num_tokens_generated += 1;
@@ -336,11 +607,44 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(input_token_ids.len + i)), .u32, replicated_sharding);
         defer token_index_buffer.deinit();
 
-        decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
+        embedding_decode_args.set(.{ qwen35_buffers.text_model.embed_tokens, current_token_buffer });
+        compile_result.decode_embedding_exe.call(embedding_decode_args, &embedding_decode_results);
+        embedding_decode_results.fill(.{&decode_hidden_buffer});
 
-        compile_result.decode_exe.call(decode_args, &decode_results);
+        for (qwen35_buffers.text_model.layers, 0..) |layer_weights, layer_index| {
+            switch (layer_cache_buffers[layer_index]) {
+                .self_attn => |layer_index_buffer| {
+                    const exe = compile_result.decode_full_layer_exe orelse unreachable;
+                    var layer_cache: zml.Bufferized(qwen35.KvCache.SelfAttnCache) = .{
+                        .k = kv_cache_buffers.self_attn.k,
+                        .v = kv_cache_buffers.self_attn.v,
+                        .layer_index = layer_index_buffer,
+                    };
+                    decode_full_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config });
+                    exe.call(decode_full_layer_args.?, &decode_full_layer_results.?);
+                    decode_full_layer_results.?.fill(.{ &decode_hidden_buffer, &layer_cache });
+                    kv_cache_buffers.self_attn.k = layer_cache.k;
+                    kv_cache_buffers.self_attn.v = layer_cache.v;
+                },
+                .linear_attn => |layer_index_buffer| {
+                    const exe = compile_result.decode_linear_layer_exe orelse unreachable;
+                    var layer_cache: zml.Bufferized(qwen35.KvCache.GatedDeltaNetCache) = .{
+                        .conv_state = kv_cache_buffers.gated_delta_net.conv_state,
+                        .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
+                        .layer_index = layer_index_buffer,
+                    };
+                    decode_linear_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config });
+                    exe.call(decode_linear_layer_args.?, &decode_linear_layer_results.?);
+                    decode_linear_layer_results.?.fill(.{ &decode_hidden_buffer, &layer_cache });
+                    kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
+                    kv_cache_buffers.gated_delta_net.recurrent_state = layer_cache.recurrent_state;
+                },
+            }
+        }
 
-        decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
+        sampling_decode_args.set(.{ qwen35_buffers.text_model, decode_hidden_buffer, rng_buffers });
+        compile_result.decode_sampling_exe.call(sampling_decode_args, &sampling_decode_results);
+        sampling_decode_results.fill(.{ &current_token_buffer, &rng_buffers });
 
         try current_token_buffer.toSlice(io, generated_token_slice);
     }
