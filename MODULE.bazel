@@ -225,7 +225,21 @@ oci.pull(
     image = "gcr.io/distroless/cc-debian12",
     platforms = ["linux/amd64"],
 )
-use_repo(oci, "distroless_cc_debian12", "distroless_cc_debian12_linux_amd64")
+
+oci.pull(
+    name = "debian_12",
+    image = "docker.io/library/debian:12",
+    digest = "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
+    platforms = ["linux/amd64"],
+)
+
+use_repo(
+    oci,
+    "distroless_cc_debian12",
+    "distroless_cc_debian12_linux_amd64",
+    "debian_12",
+    "debian_12_linux_amd64",
+)
 
 git_override(
     module_name = "rules_zig",
