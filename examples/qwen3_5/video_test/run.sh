@@ -4,7 +4,7 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Example Usage:
-  run.sh --model "/var/models/Qwen/Qwen3.5-0.8B/" --video "sample.mp4" --prompt "What is happening in this video?"
+  run.sh --model "/var/models/Qwen/Qwen3.5-0.8B/" --video "sample.mp4" --prompt "What is happening in this video?" --fps 2.0
 NB: video is expected to be in data folder
 USAGE
 }
@@ -12,6 +12,7 @@ USAGE
 model=""
 video=""
 prompt=""
+fps="2.0"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -25,6 +26,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --prompt)
       prompt="${2:-}"
+      shift 2
+      ;;
+    --fps)
+      fps="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -70,7 +75,8 @@ echo "PYTHON: Preprocessing video..."
 "${python_bin}" "${work_dir}/generate_video_inputs.py" \
   --model "${model}" \
   --video "${video_file}" \
-  --out "${video_inputs_file}"
+  --out "${video_inputs_file}" \
+  --fps "${fps}"
 
 echo -e "\nZML: Running model..."
 (

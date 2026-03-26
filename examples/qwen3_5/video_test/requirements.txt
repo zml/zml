@@ -1,5 +1,4 @@
-opencv-python-headless
+av
 safetensors
 torch
 transformers
-torchvision

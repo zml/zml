@@ -186,6 +186,49 @@ pub const Qwen35 = struct {
         return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
     }
 
+    pub fn multimodal_video_prefill_forward(
+        self: Qwen35,
+        tokens: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache,
+        pixel_values: Tensor,
+        grid_thw: [3]i64,
+        video_chunk_starts: Tensor,
+        video_chunk_len: i64,
+        position_ids: Tensor,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
+        const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
+        const vision_embeds = self.vision_model.forward(pixel_values, grid_thw);
+
+        var text_with_video_embed = token_embed;
+        for (0..@intCast(grid_thw[0])) |frame_idx| {
+            const chunk_start = video_chunk_starts.choose1d(0, @intCast(frame_idx)).convert(.i64);
+            const vision_offset = zml.Tensor.scalar(@as(i64, @intCast(frame_idx)) * video_chunk_len, .i64);
+            const vision_chunk = vision_embeds
+                .dynamicSlice1d(vision_embeds.axis(.s), .{ .start = vision_offset, .len = @intCast(video_chunk_len) })
+                .convert(token_embed.dtype());
+            text_with_video_embed = text_with_video_embed.dynamicUpdateSlice(.{ .s = chunk_start }, vision_chunk);
+        }
+
+        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
+            text_with_video_embed,
+            token_index,
+            kv_cache,
+            position_ids,
+        );
+
+        const last_pos = zml.Tensor.scalar(text_with_video_embed.dim(.s) - 1, .i64);
+        const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
+        const position_max = position_ids.max(.g).max(.b).max(.s).convert(.i64).asScalar();
+        const mrope_position_deltas = position_max
+            .addConstant(1 - text_with_video_embed.dim(.s))
+            .insertAxes(.last, .{ .b, .s });
+
+        const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
+        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
+    }
+
     pub fn multimodal_decode_forward(
         self: Qwen35,
         tokens_: Tensor,
