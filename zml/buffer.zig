@@ -284,6 +284,44 @@ pub const Buffer = struct {
 
     pub const D2HEvents = stdx.BoundedArray(?*pjrt.Event, MAX_NUM_SHARDS);
 
+    const PrefixShardCopy = struct {
+        dst_offset: usize,
+        byte_len: usize,
+        src_offset: i64,
+    };
+
+    inline fn prefixShardCopy(
+        self: Buffer,
+        shard: anytype,
+        prefix_len: i64,
+        elem_size: i64,
+        fn_name: []const u8,
+    ) ?PrefixShardCopy {
+        var shard_start: i64 = 0;
+        var shard_size: i64 = self._shape.dim(0);
+
+        switch (shard.slices.len) {
+            0 => {},
+            1 => {
+                const shard_slice = shard.slices.get(0);
+                stdx.debug.assert(shard_slice.axis == 0, "{s} expects a rank-1 shard along axis 0, got axis {}", .{ fn_name, shard_slice.axis });
+                shard_start = shard_slice.start;
+                shard_size = shard_slice.size;
+            },
+            else => stdx.debug.panic("{s} got unsupported shard slicing for rank-1 buffer: {} slices", .{ fn_name, shard.slices.len }),
+        }
+
+        const overlap_start = @max(@as(i64, 0), shard_start);
+        const overlap_end = @min(prefix_len, shard_start + shard_size);
+        if (overlap_start >= overlap_end) return null;
+
+        return .{
+            .byte_len = @intCast((overlap_end - overlap_start) * elem_size),
+            .dst_offset = @intCast(overlap_start * elem_size),
+            .src_offset = (overlap_start - shard_start) * elem_size,
+        };
+    }
+
     fn prefix1dCopyImpl(self: Buffer, slice: Slice, comptime mode: Prefix1dCopyMode, io: if (mode == .sync) std.Io else void) !D2HEvents {
         const fn_name = if (mode == .sync) "toPrefix1dSlice" else "startPrefix1dCopy";
 
@@ -299,28 +337,9 @@ pub const Buffer = struct {
 
         const elem_size = self._shape.dtype().sizeOf();
         for (self.placement().shards.constSlice(), 0..) |shard, shard_index| {
-            var shard_start: i64 = 0;
-            var shard_size: i64 = self._shape.dim(0);
-            switch (shard.slices.len) {
-                0 => {},
-                1 => {
-                    const shard_slice = shard.slices.get(0);
-                    stdx.debug.assert(shard_slice.axis == 0, "{s} expects a rank-1 shard along axis 0, got axis {}", .{ fn_name, shard_slice.axis });
-                    shard_start = shard_slice.start;
-                    shard_size = shard_slice.size;
-                },
-                else => stdx.debug.panic("{s} got unsupported shard slicing for rank-1 buffer: {} slices", .{ fn_name, shard.slices.len }),
-            }
-
-            const overlap_start = @max(@as(i64, 0), shard_start);
-            const overlap_end = @min(prefix_len, shard_start + shard_size);
-            if (overlap_start >= overlap_end) continue;
-
-            const byte_len: usize = @intCast((overlap_end - overlap_start) * elem_size);
-            const dst_offset: usize = @intCast(overlap_start * elem_size);
-            const src_offset: i64 = (overlap_start - shard_start) * elem_size;
-            const destination = slice.data()[dst_offset..][0..byte_len];
-            const maybe_event = try self._shards.get(shard_index).copyRawToHost(self._platform.pjrt_api, destination, src_offset);
+            const copy = prefixShardCopy(self, shard, prefix_len, elem_size, fn_name) orelse continue;
+            const destination = slice.data()[copy.dst_offset..][0..copy.byte_len];
+            const maybe_event = try self._shards.get(shard_index).copyRawToHost(self._platform.pjrt_api, destination, copy.src_offset);
 
             if (mode == .sync) {
                 if (maybe_event) |event| {
