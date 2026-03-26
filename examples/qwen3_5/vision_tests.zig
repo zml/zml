@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
     const options = Qwen35.GenOptions{
         .max_seq_len = args.len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = 20,
             .temperature = 1.0,
         },
     };
@@ -176,10 +176,6 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     const t = grid_thw[0];
     const h = grid_thw[1];
     const w = grid_thw[2];
-    const patch_3d_size: i64 = qwen35_model.config.vision_config.in_channels *
-        qwen35_model.config.vision_config.temporal_patch_size *
-        qwen35_model.config.vision_config.patch_size *
-        qwen35_model.config.vision_config.patch_size;
     const patch_count: i64 = t * h * w;
 
     var prefill_future = try io.concurrent(struct {
@@ -192,7 +188,6 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             prefill_len_: usize,
             grid_thw_: [3]i64,
             patch_count_: i64,
-            patch_3d_size_: i64,
             sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
@@ -202,6 +197,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
 
+            const patch_3d_size = qwen35_model_.auto_config.vision_patch_3d_size;
             return platform_.compile(
                 allocator_,
                 io_,
@@ -211,7 +207,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                     Tensor.init(.{ .b = 1, .s = prefill_len_ }, .u32),
                     Tensor.init(.{}, .i64),
                     kv_cache_,
-                    Tensor.init(.{ .p = patch_count_, .ps = patch_3d_size_ }, .f32),
+                    Tensor.init(.{ .p = patch_count_, .ps = patch_3d_size }, .f32),
                     grid_thw_,
                     Tensor.init(.{3}, .i64),
                     zml.Tensor.Rng.init(),
@@ -219,7 +215,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
                 .{ .shardings = &.{sharding_} },
             );
         }
-    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_len, grid_thw, patch_count, patch_3d_size, sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_len, grid_thw, patch_count, sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -341,7 +337,7 @@ fn runGenerationLoop(
             try stdout.interface.flush();
         }
 
-        if (generated_token == model.special_tokens.end_of_text_token_id) break;
+        if (generated_token == model.auto_config.end_of_text_token_id) break;
 
         var token_index_buffer = try zml.Buffer.scalar(
             io,

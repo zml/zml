@@ -56,12 +56,16 @@ pub const Qwen35 = struct {
         full_attention,
     };
 
-    pub const GenOptions = struct { sampling_strategy: zml.nn.SamplingStrategy = .{}, max_seq_len: i64 };
+    pub const GenOptions = struct {
+        sampling_strategy: zml.nn.SamplingStrategy = .{},
+        max_seq_len: i64,
+    };
 
-    pub const SpecialTokens = struct {
+    pub const AutoConfig = struct {
         im_start_token_id: u32,
         im_end_token_id: u32,
         end_of_text_token_id: u32,
+        vision_patch_3d_size: i64,
     };
 
     text_model: TextModel,
@@ -70,11 +74,7 @@ pub const Qwen35 = struct {
 
     config: Config,
     gen_options: GenOptions,
-    special_tokens: SpecialTokens = .{
-        .im_start_token_id = 248045,
-        .im_end_token_id = 248046,
-        .end_of_text_token_id = 248044,
-    },
+    auto_config: AutoConfig,
 
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, gen_options: GenOptions) !Qwen35 {
         // For some Qwen3.5 versions, the output projection lm_head has a standalone weight tensor, while for others it's the same as the input embedding layer
@@ -85,6 +85,12 @@ pub const Qwen35 = struct {
             .lm_head = .init(store.withPrefix(lm_head_prefix).createTensor("weight", .{ .dout, .d }, null), null, .d),
             .config = config,
             .gen_options = gen_options,
+            .auto_config = .{
+                .im_start_token_id = 248045,
+                .im_end_token_id = 248046,
+                .end_of_text_token_id = 248044,
+                .vision_patch_3d_size = config.vision_config.in_channels * config.vision_config.temporal_patch_size * config.vision_config.patch_size * config.vision_config.patch_size,
+            },
         };
     }
 

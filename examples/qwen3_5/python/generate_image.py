@@ -7,44 +7,53 @@ from PIL import Image
 from safetensors.torch import save_file
 from transformers import AutoProcessor
 
+# Each image dimension must be a multiple of this value (patch_size * spatial_merge_size) to be compatible with the patch setup in the model
+IMAGE_DIM_DIV_FACTOR = 32 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description="Generate vision input safetensors using the official HF processor pipeline"
-    )
+def nearest_multiple(value: int, multiple: int) -> int:
+    floor = (value // multiple) * multiple
+    ceil = ((value + multiple - 1) // multiple) * multiple
+    floor = max(multiple, floor)
+    ceil = max(multiple, ceil)
+    if value - floor < ceil - value:
+        return floor
+    return ceil
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Generate vision input safetensors using the official HF processor pipeline")
     parser.add_argument(
         "--model",
         type=Path,
-        default=Path("/var/models/Qwen/Qwen3.5-0.8B"),
+        required=True,
         help="Local model path (contains processor/tokenizer config)",
     )
     parser.add_argument("--image", type=Path, required=True, help="Input image path (BMP/PNG/JPEG)")
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("/home/tristan/zml/examples/qwen3_5/safetensors/vision_input.safetensors"),
-        help="Output safetensors file",
-    )
-    args = parser.parse_args()
+        required=True,        
+        help="Output safetensors file path",
+    ) 
+    return parser.parse_args()
 
-    processor = AutoProcessor.from_pretrained(str(args.model), trust_remote_code=True)
+    
+def main() -> None:
+    # Get args
+    args = parse_args()
+
+    # Resize image
     image = Image.open(args.image).convert("RGB")
-    image = image.resize((512, 512), resample=Image.Resampling.BICUBIC)
+    target_width = nearest_multiple(image.width, IMAGE_DIM_DIV_FACTOR)
+    target_height = nearest_multiple(image.height, IMAGE_DIM_DIV_FACTOR)
+    image = image.resize((target_width, target_height), resample=Image.Resampling.BICUBIC)
 
-    # Use the exact vision preprocessor path (avoid processor text/chat template path).
+    # Process image using the models' processor to get pixel values and grid info
+    processor = AutoProcessor.from_pretrained(str(args.model), trust_remote_code=True)
     processed = processor.image_processor(images=[image], return_tensors="pt")
     pixel_values = processed["pixel_values"]
     image_grid_thw = processed["image_grid_thw"]
-
-    # vision_tests.zig expects flattened patch rows.
-    if pixel_values.ndim == 3 and pixel_values.shape[0] == 1:
-        pixel_values = pixel_values[0]
-    elif pixel_values.ndim != 2:
-        raise ValueError(f"Unexpected pixel_values shape from processor: {tuple(pixel_values.shape)}")
-
-    if image_grid_thw.ndim != 2 or image_grid_thw.shape[-1] != 3:
-        raise ValueError(f"Unexpected image_grid_thw shape from processor: {tuple(image_grid_thw.shape)}")
-
+ 
+    # Save the pixel_values and image_grid_thw
     args.out.parent.mkdir(parents=True, exist_ok=True)
     save_file(
         {

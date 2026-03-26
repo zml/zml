@@ -219,9 +219,9 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeniz
     const encoded_prompt = try encoder.encode(prompt);
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 1);
 
-    try tokens.append(allocator, qwen_model.special_tokens.im_start_token_id);
+    try tokens.append(allocator, qwen_model.auto_config.im_start_token_id);
     try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.append(allocator, qwen_model.special_tokens.im_end_token_id);
+    try tokens.append(allocator, qwen_model.auto_config.im_end_token_id);
 
     return tokens.toOwnedSlice(allocator);
 }
@@ -292,7 +292,7 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         }
 
         if (i == output_tokens_len) break :generation;
-        if (generated_token == qwen_model.special_tokens.end_of_text_token_id) break :generation;
+        if (generated_token == qwen_model.auto_config.end_of_text_token_id) break :generation;
 
         var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, @intCast(input_token_ids.len + i)), .i64, replicated_sharding);
         defer token_index_buffer.deinit();
