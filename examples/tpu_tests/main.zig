@@ -112,11 +112,20 @@ pub fn main(init: std.process.Init) !void {
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
+    var profiler = try platform.profiler(allocator, io, .{});
+    defer profiler.deinit();
+
+    try profiler.start();
+
     for (0..10000) |_| {
         exe_args.set(.{ layer_buffers, input_buffer });
         exe.call(exe_args, &exe_results);
         exe_results.fill(.{&input_buffer});
     }
+
+    const profile = try profiler.stop();
+
+    std.log.info("Written profile to {s}", .{profile.?.protobuf_path});
 }
 
 pub fn generateRandomBufferKernel(rng: zml.Tensor.Rng, shape: zml.Shape) struct { zml.Tensor.Rng, zml.Tensor } {

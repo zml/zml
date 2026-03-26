@@ -200,17 +200,17 @@ pub const Profiler = struct {
 
         try self.writeFile(self.profile.protobuf_path, protobuf);
 
-        const conversion_error = c.zml_xspace_to_perfetto_dump(
-            zffi.ZigSlice.from(protobuf),
-            zffi.ZigSlice.from(self.profile.perfetto_path),
-        );
-        defer if (conversion_error.len != 0) {
-            c.zml_xspace_to_perfetto_str_free(conversion_error);
-        };
-        if (conversion_error.len != 0) {
-            log.err("Failed to convert profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
-            return error.ProfileTraceConversionFailed;
-        }
+        //const conversion_error = c.zml_xspace_to_perfetto_dump(
+        //    zffi.ZigSlice.from(protobuf),
+        //    zffi.ZigSlice.from(self.profile.perfetto_path),
+        //);
+        //defer if (conversion_error.len != 0) {
+        //    c.zml_xspace_to_perfetto_str_free(conversion_error);
+        //};
+        //if (conversion_error.len != 0) {
+        //    log.err("Failed to convert profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
+        //    return error.ProfileTraceConversionFailed;
+        //}
 
         return self.profile;
     }
