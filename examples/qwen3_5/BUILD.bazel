@@ -13,9 +13,9 @@ zig_binary(
 )
 
 zig_binary(
-    name = "vision_tests",
+    name = "image_test",
     srcs = ["qwen3_5.zig"],
-    main = "vision_tests.zig",
+    main = "image_test.zig",
     data = glob(["safetensors/*.safetensors"]),
     visibility = ["//visibility:public"],
     deps = [

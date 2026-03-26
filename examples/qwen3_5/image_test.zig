@@ -310,8 +310,10 @@ fn runGenerationLoop(
     var vision_prefill_results = try compile_result.prefill_exe.results(allocator);
     defer vision_prefill_results.deinit(allocator);
 
+    const prefill_now: std.Io.Timestamp = .now(io, .awake);
     vision_prefill_args.set(.{ model_buffers, prompt_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, pixel_values_buffer, prompt_shape_buffer, rng_buffers });
     compile_result.prefill_exe.call(vision_prefill_args, &vision_prefill_results);
+    const prefill_duration = prefill_now.untilNow(io, .awake);
     var prefill_generated_token_buffer: zml.Buffer = undefined;
     var mrope_position_deltas_buffer: zml.Buffer = undefined;
     vision_prefill_results.fill(.{ &prefill_generated_token_buffer, &kv_cache_buffers, &mrope_position_deltas_buffer, &rng_buffers });
@@ -328,10 +330,13 @@ fn runGenerationLoop(
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
+    const now: std.Io.Timestamp = .now(io, .awake);
+    var num_tokens_generated: usize = 1;
 
     for (0..gen_tokens) |i| {
         try current_token_buffer.toSlice(io, generated_token_slice);
         const generated_token = generated_token_slice.items(u32)[0];
+        num_tokens_generated += 1;
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try stdout.interface.writeAll(chunk);
             try stdout.interface.flush();
@@ -360,6 +365,15 @@ fn runGenerationLoop(
     }
     try stdout.interface.writeAll("\n");
     try stdout.interface.flush();
+    const duration = now.untilNow(io, .awake);
+    log.info("Generated {} tokens in {f}: {:.3} tok/s", .{
+        num_tokens_generated,
+        duration,
+        stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(duration, num_tokens_generated)),
+    });
+    log.info("Prefill duration: {:.3}s", .{
+        @as(f64, @floatFromInt(prefill_duration.nanoseconds)) / std.time.ns_per_s,
+    });
 }
 
 fn applyVisionChatTemplate(
