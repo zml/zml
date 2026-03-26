@@ -1,0 +1,177 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
+load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
+load("//bazel:patchelf.bzl", "patchelf")
+load("//bazel:strip_debug.bzl", "strip_debug")
+
+# tpu grpc
+
+proto_library(
+    name = "tpu_metric_service_proto",
+    srcs = ["bindings/tpu/libtpu/tpu_metric_service.proto"],
+    strip_import_prefix = "bindings/tpu/libtpu",
+    deps = ["@com_google_protobuf//:timestamp_proto"],
+)
+
+cc_proto_library(
+    name = "tpu_metric_service_cc_proto",
+    deps = [":tpu_metric_service_proto"],
+)
+
+cc_grpc_library(
+    name = "tpu_metric_service_cc_grpc",
+    srcs = [":tpu_metric_service_proto"],
+    grpc_only = True,
+    deps = [":tpu_metric_service_cc_proto"],
+)
+
+cc_library(
+    name = "tpuinfo",
+    srcs = ["bindings/tpu/libtpu/tpuinfo.cc"],
+    hdrs = ["bindings/tpu/libtpu/tpuinfo.h"],
+    strip_include_prefix = "bindings/tpu/libtpu",
+    deps = [
+        ":tpu_metric_service_cc_grpc",
+        "@grpc//:grpc++",
+    ],
+)
+
+# smi
+
+strip_debug(
+    name = "libnrt.stripped",
+    src = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+)
+
+strip_debug(
+    name = "libncfw.stripped",
+    src = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = select({
+        "@platforms//os:macos": [],
+        "//conditions:default": [
+            "@amd-smi-lib//:libamd_smi",
+            "@libdrm-amdgpu-amdgpu1",
+            "//platforms/rocm:amdgpu_ids",
+            "@libdrm2-amdgpu//:libdrm2-amdgpu",
+            "//platforms/rocm:zmlxrocm",
+            ":libnrt.stripped",
+            ":libncfw.stripped",
+        ],
+    }),
+    replace_prefixes = {
+        "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
+        "platforms/rocm/amdgpu.ids": "share/libdrm/amdgpu.ids",
+        "libdrm-amdgpu-amdgpu1": "lib",
+        "platforms/rocm": "lib",
+        "libnrt.stripped": "lib",
+        "libncfw.stripped": "lib",
+    },
+    include_external_repositories = ["**"],
+)
+
+zig_binary(
+    name = "zml-smi",
+    srcs = glob([
+        "tui/**/*.zig",
+    ]) + [
+        "bindings/dynlib.zig",
+        "bindings/amdsmi/amdsmi.zig",
+        "bindings/amdsmi/metrics.zig",
+        "bindings/amdsmi/process.zig",
+        "bindings/linux/metrics.zig",
+        "bindings/linux/process.zig",
+        "bindings/neuron/metrics.zig",
+        "bindings/neuron/nrt.zig",
+        "bindings/neuron/process.zig",
+        "bindings/nvml/metrics.zig",
+        "bindings/nvml/nvml.zig",
+        "bindings/nvml/process.zig",
+        "bindings/tpu/process.zig",
+        "bindings/tpu/metrics.zig",
+        "bindings/tpu/tpuinfo.zig",
+        "collector.zig",
+        "info/device_info.zig",
+        "info/host_info.zig",
+        "info/process_info.zig",
+        "platform.zig",
+        "utils/sandbox.zig",
+        "utils/shadow_list.zig",
+        "utils/shadow_value.zig",
+        "str.zig",
+        "utils/sysfs.zig",
+        "worker.zig",
+    ],
+    extra_srcs = glob([
+        "tui/assets/*",
+    ]),
+    data = [":sandbox"],
+    main = "main.zig",
+    deps = [
+        "//stdx",
+        "@libvaxis//:vaxis",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "@platforms//os:macos": [],
+        "//conditions:default": [
+            "//platforms/neuron:libnrt_headers",
+            ":tpuinfo",
+            "@cuda_nvml_dev//:nvml",
+            "@amd-smi-lib//:amdsmi",
+        ],
+    }),
+)
+
+# docker image
+
+mtree_spec(
+    name = "mtree",
+    srcs = [":zml-smi"],
+)
+
+tar(
+    name = "archive",
+    srcs = [":zml-smi"],
+    args = [
+        "--options",
+        ",".join([
+            "zstd:compression-level=9",
+            "zstd:threads=16",
+        ]),
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+)
+
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["/{}/zml-smi".format(package_name())],
+    tars = [
+        ":archive",
+    ],
+)
+
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = ["zmlai/zml-smi:latest"],
+    tags = ["manual"],
+)
