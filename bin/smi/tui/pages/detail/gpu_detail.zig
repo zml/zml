@@ -106,8 +106,8 @@ pub fn draw(
         gpu.pcie_link_gen orelse 0, gpu.pcie_link_width orelse 0,
     }) });
     if (gpu.pcie_tx_kbps != null or gpu.pcie_rx_kbps != null) {
-        try pcie_lines.append(ctx.arena, .{ .label = "TX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) });
-        try pcie_lines.append(ctx.arena, .{ .label = "RX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) });
+        try pcie_lines.append(ctx.arena, .{ .label = "TX       ", .value = try formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) });
+        try pcie_lines.append(ctx.arena, .{ .label = "RX       ", .value = try formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) });
     }
     if (gpu.pcie_bandwidth_mbps) |bw| {
         try pcie_lines.append(ctx.arena, .{ .label = "BW       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} Mb/s", .{bw}) });
@@ -129,4 +129,16 @@ pub fn draw(
         },
         .gap = 1,
     }, w, parent_widget);
+}
+
+fn formatBandwidth(arena: std.mem.Allocator, kbps: u64) std.mem.Allocator.Error![]const u8 {
+    if (kbps >= 1_000_000) {
+        const gbps = @as(f64, @floatFromInt(kbps)) / 1_000_000.0;
+        return std.fmt.allocPrint(arena, " {d:.1} GB/s", .{gbps});
+    } else if (kbps >= 1_000) {
+        const mbps = @as(f64, @floatFromInt(kbps)) / 1_000.0;
+        return std.fmt.allocPrint(arena, " {d:.1} MB/s", .{mbps});
+    } else {
+        return std.fmt.allocPrint(arena, " {d} KB/s", .{kbps});
+    }
 }

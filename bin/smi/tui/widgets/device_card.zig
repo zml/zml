@@ -44,11 +44,19 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     const dev = self.state.devices[i];
     const target: data.Target = std.meta.activeTag(dev.*);
     const cf = switch (dev.*) {
-        inline else => |*sv| utils.commonDeviceFields(sv.front().*),
+        inline else => |*sv| blk: {
+            const f = sv.front().*;
+            break :blk .{
+                .name = f.name orelse "Unknown",
+                .util_percent = @as(u8, @intCast(@min(f.util_percent orelse 0, 100))),
+                .mem_used = f.mem_used_bytes orelse 0,
+                .mem_total = f.mem_total_bytes orelse 0,
+            };
+        },
     };
     const mem_pct: u8 = if (cf.mem_total > 0) @intCast(@min(cf.mem_used * 100 / cf.mem_total, 100)) else 0;
 
-    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ target.deviceLabel(), i, cf.nameSlice() });
+    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ target.deviceLabel(), i, cf.name });
     const util_label = target.utilLabel();
 
     const dev_suffix = switch (dev.*) {
