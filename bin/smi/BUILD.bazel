@@ -5,11 +5,11 @@ load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
 load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
 load("//bazel:patchelf.bzl", "patchelf")
-load("//bazel:strip_debug.bzl", "strip_debug")
 
 # tpu grpc
 
@@ -45,14 +45,30 @@ cc_library(
 
 # smi
 
-strip_debug(
+run_binary(
     name = "libnrt.stripped",
-    src = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+    srcs = ["@aws-neuronx-runtime-lib//:libnrt.patchelf"],
+    outs = ["libnrt.so"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libnrt.so)",
+        "$(location @aws-neuronx-runtime-lib//:libnrt.patchelf)",
+    ],
+    tool = "@llvm//tools:llvm-strip",
 )
 
-strip_debug(
+run_binary(
     name = "libncfw.stripped",
-    src = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+    srcs = ["@aws-neuronx-runtime-lib//:libncfw.patchelf"],
+    outs = ["libncfw.so"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libncfw.so)",
+        "$(location @aws-neuronx-runtime-lib//:libncfw.patchelf)",
+    ],
+    tool = "@llvm//tools:llvm-strip",
 )
 
 copy_to_directory(
@@ -74,8 +90,8 @@ copy_to_directory(
         "platforms/rocm/amdgpu.ids": "share/libdrm/amdgpu.ids",
         "libdrm-amdgpu-amdgpu1": "lib",
         "platforms/rocm": "lib",
-        "libnrt.stripped": "lib",
-        "libncfw.stripped": "lib",
+        "libnrt.so": "lib/libnrt.so",
+        "libncfw.so": "lib/libncfw.so",
     },
     include_external_repositories = ["**"],
 )
