@@ -2,7 +2,6 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../../data.zig");
-const str = @import("../../../str.zig");
 const utils = @import("../../lib/utils.zig");
 const ui = @import("../../lib/ui.zig");
 const Chart = @import("../../widgets/chart.zig");

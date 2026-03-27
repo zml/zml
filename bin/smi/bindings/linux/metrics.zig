@@ -27,18 +27,18 @@ const Host = struct {
     io: std.Io,
 
     pub fn hostname(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        const result = try sysfs.readString(self.io, "/proc/sys/kernel/hostname");
-        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
+        var buf: [256]u8 = undefined;
+        return try arena.dupe(u8, try sysfs.readString(self.io, "/proc/sys/kernel/hostname", &buf));
     }
 
     pub fn kernel(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        const result = try sysfs.readString(self.io, "/proc/sys/kernel/osrelease");
-        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
+        var buf: [256]u8 = undefined;
+        return try arena.dupe(u8, try sysfs.readString(self.io, "/proc/sys/kernel/osrelease", &buf));
     }
 
     pub fn cpuName(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        const result = try sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name");
-        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
+        var buf: [4096]u8 = undefined;
+        return try arena.dupe(u8, try sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name", &buf));
     }
 
     pub fn cpuCores(self: Host) !u64 {
@@ -60,7 +60,9 @@ const Host = struct {
     }
 
     pub fn loadAvg(self: Host) ![256]u8 {
-        return sysfs.readString(self.io, "/proc/loadavg");
+        var buf: [256]u8 = .{0} ** 256;
+        _ = try sysfs.readString(self.io, "/proc/loadavg", &buf);
+        return buf;
     }
 
     pub fn uptime(self: Host) !u64 {

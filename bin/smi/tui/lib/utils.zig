@@ -1,12 +1,10 @@
 const std = @import("std");
-const str = @import("../../str.zig");
-
 pub fn bytesToMb(val: ?u64) u64 {
     return if (val) |v| v / (1024 * 1024) else 0;
 }
 
 pub fn parseLoadAvg(raw: ?[256]u8) [3]f32 {
-    const s = if (raw) |*b| str.slice(b) else return .{ 0, 0, 0 };
+    const s = if (raw) |*b| std.mem.sliceTo(b, 0) else return .{ 0, 0, 0 };
     var result: [3]f32 = .{ 0, 0, 0 };
     var it = std.mem.splitScalar(u8, s, ' ');
     for (&result) |*r| {
