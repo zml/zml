@@ -41,17 +41,14 @@ pub fn start(collector: *Collector) !void {
         state.handle_count += 1;
         const device_type = Nrt.deviceType(dev_handle);
         const mem_per_core: u64 = switch (device_type) {
-            1 => 2 * GiB, // inf1: 8 GiB / 4 cores
-            2 => 16 * GiB, // inf2/trn1: 32 GiB / 2 cores
-            3 => 12 * GiB, // trn2: 96 GiB / 8 cores
-            4 => 18 * GiB, // trn3: 144 GiB / 8 cores
+            .inf1 => 2 * GiB, // inf1: 8 GiB / 4 cores
+            .inf2_trn1 => 16 * GiB, // inf2/trn1: 32 GiB / 2 cores
+            .trn2 => 12 * GiB, // trn2: 96 GiB / 8 cores
+            .trn3 => 18 * GiB, // trn3: 144 GiB / 8 cores
             else => 0,
         };
 
         for (0..nc_per_device) |ci| {
-            const info = try collector.addDevice(.{ .neuron = .{ .values = .{ .{}, .{} } } });
-            try neuron_infos.append(collector.arena, info);
-
             const dev: Device = .{
                 .io = collector.io,
                 .device_idx = @intCast(device_idx),
@@ -59,9 +56,9 @@ pub fn start(collector: *Collector) !void {
                 .mem_per_core = mem_per_core,
             };
 
-            const name = dev.getName() catch null;
-            info.neuron.values[0].name = name;
-            info.neuron.values[1].name = name;
+            const initial: NeuronInfo = .{ .name = dev.name() catch null };
+            const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
+            try neuron_infos.append(collector.arena, info);
 
             try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.neuron, dev });
         }

@@ -54,7 +54,9 @@ fn resolveAll(comptime F: type, handle: *anyopaque, elf_mmap: ?[]align(std.heap.
         }
     }
 
-    if (unresolved.count() == 0) return result; // no need to parse ELF
+    if (unresolved.count() == 0) { // no need to parse ELF
+        return result;
+    }
 
     // Phase 2: scan ELF symbols, write resolved addresses directly into result fields
     const buf = elf_mmap orelse return null;
@@ -65,26 +67,37 @@ fn resolveAll(comptime F: type, handle: *anyopaque, elf_mmap: ?[]align(std.heap.
 
     outer: for (0..ehdr.shnum) |i| {
         const sh = shdrs[i];
-        if (sh.type != .SYMTAB) continue;
+        if (sh.type != .SYMTAB) {
+            continue;
+        }
 
         const strtab_sh = shdrs[sh.link];
         const strtab: [*]const u8 = @ptrCast(buf.ptr + @as(usize, strtab_sh.offset));
-        const syms: [*]const elf.ElfN.Sym = @ptrCast(@alignCast(buf.ptr + @as(usize, sh.offset)));
-        const sym_count = @as(usize, sh.size) / @sizeOf(elf.ElfN.Sym);
+        const syms: []const elf.ElfN.Sym = @as(
+            [*]const elf.ElfN.Sym,
+            @ptrCast(@alignCast(buf.ptr + @as(usize, sh.offset))),
+        )[0 .. @as(usize, sh.size) / @sizeOf(elf.ElfN.Sym)];
 
-        for (0..sym_count) |si| {
-            const s = syms[si];
-            if (s.value == 0) continue;
+        for (syms) |s| {
+            if (s.value == 0) {
+                continue;
+            }
+
             const sym_name = std.mem.sliceTo(@as([*:0]const u8, @ptrCast(strtab + @as(usize, s.name))), 0);
             if (unresolved.get(sym_name)) |field_ptr| {
                 field_ptr.* = elf_base + @as(usize, s.value);
                 remaining -= 1;
-                if (remaining == 0) break :outer;
+
+                if (remaining == 0) {
+                    break :outer;
+                }
             }
         }
     }
 
-    if (remaining > 0) return null;
+    if (remaining > 0) {
+        return null;
+    }
 
     return result;
 }

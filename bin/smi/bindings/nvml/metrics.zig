@@ -18,7 +18,7 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.getName() catch null };
+        const initial: GpuInfo = .{ .name = dev.name() catch null };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
     }

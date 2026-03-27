@@ -87,6 +87,14 @@ pub fn hbmSize(dev: *c.ndl_device_t) usize {
     return dev.hbm_size;
 }
 
-pub fn deviceType(dev: *c.ndl_device_t) c_int {
-    return dev.device_type;
+pub const DeviceType = enum(c_int) {
+    inf1 = 1,
+    inf2_trn1 = 2,
+    trn2 = 3,
+    trn3 = 4,
+    _,
+};
+
+pub fn deviceType(dev: *c.ndl_device_t) DeviceType {
+    return @enumFromInt(dev.device_type);
 }

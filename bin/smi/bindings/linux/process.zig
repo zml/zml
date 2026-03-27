@@ -41,12 +41,11 @@ pub const ProcessEnricher = struct {
             info.uid = uid;
             info.username = lookupUsername(uid);
             info.rss_kib = sysfs.readFieldInt(io, status_path, "VmRSS") catch 0;
-            const name = sysfs.readFieldString(io, status_path, "Name") catch .{0} ** 256;
 
             // Read cmdline, fall back to Name from status
             const cmdline_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{info.pid}) catch continue;
             const cmdline = readCmdline(io, cmdline_path);
-            info.comm = if (cmdline[0] != 0) cmdline else name;
+            info.comm = if (cmdline != null and cmdline.?[0] != 0) cmdline else null;
 
             // CPU% delta
             const ticks = readProcTicks(io, info.pid) orelse continue;
@@ -68,10 +67,13 @@ pub const ProcessEnricher = struct {
 
 fn lookupUsername(uid: u32) [32]u8 {
     if (std.c.getpwuid(uid)) |pw| {
-        const name: [*:0]const u8 = pw.name orelse return formatUid(uid);
+        const name_ptr = pw.name orelse return formatUid(uid);
+        const name_slice = std.mem.span(name_ptr);
+
         var buf: [32]u8 = .{0} ** 32;
-        const len = @min(std.mem.len(name), 31);
-        @memcpy(buf[0..len], name[0..len]);
+        const len = @min(name_slice.len, 31);
+
+        @memcpy(buf[0..len], name_slice[0..len]);
         return buf;
     }
 
@@ -98,9 +100,9 @@ fn readProcTicks(io: std.Io, pid: u32) ?u64 {
     return sysfs.nthTokenInt(rest, 11) + sysfs.nthTokenInt(rest, 12);
 }
 
-fn readCmdline(io: std.Io, path: []const u8) [256]u8 {
-    var buf: [256]u8 = .{0} ** 256;
-    const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return .{0} ** 256;
+fn readCmdline(io: std.Io, path: []const u8) ?[std.Io.Dir.max_path_bytes]u8 {
+    var buf: [std.Io.Dir.max_path_bytes]u8 = .{0} ** std.Io.Dir.max_path_bytes;
+    const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return null;
     const len = std.mem.trimEnd(u8, data, &.{0}).len;
 
     for (buf[0..len]) |*c| {
