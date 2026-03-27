@@ -18,7 +18,7 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.getName() catch null };
+        const initial: GpuInfo = .{ .name = dev.name() catch null };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
