@@ -78,10 +78,6 @@ pub fn normalizeRange(arena: std.mem.Allocator, raw: []const u64, min_val: u64, 
     return result;
 }
 
-pub fn trunc(s: []const u8, max: usize) []const u8 {
-    return s[0..@min(s.len, max)];
-}
-
 pub const CommonDeviceFields = struct {
     name: ?[]const u8,
     util_percent: u8,
