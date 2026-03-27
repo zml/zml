@@ -45,6 +45,53 @@ pub const GenerationConfig = struct {
     num_stages: usize,
 };
 
+pub const Metadata = struct {
+    w1_zero_bias: ?Tensor = null,
+    w2_zero_bias: ?Tensor = null,
+    first_out: ?Tensor = null,
+    second_out: ?Tensor = null,
+
+    pub const InitOptions = struct {
+        w1_zero_bias_shape: ?Shape = null,
+        w2_zero_bias_shape: ?Shape = null,
+        first_out_shape: ?Shape = null,
+        second_out_shape: ?Shape = null,
+    };
+
+    pub fn init(opts: InitOptions) Metadata {
+        return .{
+            .w1_zero_bias = if (opts.w1_zero_bias_shape) |shape| Tensor.fromShape(shape) else null,
+            .w2_zero_bias = if (opts.w2_zero_bias_shape) |shape| Tensor.fromShape(shape) else null,
+            .first_out = if (opts.first_out_shape) |shape| Tensor.fromShape(shape) else null,
+            .second_out = if (opts.second_out_shape) |shape| Tensor.fromShape(shape) else null,
+        };
+    }
+
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *zml.Platform) !zml.Bufferized(Metadata) {
+        const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+        return .{
+            .w1_zero_bias = if (self.w1_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
+            .w2_zero_bias = if (self.w2_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
+            .first_out = if (self.first_out) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
+            .second_out = if (self.second_out) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
+        };
+    }
+};
+
+pub fn deinitBuffer(bufferized: *zml.Bufferized(Metadata)) void {
+    if (bufferized.w1_zero_bias) |*buffer| buffer.deinit();
+    if (bufferized.w2_zero_bias) |*buffer| buffer.deinit();
+    if (bufferized.first_out) |*buffer| buffer.deinit();
+    if (bufferized.second_out) |*buffer| buffer.deinit();
+}
+
+fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding, shape: Shape) !zml.Buffer {
+    var zero_slice: zml.Slice = try .alloc(std.heap.c_allocator, shape);
+    defer zero_slice.free(std.heap.c_allocator);
+    @memset(zero_slice.data(), 0);
+    return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
+}
+
 fn makeGenerationConfigWithTopK(
     a: Tensor,
     b: Tensor,
@@ -54,6 +101,8 @@ fn makeGenerationConfigWithTopK(
     opts: Options,
     naive_block_assignment: bool,
     top_k: i64,
+    mul_routed_weight: bool,
+    has_bias: bool,
 ) GenerationConfig {
     return .{
         .a_dtype = a.dtype(),
@@ -74,6 +123,8 @@ fn makeGenerationConfigWithTopK(
         .compute_type = c.dtype(),
         .num_warps = @intCast(opts.num_warps),
         .num_stages = @intCast(opts.num_stages),
+        .mul_routed_weight = mul_routed_weight,
+        .has_bias = has_bias,
     };
 }
 
@@ -569,8 +620,10 @@ fn makeGenerationConfig(
     num_valid_tokens: i64,
     opts: Options,
     naive_block_assignment: bool,
+    mul_routed_weight: bool,
+    has_bias: bool,
 ) GenerationConfig {
-    return makeGenerationConfigWithTopK(a, b, c, max_num_tokens_padded, num_valid_tokens, opts, naive_block_assignment, c.dim(1));
+    return makeGenerationConfigWithTopK(a, b, c, max_num_tokens_padded, num_valid_tokens, opts, naive_block_assignment, c.dim(1), mul_routed_weight, has_bias);
 }
 
 fn callFusedKernel(
@@ -661,6 +714,7 @@ pub fn fusedExpertsImpl(
     w2: Tensor,
     topk_weights: Tensor,
     topk_ids: Tensor,
+    metadata: Metadata,
     opts: Options,
 ) !Tensor {
     try validateOptions(opts);
@@ -721,13 +775,23 @@ pub fn fusedExpertsImpl(
     const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
         // In the naive path each M-block corresponds to exactly one (token, topk) assignment.
         const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
-        const naive_expert_ids = ids.reshape(.{ .g = num_assignments }).convert(.i32);
+        const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
         const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
         break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
     } else try alignBlockSize(std.heap.c_allocator, io, ids, num_experts, block_size_m);
 
-    var first_out = Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16));
-    const first_generation_config = makeGenerationConfig(hidden, gate_up, first_out, max_num_tokens_padded, num_assignments, effective_opts, naive_block_assignment);
+    var first_out = metadata.first_out orelse Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16));
+    const first_generation_config = makeGenerationConfig(
+        hidden,
+        gate_up,
+        first_out,
+        max_num_tokens_padded,
+        num_assignments,
+        effective_opts,
+        naive_block_assignment,
+        false,
+        false,
+    );
 
     const ttir_first_matmul = generateTtir(std.heap.c_allocator, io, first_generation_config) catch |err| {
         log.err("Failed to generate TTIR for first MoE matmul: {}", .{err});
@@ -736,7 +800,7 @@ pub fn fusedExpertsImpl(
 
     defer std.heap.c_allocator.free(ttir_first_matmul);
 
-    var b_bias = opts.w1_bias orelse Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, gate_up.dtype()));
+    var b_bias = opts.w1_bias orelse metadata.w1_zero_bias orelse Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, gate_up.dtype()));
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
     var b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
 
@@ -762,7 +826,7 @@ pub fn fusedExpertsImpl(
     const up = first_flat.slice1d(.out, .{ .start = @divExact(gate_up.dim(.out), 2), .end = gate_up.dim(.out) });
     const activated = gate.silu().mul(up);
 
-    var second_out = Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
+    var second_out = metadata.second_out orelse Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
     const second_generation_config = makeGenerationConfigWithTopK(
         activated,
         down,
@@ -772,6 +836,8 @@ pub fn fusedExpertsImpl(
         effective_opts,
         naive_block_assignment,
         1,
+        true, // is_second_matmul
+        false,
     );
     const ttir_second_matmul = generateTtir(std.heap.c_allocator, io, second_generation_config) catch |err| {
         log.err("Failed to generate TTIR for second MoE matmul: {}", .{err});
@@ -779,9 +845,9 @@ pub fn fusedExpertsImpl(
     };
     defer std.heap.c_allocator.free(ttir_second_matmul);
 
-    b_bias = opts.w1_bias orelse Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, gate_up.dtype()));
-    a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
-    b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
+    b_bias = opts.w2_bias orelse metadata.w2_zero_bias orelse Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, down.dtype()));
+    a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
+    b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
     second_out = callFusedKernel(
         activated,
@@ -800,13 +866,13 @@ pub fn fusedExpertsImpl(
         num_assignments,
     );
 
-    const weighted = second_out.mul(weights.convert(second_out.dtype()).broad(second_out.shape()));
+    // const weighted = second_out.mul(weights.convert(second_out.dtype()).broad(second_out.shape()));
     // const weighted = second_out.mul(weights).broad(second_out.shape());
 
-    log.info("Completed fused MoE kernels. Starting reduction across top-k experts. Weighted output shape: {f}", .{weighted.shape()});
-    const output = weighted.sum(.topk).squeeze(.topk);
+    log.info("Second out shape before reduction: {f}", .{second_out.shape()});
 
-    // output.print("Final MoE output");
+    // log.info("Completed fused MoE kernels. Starting reduction across top-k experts. Weighted output shape: {f}", .{weighted.shape()});
+    const output = second_out.sum(.topk).squeeze(.topk);
 
     log.info("Completed MoE forward pass. Output shape: {f}", .{output.shape()});
     return output;

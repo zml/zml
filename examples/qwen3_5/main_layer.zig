@@ -15,7 +15,7 @@ pub const std_options: std.Options = .{
 const CliArgs = struct {
     model: []const u8,
     prompt: []const u8 = "What is the capital of France ?",
-    len: i64 = 4096,
+    len: i64 = 1024,
     moe_backend: ?[]const u8 = null,
 };
 
@@ -54,6 +54,7 @@ pub fn main(init: std.process.Init) !void {
 
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
+    try zml.tracer.register(platform);
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     //======================= Model & cache init ========================
@@ -61,6 +62,7 @@ pub fn main(init: std.process.Init) !void {
     const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
     const config = parsed_config.value;
+    const prefill_len: usize = @intCast(options.max_seq_len);
 
     var qwen_model: Qwen35 = try .init(allocator, store.view(), config, options);
     defer qwen_model.deinit(allocator);
@@ -98,10 +100,14 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    const moe_metadata: zml.moe.Metadata = .init(.fromBackend(moe_backend));
-    _ = moe_metadata; // autofix
+    const prefill_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, prefill_len);
+    const decode_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, 1);
     const moe_parameters: zml.moe.Parameters = .init(.fromBackend(moe_backend));
     _ = moe_parameters; // autofix
+    var prefill_moe_metadata_buffers = try prefill_moe_metadata.initBuffer(io, platform);
+    defer zml.moe.Metadata.deinitBuffer(&prefill_moe_metadata_buffers);
+    var decode_moe_metadata_buffers = try decode_moe_metadata.initBuffer(io, platform);
+    defer zml.moe.Metadata.deinitBuffer(&decode_moe_metadata_buffers);
 
     //======================= Progress tracking setup ========================
 
@@ -135,11 +141,10 @@ pub fn main(init: std.process.Init) !void {
     const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
 
     defer allocator.free(input_token_ids);
-    const prefill_len: usize = @intCast(options.max_seq_len);
 
     //======================= Model compilation (async) ========================
 
-    var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
+    var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, prefill_moe_metadata, decode_moe_metadata, &progress, prefill_len });
     defer if (compile_result_future.cancel(io)) |v| {
         v.prefill_embedding_exe.deinit();
         v.decode_embedding_exe.deinit();
@@ -166,7 +171,7 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
+    try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, &prefill_moe_metadata_buffers, &decode_moe_metadata_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
 
     //======================= Output check (panics if fail) ========================
     // try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
@@ -199,6 +204,7 @@ fn compileSelfAttnLayerExe(
     token_index: Tensor,
     cache: qwen35.KvCache.SelfAttnCache,
     config: Qwen35.Config,
+    moe_metadata: zml.moe.Metadata,
     sharding: zml.sharding.Sharding,
     progress: *std.Progress.Node,
     label: []const u8,
@@ -210,7 +216,7 @@ fn compileSelfAttnLayerExe(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
 
-    return platform.compile(allocator, io, model, .forwardSelfAttn, .{ hidden, token_index, cache, config }, .{ .shardings = &.{sharding} });
+    return platform.compile(allocator, io, model, .forwardSelfAttnWithMoeMetadata, .{ hidden, token_index, cache, config, moe_metadata }, .{ .shardings = &.{sharding} });
 }
 
 fn compileLinearAttnLayerExe(
@@ -222,6 +228,7 @@ fn compileLinearAttnLayerExe(
     token_index: Tensor,
     cache: qwen35.KvCache.GatedDeltaNetCache,
     config: Qwen35.Config,
+    moe_metadata: zml.moe.Metadata,
     sharding: zml.sharding.Sharding,
     progress: *std.Progress.Node,
     label: []const u8,
@@ -233,10 +240,10 @@ fn compileLinearAttnLayerExe(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
 
-    return platform.compile(allocator, io, model, .forwardLinearAttn, .{ hidden, token_index, cache, config }, .{ .shardings = &.{sharding} });
+    return platform.compile(allocator, io, model, .forwardLinearAttnWithMoeMetadata, .{ hidden, token_index, cache, config, moe_metadata }, .{ .shardings = &.{sharding} });
 }
 
-fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, qwen35_model: Qwen35, kv_cache: qwen35.KvCache, progress: *std.Progress.Node, prefill_len: usize) !CompileModelResult {
+fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, qwen35_model: Qwen35, kv_cache: qwen35.KvCache, prefill_moe_metadata: zml.moe.Metadata, decode_moe_metadata: zml.moe.Metadata, progress: *std.Progress.Node, prefill_len: usize) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
     defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
@@ -315,14 +322,14 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
 
     if (findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .full_attention)) |layer_index| {
         const layer_model = qwen35_model.text_model.layers[layer_index];
-        prefill_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling prefill full-attention layer...");
-        decode_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling decode full-attention layer...");
+        prefill_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, prefill_moe_metadata, replicated_sharding, progress, "Compiling prefill full-attention layer...");
+        decode_full_layer_exe = try compileSelfAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, decode_moe_metadata, replicated_sharding, progress, "Compiling decode full-attention layer...");
     }
 
     if (findFirstLayerIndex(qwen35_model.config.text_config.layer_types, .linear_attention)) |layer_index| {
         const layer_model = qwen35_model.text_model.layers[layer_index];
-        prefill_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling prefill linear-attention layer...");
-        decode_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, replicated_sharding, progress, "Compiling decode linear-attention layer...");
+        prefill_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, prefill_moe_metadata, replicated_sharding, progress, "Compiling prefill linear-attention layer...");
+        decode_linear_layer_exe = try compileLinearAttnLayerExe(allocator, io, platform, layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, decode_moe_metadata, replicated_sharding, progress, "Compiling decode linear-attention layer...");
     }
 
     var prefill_sampling_future = try io.concurrent(struct {
@@ -415,6 +422,8 @@ fn runAndGenerate(
     tokenizer_decoder: *zml.tokenizer.Tokenizer.Decoder,
     qwen35_buffers: zml.Bufferized(Qwen35),
     kv_cache_buffers: *zml.Bufferized(qwen35.KvCache),
+    prefill_moe_metadata_buffers: *zml.Bufferized(zml.moe.Metadata),
+    decode_moe_metadata_buffers: *zml.Bufferized(zml.moe.Metadata),
     compile_result: CompileModelResult,
     input_token_ids: []u32,
     writer: *std.Io.Writer,
@@ -545,7 +554,7 @@ fn runAndGenerate(
                         .v = kv_cache_buffers.self_attn.v,
                         .layer_index = layer_index_buffer,
                     };
-                    prefill_full_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config });
+                    prefill_full_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config, prefill_moe_metadata_buffers.* });
                     exe.call(prefill_full_layer_args.?, &prefill_full_layer_results.?);
                     prefill_full_layer_results.?.fill(.{ &prefill_hidden_buffer, &layer_cache });
                     kv_cache_buffers.self_attn.k = layer_cache.k;
@@ -558,7 +567,7 @@ fn runAndGenerate(
                         .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
                         .layer_index = layer_index_buffer,
                     };
-                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config });
+                    prefill_linear_layer_args.?.set(.{ layer_weights, prefill_hidden_buffer, prefill_token_index_buffer, layer_cache, qwen_model.config, prefill_moe_metadata_buffers.* });
                     exe.call(prefill_linear_layer_args.?, &prefill_linear_layer_results.?);
                     prefill_linear_layer_results.?.fill(.{ &prefill_hidden_buffer, &layer_cache });
                     kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
@@ -620,7 +629,7 @@ fn runAndGenerate(
                         .v = kv_cache_buffers.self_attn.v,
                         .layer_index = layer_index_buffer,
                     };
-                    decode_full_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config });
+                    decode_full_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config, decode_moe_metadata_buffers.* });
                     exe.call(decode_full_layer_args.?, &decode_full_layer_results.?);
                     decode_full_layer_results.?.fill(.{ &decode_hidden_buffer, &layer_cache });
                     kv_cache_buffers.self_attn.k = layer_cache.k;
@@ -633,7 +642,7 @@ fn runAndGenerate(
                         .recurrent_state = kv_cache_buffers.gated_delta_net.recurrent_state,
                         .layer_index = layer_index_buffer,
                     };
-                    decode_linear_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config });
+                    decode_linear_layer_args.?.set(.{ layer_weights, decode_hidden_buffer, token_index_buffer, layer_cache, qwen_model.config, decode_moe_metadata_buffers.* });
                     exe.call(decode_linear_layer_args.?, &decode_linear_layer_results.?);
                     decode_linear_layer_results.?.fill(.{ &decode_hidden_buffer, &layer_cache });
                     kv_cache_buffers.gated_delta_net.conv_state = layer_cache.conv_state;
@@ -656,6 +665,64 @@ fn runAndGenerate(
         duration,
         stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(duration, num_tokens_generated)),
     });
+}
+
+fn initMoeMetadata(qwen_model: Qwen35, moe_backend: zml.moe.Backend, token_len: usize) !zml.moe.Metadata {
+    return switch (moe_backend) {
+        .flashinfer => .init(.fromBackend(.flashinfer)),
+        .triton => blk: {
+            var w1_zero_bias_shape: ?zml.Shape = null;
+            var w2_zero_bias_shape: ?zml.Shape = null;
+            var first_out_shape: ?zml.Shape = null;
+            var second_out_shape: ?zml.Shape = null;
+
+            for (qwen_model.text_model.layers) |layer| {
+                switch (layer.ffn) {
+                    .dense => {},
+                    .sparse => |sparse| {
+                        const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok.?;
+                        const gate_up_shape = zml.Shape.init(.{
+                            .expert = sparse.gate_up_proj.dim(.expert),
+                            .out = sparse.gate_up_proj.dim(.dout),
+                        }, sparse.gate_up_proj.dtype());
+                        const down_shape = zml.Shape.init(.{
+                            .expert = sparse.down_proj.dim(.expert),
+                            .out = sparse.down_proj.dim(.d),
+                        }, sparse.down_proj.dtype());
+                        const first_out = zml.Shape.init(.{
+                            .token = token_len,
+                            .topk = num_experts_per_tok,
+                            .out = sparse.gate_up_proj.dim(.dout),
+                        }, .bf16);
+                        const second_out = zml.Shape.init(.{
+                            .token = token_len,
+                            .topk = num_experts_per_tok,
+                            .out = sparse.down_proj.dim(.d),
+                        }, .bf16);
+
+                        if (w1_zero_bias_shape == null) {
+                            w1_zero_bias_shape = gate_up_shape;
+                            w2_zero_bias_shape = down_shape;
+                            first_out_shape = first_out;
+                            second_out_shape = second_out;
+                            continue;
+                        }
+
+                        if (!w1_zero_bias_shape.?.eql(gate_up_shape) or !w2_zero_bias_shape.?.eql(down_shape) or !first_out_shape.?.eql(first_out) or !second_out_shape.?.eql(second_out)) {
+                            return error.UnsupportedMoeBiasShapes;
+                        }
+                    },
+                }
+            }
+
+            break :blk .init(.{ .triton = .{
+                .w1_zero_bias_shape = w1_zero_bias_shape,
+                .w2_zero_bias_shape = w2_zero_bias_shape,
+                .first_out_shape = first_out_shape,
+                .second_out_shape = second_out_shape,
+            } });
+        },
+    };
 }
 
 //======================= Load and parse setup ========================

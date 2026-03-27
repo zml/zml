@@ -73,16 +73,16 @@ pub const Parameters = union(Backend) {
 
 pub const Metadata = union(Backend) {
     flashinfer: void,
-    triton: void,
+    triton: triton_moe.Metadata,
 
     pub const InitOptions = union(Backend) {
         flashinfer: void,
-        triton: void,
+        triton: triton_moe.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .flashinfer => .{ .flashinfer = {} },
-                .triton => .{ .triton = {} },
+                .triton => .{ .triton = .{} },
             };
         }
     };
@@ -90,19 +90,22 @@ pub const Metadata = union(Backend) {
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .flashinfer => .{ .flashinfer = {} },
-            .triton => .{ .triton = {} },
+            .triton => |v| .{ .triton = triton_moe.Metadata.init(v) },
         };
     }
 
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *zml.Platform) !zml.Bufferized(Metadata) {
-        _ = self;
-        _ = io;
-        _ = platform;
-        return {};
+        return switch (self) {
+            .flashinfer => .{ .flashinfer = {} },
+            .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
+        };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-        _ = self;
+        switch (self.*) {
+            .flashinfer => {},
+            .triton => |*metadata| triton_moe.deinitBuffer(metadata),
+        }
     }
 };
 
@@ -123,8 +126,6 @@ pub fn moe(
 ) !zml.Tensor {
     return switch (parameters) {
         .flashinfer => b: {
-            // No metadata buffers in flashinfer_moe
-            _ = metadata;
             const dt = input.dtype();
 
             // Routing of the tokens to the experts
@@ -312,14 +313,10 @@ pub fn moe(
             break :b output;
         },
         .triton => b: {
-
-            // To be moved in the model
-
-            std.log.info("input shape: {f}", .{input.shape()});
-            std.log.info("weights_gate_up shape: {f}", .{weights_gate_up.shape()});
-            std.log.info("weights_down shape: {f}", .{weights_down.shape()});
-            std.log.info("topk_ids shape: {f}", .{topk_ids.shape()});
-            std.log.info("topk_weights shape: {f}", .{topk_weights.shape()});
+            const triton_metadata = switch (metadata) {
+                .triton => |v| v,
+                else => unreachable,
+            };
 
             break :b try triton_moe.fusedExpertsImpl(
                 input,
@@ -327,6 +324,7 @@ pub fn moe(
                 weights_down,
                 topk_weights,
                 topk_ids,
+                triton_metadata,
                 .{
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,

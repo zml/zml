@@ -6,6 +6,7 @@ const Buffer = zml.Buffer;
 const Tensor = zml.Tensor;
 const ShapeOf = zml.ShapeOf;
 const stdx = zml.stdx;
+const Tracer = zml.tracer.Tracer;
 
 const log = std.log.scoped(.qwen3_5);
 
@@ -266,6 +267,17 @@ pub const TransformerLayer = struct {
         kv_cache: KvCache.SelfAttnCache,
         config: Qwen35.Config,
     ) struct { Tensor, KvCache.SelfAttnCache } {
+        return self.forwardSelfAttnWithMoeMetadata(x0, token_index, kv_cache, config, .init(.fromBackend(.triton)));
+    }
+
+    pub fn forwardSelfAttnWithMoeMetadata(
+        self: TransformerLayer,
+        x0: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.SelfAttnCache,
+        config: Qwen35.Config,
+        moe_metadata: zml.moe.Metadata,
+    ) struct { Tensor, KvCache.SelfAttnCache } {
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
 
@@ -281,7 +293,7 @@ pub const TransformerLayer = struct {
 
         const mlp_output = switch (self.ffn) {
             .dense => |*dense| dense.forward(normalized_hidden),
-            .sparse => |*sparse| sparse.forward(normalized_hidden, config),
+            .sparse => |*sparse| sparse.forwardWithMetadata(normalized_hidden, config, moe_metadata),
         };
 
         return .{ mlp_output.add(residual1), updated_kv_cache };
@@ -293,6 +305,17 @@ pub const TransformerLayer = struct {
         token_index: Tensor,
         kv_cache: KvCache.GatedDeltaNetCache,
         config: Qwen35.Config,
+    ) struct { Tensor, KvCache.GatedDeltaNetCache } {
+        return self.forwardLinearAttnWithMoeMetadata(x0, token_index, kv_cache, config, .init(.fromBackend(.triton)));
+    }
+
+    pub fn forwardLinearAttnWithMoeMetadata(
+        self: TransformerLayer,
+        x0: Tensor,
+        token_index: Tensor,
+        kv_cache: KvCache.GatedDeltaNetCache,
+        config: Qwen35.Config,
+        moe_metadata: zml.moe.Metadata,
     ) struct { Tensor, KvCache.GatedDeltaNetCache } {
         _ = token_index;
 
@@ -311,7 +334,7 @@ pub const TransformerLayer = struct {
 
         const mlp_output = switch (self.ffn) {
             .dense => |*dense| dense.forward(normalized_hidden),
-            .sparse => |*sparse| sparse.forward(normalized_hidden, config),
+            .sparse => |*sparse| sparse.forwardWithMetadata(normalized_hidden, config, moe_metadata),
         };
 
         return .{ mlp_output.add(residual1), updated_kv_cache };
@@ -398,9 +421,7 @@ const Router = struct {
         const routing = router_probs.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const router_scores = routing.values.div(routing.values.sum(.top_expert).broad(routing.values.shape()));
         const router_indices = routing.indices.convert(.i64);
-        std.log.info("router_probs: {f}", .{router_probs});
-        std.log.info("router_scores: {f}", .{router_scores});
-        std.log.info("router_indices: {f}", .{router_indices});
+
         return .{ router_probs, router_scores, router_indices };
     }
 };
@@ -424,20 +445,21 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: Tensor, config: Qwen35.Config) Tensor {
-        const moe_metadata: zml.moe.Metadata = .init(.fromBackend(.triton));
+        return self.forwardWithMetadata(x, config, .init(.fromBackend(.triton)));
+    }
+
+    pub fn forwardWithMetadata(self: Moe, x: Tensor, config: Qwen35.Config, moe_metadata: zml.moe.Metadata) Tensor {
         const moe_parameters: zml.moe.Parameters = .init(.fromBackend(.triton));
         const num_experts_per_tok: u32 = config.text_config.num_experts_per_tok.?;
 
-        // const down_weight = self.down_proj.weight.rename(.{ .d = .out, .dout = .d });
-        // const down_bias = if (self.down_proj.bias) |b| b.rename(.{ .d = .out }) else null;
-
         const router_logits = self.router.forward(x).convert(.f32);
-        // Match HF: softmax over all experts, then top-k and renormalize.
-        const router_probs = router_logits.softmax(.expert);
-        const routing = router_probs.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
+        // const router_probs = router_logits.softmax(.expert);
+        const routing = router_logits.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
-        var topk_weights = routing.values;
-        topk_weights = topk_weights.div(topk_weights.sum(.top_expert).broad(topk_weights.shape())).convert(router_logits.dtype());
+        var topk_weights = routing.values.softmax(.top_expert);
+        log.info("topk_weights before renormalization: {f}", .{topk_weights.shape()});
+
+        topk_weights = topk_weights.div(topk_weights.sum(.top_expert));
 
         const routed = zml.moe.moe(
             x,
@@ -853,6 +875,7 @@ pub const RmsNorm = struct {
         const weight_f32 = self.weight.convert(.f32);
 
         const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
+        log.info("normalized shape: {f}, weight shape: {f}", .{ normalized.shape(), weight_f32.shape() });
         return normalized.mul(weight_f32.broad(x.shape())).add(normalized).convert(x.dtype());
     }
 };

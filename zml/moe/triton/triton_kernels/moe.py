@@ -320,13 +320,13 @@ def fused_moe_kernel(
     # This multiplication MUST be performed in float32 before any precision
     # conversion to ensure numerical stability, which is especially critical
     # on ROCm platforms.
-    # if MUL_ROUTED_WEIGHT:
-    #     moe_weight = tl.load(
-    #         topk_weights_ptr + offs_token,
-    #         mask=token_mask,
-    #         other=0,
-    #     )
-    #     accumulator *= moe_weight[:, None]
+    if MUL_ROUTED_WEIGHT:
+        moe_weight = tl.load(
+            topk_weights_ptr + offs_token,
+            mask=token_mask,
+            other=0,
+        )
+        accumulator *= moe_weight[:, None]
 
     # Final precision conversion:
     # Cast once at the end to the desired compute/output dtype.
