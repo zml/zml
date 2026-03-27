@@ -64,8 +64,8 @@ py_binary(
     name = "gen_ir",
     srcs = ["gen_ir.py"],
     deps = [
+        "@tpu_py_deps//absl_py",
         "@tpu_py_deps//jax",
-        "@tpu_py_deps//tpu_inference",
     ],
 )
 

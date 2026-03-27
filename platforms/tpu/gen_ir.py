@@ -3,6 +3,7 @@ import math
 import sys
 import os
 import signal
+import contextlib
 
 # This IR generator only needs CPU lowering. Forcing CPU here avoids JAX
 # probing local TPU runtime state and emitting a fallback warning.
@@ -38,6 +39,81 @@ mlir.register_lowering(
 )
 
 
+def _abstract_tpu_device_kind() -> str:
+    return (
+        os.environ.get("ZML_TPU_IR_DEVICE_KIND")
+        or os.environ.get("TPU_DEVICE_KIND")
+        or "TPU v5 lite"
+    )
+
+
+def _abstract_tpu_num_cores() -> int:
+    raw = os.environ.get("ZML_TPU_IR_NUM_CORES", "1")
+    try:
+        cores = int(raw)
+    except ValueError:
+        cores = 1
+    return max(1, cores)
+
+
+def _tpu_version_from_kind(device_kind: str) -> int:
+    kind = device_kind.strip()
+    if "TPU" not in kind:
+        return -1
+    if kind == "TPU7x":
+        return 7
+    if kind.endswith(" lite"):
+        kind = kind[: -len(" lite")]
+    if not kind.startswith("TPU v"):
+        return -1
+    version = []
+    for ch in kind[len("TPU v"):]:
+        if not ch.isdigit():
+            break
+        version.append(ch)
+    if not version:
+        return -1
+    return int("".join(version))
+
+
+def _tpu_device_name_from_kind(device_kind: str, num_devices: int | None = None) -> str:
+    parts = device_kind.split()
+    name = " ".join(parts[:2]) if len(parts) >= 2 else device_kind
+    if num_devices is not None:
+        name += f"-{num_devices}"
+    return name
+
+
+def _patch_ragged_tpu_tuning_device_probe() -> None:
+    # The tuned block-size helper probes jax.devices()[0] directly, which is
+    # CPU in this process by design. Override it with our abstract TPU kind.
+    from jax.experimental.pallas.ops.tpu.ragged_paged_attention import tuned_block_sizes
+
+    tuned_block_sizes.get_tpu_version = lambda: _tpu_version_from_kind(_abstract_tpu_device_kind())
+    tuned_block_sizes.get_device_name = (
+        lambda num_devices=None: _tpu_device_name_from_kind(_abstract_tpu_device_kind(), num_devices)
+    )
+
+
+@contextlib.contextmanager
+def _tpu_abstract_mesh_context():
+    # Force TPU chip metadata lookup to use an abstract TPU device while we
+    # still lower on CPU-only JAX backends.
+    mesh = jax.sharding.AbstractMesh(
+        axis_sizes=(1,),
+        axis_names=("tpu_core",),
+        abstract_device=jax.sharding.AbstractDevice(
+            device_kind=_abstract_tpu_device_kind(),
+            num_cores=_abstract_tpu_num_cores(),
+        ),
+    )
+    with jax.sharding.use_abstract_mesh(mesh):
+        yield
+
+
+_patch_ragged_tpu_tuning_device_probe()
+
+
 def _extract_backend_config(op) -> str | None :
     backend = op.attributes.get("backend_config")
     if backend is not None:
@@ -70,11 +146,12 @@ def flash_attention_on_tpu(kernel_params: dict) -> str | None:
     )
     sm_scale = kernel_params.get("sm_scale", 1.0 / math.sqrt(d_model))
 
-    lowered = jax.jit(
-        flash_attention,
-        backend="cpu",
-        static_argnames=["block_sizes", "causal", "sm_scale"],
-    ).lower(q, k, v, block_sizes=block, causal=True, sm_scale=sm_scale)
+    with _tpu_abstract_mesh_context():
+        lowered = jax.jit(
+            flash_attention,
+            backend="cpu",
+            static_argnames=["block_sizes", "causal", "sm_scale"],
+        ).lower(q, k, v, block_sizes=block, causal=True, sm_scale=sm_scale)
     return _extract_backend_config(lowered.compiler_ir().operation)
 
 
@@ -123,14 +200,15 @@ def paged_attention_on_tpu(kernel_params: dict) -> str | None:
 
     pallas_mod.pallas_call = _fix_paged_attention_acc_specs
     try:
-        lowered = comp_target.lower(
-            q,
-            k,
-            v,
-            lengths,
-            page_indices_flat,
-            pages_per_compute_block=kernel_params["pages_per_compute_block"],
-        )
+        with _tpu_abstract_mesh_context():
+            lowered = comp_target.lower(
+                q,
+                k,
+                v,
+                lengths,
+                page_indices_flat,
+                pages_per_compute_block=kernel_params["pages_per_compute_block"],
+            )
     finally:
         pallas_mod.pallas_call = _ORIG_PALLAS_CALL
     
@@ -165,37 +243,38 @@ def ragged_paged_attention_on_tpu(kernel_params: dict) -> str | None:
     cu_q_lens = jax.ShapeDtypeStruct((kernel_params["max_num_seqs"] + 1,), jnp.int32)
     num_seqs = jax.ShapeDtypeStruct((1,), jnp.int32)
 
-    lowered = jax.jit(
-        ragged_paged_attention,
-        backend="cpu",
-        static_argnames=[
-            "sm_scale",
-            "sliding_window",
-            "soft_cap",
-            "mask_value",
-            "k_scale",
-            "v_scale",
-            "num_kv_pages_per_block",
-            "num_queries_per_block",
-            "vmem_limit_bytes",
-        ],
-    ).lower(
-        q,
-        kv_pages,
-        kv_lens,
-        page_indices,
-        cu_q_lens,
-        num_seqs,
-        sm_scale=kernel_params.get("sm_scale", 1.0),
-        sliding_window=kernel_params.get("sliding_window"),
-        soft_cap=kernel_params.get("soft_cap"),
-        mask_value=kernel_params.get("mask_value"),
-        k_scale=kernel_params.get("k_scale"),
-        v_scale=kernel_params.get("v_scale"),
-        num_kv_pages_per_block=kernel_params.get("num_kv_pages_per_block"),
-        num_queries_per_block=kernel_params.get("num_queries_per_block"),
-        vmem_limit_bytes=kernel_params.get("vmem_limit_bytes"),
-    )
+    with _tpu_abstract_mesh_context():
+        lowered = jax.jit(
+            ragged_paged_attention,
+            backend="cpu",
+            static_argnames=[
+                "sm_scale",
+                "sliding_window",
+                "soft_cap",
+                "mask_value",
+                "k_scale",
+                "v_scale",
+                "num_kv_pages_per_block",
+                "num_queries_per_block",
+                "vmem_limit_bytes",
+            ],
+        ).lower(
+            q,
+            kv_pages,
+            kv_lens,
+            page_indices,
+            cu_q_lens,
+            num_seqs,
+            sm_scale=kernel_params.get("sm_scale", 1.0),
+            sliding_window=kernel_params.get("sliding_window"),
+            soft_cap=kernel_params.get("soft_cap"),
+            mask_value=kernel_params.get("mask_value"),
+            k_scale=kernel_params.get("k_scale"),
+            v_scale=kernel_params.get("v_scale"),
+            num_kv_pages_per_block=kernel_params.get("num_kv_pages_per_block"),
+            num_queries_per_block=kernel_params.get("num_queries_per_block"),
+            vmem_limit_bytes=kernel_params.get("vmem_limit_bytes"),
+        )
     return _extract_backend_config(lowered.compiler_ir().operation)
 
 
