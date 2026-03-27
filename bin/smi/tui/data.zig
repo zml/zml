@@ -26,12 +26,16 @@ pub fn RingBuffer(comptime T: type, comptime capacity: usize) type {
         pub fn push(self: *Self, value: T) void {
             self.buf[self.head] = value;
             self.head = (self.head + 1) % capacity;
-            if (self.len < capacity) self.len += 1;
+            if (self.len < capacity) {
+                self.len += 1;
+            }
         }
 
         pub fn sliceLast(self: *const Self, arena: std.mem.Allocator, n: usize) std.mem.Allocator.Error![]const T {
             const count = @min(n, self.len);
-            if (count == 0) return &.{};
+            if (count == 0) {
+                return &.{};
+            }
             const out = try arena.alloc(T, count);
             const start = (self.head + capacity - count) % capacity;
             for (0..count) |i| {

@@ -15,7 +15,9 @@ min_child_width: ?u16 = null,
 
 pub fn draw(self: *const ColumnLayout, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const n = self.children.len;
-    if (n == 0) return vxfw.Surface.init(ctx.arena, ui.widget(self), ctx.min);
+    if (n == 0) {
+        return vxfw.Surface.init(ctx.arena, ui.widget(self), ctx.min);
+    }
 
     const available_w = ctx.max.width orelse 80;
     const cols: u16 = if (self.min_child_width) |mcw|
@@ -29,7 +31,9 @@ pub fn draw(self: *const ColumnLayout, ctx: vxfw.DrawContext) std.mem.Allocator.
     var i: usize = 0;
 
     while (i < n) {
-        if (i > 0) row_y += self.gap;
+        if (i > 0) {
+            row_y += self.gap;
+        }
 
         const row_end = @min(i + cols, n);
         var row_h: u16 = 0;

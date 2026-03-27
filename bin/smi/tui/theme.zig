@@ -22,8 +22,12 @@ pub fn colorForPercent(pct: u8) Color {
 
 /// Returns a color for temperature (20-100°C range).
 pub fn colorForTemp(temp_c: u16) Color {
-    if (temp_c <= 20) return colorForPercent(0);
-    if (temp_c >= 100) return colorForPercent(100);
+    if (temp_c <= 20) {
+        return colorForPercent(0);
+    }
+    if (temp_c >= 100) {
+        return colorForPercent(100);
+    }
     const pct: u8 = @intCast((@as(u32, temp_c) - 20) * 100 / 80);
     return colorForPercent(pct);
 }

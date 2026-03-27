@@ -51,7 +51,9 @@ const Device = struct {
     pub fn powerLimit(self: Device) !u64 {
         // Header says W, but empirically power_limit is in µW; convert to mW
         const limit = try self.amdsmi.powerLimit(self.handle);
-        if (limit == std.math.maxInt(u32)) return error.not_supported;
+        if (limit == std.math.maxInt(u32)) {
+            return error.not_supported;
+        }
         return @as(u64, limit) / 1000;
     }
 
@@ -98,7 +100,9 @@ const Device = struct {
     // PCIe
     pub fn pcieBandwidth(self: Device) !u64 {
         const bw = try self.amdsmi.pcieBandwidth(self.handle);
-        if (bw == std.math.maxInt(u32)) return error.not_supported;
+        if (bw == std.math.maxInt(u32)) {
+            return error.not_supported;
+        }
         return bw;
     }
     pub fn pcieLinkGen(self: Device) !u64 {

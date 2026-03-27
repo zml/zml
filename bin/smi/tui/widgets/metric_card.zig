@@ -79,7 +79,9 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
         const max_chart_suffix_w = maxFieldWidth(ctx, self.charts, "suffix") + Gauge.sep_w;
 
         for (self.charts, 0..) |chart, ci| {
-            if (ci > 0) row += 1;
+            if (ci > 0) {
+                row += 1;
+            }
 
             const ch_h = chart.chart_height;
 
@@ -125,7 +127,9 @@ fn drawContent(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator
     }
 
     // Gap between charts and gauges
-    if (self.charts.len > 0 and self.gauges.len > 0) row += 1;
+    if (self.charts.len > 0 and self.gauges.len > 0) {
+        row += 1;
+    }
 
     // Gauges (with 1-row gap between consecutive gauges)
     const max_label_w = maxFieldWidth(ctx, self.gauges, "label") + 1; // +1 trailing space
