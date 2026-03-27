@@ -116,146 +116,146 @@ pub fn init() Error!Nvml {
     return .{ .lib = fns };
 }
 
-pub fn getHandleByIndex(self: Nvml, device_id: u32) Error!c.nvmlDevice_t {
+pub fn handleByIndex(self: Nvml, device_id: u32) Error!c.nvmlDevice_t {
     var handle: c.nvmlDevice_t = undefined;
     try check(self.lib.nvmlDeviceGetHandleByIndex_v2(device_id, &handle));
     return handle;
 }
 
-pub fn getDeviceCount(self: Nvml) Error!u32 {
+pub fn deviceCount(self: Nvml) Error!u32 {
     var count: c_uint = 0;
     try check(self.lib.nvmlDeviceGetCount_v2(&count));
     return @intCast(count);
 }
 
-pub fn getName(self: Nvml, handle: c.nvmlDevice_t, buf: []u8) Error![:0]const u8 {
+pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: []u8) Error![:0]const u8 {
     try check(self.lib.nvmlDeviceGetName(handle, buf.ptr, @as(c_uint, @intCast(buf.len))));
     return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf.ptr)), 0);
 }
 
-pub fn getPowerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn powerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var power_mw: c_uint = 0;
     try check(self.lib.nvmlDeviceGetPowerUsage(handle, &power_mw));
     return power_mw;
 }
 
-pub fn getTemperature(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn temperature(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var temp: c_uint = 0;
     try check(self.lib.nvmlDeviceGetTemperature(handle, c.NVML_TEMPERATURE_GPU, &temp));
     return temp;
 }
 
-pub fn getUtilizationGpu(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn utilizationGpu(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c.nvmlUtilization_t = undefined;
     try check(self.lib.nvmlDeviceGetUtilizationRates(handle, &util));
     return util.gpu;
 }
 
-pub fn getClockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn clockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
     try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &clock));
     return clock;
 }
 
-pub fn getClockSm(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn clockSm(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
     try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_SM, &clock));
     return clock;
 }
 
-pub fn getClockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn clockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
     try check(self.lib.nvmlDeviceGetClockInfo(handle, c.NVML_CLOCK_MEM, &clock));
     return clock;
 }
 
-pub fn getMaxClockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn maxClockGraphics(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
     try check(self.lib.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_GRAPHICS, &clock));
     return clock;
 }
 
-pub fn getMaxClockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn maxClockMem(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var clock: c_uint = 0;
     try check(self.lib.nvmlDeviceGetMaxClockInfo(handle, c.NVML_CLOCK_MEM, &clock));
     return clock;
 }
 
-pub fn getMemTotal(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
+pub fn memTotal(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var mem: c.nvmlMemory_t = undefined;
     try check(self.lib.nvmlDeviceGetMemoryInfo(handle, &mem));
     return @intCast(mem.total);
 }
 
-pub fn getMemUsed(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
+pub fn memUsed(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var mem: c.nvmlMemory_t = undefined;
     try check(self.lib.nvmlDeviceGetMemoryInfo(handle, &mem));
     return @intCast(mem.used);
 }
 
-pub fn getFanSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn fanSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var speed: c_uint = 0;
     try check(self.lib.nvmlDeviceGetFanSpeed(handle, &speed));
     return speed;
 }
 
-pub fn getPowerLimit(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn powerLimit(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var limit: c_uint = 0;
     try check(self.lib.nvmlDeviceGetEnforcedPowerLimit(handle, &limit));
     return limit;
 }
 
-pub fn getPcieTxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn pcieTxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var value: c_uint = 0;
     try check(self.lib.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_TX_BYTES, &value));
     return value;
 }
 
-pub fn getPcieRxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn pcieRxKBps(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var value: c_uint = 0;
     try check(self.lib.nvmlDeviceGetPcieThroughput(handle, c.NVML_PCIE_UTIL_RX_BYTES, &value));
     return value;
 }
 
-pub fn getEncoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn encoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c_uint = 0;
     var sampling: c_uint = 0;
     try check(self.lib.nvmlDeviceGetEncoderUtilization(handle, &util, &sampling));
     return util;
 }
 
-pub fn getDecoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn decoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var util: c_uint = 0;
     var sampling: c_uint = 0;
     try check(self.lib.nvmlDeviceGetDecoderUtilization(handle, &util, &sampling));
     return util;
 }
 
-pub fn getTotalEnergy(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
+pub fn totalEnergy(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
     var energy: c_ulonglong = 0;
     try check(self.lib.nvmlDeviceGetTotalEnergyConsumption(handle, &energy));
     return @intCast(energy);
 }
 
-pub fn getPcieLinkGen(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn pcieLinkGen(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var gen: c_uint = 0;
     try check(self.lib.nvmlDeviceGetCurrPcieLinkGeneration(handle, &gen));
     return gen;
 }
 
-pub fn getPcieLinkWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn pcieLinkWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
     try check(self.lib.nvmlDeviceGetCurrPcieLinkWidth(handle, &width));
     return width;
 }
 
-pub fn getMemBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+pub fn memBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
     try check(self.lib.nvmlDeviceGetMemoryBusWidth(handle, &width));
     return width;
 }
 
-pub fn getComputeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
+pub fn computeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]c.nvmlProcessInfo_t {
     var count: c_uint = 0;
     const ret = self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, null);
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
@@ -269,7 +269,7 @@ pub fn getComputeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, hand
     return infos;
 }
 
-pub fn getGraphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]const c.nvmlProcessInfo_t {
+pub fn graphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t) (Error || error{OutOfMemory})![]const c.nvmlProcessInfo_t {
     var count: c_uint = 0;
     const ret = self.lib.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, null);
 
@@ -288,7 +288,7 @@ pub fn getGraphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, han
     return infos;
 }
 
-pub fn getProcessUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t, last_seen: u64) (Error || error{OutOfMemory})![]const c.nvmlProcessUtilizationSample_t {
+pub fn processUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nvmlDevice_t, last_seen: u64) (Error || error{OutOfMemory})![]const c.nvmlProcessUtilizationSample_t {
     var count: c_uint = 0;
     const ret = self.lib.nvmlDeviceGetProcessUtilization(handle, null, &count, last_seen);
 

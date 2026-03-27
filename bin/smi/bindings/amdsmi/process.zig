@@ -15,15 +15,15 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
-    const device_count = amdsmi.getDeviceCount();
+    const device_count = amdsmi.deviceCount();
     const pci_slots = allocator.alloc(?[bdf_len]u8, device_count) catch return;
     defer allocator.free(pci_slots);
     for (pci_slots, 0..) |*slot, i| {
-        const handle = amdsmi.getHandleByIndex(@intCast(i)) catch {
+        const handle = amdsmi.handleByIndex(@intCast(i)) catch {
             slot.* = null;
             continue;
         };
-        slot.* = formatBdf(amdsmi.getBdfId(handle) catch {
+        slot.* = formatBdf(amdsmi.bdfId(handle) catch {
             slot.* = null;
             continue;
         });
@@ -38,7 +38,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         sl.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
-            const handle = amdsmi.getHandleByIndex(@intCast(dev_idx)) catch continue;
+            const handle = amdsmi.handleByIndex(@intCast(dev_idx)) catch continue;
 
             const procs = blk: {
                 const saved = c.dup(c.STDERR_FILENO);
@@ -51,7 +51,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                     _ = c.dup2(saved, c.STDERR_FILENO);
                     _ = c.close(saved);
                 };
-                break :blk amdsmi.getProcessList(allocator, handle) catch continue;
+                break :blk amdsmi.processList(allocator, handle) catch continue;
             };
             defer if (procs.len > 0) allocator.free(procs);
 

@@ -54,7 +54,7 @@ pub fn closeDevice(self: Nrt, dev: *c.ndl_device_t) void {
 
 pub const AppInfo = c.struct_neuron_app_info;
 
-pub fn getAllAppsInfo(self: Nrt, dev: *c.ndl_device_t) Error!struct { ptr: ?[*]AppInfo, count: usize } {
+pub fn allAppsInfo(self: Nrt, dev: *c.ndl_device_t) Error!struct { ptr: ?[*]AppInfo, count: usize } {
     var info: ?[*]AppInfo = null;
     var count: usize = 0;
     if (self.lib.ndl_get_all_apps_info(dev, &info, &count, c.APP_INFO_ALL) != 0) return error.nrt_error;
@@ -71,22 +71,22 @@ pub fn ndsClose(self: Nrt, inst: *c.nds_instance_t) void {
     _ = self.lib.nds_close(inst);
 }
 
-pub fn getNcCounter(self: Nrt, inst: *c.nds_instance_t, pnc_index: c_int, counter_index: u32) Error!u64 {
+pub fn ncCounter(self: Nrt, inst: *c.nds_instance_t, pnc_index: c_int, counter_index: u32) Error!u64 {
     var value: u64 = 0;
     if (self.lib.nds_get_nc_counter(inst, pnc_index, counter_index, &value) != 0) return error.nrt_error;
     return value;
 }
 
-pub fn getTotalNcCount(self: Nrt) Error!u32 {
+pub fn totalNcCount(self: Nrt) Error!u32 {
     var count: u32 = 0;
     if (self.lib.nrt_get_total_nc_count(&count) != 0) return error.nrt_error;
     return count;
 }
 
-pub fn getHbmSize(dev: *c.ndl_device_t) usize {
+pub fn hbmSize(dev: *c.ndl_device_t) usize {
     return dev.hbm_size;
 }
 
-pub fn getDeviceType(dev: *c.ndl_device_t) c_int {
+pub fn deviceType(dev: *c.ndl_device_t) c_int {
     return dev.device_type;
 }

@@ -120,7 +120,9 @@ fn readTotalCpuTicks(io: std.Io) u64 {
     var iter = std.mem.tokenizeAny(u8, line, " \t");
 
     _ = iter.next(); // skip "cpu"
-    while (iter.next()) |tok| total += std.fmt.parseInt(u64, tok, 10) catch 0;
+    while (iter.next()) |tok| {
+        total += std.fmt.parseInt(u64, tok, 10) catch 0;
+    }
 
     return total;
 }

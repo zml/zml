@@ -10,11 +10,11 @@ pub fn init(w: *Worker, io: std.Io, info: *HostInfo) !void {
 
     // read once metrics
     var initial = info.get(io);
-    initial.hostname = host.getHostname() catch null;
-    initial.kernel = host.getKernel() catch null;
-    initial.cpu_name = host.getCpuName() catch null;
-    initial.cpu_cores = host.getCpuCores() catch null;
-    initial.mem_total_kib = host.getMemTotal() catch null;
+    initial.hostname = host.hostname() catch null;
+    initial.kernel = host.kernel() catch null;
+    initial.cpu_name = host.cpuName() catch null;
+    initial.cpu_cores = host.cpuCores() catch null;
+    initial.mem_total_kib = host.memTotal() catch null;
     info.set(io, initial);
 
     try w.spawn(io, pollHost, .{ io, w, info, host });
@@ -25,19 +25,19 @@ const pollHost = Worker.pollMetrics(*HostInfo, Host, metrics);
 const Host = struct {
     io: std.Io,
 
-    pub fn getHostname(self: Host) ![256]u8 {
+    pub fn hostname(self: Host) ![256]u8 {
         return sysfs.readString(self.io, "/proc/sys/kernel/hostname");
     }
 
-    pub fn getKernel(self: Host) ![256]u8 {
+    pub fn kernel(self: Host) ![256]u8 {
         return sysfs.readString(self.io, "/proc/sys/kernel/osrelease");
     }
 
-    pub fn getCpuName(self: Host) ![256]u8 {
+    pub fn cpuName(self: Host) ![256]u8 {
         return sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name");
     }
 
-    pub fn getCpuCores(self: Host) !u64 {
+    pub fn cpuCores(self: Host) !u64 {
         var buf: [64]u8 = undefined;
 
         const data = try std.Io.Dir.readFile(.cwd(), self.io, "/sys/devices/system/cpu/present", &buf);
@@ -47,19 +47,19 @@ const Host = struct {
         return (try std.fmt.parseInt(u64, trimmed[dash + 1 ..], 10)) + 1;
     }
 
-    pub fn getMemTotal(self: Host) !u64 {
+    pub fn memTotal(self: Host) !u64 {
         return sysfs.readFieldInt(self.io, "/proc/meminfo", "MemTotal");
     }
 
-    pub fn getMemAvailable(self: Host) !u64 {
+    pub fn memAvailable(self: Host) !u64 {
         return sysfs.readFieldInt(self.io, "/proc/meminfo", "MemAvailable");
     }
 
-    pub fn getLoadAvg(self: Host) ![256]u8 {
+    pub fn loadAvg(self: Host) ![256]u8 {
         return sysfs.readString(self.io, "/proc/loadavg");
     }
 
-    pub fn getUptime(self: Host) !u64 {
+    pub fn uptime(self: Host) !u64 {
         var buf: [64]u8 = undefined;
 
         const data = try std.Io.Dir.readFile(.cwd(), self.io, "/proc/uptime", &buf);
@@ -70,7 +70,7 @@ const Host = struct {
 };
 
 const metrics = .{
-    .{ .field = "mem_available_kib", .query = Host.getMemAvailable },
-    .{ .field = "load_avg", .query = Host.getLoadAvg },
-    .{ .field = "uptime_seconds", .query = Host.getUptime },
+    .{ .field = "mem_available_kib", .query = Host.memAvailable },
+    .{ .field = "load_avg", .query = Host.loadAvg },
+    .{ .field = "uptime_seconds", .query = Host.uptime },
 };
