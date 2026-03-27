@@ -5,7 +5,6 @@ const tpuinfo = @import("tpuinfo.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const TpuInfo = device_info.TpuInfo;
-const ShadowValue = @import("../../utils/shadow_value.zig").ShadowValue;
 const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
 const tpu_process = @import("process.zig");
@@ -21,7 +20,8 @@ pub fn start(collector: *Collector) !void {
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
     for (0..device_count) |_| {
-        const info = try collector.addDevice(.{ .tpu = .{ .value = .{ .name = str.fromSlice(chip.name) } } });
+        const initial: TpuInfo = .{ .name = str.fromSlice(chip.name) };
+        const info = try collector.addDevice(.{ .tpu = .{ .values = .{ initial, initial } } });
         try tpu_infos.append(collector.arena, info);
     }
 
@@ -43,15 +43,15 @@ const metrics = .{
 
 fn pollAllDevices(io: std.Io, w: *const Worker, infos: []*DeviceInfo) void {
     w.pollLoop(io, struct {
-        fn poll(i: std.Io, devs: []*DeviceInfo) void {
+        fn poll(devs: []*DeviceInfo) void {
             inline for (metrics) |m| {
-                queryMetric(i, devs, m.field, m.metric, m.kind);
+                queryMetric(devs, m.field, m.metric, m.kind);
             }
         }
-    }.poll, .{ io, infos });
+    }.poll, .{infos});
 }
 
-fn queryMetric(io: std.Io, infos: []*DeviceInfo, comptime field: []const u8, metric_name: [:0]const u8, kind: MetricKind) void {
+fn queryMetric(infos: []*DeviceInfo, comptime field: []const u8, metric_name: [:0]const u8, kind: MetricKind) void {
     var ids: [tpuinfo.max_devices]c_longlong = undefined;
 
     switch (kind) {
@@ -59,17 +59,19 @@ fn queryMetric(io: std.Io, infos: []*DeviceInfo, comptime field: []const u8, met
             var vals: [tpuinfo.max_devices]c_longlong = undefined;
             const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
                 for (infos) |info| {
-                    var local = info.tpu.get(io);
-                    @field(local, field) = null;
-                    info.tpu.set(io, local);
+                    const back = info.tpu.back();
+                    back.* = info.tpu.front().*;
+                    @field(back, field) = null;
+                    info.tpu.swap();
                 }
                 return;
             };
             for (ids[0..n], vals[0..n]) |id, val| {
                 if (id >= 0 and id < infos.len) {
-                    var local = infos[@intCast(id)].tpu.get(io);
-                    @field(local, field) = @intCast(val);
-                    infos[@intCast(id)].tpu.set(io, local);
+                    const back = infos[@intCast(id)].tpu.back();
+                    back.* = infos[@intCast(id)].tpu.front().*;
+                    @field(back, field) = @intCast(val);
+                    infos[@intCast(id)].tpu.swap();
                 }
             } // Having not every value should in practice never happen
         },
@@ -77,17 +79,19 @@ fn queryMetric(io: std.Io, infos: []*DeviceInfo, comptime field: []const u8, met
             var vals: [tpuinfo.max_devices]f64 = undefined;
             const n = tpuinfo.queryDouble(address, metric_name, &ids, &vals) catch {
                 for (infos) |info| {
-                    var local = info.tpu.get(io);
-                    @field(local, field) = null;
-                    info.tpu.set(io, local);
+                    const back = info.tpu.back();
+                    back.* = info.tpu.front().*;
+                    @field(back, field) = null;
+                    info.tpu.swap();
                 }
                 return;
             };
             for (ids[0..n], vals[0..n]) |id, val| {
                 if (id >= 0 and id < infos.len and std.math.isFinite(val)) {
-                    var local = infos[@intCast(id)].tpu.get(io);
-                    @field(local, field) = @intFromFloat(@round(val));
-                    infos[@intCast(id)].tpu.set(io, local);
+                    const back = infos[@intCast(id)].tpu.back();
+                    back.* = infos[@intCast(id)].tpu.front().*;
+                    @field(back, field) = @intFromFloat(@round(val));
+                    infos[@intCast(id)].tpu.swap();
                 }
             } // Having not every value should in practice never happen
         },

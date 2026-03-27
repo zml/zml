@@ -3,14 +3,14 @@ const c = @import("c");
 const Nrt = @import("nrt.zig");
 const pi = @import("../../info/process_info.zig");
 const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
+const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
     try w.spawn(io, pollLoop, .{ io, w, allocator, list, nrt, handles, nc_per_device, device_infos, dev_offset });
 }
 
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
@@ -51,7 +51,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                     };
 
                     if (dev_idx < device_infos.len) {
-                        if (device_infos[dev_idx].neuron.get(io).util_percent) |util| {
+                        if (device_infos[dev_idx].neuron.front().util_percent) |util| {
                             info.dev_util_percent = @intCast(util);
                         }
                     }
@@ -67,22 +67,23 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                 const dev_idx = dev_i * nc_per_device + ci;
                 if (dev_idx >= device_infos.len) break;
 
-                var ni = device_infos[dev_idx].neuron.get(io);
-                const prev_us = ni.prev_total_us;
+                const ni_back = device_infos[dev_idx].neuron.back();
+                ni_back.* = device_infos[dev_idx].neuron.front().*;
+                const prev_us = ni_back.prev_total_us;
 
-                ni.prev_total_us = total_us_per_core[ci];
+                ni_back.prev_total_us = total_us_per_core[ci];
 
-                if (ni.prev_timestamp) |prev| {
+                if (ni_back.prev_timestamp) |prev| {
                     const elapsed = prev.untilNow(io, .awake);
                     const elapsed_us: u64 = @intCast(@divFloor(elapsed.nanoseconds, std.time.ns_per_us));
                     if (elapsed_us > 0) {
                         const delta_us = total_us_per_core[ci] -| prev_us;
-                        ni.util_percent = @min(100, delta_us * 100 / elapsed_us);
+                        ni_back.util_percent = @min(100, delta_us * 100 / elapsed_us);
                     }
                 }
 
-                ni.prev_timestamp = now;
-                device_infos[dev_idx].neuron.set(io, ni);
+                ni_back.prev_timestamp = now;
+                device_infos[dev_idx].neuron.swap();
             }
         }
 

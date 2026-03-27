@@ -3,7 +3,7 @@ const Nvml = @import("nvml.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const ShadowValue = @import("../../utils/shadow_value.zig").ShadowValue;
+const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
 const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
 const process = @import("process.zig");
@@ -18,7 +18,8 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const info = try collector.addDevice(.{ .cuda = .{ .value = .{ .name = dev.name() catch null } } });
+        const initial: GpuInfo = .{ .name = dev.getName() catch null };
+        const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
     }
 
@@ -26,7 +27,7 @@ pub fn start(collector: *Collector) !void {
     try process.init(collector.worker, collector.io, collector.gpa, processes, nvml, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*ShadowValue(GpuInfo), Device, metrics);
+const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     nvml: *const Nvml,

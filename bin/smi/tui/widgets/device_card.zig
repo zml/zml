@@ -42,11 +42,9 @@ pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event
 pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const i = self.device_id;
     const dev = self.state.devices[i];
-    const io = self.state.io;
-
     const target: data.Target = std.meta.activeTag(dev.*);
     const cf = switch (dev.*) {
-        inline else => |*sv| utils.commonDeviceFields(sv.get(io)),
+        inline else => |*sv| utils.commonDeviceFields(sv.front().*),
     };
     const mem_pct: u8 = if (cf.mem_total > 0) @intCast(@min(cf.mem_used * 100 / cf.mem_total, 100)) else 0;
 
@@ -55,7 +53,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
 
     const dev_suffix = switch (dev.*) {
         .cuda, .rocm => |*sv| blk: {
-            const gpu = sv.get(io);
+            const gpu = sv.front().*;
             const power = (gpu.power_mw orelse 0) / 1000;
             const power_limit = (gpu.power_limit_mw orelse 0) / 1000;
 

@@ -23,18 +23,19 @@ pub const Worker = struct {
         try self.group.concurrent(io, runFn, args);
     }
 
-    pub fn pollMetrics(comptime SV: type, comptime Dev: type, comptime table: anytype) fn (std.Io, *const Worker, SV, Dev) void {
+    pub fn pollMetrics(comptime DB: type, comptime Dev: type, comptime table: anytype) fn (std.Io, *const Worker, DB, Dev) void {
         return struct {
-            fn f(io: std.Io, w: *const Worker, sv: SV, dev: Dev) void {
+            fn f(io: std.Io, w: *const Worker, db: DB, dev: Dev) void {
                 w.pollLoop(io, struct {
-                    fn poll(i: std.Io, s: SV, d: Dev) void {
-                        var local = s.get(i);
+                    fn poll(s: DB, d: Dev) void {
+                        const back = s.back();
+                        back.* = s.front().*;
                         inline for (table) |m| {
-                            @field(local, m.field) = m.query(d) catch null;
+                            @field(back, m.field) = m.query(d) catch null;
                         }
-                        s.set(i, local);
+                        s.swap();
                     }
-                }.poll, .{ io, sv, dev });
+                }.poll, .{ db, dev });
             }
         }.f;
     }

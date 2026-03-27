@@ -1,6 +1,6 @@
-const ShadowValue = @import("../utils/shadow_value.zig").ShadowValue;
+const DoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer;
 
-pub const HostInfo = ShadowValue(HostData);
+pub const HostInfo = DoubleBuffer(HostData);
 
 pub const HostData = struct {
     hostname: ?[256]u8 = null,
