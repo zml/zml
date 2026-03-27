@@ -9,13 +9,14 @@ pub fn init(w: *Worker, io: std.Io, info: *HostInfo) !void {
     const host: Host = .{ .io = io };
 
     // read once metrics
-    var initial = info.get(io);
-    initial.hostname = host.hostname() catch null;
-    initial.kernel = host.kernel() catch null;
-    initial.cpu_name = host.cpuName() catch null;
-    initial.cpu_cores = host.cpuCores() catch null;
-    initial.mem_total_kib = host.memTotal() catch null;
-    info.set(io, initial);
+    var initial = info.front().*;
+    initial.hostname = host.getHostname() catch null;
+    initial.kernel = host.getKernel() catch null;
+    initial.cpu_name = host.getCpuName() catch null;
+    initial.cpu_cores = host.getCpuCores() catch null;
+    initial.mem_total_kib = host.getMemTotal() catch null;
+    info.back().* = initial;
+    info.swap();
 
     try w.spawn(io, pollHost, .{ io, w, info, host });
 }

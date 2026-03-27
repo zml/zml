@@ -2,16 +2,16 @@ const std = @import("std");
 const c = std.c;
 const AmdSmi = @import("amdsmi.zig");
 const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
+const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("../../worker.zig").Worker;
 
 const bdf_len = "0000:00:00.0".len;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi, dev_offset: u8) !void {
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) !void {
     try w.spawn(io, pollLoop, .{ io, w, allocator, list, amdsmi, dev_offset });
 }
 
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, amdsmi: *const AmdSmi, dev_offset: u8) void {
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 

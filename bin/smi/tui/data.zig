@@ -10,7 +10,7 @@ const hi = @import("../info/host_info.zig");
 pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
 pub const pi = @import("../info/process_info.zig");
-pub const ProcessShadowList = @import("../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
+pub const ProcessDoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 pub const ProcessEnricher = @import("../bindings/linux/process.zig").ProcessEnricher;
 
 pub const history_len: usize = 500;
@@ -77,7 +77,7 @@ pub const SystemState = struct {
     host: *HostInfo,
     history: HistoryBuffers = .{},
     targets: Targets,
-    process_lists: []*ProcessShadowList,
+    process_lists: []*ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -88,7 +88,7 @@ pub const SystemState = struct {
         host: *HostInfo,
         targets: Targets,
         tui_refresh_rate: u16,
-        process_lists: []*ProcessShadowList,
+        process_lists: []*ProcessDoubleBuffer,
         enricher: *ProcessEnricher,
         io: std.Io,
     };
@@ -119,7 +119,7 @@ pub const SystemState = struct {
         for (0..self.deviceCount()) |i| {
             switch (self.devices[i].*) {
                 .cuda, .rocm => |*sv| {
-                    const gpu = sv.get(self.io);
+                    const gpu = sv.front().*;
                     self.history.util[i].push(gpu.util_percent orelse 0);
                     const used = gpu.mem_used_bytes orelse 0;
                     const total = gpu.mem_total_bytes orelse 0;
@@ -128,7 +128,7 @@ pub const SystemState = struct {
                     self.history.power[i].push(gpu.power_mw orelse 0);
                 },
                 inline else => |*sv| {
-                    const info = sv.get(self.io);
+                    const info = sv.front().*;
                     self.history.util[i].push(info.util_percent orelse 0);
                     const used = info.mem_used_bytes orelse 0;
                     const total = info.mem_total_bytes orelse 0;

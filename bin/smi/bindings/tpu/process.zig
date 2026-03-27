@@ -1,14 +1,14 @@
 const std = @import("std");
 const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
+const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessShadowList, dev_offset: u8) !void {
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
     try w.spawn(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos, dev_offset });
 }
 
-fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
+fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
 
     while (w.isRunning()) {
@@ -53,7 +53,7 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.Proces
                     var info: pi.ProcessInfo = .{ .pid = pid, .device_idx = local_idx + dev_offset };
 
                     if (local_idx < infos.len) {
-                        const tpu = infos[local_idx].tpu.get(io);
+                        const tpu = infos[local_idx].tpu.front().*;
 
                         if (tpu.mem_used_bytes) |mem| {
                             info.dev_mem_kib = @intCast(mem / 1024);
