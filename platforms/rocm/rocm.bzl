@@ -255,7 +255,7 @@ def _rocm_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libdrm_mesa_amdgpu_ids", "libdrm-amdgpu-common", "libpjrt_rocm", "hipblaslt", "rocblas"],
+        root_module_direct_deps = ["libpjrt_rocm", "hipblaslt", "rocblas"],
         root_module_direct_dev_deps = [],
     )
 

@@ -128,7 +128,7 @@ cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas", "libdrm_mesa_amdgpu_ids", "libdrm-amdgpu-common")
+use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
