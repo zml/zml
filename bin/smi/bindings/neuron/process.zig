@@ -3,7 +3,7 @@ const c = @import("c");
 const Nrt = @import("nrt.zig");
 const pi = @import("../../info/process_info.zig");
 const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(pi.ProcessInfo);
+const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("../../worker.zig").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessShadowList, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
@@ -16,13 +16,11 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
 
     if (handles.len == 0) return;
 
-    var sl = list.shadow();
-    defer sl.deinit(allocator);
-
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
+        const back = list.back();
 
-        sl.clearRetainingCapacity();
+        back.clearRetainingCapacity();
 
         for (handles, 0..) |handle, dev_i| {
             const apps_result = nrt.allAppsInfo(handle) catch continue;
@@ -59,7 +57,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                     }
 
                     if (info.dev_mem_kib != null and info.dev_mem_kib.? > 0)
-                        sl.append(allocator, info) catch break;
+                        back.append(allocator, info) catch break;
                 }
             }
 
@@ -88,7 +86,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
             }
         }
 
-        sl.swap(io);
+        list.swap();
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {

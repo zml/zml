@@ -4,50 +4,19 @@ pub fn ShadowList(comptime T: type) type {
     return struct {
         const Self = @This();
 
-        list: std.ArrayList(T) = .empty,
-        mutex: std.Io.Mutex = .init,
+        values: [2]T,
+        current: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),
 
-        pub fn init() Self {
-            return .{};
+        pub fn front(self: *const Self) *const T {
+            return &self.values[self.current.load(.acquire)];
         }
 
-        /// Creates a shadow that swaps into this list.
-        pub fn shadow(self: *Self) Shadow {
-            return .init(self);
+        pub fn back(self: *Self) *T {
+            return &self.values[1 - self.current.load(.acquire)];
         }
 
-        pub fn deinit(self: *Self, allocator: std.mem.Allocator) void {
-            self.list.deinit(allocator);
+        pub fn swap(self: *Self) void {
+            self.current.store(1 - self.current.load(.acquire), .release);
         }
-
-        pub const Shadow = struct {
-            list: std.ArrayList(T) = .empty,
-            primary: *Self,
-
-            pub fn init(primary: *Self) Shadow {
-                return .{ .primary = primary };
-            }
-
-            pub fn deinit(self_: *Shadow, allocator: std.mem.Allocator) void {
-                self_.list.deinit(allocator);
-            }
-
-            pub fn clearRetainingCapacity(self_: *Shadow) void {
-                self_.list.clearRetainingCapacity();
-            }
-
-            pub fn append(self_: *Shadow, allocator: std.mem.Allocator, item: T) !void {
-                try self_.list.append(allocator, item);
-            }
-
-            /// Swap this shadow's contents into the primary list under the primary's mutex.
-            pub fn swap(self_: *Shadow, io: std.Io) void {
-                self_.primary.mutex.lockUncancelable(io);
-                defer self_.primary.mutex.unlock(io);
-                const tmp = self_.primary.list;
-                self_.primary.list = self_.list;
-                self_.list = tmp;
-            }
-        };
     };
 }
