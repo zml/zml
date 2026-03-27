@@ -1,5 +1,5 @@
 const std = @import("std");
-const ShadowValue = @import("../utils/shadow_value.zig").ShadowValue;
+const DoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer;
 
 pub const Target = enum {
     cuda,
@@ -25,10 +25,10 @@ pub const Target = enum {
 };
 
 pub const DeviceInfo = union(Target) {
-    cuda: ShadowValue(GpuInfo),
-    rocm: ShadowValue(GpuInfo),
-    neuron: ShadowValue(NeuronInfo),
-    tpu: ShadowValue(TpuInfo),
+    cuda: DoubleBuffer(GpuInfo),
+    rocm: DoubleBuffer(GpuInfo),
+    neuron: DoubleBuffer(NeuronInfo),
+    tpu: DoubleBuffer(TpuInfo),
 };
 
 pub const GpuInfo = struct {

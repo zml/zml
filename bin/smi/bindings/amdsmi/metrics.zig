@@ -3,7 +3,7 @@ const AmdSmi = @import("amdsmi.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const ShadowValue = @import("../../utils/shadow_value.zig").ShadowValue;
+const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
 const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
 const process = @import("process.zig");
@@ -18,7 +18,8 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const info = try collector.addDevice(.{ .rocm = .{ .value = .{ .name = dev.name() catch null } } });
+        const initial: GpuInfo = .{ .name = dev.getName() catch null };
+        const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
 
@@ -26,7 +27,7 @@ pub fn start(collector: *Collector) !void {
     try process.init(collector.worker, collector.io, collector.gpa, processes, amdsmi, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*ShadowValue(GpuInfo), Device, metrics);
+const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     amdsmi: *const AmdSmi,

@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub fn ShadowList(comptime T: type) type {
+pub fn DoubleBuffer(comptime T: type) type {
     return struct {
         const Self = @This();
 

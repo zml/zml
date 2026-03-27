@@ -18,12 +18,11 @@ pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
     const w = ctx.max.width orelse 80;
     const id = self.device_id;
     const dev = self.state.devices[id];
-    const io = self.state.io;
     const wgt = ui.widget(self);
 
     return switch (dev.*) {
-        .cuda, .rocm => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.get(io), wgt),
-        .neuron => |*sv| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, sv.get(io), wgt),
-        .tpu => |*sv| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.get(io), wgt),
+        .cuda, .rocm => |*sv| try gpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
+        .neuron => |*sv| try neuron_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
+        .tpu => |*sv| try tpu_detail.draw(self.state, self.process_table, ctx, w, id, sv.front().*, wgt),
     };
 }

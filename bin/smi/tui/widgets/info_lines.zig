@@ -33,7 +33,7 @@ const Entry = struct {
 
 pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {
     const w = ctx.max.width orelse 80;
-    const host = self.state.host.get(self.state.io);
+    const host = self.state.host.front().*;
 
     const hostname_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{str.optSlice(&host.hostname)});
     const kernel_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{str.optSlice(&host.kernel)});

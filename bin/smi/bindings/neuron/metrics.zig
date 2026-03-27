@@ -4,7 +4,7 @@ const sysfs = @import("../../utils/sysfs.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
 const NeuronInfo = device_info.NeuronInfo;
-const ShadowValue = @import("../../utils/shadow_value.zig").ShadowValue;
+const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
 const Collector = @import("../../collector.zig").Collector;
 const Worker = @import("../../worker.zig").Worker;
 const Nrt = @import("nrt.zig");
@@ -49,7 +49,7 @@ pub fn start(collector: *Collector) !void {
         };
 
         for (0..nc_per_device) |ci| {
-            const info = try collector.addDevice(.{ .neuron = .{ .value = .{} } });
+            const info = try collector.addDevice(.{ .neuron = .{ .values = .{ .{}, .{} } } });
             try neuron_infos.append(collector.arena, info);
 
             const dev: Device = .{
@@ -59,7 +59,9 @@ pub fn start(collector: *Collector) !void {
                 .mem_per_core = mem_per_core,
             };
 
-            info.neuron.value.name = dev.name() catch null;
+            const name = dev.getName() catch null;
+            info.neuron.values[0].name = name;
+            info.neuron.values[1].name = name;
 
             try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.neuron, dev });
         }
@@ -71,7 +73,7 @@ pub fn start(collector: *Collector) !void {
     }
 }
 
-const pollDevice = Worker.pollMetrics(*ShadowValue(NeuronInfo), Device, metrics);
+const pollDevice = Worker.pollMetrics(*DoubleBuffer(NeuronInfo), Device, metrics);
 
 const Device = struct {
     io: std.Io,
