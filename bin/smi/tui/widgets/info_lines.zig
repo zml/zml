@@ -3,7 +3,6 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
-const str = @import("../../str.zig");
 const utils = @import("../lib/utils.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");

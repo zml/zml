@@ -87,9 +87,9 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const result = try sysfs.readString(self.io, try self.devicePath(&buf, "info/architecture/device_name"));
-        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
+        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+        var read_buf: [256]u8 = undefined;
+        return try arena.dupe(u8, try sysfs.readString(self.io, try self.devicePath(&path_buf, "info/architecture/device_name"), &read_buf));
     }
 
     fn readCoreMem(self: Device, comptime subdir: []const u8) !u64 {
