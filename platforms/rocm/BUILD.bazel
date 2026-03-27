@@ -1,6 +1,11 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
+exports_files(
+    ["merge_amdgpu_ids.zig"],
+    visibility = ["@libpjrt_rocm//:__subpackages__"],
+)
+
 zig_shared_library(
     name = "zmlxrocm",
     main = "zmlxrocm.zig",

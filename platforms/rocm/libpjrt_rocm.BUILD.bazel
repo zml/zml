@@ -1,5 +1,7 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 bool_flag(
@@ -25,6 +27,26 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+zig_binary(
+    name = "merge_amdgpu_ids",
+    main = "@zml//platforms/rocm:merge_amdgpu_ids.zig",
+)
+
+run_binary(
+    name = "amdgpu_ids",
+    srcs = [
+        "@libdrm-amdgpu-common//:amdgpu_ids",
+        "@libdrm_mesa_amdgpu_ids//file:amdgpu.ids",
+    ],
+    outs = ["amdgpu.ids"],
+    args = [
+        "$(location @libdrm-amdgpu-common//:amdgpu_ids)",
+        "$(location @libdrm_mesa_amdgpu_ids//file:amdgpu.ids)",
+        "$(location amdgpu.ids)",
+    ],
+    tool = ":merge_amdgpu_ids",
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
@@ -39,7 +61,7 @@ copy_to_directory(
         "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
         "@hsa-rocr//:hsa-runtime",
         "@libdrm-amdgpu-amdgpu1",
-        "@libdrm-amdgpu-common//:amdgpu_ids",
+        ":amdgpu_ids",
         "@libdrm2-amdgpu",
         "@libbz2-1.0",
         "@libelf1",
@@ -85,6 +107,7 @@ copy_to_directory(
         "libpjrt_rocm_so": "lib",
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
         "opt/amdgpu/share": "share",
+        "amdgpu.ids": "share/libdrm/amdgpu.ids",
         "rccl": "lib",
         "rocblas": "lib",
         "rocm-core": "lib",
