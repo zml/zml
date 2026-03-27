@@ -18,7 +18,7 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name() catch null };
+        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
@@ -37,10 +37,10 @@ const Device = struct {
         return .{ .amdsmi = amdsmi, .handle = try amdsmi.handleByIndex(index) };
     }
 
-    fn name(self: Device) ![256]u8 {
-        var buf: [256]u8 = .{0} ** 256;
-        _ = try self.amdsmi.name(self.handle, buf[0..AmdSmi.name_buf_len]);
-        return buf;
+    fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        var buf: [AmdSmi.name_buf_len]u8 = .{0} ** AmdSmi.name_buf_len;
+        const slice = try self.amdsmi.name(self.handle, &buf);
+        return try arena.dupe(u8, slice);
     }
 
     // Power

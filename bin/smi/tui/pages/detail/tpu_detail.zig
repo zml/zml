@@ -19,7 +19,7 @@ pub fn draw(
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const header = try common.headerText(ctx.arena, id, str.optSlice(&tp.name));
+    const header = try common.headerText(ctx.arena, id, tp.name orelse "Unknown");
 
     // ── Utilization + Memory charts ─────────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{
