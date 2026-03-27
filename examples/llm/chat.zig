@@ -2,11 +2,11 @@ const std = @import("std");
 
 const c = @import("c");
 const zml = @import("zml");
+const tracer = zml.tracer;
 
 const models = @import("models.zig");
 
 const log = std.log.scoped(.llm);
-
 pub const prompt_prefix: [:0]const u8 = "> ";
 pub const history_file_path: [:0]const u8 = ".llm_chat_history";
 
@@ -59,7 +59,11 @@ pub const Chat = struct {
     }
 
     pub fn runOnce(self: *Chat, prompt: []const u8) !void {
-        const prompt_tokens = try self.session.tokenizePrompt(self.allocator, prompt);
+        const prompt_tokens = b: {
+            var trace = tracer.scope("llm.tokenize_prompt");
+            defer trace.end();
+            break :b try self.session.tokenizePrompt(self.allocator, prompt);
+        };
         defer self.allocator.free(prompt_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -72,7 +76,11 @@ pub const Chat = struct {
     }
 
     pub fn runInteractive(self: *Chat, initial_prompt: []const u8) !void {
-        var turn_tokens = try self.session.tokenizePrompt(self.allocator, initial_prompt);
+        var turn_tokens = b: {
+            var trace = tracer.scope("llm.tokenize_prompt");
+            defer trace.end();
+            break :b try self.session.tokenizePrompt(self.allocator, initial_prompt);
+        };
         defer self.allocator.free(turn_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
@@ -97,6 +105,12 @@ pub const Chat = struct {
     }
 
     fn runPrefill(self: *Chat, prompt_tokens: []const u32, stdout: *std.Io.Writer) !void {
+        var trace = try tracer.scopeWith(self.allocator, "llm.prefill", .{
+            .prompt_tokens = prompt_tokens.len,
+            .tokens_before = self.tokens.items.len,
+        });
+        defer trace.end();
+
         if (prompt_tokens.len + self.tokens.items.len > self.session.maxTokens()) {
             return error.PromptTooLong;
         }
@@ -111,6 +125,11 @@ pub const Chat = struct {
     }
 
     fn runDecodeTurn(self: *Chat, stdout: *std.Io.Writer) !void {
+        var trace = try tracer.scopeWith(self.allocator, "llm.decode_turn", .{
+            .tokens_before = self.tokens.items.len,
+        });
+        defer trace.end();
+
         const decode_start: std.Io.Timestamp = .now(self.io, .awake);
         const decode_pos_before = self.tokens.items.len;
         try self.session.runDecode(&self.tokens, stdout);
@@ -126,6 +145,9 @@ pub const Chat = struct {
     }
 
     fn readNextTurn(self: *Chat, previous_turn_tokens: []const u32, stdout: *std.Io.Writer) !?[]const u32 {
+        var trace = tracer.scope("llm.read_next_turn");
+        defer trace.end();
+
         while (true) {
             const line = c.linenoise(prompt_prefix.ptr) orelse {
                 try stdout.print("\x1b[2m{}/{} tokens used\x1b[0m\n\n", .{ self.tokens.items.len, self.session.maxTokens() });
@@ -139,7 +161,11 @@ pub const Chat = struct {
             if (input.len == 0) continue;
 
             self.allocator.free(previous_turn_tokens);
-            return try self.session.tokenizeTurn(self.allocator, input);
+            return b: {
+                var tokenize_trace = tracer.scope("llm.tokenize_turn");
+                defer tokenize_trace.end();
+                break :b try self.session.tokenizeTurn(self.allocator, input);
+            };
         }
     }
 };

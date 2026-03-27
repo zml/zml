@@ -76,6 +76,7 @@ zig_library(
         "//pjrt",
         "//platforms",
         "//stdx",
+        "//tools:traceme_lib",
         "//tools:xspace_to_perfetto_lib",
         "//upb",
         "//zml/io",

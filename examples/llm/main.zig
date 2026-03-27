@@ -3,6 +3,7 @@ const std = @import("std");
 const c = @import("c");
 const zml = @import("zml");
 const stdx = zml.stdx;
+const tracer = zml.tracer;
 
 const chat = @import("chat.zig");
 const models = @import("models.zig");
@@ -12,7 +13,6 @@ pub const std_options: std.Options = .{
 };
 
 const log = std.log.scoped(.llm);
-
 const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -32,7 +32,7 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
         \\
     ;
@@ -83,6 +83,16 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
+    var profiler = try platform.profiler(allocator, io, .defaults);
+    defer profiler.deinit();
+
+    try profiler.start();
+    defer {
+        if ((profiler.stop() catch unreachable)) |profile| {
+            log.info("Profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
+        }
+    }
+
     const backend = args.backend orelse b: {
         const selected = zml.attention.attention.Backend.auto(platform);
         log.info("Selected backend: {}", .{selected});
@@ -93,10 +103,18 @@ pub fn main(init: std.process.Init) !void {
     // Model initialization
     //
     log.info("Resolving model repository..", .{});
-    const repo = try zml.safetensors.resolveModelRepo(io, args.model);
+    const repo = b: {
+        var trace = tracer.scope("llm.resolve_model_repo");
+        defer trace.end();
+        break :b try zml.safetensors.resolveModelRepo(io, args.model);
+    };
 
     log.info("Initializing model..", .{});
-    var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
+    var registry: zml.safetensors.TensorRegistry = b: {
+        var trace = tracer.scope("llm.init_registry");
+        defer trace.end();
+        break :b try .fromRepo(allocator, io, repo);
+    };
     defer registry.deinit();
 
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
@@ -123,10 +141,21 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    var model_buffers = b: {
+        var trace = tracer.scope("llm.load_buffers");
+        defer trace.end();
+        break :b try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    };
     defer model.unloadBuffers(&model_buffers, allocator);
 
-    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    var compiled_model = b: {
+        var trace = try tracer.scopeWith(allocator, "llm.compile", .{
+            .seqlen = args.seqlen,
+            .interactive = args.prompt == null,
+        });
+        defer trace.end();
+        break :b try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    };
     defer compiled_model.deinit();
 
     progress.end();
@@ -159,13 +188,20 @@ pub fn main(init: std.process.Init) !void {
     defer llm_chat.deinit();
 
     if (interactive) {
+        var trace = tracer.scope("llm.chat.interactive");
+        defer trace.end();
         try llm_chat.runInteractive(prompt);
     } else {
+        var trace = tracer.scope("llm.chat.once");
+        defer trace.end();
         try llm_chat.runOnce(prompt);
     }
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
+    var trace = tracer.scope("llm.load_tokenizer");
+    defer trace.end();
+
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();

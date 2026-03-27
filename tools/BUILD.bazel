@@ -22,6 +22,31 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "traceme_lib",
+    tags = ["manual"],
+    srcs = ["traceme_lib.cc"],
+    hdrs = ["traceme.h"],
+    defines = select({
+        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ffi:cc",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/backends/cpu:host_tracer_utils",
+        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
+        "@xla//xla/tsl/profiler/utils:time_utils",
+    ] + select({
+        "//platforms:cuda.enabled": [
+            "@cuda_nvtx//:headers",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 cc_binary(
     name = "xspace_to_perfetto",
     srcs = ["xspace_to_perfetto.cc"],

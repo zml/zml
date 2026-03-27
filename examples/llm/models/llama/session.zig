@@ -4,6 +4,7 @@ const zml = @import("zml");
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
+const tracer = zml.tracer;
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -62,6 +63,9 @@ pub const Session = struct {
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("llama.tokenize_prompt");
+        defer trace.end();
+
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
@@ -80,6 +84,9 @@ pub const Session = struct {
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("llama.tokenize_turn");
+        defer trace.end();
+
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
@@ -98,6 +105,11 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        var trace = try tracer.scopeWith(self.allocator, "llama.prefill", .{
+            .tokens = all_tokens.len,
+        });
+        defer trace.end();
+
         var prefill_args = try self.compiled_model.prefill_exe.args(self.allocator);
         defer prefill_args.deinit(self.allocator);
 
@@ -133,6 +145,9 @@ pub const Session = struct {
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
+        var trace = tracer.scope("llama.decode");
+        defer trace.end();
+
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
@@ -164,18 +179,25 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, replicated_sharding);
             defer token_pos_buffer.deinit();
 
-            decode_args.set(.{
-                self.model_buffers,
-                current_token_buffer,
-                token_pos_buffer,
-                &self.kv_cache_buffers,
-                &self.rng_buffers,
-                &self.attention_metadata_buffers,
-            });
-            self.compiled_model.decode_exe.call(decode_args, &decode_results);
+            {
+                var step_trace = try tracer.scopeWith(self.allocator, "llama.decode_step", .{
+                    .token_index = all_tokens.items.len,
+                });
+                defer step_trace.end();
 
-            decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
-            try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+                decode_args.set(.{
+                    self.model_buffers,
+                    current_token_buffer,
+                    token_pos_buffer,
+                    &self.kv_cache_buffers,
+                    &self.rng_buffers,
+                    &self.attention_metadata_buffers,
+                });
+                self.compiled_model.decode_exe.call(decode_args, &decode_results);
+
+                decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
+                try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+            }
         }
     }
 };

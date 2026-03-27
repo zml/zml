@@ -5,6 +5,7 @@ const attention = zml.attention.attention;
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
+const tracer = zml.tracer;
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -57,6 +58,9 @@ pub const Session = struct {
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("lfm2.tokenize_prompt");
+        defer trace.end();
+
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
@@ -75,6 +79,9 @@ pub const Session = struct {
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("lfm2.tokenize_turn");
+        defer trace.end();
+
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
@@ -93,6 +100,11 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        var trace = try tracer.scopeWith(self.allocator, "lfm2.prefill", .{
+            .tokens = all_tokens.len,
+        });
+        defer trace.end();
+
         const tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{ .batch = 1, .seq = self.seqlen }, .u32));
         defer tokens_slice.free(self.allocator);
         const tokens = tokens_slice.items(u32);
@@ -130,6 +142,9 @@ pub const Session = struct {
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
+        var trace = tracer.scope("lfm2.decode");
+        defer trace.end();
+
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
@@ -165,20 +180,27 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, sharding);
             defer token_pos_buffer.deinit();
 
-            try self.compiled_model.decode.run(.{
-                .allocator = self.allocator,
-                .io = self.io,
-                .platform = self.platform,
-                .model_buffers = self.model_buffers,
-                .tokens_buf = &current_token_buffer,
-                .tokens_pos_buf = &token_pos_buffer,
-                .actual_seq_len_buf = &actual_seq_len_buf,
-                .rng_buf = &self.rng_buf,
-                .cache_buffers = &self.cache_buffers,
-                .attention_metadata_buffers = self.attention_metadata_buffers,
-            });
+            {
+                var step_trace = try tracer.scopeWith(self.allocator, "lfm2.decode_step", .{
+                    .token_index = all_tokens.items.len,
+                });
+                defer step_trace.end();
 
-            try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+                try self.compiled_model.decode.run(.{
+                    .allocator = self.allocator,
+                    .io = self.io,
+                    .platform = self.platform,
+                    .model_buffers = self.model_buffers,
+                    .tokens_buf = &current_token_buffer,
+                    .tokens_pos_buf = &token_pos_buffer,
+                    .actual_seq_len_buf = &actual_seq_len_buf,
+                    .rng_buf = &self.rng_buf,
+                    .cache_buffers = &self.cache_buffers,
+                    .attention_metadata_buffers = self.attention_metadata_buffers,
+                });
+
+                try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+            }
         }
     }
 };

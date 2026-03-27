@@ -142,6 +142,9 @@ pub const Profiler = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     inner: ?pjrt.Profiler,
+    raise_error_on_start_failure: bool,
+    local_host_tracer_level: ?u32,
+    local_host_traceme_filter_mask: ?u64,
     session_dir: []const u8,
     profile: Profile,
 
@@ -170,6 +173,9 @@ pub const Profiler = struct {
             .allocator = allocator,
             .io = io,
             .inner = inner,
+            .raise_error_on_start_failure = options.raise_error_on_start_failure orelse false,
+            .local_host_tracer_level = options.host_tracer_level,
+            .local_host_traceme_filter_mask = if (options.trace_options) |trace_options| trace_options.host_traceme_filter_mask else null,
             .session_dir = session_dir,
             .profile = .{
                 .protobuf_path = protobuf_path,
@@ -187,30 +193,51 @@ pub const Profiler = struct {
 
     pub fn start(self: *Profiler) !void {
         if (self.inner) |*inner| {
-            try inner.start();
+            inner.start() catch |err| {
+                if (self.raise_error_on_start_failure) {
+                    return err;
+                }
+                log.warn("Profiler backend failed to start; continuing with local host tracing only: {}", .{err});
+                self.inner = null;
+            };
+        }
+        if (self.local_host_tracer_level) |level| {
+            c.zml_traceme_session_start(
+                @intCast(level),
+                self.local_host_traceme_filter_mask orelse 0,
+                self.local_host_traceme_filter_mask != null,
+            );
         }
     }
 
     pub fn stop(self: *Profiler) !?Profile {
-        var inner = self.inner orelse return null;
-        self.inner = null;
-        try inner.stop();
-
-        const protobuf = try inner.collectData(self.arena.allocator());
-
-        try self.writeFile(self.profile.protobuf_path, protobuf);
-
-        const conversion_error = c.zml_xspace_to_perfetto_dump(
-            zffi.ZigSlice.from(protobuf),
-            zffi.ZigSlice.from(self.profile.perfetto_path),
-        );
-        defer if (conversion_error.len != 0) {
-            c.zml_xspace_to_perfetto_str_free(conversion_error);
+        const protobuf = if (self.inner) |*inner| blk: {
+            self.inner = null;
+            try inner.stop();
+            break :blk try inner.collectData(self.arena.allocator());
+        } else &.{};
+        const merged_protobuf = c.zml_traceme_session_merge(zffi.ZigSlice.from(protobuf));
+        defer if (merged_protobuf.len != 0) {
+            c.zml_traceme_str_free(merged_protobuf);
         };
-        if (conversion_error.len != 0) {
-            log.err("Failed to convert profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
-            return error.ProfileTraceConversionFailed;
+        const final_protobuf = if (merged_protobuf.len != 0) zffi.ZigSlice.to(u8, merged_protobuf) else protobuf;
+        if (final_protobuf.len == 0) {
+            return null;
         }
+
+        try self.writeFile(self.profile.protobuf_path, final_protobuf);
+
+        // const conversion_error = c.zml_xspace_to_perfetto_dump(
+        //     zffi.ZigSlice.from(final_protobuf),
+        //     zffi.ZigSlice.from(self.profile.perfetto_path),
+        // );
+        // defer if (conversion_error.len != 0) {
+        //     c.zml_xspace_to_perfetto_str_free(conversion_error);
+        // };
+        // if (conversion_error.len != 0) {
+        //     log.err("Failed to convert profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
+        //     return error.ProfileTraceConversionFailed;
+        // }
 
         return self.profile;
     }

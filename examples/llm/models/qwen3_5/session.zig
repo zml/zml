@@ -4,6 +4,7 @@ const zml = @import("zml");
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
+const tracer = zml.tracer;
 
 pub const Session = struct {
     allocator: std.mem.Allocator,
@@ -65,14 +66,23 @@ pub const Session = struct {
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("qwen.tokenize_prompt");
+        defer trace.end();
         return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, true);
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
+        var trace = tracer.scope("qwen.tokenize_turn");
+        defer trace.end();
         return tokenizeChatPrompt(allocator, self.tokenizer, prompt, self.special_tokens, false);
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        var trace = try tracer.scopeWith(self.allocator, "qwen.prefill", .{
+            .tokens = all_tokens.len,
+        });
+        defer trace.end();
+
         const prefill_tokens_shape = zml.Shape.init(.{ .b = 1, .s = self.seqlen }, .u32);
         const prefill_tokens_slice = try zml.Slice.alloc(self.allocator, prefill_tokens_shape);
         defer prefill_tokens_slice.free(self.allocator);
@@ -110,6 +120,9 @@ pub const Session = struct {
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
+        var trace = tracer.scope("qwen.decode");
+        defer trace.end();
+
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
@@ -136,6 +149,12 @@ pub const Session = struct {
     }
 
     fn runDecodeStep(self: *Session, token_id: u32, token_index: u32) !void {
+        var trace = try tracer.scopeWith(self.allocator, "qwen.decode_step", .{
+            .token_id = token_id,
+            .token_index = token_index,
+        });
+        defer trace.end();
+
         self.step_token_slice.items(u32)[0] = token_id;
 
         const replicated_sharding = self.compiled_model.params.shardings.replicated;
@@ -167,6 +186,12 @@ pub const Session = struct {
 };
 
 fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, special_tokens: model.Model.SpecialTokens, is_first_turn: bool) ![]const u32 {
+    var trace = try tracer.scopeWith(allocator, "qwen.tokenize_chat_prompt", .{
+        .prompt_len = prompt.len,
+        .first_turn = is_first_turn,
+    });
+    defer trace.end();
+
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
