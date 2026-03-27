@@ -56,7 +56,7 @@ pub fn start(collector: *Collector) !void {
                 .mem_per_core = mem_per_core,
             };
 
-            const initial: NeuronInfo = .{ .name = dev.name() catch null };
+            const initial: NeuronInfo = .{ .name = dev.name(collector.arena) catch null };
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
 
@@ -86,9 +86,10 @@ const Device = struct {
         return std.fmt.bufPrint(buf, base_path ++ "/neuron{d}/neuron_core{d}/{s}", .{ self.device_idx, self.core_idx, sub_path });
     }
 
-    fn name(self: Device) ![256]u8 {
+    fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
         var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        return sysfs.readString(self.io, try self.devicePath(&buf, "info/architecture/device_name"));
+        const result = try sysfs.readString(self.io, try self.devicePath(&buf, "info/architecture/device_name"));
+        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
     }
 
     fn readCoreMem(self: Device, comptime subdir: []const u8) !u64 {

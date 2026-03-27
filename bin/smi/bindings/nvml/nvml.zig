@@ -128,9 +128,9 @@ pub fn deviceCount(self: Nvml) Error!u32 {
     return @intCast(count);
 }
 
-pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: []u8) Error![:0]const u8 {
-    try check(self.lib.nvmlDeviceGetName(handle, buf.ptr, @as(c_uint, @intCast(buf.len))));
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf.ptr)), 0);
+pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[256]u8) Error![:0]const u8 {
+    try check(self.lib.nvmlDeviceGetName(handle, buf, buf.len));
+    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
 }
 
 pub fn powerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {

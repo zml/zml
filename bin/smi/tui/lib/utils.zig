@@ -85,13 +85,13 @@ pub fn trunc(s: []const u8, max: usize) []const u8 {
 }
 
 pub const CommonDeviceFields = struct {
-    name: ?[256]u8,
+    name: ?[]const u8,
     util_percent: u8,
     mem_used: u64,
     mem_total: u64,
 
     pub fn nameSlice(self: *const CommonDeviceFields) []const u8 {
-        return str.optSlice(&self.name);
+        return self.name orelse "N/A";
     }
 };
 

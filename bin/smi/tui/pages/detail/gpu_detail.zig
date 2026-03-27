@@ -21,7 +21,7 @@ pub fn draw(
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const header = try common.headerText(ctx.arena, id, str.optSlice(&gpu.name));
+    const header = try common.headerText(ctx.arena, id, gpu.name orelse "Unknown");
 
     // ── GPU Utilization + Memory charts ─────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{
