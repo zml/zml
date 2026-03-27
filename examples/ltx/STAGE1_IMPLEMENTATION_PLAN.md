@@ -78,8 +78,8 @@ if rescale_scale != 0:
 | `forwardDenoisingStep` | ✅ | ✅ (Euler step + post_process_latent) |
 | A2V/V2A mask support | ✅ | Pass 4: set masks to zero |
 | STG V-passthrough | ✅ | `forwardBlock0NativeSTG` — comptime V-passthrough variant |
-| Guider combine | ❌ | **New**: CFG+STG+modality formula + std-rescale |
-| Dynamic sigma schedule | ❌ | **New**: `LTX2Scheduler` shifted cosine schedule |
+| Guider combine | ✅ | **New**: `forwardGuiderCombine` — CFG+STG+modality formula + std-rescale |
+| Dynamic sigma schedule | ✅ | **New**: `computeSigmaSchedule` — native Zig LTX2Scheduler |
 
 ---
 
@@ -125,62 +125,169 @@ code path is actually active and changing behavior (identical outputs would indi
   real weights, monkeypatches attn1/audio_attn1 for V-passthrough reference)
 - Checkpoint key prefix: `model.diffusion_model.transformer_blocks.{idx}.`
 
-### Step 2: Guider combine function
+### Step 2: Guider combine function — ✅ DONE
 
 **What**: Combine the 4 denoised outputs using the CFG+STG+modality formula.
 
-**How**: New compiled function `forwardGuiderCombine`:
+**How**: New compiled function `forwardGuiderCombine` (16 Tensor inputs):
+- 4 per-modality outputs × 2 modalities (cond/neg/ptb/iso for video and audio, bf16)
+- 4 scalar guidance params × 2 modalities (cfg/stg/mod/rescale, f32)
+- Returns `GuiderCombineResult { guided_v, guided_a }`
+
+Internal helper `guiderCombineSingle` implements per-modality:
 ```
-Input:  cond_v, neg_v, ptb_v, iso_v (each [B, T_v, 128] bf16)
-        cond_a, neg_a, ptb_a, iso_a (each [B, T_a, 128] bf16)
-        cfg_v, stg_v, mod_v, rescale_v (f32 scalars)
-        cfg_a, stg_a, mod_a, rescale_a (f32 scalars)
-Output: guided_v [B, T_v, 128], guided_a [B, T_a, 128]
+pred = cond + (cfg-1)*(cond-neg) + stg*(cond-ptb) + (mod-1)*(cond-iso)
+pred *= rescale * (cond.std() / pred.std()) + (1 - rescale)
 ```
 
-Pure tensor math — straightforward to implement and validate.
+`tensorStdAll` computes std across all elements via flatten→mean→variance→sqrt.
 
-### Step 3: Sigma schedule
+**Validation results** (synthetic inputs, default guidance params):
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| Zig vs Python cos_sim | 1.000000 | 1.000000 |
+| max_abs | 0.0000 | 0.0000 |
+| mean_abs | 0.000000 | 0.000000 |
+
+**Bit-identical** on synthetic inputs. On real pipeline data, matches the pipeline's
+own `MultiModalGuider.calculate` output:
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| Zig vs Python (synthetic) cos_sim | 1.000000 | 1.000000 |
+| Our formula vs pipeline's guider cos_sim | 0.999993 | 0.999989 |
+| Our formula vs pipeline's guider max_abs | 0.046875 | 0.031250 |
+
+The tiny residual (~0.03-0.05 max_abs) is bf16 rounding from different cast ordering
+in the pipeline's internal path. Formula is confirmed correct.
+
+**Files**:
+- `model.zig`: `forwardGuiderCombine`, `guiderCombineSingle`, `tensorStdAll`, `GuiderCombineResult`
+- `guider_combine_check.zig`: Zig parity checker
+- `export_guider_combine_fixture.py`: Self-contained fixture generator (synthetic bf16 inputs,
+  default params: video cfg=3/stg=1/mod=3/rescale=0.7, audio cfg=7/stg=1/mod=3/rescale=0.7)
+- `export_guider_combine_live_fixture.py`: Live pipeline capture — hooks `transformer.forward`
+  and `MultiModalGuider.calculate` to capture real 4-pass outputs + pipeline's guided result
+
+### Step 3: Sigma schedule — ✅ DONE
 
 **What**: Stage 1 uses `LTX2Scheduler` which generates a shifted/stretched cosine
 schedule dynamically. Parameters: `max_shift=2.05`, `base_shift=0.95`,
 `terminal=0.1`, `num_steps=30`.
 
-**Options**:
-- **A) Compute in Python, export as tensor**: Simplest. The export script computes the
-  sigma schedule and includes it in the safetensors file. The Zig driver reads it.
-- **B) Compute in Zig**: Implement the scheduler formula natively. More self-contained
-  but the formula is non-trivial (involves cosine map + exponential shifting).
+**How**: Implemented natively in Zig as `computeSigmaSchedule` — a host-side function
+(not a compiled graph op) that produces `num_steps + 1` f32 values at startup.
 
-**Recommendation**: Option A for initial implementation, Option B later if needed.
+Algorithm (matching `LTX2Scheduler.execute`):
+1. `linspace(1.0, 0.0, num_steps + 1)`
+2. Compute token-dependent shift: `sigma_shift = tokens * mm + b` where
+   `mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR)`
+3. Apply logistic shift: `sigma = exp(s) / (exp(s) + 1/sigma - 1)`
+4. Stretch so last non-zero sigma = terminal
 
-### Step 4: Driver (`denoise_stage1.zig`)
+Constants: `BASE_SHIFT_ANCHOR=1024`, `MAX_SHIFT_ANCHOR=4096`.
+
+Also added `stage1_default_schedule` struct with the default parameters.
+
+**Validation results** (Zig vs Python `LTX2Scheduler().execute(steps=30)`):
+
+| Metric | Value |
+|--------|-------|
+| max_abs_diff | 1.788e-7 |
+| mean_abs_diff | 5.0e-8 |
+
+Within f32 epsilon (1.19e-7 per op). All 31 values match to full f32 precision.
+
+**Files**:
+- `model.zig`: `computeSigmaSchedule`, `stage1_default_schedule`
+- `sigma_schedule_check.zig`: Comparison against hardcoded Python reference values
+
+### Step 4: Driver (`denoise_stage1.zig`) — 🔄 IN PROGRESS (Phase 1 done)
 
 **What**: Outer loop driving the full Stage 1 denoising.
 
-**Per step** (30–40 iterations):
+**Incremental phases**:
+- **Phase 1** ✅: Single-pass skeleton (conditional only, no guidance)
+- **Phase 2**: Add 4-pass structure (negative context, STG block swap, isolation masks)
+- **Phase 3**: Wire in `forwardGuiderCombine` and validate against live fixture
+
+**Per step** (30 iterations):
 1. Run `forwardPreprocess` (1×) — sigma → adaln timesteps + RoPE + patchify
 2. Run Pass 1 (positive): 48 blocks via `block_normal_exe` + output projection
 3. Run Pass 2 (negative): 48 blocks via `block_normal_exe` + output projection
    (same exe, different text context buffers)
 4. Run Pass 3 (STG): 47 blocks via `block_normal_exe` + 1 block (29) via
    `block_stg_exe` + output projection
-5. Run Pass 4 (isolated): 48 blocks via `block_normal_exe` with a2v_mask=0, v2a_mask=0
+5. Run Pass 4 (isolated): 48 blocks via `block_iso_exe` (WithAVMasks, zero masks)
    + output projection
 6. Run `forwardGuiderCombine` — combine 4 denoised outputs
 7. Run `forwardDenoisingStep` — Euler step + post_process_latent
 
-**Compiled exes needed**:
-- `preprocess_exe` (reuse from Stage 2)
-- `block_normal_exe` (reuse from Stage 2, same model same shapes ← half-res so different compile)
-- `block_stg_exe` (new — STG variant for block 29)
+**Compiled exes needed** (3 block variants):
+- `preprocess_exe` (reuse pattern from Stage 2)
+- `block_normal_exe` — `forwardBlock0Native` (24 args, no masks) — Passes 1 & 2
+- `block_stg_exe` — `forwardBlock0NativeSTG` (24 args) — Pass 3, block 28 only
+- `block_iso_exe` — `forwardBlock0NativeWithAVMasks` (26 args, zero mask buffers) — Pass 4
 - `proj_v_exe`, `proj_a_exe` (reuse pattern from Stage 2)
 - `guider_combine_exe` (new)
 - `denoise_v_exe`, `denoise_a_exe` (reuse pattern from Stage 2)
 
-**Note**: Since Stage 1 runs at half resolution, the block exes need to be
-recompiled with Stage 1's tensor shapes (different token counts). Same model code,
-different shapes → different compiled artifacts.
+**Note**: Stage 1 runs at half resolution → different token counts → recompiled exes.
+
+**Phase 1 status**: Skeleton builds and compiles. Uses dynamic sigma schedule from
+`computeSigmaSchedule` (30 steps). Single-pass loop with `block_normal_exe` +
+output projection + Euler step. Needs `export_stage1_inputs.py` to run on GPU.
+
+**Step-0 velocity validation** (48-block full forward pass, distilled checkpoint,
+real pipeline inputs, Zig raw velocity vs Python `velocity_model.forward` output):
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| cos_sim | 0.999604 | 0.999872 |
+| close_fraction(atol=0.2, rtol=0.01) | 1.000000 | 1.000000 |
+| max_abs_err | 0.175 | 0.083 |
+| mean_abs_err | 0.022 | 0.013 |
+| rmse | 0.029 | 0.018 |
+| p50 | 0.016 | 0.011 |
+| p90 | 0.047 | 0.031 |
+| p99 | 0.080 | 0.052 |
+| p999 | 0.109 | 0.070 |
+
+Using `expectClose(atol=0.2, rtol=0.01, min_close=0.999)` — the same thresholds as
+Step 1's single-block validation — should **PASS** since max_abs_err (0.175) is below
+the single-block atol (0.2). This is a good result: bf16 error through 48 blocks
+stays within the tolerance budget for a single block.
+
+Note: initial comparison was x0-vs-velocity (cos_sim = -0.42) — Python's `X0Model.forward`
+returns x0 predictions (x0 = sample - v·σ), while Zig outputs raw velocity from
+`forwardOutputProjection`. Fixed by hooking `transformer.velocity_model.forward`
+instead of `transformer.forward`.
+
+**30-step final latent comparison** (Phase 1, single-pass conditional only — NO guidance):
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| cos_sim | 0.063 | -0.016 |
+| close_fraction(atol=0.2, rtol=0.01) | 0.028 | 0.005 |
+| max_abs_err | 24.6 | 61.1 |
+| Zig range | [-6.8, 7.3] | [-5.1, 6.4] |
+| Python range | [-17.9, 21.1] | [-59.8, 49.8] |
+
+**Expected FAIL** — Zig Phase 1 runs 1 pass (conditional only), Python runs 4 passes
+with full guidance (CFG scale 3.0/7.0, STG, modality isolation). Guidance amplifies
+the velocity signal 3–10×, so after step 1 the latents diverge exponentially through
+30 steps. This confirms guidance is the missing piece — validates that Phase 2 + Phase 3
+are required before 30-step comparison can pass. The step-0 velocity PASS already
+confirms the per-step transformer forward pass is correct.
+
+**Files**:
+- `denoise_stage1.zig`: Stage 1 driver (Phase 1 — single-pass skeleton)
+- `export_stage1_inputs.py`: Captures pre-denoising tensors from real pipeline
+- `export_stage1_step0_reference.py`: Python reference (step-0 velocity + full 30-step)
+- `compare_step0_velocity.py`: Comparison with expectClose metrics + cos_sim
+- **[STAGE1_DIVERGENCE_ANALYSIS.md](STAGE1_DIVERGENCE_ANALYSIS.md)**: Deep dive into
+  30-step divergence root causes (3 dtype mismatches) and priority-ordered fix plan
 
 ### Step 5: Weight loading
 

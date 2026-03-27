@@ -1401,6 +1401,154 @@ pub fn forwardNoiseInit(
     return noise_f32.mul(mask_sigma).add(clean_f32.mul(one_minus)).convert(out_dtype);
 }
 
+/// Result of guider combine: guided outputs for video and audio.
+pub const GuiderCombineResult = struct {
+    guided_v: Tensor,
+    guided_a: Tensor,
+};
+
+/// LTX2Scheduler sigma schedule — host-side computation (not a compiled graph op).
+///
+/// Reimplements `LTX2Scheduler.execute(steps, ...)` from ltx_core:
+///   1. linspace(1, 0, steps+1)
+///   2. Logistic shift: sigma = exp(s) / (exp(s) + 1/sigma - 1)
+///   3. Stretch so last non-zero value = terminal
+///
+/// Returns `steps + 1` values: sigmas[0] ≈ 1.0, sigmas[steps] = 0.0.
+pub fn computeSigmaSchedule(
+    comptime max_steps: usize,
+    num_steps: usize,
+    num_tokens: usize,
+    max_shift: f32,
+    base_shift: f32,
+    terminal: f32,
+) [max_steps + 1]f32 {
+    std.debug.assert(num_steps <= max_steps);
+
+    const BASE_SHIFT_ANCHOR: f32 = 1024.0;
+    const MAX_SHIFT_ANCHOR: f32 = 4096.0;
+
+    // 1. linspace(1.0, 0.0, num_steps + 1)
+    var sigmas: [max_steps + 1]f32 = undefined;
+    const n: f32 = @floatFromInt(num_steps);
+    for (0..num_steps + 1) |i| {
+        const t: f32 = @floatFromInt(i);
+        sigmas[i] = 1.0 - t / n;
+    }
+
+    // 2. Compute sigma_shift from token count
+    const mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR);
+    const b = base_shift - mm * BASE_SHIFT_ANCHOR;
+    const tokens_f: f32 = @floatFromInt(num_tokens);
+    const sigma_shift = tokens_f * mm + b;
+    const exp_shift = std.math.exp(sigma_shift);
+
+    // 3. Apply logistic shift: sigma = exp(s) / (exp(s) + (1/sigma - 1))
+    for (0..num_steps + 1) |i| {
+        if (sigmas[i] != 0.0) {
+            sigmas[i] = exp_shift / (exp_shift + (1.0 / sigmas[i] - 1.0));
+        }
+    }
+
+    // 4. Stretch so last non-zero sigma = terminal
+    //    Find last non-zero entry (should be sigmas[num_steps - 1])
+    var last_nz_idx: usize = 0;
+    for (0..num_steps + 1) |i| {
+        if (sigmas[i] != 0.0) last_nz_idx = i;
+    }
+    if (last_nz_idx > 0) {
+        const one_minus_last = 1.0 - sigmas[last_nz_idx];
+        const scale_factor = one_minus_last / (1.0 - terminal);
+        for (0..num_steps + 1) |i| {
+            if (sigmas[i] != 0.0) {
+                sigmas[i] = 1.0 - (1.0 - sigmas[i]) / scale_factor;
+            }
+        }
+    }
+
+    return sigmas;
+}
+
+pub const stage1_default_schedule = struct {
+    pub const num_steps: usize = 30;
+    pub const max_shift: f32 = 2.05;
+    pub const base_shift: f32 = 0.95;
+    pub const terminal: f32 = 0.1;
+    /// MAX_SHIFT_ANCHOR — used when no latent tensor is provided.
+    pub const default_num_tokens: usize = 4096;
+};
+
+/// Combines 4 guidance passes (cond, neg/CFG, perturbed/STG, isolated/modality)
+/// using the Stage 1 guidance formula per modality:
+///   pred = cond + (cfg-1)*(cond-neg) + stg*(cond-ptb) + (mod-1)*(cond-iso)
+///   pred *= rescale * (cond.std() / pred.std()) + (1 - rescale)
+///
+/// All tensor inputs are [B, T, D] bf16; scalar inputs are rank-0 or rank-1 f32.
+/// When rescale=0 the rescale factor evaluates to 1 (identity).
+pub fn forwardGuiderCombine(
+    cond_v: Tensor,
+    neg_v: Tensor,
+    ptb_v: Tensor,
+    iso_v: Tensor,
+    cond_a: Tensor,
+    neg_a: Tensor,
+    ptb_a: Tensor,
+    iso_a: Tensor,
+    cfg_v: Tensor,
+    stg_v: Tensor,
+    mod_v: Tensor,
+    rescale_v: Tensor,
+    cfg_a: Tensor,
+    stg_a: Tensor,
+    mod_a: Tensor,
+    rescale_a: Tensor,
+) GuiderCombineResult {
+    return .{
+        .guided_v = guiderCombineSingle(cond_v, neg_v, ptb_v, iso_v, cfg_v, stg_v, mod_v, rescale_v),
+        .guided_a = guiderCombineSingle(cond_a, neg_a, ptb_a, iso_a, cfg_a, stg_a, mod_a, rescale_a),
+    };
+}
+
+fn guiderCombineSingle(cond: Tensor, neg: Tensor, ptb: Tensor, iso: Tensor, cfg: Tensor, stg: Tensor, mod: Tensor, rescale: Tensor) Tensor {
+    const out_dtype = cond.dtype();
+    const cond_f32 = cond.convert(.f32);
+    const neg_f32 = neg.convert(.f32);
+    const ptb_f32 = ptb.convert(.f32);
+    const iso_f32 = iso.convert(.f32);
+    const cfg_f32 = cfg.convert(.f32).asScalar();
+    const stg_f32 = stg.convert(.f32).asScalar();
+    const mod_f32 = mod.convert(.f32).asScalar();
+    const rescale_f32 = rescale.convert(.f32).asScalar();
+
+    const one = Tensor.scalar(1.0, .f32);
+
+    // pred = cond + (cfg - 1) * (cond - neg) + stg * (cond - ptb) + (mod - 1) * (cond - iso)
+    const cfg_term = cfg_f32.sub(one).broad(cond_f32.shape()).mul(cond_f32.sub(neg_f32));
+    const stg_term = stg_f32.broad(cond_f32.shape()).mul(cond_f32.sub(ptb_f32));
+    const mod_term = mod_f32.sub(one).broad(cond_f32.shape()).mul(cond_f32.sub(iso_f32));
+    var pred = cond_f32.add(cfg_term).add(stg_term).add(mod_term);
+
+    // std-rescale: factor = rescale * (cond.std() / pred.std()) + (1 - rescale)
+    // When rescale=0, factor = 0 * ratio + 1 = 1 (identity).
+    const cond_std = tensorStdAll(cond_f32);
+    const pred_std = tensorStdAll(pred);
+    const eps = Tensor.scalar(1e-8, .f32);
+    const ratio = cond_std.div(pred_std.add(eps));
+    const factor = rescale_f32.mul(ratio).add(one.sub(rescale_f32));
+    pred = pred.mul(factor.broad(pred.shape()));
+
+    return pred.convert(out_dtype);
+}
+
+/// Standard deviation across all elements of a tensor, returning a rank-0 scalar.
+fn tensorStdAll(x: Tensor) Tensor {
+    const flat = x.flatten();
+    const mean_val = flat.mean(0);
+    const diff = flat.sub(mean_val.broad(flat.shape()));
+    const variance = diff.mul(diff).mean(0);
+    return variance.sqrt().asScalar();
+}
+
 /// Result of one denoising step: to_denoised + post_process_latent + Euler step.
 pub const DenoisingStepResult = struct {
     denoised: Tensor,
@@ -1458,6 +1606,72 @@ pub fn forwardDenoisingStep(
         .denoised = denoised,
         .blended = blended,
         .next_latent = next_latent,
+    };
+}
+
+/// Convert raw velocity → x0 prediction (denoised sample).
+///
+/// Matches Python's X0Model.forward output:
+///   timesteps = denoise_mask * sigma
+///   x0 = (sample - velocity * timesteps).to(bf16)
+///
+/// The guider combine should operate on x0 predictions (not velocities)
+/// so that the rescale factor is computed in the same space as Python.
+pub fn forwardToDenoised(
+    sample: Tensor,
+    velocity: Tensor,
+    denoise_mask: Tensor,
+    sigma: Tensor,
+) Tensor {
+    const out_dtype = sample.dtype();
+    const sample_f32 = sample.convert(.f32);
+    const velocity_f32 = velocity.convert(.f32);
+    const mask_f32 = denoise_mask.convert(.f32);
+    const sigma_f32 = sigma.convert(.f32);
+    const timesteps = mask_f32.mul(sigma_f32);
+    return sample_f32.sub(velocity_f32.mul(timesteps)).convert(out_dtype);
+}
+
+/// Apply post_process_latent + Euler step from a guided x0 prediction.
+///
+/// This is the second half of forwardDenoisingStep, used when guidance
+/// was applied in x0 space (matching Python's guider flow).
+///
+/// Euler denoising step from guided x0:
+///   1. post_process_latent:  blend x0 with clean latent using mask (f32)
+///   2. to_velocity:          (sample - blended) / sigma (f32)
+///   3. Euler update:         sample + velocity * dt (f32)
+///   All intermediate arithmetic stays in f32; only the final outputs
+///   are rounded to the input dtype (bf16) — avoids compounding
+///   quantization errors across the 30-step loop.
+pub fn forwardDenoisingStepFromX0(
+    sample: Tensor,
+    denoised: Tensor,
+    denoise_mask: Tensor,
+    clean_latent: Tensor,
+    sigma: Tensor,
+    sigma_next: Tensor,
+) DenoisingStepResult {
+    const out_dtype = sample.dtype();
+    const sample_f32 = sample.convert(.f32);
+    const clean_f32 = clean_latent.convert(.f32);
+    const mask_f32 = denoise_mask.convert(.f32);
+    const sigma_f32 = sigma.convert(.f32);
+    const sigma_next_f32 = sigma_next.convert(.f32);
+
+    // 1. post_process_latent: blend denoised with clean using mask
+    const one_minus_mask = Tensor.scalar(1.0, .f32).sub(mask_f32);
+    const blended_f32 = denoised.convert(.f32).mul(mask_f32).add(clean_f32.mul(one_minus_mask));
+
+    // 2. Euler step — stay in f32 throughout (no intermediate bf16 roundtrips)
+    const dt = sigma_next_f32.sub(sigma_f32);
+    const euler_vel_f32 = sample_f32.sub(blended_f32).div(sigma_f32);
+    const next_f32 = sample_f32.add(euler_vel_f32.mul(dt));
+
+    return .{
+        .denoised = denoised,
+        .blended = blended_f32.convert(out_dtype),
+        .next_latent = next_f32.convert(out_dtype),
     };
 }
 

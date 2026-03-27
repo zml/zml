@@ -325,6 +325,31 @@ zig_binary(
 )
 
 zig_binary(
+    name = "guider_combine_check",
+    main = "guider_combine_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "sigma_schedule_check",
+    main = "sigma_schedule_check.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
     name = "block_slice_native_check",
     main = "block_slice_native_check.zig",
     srcs = [
@@ -441,6 +466,18 @@ zig_binary(
 )
 
 zig_binary(
+    name = "denoise_stage1",
+    main = "denoise_stage1.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
     name = "check_noise_init",
     main = "check_noise_init.zig",
     srcs = [
@@ -495,6 +532,8 @@ build_test(
         ":block0_full_check",
         ":block0_native_check",
         ":stg_block_check",
+        ":guider_combine_check",
+        ":sigma_schedule_check",
         ":block_slice_native_check",
     ],
 )
