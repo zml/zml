@@ -144,7 +144,7 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
 
     const segs = try ctx.arena.alloc(Segment, 8);
     segs[0] = .{ .style = val, .text = try col(ctx.arena, col_fmt.pid, "{d}", .{info.pid}) };
-    segs[1] = .{ .style = val, .text = try col(ctx.arena, col_fmt.user, "{s}", .{utils.trunc(std.mem.sliceTo(&info.username, 0), 10)}) };
+    segs[1] = .{ .style = val, .text = try col(ctx.arena, col_fmt.user, "{s}", .{info.username[0..@min(info.username.len, 10)]}) };
     segs[2] = .{ .style = val, .text = try col(ctx.arena, col_fmt.dev, "{d}", .{info.device_idx}) };
     segs[3] = if (info.dev_util_percent) |util|
         .{ .style = val, .text = try col(ctx.arena, col_fmt.util, "{d}%", .{util}) }
@@ -156,7 +156,7 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
         .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
     segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
     segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try utils.fmtMem(ctx.arena, info.rss_kib)}) };
-    segs[7] = .{ .style = val, .text = if (info.comm) |*comm| std.mem.sliceTo(comm, 0) else "" };
+    segs[7] = .{ .style = val, .text = info.comm };
 
     const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
     return rich.draw(ctx.withConstraints(
