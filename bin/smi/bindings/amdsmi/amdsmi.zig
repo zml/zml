@@ -4,84 +4,12 @@ const stdx = @import("stdx");
 const DynLib = @import("../dynlib.zig");
 const sandbox = @import("../../utils/sandbox.zig");
 
+const AmdSmi = @This();
+
+pub const Error = ReturnError || error{AmdSmiUnavailable};
 pub const Handle = c.amdsmi_processor_handle;
 pub const ProcInfo = c.amdsmi_proc_info_t;
 
-pub const Error = ReturnError || error{AmdSmiUnavailable};
-
-pub const ReturnError = error{
-    inval,
-    not_supported,
-    not_yet_implemented,
-    fail_load_module,
-    fail_load_symbol,
-    drm_error,
-    api_failed,
-    timeout,
-    retry,
-    no_perm,
-    interrupt,
-    io_error,
-    address_fault,
-    file_error,
-    out_of_resources,
-    internal_exception,
-    input_out_of_bounds,
-    init_error,
-    refcount_overflow,
-    directory_not_found,
-    busy,
-    not_found,
-    not_init,
-    no_slot,
-    driver_not_loaded,
-    no_data,
-    insufficient_size,
-    unexpected_size,
-    unexpected_data,
-    unknown_error,
-};
-
-fn check(ret: c.amdsmi_status_t) Error!void {
-    if (ret == c.AMDSMI_STATUS_SUCCESS) {
-        return;
-    }
-
-    return switch (ret) {
-        c.AMDSMI_STATUS_INVAL => error.inval,
-        c.AMDSMI_STATUS_NOT_SUPPORTED => error.not_supported,
-        c.AMDSMI_STATUS_NOT_YET_IMPLEMENTED => error.not_yet_implemented,
-        c.AMDSMI_STATUS_FAIL_LOAD_MODULE => error.fail_load_module,
-        c.AMDSMI_STATUS_FAIL_LOAD_SYMBOL => error.fail_load_symbol,
-        c.AMDSMI_STATUS_DRM_ERROR => error.drm_error,
-        c.AMDSMI_STATUS_API_FAILED => error.api_failed,
-        c.AMDSMI_STATUS_TIMEOUT => error.timeout,
-        c.AMDSMI_STATUS_RETRY => error.retry,
-        c.AMDSMI_STATUS_NO_PERM => error.no_perm,
-        c.AMDSMI_STATUS_INTERRUPT => error.interrupt,
-        c.AMDSMI_STATUS_IO => error.io_error,
-        c.AMDSMI_STATUS_ADDRESS_FAULT => error.address_fault,
-        c.AMDSMI_STATUS_FILE_ERROR => error.file_error,
-        c.AMDSMI_STATUS_OUT_OF_RESOURCES => error.out_of_resources,
-        c.AMDSMI_STATUS_INTERNAL_EXCEPTION => error.internal_exception,
-        c.AMDSMI_STATUS_INPUT_OUT_OF_BOUNDS => error.input_out_of_bounds,
-        c.AMDSMI_STATUS_INIT_ERROR => error.init_error,
-        c.AMDSMI_STATUS_REFCOUNT_OVERFLOW => error.refcount_overflow,
-        c.AMDSMI_STATUS_DIRECTORY_NOT_FOUND => error.directory_not_found,
-        c.AMDSMI_STATUS_BUSY => error.busy,
-        c.AMDSMI_STATUS_NOT_FOUND => error.not_found,
-        c.AMDSMI_STATUS_NOT_INIT => error.not_init,
-        c.AMDSMI_STATUS_NO_SLOT => error.no_slot,
-        c.AMDSMI_STATUS_DRIVER_NOT_LOADED => error.driver_not_loaded,
-        c.AMDSMI_STATUS_NO_DATA => error.no_data,
-        c.AMDSMI_STATUS_INSUFFICIENT_SIZE => error.insufficient_size,
-        c.AMDSMI_STATUS_UNEXPECTED_SIZE => error.unexpected_size,
-        c.AMDSMI_STATUS_UNEXPECTED_DATA => error.unexpected_data,
-        else => error.unknown_error,
-    };
-}
-
-const AmdSmi = @This();
 lib: Fns,
 gpu_handles: []c.amdsmi_processor_handle,
 
@@ -273,4 +201,78 @@ pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (
     errdefer allocator.free(procs);
     try check(self.lib.amdsmi_get_gpu_process_list(handle, &count, @ptrCast(procs.ptr)));
     return procs;
+}
+
+// Error handling
+
+pub const ReturnError = error{
+    inval,
+    not_supported,
+    not_yet_implemented,
+    fail_load_module,
+    fail_load_symbol,
+    drm_error,
+    api_failed,
+    timeout,
+    retry,
+    no_perm,
+    interrupt,
+    io_error,
+    address_fault,
+    file_error,
+    out_of_resources,
+    internal_exception,
+    input_out_of_bounds,
+    init_error,
+    refcount_overflow,
+    directory_not_found,
+    busy,
+    not_found,
+    not_init,
+    no_slot,
+    driver_not_loaded,
+    no_data,
+    insufficient_size,
+    unexpected_size,
+    unexpected_data,
+    unknown_error,
+};
+
+fn check(ret: c.amdsmi_status_t) Error!void {
+    if (ret == c.AMDSMI_STATUS_SUCCESS) {
+        return;
+    }
+
+    return switch (ret) {
+        c.AMDSMI_STATUS_INVAL => error.inval,
+        c.AMDSMI_STATUS_NOT_SUPPORTED => error.not_supported,
+        c.AMDSMI_STATUS_NOT_YET_IMPLEMENTED => error.not_yet_implemented,
+        c.AMDSMI_STATUS_FAIL_LOAD_MODULE => error.fail_load_module,
+        c.AMDSMI_STATUS_FAIL_LOAD_SYMBOL => error.fail_load_symbol,
+        c.AMDSMI_STATUS_DRM_ERROR => error.drm_error,
+        c.AMDSMI_STATUS_API_FAILED => error.api_failed,
+        c.AMDSMI_STATUS_TIMEOUT => error.timeout,
+        c.AMDSMI_STATUS_RETRY => error.retry,
+        c.AMDSMI_STATUS_NO_PERM => error.no_perm,
+        c.AMDSMI_STATUS_INTERRUPT => error.interrupt,
+        c.AMDSMI_STATUS_IO => error.io_error,
+        c.AMDSMI_STATUS_ADDRESS_FAULT => error.address_fault,
+        c.AMDSMI_STATUS_FILE_ERROR => error.file_error,
+        c.AMDSMI_STATUS_OUT_OF_RESOURCES => error.out_of_resources,
+        c.AMDSMI_STATUS_INTERNAL_EXCEPTION => error.internal_exception,
+        c.AMDSMI_STATUS_INPUT_OUT_OF_BOUNDS => error.input_out_of_bounds,
+        c.AMDSMI_STATUS_INIT_ERROR => error.init_error,
+        c.AMDSMI_STATUS_REFCOUNT_OVERFLOW => error.refcount_overflow,
+        c.AMDSMI_STATUS_DIRECTORY_NOT_FOUND => error.directory_not_found,
+        c.AMDSMI_STATUS_BUSY => error.busy,
+        c.AMDSMI_STATUS_NOT_FOUND => error.not_found,
+        c.AMDSMI_STATUS_NOT_INIT => error.not_init,
+        c.AMDSMI_STATUS_NO_SLOT => error.no_slot,
+        c.AMDSMI_STATUS_DRIVER_NOT_LOADED => error.driver_not_loaded,
+        c.AMDSMI_STATUS_NO_DATA => error.no_data,
+        c.AMDSMI_STATUS_INSUFFICIENT_SIZE => error.insufficient_size,
+        c.AMDSMI_STATUS_UNEXPECTED_SIZE => error.unexpected_size,
+        c.AMDSMI_STATUS_UNEXPECTED_DATA => error.unexpected_data,
+        else => error.unknown_error,
+    };
 }
