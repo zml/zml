@@ -33,15 +33,14 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) vo
     self.merged.clearRetainingCapacity();
 
     for (state.process_lists) |pl| {
-        pl.mutex.lockUncancelable(state.io);
-        defer pl.mutex.unlock(state.io);
+        const pl_items = pl.front().items;
         if (device_id) |did| {
-            for (pl.list.items) |entry| {
+            for (pl_items) |entry| {
                 if (entry.device_idx != did) continue;
                 self.merged.append(state.allocator, entry) catch break;
             }
         } else {
-            self.merged.appendSlice(state.allocator, pl.list.items) catch break;
+            self.merged.appendSlice(state.allocator, pl_items) catch break;
         }
     }
 

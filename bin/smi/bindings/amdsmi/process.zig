@@ -2,7 +2,7 @@ const std = @import("std");
 const c = std.c;
 const AmdSmi = @import("amdsmi.zig");
 const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(pi.ProcessInfo);
+const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("../../worker.zig").Worker;
 
 const bdf_len = "0000:00:00.0".len;
@@ -29,13 +29,11 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         });
     }
 
-    var sl = list.shadow();
-    defer sl.deinit(allocator);
-
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
+        const back = list.back();
 
-        sl.clearRetainingCapacity();
+        back.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
             const handle = amdsmi.handleByIndex(@intCast(dev_idx)) catch continue;
@@ -58,7 +56,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
             const pci_slot = if (dev_idx < pci_slots.len) &(pci_slots[dev_idx] orelse continue) else continue;
 
             for (procs) |proc| {
-                sl.append(allocator, .{
+                back.append(allocator, .{
                     .pid = proc.pid,
                     .device_idx = @intCast(dev_idx + dev_offset),
                     .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
@@ -67,7 +65,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
             }
         }
 
-        sl.swap(io);
+        list.swap();
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {

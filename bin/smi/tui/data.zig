@@ -10,7 +10,7 @@ const hi = @import("../info/host_info.zig");
 pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
 pub const pi = @import("../info/process_info.zig");
-pub const ProcessShadowList = @import("../utils/shadow_list.zig").ShadowList(pi.ProcessInfo);
+pub const ProcessShadowList = @import("../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
 pub const ProcessEnricher = @import("../bindings/linux/process.zig").ProcessEnricher;
 
 pub const history_len: usize = 500;
