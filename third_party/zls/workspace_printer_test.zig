@@ -9,21 +9,6 @@ fn requireEnv(name: [:0]const u8) ![]const u8 {
     return std.mem.span(std.c.getenv(name) orelse return error.MissingEnvironmentVariable);
 }
 
-fn workspaceDirFromConfigPath(config_path: []const u8, package_name: []const u8) ![]const u8 {
-    var workspace_dir = std.fs.path.dirname(config_path) orelse
-        return error.InvalidWorkspacePath;
-    if (package_name.len == 0) {
-        return workspace_dir;
-    }
-
-    var it = std.mem.splitScalar(u8, package_name, '/');
-    while (it.next()) |_| {
-        workspace_dir = std.fs.path.dirname(workspace_dir) orelse
-            return error.InvalidWorkspacePath;
-    }
-    return workspace_dir;
-}
-
 test "completion print_build_config emits valid json" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -41,19 +26,16 @@ test "completion print_build_config emits valid json" {
 
     const printer_rpath = try requireEnv("COMPLETION_PRINTER_RLOCATION");
     const config_rpath = try requireEnv("COMPLETION_BUILD_CONFIG_RLOCATION");
-    const package_name = try requireEnv("COMPLETION_PACKAGE");
 
     const printer_path = try r.rlocationAlloc(allocator, printer_rpath) orelse
         return error.RLocationNotFound;
     const config_path = try r.rlocationAlloc(allocator, config_rpath) orelse
         return error.RLocationNotFound;
-    const workspace_dir = try workspaceDirFromConfigPath(config_path, package_name);
-    const execution_root = workspace_dir;
 
     var child_env_map: std.process.Environ.Map = .init(std.testing.allocator);
     defer child_env_map.deinit();
-    try child_env_map.put("BUILD_WORKSPACE_DIRECTORY", workspace_dir);
-    try child_env_map.put("BAZEL_EXECUTION_ROOT", execution_root);
+    try child_env_map.put("BUILD_WORKSPACE_DIRECTORY", "/workspace");
+    try child_env_map.put("BUILD_EXECROOT", "/execroot");
 
     const result = try std.process.run(std.testing.allocator, std.testing.io, .{
         .argv = &.{ printer_path, config_path },
