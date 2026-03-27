@@ -10,9 +10,9 @@ const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
 const log = std.log.scoped(.@"zml/attention/triton");
 
 fn use2dKernel(head_size: usize, sliding_window: usize, all_decode: bool, max_seqlen_q: usize, max_seqlen_k: usize, target_num_prgms: usize, num_2d_prgms: usize) bool {
-    _ = head_size; // autofix
-    _ = all_decode; // autofix
-    _ = max_seqlen_q; // autofix
+    _ = head_size;
+    _ = all_decode;
+    _ = max_seqlen_q;
     return sliding_window > 0 or max_seqlen_k <= 512 or num_2d_prgms > target_num_prgms;
 }
 
@@ -293,10 +293,10 @@ pub const paged = struct {
         max_seqlen_q: usize,
 
         pub fn init(parameters: Parameters, num_heads: i64, num_kv_heads: i64, head_dim: i64, page_size: i64) Context {
-            _ = num_heads; // autofix
-            _ = num_kv_heads; // autofix
-            _ = head_dim; // autofix
-            _ = page_size; // autofix
+            _ = num_heads;
+            _ = num_kv_heads;
+            _ = head_dim;
+            _ = page_size;
             return .{ .is_prefill = parameters.options_.is_prefill, .max_seqlen_q = parameters.options_.max_seqlen_q };
         }
     };
@@ -409,9 +409,10 @@ pub const paged = struct {
     }
 
     pub fn pagedAttention2d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = context; // autofix
-        _ = layer_index; // autofix
-        _ = opts; // autofix
+        _ = context;
+        _ = opts;
+        // TODO(Corentin): remove
+        _ = layer_index;
         const config = select2dConfig(paged_attention_opts);
         const generation_config: GenerationConfig = .{
             .kernel_unified_attention_2d_ptr = .{
@@ -508,9 +509,10 @@ pub const paged = struct {
     }
 
     pub fn pagedAttention3d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
-        _ = context; // autofix
-        _ = layer_index; // autofix
-        _ = opts; // autofix
+        _ = context;
+        _ = opts;
+        // TODO(Corentin): remove
+        _ = layer_index;
 
         const config = select3dConfig(paged_attention_opts);
 
