@@ -16,7 +16,7 @@ uv_lock(
         "--upgrade",
         "--python-platform=x86_64-manylinux_2_37",
     ],
-    python_version = "3.14",
+    python_version = "3.12",
     tags = ["manual"],
 )
 
@@ -43,7 +43,7 @@ py_binary(
     name = "generate_py",
     srcs = ["generate.py"],
     main = "generate.py",
-    python_version = "3.14",
+    python_version = "3.12",
     deps = [
         ":fake_plugin",
         ":triton_kernels",
@@ -55,8 +55,8 @@ cc_library(
     name = "libpython",
     hdrs = ["libpython.h"],
     deps = [
-        "@python_3_14//:libpython",
-        "@python_3_14//:python_headers",
+        "@python_3_12//:libpython",
+        "@python_3_12//:python_headers",
     ],
 )
 
