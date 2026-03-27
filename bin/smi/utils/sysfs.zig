@@ -7,12 +7,9 @@ pub fn readInt(io: std.Io, path: []const u8) !u64 {
     return std.fmt.parseInt(u64, std.mem.trimEnd(u8, data, &std.ascii.whitespace), 10);
 }
 
-pub fn readString(io: std.Io, path: []const u8) ![256]u8 {
-    var result: [256]u8 = .{0} ** 256;
-    const data = try std.Io.Dir.readFile(.cwd(), io, path, &result);
-    result[@min(std.mem.trimEnd(u8, data, &std.ascii.whitespace).len, 255)] = 0;
-
-    return result;
+pub fn readString(io: std.Io, path: []const u8, buf: []u8) ![]const u8 {
+    const data = try std.Io.Dir.readFile(.cwd(), io, path, buf);
+    return std.mem.trimEnd(u8, data, &std.ascii.whitespace);
 }
 
 pub fn readFieldInt(io: std.Io, path: []const u8, comptime key: []const u8) !u64 {
@@ -31,15 +28,9 @@ pub fn nthTokenInt(data: []const u8, n: usize) u64 {
     return 0;
 }
 
-pub fn readFieldString(io: std.Io, path: []const u8, comptime key: []const u8) ![256]u8 {
-    var buf: [4096]u8 = undefined;
-    const value = try findField(io, path, key, &buf);
-    var result: [256]u8 = .{0} ** 256;
-    const trimmed = std.mem.trimEnd(u8, value, &std.ascii.whitespace);
-    const len = @min(trimmed.len, 255);
-    @memcpy(result[0..len], trimmed[0..len]);
-
-    return result;
+pub fn readFieldString(io: std.Io, path: []const u8, comptime key: []const u8, buf: *[4096]u8) ![]const u8 {
+    const value = try findField(io, path, key, buf);
+    return std.mem.trimEnd(u8, value, &std.ascii.whitespace);
 }
 
 fn findField(io: std.Io, path: []const u8, comptime key: []const u8, buf: *[4096]u8) ![]const u8 {

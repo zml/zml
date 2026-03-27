@@ -1,5 +1,4 @@
 const std = @import("std");
-const str = @import("../../str.zig");
 const sysfs = @import("../../utils/sysfs.zig");
 const tpuinfo = @import("tpuinfo.zig");
 const device_info = @import("../../info/device_info.zig");
@@ -138,16 +137,19 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
 
     while (it.next(io) catch null) |entry| {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        const vendor = readSysfs(io, &path_buf, entry.name, "vendor") catch continue;
-        if (!str.eql(vendor, google_pci_vendor_id)) continue;
+        var read_buf: [256]u8 = undefined;
+        const vendor = readSysfs(io, &path_buf, &read_buf, entry.name, "vendor") catch continue;
+        if (!std.mem.eql(u8, vendor, google_pci_vendor_id)) continue;
 
-        const device_raw = readSysfs(io, &path_buf, entry.name, "device") catch continue;
-        const subsystem_raw = readSysfs(io, &path_buf, entry.name, "subsystem_device") catch null;
+        var device_buf: [256]u8 = undefined;
+        const device_raw = readSysfs(io, &path_buf, &device_buf, entry.name, "device") catch continue;
+        var subsys_buf: [256]u8 = undefined;
+        const subsystem_raw: ?[]const u8 = readSysfs(io, &path_buf, &subsys_buf, entry.name, "subsystem_device") catch null;
 
         for (chip_table) |chip| {
-            const dev_match = str.eql(device_raw, chip.device_id);
+            const dev_match = std.mem.eql(u8, device_raw, chip.device_id);
             const sub_match = if (chip.subsystem_id) |expected_sub|
-                if (subsystem_raw) |actual_sub| str.eql(actual_sub, expected_sub) else false
+                if (subsystem_raw) |actual_sub| std.mem.eql(u8, actual_sub, expected_sub) else false
             else
                 true;
 
@@ -171,8 +173,7 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
     return null;
 }
 
-fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, slot: []const u8, file: []const u8) ![256]u8 {
+fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, read_buf: *[256]u8, slot: []const u8, file: []const u8) ![]const u8 {
     const path = std.fmt.bufPrint(path_buf, pci_base ++ "/{s}/{s}", .{ slot, file }) catch return error.Overflow;
-
-    return sysfs.readString(io, path);
+    return sysfs.readString(io, path, read_buf);
 }
