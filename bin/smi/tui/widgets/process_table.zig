@@ -153,7 +153,7 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
         .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
     segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
     segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try utils.fmtMem(ctx.arena, info.rss_kib)}) };
-    segs[7] = .{ .style = val, .text = str.slice(&info.comm) };
+    segs[7] = .{ .style = val, .text = if (info.comm) |*comm| str.slice(&comm) else "" };
 
     const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
     return rich.draw(ctx.withConstraints(
