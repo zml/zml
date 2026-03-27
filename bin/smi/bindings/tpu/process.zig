@@ -35,14 +35,14 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.Proces
     while (proc_it.next(io) catch null) |proc_entry| {
         const pid = std.fmt.parseInt(u32, proc_entry.name, 10) catch continue;
 
-        var fd_path_buf: [64]u8 = undefined;
+        var fd_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const fd_sub = std.fmt.bufPrint(&fd_path_buf, "{d}/fd", .{pid}) catch continue;
         var fd_dir = proc_dir.openDir(io, fd_sub, .{ .iterate = true }) catch continue;
         defer fd_dir.close(io);
 
         var fd_it = fd_dir.iterate();
         while (fd_it.next(io) catch null) |fd_entry| {
-            var link_buf: [256]u8 = undefined;
+            var link_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
             const len = fd_dir.readLink(io, fd_entry.name, &link_buf) catch continue;
             const target = link_buf[0..len];
 

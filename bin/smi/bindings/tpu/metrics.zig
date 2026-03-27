@@ -20,7 +20,8 @@ pub fn start(collector: *Collector) !void {
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
     for (0..device_count) |_| {
-        const initial: TpuInfo = .{ .name = str.fromSlice(chip.name) };
+        const chip_name = try collector.arena.dupe(u8, chip.name);
+        const initial: TpuInfo = .{ .name = chip_name };
         const info = try collector.addDevice(.{ .tpu = .{ .values = .{ initial, initial } } });
         try tpu_infos.append(collector.arena, info);
     }

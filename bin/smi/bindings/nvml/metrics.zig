@@ -18,7 +18,7 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name() catch null };
+        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
     }
@@ -37,10 +37,10 @@ const Device = struct {
         return .{ .nvml = nvml, .handle = try nvml.handleByIndex(index) };
     }
 
-    fn name(self: Device) ![256]u8 {
+    fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
         var buf: [256]u8 = .{0} ** 256;
-        _ = try self.nvml.name(self.handle, &buf);
-        return buf;
+        const slice = try self.nvml.name(self.handle, &buf);
+        return try arena.dupe(u8, slice);
     }
 
     // Power

@@ -5,14 +5,14 @@ const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, info: *HostInfo) !void {
+pub fn init(w: *Worker, io: std.Io, arena: std.mem.Allocator, info: *HostInfo) !void {
     const host: Host = .{ .io = io };
 
     // read once metrics
     var initial = info.front().*;
-    initial.hostname = host.hostname() catch null;
-    initial.kernel = host.kernel() catch null;
-    initial.cpu_name = host.cpuName() catch null;
+    initial.hostname = host.hostname(arena) catch null;
+    initial.kernel = host.kernel(arena) catch null;
+    initial.cpu_name = host.cpuName(arena) catch null;
     initial.cpu_cores = host.cpuCores() catch null;
     initial.mem_total_kib = host.memTotal() catch null;
     info.back().* = initial;
@@ -26,16 +26,19 @@ const pollHost = Worker.pollMetrics(*HostInfo, Host, metrics);
 const Host = struct {
     io: std.Io,
 
-    pub fn hostname(self: Host) ![256]u8 {
-        return sysfs.readString(self.io, "/proc/sys/kernel/hostname");
+    pub fn hostname(self: Host, arena: std.mem.Allocator) ![]const u8 {
+        const result = try sysfs.readString(self.io, "/proc/sys/kernel/hostname");
+        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
     }
 
-    pub fn kernel(self: Host) ![256]u8 {
-        return sysfs.readString(self.io, "/proc/sys/kernel/osrelease");
+    pub fn kernel(self: Host, arena: std.mem.Allocator) ![]const u8 {
+        const result = try sysfs.readString(self.io, "/proc/sys/kernel/osrelease");
+        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
     }
 
-    pub fn cpuName(self: Host) ![256]u8 {
-        return sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name");
+    pub fn cpuName(self: Host, arena: std.mem.Allocator) ![]const u8 {
+        const result = try sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name");
+        return try arena.dupe(u8, std.mem.sliceTo(&result, 0));
     }
 
     pub fn cpuCores(self: Host) !u64 {
