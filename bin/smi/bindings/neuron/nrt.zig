@@ -4,9 +4,18 @@ const stdx = @import("stdx");
 const DynLib = @import("../dynlib.zig");
 const sandbox = @import("../../utils/sandbox.zig");
 
-pub const Error = error{ nrt_error, NrtUnavailable };
-
 const Nrt = @This();
+
+pub const Error = error{ nrt_error, NrtUnavailable };
+pub const AppInfo = c.struct_neuron_app_info;
+pub const DeviceType = enum(c_int) {
+    inf1 = 1,
+    inf2_trn1 = 2,
+    trn2 = 3,
+    trn3 = 4,
+    _,
+};
+
 lib: Fns,
 
 const Fns = struct {
@@ -54,8 +63,6 @@ pub fn closeDevice(self: Nrt, dev: *c.ndl_device_t) void {
     _ = self.lib.ndl_close_device(dev);
 }
 
-pub const AppInfo = c.struct_neuron_app_info;
-
 pub fn allAppsInfo(self: Nrt, dev: *c.ndl_device_t) Error!struct { ptr: ?[*]AppInfo, count: usize } {
     var info: ?[*]AppInfo = null;
     var count: usize = 0;
@@ -96,14 +103,6 @@ pub fn totalNcCount(self: Nrt) Error!u32 {
 pub fn hbmSize(dev: *c.ndl_device_t) usize {
     return dev.hbm_size;
 }
-
-pub const DeviceType = enum(c_int) {
-    inf1 = 1,
-    inf2_trn1 = 2,
-    trn2 = 3,
-    trn3 = 4,
-    _,
-};
 
 pub fn deviceType(dev: *c.ndl_device_t) DeviceType {
     return @enumFromInt(dev.device_type);
