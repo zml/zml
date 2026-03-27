@@ -77,7 +77,7 @@ if rescale_scale != 0:
 | `forwardOutputProjection` | ✅ | ✅ |
 | `forwardDenoisingStep` | ✅ | ✅ (Euler step + post_process_latent) |
 | A2V/V2A mask support | ✅ | Pass 4: set masks to zero |
-| STG V-passthrough | ❌ | **New**: block 29 self-attn replaced with `to_out(to_v(x))` |
+| STG V-passthrough | ✅ | `forwardBlock0NativeSTG` — comptime V-passthrough variant |
 | Guider combine | ❌ | **New**: CFG+STG+modality formula + std-rescale |
 | Dynamic sigma schedule | ❌ | **New**: `LTX2Scheduler` shifted cosine schedule |
 
@@ -85,22 +85,45 @@ if rescale_scale != 0:
 
 ## Implementation Steps
 
-### Step 1: STG block variant (V-passthrough at self-attention)
+### Step 1: STG block variant (V-passthrough at self-attention) — ✅ DONE
 
 **What**: When STG perturbation is active, block 29's self-attention replaces the
 full Q·K·V attention with a V-only passthrough: `to_out(to_v(x))`. The AdaLN
 gating and residual add still happen normally.
 
-**How**: Add a comptime flag to `forwardNativeImpl`:
+**How**: Added comptime flags to `forwardNativeImpl`:
 - `comptime skip_video_self_attn: bool, comptime skip_audio_self_attn: bool`
-- When `true`, replace `self.attn1.forward(norm_vx, ...)` with
-  `self.attn1.forwardValuePassthrough(norm_vx, ...)` — which computes `to_out(to_v(x))`
-  skipping Q/K projections, RoPE, and the attention function.
+- When `true`, calls `self.attn1.forwardValuePassthrough(norm_vx, ...)` — computes
+  `to_out(to_v(x))` with per-head gating, skipping Q/K projections, RoPE, and SDPA.
 
 New entry point: `forwardBlock0NativeSTG(...)` — identical signature to
 `forwardBlock0Native`, calls `forwardNativeImpl(skip_video_self_attn=true, skip_audio_self_attn=true, ...)`.
 
 This compiles to a **second block exe** that's used only for block 29 during Pass 3.
+
+**Validation results** (synthetic inputs, real block-0 weights from base checkpoint):
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| Zig vs Python cos_sim | 0.999995 | 0.999991 |
+| max_abs | 0.5000 | 0.5000 |
+| mean_abs | 0.003835 | 0.009674 |
+| STG vs Normal cos_sim | 0.581 | 0.533 |
+
+Pass threshold: `expectClose(atol=0.2, rtol=0.01, min_close=0.999)` — **PASSED**.
+
+The "STG vs Normal" row is a **sanity check** — it compares V-passthrough output against
+normal (full attention) output. These are *supposed* to differ substantially because
+V-passthrough skips Q·K attention entirely. A cos_sim of ~0.58 confirms the V-passthrough
+code path is actually active and changing behavior (identical outputs would indicate a bug).
+
+**Files**:
+- `model.zig`: `Attention.forwardValuePassthrough`, `forwardNativeImpl` with skip flags,
+  `forwardBlock0NativeSTG` / `forwardBlock0NativeSTGWithAVMasks` entrypoints
+- `stg_block_check.zig`: Zig parity checker
+- `export_stg_block_fixture.py`: Self-contained fixture generator (synthetic inputs +
+  real weights, monkeypatches attn1/audio_attn1 for V-passthrough reference)
+- Checkpoint key prefix: `model.diffusion_model.transformer_blocks.{idx}.`
 
 ### Step 2: Guider combine function
 

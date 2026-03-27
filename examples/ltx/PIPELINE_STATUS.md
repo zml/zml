@@ -105,3 +105,17 @@ Perfect parity. The small max_abs_err is from bf16 rounding in the recovered noi
 (original noise was generated in bf16, recovered via f32 division) — not a Zig computation error.
 Fixture: `export_noise_init_fixture.py` extracts from `trace_run/11_stage2_steps.pt`.
 Checker: `check_noise_init.zig` compiles+runs `forwardNoiseInit` on device.
+
+---
+
+## Stage 1 — Full Denoising (non-distilled, 30 steps × 4 guidance passes)
+
+See [STAGE1_IMPLEMENTATION_PLAN.md](STAGE1_IMPLEMENTATION_PLAN.md) for full details.
+
+| # | Component | Status |
+|---|-----------|--------|
+| **1** | STG block variant (V-passthrough) | **DONE** ✅ — cos_sim 0.999995 / 0.999991 |
+| **2** | Guider combine (CFG+STG+modality) | Not started |
+| **3** | Sigma schedule | Not started |
+| **4** | Stage 1 driver (30 steps × 4 passes) | Not started |
+| **5** | Weight loading validation | Not started |

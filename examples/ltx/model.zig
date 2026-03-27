@@ -367,6 +367,44 @@ pub const Attention = struct {
         return self.forwardImpl(true, x, params, num_heads, opts);
     }
 
+
+    /// STG V-passthrough: replaces full Q·K·V attention with to_out(to_v(x)).
+    /// Q/K projections, RMSNorm, RoPE, and SDPA are all skipped.
+    /// Per-head gating is still applied exactly as in the normal path.
+    pub fn forwardValuePassthrough(self: Attention, x: Tensor, params: Params, num_heads: usize) Tensor {
+        _ = self;
+        const x_ = x.withPartialTags(.{ .b, .t, .d });
+        const out_dtype = x_.dtype();
+        const x_compute = x_.convert(.f32);
+
+        // V-only projection (no Q/K)
+        var v = x_compute.dot(params.to_v.weight.convert(.f32), .d);
+        if (params.to_v.bias) |bias_orig| {
+            v = v.add(bias_orig.convert(.f32).broad(v.shape()));
+        }
+
+        // Split into heads, rename .t → .q so broadcast matches gate shape [B, Q, H]
+        var vh = v.rename(.{ .t = .q }).splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), .hd = .auto });
+        vh = vh.withPartialTags(.{ .b, .q, .h, .hd });
+
+        // Per-head gating (same formula as forwardImpl)
+        var gate_logits = x_compute.dot(params.to_gate_logits.weight.convert(.f32), .d);
+        if (params.to_gate_logits.bias) |bias_orig| {
+            gate_logits = gate_logits.add(bias_orig.convert(.f32).broad(gate_logits.shape()));
+        }
+        const gate = gate_logits.sigmoid().scale(2.0).rename(.{ .t = .q })
+            .splitAxis(-1, .{ .h = @as(i64, @intCast(num_heads)), ._gate = .auto }).squeeze(._gate);
+        vh = vh.mul(gate.broad(vh.shape()));
+
+        // Merge heads and project to output
+        const merged = vh.merge(.{ .d_v = .{ .h, .hd } }).rename(.{ .q = .t });
+        var out = merged.dot(params.to_out.weight.convert(.f32), .d_v);
+        if (params.to_out.bias) |bias_orig| {
+            out = out.add(bias_orig.convert(.f32).broad(out.shape()));
+        }
+        return out.convert(out_dtype).withPartialTags(.{ .b, .t, .d });
+    }
+
     fn forwardImpl(self: Attention, comptime bf16_native: bool, x: Tensor, params: Params, num_heads: usize, opts: ForwardOpts) Tensor {
         _ = self;
 
@@ -822,7 +860,7 @@ pub const BasicAVTransformerBlock = struct {
     ///
     /// For parity checkers that operate on pre-captured per-module inputs, use
     /// `forward(FullInputs, Params)` instead.
-    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, comptime bf16_attn: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+    fn forwardNativeImpl(self: BasicAVTransformerBlock, comptime audio_ff_residual_f32: bool, comptime audio_all_residuals_f32: bool, comptime video_all_residuals_f32: bool, comptime bf16_attn: bool, comptime skip_video_self_attn: bool, comptime skip_audio_self_attn: bool, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         const vx = vx_in.withPartialTags(.{ .b, .t, .d });
         const ax = ax_in.withPartialTags(.{ .b, .t, .d });
         // In f32-carry mode, vx/ax arrive as f32 while adaValueAt returns ts.dtype() = bf16.
@@ -841,7 +879,9 @@ pub const BasicAVTransformerBlock = struct {
             .add(vshift_msa.broad(vx.shape()));
 
         // M1: video self-attn residual.
-        const attn1_out = if (bf16_attn) self.attn1.forwardBf16(norm_vx, params.attn1, kindNumHeads(.attn1), .{
+        const attn1_out = if (skip_video_self_attn)
+            self.attn1.forwardValuePassthrough(norm_vx, params.attn1, kindNumHeads(.attn1))
+        else if (bf16_attn) self.attn1.forwardBf16(norm_vx, params.attn1, kindNumHeads(.attn1), .{
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
         }) else self.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
@@ -891,7 +931,9 @@ pub const BasicAVTransformerBlock = struct {
             .add(ashift_msa.broad(ax.shape()));
 
         // M4-A: audio self-attn residual.
-        const audio_attn1_out = if (bf16_attn) self.audio_attn1.forwardBf16(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
+        const audio_attn1_out = if (skip_audio_self_attn)
+            self.audio_attn1.forwardValuePassthrough(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1))
+        else if (bf16_attn) self.audio_attn1.forwardBf16(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
             .pe_cos = inputs.a_pe_cos,
             .pe_sin = inputs.a_pe_sin,
         }) else self.audio_attn1.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
@@ -1067,30 +1109,36 @@ pub const BasicAVTransformerBlock = struct {
     }
 
     pub fn forwardNative(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, false, false, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: attention runs in bf16 matching Python's dtype chain.
     pub fn forwardNativeBf16Attn(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, false, true, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, false, true, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: only the final audio FF residual add is computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioFFResidualF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(true, false, false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(true, false, false, false, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: all audio residual adds are computed in f32.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeAudioAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, true, false, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, true, false, false, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// Checker-only experimental path: all video residual adds are computed in f32, and video FF uses f32 matmul.
     /// Outputs are converted back to the original stream dtype.
     pub fn forwardNativeVideoAllResidualsF32(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
-        return self.forwardNativeImpl(false, false, true, false, vx_in, ax_in, inputs, params);
+        return self.forwardNativeImpl(false, false, true, false, false, false, vx_in, ax_in, inputs, params);
+    }
+
+    /// STG block variant: both video and audio self-attention bypass Q·K·V and compute to_out(to_v(x)) instead.
+    /// Used for block 29 during the STG perturbation pass (Pass 3) in Stage 1 denoising.
+    pub fn forwardNativeSTG(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+        return self.forwardNativeImpl(false, false, false, false, true, true, vx_in, ax_in, inputs, params);
     }
 };
 
@@ -2924,6 +2972,125 @@ pub fn forwardBlock0NativeBf16Attn(
         .v2a_pe_sin = v2a_pe_sin,
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
+
+/// STG block variant: identical interface to forwardBlock0Native, but both video and audio
+/// self-attention use V-passthrough (to_out(to_v(x))). Used for block 29 during Pass 3
+/// (STG perturbation) in Stage 1 denoising.
+pub fn forwardBlock0NativeSTG(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeSTG(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
+/// STG block variant with explicit A2V and V2A modality masks.
+/// Same as forwardBlock0NativeSTG but accepts a2v_mask and v2a_mask scalings.
+/// Used when the Stage 1 driver passes modality cross-attention masks to block 29.
+pub fn forwardBlock0NativeSTGWithAVMasks(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeSTG(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .a2v_mask = a2v_mask,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .v2a_mask = v2a_mask,
     }, params);
 }
 

@@ -1,6 +1,6 @@
 # LTX-2 Video Generation — Zig/ZML Implementation
 
-Zig port of the [LTX-2 22B](https://huggingface.co/Lightricks/LTX-Video) two-stage text/image-to-video
+Zig port of the [LTX-2 22B](https://huggingface.co/Lightricks/LTX-2.3) two-stage text/image-to-video
 generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
 ## Current Status

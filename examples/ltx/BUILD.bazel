@@ -312,6 +312,19 @@ zig_binary(
 )
 
 zig_binary(
+    name = "stg_block_check",
+    main = "stg_block_check.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
     name = "block_slice_native_check",
     main = "block_slice_native_check.zig",
     srcs = [
@@ -481,6 +494,7 @@ build_test(
         ":block0_av_v2a_check",
         ":block0_full_check",
         ":block0_native_check",
+        ":stg_block_check",
         ":block_slice_native_check",
     ],
 )
