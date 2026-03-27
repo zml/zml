@@ -33,7 +33,7 @@ pub const ProcessEnricher = struct {
         curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch return;
 
         for (procs) |*info| {
-            var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+            var path_buf: [4096]u8 = undefined;
 
             // Read Uid, VmRSS, Name from /proc/{pid}/status
             const status_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{info.pid}) catch continue;
@@ -44,8 +44,9 @@ pub const ProcessEnricher = struct {
 
             // Read cmdline, fall back to Name from status
             const cmdline_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{info.pid}) catch continue;
-            const cmdline = readCmdline(io, cmdline_path);
-            info.comm = if (cmdline != null and cmdline.?[0] != 0) cmdline else null;
+            var comm_buf: [4096]u8 = undefined;
+            const cmdline = readCmdline(io, cmdline_path, &comm_buf) catch continue;
+            info.comm = if (cmdline.len > 0) comm_buf else null;
 
             // CPU% delta
             const ticks = readProcTicks(io, info.pid) orelse continue;
@@ -67,13 +68,9 @@ pub const ProcessEnricher = struct {
 
 fn lookupUsername(uid: u32) [32]u8 {
     if (std.c.getpwuid(uid)) |pw| {
-        const name_ptr = pw.name orelse return formatUid(uid);
-        const name_slice = std.mem.span(name_ptr);
-
+        const name = std.mem.span(pw.name orelse return formatUid(uid));
         var buf: [32]u8 = .{0} ** 32;
-        const len = @min(name_slice.len, 31);
-
-        @memcpy(buf[0..len], name_slice[0..len]);
+        @memcpy(buf[0..@min(name.len, 31)], name[0..@min(name.len, 31)]);
         return buf;
     }
 
@@ -89,7 +86,7 @@ fn formatUid(uid: u32) [32]u8 {
 
 /// Extract utime + stime from /proc/{pid}/stat.
 fn readProcTicks(io: std.Io, pid: u32) ?u64 {
-    var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    var path_buf: [4096]u8 = undefined;
     const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return null;
     var buf: [1024]u8 = undefined;
     const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return null;
@@ -100,17 +97,16 @@ fn readProcTicks(io: std.Io, pid: u32) ?u64 {
     return sysfs.nthTokenInt(rest, 11) + sysfs.nthTokenInt(rest, 12);
 }
 
-fn readCmdline(io: std.Io, path: []const u8) ?[std.Io.Dir.max_path_bytes]u8 {
-    var buf: [std.Io.Dir.max_path_bytes]u8 = .{0} ** std.Io.Dir.max_path_bytes;
-    const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return null;
-    const len = std.mem.trimEnd(u8, data, &.{0}).len;
+fn readCmdline(io: std.Io, path: []const u8, buf: *[4096]u8) ![]const u8 {
+    const data = try std.Io.Dir.readFile(.cwd(), io, path, buf);
 
-    for (buf[0..len]) |*c| {
-        if (c.* == 0) c.* = ' ';
+    for (data) |*c| {
+        if (c.* == 0) {
+            c.* = ' ';
+        }
     }
-    if (len < 256) @memset(buf[len..], 0);
 
-    return buf;
+    return std.mem.trimEnd(u8, data, &std.ascii.whitespace);
 }
 
 fn readTotalCpuTicks(io: std.Io) u64 {

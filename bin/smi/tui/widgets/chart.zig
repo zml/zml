@@ -56,7 +56,9 @@ fn drawContent(self: *const Chart, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     const chart_w: u16 = if (max_w > chart_start) max_w - chart_start else 0;
 
     var surface = try vxfw.Surface.init(ctx.arena, ui.drawWidget(self, drawContent), .{ .width = max_w, .height = content_h });
-    if (chart_w == 0) return surface;
+    if (chart_w == 0) {
+        return surface;
+    }
 
     // ── Y-axis labels + axis line ────────────────────────────
     for (y_strs, y_str_widths, y_labels) |text, sw, lbl| {

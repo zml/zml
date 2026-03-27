@@ -44,7 +44,9 @@ pub fn openDevice(self: Nrt, device_index: c_int) Error!*c.ndl_device_t {
         .num_dram_regions = 0,
     };
 
-    if (self.lib.ndl_open_device(device_index, &t, &dev) != 0) return error.nrt_error;
+    if (self.lib.ndl_open_device(device_index, &t, &dev) != 0) {
+        return error.nrt_error;
+    }
     return dev orelse error.nrt_error;
 }
 
@@ -57,13 +59,17 @@ pub const AppInfo = c.struct_neuron_app_info;
 pub fn allAppsInfo(self: Nrt, dev: *c.ndl_device_t) Error!struct { ptr: ?[*]AppInfo, count: usize } {
     var info: ?[*]AppInfo = null;
     var count: usize = 0;
-    if (self.lib.ndl_get_all_apps_info(dev, &info, &count, c.APP_INFO_ALL) != 0) return error.nrt_error;
+    if (self.lib.ndl_get_all_apps_info(dev, &info, &count, c.APP_INFO_ALL) != 0) {
+        return error.nrt_error;
+    }
     return .{ .ptr = info, .count = count };
 }
 
 pub fn ndsOpen(self: Nrt, dev: *c.ndl_device_t, pid: c.pid_t) Error!*c.nds_instance_t {
     var inst: ?*c.nds_instance_t = null;
-    if (self.lib.nds_open(dev, pid, &inst) != 0) return error.nrt_error;
+    if (self.lib.nds_open(dev, pid, &inst) != 0) {
+        return error.nrt_error;
+    }
     return inst orelse error.nrt_error;
 }
 
@@ -73,13 +79,17 @@ pub fn ndsClose(self: Nrt, inst: *c.nds_instance_t) void {
 
 pub fn ncCounter(self: Nrt, inst: *c.nds_instance_t, pnc_index: c_int, counter_index: u32) Error!u64 {
     var value: u64 = 0;
-    if (self.lib.nds_get_nc_counter(inst, pnc_index, counter_index, &value) != 0) return error.nrt_error;
+    if (self.lib.nds_get_nc_counter(inst, pnc_index, counter_index, &value) != 0) {
+        return error.nrt_error;
+    }
     return value;
 }
 
 pub fn totalNcCount(self: Nrt) Error!u32 {
     var count: u32 = 0;
-    if (self.lib.nrt_get_total_nc_count(&count) != 0) return error.nrt_error;
+    if (self.lib.nrt_get_total_nc_count(&count) != 0) {
+        return error.nrt_error;
+    }
     return count;
 }
 

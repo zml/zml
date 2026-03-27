@@ -27,7 +27,9 @@ pub const Collector = struct {
     }
 
     pub fn deinit(self: *Collector) void {
-        for (self.device_infos.items) |info| self.arena.destroy(info);
+        for (self.device_infos.items) |info| {
+            self.arena.destroy(info);
+        }
         self.device_infos.deinit(self.arena);
         for (self.process_lists.items) |list| {
             list.values[0].deinit(self.gpa);

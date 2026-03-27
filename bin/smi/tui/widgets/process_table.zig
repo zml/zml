@@ -35,7 +35,9 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) vo
         const pl_items = pl.front().items;
         if (device_id) |did| {
             for (pl_items) |entry| {
-                if (entry.device_idx != did) continue;
+                if (entry.device_idx != did) {
+                    continue;
+                }
                 self.merged.append(state.allocator, entry) catch break;
             }
         } else {
@@ -99,7 +101,9 @@ pub fn draw(self: *ProcessTable, ctx: vxfw.DrawContext) std.mem.Allocator.Error!
 /// Builds only data rows (no header) for the scroll view.
 fn buildRow(ptr: *const anyopaque, idx: usize, _: usize) ?vxfw.Widget {
     const self: *ProcessTable = @ptrCast(@alignCast(@constCast(ptr)));
-    if (idx >= self.merged.items.len) return null;
+    if (idx >= self.merged.items.len) {
+        return null;
+    }
     return .{ .userdata = @ptrCast(&self.merged.items[idx]), .drawFn = drawProcessRow };
 }
 

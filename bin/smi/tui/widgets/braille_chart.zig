@@ -55,7 +55,9 @@ pub fn renderTo(self: *const BrailleChart, arena: std.mem.Allocator, surface: *v
                     const threshold: u32 = dot_rows - fill;
                     for (0..4) |dr| {
                         const abs_row: u32 = @as(u32, @intCast(cell_row)) * 4 + @as(u32, @intCast(dr));
-                        if (abs_row >= threshold) pattern |= dot_bits[dr][dx];
+                        if (abs_row >= threshold) {
+                            pattern |= dot_bits[dr][dx];
+                        }
                     }
                 }
             }

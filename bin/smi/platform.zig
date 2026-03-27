@@ -16,10 +16,18 @@ pub fn detect(io: std.Io) Targets {
     var targets: Targets = .{};
 
     if (comptime builtin.os.tag != .macos) {
-        if (hasDevice(io, "/dev/nvidiactl")) targets.insert(.cuda);
-        if (hasDevice(io, "/dev/kfd")) targets.insert(.rocm);
-        if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) targets.insert(.neuron);
-        if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) targets.insert(.tpu);
+        if (hasDevice(io, "/dev/nvidiactl")) {
+            targets.insert(.cuda);
+        }
+        if (hasDevice(io, "/dev/kfd")) {
+            targets.insert(.rocm);
+        }
+        if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
+            targets.insert(.neuron);
+        }
+        if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
+            targets.insert(.tpu);
+        }
     }
 
     return targets;

@@ -41,10 +41,16 @@ pub fn draw(self: *const TitledBorder, ctx: vxfw.DrawContext) std.mem.Allocator.
         title_col += icon.cols;
         overlay_count += 1;
     }
-    if (self.title.len > 0) overlay_count += 1;
-    if (self.value_label != null) overlay_count += 1;
+    if (self.title.len > 0) {
+        overlay_count += 1;
+    }
+    if (self.value_label != null) {
+        overlay_count += 1;
+    }
 
-    if (overlay_count == 0) return surf;
+    if (overlay_count == 0) {
+        return surf;
+    }
 
     const new_children = try ctx.arena.alloc(vxfw.SubSurface, surf.children.len + overlay_count);
     @memcpy(new_children[0..surf.children.len], surf.children);

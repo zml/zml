@@ -51,7 +51,11 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                 };
                 break :blk amdsmi.processList(allocator, handle) catch continue;
             };
-            defer if (procs.len > 0) allocator.free(procs);
+            defer {
+                if (procs.len > 0) {
+                    allocator.free(procs);
+                }
+            }
 
             const pci_slot = if (dev_idx < pci_slots.len) &(pci_slots[dev_idx] orelse continue) else continue;
 
@@ -92,8 +96,12 @@ fn readProcessGpuVram(io: std.Io, pid: u32, pci_slot: *const [bdf_len]u8) u64 {
         var buf: [4096]u8 = undefined;
         const data = std.Io.Dir.readFile(.cwd(), io, file_path, &buf) catch continue;
 
-        if (std.mem.indexOf(u8, data, "drm-driver:\tamdgpu") == null) continue;
-        if (std.mem.indexOf(u8, data, pci_slot) == null) continue;
+        if (std.mem.indexOf(u8, data, "drm-driver:\tamdgpu") == null) {
+            continue;
+        }
+        if (std.mem.indexOf(u8, data, pci_slot) == null) {
+            continue;
+        }
 
         total_vram_kib += parseVramKib(data);
     }

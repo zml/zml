@@ -14,7 +14,9 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
-    if (handles.len == 0) return;
+    if (handles.len == 0) {
+        return;
+    }
 
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
@@ -24,14 +26,20 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
 
         for (handles, 0..) |handle, dev_i| {
             const apps_result = nrt.allAppsInfo(handle) catch continue;
-            defer if (apps_result.ptr) |ptr| std.c.free(@ptrCast(ptr));
+            defer {
+                if (apps_result.ptr) |ptr| {
+                    std.c.free(@ptrCast(ptr));
+                }
+            }
 
             const apps = if (apps_result.ptr) |ptr| ptr[0..apps_result.count] else continue;
 
             var total_us_per_core: [c.MAX_NC_PER_DEVICE]u64 = .{0} ** c.MAX_NC_PER_DEVICE;
 
             for (apps) |*app| {
-                if (app.pid <= 0) continue;
+                if (app.pid <= 0) {
+                    continue;
+                }
 
                 const nds = nrt.ndsOpen(handle, app.pid) catch continue;
                 defer nrt.ndsClose(nds);
@@ -40,7 +48,9 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                     const time_in_use = nrt.ncCounter(nds, @intCast(ci), c.NDS_NC_COUNTER_TIME_IN_USE) catch continue;
                     total_us_per_core[ci] += time_in_use;
 
-                    if (time_in_use == 0) continue;
+                    if (time_in_use == 0) {
+                        continue;
+                    }
 
                     const dev_idx: u32 = @intCast(dev_i * nc_per_device + ci);
 
@@ -65,7 +75,9 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
 
             for (0..nc_per_device) |ci| {
                 const dev_idx = dev_i * nc_per_device + ci;
-                if (dev_idx >= device_infos.len) break;
+                if (dev_idx >= device_infos.len) {
+                    break;
+                }
 
                 const ni_back = device_infos[dev_idx].neuron.back();
                 ni_back.* = device_infos[dev_idx].neuron.front().*;

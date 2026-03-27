@@ -26,7 +26,9 @@ pub fn start(collector: *Collector) !void {
 
     var dev_index_buf: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
     const dev_indexes = state.nrt.availableDevices(&dev_index_buf);
-    if (dev_indexes.len == 0) return;
+    if (dev_indexes.len == 0) {
+        return;
+    }
 
     const total_nc = state.nrt.totalNcCount() catch return;
     const nc_per_device = total_nc / @as(u32, @intCast(dev_indexes.len));
@@ -98,7 +100,9 @@ const Device = struct {
     }
 
     pub fn memTotal(self: Device) !u64 {
-        if (self.mem_per_core == 0) return error.NrtUnavailable;
+        if (self.mem_per_core == 0) {
+            return error.NrtUnavailable;
+        }
         return self.mem_per_core;
     }
 

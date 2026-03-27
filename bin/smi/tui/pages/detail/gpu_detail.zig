@@ -60,7 +60,9 @@ pub fn draw(
     const power_limit_w = power_limit_mw / 1000;
     const power_raw = try state.history.power[id].sliceLast(ctx.arena, data.history_len);
     const power_watts = try ctx.arena.alloc(u64, power_raw.len);
-    for (power_raw, 0..) |p, j| power_watts[j] = p / 1000;
+    for (power_raw, 0..) |p, j| {
+        power_watts[j] = p / 1000;
+    }
     const y_max = if (power_limit_w > 0) power_limit_w else 1;
     const power_chart: Chart = .{
         .title = "Power",
@@ -88,10 +90,12 @@ pub fn draw(
     try clock_lines.append(ctx.arena, .{ .label = "Graphics ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
         gpu.clock_graphics_mhz orelse 0, gpu.clock_graphics_max_mhz orelse 0,
     }) });
-    if (gpu.clock_sm_mhz) |sm|
+    if (gpu.clock_sm_mhz) |sm| {
         try clock_lines.append(ctx.arena, .{ .label = "SM       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{sm}) });
-    if (gpu.clock_soc_mhz) |soc|
+    }
+    if (gpu.clock_soc_mhz) |soc| {
         try clock_lines.append(ctx.arena, .{ .label = "SOC      ", .value = try std.fmt.allocPrint(ctx.arena, " {d} MHz", .{soc}) });
+    }
     try clock_lines.append(ctx.arena, .{ .label = "Memory   ", .value = try std.fmt.allocPrint(ctx.arena, " {d} / {d} MHz", .{
         gpu.clock_mem_mhz orelse 0, gpu.clock_mem_max_mhz orelse 0,
     }) });
@@ -105,8 +109,9 @@ pub fn draw(
         try pcie_lines.append(ctx.arena, .{ .label = "TX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_tx_kbps orelse 0) });
         try pcie_lines.append(ctx.arena, .{ .label = "RX       ", .value = try utils.formatBandwidth(ctx.arena, gpu.pcie_rx_kbps orelse 0) });
     }
-    if (gpu.pcie_bandwidth_mbps) |bw|
+    if (gpu.pcie_bandwidth_mbps) |bw| {
         try pcie_lines.append(ctx.arena, .{ .label = "BW       ", .value = try std.fmt.allocPrint(ctx.arena, " {d} Mb/s", .{bw}) });
+    }
     const pcie_card: MetricCard = .{ .title = "PCIe", .lines = pcie_lines.items };
 
     const cards_flow: ColumnLayout = .{
