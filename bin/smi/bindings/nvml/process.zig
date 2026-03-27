@@ -28,20 +28,34 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
             const idx: u8 = @intCast(dev_idx + dev_offset);
 
             const compute = nvml.computeRunningProcesses(allocator, handle) catch &.{};
-            defer if (compute.len > 0) allocator.free(compute);
+            defer {
+                if (compute.len > 0) {
+                    allocator.free(compute);
+                }
+            }
             collectFromQuery(allocator, back, idx, compute);
 
             const graphics = nvml.graphicsRunningProcesses(allocator, handle) catch &.{};
-            defer if (graphics.len > 0) allocator.free(graphics);
+            defer {
+                if (graphics.len > 0) {
+                    allocator.free(graphics);
+                }
+            }
             collectFromQuery(allocator, back, idx, graphics);
 
             // Apply utilization samples
             const last_ts = last_seen_ts[dev_idx];
             const utils = nvml.processUtilization(allocator, handle, last_ts) catch continue;
-            defer if (utils.len > 0) allocator.free(utils);
+            defer {
+                if (utils.len > 0) {
+                    allocator.free(utils);
+                }
+            }
 
             for (utils) |sample| {
-                if (sample.smUtil > 100 or sample.timeStamp <= last_ts) continue;
+                if (sample.smUtil > 100 or sample.timeStamp <= last_ts) {
+                    continue;
+                }
 
                 last_seen_ts[dev_idx] = @max(last_seen_ts[dev_idx], sample.timeStamp);
 

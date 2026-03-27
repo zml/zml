@@ -43,7 +43,9 @@ pub const ReturnError = error{
 };
 
 fn check(ret: c.amdsmi_status_t) Error!void {
-    if (ret == c.AMDSMI_STATUS_SUCCESS) return;
+    if (ret == c.AMDSMI_STATUS_SUCCESS) {
+        return;
+    }
 
     return switch (ret) {
         c.AMDSMI_STATUS_INVAL => error.inval,
@@ -139,7 +141,9 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
 }
 
 pub fn handleByIndex(self: AmdSmi, device_id: u32) Error!Handle {
-    if (device_id >= self.gpu_handles.len) return error.not_found;
+    if (device_id >= self.gpu_handles.len) {
+        return error.not_found;
+    }
     return self.gpu_handles[device_id];
 }
 
@@ -160,8 +164,12 @@ pub fn powerUsage(self: AmdSmi, handle: Handle) Error!u32 {
     var metrics: c.amdsmi_gpu_metrics_t = undefined;
     try check(self.lib.amdsmi_get_gpu_metrics_info(handle, &metrics));
     const unsupported16 = std.math.maxInt(u16);
-    if (metrics.current_socket_power != unsupported16) return metrics.current_socket_power;
-    if (metrics.average_socket_power != unsupported16) return metrics.average_socket_power;
+    if (metrics.current_socket_power != unsupported16) {
+        return metrics.current_socket_power;
+    }
+    if (metrics.average_socket_power != unsupported16) {
+        return metrics.average_socket_power;
+    }
     return error.not_supported;
 }
 
@@ -258,7 +266,9 @@ pub fn bdfId(self: AmdSmi, handle: Handle) Error!u64 {
 pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {
     var count: u32 = 0;
     try check(self.lib.amdsmi_get_gpu_process_list(handle, &count, null));
-    if (count == 0) return &.{};
+    if (count == 0) {
+        return &.{};
+    }
     const procs = try allocator.alloc(ProcInfo, count);
     errdefer allocator.free(procs);
     try check(self.lib.amdsmi_get_gpu_process_list(handle, &count, @ptrCast(procs.ptr)));

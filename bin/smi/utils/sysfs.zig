@@ -22,7 +22,9 @@ pub fn nthTokenInt(data: []const u8, n: usize) u64 {
 
     var iter = std.mem.tokenizeAny(u8, data, " \t");
     while (iter.next()) |tok| : (i += 1) {
-        if (i == n) return std.fmt.parseInt(u64, tok, 10) catch 0;
+        if (i == n) {
+            return std.fmt.parseInt(u64, tok, 10) catch 0;
+        }
     }
 
     return 0;

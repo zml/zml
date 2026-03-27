@@ -139,7 +139,9 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
         var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var read_buf: [256]u8 = undefined;
         const vendor = readSysfs(io, &path_buf, &read_buf, entry.name, "vendor") catch continue;
-        if (!std.mem.eql(u8, vendor, google_pci_vendor_id)) continue;
+        if (!std.mem.eql(u8, vendor, google_pci_vendor_id)) {
+            continue;
+        }
 
         var device_buf: [256]u8 = undefined;
         const device_raw = readSysfs(io, &path_buf, &device_buf, entry.name, "device") catch continue;

@@ -41,7 +41,9 @@ pub const ReturnError = error{
 };
 
 fn check(ret: c_uint) Error!void {
-    if (ret == c.NVML_SUCCESS) return;
+    if (ret == c.NVML_SUCCESS) {
+        return;
+    }
     return switch (ret) {
         c.NVML_ERROR_UNINITIALIZED => error.error_uninitialized,
         c.NVML_ERROR_INVALID_ARGUMENT => error.error_invalid_argument,
@@ -259,10 +261,14 @@ pub fn computeRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle:
     var count: c_uint = 0;
     const ret = self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, null);
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
-        if (ret == c.NVML_SUCCESS) return &.{};
+        if (ret == c.NVML_SUCCESS) {
+            return &.{};
+        }
         try check(ret);
     }
-    if (count == 0) return &.{};
+    if (count == 0) {
+        return &.{};
+    }
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
     try check(self.lib.nvmlDeviceGetComputeRunningProcesses_v3(handle, &count, @ptrCast(infos.ptr)));
@@ -274,11 +280,15 @@ pub fn graphicsRunningProcesses(self: Nvml, allocator: std.mem.Allocator, handle
     const ret = self.lib.nvmlDeviceGetGraphicsRunningProcesses_v3(handle, &count, null);
 
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
-        if (ret == c.NVML_SUCCESS) return &.{};
+        if (ret == c.NVML_SUCCESS) {
+            return &.{};
+        }
         try check(ret);
     }
 
-    if (count == 0) return &.{};
+    if (count == 0) {
+        return &.{};
+    }
 
     const infos = try allocator.alloc(c.nvmlProcessInfo_t, count);
     errdefer allocator.free(infos);
@@ -293,11 +303,15 @@ pub fn processUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nv
     const ret = self.lib.nvmlDeviceGetProcessUtilization(handle, null, &count, last_seen);
 
     if (ret != c.NVML_ERROR_INSUFFICIENT_SIZE) {
-        if (ret == c.NVML_SUCCESS) return &.{};
+        if (ret == c.NVML_SUCCESS) {
+            return &.{};
+        }
         try check(ret);
     }
 
-    if (count == 0) return &.{};
+    if (count == 0) {
+        return &.{};
+    }
 
     const samples = try allocator.alloc(c.nvmlProcessUtilizationSample_t, count);
     errdefer allocator.free(samples);

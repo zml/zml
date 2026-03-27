@@ -19,7 +19,9 @@ pub fn openElf(comptime F: type, io: std.Io, path: [:0]const u8, comptime known_
         return error.KnownSymbolNotFound;
 
     var info: DlInfo = undefined;
-    if (dladdr(sym_addr, &info) == 0) return error.DladdrFailed;
+    if (dladdr(sym_addr, &info) == 0) {
+        return error.DladdrFailed;
+    }
 
     const elf_base = @intFromPtr(info.dli_fbase);
     const elf_path = std.mem.sliceTo(info.dli_fname, 0);
