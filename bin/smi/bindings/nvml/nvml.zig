@@ -2,85 +2,12 @@ const std = @import("std");
 const c = @import("c");
 const DynLib = @import("../dynlib.zig");
 
+const Nvml = @This();
+
 pub const Error = ReturnError || error{NvmlUnavailable};
 pub const Handle = c.nvmlDevice_t;
 pub const ProcessInfo_t = c.nvmlProcessInfo_t;
 
-pub const ReturnError = error{
-    error_uninitialized,
-    error_invalid_argument,
-    error_not_supported,
-    error_no_permission,
-    error_already_initialized,
-    error_not_found,
-    error_insufficient_size,
-    error_insufficient_power,
-    error_driver_not_loaded,
-    error_timeout,
-    error_irq_issue,
-    error_library_not_found,
-    error_function_not_found,
-    error_corrupted_inforom,
-    error_gpu_is_lost,
-    error_reset_required,
-    error_operating_system,
-    error_lib_rm_version_mismatch,
-    error_in_use,
-    error_memory,
-    error_no_data,
-    error_vgpu_ecc_not_supported,
-    error_insufficient_resources,
-    error_freq_not_supported,
-    error_argument_version_mismatch,
-    error_deprecated,
-    error_not_ready,
-    error_gpu_not_found,
-    error_invalid_state,
-    error_reset_type_not_supported,
-    error_unknown,
-};
-
-fn check(ret: c_uint) Error!void {
-    if (ret == c.NVML_SUCCESS) {
-        return;
-    }
-    return switch (ret) {
-        c.NVML_ERROR_UNINITIALIZED => error.error_uninitialized,
-        c.NVML_ERROR_INVALID_ARGUMENT => error.error_invalid_argument,
-        c.NVML_ERROR_NOT_SUPPORTED => error.error_not_supported,
-        c.NVML_ERROR_NO_PERMISSION => error.error_no_permission,
-        c.NVML_ERROR_ALREADY_INITIALIZED => error.error_already_initialized,
-        c.NVML_ERROR_NOT_FOUND => error.error_not_found,
-        c.NVML_ERROR_INSUFFICIENT_SIZE => error.error_insufficient_size,
-        c.NVML_ERROR_INSUFFICIENT_POWER => error.error_insufficient_power,
-        c.NVML_ERROR_DRIVER_NOT_LOADED => error.error_driver_not_loaded,
-        c.NVML_ERROR_TIMEOUT => error.error_timeout,
-        c.NVML_ERROR_IRQ_ISSUE => error.error_irq_issue,
-        c.NVML_ERROR_LIBRARY_NOT_FOUND => error.error_library_not_found,
-        c.NVML_ERROR_FUNCTION_NOT_FOUND => error.error_function_not_found,
-        c.NVML_ERROR_CORRUPTED_INFOROM => error.error_corrupted_inforom,
-        c.NVML_ERROR_GPU_IS_LOST => error.error_gpu_is_lost,
-        c.NVML_ERROR_RESET_REQUIRED => error.error_reset_required,
-        c.NVML_ERROR_OPERATING_SYSTEM => error.error_operating_system,
-        c.NVML_ERROR_LIB_RM_VERSION_MISMATCH => error.error_lib_rm_version_mismatch,
-        c.NVML_ERROR_IN_USE => error.error_in_use,
-        c.NVML_ERROR_MEMORY => error.error_memory,
-        c.NVML_ERROR_NO_DATA => error.error_no_data,
-        c.NVML_ERROR_VGPU_ECC_NOT_SUPPORTED => error.error_vgpu_ecc_not_supported,
-        c.NVML_ERROR_INSUFFICIENT_RESOURCES => error.error_insufficient_resources,
-        c.NVML_ERROR_FREQ_NOT_SUPPORTED => error.error_freq_not_supported,
-        c.NVML_ERROR_ARGUMENT_VERSION_MISMATCH => error.error_argument_version_mismatch,
-        c.NVML_ERROR_DEPRECATED => error.error_deprecated,
-        c.NVML_ERROR_NOT_READY => error.error_not_ready,
-        c.NVML_ERROR_GPU_NOT_FOUND => error.error_gpu_not_found,
-        c.NVML_ERROR_INVALID_STATE => error.error_invalid_state,
-        c.NVML_ERROR_RESET_TYPE_NOT_SUPPORTED => error.error_reset_type_not_supported,
-        c.NVML_ERROR_UNKNOWN => error.error_unknown,
-        else => error.error_unknown,
-    };
-}
-
-const Nvml = @This();
 lib: Fns,
 
 const Fns = struct {
@@ -107,8 +34,6 @@ const Fns = struct {
     nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetGraphicsRunningProcesses_v3"),
     nvmlDeviceGetProcessUtilization: DynLib.Fn("nvmlDeviceGetProcessUtilization"),
 };
-
-// Public API
 
 pub fn init() Error!Nvml {
     const fns = DynLib.open(Fns, "libnvidia-ml.so.1") orelse
@@ -319,4 +244,80 @@ pub fn processUtilization(self: Nvml, allocator: std.mem.Allocator, handle: c.nv
     try check(self.lib.nvmlDeviceGetProcessUtilization(handle, @ptrCast(samples.ptr), &count, last_seen));
 
     return samples;
+}
+
+// Error handling
+
+pub const ReturnError = error{
+    error_uninitialized,
+    error_invalid_argument,
+    error_not_supported,
+    error_no_permission,
+    error_already_initialized,
+    error_not_found,
+    error_insufficient_size,
+    error_insufficient_power,
+    error_driver_not_loaded,
+    error_timeout,
+    error_irq_issue,
+    error_library_not_found,
+    error_function_not_found,
+    error_corrupted_inforom,
+    error_gpu_is_lost,
+    error_reset_required,
+    error_operating_system,
+    error_lib_rm_version_mismatch,
+    error_in_use,
+    error_memory,
+    error_no_data,
+    error_vgpu_ecc_not_supported,
+    error_insufficient_resources,
+    error_freq_not_supported,
+    error_argument_version_mismatch,
+    error_deprecated,
+    error_not_ready,
+    error_gpu_not_found,
+    error_invalid_state,
+    error_reset_type_not_supported,
+    error_unknown,
+};
+
+fn check(ret: c_uint) Error!void {
+    if (ret == c.NVML_SUCCESS) {
+        return;
+    }
+    return switch (ret) {
+        c.NVML_ERROR_UNINITIALIZED => error.error_uninitialized,
+        c.NVML_ERROR_INVALID_ARGUMENT => error.error_invalid_argument,
+        c.NVML_ERROR_NOT_SUPPORTED => error.error_not_supported,
+        c.NVML_ERROR_NO_PERMISSION => error.error_no_permission,
+        c.NVML_ERROR_ALREADY_INITIALIZED => error.error_already_initialized,
+        c.NVML_ERROR_NOT_FOUND => error.error_not_found,
+        c.NVML_ERROR_INSUFFICIENT_SIZE => error.error_insufficient_size,
+        c.NVML_ERROR_INSUFFICIENT_POWER => error.error_insufficient_power,
+        c.NVML_ERROR_DRIVER_NOT_LOADED => error.error_driver_not_loaded,
+        c.NVML_ERROR_TIMEOUT => error.error_timeout,
+        c.NVML_ERROR_IRQ_ISSUE => error.error_irq_issue,
+        c.NVML_ERROR_LIBRARY_NOT_FOUND => error.error_library_not_found,
+        c.NVML_ERROR_FUNCTION_NOT_FOUND => error.error_function_not_found,
+        c.NVML_ERROR_CORRUPTED_INFOROM => error.error_corrupted_inforom,
+        c.NVML_ERROR_GPU_IS_LOST => error.error_gpu_is_lost,
+        c.NVML_ERROR_RESET_REQUIRED => error.error_reset_required,
+        c.NVML_ERROR_OPERATING_SYSTEM => error.error_operating_system,
+        c.NVML_ERROR_LIB_RM_VERSION_MISMATCH => error.error_lib_rm_version_mismatch,
+        c.NVML_ERROR_IN_USE => error.error_in_use,
+        c.NVML_ERROR_MEMORY => error.error_memory,
+        c.NVML_ERROR_NO_DATA => error.error_no_data,
+        c.NVML_ERROR_VGPU_ECC_NOT_SUPPORTED => error.error_vgpu_ecc_not_supported,
+        c.NVML_ERROR_INSUFFICIENT_RESOURCES => error.error_insufficient_resources,
+        c.NVML_ERROR_FREQ_NOT_SUPPORTED => error.error_freq_not_supported,
+        c.NVML_ERROR_ARGUMENT_VERSION_MISMATCH => error.error_argument_version_mismatch,
+        c.NVML_ERROR_DEPRECATED => error.error_deprecated,
+        c.NVML_ERROR_NOT_READY => error.error_not_ready,
+        c.NVML_ERROR_GPU_NOT_FOUND => error.error_gpu_not_found,
+        c.NVML_ERROR_INVALID_STATE => error.error_invalid_state,
+        c.NVML_ERROR_RESET_TYPE_NOT_SUPPORTED => error.error_reset_type_not_supported,
+        c.NVML_ERROR_UNKNOWN => error.error_unknown,
+        else => error.error_unknown,
+    };
 }
