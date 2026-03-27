@@ -15,12 +15,12 @@
 
 namespace {
 
-struct TraceMeSession {
+struct LocalHostTraceSession {
   bool active = false;
   uint64_t start_timestamp_ns = 0;
 };
 
-TraceMeSession g_traceme_session;
+LocalHostTraceSession g_local_host_trace_session;
 
 tensorflow::profiler::XPlane* FindOrAddHostPlane(
     tensorflow::profiler::XSpace* space) {
@@ -46,32 +46,11 @@ zig_slice CopyToOwnedSlice(const std::string& data) {
   return {ptr, data.size()};
 }
 
-}  // namespace
-
-struct zml_traceme {
-  explicit zml_traceme(std::string encoded_name)
-      : name(std::move(encoded_name)),
-        traceme([&] { return name; }) {
-    PushCudaRange();
-  }
-
-  ~zml_traceme() {
-    PopCudaRange();
-  }
-
-  std::string name;
-  tsl::profiler::TraceMe traceme;
-
 #if defined(ZML_RUNTIME_CUDA)
-  static nvtxDomainHandle_t TslNvtxDomain() {
-    static nvtxDomainHandle_t domain = nvtxDomainCreateA("TSL");
-    return domain;
-  }
-
-  void PushCudaRange() {
-    nvtx_domain = TslNvtxDomain();
-    pushed_nvtx_range = nvtx_domain != nullptr;
-    if (!pushed_nvtx_range) {
+struct CudaNvtxRangeBackend {
+  explicit CudaNvtxRangeBackend(const std::string& name)
+      : domain(TslNvtxDomain()), active(domain != nullptr) {
+    if (!active) {
       return;
     }
 
@@ -80,21 +59,44 @@ struct zml_traceme {
     attrs.size = NVTX_EVENT_ATTRIB_STRUCT_SIZE;
     attrs.messageType = NVTX_MESSAGE_TYPE_ASCII;
     attrs.message.ascii = name.c_str();
-    nvtxDomainRangePushEx(nvtx_domain, &attrs);
+    nvtxDomainRangePushEx(domain, &attrs);
   }
 
-  void PopCudaRange() {
-    if (pushed_nvtx_range) {
-      nvtxDomainRangePop(nvtx_domain);
+  ~CudaNvtxRangeBackend() {
+    if (active) {
+      nvtxDomainRangePop(domain);
     }
   }
 
-  nvtxDomainHandle_t nvtx_domain = nullptr;
-  bool pushed_nvtx_range = false;
+  static bool IsEnabled() { return TslNvtxDomain() != nullptr; }
+
+ private:
+  static nvtxDomainHandle_t TslNvtxDomain() {
+    static nvtxDomainHandle_t domain = nvtxDomainCreateA("TSL");
+    return domain;
+  }
+
+  nvtxDomainHandle_t domain = nullptr;
+  bool active = false;
+};
 #else
-  void PushCudaRange() {}
-  void PopCudaRange() {}
+struct CudaNvtxRangeBackend {
+  explicit CudaNvtxRangeBackend(const std::string&) {}
+  static bool IsEnabled() { return false; }
+};
 #endif
+
+}  // namespace
+
+struct zml_traceme {
+  explicit zml_traceme(std::string encoded_name)
+      : name(std::move(encoded_name)),
+        traceme([&] { return name; }),
+        cuda_backend(name) {}
+
+  std::string name;
+  tsl::profiler::TraceMe traceme;
+  CudaNvtxRangeBackend cuda_backend;
 };
 
 extern "C" zml_traceme* zml_traceme_start(zig_slice name) {
@@ -105,17 +107,14 @@ extern "C" zml_traceme* zml_traceme_start(zig_slice name) {
 extern "C" void zml_traceme_stop(zml_traceme* traceme) { delete traceme; }
 
 extern "C" bool zml_traceme_enabled(void) {
-  return tsl::profiler::TraceMe::Active()
-#if defined(ZML_RUNTIME_CUDA)
-         || zml_traceme::TslNvtxDomain() != nullptr
-#endif
-      ;
+  return tsl::profiler::TraceMe::Active() || CudaNvtxRangeBackend::IsEnabled();
 }
 
 extern "C" void zml_traceme_session_start(int level, uint64_t filter_mask,
                                           bool enable_filter) {
-  g_traceme_session.start_timestamp_ns = tsl::profiler::GetCurrentTimeNanos();
-  g_traceme_session.active =
+  g_local_host_trace_session.start_timestamp_ns =
+      tsl::profiler::GetCurrentTimeNanos();
+  g_local_host_trace_session.active =
       enable_filter ? tsl::profiler::TraceMeRecorder::Start(level, filter_mask)
                     : tsl::profiler::TraceMeRecorder::Start(level);
 }
@@ -128,12 +127,12 @@ extern "C" zig_slice zml_traceme_session_merge(zig_slice xspace) {
         std::string(static_cast<const char*>(xspace.ptr), xspace.len));
   }
 
-  if (g_traceme_session.active) {
+  if (g_local_host_trace_session.active) {
     auto events = tsl::profiler::TraceMeRecorder::Stop();
-    g_traceme_session.active = false;
+    g_local_host_trace_session.active = false;
     if (!events.empty()) {
       tsl::profiler::ConvertCompleteEventsToXPlane(
-          g_traceme_session.start_timestamp_ns, std::move(events),
+          g_local_host_trace_session.start_timestamp_ns, std::move(events),
           FindOrAddHostPlane(&space));
     }
   }

@@ -192,6 +192,11 @@ pub const Profiler = struct {
     }
 
     pub fn start(self: *Profiler) !void {
+        if (hasActiveNsysSession()) {
+            self.inner = null;
+            return;
+        }
+
         if (self.inner) |*inner| {
             inner.start() catch |err| {
                 if (self.raise_error_on_start_failure) {
@@ -211,7 +216,8 @@ pub const Profiler = struct {
     }
 
     pub fn stop(self: *Profiler) !?Profile {
-        const protobuf = if (self.inner) |*inner| blk: {
+        const protobuf = if (self.inner) |saved_inner| blk: {
+            var inner = saved_inner;
             self.inner = null;
             try inner.stop();
             break :blk try inner.collectData(self.arena.allocator());
@@ -249,3 +255,8 @@ pub const Profiler = struct {
         try file.writePositionalAll(self.io, contents, 0);
     }
 };
+
+fn hasActiveNsysSession() bool {
+    const session_id = std.c.getenv("NSYS_PROFILING_SESSION_ID") orelse return false;
+    return session_id[0] != 0;
+}
