@@ -3,7 +3,6 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
-const utils = @import("../lib/utils.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 
@@ -37,9 +36,9 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const hostname_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.hostname orelse "Unkown"});
     const kernel_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.kernel orelse "Unknown"});
     const cpu_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.cpu_name orelse "Unknown"});
-    const uptime_str = try utils.formatUptime(ctx.arena, host.uptime_seconds orelse 0);
+    const uptime_str = try formatUptime(ctx.arena, host.uptime_seconds orelse 0);
     const cores_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{host.cpu_cores orelse 0});
-    const load = utils.parseLoadAvg(host.load_avg);
+    const load = parseLoadAvg(host.load_avg);
     const load_str = try std.fmt.allocPrint(ctx.arena, "{d:.2} / {d:.2} / {d:.2}", .{
         load[0], load[1], load[2],
     });
@@ -95,4 +94,28 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
 
     const total_h: u16 = @intCast(entries.len);
     return sb.finish(.{ .width = w, .height = total_h }, ui.widget(self));
+}
+
+fn parseLoadAvg(raw: ?[256]u8) [3]f32 {
+    const s = if (raw) |*b| std.mem.sliceTo(b, 0) else return .{ 0, 0, 0 };
+    var result: [3]f32 = .{ 0, 0, 0 };
+    var it = std.mem.splitScalar(u8, s, ' ');
+    for (&result) |*r| {
+        const token = it.next() orelse break;
+        r.* = std.fmt.parseFloat(f32, token) catch 0;
+    }
+    return result;
+}
+
+fn formatUptime(arena: std.mem.Allocator, seconds: u64) std.mem.Allocator.Error![]const u8 {
+    const days = seconds / 86400;
+    const hours = (seconds % 86400) / 3600;
+    const mins = (seconds % 3600) / 60;
+    if (days > 0) {
+        return std.fmt.allocPrint(arena, "{d}d {d}h {d}m", .{ days, hours, mins });
+    } else if (hours > 0) {
+        return std.fmt.allocPrint(arena, "{d}h {d}m", .{ hours, mins });
+    } else {
+        return std.fmt.allocPrint(arena, "{d}m", .{mins});
+    }
 }

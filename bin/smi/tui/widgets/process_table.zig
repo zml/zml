@@ -3,7 +3,6 @@ const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
 const data = @import("../data.zig");
 const theme = @import("../theme.zig");
-const utils = @import("../lib/utils.zig");
 const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
@@ -151,11 +150,11 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
     else
         .{ .style = dim, .text = try col(ctx.arena, col_fmt.util, "-", .{}) };
     segs[4] = if (info.dev_mem_kib) |mem|
-        .{ .style = val, .text = try col(ctx.arena, col_fmt.mem, "{s}", .{try utils.fmtMem(ctx.arena, mem)}) }
+        .{ .style = val, .text = try col(ctx.arena, col_fmt.mem, "{s}", .{try fmtMem(ctx.arena, mem)}) }
     else
         .{ .style = dim, .text = try col(ctx.arena, col_fmt.mem, "-", .{}) };
     segs[5] = .{ .style = val, .text = try col(ctx.arena, col_fmt.cpu, "{d}.{d}%", .{ info.cpu_percent / 10, info.cpu_percent % 10 }) };
-    segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try utils.fmtMem(ctx.arena, info.rss_kib)}) };
+    segs[6] = .{ .style = val, .text = try col(ctx.arena, col_fmt.host_mem, "{s}", .{try fmtMem(ctx.arena, info.rss_kib)}) };
     segs[7] = .{ .style = val, .text = info.comm };
 
     const rich: RichText = .{ .text = segs, .softwrap = false, .overflow = .clip };
@@ -163,4 +162,18 @@ fn drawProcessRow(ptr: *anyopaque, ctx: vxfw.DrawContext) std.mem.Allocator.Erro
         .{ .width = ctx.min.width, .height = 1 },
         .{ .width = ctx.max.width, .height = 1 },
     ));
+}
+
+fn fmtMem(arena: std.mem.Allocator, kib: u64) std.mem.Allocator.Error![]const u8 {
+    if (kib >= 1024 * 1024) {
+        const whole = kib / (1024 * 1024);
+        const frac = (kib % (1024 * 1024)) * 10 / (1024 * 1024);
+        return std.fmt.allocPrint(arena, "{d}.{d}G", .{ whole, frac });
+    } else if (kib >= 1024) {
+        const whole = kib / 1024;
+        const frac = (kib % 1024) * 10 / 1024;
+        return std.fmt.allocPrint(arena, "{d}.{d}M", .{ whole, frac });
+    } else {
+        return std.fmt.allocPrint(arena, "{d}K", .{kib});
+    }
 }
