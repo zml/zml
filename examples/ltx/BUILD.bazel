@@ -428,6 +428,19 @@ zig_binary(
 )
 
 zig_binary(
+    name = "check_noise_init",
+    main = "check_noise_init.zig",
+    srcs = [
+        "model.zig",
+        "check_utils.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
     name = "perblock_check",
     main = "perblock_check.zig",
     srcs = [

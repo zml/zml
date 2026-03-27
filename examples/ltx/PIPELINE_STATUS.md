@@ -7,7 +7,7 @@ Reference Python pipeline: `ti2vid_two_stages.py` (two-stage text/image-to-video
 | # | Component | Status | Notes |
 |---|-----------|--------|-------|
 | **1** | **Text encoding** (Gemma → embeddings) | Not started | Gemma2 text encoder + embeddings processor produces `v_context` and `a_context` [B, T, 4096]. Separate ~2B param model. |
-| **2** | **Noise initialization** | Not started | Create initial latent state: take `initial_video_latent` (from stage 1 upsampler) + `initial_audio_latent`, add Gaussian noise scaled by `sigma[0] * denoise_mask`. Formula: `latent = noise * mask * sigma_0 + clean * (1 - mask * sigma_0)` |
+| **2** | **Noise initialization** | **DONE** ✅ | `noised = noise * mask * sigma_0 + clean * (1 - mask * sigma_0)`. Validated: video cos_sim=1.000000 close=1.000000, audio cos_sim=1.000000 close=1.000000. Implemented in `model.zig:forwardNoiseInit`. |
 | **3** | **Denoising loop** (3 Euler steps) | **DONE (Step 3)** ✅ | Sigma schedule: `[0.909375, 0.725, 0.421875, 0.0]` → 3 steps. Validated: video cos_sim=0.978–0.982, audio cos_sim=0.9999 |
 | 3a | velocity_model.forward | **DONE (Step 2)** ✅ | Preprocessing + 48 blocks + output projection. Validated: cos_sim=0.9965, close=0.9762 |
 | 3b | post_process_latent | **DONE (Step 3)** ✅ | `denoised * mask + clean * (1 - mask)` — implemented in `forwardDenoisingStep` |
@@ -56,12 +56,17 @@ for step_idx in 0..3:
 
 Hybrid Python→Zig→Python pipeline validated end-to-end (March 2026):
 
-1. **Python** (`e2e/export_stage2_inputs.py`): Text encoding + Stage 1 (30 steps) + upsample + Stage 2 noise init → safetensors
-2. **Zig** (`denoise_e2e.zig`): 3-step Stage 2 denoising loop (48 blocks × 3 Euler steps) → raw binary latents
+1. **Python** (`e2e/export_stage2_inputs.py`): Text encoding + Stage 1 (30 steps) + upsample → exports clean latents, noise, masks, contexts as safetensors
+2. **Zig** (`denoise_e2e.zig`): Noise init (`forwardNoiseInit`) + 3-step Stage 2 denoising loop (48 blocks × 3 Euler steps) → raw binary latents
 3. **Python** (`e2e/decode_latents.py`): Unpatchify + Video VAE decode + Audio VAE decode + Vocoder → MP4
 
 Produces playable video+audio (768×512, 121 frames @ 25fps). Verified against pure-Python
 reference — same semantic content, confirming no divergence from the Zig denoiser.
+
+**Noise init integration (March 27):** The Zig denoiser now applies `forwardNoiseInit` on device
+rather than receiving pre-noised latents from Python. The export script provides clean latent +
+back-computed noise, and Zig computes `noised = noise * mask * sigma_0 + clean * (1 - mask * sigma_0)`.
+E2E re-validated — produces identical video output.
 
 ## Step 2 Validation Results
 
@@ -86,3 +91,17 @@ Run-to-run variance: ±0.002 on cos_sim due to non-deterministic GPU GEMM schedu
 
 bf16 attention experiment showed f32 attention is strictly better for parity (XLA f32 matmuls
 closer to PyTorch cuBLAS bf16 tensor core behavior than XLA bf16 matmuls).
+
+## Noise Init Validation Results
+
+| Metric | Video | Audio |
+|--------|-------|-------|
+| cos_sim | 1.000000 | 1.000000 |
+| close | 1.000000 | 1.000000 |
+| max_abs_err | 1.56e-2 | 7.81e-3 |
+| mean_abs_err | 1.32e-6 | 1.35e-6 |
+
+Perfect parity. The small max_abs_err is from bf16 rounding in the recovered noise tensor
+(original noise was generated in bf16, recovered via f32 division) — not a Zig computation error.
+Fixture: `export_noise_init_fixture.py` extracts from `trace_run/11_stage2_steps.pt`.
+Checker: `check_noise_init.zig` compiles+runs `forwardNoiseInit` on device.

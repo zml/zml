@@ -19,6 +19,8 @@ Saved keys:
   audio_denoise_mask   f32   [B, T_a, 1]
   video_clean_latent   bf16  [B, T_v, 128]   conditioning reference
   audio_clean_latent   bf16  [B, T_a, 128]
+  video_noise          bf16  [B, T_v, 128]   back-computed noise tensor
+  audio_noise          bf16  [B, T_a, 128]
   video_positions      bf16  [B, 3, T_v, 2]  position coordinates
   audio_positions      f32   [B, 1, T_a, 2]
   v_context            bf16  [B, S, 4096]    text context (video)
@@ -269,6 +271,36 @@ def main() -> None:
     print(f"  a_context: {list(a_context_p.shape)}")
 
     # ========================================================================
+    # Back-compute noise tensors for Zig noise init validation
+    # ========================================================================
+    sigma_0 = distilled_sigmas[0].item()
+    print(f"  sigma_0 = {sigma_0}")
+
+    def recover_noise(noised, clean, mask, sigma_0):
+        """Recover noise tensor: noise = (noised - clean * (1 - mask*s)) / (mask*s)."""
+        noised_f32 = noised.float()
+        clean_f32 = clean.float()
+        mask_f32 = mask.float()
+        mask_sigma = mask_f32 * sigma_0
+        one_minus = 1.0 - mask_sigma
+        noise_f32 = torch.zeros_like(noised_f32)
+        nonzero = mask_sigma.squeeze(-1) > 0
+        if nonzero.any():
+            noise_f32[nonzero] = (noised_f32[nonzero] - clean_f32[nonzero] * one_minus[nonzero]) / mask_sigma[nonzero]
+        return noise_f32.to(noised.dtype)
+
+    video_noise = recover_noise(
+        video_state_s2.latent, video_state_s2.clean_latent,
+        video_state_s2.denoise_mask, sigma_0,
+    )
+    audio_noise = recover_noise(
+        audio_state_s2.latent, audio_state_s2.clean_latent,
+        audio_state_s2.denoise_mask, sigma_0,
+    )
+    print(f"  video_noise:  {list(video_noise.shape)} {video_noise.dtype}")
+    print(f"  audio_noise:  {list(audio_noise.shape)} {audio_noise.dtype}")
+
+    # ========================================================================
     # Export to safetensors
     # ========================================================================
     print("Exporting tensors...")
@@ -283,6 +315,8 @@ def main() -> None:
         "audio_positions": audio_state_s2.positions.detach().cpu().contiguous(),
         "v_context": v_context_p.detach().cpu().contiguous(),
         "a_context": a_context_p.detach().cpu().contiguous(),
+        "video_noise": video_noise.detach().cpu().contiguous(),
+        "audio_noise": audio_noise.detach().cpu().contiguous(),
     }
 
     # Compute unpatchified shapes for the decode script
@@ -307,6 +341,7 @@ def main() -> None:
         "seed": str(args.seed),
         "prompt": args.prompt,
         "negative_prompt": args.negative_prompt,
+        "sigma_0": str(sigma_0),
         "f_lat": str(f_lat),
         "h_lat": str(h_lat),
         "w_lat": str(w_lat),

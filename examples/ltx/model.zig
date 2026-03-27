@@ -1326,6 +1326,33 @@ pub fn forwardOutputProjection(x: Tensor, embedded_timestep: Tensor, params: Out
 // Denoising-loop arithmetic (Step 3)
 // =====================================================================
 
+/// Apply noise initialization (GaussianNoiser).
+///
+/// Produces the initial noised latent from clean latent, noise, and mask:
+///   noised = noise * mask * sigma_0 + clean * (1 - mask * sigma_0)
+///
+/// Matches Python's GaussianNoiser dtype chain: all arithmetic in f32,
+/// final cast back to the clean latent's dtype (bf16).
+pub fn forwardNoiseInit(
+    clean_latent: Tensor,
+    noise: Tensor,
+    denoise_mask: Tensor,
+    sigma_0: Tensor,
+) Tensor {
+    const out_dtype = clean_latent.dtype();
+    const clean_f32 = clean_latent.convert(.f32);
+    const noise_f32 = noise.convert(.f32);
+    const mask_f32 = denoise_mask.convert(.f32);
+    const sigma_f32 = sigma_0.convert(.f32);
+
+    // mask_sigma = mask * sigma_0
+    const mask_sigma = mask_f32.mul(sigma_f32);
+    // one_minus = 1 - mask_sigma
+    const one_minus = Tensor.scalar(1.0, .f32).sub(mask_sigma);
+    // noised = noise * mask_sigma + clean * (1 - mask_sigma)
+    return noise_f32.mul(mask_sigma).add(clean_f32.mul(one_minus)).convert(out_dtype);
+}
+
 /// Result of one denoising step: to_denoised + post_process_latent + Euler step.
 pub const DenoisingStepResult = struct {
     denoised: Tensor,

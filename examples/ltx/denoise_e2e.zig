@@ -74,8 +74,10 @@ pub fn main(init: std.process.Init) !void {
     // ========================================================================
     std.log.info("Loading inputs...", .{});
 
-    var v_latent_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_latent", sharding);
-    var a_latent_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_latent", sharding);
+    var v_noise_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_noise", sharding);
+    defer v_noise_buf.deinit();
+    var a_noise_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_noise", sharding);
+    defer a_noise_buf.deinit();
     var v_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_denoise_mask", sharding);
     defer v_mask_buf.deinit();
     var a_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_denoise_mask", sharding);
@@ -93,8 +95,67 @@ pub fn main(init: std.process.Init) !void {
     var a_context_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context", sharding);
     defer a_context_buf.deinit();
 
-    std.log.info("  video_latent: {any}", .{v_latent_buf.shape()});
-    std.log.info("  audio_latent: {any}", .{a_latent_buf.shape()});
+    std.log.info("  video_noise: {any}", .{v_noise_buf.shape()});
+    std.log.info("  video_clean: {any}", .{v_clean_buf.shape()});
+    std.log.info("  audio_noise: {any}", .{a_noise_buf.shape()});
+    std.log.info("  audio_clean: {any}", .{a_clean_buf.shape()});
+
+    // ========================================================================
+    // Noise init: compute initial noised latent from clean + noise + mask
+    // ========================================================================
+    std.log.info("Compiling noise init...", .{});
+    const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
+
+    var noise_init_v_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardNoiseInit,
+        .{
+            zml.Tensor.fromShape(v_clean_buf.shape()),
+            zml.Tensor.fromShape(v_noise_buf.shape()),
+            zml.Tensor.fromShape(v_mask_buf.shape()),
+            zml.Tensor.fromShape(sigma_scalar_shape),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_init_v_exe.deinit();
+
+    var noise_init_a_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardNoiseInit,
+        .{
+            zml.Tensor.fromShape(a_clean_buf.shape()),
+            zml.Tensor.fromShape(a_noise_buf.shape()),
+            zml.Tensor.fromShape(a_mask_buf.shape()),
+            zml.Tensor.fromShape(sigma_scalar_shape),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_init_a_exe.deinit();
+
+    std.log.info("Running noise init...", .{});
+    var sigma0_buf = try zml.Buffer.scalar(io, platform, SIGMAS[0], .f32, sharding);
+    defer sigma0_buf.deinit();
+
+    // Video noise init
+    var ni_v_args = try noise_init_v_exe.args(allocator);
+    defer ni_v_args.deinit(allocator);
+    var ni_v_results = try noise_init_v_exe.results(allocator);
+    defer ni_v_results.deinit(allocator);
+    ni_v_args.set(.{ v_clean_buf, v_noise_buf, v_mask_buf, sigma0_buf });
+    noise_init_v_exe.call(ni_v_args, &ni_v_results);
+    var v_latent_buf = ni_v_results.get(zml.Buffer);
+
+    // Audio noise init
+    var ni_a_args = try noise_init_a_exe.args(allocator);
+    defer ni_a_args.deinit(allocator);
+    var ni_a_results = try noise_init_a_exe.results(allocator);
+    defer ni_a_results.deinit(allocator);
+    ni_a_args.set(.{ a_clean_buf, a_noise_buf, a_mask_buf, sigma0_buf });
+    noise_init_a_exe.call(ni_a_args, &ni_a_results);
+    var a_latent_buf = ni_a_results.get(zml.Buffer);
+
+    std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape()});
+    std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape()});
 
     // ========================================================================
     // Compile exes
@@ -232,7 +293,6 @@ pub fn main(init: std.process.Init) !void {
 
     // Compile denoising step exes
     std.log.info("Compiling denoising step exes...", .{});
-    const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
 
     var denoise_v_exe = try platform.compileFn(
         allocator, io,
