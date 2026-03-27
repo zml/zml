@@ -12,7 +12,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
-    const device_count = nvml.getDeviceCount() catch 0;
+    const device_count = nvml.deviceCount() catch 0;
     const last_seen_ts = allocator.alloc(u64, device_count) catch return;
     defer allocator.free(last_seen_ts);
     @memset(last_seen_ts, 0);
@@ -26,20 +26,20 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         sl.clearRetainingCapacity();
 
         for (0..device_count) |dev_idx| {
-            const handle = nvml.getHandleByIndex(@intCast(dev_idx)) catch continue;
+            const handle = nvml.handleByIndex(@intCast(dev_idx)) catch continue;
             const idx: u8 = @intCast(dev_idx + dev_offset);
 
-            const compute = nvml.getComputeRunningProcesses(allocator, handle) catch &.{};
+            const compute = nvml.computeRunningProcesses(allocator, handle) catch &.{};
             defer if (compute.len > 0) allocator.free(compute);
             collectFromQuery(allocator, &sl, idx, compute);
 
-            const graphics = nvml.getGraphicsRunningProcesses(allocator, handle) catch &.{};
+            const graphics = nvml.graphicsRunningProcesses(allocator, handle) catch &.{};
             defer if (graphics.len > 0) allocator.free(graphics);
             collectFromQuery(allocator, &sl, idx, graphics);
 
             // Apply utilization samples
             const last_ts = last_seen_ts[dev_idx];
-            const utils = nvml.getProcessUtilization(allocator, handle, last_ts) catch continue;
+            const utils = nvml.processUtilization(allocator, handle, last_ts) catch continue;
             defer if (utils.len > 0) allocator.free(utils);
 
             for (utils) |sample| {

@@ -25,7 +25,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         sl.clearRetainingCapacity();
 
         for (handles, 0..) |handle, dev_i| {
-            const apps_result = nrt.getAllAppsInfo(handle) catch continue;
+            const apps_result = nrt.allAppsInfo(handle) catch continue;
             defer if (apps_result.ptr) |ptr| std.c.free(@ptrCast(ptr));
 
             const apps = if (apps_result.ptr) |ptr| ptr[0..apps_result.count] else continue;
@@ -39,7 +39,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                 defer nrt.ndsClose(nds);
 
                 for (0..nc_per_device) |ci| {
-                    const time_in_use = nrt.getNcCounter(nds, @intCast(ci), c.NDS_NC_COUNTER_TIME_IN_USE) catch continue;
+                    const time_in_use = nrt.ncCounter(nds, @intCast(ci), c.NDS_NC_COUNTER_TIME_IN_USE) catch continue;
                     total_us_per_core[ci] += time_in_use;
 
                     if (time_in_use == 0) continue;
