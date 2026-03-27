@@ -13,12 +13,12 @@ pub const target: device_info.Target = .cuda;
 pub fn start(collector: *Collector) !void {
     const nvml = try collector.arena.create(Nvml);
     nvml.* = try Nvml.init();
-    const count = try nvml.getDeviceCount();
+    const count = try nvml.deviceCount();
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const info = try collector.addDevice(.{ .cuda = .{ .value = .{ .name = dev.getName() catch null } } });
+        const info = try collector.addDevice(.{ .cuda = .{ .value = .{ .name = dev.name() catch null } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
     }
 
@@ -33,107 +33,107 @@ const Device = struct {
     handle: Nvml.Handle,
 
     pub fn open(nvml: *const Nvml, index: u32) !Device {
-        return .{ .nvml = nvml, .handle = try nvml.getHandleByIndex(index) };
+        return .{ .nvml = nvml, .handle = try nvml.handleByIndex(index) };
     }
 
-    fn getName(self: Device) ![256]u8 {
+    fn name(self: Device) ![256]u8 {
         var buf: [256]u8 = .{0} ** 256;
-        _ = try self.nvml.getName(self.handle, &buf);
+        _ = try self.nvml.name(self.handle, &buf);
         return buf;
     }
 
     // Power
-    pub fn getPowerUsage(self: Device) !u64 {
-        return @intCast(try self.nvml.getPowerUsage(self.handle));
+    pub fn powerUsage(self: Device) !u64 {
+        return @intCast(try self.nvml.powerUsage(self.handle));
     }
-    pub fn getPowerLimit(self: Device) !u64 {
-        return @intCast(try self.nvml.getPowerLimit(self.handle));
+    pub fn powerLimit(self: Device) !u64 {
+        return @intCast(try self.nvml.powerLimit(self.handle));
     }
-    pub fn getTotalEnergy(self: Device) !u64 {
-        return self.nvml.getTotalEnergy(self.handle);
+    pub fn totalEnergy(self: Device) !u64 {
+        return self.nvml.totalEnergy(self.handle);
     }
 
     // Thermal
-    pub fn getTemperature(self: Device) !u64 {
-        return @intCast(try self.nvml.getTemperature(self.handle));
+    pub fn temperature(self: Device) !u64 {
+        return @intCast(try self.nvml.temperature(self.handle));
     }
-    pub fn getFanSpeed(self: Device) !u64 {
-        return @intCast(try self.nvml.getFanSpeed(self.handle));
+    pub fn fanSpeed(self: Device) !u64 {
+        return @intCast(try self.nvml.fanSpeed(self.handle));
     }
 
     // Utilization
-    pub fn getGpuUtil(self: Device) !u64 {
-        return @intCast(try self.nvml.getUtilizationGpu(self.handle));
+    pub fn gpuUtil(self: Device) !u64 {
+        return @intCast(try self.nvml.utilizationGpu(self.handle));
     }
-    pub fn getEncoderUtil(self: Device) !u64 {
-        return @intCast(try self.nvml.getEncoderUtil(self.handle));
+    pub fn encoderUtil(self: Device) !u64 {
+        return @intCast(try self.nvml.encoderUtil(self.handle));
     }
-    pub fn getDecoderUtil(self: Device) !u64 {
-        return @intCast(try self.nvml.getDecoderUtil(self.handle));
+    pub fn decoderUtil(self: Device) !u64 {
+        return @intCast(try self.nvml.decoderUtil(self.handle));
     }
 
     // Clocks
-    pub fn getClockGraphics(self: Device) !u64 {
-        return @intCast(try self.nvml.getClockGraphics(self.handle));
+    pub fn clockGraphics(self: Device) !u64 {
+        return @intCast(try self.nvml.clockGraphics(self.handle));
     }
-    pub fn getClockSm(self: Device) !u64 {
-        return @intCast(try self.nvml.getClockSm(self.handle));
+    pub fn clockSm(self: Device) !u64 {
+        return @intCast(try self.nvml.clockSm(self.handle));
     }
-    pub fn getClockMem(self: Device) !u64 {
-        return @intCast(try self.nvml.getClockMem(self.handle));
+    pub fn clockMem(self: Device) !u64 {
+        return @intCast(try self.nvml.clockMem(self.handle));
     }
-    pub fn getMaxClockGraphics(self: Device) !u64 {
-        return @intCast(try self.nvml.getMaxClockGraphics(self.handle));
+    pub fn maxClockGraphics(self: Device) !u64 {
+        return @intCast(try self.nvml.maxClockGraphics(self.handle));
     }
-    pub fn getMaxClockMem(self: Device) !u64 {
-        return @intCast(try self.nvml.getMaxClockMem(self.handle));
+    pub fn maxClockMem(self: Device) !u64 {
+        return @intCast(try self.nvml.maxClockMem(self.handle));
     }
 
     // Memory
-    pub fn getMemUsed(self: Device) !u64 {
-        return self.nvml.getMemUsed(self.handle);
+    pub fn memUsed(self: Device) !u64 {
+        return self.nvml.memUsed(self.handle);
     }
-    pub fn getMemTotal(self: Device) !u64 {
-        return self.nvml.getMemTotal(self.handle);
+    pub fn memTotal(self: Device) !u64 {
+        return self.nvml.memTotal(self.handle);
     }
-    pub fn getMemBusWidth(self: Device) !u64 {
-        return @intCast(try self.nvml.getMemBusWidth(self.handle));
+    pub fn memBusWidth(self: Device) !u64 {
+        return @intCast(try self.nvml.memBusWidth(self.handle));
     }
 
     // PCIe
-    pub fn getPcieTx(self: Device) !u64 {
-        return @intCast(try self.nvml.getPcieTxKBps(self.handle));
+    pub fn pcieTx(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieTxKBps(self.handle));
     }
-    pub fn getPcieRx(self: Device) !u64 {
-        return @intCast(try self.nvml.getPcieRxKBps(self.handle));
+    pub fn pcieRx(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieRxKBps(self.handle));
     }
-    pub fn getPcieLinkGen(self: Device) !u64 {
-        return @intCast(try self.nvml.getPcieLinkGen(self.handle));
+    pub fn pcieLinkGen(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieLinkGen(self.handle));
     }
-    pub fn getPcieLinkWidth(self: Device) !u64 {
-        return @intCast(try self.nvml.getPcieLinkWidth(self.handle));
+    pub fn pcieLinkWidth(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieLinkWidth(self.handle));
     }
 };
 
 const metrics = .{
-    .{ .field = "power_mw", .query = Device.getPowerUsage },
-    .{ .field = "power_limit_mw", .query = Device.getPowerLimit },
-    .{ .field = "total_energy_mj", .query = Device.getTotalEnergy },
-    .{ .field = "temperature", .query = Device.getTemperature },
-    .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
-    .{ .field = "util_percent", .query = Device.getGpuUtil },
-    .{ .field = "encoder_util_percent", .query = Device.getEncoderUtil },
-    .{ .field = "decoder_util_percent", .query = Device.getDecoderUtil },
-    .{ .field = "clock_graphics_mhz", .query = Device.getClockGraphics },
-    .{ .field = "clock_sm_mhz", .query = Device.getClockSm },
-    .{ .field = "clock_mem_mhz", .query = Device.getClockMem },
-    .{ .field = "clock_graphics_max_mhz", .query = Device.getMaxClockGraphics },
-    .{ .field = "clock_mem_max_mhz", .query = Device.getMaxClockMem },
-    .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
-    .{ .field = "mem_total_bytes", .query = Device.getMemTotal },
-    .{ .field = "mem_bus_width", .query = Device.getMemBusWidth },
-    .{ .field = "pcie_tx_kbps", .query = Device.getPcieTx },
-    .{ .field = "pcie_rx_kbps", .query = Device.getPcieRx },
-    .{ .field = "pcie_link_gen", .query = Device.getPcieLinkGen },
-    .{ .field = "pcie_link_width", .query = Device.getPcieLinkWidth },
+    .{ .field = "power_mw", .query = Device.powerUsage },
+    .{ .field = "power_limit_mw", .query = Device.powerLimit },
+    .{ .field = "total_energy_mj", .query = Device.totalEnergy },
+    .{ .field = "temperature", .query = Device.temperature },
+    .{ .field = "fan_speed_percent", .query = Device.fanSpeed },
+    .{ .field = "util_percent", .query = Device.gpuUtil },
+    .{ .field = "encoder_util_percent", .query = Device.encoderUtil },
+    .{ .field = "decoder_util_percent", .query = Device.decoderUtil },
+    .{ .field = "clock_graphics_mhz", .query = Device.clockGraphics },
+    .{ .field = "clock_sm_mhz", .query = Device.clockSm },
+    .{ .field = "clock_mem_mhz", .query = Device.clockMem },
+    .{ .field = "clock_graphics_max_mhz", .query = Device.maxClockGraphics },
+    .{ .field = "clock_mem_max_mhz", .query = Device.maxClockMem },
+    .{ .field = "mem_used_bytes", .query = Device.memUsed },
+    .{ .field = "mem_total_bytes", .query = Device.memTotal },
+    .{ .field = "mem_bus_width", .query = Device.memBusWidth },
+    .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
+    .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
+    .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
+    .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };

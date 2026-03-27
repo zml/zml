@@ -138,25 +138,25 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     return .{ .lib = fns, .gpu_handles = try handle_list.toOwnedSlice(allocator) };
 }
 
-pub fn getHandleByIndex(self: AmdSmi, device_id: u32) Error!Handle {
+pub fn handleByIndex(self: AmdSmi, device_id: u32) Error!Handle {
     if (device_id >= self.gpu_handles.len) return error.not_found;
     return self.gpu_handles[device_id];
 }
 
-pub fn getDeviceCount(self: AmdSmi) u32 {
+pub fn deviceCount(self: AmdSmi) u32 {
     return @intCast(self.gpu_handles.len);
 }
 
 pub const name_buf_len = c.AMDSMI_MAX_STRING_LENGTH;
 
-pub fn getName(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) Error![:0]const u8 {
+pub fn name(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) Error![:0]const u8 {
     var info: c.amdsmi_asic_info_t = undefined;
     try check(self.lib.amdsmi_get_gpu_asic_info(handle, &info));
     @memcpy(buf, &info.market_name);
     return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
 }
 
-pub fn getPowerUsage(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn powerUsage(self: AmdSmi, handle: Handle) Error!u32 {
     var metrics: c.amdsmi_gpu_metrics_t = undefined;
     try check(self.lib.amdsmi_get_gpu_metrics_info(handle, &metrics));
     const unsupported16 = std.math.maxInt(u16);
@@ -165,97 +165,97 @@ pub fn getPowerUsage(self: AmdSmi, handle: Handle) Error!u32 {
     return error.not_supported;
 }
 
-pub fn getPowerLimit(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn powerLimit(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_power_info_t = undefined;
     try check(self.lib.amdsmi_get_power_info(handle, &info));
     return info.power_limit;
 }
 
-pub fn getTemperature(self: AmdSmi, handle: Handle) Error!i64 {
+pub fn temperature(self: AmdSmi, handle: Handle) Error!i64 {
     var temp: i64 = 0;
     try check(self.lib.amdsmi_get_temp_metric(handle, c.AMDSMI_TEMPERATURE_TYPE_EDGE, c.AMDSMI_TEMP_CURRENT, &temp));
     return temp;
 }
 
-pub fn getFanSpeed(self: AmdSmi, handle: Handle) Error!i64 {
+pub fn fanSpeed(self: AmdSmi, handle: Handle) Error!i64 {
     var speed: i64 = 0;
     try check(self.lib.amdsmi_get_gpu_fan_speed(handle, @as(u32, 0), &speed));
     return speed;
 }
 
-pub fn getGpuUtil(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn gpuUtil(self: AmdSmi, handle: Handle) Error!u32 {
     var usage: c.amdsmi_engine_usage_t = undefined;
     try check(self.lib.amdsmi_get_gpu_activity(handle, &usage));
     return usage.gfx_activity;
 }
 
-pub fn getClockGraphics(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn clockGraphics(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_clk_info_t = undefined;
     try check(self.lib.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SYS, &info));
     return info.clk;
 }
 
-pub fn getMaxClockGraphics(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn maxClockGraphics(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_clk_info_t = undefined;
     try check(self.lib.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SYS, &info));
     return info.max_clk;
 }
 
-pub fn getClockMem(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn clockMem(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_clk_info_t = undefined;
     try check(self.lib.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_MEM, &info));
     return info.clk;
 }
 
-pub fn getMaxClockMem(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn maxClockMem(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_clk_info_t = undefined;
     try check(self.lib.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_MEM, &info));
     return info.max_clk;
 }
 
-pub fn getClockSoc(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn clockSoc(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_clk_info_t = undefined;
     try check(self.lib.amdsmi_get_clock_info(handle, c.AMDSMI_CLK_TYPE_SOC, &info));
     return info.clk;
 }
 
-pub fn getMemTotal(self: AmdSmi, handle: Handle) Error!u64 {
+pub fn memTotal(self: AmdSmi, handle: Handle) Error!u64 {
     var total: u64 = 0;
     try check(self.lib.amdsmi_get_gpu_memory_total(handle, c.AMDSMI_MEM_TYPE_VRAM, &total));
     return total;
 }
 
-pub fn getMemUsed(self: AmdSmi, handle: Handle) Error!u64 {
+pub fn memUsed(self: AmdSmi, handle: Handle) Error!u64 {
     var used: u64 = 0;
     try check(self.lib.amdsmi_get_gpu_memory_usage(handle, c.AMDSMI_MEM_TYPE_VRAM, &used));
     return used;
 }
 
-pub fn getPcieWidth(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn pcieWidth(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try check(self.lib.amdsmi_get_pcie_info(handle, &info));
     return @intCast(info.pcie_metric.pcie_width);
 }
 
-pub fn getPcieBandwidth(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn pcieBandwidth(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try check(self.lib.amdsmi_get_pcie_info(handle, &info));
     return info.pcie_metric.pcie_bandwidth;
 }
 
-pub fn getPcieLinkGen(self: AmdSmi, handle: Handle) Error!u32 {
+pub fn pcieLinkGen(self: AmdSmi, handle: Handle) Error!u32 {
     var info: c.amdsmi_pcie_info_t = undefined;
     try check(self.lib.amdsmi_get_pcie_info(handle, &info));
     return info.pcie_static.pcie_interface_version;
 }
 
-pub fn getBdfId(self: AmdSmi, handle: Handle) Error!u64 {
+pub fn bdfId(self: AmdSmi, handle: Handle) Error!u64 {
     var bdf_id: u64 = 0;
     try check(self.lib.amdsmi_get_gpu_bdf_id(handle, &bdf_id));
     return bdf_id;
 }
 
-pub fn getProcessList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {
+pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {
     var count: u32 = 0;
     try check(self.lib.amdsmi_get_gpu_process_list(handle, &count, null));
     if (count == 0) return &.{};

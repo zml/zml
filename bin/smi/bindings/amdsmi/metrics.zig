@@ -13,12 +13,12 @@ pub const target: device_info.Target = .rocm;
 pub fn start(collector: *Collector) !void {
     const amdsmi = try collector.arena.create(AmdSmi);
     amdsmi.* = try AmdSmi.init(collector.arena);
-    const count = amdsmi.getDeviceCount();
+    const count = amdsmi.deviceCount();
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const info = try collector.addDevice(.{ .rocm = .{ .value = .{ .name = dev.getName() catch null } } });
+        const info = try collector.addDevice(.{ .rocm = .{ .value = .{ .name = dev.name() catch null } } });
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
 
@@ -33,95 +33,95 @@ const Device = struct {
     handle: AmdSmi.Handle,
 
     pub fn open(amdsmi: *const AmdSmi, index: u32) !Device {
-        return .{ .amdsmi = amdsmi, .handle = try amdsmi.getHandleByIndex(index) };
+        return .{ .amdsmi = amdsmi, .handle = try amdsmi.handleByIndex(index) };
     }
 
-    fn getName(self: Device) ![256]u8 {
+    fn name(self: Device) ![256]u8 {
         var buf: [256]u8 = .{0} ** 256;
-        _ = try self.amdsmi.getName(self.handle, buf[0..AmdSmi.name_buf_len]);
+        _ = try self.amdsmi.name(self.handle, buf[0..AmdSmi.name_buf_len]);
         return buf;
     }
 
     // Power
-    pub fn getPowerUsage(self: Device) !u64 {
-        const pw = try self.amdsmi.getPowerUsage(self.handle);
+    pub fn powerUsage(self: Device) !u64 {
+        const pw = try self.amdsmi.powerUsage(self.handle);
         return @as(u64, pw) * 1000;
     }
-    pub fn getPowerLimit(self: Device) !u64 {
+    pub fn powerLimit(self: Device) !u64 {
         // Header says W, but empirically power_limit is in µW; convert to mW
-        const limit = try self.amdsmi.getPowerLimit(self.handle);
+        const limit = try self.amdsmi.powerLimit(self.handle);
         if (limit == std.math.maxInt(u32)) return error.not_supported;
         return @as(u64, limit) / 1000;
     }
 
     // Thermal
-    pub fn getTemperature(self: Device) !u64 {
-        const temp = try self.amdsmi.getTemperature(self.handle);
+    pub fn temperature(self: Device) !u64 {
+        const temp = try self.amdsmi.temperature(self.handle);
         return @intCast(temp);
     }
-    pub fn getFanSpeed(self: Device) !u64 {
-        const speed = try self.amdsmi.getFanSpeed(self.handle);
+    pub fn fanSpeed(self: Device) !u64 {
+        const speed = try self.amdsmi.fanSpeed(self.handle);
         return @intCast(@divTrunc(speed * 100, 255));
     }
 
     // Utilization
-    pub fn getGpuUtil(self: Device) !u64 {
-        return try self.amdsmi.getGpuUtil(self.handle);
+    pub fn gpuUtil(self: Device) !u64 {
+        return try self.amdsmi.gpuUtil(self.handle);
     }
 
     // Clocks
-    pub fn getClockGraphics(self: Device) !u64 {
-        return try self.amdsmi.getClockGraphics(self.handle);
+    pub fn clockGraphics(self: Device) !u64 {
+        return try self.amdsmi.clockGraphics(self.handle);
     }
-    pub fn getClockSoc(self: Device) !u64 {
-        return try self.amdsmi.getClockSoc(self.handle);
+    pub fn clockSoc(self: Device) !u64 {
+        return try self.amdsmi.clockSoc(self.handle);
     }
-    pub fn getClockMem(self: Device) !u64 {
-        return try self.amdsmi.getClockMem(self.handle);
+    pub fn clockMem(self: Device) !u64 {
+        return try self.amdsmi.clockMem(self.handle);
     }
-    pub fn getMaxClockGraphics(self: Device) !u64 {
-        return try self.amdsmi.getMaxClockGraphics(self.handle);
+    pub fn maxClockGraphics(self: Device) !u64 {
+        return try self.amdsmi.maxClockGraphics(self.handle);
     }
-    pub fn getMaxClockMem(self: Device) !u64 {
-        return try self.amdsmi.getMaxClockMem(self.handle);
+    pub fn maxClockMem(self: Device) !u64 {
+        return try self.amdsmi.maxClockMem(self.handle);
     }
 
     // Memory
-    pub fn getMemUsed(self: Device) !u64 {
-        return self.amdsmi.getMemUsed(self.handle);
+    pub fn memUsed(self: Device) !u64 {
+        return self.amdsmi.memUsed(self.handle);
     }
-    pub fn getMemTotal(self: Device) !u64 {
-        return self.amdsmi.getMemTotal(self.handle);
+    pub fn memTotal(self: Device) !u64 {
+        return self.amdsmi.memTotal(self.handle);
     }
 
     // PCIe
-    pub fn getPcieBandwidth(self: Device) !u64 {
-        const bw = try self.amdsmi.getPcieBandwidth(self.handle);
+    pub fn pcieBandwidth(self: Device) !u64 {
+        const bw = try self.amdsmi.pcieBandwidth(self.handle);
         if (bw == std.math.maxInt(u32)) return error.not_supported;
         return bw;
     }
-    pub fn getPcieLinkGen(self: Device) !u64 {
-        return try self.amdsmi.getPcieLinkGen(self.handle);
+    pub fn pcieLinkGen(self: Device) !u64 {
+        return try self.amdsmi.pcieLinkGen(self.handle);
     }
-    pub fn getPcieLinkWidth(self: Device) !u64 {
-        return try self.amdsmi.getPcieWidth(self.handle);
+    pub fn pcieLinkWidth(self: Device) !u64 {
+        return try self.amdsmi.pcieWidth(self.handle);
     }
 };
 
 const metrics = .{
-    .{ .field = "power_mw", .query = Device.getPowerUsage },
-    .{ .field = "power_limit_mw", .query = Device.getPowerLimit },
-    .{ .field = "temperature", .query = Device.getTemperature },
-    .{ .field = "fan_speed_percent", .query = Device.getFanSpeed },
-    .{ .field = "util_percent", .query = Device.getGpuUtil },
-    .{ .field = "clock_graphics_mhz", .query = Device.getClockGraphics },
-    .{ .field = "clock_soc_mhz", .query = Device.getClockSoc },
-    .{ .field = "clock_mem_mhz", .query = Device.getClockMem },
-    .{ .field = "clock_graphics_max_mhz", .query = Device.getMaxClockGraphics },
-    .{ .field = "clock_mem_max_mhz", .query = Device.getMaxClockMem },
-    .{ .field = "mem_used_bytes", .query = Device.getMemUsed },
-    .{ .field = "mem_total_bytes", .query = Device.getMemTotal },
-    .{ .field = "pcie_bandwidth_mbps", .query = Device.getPcieBandwidth },
-    .{ .field = "pcie_link_gen", .query = Device.getPcieLinkGen },
-    .{ .field = "pcie_link_width", .query = Device.getPcieLinkWidth },
+    .{ .field = "power_mw", .query = Device.powerUsage },
+    .{ .field = "power_limit_mw", .query = Device.powerLimit },
+    .{ .field = "temperature", .query = Device.temperature },
+    .{ .field = "fan_speed_percent", .query = Device.fanSpeed },
+    .{ .field = "util_percent", .query = Device.gpuUtil },
+    .{ .field = "clock_graphics_mhz", .query = Device.clockGraphics },
+    .{ .field = "clock_soc_mhz", .query = Device.clockSoc },
+    .{ .field = "clock_mem_mhz", .query = Device.clockMem },
+    .{ .field = "clock_graphics_max_mhz", .query = Device.maxClockGraphics },
+    .{ .field = "clock_mem_max_mhz", .query = Device.maxClockMem },
+    .{ .field = "mem_used_bytes", .query = Device.memUsed },
+    .{ .field = "mem_total_bytes", .query = Device.memTotal },
+    .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
+    .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
+    .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };
