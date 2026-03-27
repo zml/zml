@@ -1,6 +1,8 @@
 const std = @import("std");
 
+const dialects = @import("mlir/dialects");
 const flashattn = @import("platforms/cuda/flashattn");
+const mlir = @import("mlir");
 const platforms = @import("platforms");
 const stdx = @import("stdx");
 
@@ -755,12 +757,9 @@ pub const paged_fa2 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[11]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -827,12 +826,9 @@ pub const paged_fa2 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[10]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -888,6 +884,7 @@ pub const paged_fa2 = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index_: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        _ = layer_index_;
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
@@ -897,7 +894,6 @@ pub const paged_fa2 = struct {
         const num_kv_heads = q.dim(.hkv);
         const head_dim = q.dim(.hd);
         const num_heads = num_head_groups * num_kv_heads;
-        const layer_index = layer_index_.reshape(.{1}).withPartitioning(.{ ._0 = .replicated });
         // FIXME: remove unreachable and propagate error correctly.
         const num_heads_per_shard = @divExact(num_heads, ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable);
 
@@ -950,7 +946,6 @@ pub const paged_fa2 = struct {
                         softmax_lse,
                         softmax_lse_accum,
                         out_accum,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1027,7 +1022,6 @@ pub const paged_fa2 = struct {
                         softmax_lse_accum_prefill,
                         out_accum_prefill,
                         host_metadata,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1091,7 +1085,6 @@ pub const paged_fa2 = struct {
                         softmax_lse_decode,
                         softmax_lse_accum_decode,
                         out_accum_decode,
-                        layer_index,
                     },
                     output_shape_decode,
                     .{
@@ -1369,12 +1362,9 @@ pub const paged_fa3 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[11]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -1450,12 +1440,9 @@ pub const paged_fa3 = struct {
         pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
             if (call_frame.registeringHook()) return null;
 
-            const layer_index = bufferFromFfiBuffer(call_frame.args.buffers()[10]);
-            const layer_index_raw = @as([*]i32, @ptrCast(@alignCast(layer_index.ptr)))[0];
-
             const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-            const paged_k = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[1]), layer_index_raw);
-            const paged_v = fixupKvCacheBuffer(bufferFromFfiBuffer(call_frame.args.buffers()[2]), layer_index_raw);
+            const paged_k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
+            const paged_v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
             const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
             const seqused_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
             const block_table = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
@@ -1520,6 +1507,7 @@ pub const paged_fa3 = struct {
     };
 
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        _ = layer_index;
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
@@ -1563,7 +1551,6 @@ pub const paged_fa3 = struct {
                         softmax_lse_accum,
                         out_accum,
                         scheduler_metadata,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1628,7 +1615,6 @@ pub const paged_fa3 = struct {
                         out_accum,
                         scheduler_metadata_prefill,
                         host_metadata,
-                        layer_index,
                     },
                     output_shape,
                     .{
@@ -1678,7 +1664,6 @@ pub const paged_fa3 = struct {
                         softmax_lse_accum_decode,
                         out_accum,
                         scheduler_metadata_decode,
-                        layer_index,
                     },
                     decode_output_shape,
                     .{
@@ -1703,5 +1688,280 @@ pub const paged_fa3 = struct {
         };
 
         return o;
+    }
+};
+
+pub const mosaic_tpu = struct {
+    const RaggedPagedAttentionParams = struct {
+        num_q_tokens: i64,
+        num_q_heads: i64,
+        num_kv_heads: i64,
+        head_dim: i64,
+        q_dtype: []const u8,
+        kv_dtype: []const u8,
+        max_num_seqs: i64,
+        pages_per_seq: i64,
+        total_num_pages: i64,
+        page_size: i64,
+        sm_scale: f32,
+        num_kv_pages_per_block: u32,
+        num_queries_per_block: u32,
+    };
+
+    fn kernelFrontendAttrs(comp_ctx: anytype) *const mlir.Attribute {
+        return mlir.dictionaryAttribute(comp_ctx.mlir_ctx, &.{
+            mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_metadata", mlir.stringAttribute(comp_ctx.mlir_ctx, "{}")),
+        });
+    }
+
+    fn raggedPagedKernelCall(
+        q: zml.Tensor,
+        kv_pages: zml.Tensor,
+        kv_lens: zml.Tensor,
+        page_indices: zml.Tensor,
+        cu_q_lens: zml.Tensor,
+        num_seqs: zml.Tensor,
+        backend_config: []const u8,
+    ) zml.Tensor {
+        const seq_buf_idx = zml.Tensor.constant(zml.DataType.i32.zero()).broad(.init(.{2}, .i32));
+
+        const comp_ctx = zml.module.CompilationContext.current();
+        const op = dialects.stablehlo.custom_call(
+            comp_ctx.mlir_ctx,
+            &.{
+                kv_lens.value(),
+                page_indices.value(),
+                cu_q_lens.value(),
+                seq_buf_idx.value(),
+                num_seqs.value(),
+                q.value(),
+                kv_pages.value(),
+            },
+            &.{q.value().type_()},
+            .{
+                .call_target_name = "tpu_custom_call",
+                .backend_config = .{ .original = backend_config },
+                .has_side_effect = false,
+                .additional_attributes = &.{
+                    mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "kernel_name", mlir.stringAttribute(comp_ctx.mlir_ctx, "ragged_paged_attention_kernel")),
+                    mlir.NamedAttribute.named(comp_ctx.mlir_ctx, "mhlo.frontend_attributes", kernelFrontendAttrs(comp_ctx)),
+                },
+            },
+            .unknown(comp_ctx.mlir_ctx),
+        ).appendTo(comp_ctx.currentScope().block);
+        return zml.Tensor._result(q.shape(), op.result(0));
+    }
+
+    pub const Options = struct {
+        is_prefill: bool,
+        batch_size: u32,
+        max_num_pages: u32,
+        max_seqlen_k: u32,
+        max_token_count: u32,
+        num_heads: u32,
+        head_dim: u32,
+        pages_per_compute_block: u32 = 1,
+
+        pub fn isPrefill(self: @This()) bool {
+            return self.is_prefill;
+        }
+
+        pub fn maxNumPages(self: @This()) usize {
+            return self.max_num_pages;
+        }
+    };
+
+    pub const Parameters = struct {
+        opts: mosaic_tpu.Options,
+        cu_seqlens_q: zml.Tensor,
+        page_indices: zml.Tensor,
+        kv_lens: zml.Tensor,
+
+        pub fn init(opts: mosaic_tpu.Options) @This() {
+            return .{
+                .opts = opts,
+                .cu_seqlens_q = zml.Tensor.init(.{ .n = @as(i64, opts.batch_size) + 1 }, .i32),
+                .page_indices = zml.Tensor.init(.{ @as(i64, opts.batch_size), @as(i64, opts.max_num_pages) }, .i32),
+                .kv_lens = zml.Tensor.init(.{@as(i64, opts.batch_size)}, .i32),
+            };
+        }
+
+        pub fn options(self: @This()) mosaic_tpu.Options {
+            return self.opts;
+        }
+
+        pub fn allocationSize(self: @This()) usize {
+            var size: usize = 0;
+            size += self.cu_seqlens_q.shape().byteSize();
+            size += self.page_indices.shape().byteSize();
+            size += self.kv_lens.shape().byteSize();
+            return size;
+        }
+    };
+
+    pub const Context = struct {
+        max_num_pages: u32,
+        pages_per_compute_block: u32,
+
+        pub fn init(parameters: mosaic_tpu.Parameters) @This() {
+            return .{
+                .max_num_pages = parameters.opts.max_num_pages,
+                .pages_per_compute_block = parameters.opts.pages_per_compute_block,
+            };
+        }
+    };
+
+    fn activeSequenceCount(cu_seqlens_q: zml.Tensor) zml.Tensor {
+        const start = cu_seqlens_q.slice1d(0, .{ .end = cu_seqlens_q.dim(0) - 1 });
+        const end = cu_seqlens_q.slice1d(0, .{ .start = 1 });
+        const query_lens = end.sub(start);
+        return query_lens
+            .cmp(.GT, zml.Tensor.constant(query_lens.dtype().zero()).broad(query_lens.shape()))
+            .convert(.i32)
+            .sum(0)
+            .reshape(zml.Shape.init(.{1}, .i32));
+    }
+
+    fn jnpDTypeExpr(dtype: zml.DataType) []const u8 {
+        return switch (dtype) {
+            .bf16 => "jnp.bfloat16",
+            .f32 => "jnp.float32",
+            else => stdx.debug.panic("mosaic_tpu ragged paged attention expects q/kv dtype bf16 or f32, got {}", .{dtype}),
+        };
+    }
+
+    fn renderBackendConfig(allocator: std.mem.Allocator, io: std.Io, params: RaggedPagedAttentionParams) []u8 {
+        const json_string = std.fmt.allocPrint(
+            allocator,
+            "{{\"backend_config\":\"ragged_paged\",\"params\":{f}}}",
+            .{std.json.fmt(params, .{})},
+        ) catch |err| stdx.debug.panic("Failed to allocate ragged paged attention TPU params: {}", .{err});
+        defer allocator.free(json_string);
+
+        const compilation_context = zml.module.CompilationContext.current();
+        const runtime = @constCast(compilation_context.platform).ensureTpuIrRuntime(compilation_context.allocator, io) catch |err| {
+            stdx.debug.panic("Failed to initialize TPU IR runtime: {}", .{err});
+        };
+        return runtime.request(allocator, io, json_string) catch |err| {
+            stdx.debug.panic("Failed to generate TPU backend config through persistent runtime: {}", .{err});
+        };
+    }
+
+    const RaggedInputs = struct {
+        q: zml.Tensor,
+        kv_cache: zml.Tensor,
+        kv_lens: zml.Tensor,
+        page_indices: zml.Tensor,
+        cu_seqlens_q: zml.Tensor,
+        num_seqs: zml.Tensor,
+    };
+
+    inline fn shardRaggedInputs(
+        parameters: Parameters,
+        q: zml.Tensor,
+        kv_cache: zml.Tensor,
+    ) RaggedInputs {
+        const q_sharded = q.withPartitioning(.{ .h = .model });
+        const kv_cache_sharded = kv_cache.withPartitioning(.{ .hkv = .model });
+        const cu_seqlens_q = parameters.cu_seqlens_q.withPartitioning(.{ .n = .replicated });
+
+        return .{
+            .q = q_sharded,
+            .kv_cache = kv_cache_sharded,
+            .kv_lens = parameters.kv_lens.withPartitioning(.{ ._0 = .replicated }),
+            .page_indices = parameters.page_indices.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
+            .cu_seqlens_q = cu_seqlens_q,
+            .num_seqs = activeSequenceCount(cu_seqlens_q).withPartitioning(.{ ._0 = .replicated }),
+        };
+    }
+
+    inline fn buildRaggedParams(
+        inputs: RaggedInputs,
+        parameters: Parameters,
+        context: Context,
+    ) RaggedPagedAttentionParams {
+        const q_token_count = if (inputs.q.shape().hasTag(.q) != null) inputs.q.dim(.q) else inputs.q.dim(.b);
+        const compilation_ctx = zml.module.CompilationContext.current();
+        const model_partitions = compilation_ctx.partitioning.numPartitionsForLogicalAxis(inputs.q.shape(), .model) catch unreachable;
+        stdx.debug.assert(model_partitions > 0, "Expected positive model partition count, got {}", .{model_partitions});
+
+        const num_q_heads = inputs.q.dim(.h);
+        const num_kv_heads = @divExact(inputs.kv_cache.dim(.hkv), 2);
+        stdx.debug.assert(@mod(num_q_heads, model_partitions) == 0, "mosaic_tpu ragged paged attention expects q heads divisible by model partitions, got q_heads={} model_partitions={}", .{ num_q_heads, model_partitions });
+        stdx.debug.assert(@mod(num_kv_heads, model_partitions) == 0, "mosaic_tpu ragged paged attention expects kv heads divisible by model partitions, got kv_heads={} model_partitions={}", .{ num_kv_heads, model_partitions });
+
+        const max_num_seqs: i64 = @intCast(parameters.opts.batch_size);
+        const num_queries_per_block: i64 = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
+        return .{
+            .num_q_tokens = q_token_count,
+            .num_q_heads = @divExact(num_q_heads, model_partitions),
+            .num_kv_heads = @divExact(num_kv_heads, model_partitions),
+            .head_dim = inputs.q.dim(.hd),
+            .q_dtype = jnpDTypeExpr(inputs.q.dtype()),
+            .kv_dtype = jnpDTypeExpr(inputs.kv_cache.dtype()),
+            .max_num_seqs = max_num_seqs,
+            .pages_per_seq = context.max_num_pages,
+            .total_num_pages = inputs.kv_cache.dim(.page),
+            .page_size = inputs.kv_cache.dim(.k_chunk),
+            .sm_scale = 1.0 / @sqrt(@as(f32, @floatFromInt(parameters.opts.head_dim))),
+            .num_kv_pages_per_block = context.pages_per_compute_block,
+            .num_queries_per_block = @intCast(num_queries_per_block),
+        };
+    }
+
+    const RaggedKernelBody = struct {
+        fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
+            stdx.debug.assert(sharded_inputs.len == 6, "mosaic_tpu ragged paged manualComputation expects 6 sharded inputs, got {}", .{sharded_inputs.len});
+            const out = raggedPagedKernelCall(
+                sharded_inputs[0],
+                sharded_inputs[1],
+                sharded_inputs[2],
+                sharded_inputs[3],
+                sharded_inputs[4],
+                sharded_inputs[5],
+                ctx_.backend_config,
+            );
+            stdx.debug.assert(out.shape().eql(output), "mosaic_tpu ragged paged manualComputation output shape mismatch, got {f}, expected {f}", .{ out.shape(), output });
+            return out;
+        }
+    };
+
+    pub fn raggedPagedAttention(parameters: @This().Parameters, context: @This().Context, q: zml.Tensor, kv_cache: zml.Tensor) zml.Tensor {
+        stdx.debug.assert(
+            q.shape().hasTags(.{ .b, .h, .hd }) or q.shape().hasTags(.{ .q, .h, .hd }),
+            "mosaic_tpu ragged paged attention expects q to have tags (.b|.q, .h, .hd), got {f}",
+            .{q.shape()},
+        );
+        stdx.debug.assert(
+            kv_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }),
+            "mosaic_tpu ragged paged attention expects kv_cache to have tags (.page, .k_chunk, .hkv, .hd), got {f}",
+            .{kv_cache.shape()},
+        );
+
+        var threaded: std.Io.Threaded = .init_single_threaded;
+        threaded.allocator = zml.module.CompilationContext.current().allocator;
+        defer threaded.deinit();
+
+        const inputs = shardRaggedInputs(parameters, q, kv_cache);
+        const backend_config = renderBackendConfig(
+            threaded.allocator,
+            threaded.io(),
+            buildRaggedParams(inputs, parameters, context),
+        );
+        defer threaded.allocator.free(backend_config);
+
+        return zml.ops.manualComputation(
+            .{
+                inputs.q,
+                inputs.kv_cache,
+                inputs.kv_lens,
+                inputs.page_indices,
+                inputs.cu_seqlens_q,
+                inputs.num_seqs,
+            },
+            inputs.q.shape(),
+            .{ .backend_config = backend_config },
+            RaggedKernelBody.body,
+        );
     }
 };

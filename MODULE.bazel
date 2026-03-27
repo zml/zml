@@ -133,6 +133,14 @@ use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
+pip.parse(
+    download_only = True,
+    hub_name = "tpu_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//platforms/tpu:requirements.lock.txt",
+)
+use_repo(pip, "tpu_py_deps")
+
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
 use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
 
