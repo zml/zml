@@ -1,6 +1,6 @@
 const std = @import("std");
 const pi = @import("../../info/process_info.zig");
-const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(pi.ProcessInfo);
+const ProcessShadowList = @import("../../utils/shadow_list.zig").ShadowList(std.ArrayList(pi.ProcessInfo));
 const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
 const Worker = @import("../../worker.zig").Worker;
 
@@ -11,17 +11,12 @@ pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_ch
 fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessShadowList, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
 
-    var sl = list.shadow();
-    defer sl.deinit(allocator);
-
     while (w.isRunning()) {
         const start: std.Io.Timestamp = .now(io, .awake);
 
-        sl.clearRetainingCapacity();
+        scan(io, allocator, list.back(), devices_per_chip, device_infos, dev_offset);
 
-        scan(io, allocator, &sl, devices_per_chip, device_infos, dev_offset);
-
-        sl.swap(io);
+        list.swap();
 
         const elapsed = start.untilNow(io, .awake);
         if (elapsed.nanoseconds < interval.nanoseconds) {
@@ -30,7 +25,9 @@ fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
     }
 }
 
-fn scan(io: std.Io, allocator: std.mem.Allocator, sl: *ProcessShadowList.Shadow, devices_per_chip: u32, infos: []*DeviceInfo, dev_offset: u8) void {
+fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, infos: []*DeviceInfo, dev_offset: u8) void {
+    back.clearRetainingCapacity();
+
     var proc_dir = std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true }) catch return;
     defer proc_dir.close(io);
 
@@ -67,7 +64,7 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, sl: *ProcessShadowList.Shadow,
                         }
                     }
 
-                    sl.append(allocator, info) catch return;
+                    back.append(allocator, info) catch return;
                 }
             }
         }
