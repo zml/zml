@@ -13,7 +13,7 @@ const address = "localhost:8431";
 pub const target: device_info.Target = .tpu;
 
 pub fn start(collector: *Collector) !void {
-    const chip = scanPciChips(collector.io) orelse return error.TpuUnavailable;
+    const chip = scanPciChips(collector.arena, collector.io) orelse return error.TpuUnavailable;
     const device_count = chip.chip_count * chip.devices_per_chip;
     var tpu_infos: std.ArrayList(*DeviceInfo) = .{};
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
@@ -127,7 +127,7 @@ const chip_table = [_]ChipEntry{
     .{ .device_id = "0x006f", .name = "TPU v6e", .devices_per_chip = 1 },
 };
 
-fn scanPciChips(io: std.Io) ?ChipInfo {
+fn scanPciChips(allocator: std.mem.Allocator, io: std.Io) ?ChipInfo {
     var pci_dir = std.Io.Dir.openDir(.cwd(), io, pci_base, .{ .iterate = true }) catch return null;
     defer pci_dir.close(io);
 
@@ -136,17 +136,13 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
     var result: ChipInfo = undefined;
 
     while (it.next(io) catch null) |entry| {
-        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var read_buf: [256]u8 = undefined;
-        const vendor = readSysfs(io, &path_buf, &read_buf, entry.name, "vendor") catch continue;
+        const vendor = readSysfs(allocator, io, entry.name, "vendor") catch continue;
         if (!std.mem.eql(u8, vendor, google_pci_vendor_id)) {
             continue;
         }
 
-        var device_buf: [256]u8 = undefined;
-        const device_raw = readSysfs(io, &path_buf, &device_buf, entry.name, "device") catch continue;
-        var subsys_buf: [256]u8 = undefined;
-        const subsystem_raw: ?[]const u8 = readSysfs(io, &path_buf, &subsys_buf, entry.name, "subsystem_device") catch null;
+        const device_raw = readSysfs(allocator, io, entry.name, "device") catch continue;
+        const subsystem_raw: ?[]const u8 = readSysfs(allocator, io, entry.name, "subsystem_device") catch null;
 
         for (chip_table) |chip| {
             const dev_match = std.mem.eql(u8, device_raw, chip.device_id);
@@ -175,7 +171,7 @@ fn scanPciChips(io: std.Io) ?ChipInfo {
     return null;
 }
 
-fn readSysfs(io: std.Io, path_buf: *[std.Io.Dir.max_path_bytes]u8, read_buf: *[256]u8, slot: []const u8, file: []const u8) ![]const u8 {
-    const path = std.fmt.bufPrint(path_buf, pci_base ++ "/{s}/{s}", .{ slot, file }) catch return error.Overflow;
-    return sysfs.readString(io, path, read_buf);
+fn readSysfs(allocator: std.mem.Allocator, io: std.Io, slot: []const u8, file: []const u8) ![]const u8 {
+    const path = try std.fmt.allocPrint(allocator, pci_base ++ "/{s}/{s}", .{ slot, file });
+    return sysfs.readString(allocator, io, path);
 }

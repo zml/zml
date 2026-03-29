@@ -11,10 +11,11 @@ pub const ProcessEnricher = struct {
     prev_total_ticks: u64 = 0,
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) !ProcessEnricher {
+        var arena = std.heap.ArenaAllocator.init(gpa);
         var enricher: ProcessEnricher = .{
             .gpa = gpa,
-            .arena = std.heap.ArenaAllocator.init(gpa),
-            .prev_total_ticks = readTotalCpuTicks(io),
+            .arena = arena,
+            .prev_total_ticks = readTotalCpuTicks(arena.allocator(), io),
             .prev_ticks = .{},
         };
 
@@ -32,28 +33,26 @@ pub const ProcessEnricher = struct {
         _ = self.arena.reset(.retain_capacity);
         const alloc = self.arena.allocator();
 
-        const curr_total = readTotalCpuTicks(io);
+        const curr_total = readTotalCpuTicks(alloc, io);
         const delta_total = curr_total -| self.prev_total_ticks;
 
         var curr_ticks: std.AutoHashMapUnmanaged(u32, u64) = .{};
         curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch return;
 
         for (procs) |*info| {
-            var path_buf: [4096]u8 = undefined;
-
             // Read Uid, VmRSS from /proc/{pid}/status
-            const status_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/status", .{info.pid}) catch continue;
-            const uid: u32 = @intCast(sysfs.readFieldInt(io, status_path, "Uid") catch 0);
+            const status_path = std.fmt.allocPrint(alloc, "/proc/{d}/status", .{info.pid}) catch continue;
+            const uid: u32 = @intCast(sysfs.readFieldInt(alloc, io, status_path, "Uid") catch 0);
             info.uid = uid;
             info.username = lookupUsername(alloc, uid) catch continue;
-            info.rss_kib = sysfs.readFieldInt(io, status_path, "VmRSS") catch 0;
+            info.rss_kib = sysfs.readFieldInt(alloc, io, status_path, "VmRSS") catch 0;
 
             // Read cmdline
-            const cmdline_path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cmdline", .{info.pid}) catch continue;
+            const cmdline_path = std.fmt.allocPrint(alloc, "/proc/{d}/cmdline", .{info.pid}) catch continue;
             info.comm = readCmdline(alloc, io, cmdline_path) catch continue;
 
             // CPU% delta
-            const ticks = readProcTicks(io, info.pid) orelse continue;
+            const ticks = readProcTicks(alloc, io, info.pid) orelse continue;
             if (delta_total > 0) {
                 if (self.prev_ticks.get(info.pid)) |prev| {
                     const delta_proc = ticks -| prev;
@@ -73,15 +72,14 @@ pub const ProcessEnricher = struct {
 fn lookupUsername(allocator: std.mem.Allocator, uid: u32) ![]const u8 {
     const pw = std.c.getpwuid(uid) orelse return error.NoUser;
     const name = std.mem.span(pw.name orelse return error.NoName);
+
     return try allocator.dupe(u8, name);
 }
 
 /// Extract utime + stime from /proc/{pid}/stat.
-fn readProcTicks(io: std.Io, pid: u32) ?u64 {
-    var path_buf: [4096]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return null;
-    var buf: [1024]u8 = undefined;
-    const data = std.Io.Dir.readFile(.cwd(), io, path, &buf) catch return null;
+fn readProcTicks(allocator: std.mem.Allocator, io: std.Io, pid: u32) ?u64 {
+    const path = std.fmt.allocPrint(allocator, "/proc/{d}/stat", .{pid}) catch return null;
+    const data = sysfs.readFirstLine(allocator, io, path) catch return null;
 
     // Fields after ") ": state=0, ppid=1, ..., utime=11, stime=12
     const rest = data[(std.mem.lastIndexOfScalar(u8, data, ')') orelse return null) + 2 ..];
@@ -90,8 +88,7 @@ fn readProcTicks(io: std.Io, pid: u32) ?u64 {
 }
 
 fn readCmdline(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
-    var buf: [4096]u8 = undefined;
-    const data = try std.Io.Dir.readFile(.cwd(), io, path, &buf);
+    const data = try sysfs.readFirstLine(allocator, io, path);
 
     for (data) |*c| {
         if (c.* == 0) {
@@ -99,17 +96,14 @@ fn readCmdline(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]co
         }
     }
 
-    const trimmed = std.mem.trimEnd(u8, data, &std.ascii.whitespace);
-    return allocator.dupe(u8, trimmed);
+    return std.mem.trimEnd(u8, data, &std.ascii.whitespace);
 }
 
-fn readTotalCpuTicks(io: std.Io) u64 {
-    var buf: [512]u8 = undefined;
-    const data = std.Io.Dir.readFile(.cwd(), io, "/proc/stat", &buf) catch return 0;
-    const line = data[0 .. std.mem.indexOfScalar(u8, data, '\n') orelse data.len];
+fn readTotalCpuTicks(allocator: std.mem.Allocator, io: std.Io) u64 {
+    const data = sysfs.readFirstLine(allocator, io, "/proc/stat") catch return 0;
 
     var total: u64 = 0;
-    var iter = std.mem.tokenizeAny(u8, line, " \t");
+    var iter = std.mem.tokenizeAny(u8, data, " \t");
 
     _ = iter.next(); // skip "cpu"
     while (iter.next()) |tok| {
@@ -118,3 +112,4 @@ fn readTotalCpuTicks(io: std.Io) u64 {
 
     return total;
 }
+

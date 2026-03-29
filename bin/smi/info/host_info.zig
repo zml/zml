@@ -9,6 +9,8 @@ pub const HostData = struct {
     cpu_cores: ?u64 = null,
     mem_total_kib: ?u64 = null,
     mem_available_kib: ?u64 = null,
-    load_avg: ?[256]u8 = null,
+    load_1: ?f32 = null,
+    load_5: ?f32 = null,
+    load_15: ?f32 = null,
     uptime_seconds: ?u64 = null,
 };
