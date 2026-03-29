@@ -28,6 +28,9 @@ pub const Worker = struct {
             fn f(io: std.Io, w: *const Worker, db: DB, dev: Dev) void {
                 w.pollLoop(io, struct {
                     fn poll(s: DB, d: Dev) void {
+                        if (@hasField(Dev, "arena")) {
+                            _ = d.arena.reset(.retain_capacity);
+                        }
                         const back = s.back();
                         back.* = s.front().*;
                         inline for (table) |m| {

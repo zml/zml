@@ -1,20 +1,16 @@
 const std = @import("std");
 
-pub fn readInt(io: std.Io, path: []const u8) !u64 {
-    var buf: [64]u8 = undefined;
-    const data = try std.Io.Dir.readFile(.cwd(), io, path, &buf);
-
-    return std.fmt.parseInt(u64, std.mem.trimEnd(u8, data, &std.ascii.whitespace), 10);
+pub fn readInt(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !u64 {
+    const data = try readFirstLine(allocator, io, path);
+    return std.fmt.parseInt(u64, data, 10);
 }
 
-pub fn readString(io: std.Io, path: []const u8, buf: []u8) ![]const u8 {
-    const data = try std.Io.Dir.readFile(.cwd(), io, path, buf);
-    return std.mem.trimEnd(u8, data, &std.ascii.whitespace);
+pub fn readString(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]const u8 {
+    return readFirstLine(allocator, io, path);
 }
 
-pub fn readFieldInt(io: std.Io, path: []const u8, comptime key: []const u8) !u64 {
-    var buf: [4096]u8 = undefined;
-    return nthTokenInt(try findField(io, path, key, &buf), 0);
+pub fn readFieldInt(allocator: std.mem.Allocator, io: std.Io, path: []const u8, comptime key: []const u8) !u64 {
+    return nthTokenInt(try findField(allocator, io, path, key), 0);
 }
 
 pub fn nthTokenInt(data: []const u8, n: usize) u64 {
@@ -30,20 +26,40 @@ pub fn nthTokenInt(data: []const u8, n: usize) u64 {
     return 0;
 }
 
-pub fn readFieldString(io: std.Io, path: []const u8, comptime key: []const u8, buf: *[4096]u8) ![]const u8 {
-    const value = try findField(io, path, key, buf);
+pub fn readFieldString(allocator: std.mem.Allocator, io: std.Io, path: []const u8, comptime key: []const u8) ![]const u8 {
+    const value = try findField(allocator, io, path, key);
     return std.mem.trimEnd(u8, value, &std.ascii.whitespace);
 }
 
-fn findField(io: std.Io, path: []const u8, comptime key: []const u8, buf: *[4096]u8) ![]const u8 {
-    const data = try std.Io.Dir.readFile(.cwd(), io, path, buf);
+fn findField(allocator: std.mem.Allocator, io: std.Io, path: []const u8, comptime key: []const u8) ![]const u8 {
+    var file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
+    defer file.close(io);
 
-    var iter = std.mem.splitScalar(u8, data, '\n');
-    while (iter.next()) |line| {
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    while (true) {
+        var line_writer: std.Io.Writer.Allocating = .init(allocator);
+        _ = reader.interface.streamDelimiter(&line_writer.writer, '\n') catch return error.NotFound;
+        reader.interface.toss(1);
+
+        const line = line_writer.toOwnedSlice() catch return error.NotFound;
         if (std.mem.startsWith(u8, line, key)) {
             return std.mem.trimStart(u8, line[key.len..], " :\t");
         }
     }
+}
 
-    return error.NotFound;
+pub fn readFirstLine(allocator: std.mem.Allocator, io: std.Io, path: []const u8) ![]u8 {
+    var file = try std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only });
+    defer file.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+    var writer: std.Io.Writer.Allocating = .init(allocator);
+    _ = reader.interface.streamDelimiter(&writer.writer, '\n') catch |err| switch (err) {
+        error.EndOfStream => 0,
+        else => |e| return e,
+    };
+    return writer.toOwnedSlice();
 }

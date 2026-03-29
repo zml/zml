@@ -5,14 +5,17 @@ const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, arena: std.mem.Allocator, info: *HostInfo) !void {
-    const host: Host = .{ .io = io };
+const Collector = @import("../../collector.zig").Collector;
+
+pub fn init(w: *Worker, io: std.Io, collector: *Collector, info: *HostInfo) !void {
+    const poll_arena = try collector.createPollArena();
+    const host: Host = .{ .io = io, .arena = poll_arena };
 
     // read once metrics
     var initial = info.front().*;
-    initial.hostname = host.hostname(arena) catch null;
-    initial.kernel = host.kernel(arena) catch null;
-    initial.cpu_name = host.cpuName(arena) catch null;
+    initial.hostname = host.hostname(collector.arena) catch null;
+    initial.kernel = host.kernel(collector.arena) catch null;
+    initial.cpu_name = host.cpuName(collector.arena) catch null;
     initial.cpu_cores = host.cpuCores() catch null;
     initial.mem_total_kib = host.memTotal() catch null;
     info.back().* = initial;
@@ -25,58 +28,70 @@ const pollHost = Worker.pollMetrics(*HostInfo, Host, metrics);
 
 const Host = struct {
     io: std.Io,
+    arena: *std.heap.ArenaAllocator,
 
-    pub fn hostname(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = undefined;
-        return try arena.dupe(u8, try sysfs.readString(self.io, "/proc/sys/kernel/hostname", &buf));
+    pub fn hostname(self: Host, allocator: std.mem.Allocator) ![]const u8 {
+        return sysfs.readString(allocator, self.io, "/proc/sys/kernel/hostname");
     }
 
-    pub fn kernel(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = undefined;
-        return try arena.dupe(u8, try sysfs.readString(self.io, "/proc/sys/kernel/osrelease", &buf));
+    pub fn kernel(self: Host, allocator: std.mem.Allocator) ![]const u8 {
+        return sysfs.readString(allocator, self.io, "/proc/sys/kernel/osrelease");
     }
 
-    pub fn cpuName(self: Host, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [4096]u8 = undefined;
-        return try arena.dupe(u8, try sysfs.readFieldString(self.io, "/proc/cpuinfo", "model name", &buf));
+    pub fn cpuName(self: Host, allocator: std.mem.Allocator) ![]const u8 {
+        return sysfs.readFieldString(allocator, self.io, "/proc/cpuinfo", "model name");
     }
 
     pub fn cpuCores(self: Host) !u64 {
-        var buf: [64]u8 = undefined;
+        const data = try sysfs.readString(self.arena.allocator(), self.io, "/sys/devices/system/cpu/present");
+        const dash = std.mem.indexOfScalar(u8, data, '-') orelse return 1;
 
-        const data = try std.Io.Dir.readFile(.cwd(), self.io, "/sys/devices/system/cpu/present", &buf);
-        const trimmed = std.mem.trimEnd(u8, data, &std.ascii.whitespace);
-        const dash = std.mem.indexOfScalar(u8, trimmed, '-') orelse return 1;
-
-        return (try std.fmt.parseInt(u64, trimmed[dash + 1 ..], 10)) + 1;
+        return (try std.fmt.parseInt(u64, data[dash + 1 ..], 10)) + 1;
     }
 
     pub fn memTotal(self: Host) !u64 {
-        return sysfs.readFieldInt(self.io, "/proc/meminfo", "MemTotal");
+        return sysfs.readFieldInt(self.arena.allocator(), self.io, "/proc/meminfo", "MemTotal");
     }
 
     pub fn memAvailable(self: Host) !u64 {
-        return sysfs.readFieldInt(self.io, "/proc/meminfo", "MemAvailable");
+        return sysfs.readFieldInt(self.arena.allocator(), self.io, "/proc/meminfo", "MemAvailable");
     }
 
-    pub fn loadAvg(self: Host) ![256]u8 {
-        var buf: [256]u8 = .{0} ** 256;
-        _ = try sysfs.readString(self.io, "/proc/loadavg", &buf);
-        return buf;
+    fn parseLoadAvg(self: Host, comptime n: usize) !f32 {
+        const data = try sysfs.readString(self.arena.allocator(), self.io, "/proc/loadavg");
+        var iter = std.mem.splitScalar(u8, data, ' ');
+        var i: usize = 0;
+        while (iter.next()) |tok| : (i += 1) {
+            if (i == n) return std.fmt.parseFloat(f32, tok);
+        }
+        return error.NotFound;
+    }
+
+    pub fn load1(self: Host) !f32 {
+        return self.parseLoadAvg(0);
+    }
+
+    pub fn load5(self: Host) !f32 {
+        return self.parseLoadAvg(1);
+    }
+
+    pub fn load15(self: Host) !f32 {
+        return self.parseLoadAvg(2);
     }
 
     pub fn uptime(self: Host) !u64 {
-        var buf: [64]u8 = undefined;
-
-        const data = try std.Io.Dir.readFile(.cwd(), self.io, "/proc/uptime", &buf);
+        const data = try sysfs.readString(self.arena.allocator(), self.io, "/proc/uptime");
         const dot = std.mem.indexOfScalar(u8, data, '.') orelse data.len;
 
         return std.fmt.parseInt(u64, data[0..dot], 10);
     }
 };
 
+
 const metrics = .{
     .{ .field = "mem_available_kib", .query = Host.memAvailable },
-    .{ .field = "load_avg", .query = Host.loadAvg },
+    .{ .field = "load_1", .query = Host.load1 },
+    .{ .field = "load_5", .query = Host.load5 },
+    .{ .field = "load_15", .query = Host.load15 },
     .{ .field = "uptime_seconds", .query = Host.uptime },
 };

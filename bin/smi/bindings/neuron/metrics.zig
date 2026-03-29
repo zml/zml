@@ -51,8 +51,11 @@ pub fn start(collector: *Collector) !void {
         };
 
         for (0..nc_per_device) |ci| {
+            const poll_arena = try collector.createPollArena();
+
             const dev: Device = .{
                 .io = collector.io,
+                .arena = poll_arena,
                 .device_idx = @intCast(device_idx),
                 .core_idx = @intCast(ci),
                 .mem_per_core = mem_per_core,
@@ -76,27 +79,25 @@ const pollDevice = Worker.pollMetrics(*DoubleBuffer(NeuronInfo), Device, metrics
 
 const Device = struct {
     io: std.Io,
+    arena: *std.heap.ArenaAllocator,
     device_idx: u32,
     core_idx: u32,
     mem_per_core: u64 = 0,
 
-    fn devicePath(self: Device, buf: *[std.Io.Dir.max_path_bytes]u8, sub_path: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, base_path ++ "/neuron{d}/{s}", .{ self.device_idx, sub_path });
+    fn devicePath(self: Device, sub_path: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), base_path ++ "/neuron{d}/{s}", .{ self.device_idx, sub_path });
     }
 
-    fn corePath(self: Device, buf: *[std.Io.Dir.max_path_bytes]u8, sub_path: []const u8) ![]const u8 {
-        return std.fmt.bufPrint(buf, base_path ++ "/neuron{d}/neuron_core{d}/{s}", .{ self.device_idx, self.core_idx, sub_path });
+    fn corePath(self: Device, sub_path: []const u8) ![]const u8 {
+        return std.fmt.allocPrint(self.arena.allocator(), base_path ++ "/neuron{d}/neuron_core{d}/{s}", .{ self.device_idx, self.core_idx, sub_path });
     }
 
-    fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        var read_buf: [256]u8 = undefined;
-        return try arena.dupe(u8, try sysfs.readString(self.io, try self.devicePath(&path_buf, "info/architecture/device_name"), &read_buf));
+    fn name(self: Device, allocator: std.mem.Allocator) ![]const u8 {
+        return sysfs.readString(allocator, self.io, try self.devicePath("info/architecture/device_name"));
     }
 
     fn readCoreMem(self: Device, comptime subdir: []const u8) !u64 {
-        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        return sysfs.readInt(self.io, try self.corePath(&buf, "stats/memory_usage/device_mem/" ++ subdir ++ "/total"));
+        return sysfs.readInt(self.arena.allocator(), self.io, try self.corePath("stats/memory_usage/device_mem/" ++ subdir ++ "/total"));
     }
 
     pub fn memTotal(self: Device) !u64 {
@@ -108,8 +109,7 @@ const Device = struct {
 
     // Sysfs-based metrics
     pub fn memUsed(self: Device) !u64 {
-        var buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-        return sysfs.readInt(self.io, try self.corePath(&buf, "stats/memory_usage/device_mem/total"));
+        return sysfs.readInt(self.arena.allocator(), self.io, try self.corePath("stats/memory_usage/device_mem/total"));
     }
 
     pub fn tensors(self: Device) !u64 {
