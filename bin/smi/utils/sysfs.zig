@@ -38,14 +38,18 @@ fn findField(allocator: std.mem.Allocator, io: std.Io, path: []const u8, comptim
     var read_buf: [4096]u8 = undefined;
     var reader = file.reader(io, &read_buf);
 
+    var line_writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer line_writer.deinit();
+
     while (true) {
-        var line_writer: std.Io.Writer.Allocating = .init(allocator);
+        line_writer.clearRetainingCapacity();
         _ = reader.interface.streamDelimiter(&line_writer.writer, '\n') catch return error.NotFound;
         reader.interface.toss(1);
 
-        const line = line_writer.toOwnedSlice() catch return error.NotFound;
+        const line = line_writer.written();
         if (std.mem.startsWith(u8, line, key)) {
-            return std.mem.trimStart(u8, line[key.len..], " :\t");
+            const owned = line_writer.toOwnedSlice() catch return error.NotFound;
+            return std.mem.trimStart(u8, owned[key.len..], " :\t");
         }
     }
 }
@@ -57,6 +61,7 @@ pub fn readFirstLine(allocator: std.mem.Allocator, io: std.Io, path: []const u8)
     var read_buf: [4096]u8 = undefined;
     var reader = file.reader(io, &read_buf);
     var writer: std.Io.Writer.Allocating = .init(allocator);
+    errdefer writer.deinit();
     _ = reader.interface.streamDelimiter(&writer.writer, '\n') catch |err| switch (err) {
         error.EndOfStream => 0,
         else => |e| return e,
