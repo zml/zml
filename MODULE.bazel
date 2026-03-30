@@ -128,6 +128,15 @@ pip.parse(
 )
 use_repo(pip, "huggingface_hub")
 
+# For Triton generation
+pip.parse(
+    download_only = True,
+    hub_name = "triton_py_deps",
+    python_version = "3.14",
+    requirements_lock = "//zml/moe/triton:requirements.lock.txt",
+)
+use_repo(pip, "triton_py_deps")
+
 pip.parse(
     download_only = True,
     hub_name = "xprof_nightly",

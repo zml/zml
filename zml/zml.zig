@@ -46,6 +46,8 @@ pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
 pub const tracer = @import("tracer.zig");
+pub const triton_moe = @import("moe/triton.zig");
+pub const moe = @import("moe/moe.zig");
 
 test "zml" {
     std.testing.refAllDecls(@This());
