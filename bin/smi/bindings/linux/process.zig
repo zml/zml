@@ -12,10 +12,13 @@ pub const ProcessEnricher = struct {
 
     pub fn init(gpa: std.mem.Allocator, io: std.Io) !ProcessEnricher {
         var arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer arena.deinit();
+
+        const prev_total_ticks = readTotalCpuTicks(arena.allocator(), io);
         var enricher: ProcessEnricher = .{
             .gpa = gpa,
             .arena = arena,
-            .prev_total_ticks = readTotalCpuTicks(arena.allocator(), io),
+            .prev_total_ticks = prev_total_ticks,
             .prev_ticks = .{},
         };
 
@@ -112,4 +115,3 @@ fn readTotalCpuTicks(allocator: std.mem.Allocator, io: std.Io) u64 {
 
     return total;
 }
-

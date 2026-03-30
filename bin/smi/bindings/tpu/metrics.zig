@@ -35,65 +35,61 @@ pub fn start(collector: *Collector) !void {
 
 const MetricKind = enum { int, double };
 
-const metrics = .{
-    .{ .field = "mem_used_bytes", .metric = "tpu.runtime.hbm.memory.usage.bytes", .kind = MetricKind.int },
-    .{ .field = "mem_total_bytes", .metric = "tpu.runtime.hbm.memory.total.bytes", .kind = MetricKind.int },
-    .{ .field = "util_percent", .metric = "tpu.runtime.tensorcore.dutycycle.percent", .kind = MetricKind.double },
-};
-
 fn pollAllDevices(io: std.Io, w: *const Worker, infos: []*DeviceInfo) void {
     w.pollLoop(io, struct {
         fn poll(devs: []*DeviceInfo) void {
-            inline for (metrics) |m| {
-                queryMetric(devs, m.field, m.metric, m.kind);
+            var mem_used: [tpuinfo.max_devices]?u64 = undefined;
+            var mem_total: [tpuinfo.max_devices]?u64 = undefined;
+            var util: [tpuinfo.max_devices]?u64 = undefined;
+
+            for (devs, 0..) |info, i| {
+                const front = info.tpu.front();
+                mem_used[i] = front.mem_used_bytes;
+                mem_total[i] = front.mem_total_bytes;
+                util[i] = front.util_percent;
+            }
+
+            queryRaw("tpu.runtime.hbm.memory.usage.bytes", .int, mem_used[0..devs.len]);
+            queryRaw("tpu.runtime.hbm.memory.total.bytes", .int, mem_total[0..devs.len]);
+            queryRaw("tpu.runtime.tensorcore.dutycycle.percent", .double, util[0..devs.len]);
+
+            for (devs, 0..) |info, i| {
+                const back = info.tpu.back();
+                back.* = info.tpu.front().*;
+                back.mem_used_bytes = mem_used[i];
+                back.mem_total_bytes = mem_total[i];
+                back.util_percent = util[i];
+                info.tpu.swap();
             }
         }
     }.poll, .{infos});
 }
 
-fn queryMetric(infos: []*DeviceInfo, comptime field: []const u8, metric_name: [:0]const u8, kind: MetricKind) void {
+fn queryRaw(metric_name: [:0]const u8, comptime kind: MetricKind, out: []?u64) void {
     var ids: [tpuinfo.max_devices]c_longlong = undefined;
-
     switch (kind) {
         .int => {
             var vals: [tpuinfo.max_devices]c_longlong = undefined;
             const n = tpuinfo.queryInt(address, metric_name, &ids, &vals) catch {
-                for (infos) |info| {
-                    const back = info.tpu.back();
-                    back.* = info.tpu.front().*;
-                    @field(back, field) = null;
-                    info.tpu.swap();
-                }
+                @memset(out, null);
                 return;
             };
+
             for (ids[0..n], vals[0..n]) |id, val| {
-                if (id >= 0 and id < infos.len) {
-                    const back = infos[@intCast(id)].tpu.back();
-                    back.* = infos[@intCast(id)].tpu.front().*;
-                    @field(back, field) = @intCast(val);
-                    infos[@intCast(id)].tpu.swap();
-                }
-            } // Having not every value should in practice never happen
+                if (id >= 0 and id < out.len) out[@intCast(id)] = @intCast(val);
+            }
         },
         .double => {
             var vals: [tpuinfo.max_devices]f64 = undefined;
             const n = tpuinfo.queryDouble(address, metric_name, &ids, &vals) catch {
-                for (infos) |info| {
-                    const back = info.tpu.back();
-                    back.* = info.tpu.front().*;
-                    @field(back, field) = null;
-                    info.tpu.swap();
-                }
+                @memset(out, null);
                 return;
             };
+
             for (ids[0..n], vals[0..n]) |id, val| {
-                if (id >= 0 and id < infos.len and std.math.isFinite(val)) {
-                    const back = infos[@intCast(id)].tpu.back();
-                    back.* = infos[@intCast(id)].tpu.front().*;
-                    @field(back, field) = @intFromFloat(@round(val));
-                    infos[@intCast(id)].tpu.swap();
-                }
-            } // Having not every value should in practice never happen
+                if (id >= 0 and id < out.len and std.math.isFinite(val))
+                    out[@intCast(id)] = @intFromFloat(@round(val));
+            }
         },
     }
 }
@@ -125,6 +121,7 @@ const chip_table = [_]ChipEntry{
     .{ .device_id = "0x0063", .name = "TPU v5e", .devices_per_chip = 1 },
     .{ .device_id = "0x0062", .name = "TPU v5p", .devices_per_chip = 1 },
     .{ .device_id = "0x006f", .name = "TPU v6e", .devices_per_chip = 1 },
+    .{ .device_id = "0x0076", .name = "TPU7x", .devices_per_chip = 2 },
 };
 
 fn scanPciChips(allocator: std.mem.Allocator, io: std.Io) ?ChipInfo {
