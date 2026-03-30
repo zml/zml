@@ -26,6 +26,39 @@ cc_library(
     hdrs = ["posix.h"],
 )
 
+cc_library(
+    name = "profiling_traceme_lib",
+    tags = ["manual"],
+    srcs = ["profiling/traceme_lib.cc"],
+    hdrs = ["profiling/traceme.h"],
+    defines = select({
+        "//platforms:cuda.enabled": ["ZML_RUNTIME_CUDA"],
+        "//platforms:rocm.enabled": ["ZML_RUNTIME_ROCM"],
+        "//conditions:default": [],
+    }),
+    linkopts = select({
+        "//platforms:rocm.enabled": ["-ldl"],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ffi:cc",
+        "@tsl//tsl/profiler/lib:traceme",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/backends/cpu:host_tracer_utils",
+        "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
+        "@xla//xla/tsl/profiler/utils:time_utils",
+    ] + select({
+        "//platforms:cuda.enabled": [
+            "@cuda_nvtx//:headers",
+        ],
+        "//platforms:rocm.enabled": [
+            "@rocprofiler-sdk-roctx//:headers",
+        ],
+        "//conditions:default": [],
+    }),
+)
+
 zig_library(
     name = "zml",
     tags = ["manual"],
@@ -48,14 +81,14 @@ zig_library(
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
-        "profiler.zig",
+        "profiling/profiler.zig",
+        "profiling/tracer.zig",
         "safetensors.zig",
         "shape.zig",
         "sharding.zig",
         "slice.zig",
         "tensor.zig",
         "testing.zig",
-        "tracer.zig",
         "zml.zig",
     ],
     main = "zml.zig",
@@ -76,11 +109,12 @@ zig_library(
         "//pjrt",
         "//platforms",
         "//stdx",
-        "//tools:xspace_to_perfetto_lib",
+        "//tools/xspace_to_perfetto:xspace_to_perfetto_lib",
         "//upb",
         "//zml/io",
         "//zml/tokenizer",
         "@rules_zig//zig/runfiles",
+        ":profiling_traceme_lib",
     ] + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",

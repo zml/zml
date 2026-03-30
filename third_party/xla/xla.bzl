@@ -1,6 +1,7 @@
 load("@xla//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls", "tf_vendored")
 load("@xla//third_party/farmhash:workspace.bzl", farmhash = "repo")
 load("@xla//third_party/eigen3:workspace.bzl", eigen3 = "repo")
+load("@xla//third_party/hwloc:workspace.bzl", hwloc = "repo")
 load("@xla//third_party/llvm:workspace.bzl", llvm = "repo")
 load("@xla//third_party/py/ml_dtypes:workspace.bzl", ml_dtypes = "repo")
 load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
@@ -148,6 +149,7 @@ def _xla_impl(mctx):
     triton()
     farmhash()
     eigen3()
+    hwloc()
     ml_dtypes()
 
     tf_http_archive(
