@@ -1,14 +1,159 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+# Generator
+
+zig_library(
+    name = "_config_gen",
+    import_name = "config.zig",
+    main = "src/config.zig",
+    srcs = ["src/quirks.zig"],
+    zigopts = ["--dep", "types.zig=_types_gen"],  # circular: config.zig <-> types.zig
+)
+
+zig_library(
+    name = "_types_gen",
+    import_name = "types.zig",
+    main = "src/types.zig",
+    srcs = ["src/get.zig"],
+    deps = [":_config_gen"],
+)
+
+zig_library(
+    name = "_config_x_gen",
+    import_name = "config.x.zig",
+    main = "src/x/config.x.zig",
+    srcs = [
+        "src/x/config_x/grapheme_break.zig",
+        "src/x/config_x/wcwidth.zig",
+    ],
+    deps = [
+        ":_config_gen",
+        ":_types_gen",
+        ":types_x",
+    ],
+)
+
+zig_library(
+    name = "_build_config_gen",
+    import_name = "build_config",
+    main = "build_config.zig",
+    deps = [
+        ":_config_gen",
+        ":_config_x_gen",
+    ],
+)
+
+zig_binary(
+    name = "gen_tables",
+    main = "src/build/tables.zig",
+    srcs = ["src/build/Ucd.zig"],
+    deps = [
+        ":_build_config_gen",
+        ":_config_gen",
+        ":_types_gen",
+    ],
+)
+
+genrule(
+    name = "tables",
+    srcs = glob(["ucd/**"]),
+    outs = ["tables.zig"],
+    cmd = "OUT=$$PWD/$@ && TOOL=$$PWD/$(execpath :gen_tables) && cd $$(dirname $(location ucd/UnicodeData.txt))/.. && $$TOOL $$OUT",
+    tools = [":gen_tables"],
+)
+
+# Library
+
+zig_library(
+    name = "config",
+    import_name = "config.zig",
+    main = "src/config.zig",
+    srcs = ["src/quirks.zig"],
+    zigopts = ["--dep", "types.zig=types"],  # circular: config.zig <-> types.zig
+)
+
+zig_library(
+    name = "types",
+    import_name = "types.zig",
+    main = "src/types.zig",
+    deps = [":config"],
+    zigopts = ["--dep", "get.zig=get"],  # circular: types.zig -> get.zig -> tables -> types.zig
+)
+
+zig_library(
+    name = "types_x",
+    import_name = "types.x.zig",
+    main = "src/x/types.x.zig",
+    srcs = ["src/x/types_x/grapheme.zig"],
+)
+
+zig_library(
+    name = "config_x",
+    import_name = "config.x.zig",
+    main = "src/x/config.x.zig",
+    srcs = [
+        "src/x/config_x/grapheme_break.zig",
+        "src/x/config_x/wcwidth.zig",
+    ],
+    deps = [
+        ":config",
+        ":types",
+        ":types_x",
+    ],
+)
+
+zig_library(
+    name = "build_config",
+    import_name = "build_config",
+    main = "build_config.zig",
+    deps = [
+        ":config",
+        ":config_x",
+    ],
+)
+
+zig_library(
+    name = "tables_lib",
+    import_name = "tables",
+    main = ":tables",
+    deps = [
+        ":build_config",
+        ":config",
+        ":types",
+        ":types_x",
+    ],
+)
+
+zig_library(
+    name = "get",
+    import_name = "get.zig",
+    main = "src/get.zig",
+    deps = [
+        ":tables_lib",
+        ":types",
+    ],
+)
 
 zig_library(
     name = "uucode",
-    srcs = glob([
-        "src/*.zig",
-        "src/build/*.zig",
-        "src/x/*.zig",
-        "src/x/config_x/*.zig",
-        "src/x/types_x/*.zig",
-    ]),
+    import_name = "uucode",
     main = "src/root.zig",
+    srcs = [
+        "src/ascii.zig",
+        "src/build/Ucd.zig",
+        "src/code_point.zig",
+        "src/grapheme.zig",
+        "src/utf8.zig",
+        "src/x/grapheme.zig",
+        "src/x/root.zig",
+    ],
+    deps = [
+        ":config",
+        ":get",
+        ":tables_lib",
+        ":types",
+        ":types_x",
+    ],
     visibility = ["//visibility:public"],
 )
