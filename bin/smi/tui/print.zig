@@ -79,7 +79,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
 
     try silentResize(&vx, allocator, .{
         .rows = surface.size.height,
-        .cols = ws.cols,
+        .cols = content_w,
         .x_pixel = ws.x_pixel,
         .y_pixel = ws.y_pixel,
     });
