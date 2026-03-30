@@ -1509,35 +1509,34 @@ pub fn forwardGuiderCombine(
     };
 }
 
+/// Guidance combine — matches Python's MultiModalGuider.calculate() dtype chain.
+/// Python operates entirely in bf16 (tensor dtype), including std-rescale.
+/// Traced empirically: all intermediates stay bf16 when inputs are bf16.
 fn guiderCombineSingle(cond: Tensor, neg: Tensor, ptb: Tensor, iso: Tensor, cfg: Tensor, stg: Tensor, mod: Tensor, rescale: Tensor) Tensor {
-    const out_dtype = cond.dtype();
-    const cond_f32 = cond.convert(.f32);
-    const neg_f32 = neg.convert(.f32);
-    const ptb_f32 = ptb.convert(.f32);
-    const iso_f32 = iso.convert(.f32);
-    const cfg_f32 = cfg.convert(.f32).asScalar();
-    const stg_f32 = stg.convert(.f32).asScalar();
-    const mod_f32 = mod.convert(.f32).asScalar();
-    const rescale_f32 = rescale.convert(.f32).asScalar();
+    const dt = cond.dtype(); // bf16
 
-    const one = Tensor.scalar(1.0, .f32);
+    // Python: float * bf16_tensor → bf16 (scalar doesn't promote).
+    // We use bf16 scalars to match.
+    const cfg_bf = cfg.convert(dt).asScalar();
+    const stg_bf = stg.convert(dt).asScalar();
+    const mod_bf = mod.convert(dt).asScalar();
+    const rescale_bf = rescale.convert(dt).asScalar();
+    const one = Tensor.scalar(1.0, dt);
 
-    // pred = cond + (cfg - 1) * (cond - neg) + stg * (cond - ptb) + (mod - 1) * (cond - iso)
-    const cfg_term = cfg_f32.sub(one).broad(cond_f32.shape()).mul(cond_f32.sub(neg_f32));
-    const stg_term = stg_f32.broad(cond_f32.shape()).mul(cond_f32.sub(ptb_f32));
-    const mod_term = mod_f32.sub(one).broad(cond_f32.shape()).mul(cond_f32.sub(iso_f32));
-    var pred = cond_f32.add(cfg_term).add(stg_term).add(mod_term);
+    // pred = cond + (cfg-1)*(cond-neg) + stg*(cond-ptb) + (mod-1)*(cond-iso)
+    const cfg_term = cfg_bf.sub(one).broad(cond.shape()).mul(cond.sub(neg));
+    const stg_term = stg_bf.broad(cond.shape()).mul(cond.sub(ptb));
+    const mod_term = mod_bf.sub(one).broad(cond.shape()).mul(cond.sub(iso));
+    var pred = cond.add(cfg_term).add(stg_term).add(mod_term);
 
-    // std-rescale: factor = rescale * (cond.std() / pred.std()) + (1 - rescale)
-    // When rescale=0, factor = 0 * ratio + 1 = 1 (identity).
-    const cond_std = tensorStdAll(cond_f32);
+    // std-rescale in bf16: factor = rescale * (cond.std() / pred.std()) + (1 - rescale)
+    const cond_std = tensorStdAll(cond);
     const pred_std = tensorStdAll(pred);
-    const eps = Tensor.scalar(1e-8, .f32);
-    const ratio = cond_std.div(pred_std.add(eps));
-    const factor = rescale_f32.mul(ratio).add(one.sub(rescale_f32));
+    const ratio = cond_std.div(pred_std);
+    const factor = rescale_bf.mul(ratio).add(one.sub(rescale_bf));
     pred = pred.mul(factor.broad(pred.shape()));
 
-    return pred.convert(out_dtype);
+    return pred;
 }
 
 /// Standard deviation across all elements of a tensor, returning a rank-0 scalar.
@@ -1617,6 +1616,12 @@ pub fn forwardDenoisingStep(
 ///
 /// The guider combine should operate on x0 predictions (not velocities)
 /// so that the rescale factor is computed in the same space as Python.
+/// Velocity → x0 conversion matching Python's X0Model + to_denoised() dtype chain.
+///
+/// Python (traced empirically with f32 denoise_mask):
+///   timesteps = denoise_mask(f32) * sigma(f32) → f32
+///   to_denoised: sigma = sigma.to(f32)  →  f32 (no-op since timesteps already f32)
+///               (sample.f32 - velocity.f32 * sigma_f32).to(bf16)
 pub fn forwardToDenoised(
     sample: Tensor,
     velocity: Tensor,
@@ -1624,12 +1629,14 @@ pub fn forwardToDenoised(
     sigma: Tensor,
 ) Tensor {
     const out_dtype = sample.dtype();
+    // Python: timesteps = denoise_mask * sigma (both in mask's dtype)
+    // With f32 mask: f32 * f32 → f32.  With bf16 mask: bf16 * bf16 → bf16.
+    const timesteps = denoise_mask.mul(sigma.convert(denoise_mask.dtype()));
+    // Python: to_denoised converts timesteps to f32 for the arithmetic
+    const timesteps_f32 = timesteps.convert(.f32);
     const sample_f32 = sample.convert(.f32);
     const velocity_f32 = velocity.convert(.f32);
-    const mask_f32 = denoise_mask.convert(.f32);
-    const sigma_f32 = sigma.convert(.f32);
-    const timesteps = mask_f32.mul(sigma_f32);
-    return sample_f32.sub(velocity_f32.mul(timesteps)).convert(out_dtype);
+    return sample_f32.sub(velocity_f32.mul(timesteps_f32)).convert(out_dtype);
 }
 
 /// Apply post_process_latent + Euler step from a guided x0 prediction.
@@ -1637,13 +1644,13 @@ pub fn forwardToDenoised(
 /// This is the second half of forwardDenoisingStep, used when guidance
 /// was applied in x0 space (matching Python's guider flow).
 ///
-/// Euler denoising step from guided x0:
-///   1. post_process_latent:  blend x0 with clean latent using mask (f32)
-///   2. to_velocity:          (sample - blended) / sigma (f32)
-///   3. Euler update:         sample + velocity * dt (f32)
-///   All intermediate arithmetic stays in f32; only the final outputs
-///   are rounded to the input dtype (bf16) — avoids compounding
-///   quantization errors across the 30-step loop.
+/// Euler denoising step from guided x0 — matches Python's exact dtype chain
+/// (traced empirically with trace_dtype_chain.py, f32 denoise_mask).
+///
+/// Python dtype chain (with f32 mask):
+///   1. post_process_latent:  denoised(bf16)*mask(f32)→f32 + clean.f32*(1-mask)(f32)  → f32 → bf16
+///   2. to_velocity:          ((sample.f32 - blended.f32) / sigma_float) → f32 → bf16  ← ROUNDTRIP!
+///   3. Euler update:         (sample.f32 + velocity_bf16.f32 * dt_f32) → f32 → bf16
 pub fn forwardDenoisingStepFromX0(
     sample: Tensor,
     denoised: Tensor,
@@ -1652,26 +1659,39 @@ pub fn forwardDenoisingStepFromX0(
     sigma: Tensor,
     sigma_next: Tensor,
 ) DenoisingStepResult {
-    const out_dtype = sample.dtype();
+    const out_dtype = sample.dtype(); // bf16
     const sample_f32 = sample.convert(.f32);
-    const clean_f32 = clean_latent.convert(.f32);
-    const mask_f32 = denoise_mask.convert(.f32);
     const sigma_f32 = sigma.convert(.f32);
     const sigma_next_f32 = sigma_next.convert(.f32);
 
-    // 1. post_process_latent: blend denoised with clean using mask
+    // 1. post_process_latent — match Python's dtype promotion:
+    //    PyTorch promotes bf16 * f32 → f32, so all arithmetic ends up in f32.
+    //    denoised(bf16) * mask(f32) → f32   (PyTorch promotes to wider type)
+    //    clean.float()              → f32
+    //    1.0 - mask(f32)            → f32
+    //    sum                        → f32
+    //    .to(denoised.dtype)        → bf16
+    const mask_f32 = denoise_mask.convert(.f32);
+    const clean_f32 = clean_latent.convert(.f32);
     const one_minus_mask = Tensor.scalar(1.0, .f32).sub(mask_f32);
     const blended_f32 = denoised.convert(.f32).mul(mask_f32).add(clean_f32.mul(one_minus_mask));
+    const blended = blended_f32.convert(out_dtype); // bf16
 
-    // 2. Euler step — stay in f32 throughout (no intermediate bf16 roundtrips)
+    // 2. to_velocity — Python rounds to bf16 then re-upcasts:
+    //    velocity = ((sample.f32 - blended.f32) / sigma_item).to(bf16)
+    const euler_vel_f32 = sample_f32.sub(blended.convert(.f32)).div(sigma_f32);
+    const euler_vel = euler_vel_f32.convert(out_dtype); // bf16 roundtrip!
+
+    // 3. Euler update:
+    //    next = (sample.f32 + velocity_bf16.f32 * dt).to(bf16)
     const dt = sigma_next_f32.sub(sigma_f32);
-    const euler_vel_f32 = sample_f32.sub(blended_f32).div(sigma_f32);
-    const next_f32 = sample_f32.add(euler_vel_f32.mul(dt));
+    const next_f32 = sample_f32.add(euler_vel.convert(.f32).mul(dt));
+    const next_latent = next_f32.convert(out_dtype);
 
     return .{
         .denoised = denoised,
-        .blended = blended_f32.convert(out_dtype),
-        .next_latent = next_f32.convert(out_dtype),
+        .blended = blended,
+        .next_latent = next_latent,
     };
 }
 

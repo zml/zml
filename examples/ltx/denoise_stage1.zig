@@ -37,17 +37,22 @@ pub fn main(init: std.process.Init) !void {
     _ = it.next(); // exe
 
     const ckpt_path = it.next() orelse {
-        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/> [reset_latents.safetensors]", .{});
         return error.InvalidArgs;
     };
     const inputs_path = it.next() orelse {
-        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/> [reset_latents.safetensors]", .{});
         return error.InvalidArgs;
     };
     const output_dir = it.next() orelse {
-        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/> [reset_latents.safetensors]", .{});
         return error.InvalidArgs;
     };
+    const reset_path = it.next(); // optional 4th arg: per-step reset latents
+    const is_reset = reset_path != null;
+    if (is_reset) {
+        std.log.info("Reset mode: will load Python latents at each step from {s}", .{reset_path.?});
+    }
 
     // ========================================================================
     // Sigma schedule (host-side computation)
@@ -82,6 +87,21 @@ pub fn main(init: std.process.Init) !void {
     defer inputs_reg.deinit();
     var inputs_store: zml.io.TensorStore = .fromRegistry(allocator, &inputs_reg);
     defer inputs_store.deinit();
+
+    // Optional: reset latents for per-step reset test
+    var reset_reg: zml.safetensors.TensorRegistry = undefined;
+    var reset_store: zml.io.TensorStore = undefined;
+    if (reset_path) |rp| {
+        reset_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, rp) catch |err| {
+            std.log.err("Failed to open reset latents: {s}", .{rp});
+            return err;
+        };
+        reset_store = .fromRegistry(allocator, &reset_reg);
+    }
+    defer if (is_reset) {
+        reset_store.deinit();
+        reset_reg.deinit();
+    };
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
@@ -525,6 +545,19 @@ pub fn main(init: std.process.Init) !void {
             step_idx + 1, NUM_STEPS, sigma, sigma_next,
         });
 
+        // Optionally reset to Python's reference latent for per-step isolation
+        if (is_reset) {
+            const v_key = try std.fmt.allocPrint(allocator, "v_lat_{d}", .{step_idx});
+            defer allocator.free(v_key);
+            const a_key = try std.fmt.allocPrint(allocator, "a_lat_{d}", .{step_idx});
+            defer allocator.free(a_key);
+            v_latent_buf.deinit();
+            v_latent_buf = try loadBuf(allocator, io, platform, &reset_store, v_key, sharding);
+            a_latent_buf.deinit();
+            a_latent_buf = try loadBuf(allocator, io, platform, &reset_store, a_key, sharding);
+            std.log.info("  Reset to Python latent for step {d}", .{step_idx});
+        }
+
         var sigma_1d = try sigma1dBuffer(io, platform, sigma, sharding);
         defer sigma_1d.deinit();
         var sigma_buf = try zml.Buffer.scalar(io, platform, sigma, .f32, sharding);
@@ -858,22 +891,15 @@ pub fn main(init: std.process.Init) !void {
         v_latent_buf = dv_out.next_latent;
         a_latent_buf = da_out.next_latent;
 
-        // Dump step-1 latent (output of first Euler step) for offline verification
-        if (step_idx == 0) {
-            std.log.info("  Dumping step-1 latent (after first Euler step)...", .{});
-            try writeBuffer(allocator, io, v_latent_buf, output_dir, "step1_video_latent.bin");
-            try writeBuffer(allocator, io, a_latent_buf, output_dir, "step1_audio_latent.bin");
-        }
-        // Also dump step-5 and step-15 latents to track evolution
-        if (step_idx == 4) {
-            std.log.info("  Dumping step-5 latent...", .{});
-            try writeBuffer(allocator, io, v_latent_buf, output_dir, "step5_video_latent.bin");
-            try writeBuffer(allocator, io, a_latent_buf, output_dir, "step5_audio_latent.bin");
-        }
-        if (step_idx == 14) {
-            std.log.info("  Dumping step-15 latent...", .{});
-            try writeBuffer(allocator, io, v_latent_buf, output_dir, "step15_video_latent.bin");
-            try writeBuffer(allocator, io, a_latent_buf, output_dir, "step15_audio_latent.bin");
+        // Dump per-step latent output
+        if (is_reset or step_idx == 0 or step_idx == 4 or step_idx == 14) {
+            const v_name = try std.fmt.allocPrint(allocator, "step{d}_video_latent.bin", .{step_idx + 1});
+            defer allocator.free(v_name);
+            const a_name = try std.fmt.allocPrint(allocator, "step{d}_audio_latent.bin", .{step_idx + 1});
+            defer allocator.free(a_name);
+            std.log.info("  Dumping step-{d} latent...", .{step_idx + 1});
+            try writeBuffer(allocator, io, v_latent_buf, output_dir, v_name);
+            try writeBuffer(allocator, io, a_latent_buf, output_dir, a_name);
         }
 
         std.log.info("  Step {d} complete.", .{step_idx + 1});
