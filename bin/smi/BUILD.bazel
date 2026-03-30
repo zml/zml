@@ -1,9 +1,6 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
-load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
-load("@com_google_protobuf//bazel:proto_library.bzl", "proto_library")
-load("@grpc//bazel:cc_grpc_library.bzl", "cc_grpc_library")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
@@ -13,32 +10,13 @@ load("//bazel:patchelf.bzl", "patchelf")
 
 # tpu grpc
 
-proto_library(
-    name = "tpu_metric_service_proto",
-    srcs = ["bindings/tpu/libtpu/tpu_metric_service.proto"],
-    strip_import_prefix = "bindings/tpu/libtpu",
-    deps = ["@com_google_protobuf//:timestamp_proto"],
-)
-
-cc_proto_library(
-    name = "tpu_metric_service_cc_proto",
-    deps = [":tpu_metric_service_proto"],
-)
-
-cc_grpc_library(
-    name = "tpu_metric_service_cc_grpc",
-    srcs = [":tpu_metric_service_proto"],
-    grpc_only = True,
-    deps = [":tpu_metric_service_cc_proto"],
-)
-
 cc_library(
     name = "tpuinfo",
     srcs = ["bindings/tpu/libtpu/tpuinfo.cc"],
     hdrs = ["bindings/tpu/libtpu/tpuinfo.h"],
     strip_include_prefix = "bindings/tpu/libtpu",
     deps = [
-        ":tpu_metric_service_cc_grpc",
+        "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
         "@grpc//:grpc++",
     ],
 )
