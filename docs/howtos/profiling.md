@@ -115,6 +115,13 @@ sudo -E nsys profile ...
 with CUDA, cuBLAS, cuSPARSE, cuDNN, NVTX, syscall, and OS runtime tracing
 enabled.
 
+If you need to install Nsight Systems manually, use NVIDIA's official download
+page: <https://developer.nvidia.com/nsight-systems/get-started>. For the server
+or target machine where `nsys` will run, choose the `Linux CLI only` package.
+For the client machine where you open and inspect reports, choose the full host
+package for your OS. NVIDIA's installation guide is here:
+<https://docs.nvidia.com/nsight-systems/2025.4/InstallationGuide/index.html>.
+
 Useful overrides:
 
 - `ZML_PROFILE_NO_SUDO=1`: run `nsys` without `sudo`
