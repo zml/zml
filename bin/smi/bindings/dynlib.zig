@@ -13,7 +13,10 @@ pub fn open(comptime F: type, path: [:0]const u8) ?F {
 }
 
 pub fn openElf(comptime F: type, io: std.Io, path: [:0]const u8, comptime known_sym: [:0]const u8) !F {
-    const handle = openDl(path) orelse return error.DlOpenFailed;
+    const handle = openDl(path) orelse {
+        if (std.c.dlerror()) |err| std.log.err("dlopen: {s}", .{err});
+        return error.DlOpenFailed;
+    };
 
     const sym_addr = std.c.dlsym(handle, known_sym) orelse
         return error.KnownSymbolNotFound;

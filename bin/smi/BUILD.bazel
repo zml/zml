@@ -48,11 +48,11 @@ cc_library(
 run_binary(
     name = "libnrt.stripped",
     srcs = ["@aws-neuronx-runtime-lib//:libnrt.patchelf"],
-    outs = ["libnrt.so"],
+    outs = ["libnrt.so.1"],
     args = [
         "--strip-debug",
         "-o",
-        "$(location libnrt.so)",
+        "$(location libnrt.so.1)",
         "$(location @aws-neuronx-runtime-lib//:libnrt.patchelf)",
     ],
     tool = "@llvm//tools:llvm-strip",
@@ -61,11 +61,11 @@ run_binary(
 run_binary(
     name = "libncfw.stripped",
     srcs = ["@aws-neuronx-runtime-lib//:libncfw.patchelf"],
-    outs = ["libncfw.so"],
+    outs = ["libncfw.so.2"],
     args = [
         "--strip-debug",
         "-o",
-        "$(location libncfw.so)",
+        "$(location libncfw.so.2)",
         "$(location @aws-neuronx-runtime-lib//:libncfw.patchelf)",
     ],
     tool = "@llvm//tools:llvm-strip",
@@ -90,8 +90,8 @@ copy_to_directory(
         "amdgpu.ids": "share/libdrm/amdgpu.ids",
         "libdrm-amdgpu-amdgpu1": "lib",
         "platforms/rocm": "lib",
-        "libnrt.so": "lib/libnrt.so",
-        "libncfw.so": "lib/libncfw.so",
+        "libnrt.so.1": "lib/libnrt.so.1",
+        "libncfw.so.2": "lib/libncfw.so.2",
     },
     include_external_repositories = ["**"],
 )
