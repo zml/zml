@@ -92,7 +92,7 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.s
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
 }
 
-fn makeGenerationConfigWithTopK(
+fn makeGenerationConfig(
     a: Tensor,
     b: Tensor,
     c: Tensor,
@@ -612,20 +612,6 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
 }
 
-fn makeGenerationConfig(
-    a: Tensor,
-    b: Tensor,
-    c: Tensor,
-    max_num_tokens_padded: i64,
-    num_valid_tokens: i64,
-    opts: Options,
-    naive_block_assignment: bool,
-    mul_routed_weight: bool,
-    has_bias: bool,
-) GenerationConfig {
-    return makeGenerationConfigWithTopK(a, b, c, max_num_tokens_padded, num_valid_tokens, opts, naive_block_assignment, c.dim(1), mul_routed_weight, has_bias);
-}
-
 fn callFusedKernel(
     a: Tensor,
     b: Tensor,
@@ -730,7 +716,6 @@ pub fn fusedExpertsImpl(
     const gate_up = w1.withTags(.{ .expert, .out, .in });
     const down = w2.withTags(.{ .expert, .out, .mid });
     const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
-    log.info("top weights shape: {f}", .{weights.shape()});
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     // const hidden = hidden_states.withTags(.{ .token, .in });
@@ -764,7 +749,7 @@ pub fn fusedExpertsImpl(
     else
         num_assignments + num_experts * (block_size_m - 1);
 
-    log.info("moe naive path selected={}", .{naive_block_assignment});
+    log.info("Moe naive path selected", .{});
 
     var threaded_io: std.Io.Threaded = .init_single_threaded;
     threaded_io.allocator = std.heap.c_allocator;
@@ -789,6 +774,7 @@ pub fn fusedExpertsImpl(
         num_assignments,
         effective_opts,
         naive_block_assignment,
+        ids.dim(.topk),
         false,
         false,
     );
@@ -826,8 +812,8 @@ pub fn fusedExpertsImpl(
     const up = first_flat.slice1d(.out, .{ .start = @divExact(gate_up.dim(.out), 2), .end = gate_up.dim(.out) });
     const activated = gate.silu().mul(up);
 
-    var second_out = metadata.second_out orelse Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
-    const second_generation_config = makeGenerationConfigWithTopK(
+    var second_out = metadata.second_out orelse Tensor.zeroes(Shape.init(.{ .b = b, .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
+    const second_generation_config = makeGenerationConfig(
         activated,
         down,
         second_out,
@@ -866,14 +852,7 @@ pub fn fusedExpertsImpl(
         num_assignments,
     );
 
-    // const weighted = second_out.mul(weights.convert(second_out.dtype()).broad(second_out.shape()));
-    // const weighted = second_out.mul(weights).broad(second_out.shape());
-
-    log.info("Second out shape before reduction: {f}", .{second_out.shape()});
-
-    // log.info("Completed fused MoE kernels. Starting reduction across top-k experts. Weighted output shape: {f}", .{weighted.shape()});
     const output = second_out.sum(.topk).squeeze(.topk);
 
-    log.info("Completed MoE forward pass. Output shape: {f}", .{output.shape()});
-    return output;
+    return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }

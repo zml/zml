@@ -457,7 +457,6 @@ pub const Moe = struct {
         const routing = router_logits.topK(.{ .top_expert = .expert }, num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
         var topk_weights = routing.values.softmax(.top_expert);
-        log.info("topk_weights before renormalization: {f}", .{topk_weights.shape()});
 
         topk_weights = topk_weights.div(topk_weights.sum(.top_expert));
 
@@ -875,7 +874,6 @@ pub const RmsNorm = struct {
         const weight_f32 = self.weight.convert(.f32);
 
         const normalized = zml.nn.rmsNorm(x_f32, .d, self.eps);
-        log.info("normalized shape: {f}, weight shape: {f}", .{ normalized.shape(), weight_f32.shape() });
         return normalized.mul(weight_f32.broad(x.shape())).add(normalized).convert(x.dtype());
     }
 };

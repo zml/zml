@@ -100,8 +100,9 @@ pub fn main(init: std.process.Init) !void {
         return err;
     };
 
-    const prefill_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, prefill_len);
-    const decode_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, 1);
+    const batch_size: u32 = 1;
+    const prefill_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, prefill_len, batch_size);
+    const decode_moe_metadata = try initMoeMetadata(qwen_model, moe_backend, 1, batch_size);
     const moe_parameters: zml.moe.Parameters = .init(.fromBackend(moe_backend));
     _ = moe_parameters; // autofix
     var prefill_moe_metadata_buffers = try prefill_moe_metadata.initBuffer(io, platform);
@@ -174,7 +175,6 @@ pub fn main(init: std.process.Init) !void {
     try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, &prefill_moe_metadata_buffers, &decode_moe_metadata_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
 
     //======================= Output check (panics if fail) ========================
-    // try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
 }
 
 const CompileModelResult = struct {
@@ -602,10 +602,6 @@ fn runAndGenerate(
         num_tokens_generated += 1;
         const generated_token = generated_token_slice.items(u32)[0];
         if (try tokenizer_decoder.*.next(generated_token)) |chunk| {
-            // if (i % 50 == 0) {
-            //     var buf: [32]u8 = undefined;
-            //     try writer.writeAll(try std.fmt.bufPrint(&buf, "\x1b[31m{d}\x1b[0m", .{i}));
-            // }
             try writer.writeAll(chunk);
             try writer.flush();
         }
@@ -667,7 +663,7 @@ fn runAndGenerate(
     });
 }
 
-fn initMoeMetadata(qwen_model: Qwen35, moe_backend: zml.moe.Backend, token_len: usize) !zml.moe.Metadata {
+fn initMoeMetadata(qwen_model: Qwen35, moe_backend: zml.moe.Backend, token_len: usize, batch_size: u32) !zml.moe.Metadata {
     return switch (moe_backend) {
         .flashinfer => .init(.fromBackend(.flashinfer)),
         .triton => blk: {
@@ -690,12 +686,12 @@ fn initMoeMetadata(qwen_model: Qwen35, moe_backend: zml.moe.Backend, token_len: 
                             .out = sparse.down_proj.dim(.d),
                         }, sparse.down_proj.dtype());
                         const first_out = zml.Shape.init(.{
-                            .token = token_len,
+                            .token = batch_size * token_len,
                             .topk = num_experts_per_tok,
                             .out = sparse.gate_up_proj.dim(.dout),
                         }, .bf16);
                         const second_out = zml.Shape.init(.{
-                            .token = token_len,
+                            .token = batch_size * token_len,
                             .topk = num_experts_per_tok,
                             .out = sparse.down_proj.dim(.d),
                         }, .bf16);
