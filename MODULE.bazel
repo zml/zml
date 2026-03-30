@@ -134,7 +134,7 @@ tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
 pip.parse(
-    download_only = True,
+    download_only = False,
     hub_name = "tpu_py_deps",
     python_version = "3.12",
     requirements_lock = "//platforms/tpu:requirements.lock.txt",
