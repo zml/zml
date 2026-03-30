@@ -78,7 +78,7 @@ copy_to_directory(
         "@rocm-device-libs//:runfiles",
         "@rocm-smi-lib//:rocm_smi",
         "@rocprofiler-register",
-        "@rocprofiler-sdk//:rocprofiler-sdk",
+        "@rocprofiler-sdk//:rocprofv3_tool",
         "@rocprofiler-sdk-rocpd//:rocprofiler-sdk-rocpd",
         "@rocprofiler-sdk-roctx//:rocprofiler-sdk-roctx",
         "@rocsparse",
@@ -113,6 +113,7 @@ copy_to_directory(
         "rocm-core": "lib",
         "rocprofiler-register": "lib",
         "rocprofiler-sdk_so": "lib",
+        "rocprofiler-sdk-roctx": "lib",
         "rocm_smi": "lib",
         "rocsolver": "lib",
         "rocroller": "lib",
@@ -123,6 +124,7 @@ copy_to_directory(
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(

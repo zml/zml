@@ -12,6 +12,7 @@ const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
+const tracer = @import("profiling/tracer.zig");
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
 const sharding_ = @import("sharding.zig");
@@ -1082,6 +1083,11 @@ pub fn load(
     store: *const TensorStore,
     opts: LoadOpts,
 ) !Bufferized(ModelType) {
+    var trace = try tracer.scope("zml.io.load", .{
+        .tensor_count = meta.count(Tensor, model),
+    });
+    defer trace.end();
+
     var bufferized = try mem.bufferize(allocator, ModelType, model);
 
     const pool_count = platform.devices.len;

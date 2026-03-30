@@ -180,9 +180,7 @@ pub fn main(init: std.process.Init) !void {
 
     try profiler.start();
     defer {
-        if ((profiler.stop() catch unreachable)) |profile| {
-            log.info("Profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
-        }
+        _ = profiler.stop() catch unreachable;
     }
 
     log.info("Partitioner: {s}", .{@tagName(args.partitioner)});

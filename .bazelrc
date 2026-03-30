@@ -138,3 +138,10 @@ common:remote   --grpc_keepalive_time=30s
 common:remote   --jobs=2000
 common:remote   --extra_execution_platforms=@zml//:rbe_platform
 common:remote   --experimental_repo_remote_exec=true
+
+# Runtime profiling helpers for `bazel run`.
+run:nsys       --@zml//platforms:cuda=true
+run:nsys       --run_under=//tools:nsys
+
+run:rocprofv3  --@zml//platforms:rocm=true
+run:rocprofv3  --run_under=//tools:rocprofv3
