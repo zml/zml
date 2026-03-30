@@ -78,7 +78,7 @@ pub const Metadata = union(Backend) {
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *zml.Platform) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         return switch (self) {
             .triton => |metadata| .{ .triton = try metadata.initBuffer(io, platform) },
         };

@@ -76,7 +76,7 @@ pub const Metadata = struct {
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *zml.Platform) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(Metadata) {
         const replicated_sharding = try zml.sharding.replicatedSharding(platform);
         return .{
             .w1_zero_bias = if (self.w1_zero_bias) |tensor| try initZeroBiasBuffer(io, platform, replicated_sharding, tensor.shape()) else null,
@@ -338,7 +338,7 @@ fn getLaunchConfigJsonPath(allocator: std.mem.Allocator) ![]const u8 {
     };
 
     const config_json = config_path orelse {
-        log.err("MoE launch config is missing from runfiles: zml/zml/moe/triton/triton_kernels/config.json", .{});
+        log.warn("MoE launch config is missing from runfiles: zml/zml/moe/triton/triton_kernels/config.json", .{});
         return error.MissingLaunchConfigRunfile;
     };
 
@@ -701,8 +701,8 @@ pub fn fusedExpertsImpl(
         const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
         break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
     } else try alignBlockSize(std.heap.c_allocator, io, ids, num_experts, block_size_m);
-
-    var first_out = metadata.first_out orelse Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16));
+    //orelse Tensor.zeroes(Shape.init(.{ .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16))
+    var first_out = metadata.first_out.?;
     const first_generation_config = makeGenerationConfig(
         hidden,
         gate_up,
@@ -722,8 +722,8 @@ pub fn fusedExpertsImpl(
     };
 
     defer std.heap.c_allocator.free(ttir_first_matmul);
-
-    var b_bias = opts.w1_bias orelse metadata.w1_zero_bias orelse Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, gate_up.dtype()));
+    //orelse Tensor.zeroes(Shape.init(.{ .expert = gate_up.dim(.expert), .out = gate_up.dim(.out) }, gate_up.dtype()))
+    var b_bias = opts.w1_bias orelse metadata.w1_zero_bias.?;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
     var b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
 
@@ -748,8 +748,8 @@ pub fn fusedExpertsImpl(
     const gate = first_flat.slice1d(.out, .{ .start = 0, .end = @divExact(gate_up.dim(.out), 2) });
     const up = first_flat.slice1d(.out, .{ .start = @divExact(gate_up.dim(.out), 2), .end = gate_up.dim(.out) });
     const activated = gate.silu().mul(up);
-
-    var second_out = metadata.second_out orelse Tensor.zeroes(Shape.init(.{ .b = b, .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
+    // orelse Tensor.zeroes(Shape.init(.{ .b = b, .token = hidden.dim(.token), .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16));
+    var second_out = metadata.second_out.?;
     const second_generation_config = makeGenerationConfig(
         activated,
         down,
@@ -767,8 +767,8 @@ pub fn fusedExpertsImpl(
         return err;
     };
     defer std.heap.c_allocator.free(ttir_second_matmul);
-
-    b_bias = opts.w2_bias orelse metadata.w2_zero_bias orelse Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, down.dtype()));
+    //orelse Tensor.zeroes(Shape.init(.{ .expert = down.dim(.expert), .out = down.dim(.out) }, down.dtype()))
+    b_bias = opts.w2_bias orelse metadata.w2_zero_bias.?;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
     b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
