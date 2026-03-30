@@ -30,11 +30,11 @@ pub fn start(collector: *Collector) !void {
 
     for (nrt.handles, nrt.device_indexes) |dev_handle, device_idx| {
         const device_type = Nrt.deviceType(dev_handle);
-        const mem_per_core: u64 = switch (device_type) {
-            .inf1 => 2 * GiB, // inf1: 8 GiB / 4 cores
-            .inf2_trn1 => 16 * GiB, // inf2/trn1: 32 GiB / 2 cores
-            .trn2 => 12 * GiB, // trn2: 96 GiB / 8 cores
-            .trn3 => 18 * GiB, // trn3: 144 GiB / 8 cores
+        const mem_per_device: u64 = switch (device_type) {
+            .inf1 => 8 * GiB,
+            .inf2_trn1 => 32 * GiB,
+            .trn2 => 96 * GiB,
+            .trn3 => 144 * GiB,
             else => 0,
         };
 
@@ -46,7 +46,8 @@ pub fn start(collector: *Collector) !void {
                 .arena = poll_arena,
                 .device_idx = @intCast(device_idx),
                 .core_idx = @intCast(ci),
-                .mem_per_core = mem_per_core,
+                .mem_per_device = mem_per_device,
+                .nc_per_device = nc_per_device,
             };
 
             const initial: NeuronInfo = .{ .name = dev.name(collector.arena) catch null };
@@ -70,7 +71,8 @@ const Device = struct {
     arena: *std.heap.ArenaAllocator,
     device_idx: u32,
     core_idx: u32,
-    mem_per_core: u64 = 0,
+    mem_per_device: u64 = 0,
+    nc_per_device: u32 = 1,
 
     fn devicePath(self: Device, sub_path: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.arena.allocator(), base_path ++ "/neuron{d}/{s}", .{ self.device_idx, sub_path });
@@ -89,15 +91,21 @@ const Device = struct {
     }
 
     pub fn memTotal(self: Device) !u64 {
-        if (self.mem_per_core == 0) {
+        if (self.mem_per_device == 0) {
             return error.NrtUnavailable;
         }
-        return self.mem_per_core;
+        return self.mem_per_device;
     }
 
-    // Sysfs-based metrics
+    // Sysfs-based metrics — RAM is shared across cores, so sum all cores on the device.
     pub fn memUsed(self: Device) !u64 {
-        return sysfs.readInt(self.arena.allocator(), self.io, try self.corePath("stats/memory_usage/device_mem/total"));
+        var total: u64 = 0;
+        for (0..self.nc_per_device) |ci| {
+            const path = try std.fmt.allocPrint(self.arena.allocator(), base_path ++ "/neuron{d}/neuron_core{d}/stats/memory_usage/device_mem/total", .{ self.device_idx, ci });
+            total += try sysfs.readInt(self.arena.allocator(), self.io, path);
+        }
+
+        return total;
     }
 
     pub fn tensors(self: Device) !u64 {
