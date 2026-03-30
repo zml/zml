@@ -34,17 +34,26 @@ pub fn main(init: std.process.Init) !void {
     _ = it.next(); // exe
 
     const ckpt_path = it.next() orelse {
-        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/> [--bf16-attn]", .{});
         return error.InvalidArgs;
     };
     const inputs_path = it.next() orelse {
-        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/> [--bf16-attn]", .{});
         return error.InvalidArgs;
     };
     const output_dir = it.next() orelse {
-        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/>", .{});
+        std.log.err("Usage: denoise_e2e <checkpoint.safetensors> <stage2_inputs.safetensors> <output_dir/> [--bf16-attn]", .{});
         return error.InvalidArgs;
     };
+
+    // Optional: --bf16-attn to use bf16-native attention (needed for large resolutions
+    // to avoid 72+ GiB f32 attention matrix OOM).
+    var use_bf16_attn = false;
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--bf16-attn")) {
+            use_bf16_attn = true;
+        }
+    }
 
     // ========================================================================
     // Open stores
@@ -221,43 +230,44 @@ pub fn main(init: std.process.Init) !void {
     const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // Compile block exe
-    std.log.info("Compiling block exe...", .{});
+    std.log.info("Compiling block exe (bf16_attn={})...", .{use_bf16_attn});
     var block_params_shape = try allocator.create(model.FullStepParams);
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
 
-    var block_exe = try platform.compileFn(
-        allocator, io,
-        model.forwardBlock0Native,
-        .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()),
-            zml.Tensor.fromShape(init_pre_out.ax.shape()),
-            zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
-            block_params_shape.blocks[0],
-        },
-        .{ .shardings = &.{sharding} },
-    );
+    const block_compile_args = .{
+        zml.Tensor.fromShape(init_pre_out.vx.shape()),
+        zml.Tensor.fromShape(init_pre_out.ax.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+        block_params_shape.blocks[0],
+    };
+    const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
+
+    var block_exe = if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args, compile_opts)
+    else
+        try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_exe.deinit();
     std.log.info("Block exe compiled.", .{});
 

@@ -273,6 +273,66 @@ pub const OutputProjection = struct {
     }
 };
 
+/// Like zml.nn.sdpa but computes softmax in native dtype (no f32 upcast)
+/// and chunks along the query dimension to avoid materializing a full Q×K^T
+/// matrix. For Stage 2 video self-attention ([32, 24576, 24576] bf16 ≈ 36 GiB),
+/// the full matrix can't fit in GPU memory. Chunking queries into blocks of
+/// CHUNK_Q tokens produces smaller [32, CHUNK_Q, 24576] intermediates that
+/// XLA can schedule without OOM.
+fn sdpaNoF32Upcast(q_: Tensor, k_: Tensor, v_: Tensor, opts: zml.nn.SdpaOpts) Tensor {
+    var q, var k, const v = .{ q_, k_, v_ };
+
+    // Handle GQA: split q heads to match k heads.
+    q = q.splitAxis(.h, .{ .h = k.dim(.h), .hq = .auto });
+
+    const sqrtHeadDim: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(q.dim(.hd))));
+    const head_scaling = if (opts.scale) |s| s else Tensor.scalar(sqrtHeadDim, k.dtype());
+    k = k.mul(head_scaling.convert(k.dtype()));
+
+    const n_queries: usize = @intCast(q.dim(.q));
+
+    // Choose chunk size: 1024 queries per chunk → attention tile is [H, 1024, K] which is manageable.
+    const CHUNK_Q: usize = 1024;
+    const n_full_chunks = n_queries / CHUNK_Q;
+    const remainder = n_queries % CHUNK_Q;
+    const n_chunks = n_full_chunks + @as(usize, if (remainder > 0) 1 else 0);
+
+    // For small sequence lengths (≤ CHUNK_Q), skip chunking entirely.
+    if (n_chunks <= 1) {
+        var attn_weights = q.dot(k, .hd);
+        if (opts.attn_mask) |mask| attn_weights = attn_weights.add(mask.broad(attn_weights.shape()));
+        attn_weights = attn_weights.softmax(.k);
+        const attn = attn_weights.dot(v, .k);
+        return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
+    }
+
+    // Process each chunk: slice Q (and optionally the mask) along the .q axis,
+    // compute attention with the full K/V, and collect results.
+    // concatenate supports up to 32 tensors — 24576/1024 = 24 chunks, well within limit.
+    var chunk_results: [32]Tensor = undefined;
+    std.debug.assert(n_chunks <= 32);
+
+    var ci: usize = 0;
+    while (ci < n_chunks) : (ci += 1) {
+        const start: i64 = @intCast(ci * CHUNK_Q);
+        const end: i64 = @intCast(@min((ci + 1) * CHUNK_Q, n_queries));
+
+        const q_chunk = q.slice1d(.q, .{ .start = start, .end = end });
+
+        var aw = q_chunk.dot(k, .hd);
+        if (opts.attn_mask) |mask| {
+            const mask_chunk = mask.slice1d(.q, .{ .start = start, .end = end });
+            aw = aw.add(mask_chunk.broad(aw.shape()));
+        }
+        aw = aw.softmax(.k);
+        chunk_results[ci] = aw.dot(v, .k);
+    }
+
+    // Concatenate chunks back along the query axis and finalize.
+    const attn = Tensor.concatenate(chunk_results[0..n_chunks], .q);
+    return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
+}
+
 pub const AttentionKind = enum {
     attn1,
     attn2,
@@ -482,12 +542,21 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        var attn = zml.nn.sdpa(
-            qh.rename(.{ .b = .batch }),
-            kh.rename(.{ .b = .batch }),
-            vh.rename(.{ .b = .batch }),
-            .{ .attn_mask = if (opts.mask) |m| m.rename(.{ .b = .batch }) else null },
-        ).rename(.{ .batch = .b }); // [B, Q, H, HD]
+        const sdpa_opts: zml.nn.SdpaOpts = .{ .attn_mask = if (opts.mask) |m| m.rename(.{ .b = .batch }) else null };
+        var attn = (if (bf16_native)
+            sdpaNoF32Upcast(
+                qh.rename(.{ .b = .batch }),
+                kh.rename(.{ .b = .batch }),
+                vh.rename(.{ .b = .batch }),
+                sdpa_opts,
+            )
+        else
+            zml.nn.sdpa(
+                qh.rename(.{ .b = .batch }),
+                kh.rename(.{ .b = .batch }),
+                vh.rename(.{ .b = .batch }),
+                sdpa_opts,
+            )).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
         // Compute per-head gates as 2 * sigmoid(logits) so zero-initialized logits preserve identity.
         var gate_logits = x_compute.dot(params.to_gate_logits.weight.convert(compute_dtype), .d); // [B, T, H]
