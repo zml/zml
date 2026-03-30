@@ -42,8 +42,6 @@ pub const GpuInfo = struct {
     // Power
     power_mw: ?u64 = null,
     power_limit_mw: ?u64 = null,
-    total_energy_mj: ?u64 = null,
-
     // Thermal
     temperature: ?u64 = null,
     fan_speed_percent: ?u64 = null,
