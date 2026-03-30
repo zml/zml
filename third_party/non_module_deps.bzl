@@ -1,4 +1,5 @@
 load("//third_party/arocc:repo.bzl", arocc = "repo")
+load("//third_party/cloud_accelerator_diagnostics:repo.bzl", cloud_accelerator_diagnostics = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
 load("//third_party/mnist:repo.bzl", mnist = "repo")
 load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
@@ -12,6 +13,7 @@ load("//third_party/uucode:repo.bzl", uucode = "repo")
 load("//third_party/libvaxis:repo.bzl", libvaxis = "repo")
 
 def _non_module_deps_impl(mctx):
+    cloud_accelerator_diagnostics()
     com_google_sentencepiece()
     org_swig_swig()
     mnist()
