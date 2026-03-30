@@ -93,30 +93,40 @@ fn readProcessGpuVram(io: std.Io, pid: u32, pci_slot: *const [bdf_len]u8) u64 {
         var file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         const file_path = std.fmt.bufPrint(&file_buf, "{s}/{s}", .{ dir_path, entry.name }) catch continue;
 
-        var buf: [4096]u8 = undefined;
-        const data = std.Io.Dir.readFile(.cwd(), io, file_path, &buf) catch continue;
-
-        if (std.mem.indexOf(u8, data, "drm-driver:\tamdgpu") == null) {
-            continue;
-        }
-        if (std.mem.indexOf(u8, data, pci_slot) == null) {
-            continue;
-        }
-
-        total_vram_kib += parseVramKib(data);
+        total_vram_kib += parseFdinfoVram(io, file_path, pci_slot);
     }
 
     return total_vram_kib;
 }
 
-fn parseVramKib(data: []const u8) u64 {
-    // Support both new and old fdinfo keys (see amdgpu_fdinfo.c)
-    for ([_][]const u8{ "drm-memory-vram:\t", "vram mem:\t" }) |key| {
-        const pos = std.mem.indexOf(u8, data, key) orelse continue;
-        const rest = data[pos + key.len ..];
-        const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
-        return std.fmt.parseInt(u64, rest[0..end], 10) catch 0;
+fn parseFdinfoVram(io: std.Io, path: []const u8, pci_slot: *const [bdf_len]u8) u64 {
+    var file = std.Io.Dir.openFile(.cwd(), io, path, .{ .mode = .read_only }) catch return 0;
+    defer file.close(io);
+
+    var read_buf: [4096]u8 = undefined;
+    var reader = file.reader(io, &read_buf);
+
+    var found_pci = false;
+    var vram_kib: ?u64 = null;
+
+    while (true) {
+        const line = reader.interface.takeDelimiterExclusive('\n') catch break;
+        reader.interface.toss(1);
+
+        if (std.mem.indexOf(u8, line, pci_slot) != null) found_pci = true;
+
+        // Support both new and old fdinfo keys (see amdgpu_fdinfo.c)
+        inline for ([_][]const u8{ "drm-memory-vram:\t", "vram mem:\t" }) |key| {
+            if (std.mem.startsWith(u8, line, key)) {
+                const rest = line[key.len..];
+                const end = std.mem.indexOfAny(u8, rest, " \t\n") orelse rest.len;
+                vram_kib = std.fmt.parseInt(u64, rest[0..end], 10) catch 0;
+            }
+        }
+
+        if (found_pci and vram_kib != null) return vram_kib.?;
     }
+
     return 0;
 }
 
