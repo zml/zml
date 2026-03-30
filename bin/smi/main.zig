@@ -68,8 +68,8 @@ pub fn main(init: std.process.Init) !void {
 
     inline for (device_backends) |backend| {
         if (targets.contains(backend.target)) {
-            backend.start(&collector) catch {
-                std.log.err("{s} skipped", .{@tagName(backend.target)});
+            backend.start(&collector) catch |err| {
+                std.log.err("{s} skipped: {s}", .{ @tagName(backend.target), @errorName(err) });
             };
         }
     }

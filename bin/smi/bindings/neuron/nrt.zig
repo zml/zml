@@ -33,13 +33,21 @@ const Fns = struct {
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = sandbox.path(&path_buf) orelse return error.NrtUnavailable;
+    const sandbox_path = sandbox.path(&path_buf) orelse {
+        std.log.err("neuron: sandbox path unavailable", .{});
+        return error.NrtUnavailable;
+    };
 
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const path = stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnrt.so.1" }) catch
+    const path = stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnrt.so.1" }) catch {
+        std.log.err("neuron: failed to construct libnrt.so.1 path", .{});
         return error.NrtUnavailable;
+    };
 
-    const lib = DynLib.openElf(Fns, io, path, "nrt_init") catch return error.NrtUnavailable;
+    const lib = DynLib.openElf(Fns, io, path, "nrt_init") catch |err| {
+        std.log.err("neuron: failed to open {s}: {s}", .{ path, @errorName(err) });
+        return error.NrtUnavailable;
+    };
 
     var dev_index_buf: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
     const count: usize = @intCast(@max(0, lib.ndl_available_devices(&dev_index_buf, c.MAX_NEURON_DEVICE_COUNT)));
