@@ -60,10 +60,12 @@ const Host = struct {
     fn parseLoadAvg(self: Host, comptime n: usize) !f32 {
         const data = try sysfs.readString(self.arena.allocator(), self.io, "/proc/loadavg");
         var iter = std.mem.splitScalar(u8, data, ' ');
+
         var i: usize = 0;
         while (iter.next()) |tok| : (i += 1) {
             if (i == n) return std.fmt.parseFloat(f32, tok);
         }
+
         return error.NotFound;
     }
 
@@ -86,7 +88,6 @@ const Host = struct {
         return std.fmt.parseInt(u64, data[0..dot], 10);
     }
 };
-
 
 const metrics = .{
     .{ .field = "mem_available_kib", .query = Host.memAvailable },

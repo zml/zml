@@ -62,6 +62,7 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
             .map_hbm = false,
             .num_dram_regions = 0,
         };
+
         if (lib.ndl_open_device(device_idx, &t, &dev) == 0) {
             if (dev) |d| {
                 handle_list.append(allocator, d) catch continue;

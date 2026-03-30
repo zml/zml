@@ -13,6 +13,7 @@ pub const target: device_info.Target = .cuda;
 pub fn start(collector: *Collector) !void {
     const nvml = try collector.arena.create(Nvml);
     nvml.* = try Nvml.init();
+
     const count = try nvml.deviceCount();
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
@@ -40,6 +41,7 @@ const Device = struct {
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
         var buf: [256]u8 = .{0} ** 256;
         const slice = try self.nvml.name(self.handle, &buf);
+
         return try arena.dupe(u8, slice);
     }
 
@@ -47,13 +49,16 @@ const Device = struct {
     pub fn powerUsage(self: Device) !u64 {
         return @intCast(try self.nvml.powerUsage(self.handle));
     }
+
     pub fn powerLimit(self: Device) !u64 {
         return @intCast(try self.nvml.powerLimit(self.handle));
     }
+
     // Thermal
     pub fn temperature(self: Device) !u64 {
         return @intCast(try self.nvml.temperature(self.handle));
     }
+
     pub fn fanSpeed(self: Device) !u64 {
         return @intCast(try self.nvml.fanSpeed(self.handle));
     }
@@ -62,9 +67,11 @@ const Device = struct {
     pub fn gpuUtil(self: Device) !u64 {
         return @intCast(try self.nvml.utilizationGpu(self.handle));
     }
+
     pub fn encoderUtil(self: Device) !u64 {
         return @intCast(try self.nvml.encoderUtil(self.handle));
     }
+
     pub fn decoderUtil(self: Device) !u64 {
         return @intCast(try self.nvml.decoderUtil(self.handle));
     }
@@ -73,15 +80,19 @@ const Device = struct {
     pub fn clockGraphics(self: Device) !u64 {
         return @intCast(try self.nvml.clockGraphics(self.handle));
     }
+
     pub fn clockSm(self: Device) !u64 {
         return @intCast(try self.nvml.clockSm(self.handle));
     }
+
     pub fn clockMem(self: Device) !u64 {
         return @intCast(try self.nvml.clockMem(self.handle));
     }
+
     pub fn maxClockGraphics(self: Device) !u64 {
         return @intCast(try self.nvml.maxClockGraphics(self.handle));
     }
+
     pub fn maxClockMem(self: Device) !u64 {
         return @intCast(try self.nvml.maxClockMem(self.handle));
     }
@@ -90,9 +101,11 @@ const Device = struct {
     pub fn memUsed(self: Device) !u64 {
         return self.nvml.memUsed(self.handle);
     }
+
     pub fn memTotal(self: Device) !u64 {
         return self.nvml.memTotal(self.handle);
     }
+
     pub fn memBusWidth(self: Device) !u64 {
         return @intCast(try self.nvml.memBusWidth(self.handle));
     }
@@ -101,12 +114,15 @@ const Device = struct {
     pub fn pcieTx(self: Device) !u64 {
         return @intCast(try self.nvml.pcieTxKBps(self.handle));
     }
+
     pub fn pcieRx(self: Device) !u64 {
         return @intCast(try self.nvml.pcieRxKBps(self.handle));
     }
+
     pub fn pcieLinkGen(self: Device) !u64 {
         return @intCast(try self.nvml.pcieLinkGen(self.handle));
     }
+
     pub fn pcieLinkWidth(self: Device) !u64 {
         return @intCast(try self.nvml.pcieLinkWidth(self.handle));
     }

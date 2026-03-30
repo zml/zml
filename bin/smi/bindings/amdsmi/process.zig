@@ -18,11 +18,13 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
     const device_count = amdsmi.deviceCount();
     const pci_slots = allocator.alloc(?[bdf_len]u8, device_count) catch return;
     defer allocator.free(pci_slots);
+
     for (pci_slots, 0..) |*slot, i| {
         const handle = amdsmi.handleByIndex(@intCast(i)) catch {
             slot.* = null;
             continue;
         };
+
         slot.* = formatBdf(amdsmi.bdfId(handle) catch {
             slot.* = null;
             continue;
@@ -41,14 +43,17 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
             const procs = blk: {
                 const saved = c.dup(c.STDERR_FILENO);
                 const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+
                 if (devnull >= 0) {
                     _ = c.dup2(devnull, c.STDERR_FILENO);
                     _ = c.close(devnull);
                 }
+
                 defer if (saved >= 0) {
                     _ = c.dup2(saved, c.STDERR_FILENO);
                     _ = c.close(saved);
                 };
+
                 break :blk amdsmi.processList(allocator, handle) catch continue;
             };
             defer {
@@ -138,5 +143,6 @@ fn formatBdf(bdf_id: u64) [bdf_len]u8 {
         (bdf_id >> 3) & 0x1F,
         bdf_id & 0x7,
     }) catch unreachable;
+
     return buf;
 }

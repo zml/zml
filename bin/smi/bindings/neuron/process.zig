@@ -88,6 +88,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
                 if (ni_back.prev_timestamp) |prev| {
                     const elapsed = prev.untilNow(io, .awake);
                     const elapsed_us: u64 = @intCast(@divFloor(elapsed.nanoseconds, std.time.ns_per_us));
+
                     if (elapsed_us > 0) {
                         const delta_us = total_us_per_core[ci] -| prev_us;
                         ni_back.util_percent = @min(100, delta_us * 100 / elapsed_us);
