@@ -6,15 +6,15 @@ const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
 const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("../../worker.zig").Worker;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
-    try w.spawn(io, pollLoop, .{ io, w, allocator, list, nrt, handles, nc_per_device, device_infos, dev_offset });
+pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
+    try w.spawn(io, pollLoop, .{ io, w, allocator, list, nrt, nc_per_device, device_infos, dev_offset });
 }
 
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, handles: []const *c.ndl_device_t, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
+fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
     const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
     io.sleep(interval, .awake) catch {};
 
-    if (handles.len == 0) {
+    if (nrt.handles.len == 0) {
         return;
     }
 
@@ -24,7 +24,7 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
 
         back.clearRetainingCapacity();
 
-        for (handles, 0..) |handle, dev_i| {
+        for (nrt.handles, 0..) |handle, dev_i| {
             const apps_result = nrt.allAppsInfo(handle) catch continue;
             defer {
                 if (apps_result.ptr) |ptr| {

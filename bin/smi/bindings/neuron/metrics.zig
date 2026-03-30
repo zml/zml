@@ -1,5 +1,4 @@
 const std = @import("std");
-const c = @import("c");
 const sysfs = @import("../../utils/sysfs.zig");
 const device_info = @import("../../info/device_info.zig");
 const DeviceInfo = device_info.DeviceInfo;
@@ -14,33 +13,22 @@ const base_path = "/sys/devices/virtual/neuron_device";
 
 pub const target: device_info.Target = .neuron;
 
-const State = struct {
-    nrt: Nrt,
-    handles: [c.MAX_NEURON_DEVICE_COUNT]*c.ndl_device_t = undefined,
-    handle_count: usize = 0,
-};
-
 pub fn start(collector: *Collector) !void {
-    const state = try collector.arena.create(State);
-    state.* = .{ .nrt = try Nrt.init(collector.io) };
+    const nrt = try collector.arena.create(Nrt);
+    nrt.* = try Nrt.init(collector.arena, collector.io);
 
-    var dev_index_buf: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
-    const dev_indexes = state.nrt.availableDevices(&dev_index_buf);
-    if (dev_indexes.len == 0) {
+    if (nrt.handles.len == 0) {
         return;
     }
 
-    const total_nc = state.nrt.totalNcCount() catch return;
-    const nc_per_device = total_nc / @as(u32, @intCast(dev_indexes.len));
+    const total_nc = nrt.totalNcCount() catch return;
+    const nc_per_device = total_nc / @as(u32, @intCast(nrt.handles.len));
 
     const GiB: u64 = 1024 * 1024 * 1024;
     var neuron_infos: std.ArrayList(*DeviceInfo) = .{};
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
-    for (dev_indexes) |device_idx| {
-        const dev_handle = state.nrt.openDevice(device_idx) catch continue;
-        state.handles[state.handle_count] = dev_handle;
-        state.handle_count += 1;
+    for (nrt.handles, nrt.device_indexes) |dev_handle, device_idx| {
         const device_type = Nrt.deviceType(dev_handle);
         const mem_per_core: u64 = switch (device_type) {
             .inf1 => 2 * GiB, // inf1: 8 GiB / 4 cores
@@ -71,7 +59,7 @@ pub fn start(collector: *Collector) !void {
 
     if (neuron_infos.items.len > 0) {
         const processes = try collector.createProcessList();
-        try process.init(collector.worker, collector.io, collector.gpa, processes, &state.nrt, state.handles[0..state.handle_count], nc_per_device, neuron_infos.items, dev_offset);
+        try process.init(collector.worker, collector.io, collector.gpa, processes, nrt, nc_per_device, neuron_infos.items, dev_offset);
     }
 }
 

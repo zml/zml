@@ -17,6 +17,8 @@ pub const DeviceType = enum(c_int) {
 };
 
 lib: Fns,
+handles: []const *c.ndl_device_t,
+device_indexes: []const c_int,
 
 const Fns = struct {
     ndl_available_devices: DynLib.Fn("ndl_available_devices"),
@@ -29,7 +31,7 @@ const Fns = struct {
     nrt_get_total_nc_count: DynLib.Fn("nrt_get_total_nc_count"),
 };
 
-pub fn init(io: std.Io) Error!Nrt {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = sandbox.path(&path_buf) orelse return error.NrtUnavailable;
 
@@ -37,30 +39,38 @@ pub fn init(io: std.Io) Error!Nrt {
     const path = stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libnrt.so.1" }) catch
         return error.NrtUnavailable;
 
-    return .{ .lib = DynLib.openElf(Fns, io, path, "nrt_init") catch return error.NrtUnavailable };
-}
+    const lib = DynLib.openElf(Fns, io, path, "nrt_init") catch return error.NrtUnavailable;
 
-pub fn availableDevices(self: Nrt, buf: []c_int) []c_int {
-    const count: usize = @intCast(@max(0, self.lib.ndl_available_devices(buf.ptr, @intCast(buf.len))));
-    return buf[0..count];
-}
+    var dev_index_buf: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
+    const count: usize = @intCast(@max(0, lib.ndl_available_devices(&dev_index_buf, c.MAX_NEURON_DEVICE_COUNT)));
 
-pub fn openDevice(self: Nrt, device_index: c_int) Error!*c.ndl_device_t {
-    var dev: ?*c.ndl_device_t = null;
-    var t: c.struct_ndl_device_init_param = .{
-        .initialize_device = false,
-        .map_hbm = false,
-        .num_dram_regions = 0,
-    };
+    var handle_list: std.ArrayList(*c.ndl_device_t) = .{};
+    var index_list: std.ArrayList(c_int) = .{};
 
-    if (self.lib.ndl_open_device(device_index, &t, &dev) != 0) {
-        return error.nrt_error;
+    for (dev_index_buf[0..count]) |device_idx| {
+        var dev: ?*c.ndl_device_t = null;
+        var t: c.struct_ndl_device_init_param = .{
+            .initialize_device = false,
+            .map_hbm = false,
+            .num_dram_regions = 0,
+        };
+        if (lib.ndl_open_device(device_idx, &t, &dev) == 0) {
+            if (dev) |d| {
+                handle_list.append(allocator, d) catch continue;
+                index_list.append(allocator, device_idx) catch continue;
+            }
+        }
     }
-    return dev orelse error.nrt_error;
+
+    return .{
+        .lib = lib,
+        .handles = handle_list.toOwnedSlice(allocator) catch return error.NrtUnavailable,
+        .device_indexes = index_list.toOwnedSlice(allocator) catch return error.NrtUnavailable,
+    };
 }
 
-pub fn closeDevice(self: Nrt, dev: *c.ndl_device_t) void {
-    _ = self.lib.ndl_close_device(dev);
+pub fn deviceCount(self: Nrt) u32 {
+    return @intCast(self.handles.len);
 }
 
 pub fn allAppsInfo(self: Nrt, dev: *c.ndl_device_t) Error!struct { ptr: ?[*]AppInfo, count: usize } {
