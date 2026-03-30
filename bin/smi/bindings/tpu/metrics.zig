@@ -154,6 +154,7 @@ fn scanPciChips(allocator: std.mem.Allocator, io: std.Io) ?ChipInfo {
                     .devices_per_chip = chip.devices_per_chip,
                     .chip_count = undefined,
                 };
+
                 chip_count += 1;
                 break;
             }

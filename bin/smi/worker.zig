@@ -31,11 +31,14 @@ pub const Worker = struct {
                         if (@hasField(Dev, "arena")) {
                             _ = d.arena.reset(.retain_capacity);
                         }
+
                         const back = s.back();
                         back.* = s.front().*;
+
                         inline for (table) |m| {
                             @field(back, m.field) = m.query(d) catch null;
                         }
+
                         s.swap();
                     }
                 }.poll, .{ db, dev });

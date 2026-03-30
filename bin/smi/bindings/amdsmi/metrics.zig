@@ -13,6 +13,7 @@ pub const target: device_info.Target = .rocm;
 pub fn start(collector: *Collector) !void {
     const amdsmi = try collector.arena.create(AmdSmi);
     amdsmi.* = try AmdSmi.init(collector.arena);
+
     const count = amdsmi.deviceCount();
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
@@ -20,6 +21,7 @@ pub fn start(collector: *Collector) !void {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
         const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
+
         try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
     }
 
@@ -40,6 +42,7 @@ const Device = struct {
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
         var buf: [AmdSmi.name_buf_len]u8 = .{0} ** AmdSmi.name_buf_len;
         const slice = try self.amdsmi.name(self.handle, &buf);
+
         return try arena.dupe(u8, slice);
     }
 
@@ -48,12 +51,13 @@ const Device = struct {
         const pw = try self.amdsmi.powerUsage(self.handle);
         return @as(u64, pw) * 1000;
     }
+
     pub fn powerLimit(self: Device) !u64 {
-        // Header says W, but empirically power_limit is in µW; convert to mW
         const limit = try self.amdsmi.powerLimit(self.handle);
         if (limit == std.math.maxInt(u32)) {
             return error.not_supported;
         }
+
         return @as(u64, limit) / 1000;
     }
 
@@ -62,6 +66,7 @@ const Device = struct {
         const temp = try self.amdsmi.temperature(self.handle);
         return @intCast(temp);
     }
+
     pub fn fanSpeed(self: Device) !u64 {
         const speed = try self.amdsmi.fanSpeed(self.handle);
         return @intCast(@divTrunc(speed * 100, 255));
@@ -76,15 +81,19 @@ const Device = struct {
     pub fn clockGraphics(self: Device) !u64 {
         return try self.amdsmi.clockGraphics(self.handle);
     }
+
     pub fn clockSoc(self: Device) !u64 {
         return try self.amdsmi.clockSoc(self.handle);
     }
+
     pub fn clockMem(self: Device) !u64 {
         return try self.amdsmi.clockMem(self.handle);
     }
+
     pub fn maxClockGraphics(self: Device) !u64 {
         return try self.amdsmi.maxClockGraphics(self.handle);
     }
+
     pub fn maxClockMem(self: Device) !u64 {
         return try self.amdsmi.maxClockMem(self.handle);
     }
@@ -93,6 +102,7 @@ const Device = struct {
     pub fn memUsed(self: Device) !u64 {
         return self.amdsmi.memUsed(self.handle);
     }
+
     pub fn memTotal(self: Device) !u64 {
         return self.amdsmi.memTotal(self.handle);
     }
@@ -103,11 +113,14 @@ const Device = struct {
         if (bw == std.math.maxInt(u32)) {
             return error.not_supported;
         }
+
         return bw;
     }
+
     pub fn pcieLinkGen(self: Device) !u64 {
         return try self.amdsmi.pcieLinkGen(self.handle);
     }
+
     pub fn pcieLinkWidth(self: Device) !u64 {
         return try self.amdsmi.pcieWidth(self.handle);
     }

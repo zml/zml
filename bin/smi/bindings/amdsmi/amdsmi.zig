@@ -58,6 +58,7 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
 
         const procs = try allocator.alloc(c.amdsmi_processor_handle, proc_count);
         defer allocator.free(procs);
+
         try check(fns.amdsmi_get_processor_handles(socket, &proc_count, @ptrCast(procs.ptr)));
 
         for (procs[0..proc_count]) |proc| {

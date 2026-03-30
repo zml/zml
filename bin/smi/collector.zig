@@ -16,8 +16,8 @@ pub const Collector = struct {
     pub fn addDevice(self: *Collector, initial: DeviceInfo) !*DeviceInfo {
         const info = try self.arena.create(DeviceInfo);
         info.* = initial;
-
         try self.device_infos.append(self.arena, info);
+
         return info;
     }
 
@@ -25,6 +25,7 @@ pub const Collector = struct {
         const list = try self.arena.create(ProcessDoubleBuffer);
         list.* = .{ .values = .{ .empty, .empty } };
         try self.process_lists.append(self.arena, list);
+
         return list;
     }
 
@@ -32,6 +33,7 @@ pub const Collector = struct {
         const poll_arena = try self.arena.create(std.heap.ArenaAllocator);
         poll_arena.* = std.heap.ArenaAllocator.init(self.gpa);
         try self.poll_arenas.append(self.arena, poll_arena);
+
         return poll_arena;
     }
 
@@ -40,11 +42,13 @@ pub const Collector = struct {
             self.arena.destroy(info);
         }
         self.device_infos.deinit(self.arena);
+
         for (self.process_lists.items) |list| {
             list.values[0].deinit(self.gpa);
             list.values[1].deinit(self.gpa);
         }
         self.process_lists.deinit(self.arena);
+
         for (self.poll_arenas.items) |poll_arena| {
             poll_arena.deinit();
         }
