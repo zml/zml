@@ -63,6 +63,11 @@ CUDA_PACKAGES = {
         ),
     ],
     "cuda_nvtx": [
+        packages.cc_library_hdrs_glob(
+            name = "headers",
+            hdrs_glob = ["include/nvtx3/**"],
+            includes = ["include"],
+        ),
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
@@ -354,6 +359,8 @@ def _cuda_impl(mctx):
             "cuda_nvml_dev_linux_sbsa",
             "zlib1g_linux_arm64",
             "zlib1g_linux_amd64",
+            "cuda_nvtx_linux_x86_64",
+            "cuda_nvtx_linux_sbsa",
         ],
         root_module_direct_dev_deps = [],
     )

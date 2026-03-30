@@ -37,6 +37,7 @@ pub const platform = @import("platform.zig");
 pub const Memory = platform.Memory;
 pub const Platform = platform.Platform;
 pub const Target = platform.Target;
+pub const tracer = @import("profiling/tracer.zig");
 pub const safetensors = @import("safetensors.zig");
 pub const shape = @import("shape.zig");
 pub const Shape = shape.Shape;
@@ -46,7 +47,6 @@ pub const Slice = slice.Slice;
 pub const tensor = @import("tensor.zig");
 pub const Tensor = tensor.Tensor;
 pub const testing = @import("testing.zig");
-pub const tracer = @import("tracer.zig");
 
 test "zml" {
     std.testing.refAllDecls(@This());
