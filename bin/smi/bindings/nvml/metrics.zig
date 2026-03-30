@@ -50,10 +50,6 @@ const Device = struct {
     pub fn powerLimit(self: Device) !u64 {
         return @intCast(try self.nvml.powerLimit(self.handle));
     }
-    pub fn totalEnergy(self: Device) !u64 {
-        return self.nvml.totalEnergy(self.handle);
-    }
-
     // Thermal
     pub fn temperature(self: Device) !u64 {
         return @intCast(try self.nvml.temperature(self.handle));
@@ -119,7 +115,6 @@ const Device = struct {
 const metrics = .{
     .{ .field = "power_mw", .query = Device.powerUsage },
     .{ .field = "power_limit_mw", .query = Device.powerLimit },
-    .{ .field = "total_energy_mj", .query = Device.totalEnergy },
     .{ .field = "temperature", .query = Device.temperature },
     .{ .field = "fan_speed_percent", .query = Device.fanSpeed },
     .{ .field = "util_percent", .query = Device.gpuUtil },

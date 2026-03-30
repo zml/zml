@@ -26,7 +26,6 @@ const Fns = struct {
     nvmlDeviceGetPcieThroughput: DynLib.Fn("nvmlDeviceGetPcieThroughput"),
     nvmlDeviceGetEncoderUtilization: DynLib.Fn("nvmlDeviceGetEncoderUtilization"),
     nvmlDeviceGetDecoderUtilization: DynLib.Fn("nvmlDeviceGetDecoderUtilization"),
-    nvmlDeviceGetTotalEnergyConsumption: DynLib.Fn("nvmlDeviceGetTotalEnergyConsumption"),
     nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn("nvmlDeviceGetCurrPcieLinkGeneration"),
     nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn("nvmlDeviceGetCurrPcieLinkWidth"),
     nvmlDeviceGetMemoryBusWidth: DynLib.Fn("nvmlDeviceGetMemoryBusWidth"),
@@ -156,12 +155,6 @@ pub fn decoderUtil(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var sampling: c_uint = 0;
     try check(self.lib.nvmlDeviceGetDecoderUtilization(handle, &util, &sampling));
     return util;
-}
-
-pub fn totalEnergy(self: Nvml, handle: c.nvmlDevice_t) Error!u64 {
-    var energy: c_ulonglong = 0;
-    try check(self.lib.nvmlDeviceGetTotalEnergyConsumption(handle, &energy));
-    return @intCast(energy);
 }
 
 pub fn pcieLinkGen(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
