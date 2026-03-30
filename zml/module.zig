@@ -15,6 +15,7 @@ const mlirx = @import("mlirx.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const tracer = @import("profiling/tracer.zig");
 const sharding_ = @import("sharding.zig");
 const Sharding = sharding_.Sharding;
 const Partitioning = sharding_.Partitioning;
@@ -188,6 +189,12 @@ pub fn compile(
     _ = io;
     var st_io: std.Io.Threaded = .init_single_threaded;
     defer st_io.deinit();
+
+    var trace = try tracer.scope("zml.module.compile", .{
+        .program_name = opts.program_name,
+        .arg_count = args.len,
+    });
+    defer trace.end();
 
     var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();

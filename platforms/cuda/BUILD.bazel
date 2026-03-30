@@ -38,6 +38,7 @@ zig_library(
     data = select({
         "//platforms:cuda.enabled": [
             "@flashattn//:libflashattn",
+            "@cuda_nvtx//:cuda_nvtx",
         ],
         "//conditions:default": [":empty"],
     }),

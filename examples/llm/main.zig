@@ -32,7 +32,7 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
         \\
     ;
@@ -82,6 +82,12 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     log.info("\n{f}", .{platform.fmtVerbose()});
+
+    var profiler = try platform.profiler(allocator, io, .defaults);
+    defer profiler.deinit();
+
+    try profiler.start();
+    defer _ = profiler.stop() catch unreachable;
 
     const backend = args.backend orelse b: {
         const selected = zml.attention.attention.Backend.auto(platform);
