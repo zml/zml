@@ -294,11 +294,21 @@ pub const Llama = struct {
         var updated_kv_cache = kv_cache;
 
         for (self.layers, 0..) |layer, i| {
+            const layer_attention_metadata: zml.attention.attention.Metadata = switch (attention_parameters) {
+                .attnd => .{ .attnd = .{
+                    .layer_id = zml.Tensor.scalar(i, .u16),
+                    .conversation_id = attention_metadata.attnd.conversation_id,
+                    .num_tokens = attention_metadata.attnd.num_tokens,
+                } },
+                .vanilla => attention_metadata,
+                .cuda_fa2 => attention_metadata,
+                .cuda_fa3 => attention_metadata,
+            };
             hidden, updated_kv_cache = layer.forward(
                 hidden,
                 token_index,
                 updated_kv_cache.atLayer(i),
-                attention_metadata,
+                layer_attention_metadata,
                 attention_parameters,
             );
         }
