@@ -246,3 +246,83 @@ uv run examples/ltx/e2e/decode_latents.py \
 - Models: `/root/models/ltx-2.3/`
 - Zig/ZML: `/root/repos/zml/`
 - Python/LTX-2: `/root/repos/LTX-2/`
+
+---
+
+## Full Command Reference
+
+All commands below run on the GPU server. Adjust `OUT`, `PROMPT`, and `SEED` for different runs.
+
+```bash
+# ============================================================
+# Full mixed pipeline: "Someone walking by the beach at sunset"
+# ============================================================
+export OUT=/root/mixed_beach
+export CKPT=/root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors
+export UPSAMPLER=/root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
+export GEMMA=/root/models/gemma-3-12b-it
+export PROMPT="Someone walking by the beach at sunset"
+export SEED=42
+
+mkdir -p $OUT/stage1_out $OUT/stage2_out
+
+# ---- M0: Python — text encode + noise init + reference trace ----
+cd /root/repos/LTX-2
+uv run /root/repos/zml/examples/ltx/export_mixed_pipeline.py \
+    --output-dir $OUT \
+    --prompt "$PROMPT" \
+    --seed $SEED \
+    --checkpoint $CKPT \
+    --spatial-upsampler $UPSAMPLER \
+    --gemma-root $GEMMA
+
+echo "M0 done" && ls -lh $OUT/stage1_inputs.safetensors $OUT/stage2_noise.safetensors $OUT/pipeline_meta.json
+
+# ---- M1: Zig Stage 1 (30 steps, 4-pass guidance) ----
+cd /root/repos/zml
+ulimit -s unlimited && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_stage1 -- \
+    $CKPT \
+    $OUT/stage1_inputs.safetensors \
+    $OUT/stage1_out/
+
+echo "M1 done" && ls -lh $OUT/stage1_out/
+
+# ---- M2: Python — bridge (unpatchify + upsample + Stage 2 noise) ----
+cd /root/repos/LTX-2
+uv run /root/repos/zml/examples/ltx/bridge_s1_to_s2.py \
+    --stage1-video $OUT/stage1_out/video_latent.bin \
+    --stage1-audio $OUT/stage1_out/audio_latent.bin \
+    --stage2-noise $OUT/stage2_noise.safetensors \
+    --meta $OUT/pipeline_meta.json \
+    --stage1-inputs $OUT/stage1_inputs.safetensors \
+    --output $OUT/stage2_inputs.safetensors \
+    --checkpoint $CKPT \
+    --spatial-upsampler $UPSAMPLER \
+    --gemma-root $GEMMA
+
+echo "M2 done" && ls -lh $OUT/stage2_inputs.safetensors
+
+# ---- M3: Zig Stage 2 (3 steps, distilled, --bf16-attn needed for 1536x1024) ----
+cd /root/repos/zml
+ulimit -s unlimited && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_e2e -- \
+    $CKPT \
+    $OUT/stage2_inputs.safetensors \
+    $OUT/stage2_out/ \
+    --bf16-attn
+
+echo "M3 done" && ls -lh $OUT/stage2_out/
+
+# ---- M4: Python — VAE decode → MP4 ----
+cd /root/repos/LTX-2
+uv run /root/repos/zml/examples/ltx/e2e/decode_latents.py \
+    --inputs $OUT/stage2_inputs.safetensors \
+    --video-latent $OUT/stage2_out/video_latent.bin \
+    --audio-latent $OUT/stage2_out/audio_latent.bin \
+    --output $OUT/output.mp4 \
+    --checkpoint $CKPT \
+    --spatial-upsampler $UPSAMPLER \
+    --gemma-root $GEMMA
+
+echo "===== PIPELINE COMPLETE ====="
+echo "Output: $OUT/output.mp4"
+```

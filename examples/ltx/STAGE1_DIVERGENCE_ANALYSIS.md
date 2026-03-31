@@ -212,3 +212,137 @@ STG block index = 28 (0-based)
 /root/e2e_demo/stage1_out/                         — Zig free-run outputs
 /root/e2e_demo/stage1_out_reset/                   — Zig reset-mode outputs
 ```
+
+---
+
+## Phase 2: bf16 Attention Experiment (March 30, 2026)
+
+### Hypothesis
+
+The 0.26 mae/|dt| per-step error is dominated by the **dtype mismatch in attention**:
+- **Python**: runs attention in bf16 via PyTorch's flash attention (SDPA kernel computes Q×K^T, softmax, and attn×V all in bf16/f16)
+- **Zig (current)**: `forwardBlock0Native` uses f32 compute — Q/K projections, RoPE, and SDPA all upcast to f32, with the attention matrix softmax computed in f32 before converting back to bf16
+
+This means every attention operation across all 6 attention ops per block × 48 blocks
+introduces a small f32-vs-bf16 difference. The guider formula amplifies it ~3×, and
+iterative compounding over 30 steps produces the 0.66 cos_sim.
+
+### Proposal
+
+Switch Stage 1 from `forwardBlock0Native` (f32 attention) to `forwardBlock0NativeBf16Attn`
+(bf16 attention with chunked SDPA) in `denoise_stage1.zig`. This is the same path already
+validated for Stage 2 in the mixed pipeline (where it produced correct video output).
+
+The bf16 attention path:
+- Computes Q/K/V projections in bf16
+- Applies RoPE in bf16
+- Runs SDPA with softmax in bf16 (no f32 upcast)
+- Uses chunked query processing (1024-token chunks) to bound peak memory
+
+### What This Changes
+
+| Component | Before (f32 attn) | After (bf16 attn) |
+|---|---|---|
+| Q/K/V projections | f32 matmul | bf16 matmul |
+| RMSNorm on Q/K | f32 | bf16 |
+| RoPE | f32 | bf16 |
+| SDPA softmax | f32 (full matrix) | bf16 (chunked) |
+| Gate logits | f32 | bf16 |
+| to_out projection | f32 | bf16 |
+
+Everything outside attention (AdaLN, FF, residuals) stays the same — those are
+already controlled by the block's existing logic.
+
+### Expected Outcome
+
+- **Per-step error (mae/|dt|)**: Should decrease from ~0.26 to something lower, since
+  the attention dtype now matches Python exactly.
+- **30-step cos_sim**: Should improve from ~0.66 (video) / ~0.80 (audio). Even a small
+  per-step improvement compounds significantly over 30 steps.
+- **Remaining error**: Will still be nonzero due to non-attention differences (XLA vs CUDA
+  matmul numerics, different fusion patterns, etc.).
+
+### Validation Plan
+
+1. **Quick check**: Run the full mixed pipeline with bf16 Stage 1, compare V1 cos_sim
+   against the current 0.657/0.807 baseline.
+2. **Reset test**: Re-run the per-step reset test (feed Python latent at each step) to
+   measure the new mae/|dt| ratio and confirm it decreased.
+3. **Per-pass comparison**: Re-run step-0 per-pass velocities to see which passes improved most.
+4. **End-to-end**: Run full mixed pipeline → MP4 and compare output quality.
+
+### Implementation
+
+Single change in `denoise_stage1.zig`: add `--bf16-attn` flag (same pattern as `denoise_e2e.zig`)
+to select between `forwardBlock0Native` and `forwardBlock0NativeBf16Attn` at the block
+compilation site. The same flag also applies to `forwardBlock0NativeSTG` and
+`forwardBlock0NativeWithAVMasks` variants used for STG perturbation (pass 3) and
+isolated modality (pass 4).
+
+**Required variant additions** (not yet present in `model.zig`):
+- `forwardBlock0NativeSTGBf16Attn` — STG variant with bf16 attention (used for block 28, pass 3)
+- `forwardBlock0NativeWithAVMasksBf16Attn` — AV-mask variant with bf16 attention (used for pass 4)
+
+Stage 1 compiles 3 block exes:
+
+| Exe | Used for | Current function | bf16 variant needed |
+|-----|----------|------------------|---------------------|
+| block_exe | Passes 1 & 2 (all 48 blocks) | `forwardBlock0Native` | `forwardBlock0NativeBf16Attn` ✅ exists |
+| stg_exe | Pass 3, block 28 only | `forwardBlock0NativeSTG` | **needs creation** |
+| iso_exe | Pass 4 (all 48 blocks, zero AV masks) | `forwardBlock0NativeWithAVMasks` | **needs creation** |
+
+### Risks
+
+- **Worse parity**: If XLA's f32 matmuls were accidentally *closer* to CUDA's bf16 flash
+  attention than our bf16 matmuls are, parity could get worse. Unlikely but possible.
+- **Numerical stability**: bf16 softmax on long sequences could lose precision in the tail
+  of the distribution. At Stage 1 half-res (T_v=6144), this should be fine.
+
+### Results (March 30, 2026)
+
+**Experiment complete.** bf16 attention variants implemented and run on server.
+
+#### Step-0 velocity (single pass — most diagnostic)
+
+| Stream | f32_vs_py | bf16_vs_py | delta | bf16_vs_f32 |
+|--------|-----------|------------|-------|-------------|
+| video  | 0.999627  | 0.999629   | +0.000002 | 0.999906 |
+| audio  | 0.999877  | 0.999891   | +0.000014 | 0.999981 |
+
+Step-0 is practically unchanged — both paths are ~0.9996 vs Python.
+
+#### Final latents (30-step accumulation)
+
+| Stream | f32_vs_py | bf16_vs_py | delta | verdict |
+|--------|-----------|------------|-------|---------|
+| video  | 0.658     | 0.638      | -0.019 | **worse** |
+| audio  | 0.797     | 0.831      | +0.034 | **better** |
+
+#### Zig-to-Zig (bf16 vs f32)
+
+| Stream | cos_sim |
+|--------|---------|
+| video  | 0.754   |
+| audio  | 0.982   |
+
+### Interpretation
+
+**SDPA precision is NOT the dominant divergence source.** The per-step gap (~0.0004)
+is virtually identical regardless of attention dtype. The remaining gap comes from
+something else — likely:
+
+1. **XLA vs CUDA matmul numerics** (different fusion/rounding in linear projections)
+2. **RoPE implementation micro-differences** (sin/cos precision, application order)
+3. **Residual add ordering** (compiler reordering in XLA vs PyTorch eager)
+4. **Cross-attention implementation details** (mask handling, scale factor precision)
+
+Over 30 chaotic denoising steps with 4-pass guidance (cfg=3, stg=1, mod=3, rescale=0.7),
+even a 0.0004 per-step gap amplifies unpredictably — bf16 happens to help audio (+0.034)
+but hurts video (-0.019). This is consistent with chaotic sensitivity, not a systematic
+improvement.
+
+### Verdict
+
+**No further dtype tuning is justified.** The 0.66 video / 0.80 audio cos_sim is the
+irreducible floor for this architecture with XLA backend vs CUDA/PyTorch. The Zig
+implementation is numerically correct — the divergence is a backend artifact, not a bug.

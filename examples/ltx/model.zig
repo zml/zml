@@ -1209,6 +1209,12 @@ pub const BasicAVTransformerBlock = struct {
     pub fn forwardNativeSTG(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         return self.forwardNativeImpl(false, false, false, false, true, true, vx_in, ax_in, inputs, params);
     }
+
+    /// STG block variant with bf16-native attention on text and AV cross-attention.
+    /// Self-attention still uses V-passthrough (no SDPA).
+    pub fn forwardNativeSTGBf16Attn(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
+        return self.forwardNativeImpl(false, false, false, true, true, true, vx_in, ax_in, inputs, params);
+    }
 };
 
 /// Velocity model (transformer stack) shared across stages.
@@ -3336,6 +3342,62 @@ pub fn forwardBlock0NativeSTG(
     }, params);
 }
 
+/// Same as forwardBlock0NativeSTG but with bf16-native attention on text/AV cross-attention.
+/// Self-attention still uses V-passthrough (no SDPA).
+pub fn forwardBlock0NativeSTGBf16Attn(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeSTGBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
 /// STG block variant with explicit A2V and V2A modality masks.
 /// Same as forwardBlock0NativeSTG but accepts a2v_mask and v2a_mask scalings.
 /// Used when the Stage 1 driver passes modality cross-attention masks to block 29.
@@ -3428,6 +3490,65 @@ pub fn forwardBlock0NativeWithAVMasks(
 ) BasicAVTransformerBlock.FullOutputs {
     const block = BasicAVTransformerBlock.init();
     return block.forwardNative(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .a2v_mask = a2v_mask,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .v2a_mask = v2a_mask,
+    }, params);
+}
+
+/// Same as forwardBlock0NativeWithAVMasks but with bf16-native attention.
+pub fn forwardBlock0NativeWithAVMasksBf16Attn(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
         .v_prompt_timestep = v_prompt_timestep,

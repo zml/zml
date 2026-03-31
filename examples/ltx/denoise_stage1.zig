@@ -48,10 +48,22 @@ pub fn main(init: std.process.Init) !void {
         std.log.err("Usage: denoise_stage1 <base_checkpoint.safetensors> <stage1_inputs.safetensors> <output_dir/> [reset_latents.safetensors]", .{});
         return error.InvalidArgs;
     };
-    const reset_path = it.next(); // optional 4th arg: per-step reset latents
+    // Remaining positional/optional args
+    var reset_path: ?[]const u8 = null;
+    var use_bf16_attn = false;
+    while (it.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--bf16-attn")) {
+            use_bf16_attn = true;
+        } else if (reset_path == null) {
+            reset_path = arg;
+        }
+    }
     const is_reset = reset_path != null;
     if (is_reset) {
         std.log.info("Reset mode: will load Python latents at each step from {s}", .{reset_path.?});
+    }
+    if (use_bf16_attn) {
+        std.log.info("bf16 attention mode enabled — all block exes use bf16-native attention.", .{});
     }
 
     // ========================================================================
@@ -207,121 +219,94 @@ pub fn main(init: std.process.Init) !void {
     preprocess_exe.call(pre_args_init, &pre_results_init);
     const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
-    // ---- Compile block exe (normal — Passes 1 & 2) ----
-    std.log.info("Compiling block exe (normal)...", .{});
+    // ---- Shared block compile args (24 tensors + params) ----
     var block_params_shape = try allocator.create(model.FullStepParams);
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
 
-    var block_normal_exe = try platform.compileFn(
-        allocator, io,
-        model.forwardBlock0Native,
-        .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()),
-            zml.Tensor.fromShape(init_pre_out.ax.shape()),
-            zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
-            block_params_shape.blocks[0],
-        },
-        .{ .shardings = &.{sharding} },
-    );
+    const block_compile_args = .{
+        zml.Tensor.fromShape(init_pre_out.vx.shape()),
+        zml.Tensor.fromShape(init_pre_out.ax.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+        block_params_shape.blocks[0],
+    };
+    const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
+
+    // ---- Compile block exe (normal — Passes 1 & 2) ----
+    std.log.info("Compiling block exe (normal, bf16_attn={})...", .{use_bf16_attn});
+    var block_normal_exe = if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args, compile_opts)
+    else
+        try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_normal_exe.deinit();
     std.log.info("Block exe (normal) compiled.", .{});
 
     // ---- Compile block exe (STG — V-passthrough at self-attn, Pass 3 block 28) ----
-    std.log.info("Compiling block exe (STG)...", .{});
-    var block_stg_exe = try platform.compileFn(
-        allocator, io,
-        model.forwardBlock0NativeSTG,
-        .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()),
-            zml.Tensor.fromShape(init_pre_out.ax.shape()),
-            zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
-            block_params_shape.blocks[0],
-        },
-        .{ .shardings = &.{sharding} },
-    );
+    std.log.info("Compiling block exe (STG, bf16_attn={})...", .{use_bf16_attn});
+    var block_stg_exe = if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args, compile_opts)
+    else
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTG, block_compile_args, compile_opts);
     defer block_stg_exe.deinit();
     std.log.info("Block exe (STG) compiled.", .{});
 
     // ---- Compile block exe (isolated — WithAVMasks, zero masks for Pass 4) ----
-    std.log.info("Compiling block exe (isolated)...", .{});
+    std.log.info("Compiling block exe (isolated, bf16_attn={})...", .{use_bf16_attn});
     const mask_scalar_shape = zml.Shape.init(.{}, .bf16);
-    var block_iso_exe = try platform.compileFn(
-        allocator, io,
-        model.forwardBlock0NativeWithAVMasks,
-        .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()),
-            zml.Tensor.fromShape(init_pre_out.ax.shape()),
-            zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
-            zml.Tensor.fromShape(mask_scalar_shape), // a2v_mask
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
-            zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
-            zml.Tensor.fromShape(mask_scalar_shape), // v2a_mask
-            block_params_shape.blocks[0],
-        },
-        .{ .shardings = &.{sharding} },
-    );
+    const iso_compile_args = .{
+        zml.Tensor.fromShape(init_pre_out.vx.shape()),
+        zml.Tensor.fromShape(init_pre_out.ax.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_text_ctx.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_ss_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_cross_gate_ts.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.a2v_k_pe_sin.shape()),
+        zml.Tensor.fromShape(mask_scalar_shape), // a2v_mask
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
+        zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+        zml.Tensor.fromShape(mask_scalar_shape), // v2a_mask
+        block_params_shape.blocks[0],
+    };
+    var block_iso_exe = if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args, compile_opts)
+    else
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasks, iso_compile_args, compile_opts);
     defer block_iso_exe.deinit();
     std.log.info("Block exe (isolated) compiled.", .{});
 
