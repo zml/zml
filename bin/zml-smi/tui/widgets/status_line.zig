@@ -33,6 +33,8 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
     } else {
         bindings_buf[n] = .{ .key = "v", .desc = chart_label };
         n += 1;
+        bindings_buf[n] = .{ .key = "click", .desc = "device details" };
+        n += 1;
     }
     bindings_buf[n] = .{ .key = "q", .desc = "quit" };
     n += 1;

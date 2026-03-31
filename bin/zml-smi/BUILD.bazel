@@ -4,7 +4,7 @@ load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
-load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:mtree.bzl", "mtree_mutate", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
 load("//bazel:patchelf.bzl", "patchelf")
 
@@ -17,7 +17,7 @@ cc_library(
     strip_include_prefix = "bindings/tpu/libtpu",
     deps = [
         "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
-        "@grpc//:grpc++",
+        "@grpc//:grpc++_unsecure",
     ],
 )
 
@@ -127,8 +127,15 @@ zig_binary(
 # docker image
 
 mtree_spec(
-    name = "mtree",
+    name = "mtree_spec",
     srcs = [":zml-smi"],
+)
+
+mtree_mutate(
+    name = "mtree",
+    mtree = ":mtree_spec",
+    package_dir = "zml-smi",
+    strip_prefix = package_name(),
 )
 
 tar(
@@ -137,7 +144,7 @@ tar(
     args = [
         "--options",
         ",".join([
-            "zstd:compression-level=9",
+            "zstd:compression-level=22",
             "zstd:threads=16",
         ]),
     ],
@@ -148,7 +155,7 @@ tar(
 oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
-    entrypoint = ["/{}/zml-smi".format(package_name())],
+    entrypoint = ["/zml-smi/zml-smi"],
     tars = [
         ":archive",
     ],

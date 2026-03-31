@@ -117,11 +117,11 @@ download_and_install() {
   mkdir -p "$INSTALL_DIR"
 
   if [ "$DOWNLOADER" = "curl" ]; then
-    if ! curl -fsSL "$DOWNLOAD_URL" | tar --zstd -xf - --strip-components=2 -C "$INSTALL_DIR"; then
+    if ! curl -fsSL "$DOWNLOAD_URL" | tar --zstd -xf - --strip-components=1 -C "$INSTALL_DIR"; then
       fail "Download failed — is this OS/arch supported?"
     fi
   else
-    if ! wget -q -O- "$DOWNLOAD_URL" | tar --zstd -xf - --strip-components=2 -C "$INSTALL_DIR"; then
+    if ! wget -q -O- "$DOWNLOAD_URL" | tar --zstd -xf - --strip-components=1 -C "$INSTALL_DIR"; then
       fail "Download failed — is this OS/arch supported?"
     fi
   fi
