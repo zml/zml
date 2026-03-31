@@ -23,29 +23,6 @@ pub const Worker = struct {
         try self.group.concurrent(io, runFn, args);
     }
 
-    pub fn pollMetrics(comptime DB: type, comptime Dev: type, comptime table: anytype) fn (std.Io, *const Worker, DB, Dev) void {
-        return struct {
-            fn f(io: std.Io, w: *const Worker, db: DB, dev: Dev) void {
-                w.pollLoop(io, struct {
-                    fn poll(s: DB, d: Dev) void {
-                        if (@hasField(Dev, "arena")) {
-                            _ = d.arena.reset(.retain_capacity);
-                        }
-
-                        const back = s.back();
-                        back.* = s.front().*;
-
-                        inline for (table) |m| {
-                            @field(back, m.field) = m.query(d) catch null;
-                        }
-
-                        s.swap();
-                    }
-                }.poll, .{ db, dev });
-            }
-        }.f;
-    }
-
     pub fn pollLoop(self: *const Worker, io: std.Io, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
         const interval: std.Io.Duration = .fromMilliseconds(self.poll_interval_ms);
         while (!self.should_stop.load(.acquire)) {

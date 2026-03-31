@@ -5,7 +5,7 @@ const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
-const Worker = @import("zml-smi/worker").Worker;
+const poll_metrics = @import("zml-smi/poll_metrics");
 const process = @import("process.zig");
 
 pub const target: device_info.Target = .cuda;
@@ -21,14 +21,14 @@ pub fn start(collector: *Collector) !void {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
         const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
+        try collector.spawnPoll(pollOnce, .{ &info.cuda, dev });
     }
 
     const processes = try collector.createProcessList();
     try process.init(collector.worker, collector.io, collector.gpa, processes, nvml, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     nvml: *const Nvml,

@@ -5,7 +5,7 @@ const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const NeuronInfo = device_info.NeuronInfo;
 const Collector = @import("zml-smi/collector").Collector;
-const Worker = @import("zml-smi/worker").Worker;
+const poll_metrics = @import("zml-smi/poll_metrics");
 const Nrt = @import("nrt.zig");
 const process = @import("process.zig");
 
@@ -54,7 +54,7 @@ pub fn start(collector: *Collector) !void {
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
 
-            try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.neuron, dev });
+            try collector.spawnPoll(pollOnce, .{ &info.neuron, dev });
         }
     }
 
@@ -64,7 +64,7 @@ pub fn start(collector: *Collector) !void {
     }
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(NeuronInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(NeuronInfo), Device, metrics);
 
 const Device = struct {
     io: std.Io,

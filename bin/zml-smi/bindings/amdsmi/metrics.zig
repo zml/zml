@@ -5,7 +5,7 @@ const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
-const Worker = @import("zml-smi/worker").Worker;
+const poll_metrics = @import("zml-smi/poll_metrics");
 const process = @import("process.zig");
 
 pub const target: device_info.Target = .rocm;
@@ -22,14 +22,14 @@ pub fn start(collector: *Collector) !void {
         const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
 
-        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
+        try collector.spawnPoll(pollOnce, .{ &info.rocm, dev });
     }
 
     const processes = try collector.createProcessList();
     try process.init(collector.worker, collector.io, collector.gpa, processes, amdsmi, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     amdsmi: *const AmdSmi,

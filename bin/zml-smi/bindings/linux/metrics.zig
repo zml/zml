@@ -3,12 +3,12 @@ const sysfs = @import("zml-smi/sysfs");
 const host_info = @import("zml-smi/info").host_info;
 const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;
-const Worker = @import("zml-smi/worker").Worker;
+const poll_metrics = @import("zml-smi/poll_metrics");
 const Collector = @import("zml-smi/collector").Collector;
 
-pub fn init(w: *Worker, io: std.Io, collector: *Collector, info: *HostInfo) !void {
+pub fn init(collector: *Collector, info: *HostInfo) !void {
     const poll_arena = try collector.createPollArena();
-    const host: Host = .{ .io = io, .arena = poll_arena };
+    const host: Host = .{ .io = collector.io, .arena = poll_arena };
 
     // read once metrics
     var initial = info.front().*;
@@ -20,10 +20,10 @@ pub fn init(w: *Worker, io: std.Io, collector: *Collector, info: *HostInfo) !voi
     info.back().* = initial;
     info.swap();
 
-    try w.spawn(io, pollHost, .{ io, w, info, host });
+    try collector.spawnPoll(pollOnce, .{ info, host });
 }
 
-const pollHost = Worker.pollMetrics(*HostInfo, Host, metrics);
+const pollOnce = poll_metrics.poll(*HostInfo, Host, metrics);
 
 const Host = struct {
     io: std.Io,

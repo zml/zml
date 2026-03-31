@@ -16,6 +16,13 @@ zig_library(
 )
 
 zig_library(
+    name = "poll_metrics",
+    import_name = "zml-smi/poll_metrics",
+    main = "poll_metrics.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
     name = "collector",
     import_name = "zml-smi/collector",
     main = "collector.zig",

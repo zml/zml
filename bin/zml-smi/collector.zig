@@ -38,6 +38,15 @@ pub const Collector = struct {
         return poll_arena;
     }
 
+    pub fn spawnPoll(self: *Collector, comptime pollOnce: anytype, args: std.meta.ArgsTuple(@TypeOf(pollOnce))) !void {
+        const Args = std.meta.ArgsTuple(@TypeOf(pollOnce));
+        try self.worker.spawn(self.io, struct {
+            fn f(io: std.Io, w: *const Worker, a: Args) void {
+                w.pollLoop(io, pollOnce, a);
+            }
+        }.f, .{ self.io, self.worker, args });
+    }
+
     pub fn deinit(self: *Collector) void {
         for (self.device_infos.items) |info| {
             self.arena.destroy(info);

@@ -63,7 +63,7 @@ pub fn main(init: std.process.Init) !void {
     defer w.shutdown(io);
 
     var host_info: HostInfo = .{ .values = .{ .{}, .{} } };
-    try host.init(&w, io, &collector, &host_info);
+    try host.init(&collector, &host_info);
 
     var enricher: ProcessEnricher = try .init(gpa, io);
     defer enricher.deinit();

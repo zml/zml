@@ -11,6 +11,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//bin/zml-smi:collector",
+        "//bin/zml-smi:poll_metrics",
         "//bin/zml-smi:worker",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
