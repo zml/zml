@@ -181,8 +181,8 @@ pub const fa2 = struct {
 
     fn ffiCall(
         call_frame: *zml.pjrt.ffi.CallFrame,
-        input: zml.ops.TensorToCustomCallBuffer(Input),
-        output: zml.ops.ShapeToCustomCallBuffer(Output),
+        input: zml.pjrtx.TensorToCustomCallBuffer(Input),
+        output: zml.pjrtx.ShapeToCustomCallBuffer(Output),
         attributes: Attributes,
     ) !?*zml.pjrt.ffi.Error {
         const params: flashattn.FA2MhaVarlenFwdParams = .{
