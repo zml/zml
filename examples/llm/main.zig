@@ -83,13 +83,18 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
+    try zml.attention.attnd.register(allocator, io, platform, .{
+        .desctination = try .parseLiteral("100.71.150.100:9898"),
+    });
+
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    const backend = args.backend orelse b: {
-        const selected = zml.attention.attention.Backend.auto(platform);
-        log.info("Selected backend: {}", .{selected});
-        break :b selected;
-    };
+    const backend: zml.attention.attention.Backend = .attnd;
+    // const backend = args.backend orelse b: {
+    //     const selected = zml.attention.attention.Backend.auto(platform);
+    //     log.info("Selected backend: {}", .{selected});
+    //     break :b selected;
+    // };
 
     //
     // Model initialization

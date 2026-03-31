@@ -156,7 +156,7 @@ pub const ExecutionContext = opaque {
 
     pub fn getContext(self: *const ExecutionContext, type_id: TypeId, api: *const Api) pjrt.ApiError!*anyopaque {
         var ret: c.XLA_FFI_ExecutionContext_Get_Args = .{
-            .struct_size = pjrt.pjrtStructSize(c.XLA_FFI_ExecutionContext_Get_Args),
+            .struct_size = pjrt.meta.structSize(c.XLA_FFI_ExecutionContext_Get_Args),
             .extension_start = api.inner().extension_start,
             .ctx = @ptrCast(@constCast(self)),
             .type_id = @constCast(&type_id),

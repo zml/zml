@@ -15,7 +15,9 @@ const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
+const ShapeToCustomCallBuffer = @import("pjrtx.zig").ShapeToCustomCallBuffer;
 const Tensor = @import("tensor.zig").Tensor;
+const TensorToCustomCallBuffer = @import("pjrtx.zig").TensorToCustomCallBuffer;
 
 pub const ReduceArgs = struct {
     left: Tensor,
@@ -1704,20 +1706,12 @@ pub fn CustomCall(
     };
 }
 
-fn CustomCallArgs(I: type, O: type, A: type) type {
+pub fn CustomCallArgs(I: type, O: type, A: type) type {
     return struct {
         input_tensors: I,
         output_shapes: O,
         attributes: A,
     };
-}
-
-pub fn TensorToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
-}
-
-pub fn ShapeToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
 }
 
 pub fn ShapeToTensor(T: type) type {
@@ -1728,6 +1722,16 @@ pub fn CustomCallOutputOperandAliases(I: type, O: type) type {
     return meta.MapRestrict(Shape, ?std.meta.FieldEnum(I)).map(O);
 }
 
+pub fn typedShardedCustomCall(
+    I: type,
+    O: type,
+    A: type,
+    comptime target_name: [:0]const u8,
+    args: CustomCallArgs(I, O, A),
+    comptime opts: CustomCallOptions,
+) ShapeToTensor(O) {
+    return shardingAwareTypedCustomCall(I, O, A, target_name, opts, args);
+}
 pub fn shardingAwareTypedCustomCall(
     I: type,
     O: type,
@@ -1798,7 +1802,7 @@ pub fn typedCustomCall(
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b args.input_tensors;
         },
-        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensors))),
     };
 
     const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(args.output_shapes))) {
@@ -1814,7 +1818,7 @@ pub fn typedCustomCall(
             if (pointer_info.size != .slice) @compileError("Expected input slice");
             break :b args.output_shapes;
         },
-        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+        else => @compileError("Unsupported output type: " ++ @typeName(@TypeOf(args.output_shapes))),
     };
 
     const metadata_attributes =
@@ -1824,6 +1828,25 @@ pub fn typedCustomCall(
                 inline for (struct_info.fields, 0..) |field, i| {
                     const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
                         .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(args.attributes, field.name))),
+                        .@"enum" => |enum_field| switch (@typeInfo(enum_field.tag_type)) {
+                            .int => |int_tag| switch (int_tag.signedness) {
+                                .signed => switch (int_tag.bits) {
+                                    8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @intFromEnum(@field(args.attributes, field.name))),
+                                    16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @intFromEnum(@field(args.attributes, field.name))),
+                                    32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @intFromEnum(@field(args.attributes, field.name))),
+                                    64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @intFromEnum(@field(args.attributes, field.name))),
+                                    else => @panic("Unsupported DataType"),
+                                },
+                                .unsigned => switch (int_tag.bits) {
+                                    8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @intFromEnum(@field(args.attributes, field.name))),
+                                    16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @intFromEnum(@field(args.attributes, field.name))),
+                                    32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @intFromEnum(@field(args.attributes, field.name))),
+                                    64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @intFromEnum(@field(args.attributes, field.name))),
+                                    else => @panic("Unsupported DataType"),
+                                },
+                            },
+                            else => @compileError("Unsupported tag type for enum metadata: " ++ @typeName(enum_field.tag_type)),
+                        },
                         .int => |int_field| switch (int_field.signedness) {
                             .signed => switch (int_field.bits) {
                                 8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(args.attributes, field.name)),
@@ -1861,6 +1884,7 @@ pub fn typedCustomCall(
 
                 break :b mlir_attributes_array;
             },
+            .void => [_]mlir.NamedAttribute{},
             else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(args.attributes))),
         };
 
@@ -1949,12 +1973,20 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
         @field(output, field.name) = .fromPjrt(shape_buf);
     }
 
-    var attributes: A = undefined;
-    inline for (@typeInfo(A).@"struct".fields) |field| {
-        const attribute = call_frame.attrs.getByName(.scalar, field.name) orelse
-            @panic("Attribute not found: " ++ field.name);
-        @field(attributes, field.name) = attribute.get(field.type);
-    }
+    const attributes: A = switch (@typeInfo(A)) {
+        .void => {},
+        .@"struct" => blk: {
+            var attrs: A = undefined;
+            inline for (@typeInfo(A).@"struct".fields) |field| {
+                // TODO: Use getByIndex instead?
+                const attribute = call_frame.attrs.getByName(.scalar, field.name) orelse
+                    @panic("Attribute not found: " ++ field.name);
+                @field(attrs, field.name) = attribute.get(field.type);
+            }
+            break :blk attrs;
+        },
+        else => @compileError("Unsupported attributes type: " ++ @typeName(A)),
+    };
 
     return .{ input, output, attributes };
 }

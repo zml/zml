@@ -56,6 +56,7 @@ pub const Exe = struct {
             .num_devices = num_devices,
             .num_partitions = num_partitions,
             .arena = arena,
+            .context = platform.execution_context,
         };
     }
 
@@ -259,7 +260,7 @@ pub const Exe = struct {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
 
-        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_partitions)] else null;
+        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_devices)] else null;
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
