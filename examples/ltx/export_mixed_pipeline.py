@@ -42,22 +42,23 @@ from ltx_core.components.guiders import (
 from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
 from ltx_core.components.schedulers import LTX2Scheduler
-from ltx_core.loader import LoraPathStrengthAndSDOps, LTXV_LORA_COMFY_RENAMING_MAP
-from ltx_core.model.upsampler import upsample_video
+from ltx_core.model.transformer import X0Model
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.utils import (
-    ModelLedger,
+    DiffusionStage,
+    FactoryGuidedDenoiser,
+    ImageConditioner,
+    ModalitySpec,
+    PromptEncoder,
+    SimpleDenoiser,
+    VideoUpsampler,
     cleanup_memory,
     combined_image_conditionings,
-    denoise_audio_video,
-    encode_prompts,
     euler_denoising_loop,
     get_device,
-    multi_modal_guider_factory_denoising_func,
-    simple_denoising_func,
 )
 from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
-from ltx_pipelines.utils.types import PipelineComponents
+from ltx_pipelines.utils.types import Denoiser
 
 
 def parse_args() -> argparse.Namespace:
@@ -79,16 +80,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--checkpoint", type=str,
         default=str(Path("~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors").expanduser()),
-        help="Base model checkpoint (used for Stage 1, and as base for Stage 2 + LoRA)",
-    )
-    parser.add_argument(
-        "--distilled-lora", type=str, default=None,
-        help="Distilled LoRA for Stage 2 (applied on top of --checkpoint). "
-             "If not provided, Stage 2 uses the same checkpoint as Stage 1.",
-    )
-    parser.add_argument(
-        "--distilled-lora-strength", type=float, default=0.8,
-        help="Strength for the distilled LoRA (default: 0.8)",
+        help="Base model checkpoint (used for both Stage 1 and Stage 2)",
     )
     parser.add_argument(
         "--spatial-upsampler", type=str,
@@ -149,44 +141,25 @@ def main() -> None:
     # Model setup
     # ========================================================================
     print("\n=== Loading models ===")
-    stage_1_ledger = ModelLedger(
-        dtype=dtype,
-        device=device,
-        checkpoint_path=args.checkpoint,
-        gemma_root_path=args.gemma_root,
-        spatial_upsampler_path=args.spatial_upsampler,
-        loras=[],
-        quantization=None,
+
+    prompt_encoder = PromptEncoder(
+        args.checkpoint, args.gemma_root, dtype, device,
     )
+    image_conditioner = ImageConditioner(args.checkpoint, dtype, device)
+    upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
 
-    if args.distilled_lora:
-        print(f"  Applying distilled LoRA: {args.distilled_lora} (strength={args.distilled_lora_strength})")
-        stage_2_ledger = stage_1_ledger.with_additional_loras(
-            loras=[
-                LoraPathStrengthAndSDOps(
-                    path=args.distilled_lora,
-                    strength=args.distilled_lora_strength,
-                    sd_ops=LTXV_LORA_COMFY_RENAMING_MAP,
-                )
-            ],
-        )
-    else:
-        print("  No distilled LoRA — Stage 2 uses same checkpoint as Stage 1")
-        stage_2_ledger = stage_1_ledger
-
-    pipeline_components = PipelineComponents(dtype=dtype, device=device)
+    stage_1_diffusion = DiffusionStage(args.checkpoint, dtype, device)
+    stage_2_diffusion = DiffusionStage(args.checkpoint, dtype, device)
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     noiser = GaussianNoiser(generator=generator)
-    stepper = EulerDiffusionStep()
 
     # ========================================================================
     # Text encoding
     # ========================================================================
     print("\n=== Text encoding ===")
-    ctx_p, ctx_n = encode_prompts(
+    ctx_p, ctx_n = prompt_encoder(
         [args.prompt, args.negative_prompt],
-        stage_1_ledger,
         enhance_first_prompt=False,
         enhance_prompt_image=None,
         enhance_prompt_seed=args.seed,
@@ -211,20 +184,17 @@ def main() -> None:
         fps=args.frame_rate,
     )
 
-    video_encoder = stage_1_ledger.video_encoder()
-    stage_1_conditionings = combined_image_conditionings(
-        images=[],
-        height=stage_1_output_shape.height,
-        width=stage_1_output_shape.width,
-        video_encoder=video_encoder,
-        dtype=dtype,
-        device=device,
+    stage_1_conditionings = image_conditioner(
+        lambda enc: combined_image_conditionings(
+            images=[],
+            height=stage_1_output_shape.height,
+            width=stage_1_output_shape.width,
+            video_encoder=enc,
+            dtype=dtype,
+            device=device,
+        )
     )
-    del video_encoder
-    torch.cuda.synchronize()
-    cleanup_memory()
 
-    transformer = stage_1_ledger.transformer()
     sigmas = LTX2Scheduler().execute(steps=args.num_inference_steps).to(
         dtype=torch.float32, device=device,
     )
@@ -244,12 +214,14 @@ def main() -> None:
     # ========================================================================
     captured_s1 = {}
 
-    def stage1_denoising_loop(
+    def stage1_loop(
         sigmas: torch.Tensor,
-        video_state: LatentState,
-        audio_state: LatentState,
+        video_state: LatentState | None,
+        audio_state: LatentState | None,
         stepper: DiffusionStepProtocol,
-    ) -> tuple[LatentState, LatentState]:
+        transformer: X0Model,
+        denoiser: Denoiser,
+    ) -> tuple[LatentState | None, LatentState | None]:
         # Capture the initial patchified states (before any denoising)
         captured_s1["video"] = video_state.clone()
         captured_s1["audio"] = audio_state.clone()
@@ -259,42 +231,39 @@ def main() -> None:
         print(f"    video_mask:   {list(video_state.denoise_mask.shape)} {video_state.denoise_mask.dtype}")
         print(f"    video_pos:    {list(video_state.positions.shape)} {video_state.positions.dtype}")
 
-        # Actually run the denoising loop with full guidance
         return euler_denoising_loop(
             sigmas=sigmas,
             video_state=video_state,
             audio_state=audio_state,
             stepper=stepper,
-            denoise_fn=multi_modal_guider_factory_denoising_func(
-                video_guider_factory=create_multimodal_guider_factory(
-                    params=video_guider_params,
-                    negative_context=v_context_n,
-                ),
-                audio_guider_factory=create_multimodal_guider_factory(
-                    params=audio_guider_params,
-                    negative_context=a_context_n,
-                ),
-                v_context=v_context_p,
-                a_context=a_context_p,
-                transformer=transformer,
-            ),
+            transformer=transformer,
+            denoiser=denoiser,
         )
 
     print("  Running Stage 1 denoising (this will take a while)...")
-    video_state_s1, audio_state_s1 = denoise_audio_video(
-        output_shape=stage_1_output_shape,
-        conditionings=stage_1_conditionings,
-        noiser=noiser,
+    video_state_s1, audio_state_s1 = stage_1_diffusion(
+        denoiser=FactoryGuidedDenoiser(
+            v_context=v_context_p,
+            a_context=a_context_p,
+            video_guider_factory=create_multimodal_guider_factory(
+                params=video_guider_params,
+                negative_context=v_context_n,
+            ),
+            audio_guider_factory=create_multimodal_guider_factory(
+                params=audio_guider_params,
+                negative_context=a_context_n,
+            ),
+        ),
         sigmas=sigmas,
-        stepper=stepper,
-        denoising_loop_fn=stage1_denoising_loop,
-        components=pipeline_components,
-        dtype=dtype,
-        device=device,
+        noiser=noiser,
+        width=stage_1_output_shape.width,
+        height=stage_1_output_shape.height,
+        frames=args.num_frames,
+        fps=args.frame_rate,
+        video=ModalitySpec(context=v_context_p, conditionings=stage_1_conditionings),
+        audio=ModalitySpec(context=a_context_p),
+        loop=stage1_loop,
     )
-    torch.cuda.synchronize()
-    del transformer
-    cleanup_memory()
 
     # NOTE: video_state_s1.latent is UNPATCHIFIED [B, 128, F, H, W] after
     # denoise_audio_video returns (it calls unpatchify internally).
@@ -341,12 +310,7 @@ def main() -> None:
     # Upsample video latent
     # ========================================================================
     print("\n=== Upsampling video latent 2x ===")
-    video_encoder = stage_1_ledger.video_encoder()
-    upscaled_video_latent = upsample_video(
-        latent=video_state_s1.latent[:1],
-        video_encoder=video_encoder,
-        upsampler=stage_2_ledger.spatial_upsampler(),
-    )
+    upscaled_video_latent = upsampler(video_state_s1.latent[:1])
     print(f"  Upscaled: {list(upscaled_video_latent.shape)}")
 
     save_safetensors(
@@ -358,26 +322,18 @@ def main() -> None:
     # Stage 2 setup
     # ========================================================================
     print("\n=== Stage 2: full-resolution refinement ===")
-    stage_2_output_shape = VideoPixelShape(
-        batch=1,
-        frames=args.num_frames,
-        width=args.width,
-        height=args.height,
-        fps=args.frame_rate,
-    )
-    stage_2_conditionings = combined_image_conditionings(
-        images=[],
-        height=stage_2_output_shape.height,
-        width=stage_2_output_shape.width,
-        video_encoder=video_encoder,
-        dtype=dtype,
-        device=device,
-    )
-    del video_encoder
-    torch.cuda.synchronize()
-    cleanup_memory()
 
-    transformer_s2 = stage_2_ledger.transformer()
+    stage_2_conditionings = image_conditioner(
+        lambda enc: combined_image_conditionings(
+            images=[],
+            height=args.height,
+            width=args.width,
+            video_encoder=enc,
+            dtype=dtype,
+            device=device,
+        )
+    )
+
     distilled_sigmas = torch.Tensor(STAGE_2_DISTILLED_SIGMA_VALUES).to(device)
 
     # ========================================================================
@@ -385,12 +341,14 @@ def main() -> None:
     # ========================================================================
     captured_s2 = {}
 
-    def stage2_denoising_loop(
+    def stage2_loop(
         sigmas: torch.Tensor,
-        video_state: LatentState,
-        audio_state: LatentState,
+        video_state: LatentState | None,
+        audio_state: LatentState | None,
         stepper: DiffusionStepProtocol,
-    ) -> tuple[LatentState, LatentState]:
+        transformer: X0Model,
+        denoiser: Denoiser,
+    ) -> tuple[LatentState | None, LatentState | None]:
         # Capture the initial patchified states (before any denoising)
         captured_s2["video"] = video_state.clone()
         captured_s2["audio"] = audio_state.clone()
@@ -398,37 +356,37 @@ def main() -> None:
         print(f"    video_latent: {list(video_state.latent.shape)} {video_state.latent.dtype}")
         print(f"    audio_latent: {list(audio_state.latent.shape)} {audio_state.latent.dtype}")
 
-        # Stage 2 uses simple denoising (distilled, no guidance)
         return euler_denoising_loop(
             sigmas=sigmas,
             video_state=video_state,
             audio_state=audio_state,
             stepper=stepper,
-            denoise_fn=simple_denoising_func(
-                video_context=v_context_p,
-                audio_context=a_context_p,
-                transformer=transformer_s2,
-            ),
+            transformer=transformer,
+            denoiser=denoiser,
         )
 
     print("  Running Stage 2 denoising...")
-    video_state_s2, audio_state_s2 = denoise_audio_video(
-        output_shape=stage_2_output_shape,
-        conditionings=stage_2_conditionings,
-        noiser=noiser,
+    video_state_s2, audio_state_s2 = stage_2_diffusion(
+        denoiser=SimpleDenoiser(v_context=v_context_p, a_context=a_context_p),
         sigmas=distilled_sigmas,
-        stepper=stepper,
-        denoising_loop_fn=stage2_denoising_loop,
-        components=pipeline_components,
-        dtype=dtype,
-        device=device,
-        noise_scale=distilled_sigmas[0].item(),
-        initial_video_latent=upscaled_video_latent,
-        initial_audio_latent=audio_state_s1.latent,
+        noiser=noiser,
+        width=args.width,
+        height=args.height,
+        frames=args.num_frames,
+        fps=args.frame_rate,
+        video=ModalitySpec(
+            context=v_context_p,
+            conditionings=stage_2_conditionings,
+            noise_scale=distilled_sigmas[0].item(),
+            initial_latent=upscaled_video_latent,
+        ),
+        audio=ModalitySpec(
+            context=a_context_p,
+            noise_scale=distilled_sigmas[0].item(),
+            initial_latent=audio_state_s1.latent,
+        ),
+        loop=stage2_loop,
     )
-    torch.cuda.synchronize()
-    del transformer_s2
-    cleanup_memory()
 
     print(f"  Stage 2 done.")
     print(f"    video_latent (unpatchified): {list(video_state_s2.latent.shape)}")
@@ -532,7 +490,6 @@ def main() -> None:
         "frame_rate": args.frame_rate,
         "num_inference_steps": args.num_inference_steps,
         "checkpoint": args.checkpoint,
-        "distilled_lora": args.distilled_lora,
         "spatial_upsampler": args.spatial_upsampler,
         "stage1": {
             "f_lat": f_lat_s1,

@@ -47,7 +47,6 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from ltx_core.components.patchifiers import AudioPatchifier, VideoLatentPatchifier
-from ltx_core.model.upsampler import upsample_video
 from ltx_core.types import (
     AudioLatentShape,
     SpatioTemporalScaleFactors,
@@ -55,7 +54,7 @@ from ltx_core.types import (
     VideoPixelShape,
 )
 from ltx_core.tools import AudioLatentTools, VideoLatentTools
-from ltx_pipelines.utils import ModelLedger, cleanup_memory, get_device
+from ltx_pipelines.utils import VideoUpsampler, cleanup_memory, get_device
 
 
 VIDEO_SCALE_FACTORS = SpatioTemporalScaleFactors.default()  # (8, 32, 32)
@@ -82,8 +81,6 @@ def parse_args() -> argparse.Namespace:
                         default=str(Path("~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors").expanduser()))
     parser.add_argument("--spatial-upsampler", type=str,
                         default=str(Path("~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors").expanduser()))
-    parser.add_argument("--gemma-root", type=str,
-                        default=str(Path("~/models/gemma-3-12b-it").expanduser()))
     return parser.parse_args()
 
 
@@ -163,22 +160,9 @@ def main() -> None:
     # Upsample video latent 2x
     # ========================================================================
     print("\n=== Upsampling video latent 2x ===")
-    ledger = ModelLedger(
-        dtype=dtype,
-        device=device,
-        checkpoint_path=args.checkpoint,
-        gemma_root_path=args.gemma_root,
-        spatial_upsampler_path=args.spatial_upsampler,
-        loras=[],
-        quantization=None,
-    )
-    video_encoder = ledger.video_encoder()
-    upscaled_video = upsample_video(
-        latent=video_5d,
-        video_encoder=video_encoder,
-        upsampler=ledger.spatial_upsampler(),
-    )
-    del video_encoder
+    upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
+    upscaled_video = upsampler(video_5d)
+    del upsampler
     torch.cuda.synchronize()
     cleanup_memory()
 

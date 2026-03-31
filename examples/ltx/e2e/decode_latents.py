@@ -23,12 +23,9 @@ import torch
 from einops import rearrange
 from safetensors import safe_open
 
-from ltx_core.loader import LoraPathStrengthAndSDOps
-from ltx_core.model.audio_vae import decode_audio as vae_decode_audio
 from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
-from ltx_core.model.video_vae import decode_video as vae_decode_video
 from ltx_core.types import Audio
-from ltx_pipelines.utils import ModelLedger, get_device
+from ltx_pipelines.utils import AudioDecoder, VideoDecoder, get_device
 from ltx_pipelines.utils.media_io import encode_video
 
 
@@ -45,10 +42,6 @@ def parse_args() -> argparse.Namespace:
     # Model paths
     parser.add_argument("--checkpoint", type=str,
                         default=str(Path("~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors").expanduser()))
-    parser.add_argument("--spatial-upsampler", type=str,
-                        default=str(Path("~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.0.safetensors").expanduser()))
-    parser.add_argument("--gemma-root", type=str,
-                        default=str(Path("~/models/gemma-3-12b-it").expanduser()))
     parser.add_argument("--seed", type=int, default=42,
                         help="RNG seed for VAE decode (tiling noise)")
     return parser.parse_args()
@@ -130,43 +123,19 @@ def main() -> None:
     audio_latent = audio_latent.to(device=device, dtype=dtype)
 
     # ========================================================================
-    # Load VAE models
-    # ========================================================================
-    print("Loading VAE models...")
-    ledger = ModelLedger(
-        dtype=dtype,
-        device=device,
-        checkpoint_path=args.checkpoint,
-        gemma_root_path=args.gemma_root,
-        spatial_upsampler_path=args.spatial_upsampler,
-        loras=[],
-        quantization=None,
-    )
-
-    # ========================================================================
-    # Decode video
+    # Load VAE models and decode
     # ========================================================================
     print("Decoding video...")
     generator = torch.Generator(device=device).manual_seed(args.seed)
     tiling_config = TilingConfig.default()
 
-    decoded_video = vae_decode_video(
-        video_latent,
-        ledger.video_decoder(),
-        tiling_config,
-        generator,
-    )
+    video_decoder = VideoDecoder(args.checkpoint, dtype, device)
+    decoded_video = video_decoder(video_latent, tiling_config, generator)
     print("  Video decoded.")
 
-    # ========================================================================
-    # Decode audio
-    # ========================================================================
     print("Decoding audio...")
-    decoded_audio = vae_decode_audio(
-        audio_latent,
-        ledger.audio_decoder(),
-        ledger.vocoder(),
-    )
+    audio_decoder = AudioDecoder(args.checkpoint, dtype, device)
+    decoded_audio = audio_decoder(audio_latent)
     print(f"  Audio decoded: sample_rate={decoded_audio.sampling_rate}")
 
     # ========================================================================
