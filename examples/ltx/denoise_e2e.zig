@@ -21,7 +21,7 @@ comptime {
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-/// Sigma schedule for stage-2 distilled (3 steps).
+/// Sigma schedule for stage-2 distilled (3 steps). Must match the SIGMAS array in Python code (and the 
 const SIGMAS = [4]f32{ 0.909375, 0.725, 0.421875, 0.0 };
 
 pub fn main(init: std.process.Init) !void {
