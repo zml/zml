@@ -56,7 +56,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ========================================================================
-    // Open stores
+    // Section A: CLI argument parsing (above) / Section B: Open stores
     // ========================================================================
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
@@ -79,7 +79,7 @@ pub fn main(init: std.process.Init) !void {
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     // ========================================================================
-    // Load inputs
+    // (continued) Load inputs
     // ========================================================================
     std.log.info("Loading inputs...", .{});
 
@@ -110,7 +110,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  audio_clean: {any}", .{a_clean_buf.shape()});
 
     // ========================================================================
-    // Noise init: compute initial noised latent from clean + noise + mask
+    // Section C: Compile executables (noise init + preprocessing + blocks + projection + denoising)
     // ========================================================================
     std.log.info("Compiling noise init...", .{});
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
@@ -167,7 +167,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape()});
 
     // ========================================================================
-    // Compile exes
+    // (continued) Compile remaining executables
     // ========================================================================
     std.log.info("Compiling preprocessing exe...", .{});
 
@@ -336,7 +336,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Denoising step exes compiled.", .{});
 
     // ========================================================================
-    // Load weights
+    // Section D: Load weights
     // ========================================================================
     std.log.info("Loading 48 block weights...", .{});
     var block_params_bufs = try allocator.create([48]zml.Bufferized(model.Block0FullParams));
@@ -388,7 +388,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("All weights loaded.", .{});
 
     // ========================================================================
-    // 3-step denoising loop
+    // Section E: Denoising loop (3-step Euler)
     // ========================================================================
     std.log.info("Starting 3-step denoising loop...", .{});
 
@@ -524,7 +524,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Denoising complete. Writing output...", .{});
 
     // ========================================================================
-    // Write output latents as raw binary files
+    // Section F: Write output
     // ========================================================================
     // Video: bf16 [B, T_v, 128] — patchified
     // Audio: bf16 [B, T_a, 128] — patchified

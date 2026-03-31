@@ -1,108 +1,77 @@
 # LTX-2 Video Generation — Zig/ZML Implementation
 
-Zig port of the [LTX-2 22B](https://huggingface.co/Lightricks/LTX-2.3) two-stage text/image-to-video
+Zig port of the [LTX-2 22B](https://huggingface.co/Lightricks/LTX-2.3) two-stage text-to-video
 generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
-## Current Status
+The pipeline produces video+audio from a text prompt using a mixed Python↔Zig architecture:
+Python handles text encoding, VAE decode, and pipeline orchestration; Zig handles the
+compute-intensive denoising (48-block AV transformer, 4-pass guided Stage 1 + 3-step distilled Stage 2).
 
-**Stage 2 (distilled, 3-step) is fully validated end-to-end.**
+## File Map
 
-The Zig denoiser handles: noise init → preprocessing → 48-block transformer chain →
-output projection → Euler denoising step. Combined with Python for upstream (text encoding,
-Stage 1, upsample) and downstream (VAE decode), it produces playable video+audio.
-
-| Component | Status | Validation |
-|-----------|--------|------------|
-| Noise init (`forwardNoiseInit`) | ✅ | cos_sim=1.0, close=1.0 |
-| Preprocessing (`forwardPreprocess`) | ✅ | Part of Step 2 |
-| 48-block chain (`forwardBlock0Native`) | ✅ | cos_sim=0.9965, close=0.9762 |
-| Output projection (`forwardOutputProjection`) | ✅ | Part of Step 2 |
-| Denoising step (`forwardDenoisingStep`) | ✅ | Part of Step 3 |
-| Full 3-step denoising loop | ✅ | cos_sim=0.978–0.982 |
-| E2E demo (noise init → denoise → MP4) | ✅ | Playable video matches Python reference |
-
-## Key Files
-
-### Core implementation
-- **`model.zig`** — Core model: transformer blocks, preprocessing, noise init, denoising step (~4800 lines)
-- **`denoise_e2e.zig`** — E2E Stage 2 driver: loads inputs, runs noise init + 3-step Euler loop, writes output
-- **`check_utils.zig`** — Shared parity comparison utilities (cosine similarity, extended metrics)
-
-### E2E pipeline scripts
-- **`e2e/export_stage2_inputs.py`** — Python: text encoding + Stage 1 + upsample + exports safetensors for Zig
-- **`e2e/decode_latents.py`** — Python: unpatchify + VAE decode → MP4
-
-### Validation checkers
-- **`check_noise_init.zig`** — Validates `forwardNoiseInit` against Python fixture
-- **`export_noise_init_fixture.py`** — Exports noise init fixture from trace data
-
-### Configuration
-- **`config.zig`** — Model hyperparameters
-- **`BUILD.bazel`** — Build targets (`denoise_e2e`, `check_noise_init`, etc.)
-
-## Documentation Index
-
-### Active
+### Zig (compiled to GPU via ZML)
 | File | Purpose |
 |------|---------|
-| **[PIPELINE_STATUS.md](PIPELINE_STATUS.md)** | Live tracker — component status, validation metrics, e2e demo results |
-| **[STAGE1_IMPLEMENTATION_PLAN.md](STAGE1_IMPLEMENTATION_PLAN.md)** | Plan for Stage 1 (30-step guided denoising with CFG/STG/modality isolation) |
+| `model.zig` | Core model: transformer blocks, preprocessing, output projection, denoising step, guidance combine, noise init (~2500 lines) |
+| `denoise_stage1.zig` | Stage 1 driver: 30-step 4-pass guided denoising (CFG + STG + modality isolation) |
+| `denoise_e2e.zig` | Stage 2 driver: 3-step distilled Euler denoising |
+| `main.zig` | Utility: safetensors inspector |
 
-### Historical reference
-These document completed work and past debugging. Kept for reference.
-
+### Python (pipeline orchestration)
 | File | Purpose |
 |------|---------|
-| [VELOCITY_MODEL_PLAN.md](VELOCITY_MODEL_PLAN.md) | Original step-by-step validation plan (Steps 1–3). Superseded by PIPELINE_STATUS. |
-| [ADALN_SINGLE_IMPLEMENTATION.md](ADALN_SINGLE_IMPLEMENTATION.md) | AdaLayerNormSingle module implementation tracker |
-| [OUTPUT_PROJECTION_IMPLEMENTATION.md](OUTPUT_PROJECTION_IMPLEMENTATION.md) | OutputProjection implementation tracker |
-| [AUDIO_PARITY_FINDINGS_2026-03-24.md](AUDIO_PARITY_FINDINGS_2026-03-24.md) | Audio parity analysis and numerical drift diagnosis |
-| [transformer_threading_progress.md](transformer_threading_progress.md) | Multi-block validation progress (post-M1–M6) |
-| [block0_reverse_engineering_map.md](block0_reverse_engineering_map.md) | Block-0 reverse engineering reference archive |
+| `export_mixed_pipeline.py` | M0: Full Python reference pipeline + Stage 1/2 input export |
+| `bridge_s1_to_s2.py` | M2: Bridge Zig Stage 1 output → Stage 2 inputs (unpatchify + upsample + noise) |
+| `validate_mixed_pipeline.py` | Boundary validation: cos_sim checks between Python reference and Zig outputs |
+| `e2e/export_stage2_inputs.py` | Standalone Stage 2 input exporter |
+| `e2e/decode_latents.py` | M4: VAE decode Zig-produced latents → MP4 |
 
-### Diagnostic infrastructure (historical)
+### Documentation
 | File | Purpose |
 |------|---------|
-| [DIAGNOSTIC_QUICKSTART.md](DIAGNOSTIC_QUICKSTART.md) | Quick reference for diagnostic commands |
-| [DIAGNOSTIC_PIPELINE.md](DIAGNOSTIC_PIPELINE.md) | Diagnostic pipeline overview |
-| [DIAGNOSTIC_CHECKLIST.md](DIAGNOSTIC_CHECKLIST.md) | Diagnostic next-actions checklist |
-| [DIAGNOSTIC_COMPLETE.md](DIAGNOSTIC_COMPLETE.md) | Diagnostic completion summary |
-| [DIAGNOSTIC_IMPLEMENTATION_SUMMARY.md](DIAGNOSTIC_IMPLEMENTATION_SUMMARY.md) | Diagnostic infrastructure summary |
-| [ZIG_DIAGNOSTIC_USAGE.md](ZIG_DIAGNOSTIC_USAGE.md) | Diagnostic tool usage |
-| [ZIG_IMPLEMENTATION_COMPLETE.md](ZIG_IMPLEMENTATION_COMPLETE.md) | Zig diagnostic implementation summary |
+| `full_e2e_mixed.md` | Full command reference for the mixed pipeline |
+| `STAGE1_DIVERGENCE_ANALYSIS.md` | Analysis of Stage 1 numerical divergence patterns |
 
-## Running the E2E Pipeline
+## Architecture: Mixed Pipeline Flow
 
-### Prerequisites
-- GPU server with NVIDIA CUDA
-- Model weights at `/root/models/ltx-2.3/`
-- Python environment with `ltx-core` and `ltx-pipelines` packages
-- ZML repo with Bazel
-
-### Step 1: Export Stage 2 inputs (Python)
-```bash
-cd /root/repos/LTX-2
-uv run python scripts/e2e/export_stage2_inputs.py \
-    --prompt "A cat playing piano" \
-    --output /root/e2e_demo/stage2_inputs.safetensors
+```
+Python (M0)                    Zig (M1)                     Python (M2)
+─────────────────              ───────────────              ─────────────────
+text encoding ──┐              Stage 1 denoiser             upsample + noise
+noise init      ├─→ inputs ──→ (30 steps × 4 passes) ──→   init for Stage 2
+sigma schedule  ┘              per block: 48 blocks          │
+                                                             ▼
+                               Zig (M3)                     Python (M4)
+                               ───────────────              ─────────────────
+                               Stage 2 denoiser             VAE decode
+                               (3 steps × 1 pass)  ──────→ video + audio
+                               per block: 48 blocks         → output.mp4
 ```
 
-### Step 2: Run Zig denoiser (noise init + 3-step Euler loop)
-```bash
-cd /root/repos/zml
-bazel run --config=release --@zml//platforms:cuda=true \
-    //examples/ltx:denoise_e2e -- \
-    /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
-    /root/e2e_demo/stage2_inputs.safetensors \
-    /root/e2e_demo/
-```
+## Running the Full Pipeline
 
-### Step 3: Decode to MP4 (Python)
+See **[full_e2e_mixed.md](full_e2e_mixed.md)** for the complete command reference.
+
+### Quick overview
+
 ```bash
-cd /root/repos/LTX-2
-uv run python scripts/e2e/decode_latents.py \
-    --inputs /root/e2e_demo/stage2_inputs.safetensors \
-    --video-latent /root/e2e_demo/video_latent.bin \
-    --audio-latent /root/e2e_demo/audio_latent.bin \
-    --output /root/e2e_demo/output.mp4
+# Build Zig denoisers
+bazel build --config=release --@zml//platforms:cuda=true \
+  //examples/ltx:denoise_stage1 //examples/ltx:denoise_e2e
+
+# M0: Export inputs from Python
+python export_mixed_pipeline.py --prompt "A cat playing piano" ...
+
+# M1: Stage 1 denoising (Zig)
+./bazel-bin/examples/ltx/denoise_stage1 <checkpoint> <inputs> <output_dir/>
+
+# M2: Bridge Stage 1 → Stage 2 (Python)
+python bridge_s1_to_s2.py --checkpoint <ckpt> --stage1-dir <dir> --output <s2_inputs>
+
+# M3: Stage 2 denoising (Zig)
+./bazel-bin/examples/ltx/denoise_e2e <checkpoint> <s2_inputs> <output_dir/> --bf16-attn
+
+# M4: Decode to MP4 (Python)
+python e2e/decode_latents.py --inputs <s2_inputs> --video-latent <dir>/video_latent.bin \
+  --audio-latent <dir>/audio_latent.bin --output output.mp4
 ```

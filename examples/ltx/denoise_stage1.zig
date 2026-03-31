@@ -67,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     // ========================================================================
-    // Sigma schedule (host-side computation)
+    // Section A: CLI argument parsing (above) / Section B: Sigma schedule
     // ========================================================================
     const sigmas = model.computeSigmaSchedule(
         NUM_STEPS,
@@ -82,7 +82,7 @@ pub fn main(init: std.process.Init) !void {
     });
 
     // ========================================================================
-    // Open stores
+    // Section C: Open stores + load inputs
     // ========================================================================
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
@@ -120,7 +120,7 @@ pub fn main(init: std.process.Init) !void {
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     // ========================================================================
-    // Load inputs
+    // (continued) Load inputs
     // ========================================================================
     std.log.info("Loading inputs...", .{});
 
@@ -157,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  audio_clean:           {any}", .{a_clean_buf.shape()});
 
     // ========================================================================
-    // Compile exes
+    // Section D: Compile executables
     // ========================================================================
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
     std.log.info("Compiling preprocessing exe...", .{});
@@ -440,7 +440,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Guider combine exe compiled.", .{});
 
     // ========================================================================
-    // Load weights
+    // Section E: Load weights
     // ========================================================================
     std.log.info("Loading 48 block weights...", .{});
     var block_params_bufs = try allocator.create([48]zml.Bufferized(model.Block0FullParams));
@@ -492,7 +492,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("All weights loaded.", .{});
 
     // ========================================================================
-    // Create constant buffers for guidance
+    // (continued) Create constant buffers for guidance
     // ========================================================================
     // Zero masks for isolation pass (scalar bf16, broadcast to all elements)
     var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16, sharding);
@@ -517,7 +517,7 @@ pub fn main(init: std.process.Init) !void {
     defer rescale_a_buf.deinit();
 
     // ========================================================================
-    // Denoising loop — Phase 2: 4-pass with guidance
+    // Section F: Denoising loop — 4-pass with guidance
     // ========================================================================
     std.log.info("Starting {d}-step denoising loop (Phase 2: 4-pass guidance)...", .{NUM_STEPS});
 
@@ -550,7 +550,7 @@ pub fn main(init: std.process.Init) !void {
         var sigma_next_buf = try zml.Buffer.scalar(io, platform, sigma_next, .f32, sharding);
         defer sigma_next_buf.deinit();
 
-        // ---- 1. Preprocessing (once per step, with positive context) ----
+        // ---- F.1: Preprocessing (once per step, with positive context) ----
         std.log.info("  Preprocessing...", .{});
         var pre_args = try preprocess_exe.args(allocator);
         defer pre_args.deinit(allocator);
@@ -568,7 +568,7 @@ pub fn main(init: std.process.Init) !void {
         preprocess_exe.call(pre_args, &pre_results);
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
-        // ---- 2. Pass 1: Conditional (positive context, normal blocks) ----
+        // ---- F.2: Pass 1 — Conditional (positive context, normal blocks) ----
         std.log.info("  Pass 1 (conditional): 48-block chain...", .{});
         var cond_h_v = pre_out.vx;
         var cond_h_a = pre_out.ax;
@@ -623,7 +623,7 @@ pub fn main(init: std.process.Init) !void {
         cond_v_vel.deinit();
         cond_a_vel.deinit();
 
-        // ---- 3. Pass 2: Negative (negative context, normal blocks) ----
+        // ---- F.3: Pass 2 — Negative/CFG (negative context, normal blocks) ----
         std.log.info("  Pass 2 (negative/CFG): 48-block chain...", .{});
         var neg_h_v = pre_out.vx;
         var neg_h_a = pre_out.ax;
@@ -676,7 +676,7 @@ pub fn main(init: std.process.Init) !void {
         neg_v_vel.deinit();
         neg_a_vel.deinit();
 
-        // ---- 4. Pass 3: Perturbed/STG (positive context, V-passthrough at block 28) ----
+        // ---- F.4: Pass 3 — STG (positive context, V-passthrough at block 28) ----
         std.log.info("  Pass 3 (STG): 48-block chain (STG at block {d})...", .{STG_BLOCK_IDX});
         var ptb_h_v = pre_out.vx;
         var ptb_h_a = pre_out.ax;
@@ -758,7 +758,7 @@ pub fn main(init: std.process.Init) !void {
         ptb_v_vel.deinit();
         ptb_a_vel.deinit();
 
-        // ---- 5. Pass 4: Isolated (positive context, zero AV masks) ----
+        // ---- F.5: Pass 4 — Isolated (positive context, zero AV masks) ----
         std.log.info("  Pass 4 (isolated): 48-block chain...", .{});
         var iso_h_v = pre_out.vx;
         var iso_h_a = pre_out.ax;
@@ -812,7 +812,7 @@ pub fn main(init: std.process.Init) !void {
         iso_v_vel.deinit();
         iso_a_vel.deinit();
 
-        // ---- 6. Guider combine ----
+        // ---- F.6: Guider combine ----
         std.log.info("  Guider combine...", .{});
         var gc_args = try guider_combine_exe.args(allocator);
         defer gc_args.deinit(allocator);
@@ -848,7 +848,7 @@ pub fn main(init: std.process.Init) !void {
         ptb_a_x0.deinit();
         iso_a_x0.deinit();
 
-        // ---- 7. Denoising step from guided x0 (post_process + Euler) ----
+        // ---- F.7: Denoising step from guided x0 (post_process + Euler) ----
         std.log.info("  Euler step (from x0)...", .{});
 
         var dv_args = try denoise_v_exe.args(allocator);
@@ -894,7 +894,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Denoising complete. Writing output...", .{});
 
     // ========================================================================
-    // Write output latents
+    // Section G: Write output
     // ========================================================================
     try writeBuffer(allocator, io, v_latent_buf, output_dir, "video_latent.bin");
     try writeBuffer(allocator, io, a_latent_buf, output_dir, "audio_latent.bin");

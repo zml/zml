@@ -3,6 +3,11 @@ const std = @import("std");
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 
+// ============================================================================
+// Section 1: Configuration & Constants
+// Python ref: ltx_core/models/ltx_model.py — LTXConfig
+// ============================================================================
+
 /// Which parameter set to use at runtime.
 pub const Stage = enum {
     stage1,
@@ -12,6 +17,11 @@ pub const Stage = enum {
 pub const Config = struct {
     num_transformer_blocks: usize,
 };
+
+// ============================================================================
+// Section 6: FeedForward
+// Python ref: ltx_core/models/attention.py — FeedForward
+// ============================================================================
 
 /// FeedForward module shared by stage 1 and stage 2.
 ///
@@ -80,6 +90,11 @@ fn forwardAudioFFPrecise(x: Tensor, params: FeedForward.Params) Tensor {
     return h3.convert(out_dtype);
 }
 
+// ============================================================================
+// Section 2: Patchification (Video + Audio)
+// Python ref: ltx_core/models/patchifiers/ — VideoLatentPatchifier, AudioPatchifier
+// ============================================================================
+
 /// Patchify projection used before transformer blocks.
 /// Forward contract for LTX video patchify:
 /// [B, T, 128] -> Linear(128->4096)
@@ -106,6 +121,11 @@ pub const Patchify = struct {
         if (params.bias) |*b| b.deinit();
     }
 };
+
+// ============================================================================
+// Section 4: AdaLayerNormSingle (timestep modulation)
+// Python ref: ltx_core/models/normalization.py — AdaLayerNormSingle
+// ============================================================================
 
 /// Sinusoidal timestep embedding.
 /// Matches Python: get_timestep_embedding(sigma, dim=256, flip_sin_to_cos=True, downscale_freq_shift=0)
@@ -229,6 +249,11 @@ pub const AdaLayerNormSingle = struct {
     }
 };
 
+// ============================================================================
+// Section 10: Output Projection
+// Python ref: ltx_core/models/ltx_model.py — LTXModel._postprocess()
+// ============================================================================
+
 /// Final output projection applied after all transformer blocks.
 ///
 /// Implements Python's `velocity_model._process_output`:
@@ -274,6 +299,11 @@ pub const OutputProjection = struct {
         return params.proj_out.forward(modulated);
     }
 };
+
+// ============================================================================
+// Section 5: Attention (self-attention, cross-attention, AV cross-attention)
+// Python ref: ltx_core/models/attention.py — Attention, CrossAttention
+// ============================================================================
 
 /// Like zml.nn.sdpa but computes softmax in native dtype (no f32 upcast)
 /// and chunks along the query dimension to avoid materializing a full Q×K^T
@@ -659,6 +689,11 @@ fn adaValueAt(sst: Tensor, timestep: Tensor, idx: i64) Tensor {
         .convert(ts.dtype());
     return sst_row.broad(ts.shape()).add(ts);
 }
+
+// ============================================================================
+// Section 7: BasicAVTransformerBlock (single block forward)
+// Python ref: ltx_core/models/transformer_ltx_2.py — BasicAVTransformerBlock.forward()
+// ============================================================================
 
 /// One AV transformer block. Shared implementation across stages.
 ///
@@ -1066,6 +1101,11 @@ pub const BasicAVTransformerBlock = struct {
     }
 };
 
+// ============================================================================
+// Section 8: LTXModel (full transformer stack)
+// Python ref: ltx_core/models/ltx_model.py — LTXModel.forward()
+// ============================================================================
+
 /// Velocity model (transformer stack) shared across stages.
 pub const LTXModel = struct {
     blocks: []BasicAVTransformerBlock,
@@ -1257,6 +1297,11 @@ pub fn selectTransformerRoot(store: zml.io.TensorStore.View) zml.io.TensorStore.
     return store.withPrefix("velocity_model");
 }
 
+// ============================================================================
+// Section 11: Denoising Step (sigma schedule + Euler step + mask blending)
+// Python ref: ltx_pipelines/scheduler.py — RectifiedFlowScheduler
+// ============================================================================
+
 /// Free-function entrypoint to run one AdaLayerNormSingle module.
 /// Returns modulation [.b, .d_ada] — the full outputs (modulation + embedded_timestep)
 /// are available via AdaLayerNormSingle.forward; this helper returns both as a named struct
@@ -1302,6 +1347,11 @@ pub fn forwardNoiseInit(
     // noised = noise * mask_sigma + clean * (1 - mask_sigma)
     return noise_f32.mul(mask_sigma).add(clean_f32.mul(one_minus)).convert(out_dtype);
 }
+
+// ============================================================================
+// Section 12: Guidance Combine (CFG + STG + modality isolation + rescale)
+// Python ref: ltx_pipelines/guiders.py — LTXGuider.combine()
+// ============================================================================
 
 /// Result of guider combine: guided outputs for video and audio.
 pub const GuiderCombineResult = struct {
@@ -1596,6 +1646,12 @@ pub fn forwardDenoisingStepFromX0(
         .next_latent = next_latent,
     };
 }
+
+// ============================================================================
+// Section 13: Block-Level Entrypoints (forwardBlock0* family)
+// These are the ZML-compilable entrypoints — each wraps a Section 7 method
+// with explicit tensor arguments (no struct, for MLIR arg flattening).
+// ============================================================================
 
 pub const Block0FullParams = BasicAVTransformerBlock.Params;
 
@@ -1942,9 +1998,10 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
     }, params);
 }
 
-// ---------------------------------------------------------------------------
-// RoPE generation: positions → cos/sin pairs (Step 2)
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 3: Positional Embeddings (RoPE)
+// Python ref: ltx_core/models/embeddings.py — RoPE3D
+// ============================================================================
 
 /// Cos/sin pair returned by RoPE generation.
 const CosSinPair = struct { cos: Tensor, sin: Tensor };
@@ -2153,9 +2210,10 @@ fn precomputeFreqsCis(
     return splitFreqsCis(freqs, config.num_heads, head_dim);
 }
 
-// ---------------------------------------------------------------------------
-// Full transformer step: 48 blocks + OutputProjection (Step 1 parity)
-// ---------------------------------------------------------------------------
+// ============================================================================
+// Section 9: Preprocessing (patchify + embed + RoPE + AV mask computation)
+// Python ref: ltx_core/models/ltx_model.py — LTXModel._prepare_inputs()
+// ============================================================================
 
 /// Parameters for a full velocity_model forward pass (blocks + output projection).
 /// Adaln modules are NOT included — their outputs are provided as inputs (SharedInputs).
@@ -2198,10 +2256,6 @@ pub fn unloadFullStepBuffers(params: *zml.Bufferized(FullStepParams)) void {
     OutputProjection.Params.unloadBuffers(&params.norm_proj_out);
     OutputProjection.Params.unloadBuffers(&params.audio_norm_proj_out);
 }
-
-// ---------------------------------------------------------------------------
-// Step 2: Preprocessing (raw inputs → SharedInputs) + full velocity model
-// ---------------------------------------------------------------------------
 
 /// Parameters for the preprocessing stage (everything except the 48 transformer blocks
 /// and the output projections). This turns raw latent inputs + sigma into SharedInputs.
