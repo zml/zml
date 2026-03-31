@@ -56,11 +56,6 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
 
     const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
 
-    // Neuron util% is delta-based; wait for 2 poll cycles to get a real sample.
-    if (state.targets.contains(.neuron)) {
-        io.sleep(.fromSeconds(2), .awake) catch {};
-    }
-
     var viewing_device: ?u8 = null;
     var overview = try Overview.init(allocator, state, null, &viewing_device);
     defer overview.deinit(allocator);

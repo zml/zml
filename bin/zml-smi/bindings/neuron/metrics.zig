@@ -53,7 +53,7 @@ pub fn start(collector: *Collector) !void {
             const initial: NeuronInfo = .{ .name = dev.name(collector.arena) catch null };
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
-            try collector.spawnPoll(pollOnce, .{ poll_arena, &info.neuron, dev });
+            try collector.spawnPoll(pollOnce, .{ poll_arena, &info.neuron, dev }, .{ .needs_warmup = true });
         }
     }
 

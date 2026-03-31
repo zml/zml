@@ -9,7 +9,7 @@ const Collector = @import("zml-smi/collector").Collector;
 
 pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
     if (nrt.handles.len == 0) return;
-    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, nrt, nc_per_device, device_infos, dev_offset });
+    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, nrt, nc_per_device, device_infos, dev_offset }, .{});
 }
 
 fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {

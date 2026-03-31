@@ -9,7 +9,7 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nvml: *const Nvml
     const last_seen_ts = try collector.arena.alloc(u64, device_count);
     @memset(last_seen_ts, 0);
 
-    try collector.spawnPoll(pollOnce, .{ collector.gpa, list, nvml, dev_offset, device_count, last_seen_ts });
+    try collector.spawnPoll(pollOnce, .{ collector.gpa, list, nvml, dev_offset, device_count, last_seen_ts }, .{});
 }
 
 fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8, device_count: u32, last_seen_ts: []u64) void {

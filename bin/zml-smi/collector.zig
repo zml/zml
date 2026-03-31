@@ -39,9 +39,13 @@ pub const Collector = struct {
         return poll_arena;
     }
 
-    pub fn spawnPoll(self: *Collector, comptime pollOnce: anytype, args: std.meta.ArgsTuple(@TypeOf(pollOnce))) !void {
+    pub fn spawnPoll(self: *Collector, comptime pollOnce: anytype, args: std.meta.ArgsTuple(@TypeOf(pollOnce)), options: struct { needs_warmup: bool = false }) !void {
         if (self.poll_only) {
             @call(.auto, pollOnce, args);
+            if (options.needs_warmup) {
+                self.io.sleep(.fromSeconds(1), .awake) catch {};
+                @call(.auto, pollOnce, args);
+            }
             return;
         }
 

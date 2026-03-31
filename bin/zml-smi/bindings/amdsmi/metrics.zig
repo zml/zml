@@ -21,7 +21,7 @@ pub fn start(collector: *Collector) !void {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
         const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
-        try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev });
+        try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev }, .{});
     }
 
     const processes = try collector.createProcessList();
