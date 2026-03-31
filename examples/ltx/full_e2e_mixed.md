@@ -275,6 +275,7 @@ uv run /root/repos/zml/examples/ltx/export_mixed_pipeline.py \
     --checkpoint $CKPT \
     --spatial-upsampler $UPSAMPLER \
     --gemma-root $GEMMA
+    --decode-video
 
 echo "M0 done" && ls -lh $OUT/stage1_inputs.safetensors $OUT/stage2_noise.safetensors $OUT/pipeline_meta.json
 
