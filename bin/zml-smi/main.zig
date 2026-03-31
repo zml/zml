@@ -58,6 +58,7 @@ pub fn main(init: std.process.Init) !void {
         .gpa = gpa,
         .worker = &w,
         .io = io,
+        .poll_only = !args.top,
     };
     defer collector.deinit();
     defer w.shutdown(io);

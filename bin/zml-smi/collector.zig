@@ -13,6 +13,7 @@ pub const Collector = struct {
     gpa: std.mem.Allocator,
     worker: *Worker,
     io: std.Io,
+    poll_only: bool = false,
 
     pub fn addDevice(self: *Collector, initial: DeviceInfo) !*DeviceInfo {
         const info = try self.arena.create(DeviceInfo);
@@ -39,6 +40,11 @@ pub const Collector = struct {
     }
 
     pub fn spawnPoll(self: *Collector, comptime pollOnce: anytype, args: std.meta.ArgsTuple(@TypeOf(pollOnce))) !void {
+        if (self.poll_only) {
+            @call(.auto, pollOnce, args);
+            return;
+        }
+
         const Args = std.meta.ArgsTuple(@TypeOf(pollOnce));
         try self.worker.spawn(self.io, struct {
             fn f(io: std.Io, w: *const Worker, a: Args) void {
