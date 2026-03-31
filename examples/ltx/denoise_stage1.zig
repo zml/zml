@@ -1,12 +1,17 @@
-/// Stage 1 denoiser — full denoising loop with guidance.
+/// Stage 1 denoiser — 30-step Euler loop with 4-pass guided denoising.
 ///
-/// Phase 1: single-pass (conditional only), no guidance. (DONE)
-/// Phase 2 (current): 4-pass structure (CFG + STG + modality isolation)
-///                     with forwardGuiderCombine.
+/// Python reference: euler_denoising_loop() in samplers.py, called via
+///   FactoryGuidedDenoiser (denoisers.py) which builds 4 passes per step:
+///   cond / uncond(CFG) / ptb(STG) / mod(isolated).
+///
+/// Each pass runs the full 48-block transformer + output projection,
+/// producing an x0 prediction. The 4 x0s are then combined by
+/// MultiModalGuider.calculate() (guiders.py) and the result is stepped
+/// via EulerDiffusionStep.step() (diffusion_steps.py).
 ///
 /// Usage:
 ///   bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_stage1 -- \
-///       /root/models/ltx-2.3/ltx-2.3-22b.safetensors \
+///       /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
 ///       /root/e2e_demo/stage1_inputs.safetensors \
 ///       /root/e2e_demo/stage1_out/
 
@@ -25,6 +30,7 @@ pub const std_options: std.Options = .{ .log_level = .info };
 const STG_BLOCK_IDX: usize = 28;
 
 /// Number of denoising steps.
+/// Python: LTX_2_3_PARAMS.num_inference_steps = 30 (constants.py).
 const NUM_STEPS: usize = model.stage1_default_schedule.num_steps;
 
 pub fn main(init: std.process.Init) !void {
@@ -68,6 +74,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // Section A: CLI argument parsing (above) / Section B: Sigma schedule
+    // Python: LTX2Scheduler().execute(steps=30) in schedulers.py
     // ========================================================================
     const sigmas = model.computeSigmaSchedule(
         NUM_STEPS,
@@ -158,6 +165,15 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // Section D: Compile executables
+    // We compile 8 exe types (11 exes with v/a pairs), mapping to these Python components:
+    //   preprocess_exe     → LTXAVModel._pre_process() in model.py
+    //   block_normal_exe   → BasicAVTransformerBlock.forward() in transformer.py
+    //   block_stg_exe      → same, but with SKIP_VIDEO_SELF_ATTN perturbation
+    //   block_iso_exe      → same, but with SKIP_A2V/V2A_CROSS_ATTN (zero masks)
+    //   proj_{v,a}_exe     → LTXAVModel._process_output() in model.py
+    //   to_denoised_{v,a}  → X0Model.to_denoised() (velocity → x0 conversion)
+    //   denoise_{v,a}_exe  → EulerDiffusionStep.step() + post_process_latent()
+    //   guider_combine_exe → MultiModalGuider.calculate() in guiders.py
     // ========================================================================
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
     std.log.info("Compiling preprocessing exe...", .{});
@@ -493,6 +509,9 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // (continued) Create constant buffers for guidance
+    // Python: MultiModalGuiderParams in LTX_2_3_PARAMS (constants.py)
+    //   video: cfg=3.0, stg=1.0, rescale=0.7, modality=3.0
+    //   audio: cfg=7.0, stg=1.0, rescale=0.7, modality=3.0
     // ========================================================================
     // Zero masks for isolation pass (scalar bf16, broadcast to all elements)
     var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16, sharding);
@@ -518,6 +537,22 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // Section F: Denoising loop — 4-pass with guidance
+    //
+    // Python: euler_denoising_loop() (samplers.py) calls
+    //   FactoryGuidedDenoiser.__call__() (denoisers.py) which internally
+    //   calls _guided_denoise() → builds 4 passes (denoisers.py:89-127):
+    //     Pass 1 "cond"   — positive context, no perturbation
+    //     Pass 2 "uncond" — negative context, no perturbation (for CFG)
+    //     Pass 3 "ptb"    — positive context, SKIP_VIDEO/AUDIO_SELF_ATTN at stg_blocks
+    //     Pass 4 "mod"    — positive context, SKIP_A2V + SKIP_V2A cross-attn (isolation)
+    //
+    //   Python batches all 4 passes into one transformer call (B*4).
+    //   We run them sequentially (4 × 48 blocks) because Zig compiles
+    //   each exe for B=1.
+    //
+    //   After all 4 passes, MultiModalGuider.calculate() (guiders.py)
+    //   combines the x0 predictions (CFG + STG + modality rescaling).
+    //   Then EulerDiffusionStep.step() advances the latent.
     // ========================================================================
     std.log.info("Starting {d}-step denoising loop (Phase 2: 4-pass guidance)...", .{NUM_STEPS});
 
@@ -551,6 +586,7 @@ pub fn main(init: std.process.Init) !void {
         defer sigma_next_buf.deinit();
 
         // ---- F.1: Preprocessing (once per step, with positive context) ----
+        // Python: LTXAVModel._pre_process() — patch embed, timestep embed, RoPE, text cross-attn proj
         std.log.info("  Preprocessing...", .{});
         var pre_args = try preprocess_exe.args(allocator);
         defer pre_args.deinit(allocator);
@@ -569,6 +605,7 @@ pub fn main(init: std.process.Init) !void {
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- F.2: Pass 1 — Conditional (positive context, normal blocks) ----
+        // Python: "cond" pass in _guided_denoise() — PerturbationConfig.empty()
         std.log.info("  Pass 1 (conditional): 48-block chain...", .{});
         var cond_h_v = pre_out.vx;
         var cond_h_a = pre_out.ax;
@@ -624,6 +661,7 @@ pub fn main(init: std.process.Init) !void {
         cond_a_vel.deinit();
 
         // ---- F.3: Pass 2 — Negative/CFG (negative context, normal blocks) ----
+        // Python: "uncond" pass — same blocks, but with negative text context
         std.log.info("  Pass 2 (negative/CFG): 48-block chain...", .{});
         var neg_h_v = pre_out.vx;
         var neg_h_a = pre_out.ax;
@@ -677,6 +715,7 @@ pub fn main(init: std.process.Init) !void {
         neg_a_vel.deinit();
 
         // ---- F.4: Pass 3 — STG (positive context, V-passthrough at block 28) ----
+        // Python: "ptb" pass — Perturbation(SKIP_VIDEO_SELF_ATTN, blocks=stg_blocks)
         std.log.info("  Pass 3 (STG): 48-block chain (STG at block {d})...", .{STG_BLOCK_IDX});
         var ptb_h_v = pre_out.vx;
         var ptb_h_a = pre_out.ax;
@@ -759,6 +798,7 @@ pub fn main(init: std.process.Init) !void {
         ptb_a_vel.deinit();
 
         // ---- F.5: Pass 4 — Isolated (positive context, zero AV masks) ----
+        // Python: "mod" pass — Perturbation(SKIP_A2V_CROSS_ATTN + SKIP_V2A_CROSS_ATTN, blocks=None)
         std.log.info("  Pass 4 (isolated): 48-block chain...", .{});
         var iso_h_v = pre_out.vx;
         var iso_h_a = pre_out.ax;
@@ -813,6 +853,8 @@ pub fn main(init: std.process.Init) !void {
         iso_a_vel.deinit();
 
         // ---- F.6: Guider combine ----
+        // Python: MultiModalGuider.calculate() in guiders.py
+        // Combines cond/uncond/ptb/iso x0 predictions via CFG+STG+modality rescaling
         std.log.info("  Guider combine...", .{});
         var gc_args = try guider_combine_exe.args(allocator);
         defer gc_args.deinit(allocator);
@@ -849,6 +891,7 @@ pub fn main(init: std.process.Init) !void {
         iso_a_x0.deinit();
 
         // ---- F.7: Denoising step from guided x0 (post_process + Euler) ----
+        // Python: post_process_latent() + EulerDiffusionStep.step() in _step_state()
         std.log.info("  Euler step (from x0)...", .{});
 
         var dv_args = try denoise_v_exe.args(allocator);

@@ -1,9 +1,14 @@
-/// End-to-end Stage 2 denoiser.
+/// End-to-end Stage 2 denoiser — 3-step Euler with distilled model.
+///
+/// Python reference: euler_denoising_loop() in samplers.py, called via
+///   SimpleDenoiser (denoisers.py) which runs a single conditional pass
+///   per step (no guidance, no CFG/STG/isolation).
 ///
 /// Loads patchified noised latent states + text contexts from a safetensors
-/// file (produced by export_stage2_inputs.py), runs the 3-step Euler
-/// denoising loop using the velocity model, and writes the denoised
-/// patchified latents as raw binary files for decode_latents.py.
+/// file (produced by bridge_s1_to_s2.py or export_stage2_inputs.py),
+/// runs the 3-step Euler denoising loop using the velocity model,
+/// and writes the denoised patchified latents as raw binary files
+/// for decode_latents.py.
 ///
 /// Usage:
 ///   bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_e2e -- \
@@ -21,7 +26,9 @@ comptime {
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-/// Sigma schedule for stage-2 distilled (3 steps). Must match the SIGMAS array in Python code (and the 
+/// Sigma schedule for stage-2 distilled (3 steps).
+/// Python: STAGE_2_DISTILLED_SIGMA_VALUES in constants.py.
+/// Requires the distilled checkpoint (22b-distilled.safetensors).
 const SIGMAS = [4]f32{ 0.909375, 0.725, 0.421875, 0.0 };
 
 pub fn main(init: std.process.Init) !void {
@@ -111,6 +118,12 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // Section C: Compile executables (noise init + preprocessing + blocks + projection + denoising)
+    // We compile 5 exe types, mapping to these Python components:
+    //   noise_init_{v,a}  → noise_state() in blocks.py (latent = clean*(1-mask*σ) + noise*mask*σ)
+    //   preprocess_exe    → LTXAVModel._pre_process() in model.py
+    //   block_exe         → BasicAVTransformerBlock.forward() in transformer.py
+    //   proj_{v,a}_exe    → LTXAVModel._process_output() in model.py
+    //   denoise_{v,a}_exe → EulerDiffusionStep.step() + post_process_latent()
     // ========================================================================
     std.log.info("Compiling noise init...", .{});
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
@@ -389,6 +402,14 @@ pub fn main(init: std.process.Init) !void {
 
     // ========================================================================
     // Section E: Denoising loop (3-step Euler)
+    //
+    // Python: euler_denoising_loop() (samplers.py) calls
+    //   SimpleDenoiser.__call__() (denoisers.py) which runs a single
+    //   transformer pass per step (positive context only, no guidance).
+    //   Then _step_state() → post_process_latent() + EulerDiffusionStep.step()
+    //   advances the latent.
+    //
+    //   Per step: preprocess → 48 blocks → output projection → Euler step.
     // ========================================================================
     std.log.info("Starting 3-step denoising loop...", .{});
 
@@ -407,6 +428,7 @@ pub fn main(init: std.process.Init) !void {
         defer sigma_next_buf.deinit();
 
         // ---- 1. Preprocessing ----
+        // Python: LTXAVModel._pre_process() — patch embed, timestep embed, RoPE, text cross-attn proj
         std.log.info("  Running preprocessing...", .{});
         var pre_args = try preprocess_exe.args(allocator);
         defer pre_args.deinit(allocator);
@@ -426,6 +448,7 @@ pub fn main(init: std.process.Init) !void {
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- 2. 48-block chain ----
+        // Python: LTXAVModel._process_transformer_blocks() — no perturbations (PerturbationConfig.empty())
         std.log.info("  Running 48-block chain...", .{});
         var h_v = pre_out.vx;
         var h_a = pre_out.ax;
@@ -468,6 +491,7 @@ pub fn main(init: std.process.Init) !void {
         }
 
         // ---- 3. Output projection ----
+        // Python: LTXAVModel._process_output() — AdaLayerNorm + linear projection
         std.log.info("  Running output projection...", .{});
 
         var proj_v_args = try proj_v_exe.args(allocator);
@@ -490,6 +514,7 @@ pub fn main(init: std.process.Init) !void {
         h_a.deinit();
 
         // ---- 4. Denoising step ----
+        // Python: _step_state() → to_velocity() + EulerDiffusionStep.step() + post_process_latent()
         std.log.info("  Running denoising step...", .{});
 
         var dv_args = try denoise_v_exe.args(allocator);
