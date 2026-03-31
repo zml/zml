@@ -2,11 +2,10 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
-load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
-load("@tar.bzl//tar:mtree.bzl", "mtree_mutate", "mtree_spec")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
-load("//bazel:patchelf.bzl", "patchelf")
 
 # tpu grpc
 
@@ -54,15 +53,16 @@ copy_to_directory(
     srcs = select({
         "@platforms//os:macos": [],
         "//conditions:default": [
+            ":libncfw.stripped",
+            ":libnrt.stripped",
+            "//platforms/rocm:zmlxrocm",
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1",
-            "@libpjrt_rocm//:amdgpu_ids",
             "@libdrm2-amdgpu//:libdrm2-amdgpu",
-            "//platforms/rocm:zmlxrocm",
-            ":libnrt.stripped",
-            ":libncfw.stripped",
+            "@libpjrt_rocm//:amdgpu_ids",
         ],
     }),
+    include_external_repositories = ["**"],
     replace_prefixes = {
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
         "amdgpu.ids": "share/libdrm/amdgpu.ids",
@@ -71,7 +71,6 @@ copy_to_directory(
         "libnrt.so.1": "lib/libnrt.so.1",
         "libncfw.so.2": "lib/libncfw.so.2",
     },
-    include_external_repositories = ["**"],
 )
 
 zig_binary(
@@ -79,10 +78,10 @@ zig_binary(
     srcs = glob([
         "tui/**/*.zig",
     ]) + [
-        "bindings/dynlib.zig",
         "bindings/amdsmi/amdsmi.zig",
         "bindings/amdsmi/metrics.zig",
         "bindings/amdsmi/process.zig",
+        "bindings/dynlib.zig",
         "bindings/linux/metrics.zig",
         "bindings/linux/process.zig",
         "bindings/neuron/metrics.zig",
@@ -91,23 +90,23 @@ zig_binary(
         "bindings/nvml/metrics.zig",
         "bindings/nvml/nvml.zig",
         "bindings/nvml/process.zig",
-        "bindings/tpu/process.zig",
         "bindings/tpu/metrics.zig",
+        "bindings/tpu/process.zig",
         "bindings/tpu/tpuinfo.zig",
         "collector.zig",
         "info/device_info.zig",
         "info/host_info.zig",
         "info/process_info.zig",
         "platform.zig",
-        "utils/sandbox.zig",
         "utils/double_buffer.zig",
+        "utils/sandbox.zig",
         "utils/sysfs.zig",
         "worker.zig",
     ],
+    data = [":sandbox"],
     extra_srcs = glob([
         "tui/assets/*",
     ]),
-    data = [":sandbox"],
     main = "main.zig",
     deps = [
         "//stdx",
@@ -116,10 +115,10 @@ zig_binary(
     ] + select({
         "@platforms//os:macos": [],
         "//conditions:default": [
-            "//platforms/neuron:libnrt_headers",
             ":tpuinfo",
-            "@cuda_nvml_dev//:nvml",
+            "//platforms/neuron:libnrt_headers",
             "@amd-smi-lib//:amdsmi",
+            "@cuda_nvml_dev//:nvml",
         ],
     }),
 )
@@ -131,12 +130,19 @@ mtree_spec(
     srcs = [":zml-smi"],
 )
 
-mtree_mutate(
+# Use this genrule until mtree_mutate is fixed
+genrule(
     name = "mtree",
-    mtree = ":mtree_spec",
-    package_dir = "zml-smi",
-    strip_prefix = package_name(),
+    srcs = [":mtree_spec"],
+    outs = ["mtree.txt"],
+    cmd = """sed -e '/type=dir/d' -e 's#^bin/##g' $< > $@""",
 )
+
+# mtree_mutate(
+#     name = "mtree",
+#     mtree = ":mtree_spec",
+#     strip_prefix = "bin",
+# )
 
 tar(
     name = "archive",
