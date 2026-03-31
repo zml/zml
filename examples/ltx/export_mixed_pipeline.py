@@ -17,13 +17,15 @@ Outputs:
   {out}/ref/stage2_inputs.safetensors  — Stage 2 full inputs (reference, 12 tensors)
   {out}/ref/stage2_outputs.safetensors — Stage 2 denoised latents (reference)
   {out}/pipeline_meta.json             — Pipeline config metadata
+  {out}/python_reference.mp4           — Full-Python video (with --decode-video)
 
 Usage (on GPU server):
   cd /root/repos/LTX-2
   uv run examples/ltx/export_mixed_pipeline.py \
       --output-dir /root/mixed/ \
       --prompt "A beautiful sunset over the ocean" \
-      --seed 10
+      --seed 10 \
+      --decode-video
 """
 
 import argparse
@@ -43,14 +45,17 @@ from ltx_core.components.noisers import GaussianNoiser
 from ltx_core.components.protocols import DiffusionStepProtocol
 from ltx_core.components.schedulers import LTX2Scheduler
 from ltx_core.model.transformer import X0Model
+from ltx_core.model.video_vae import TilingConfig, get_video_chunks_number
 from ltx_core.types import LatentState, VideoPixelShape
 from ltx_pipelines.utils import (
+    AudioDecoder,
     DiffusionStage,
     FactoryGuidedDenoiser,
     ImageConditioner,
     ModalitySpec,
     PromptEncoder,
     SimpleDenoiser,
+    VideoDecoder,
     VideoUpsampler,
     cleanup_memory,
     combined_image_conditionings,
@@ -58,6 +63,7 @@ from ltx_pipelines.utils import (
     get_device,
 )
 from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
+from ltx_pipelines.utils.media_io import encode_video
 from ltx_pipelines.utils.types import Denoiser
 
 
@@ -89,6 +95,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--gemma-root", type=str,
         default=str(Path("~/models/gemma-3-12b-it").expanduser()),
+    )
+    # Decode options
+    parser.add_argument(
+        "--decode-video", action="store_true",
+        help="Decode final latents to MP4 (full-Python reference video)",
     )
     return parser.parse_args()
 
@@ -527,6 +538,35 @@ def main() -> None:
     print(f"  Saved {meta_path}")
 
     # ========================================================================
+    # Decode to MP4 (optional, full-Python reference video)
+    # ========================================================================
+    python_video_path = None
+    if args.decode_video:
+        print("\n=== Decoding full-Python reference video ===")
+        tiling_config = TilingConfig.default()
+        decode_generator = torch.Generator(device=device).manual_seed(args.seed)
+
+        video_decoder = VideoDecoder(args.checkpoint, dtype, device)
+        decoded_video = video_decoder(video_state_s2.latent, tiling_config, decode_generator)
+        print("  Video decoded.")
+
+        audio_decoder = AudioDecoder(args.checkpoint, dtype, device)
+        decoded_audio = audio_decoder(audio_state_s2.latent)
+        print(f"  Audio decoded: sample_rate={decoded_audio.sampling_rate}")
+
+        python_video_path = out / "python_reference.mp4"
+        python_video_path.parent.mkdir(parents=True, exist_ok=True)
+        video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
+        encode_video(
+            video=decoded_video,
+            fps=args.frame_rate,
+            audio=decoded_audio,
+            output_path=str(python_video_path),
+            video_chunks_number=video_chunks_number,
+        )
+        print(f"  Full-Python reference video: {python_video_path}")
+
+    # ========================================================================
     # Summary
     # ========================================================================
     print("\n" + "=" * 70)
@@ -535,6 +575,8 @@ def main() -> None:
     print(f"\nStage 1 inputs (for Zig):  {out / 'stage1_inputs.safetensors'}")
     print(f"Stage 2 noise (for bridge): {out / 'stage2_noise.safetensors'}")
     print(f"Pipeline metadata:          {out / 'pipeline_meta.json'}")
+    if python_video_path:
+        print(f"Full-Python reference video: {python_video_path}")
     print(f"\nReference tensors:")
     print(f"  Stage 1 outputs: {ref / 'stage1_outputs.safetensors'}")
     print(f"  Upsampled:       {ref / 'upsampled.safetensors'}")
