@@ -297,8 +297,7 @@ uv run /root/repos/zml/examples/ltx/bridge_s1_to_s2.py \
     --stage1-inputs $OUT/stage1_inputs.safetensors \
     --output $OUT/stage2_inputs.safetensors \
     --checkpoint $CKPT \
-    --spatial-upsampler $UPSAMPLER \
-    --gemma-root $GEMMA
+    --spatial-upsampler $UPSAMPLER
 
 echo "M2 done" && ls -lh $OUT/stage2_inputs.safetensors
 
@@ -319,9 +318,7 @@ uv run /root/repos/zml/examples/ltx/e2e/decode_latents.py \
     --video-latent $OUT/stage2_out/video_latent.bin \
     --audio-latent $OUT/stage2_out/audio_latent.bin \
     --output $OUT/output.mp4 \
-    --checkpoint $CKPT \
-    --spatial-upsampler $UPSAMPLER \
-    --gemma-root $GEMMA
+    --checkpoint $CKPT
 
 echo "===== PIPELINE COMPLETE ====="
 echo "Output: $OUT/output.mp4"
