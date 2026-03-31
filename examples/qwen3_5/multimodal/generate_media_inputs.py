@@ -50,7 +50,7 @@ def resize_dimensions(width: int, height: int, max_pixels: int, multiple: int) -
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Generate mixed media safetensors inputs for qwen3_5 media_test")
+    parser = argparse.ArgumentParser(description="Generate mixed media safetensors inputs for qwen3_5 multimodal")
     parser.add_argument("--model", type=Path, required=True, help="Local model path (contains processor/tokenizer config)")
     parser.add_argument("--out", type=Path, required=True, help="Output safetensors path")
     parser.add_argument("--image", action="append", default=[], type=Path, help="Image input path (repeatable)")

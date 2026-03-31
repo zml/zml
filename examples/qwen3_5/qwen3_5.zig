@@ -152,12 +152,18 @@ pub const Qwen35 = struct {
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
+        const token_embeds = self.text_model.embed_tokens.forward(tokens);
+
+        const text_only_position_ids = Tensor.arange(.{ .end = token_embeds.dim(.s) }, .i64)
+            .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = token_embeds.dim(.b), .s = token_embeds.dim(.s) }, .i64))
+            .add(token_index.broad(zml.Shape.init(.{ .b = token_embeds.dim(.b), .s = token_embeds.dim(.s) }, .i64)));
+
+        const text_model_output, const updated_kv_cache = self.text_model.forward(token_embeds, token_index, kv_cache, text_only_position_ids);
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
 
-    pub fn generic_multimodal_prefill_forward(
+    pub fn multimodal_prefill_forward(
         self: Qwen35,
         tokens: Tensor,
         media_pixel_values: []const Tensor,
@@ -191,7 +197,7 @@ pub const Qwen35 = struct {
             }
         }
 
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
+        const text_model_output, const updated_kv_cache = self.text_model.forward(
             text_with_vision_embeds,
             zml.Tensor.scalar(@as(i64, 0), .i64),
             kv_cache,
@@ -222,124 +228,10 @@ pub const Qwen35 = struct {
         const position_ids_1d = token_index.add(mrope_position_deltas);
         const position_ids = zml.Tensor.stack(&.{ position_ids_1d, position_ids_1d, position_ids_1d }, 0, .g).withTags(.{ .g, .b, .s });
 
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(token_embeds, token_index, kv_cache, position_ids);
+        const text_model_output, const updated_kv_cache = self.text_model.forward(token_embeds, token_index, kv_cache, position_ids);
 
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
-    }
-
-    pub fn multimodal_prefill_forward_old(
-        self: Qwen35,
-        tokens: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache,
-        pixel_values: Tensor,
-        // Vision patch grid shape [t, h, w]
-        grid_thw: [3]i64,
-        // Prompt shape [num_pre_image_tokens, num_image_tokens, num_post_image_tokens]
-        prompt_shape: Tensor,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
-        const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
-
-        const vision_embeds = self.vision_model.forward(pixel_values, grid_thw);
-
-        const num_pre_image_tokens, const num_image_tokens, const num_post_image_tokens = .{ prompt_shape.choose1d(0, 0).convert(.i64), prompt_shape.choose1d(0, 1).convert(.i64), prompt_shape.choose1d(0, 2).convert(.i64) };
-        const total_seq_len = num_pre_image_tokens.add(num_post_image_tokens).add(num_image_tokens);
-
-        const text_with_image_embed = token_embed.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, vision_embeds.convert(token_embed.dtype()));
-
-        const position_ids, const mrope_position_deltas = self.build3dPositionIdsOld(1, text_with_image_embed.dim(.s), prompt_shape, grid_thw);
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(text_with_image_embed, token_index, kv_cache, position_ids);
-
-        const last_pos = total_seq_len.addConstant(-1).asScalar();
-        const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
-
-        const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
-        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
-    }
-
-    pub fn multimodal_video_prefill_forward_old(
-        self: Qwen35,
-        tokens: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache,
-        pixel_values: Tensor,
-        grid_thw: [3]i64,
-        video_chunk_starts: Tensor,
-        video_chunk_len: i64,
-        position_ids: Tensor,
-        rng: Tensor.Rng,
-    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
-        const token_embed = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
-        const vision_embeds = self.vision_model.forward(pixel_values, grid_thw);
-
-        var text_with_video_embed = token_embed;
-        for (0..@intCast(grid_thw[0])) |frame_idx| {
-            const chunk_start = video_chunk_starts.choose1d(0, @intCast(frame_idx)).convert(.i64);
-            const vision_offset = zml.Tensor.scalar(@as(i64, @intCast(frame_idx)) * video_chunk_len, .i64);
-            const vision_chunk = vision_embeds
-                .dynamicSlice1d(vision_embeds.axis(.s), .{ .start = vision_offset, .len = @intCast(video_chunk_len) })
-                .convert(token_embed.dtype());
-            text_with_video_embed = text_with_video_embed.dynamicUpdateSlice(.{ .s = chunk_start }, vision_chunk);
-        }
-
-        const text_model_output, const updated_kv_cache = self.text_model.multimodal_forward(
-            text_with_video_embed,
-            token_index,
-            kv_cache,
-            position_ids,
-        );
-
-        const last_pos = zml.Tensor.scalar(text_with_video_embed.dim(.s) - 1, .i64);
-        const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
-        const position_max = position_ids.max(.g).max(.b).max(.s).convert(.i64).asScalar();
-        const mrope_position_deltas = position_max
-            .addConstant(1 - text_with_video_embed.dim(.s))
-            .insertAxes(.last, .{ .b, .s });
-
-        const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
-        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
-    }
-
-    pub fn build3dPositionIdsOld(
-        self: Qwen35,
-        batch_count: i64,
-        seq_len: i64,
-        prompt_shape: Tensor,
-        grid_thw: [3]i64,
-    ) struct { Tensor, Tensor } {
-        const num_pre_image_tokens, const num_image_tokens, const num_post_image_tokens = .{ prompt_shape.choose1d(0, 0).convert(.i64), prompt_shape.choose1d(0, 1).convert(.i64), prompt_shape.choose1d(0, 2).convert(.i64) };
-        const t = grid_thw[0];
-        const h = @divExact(grid_thw[1], self.config.vision_config.spatial_merge_size);
-        const w = @divExact(grid_thw[2], self.config.vision_config.spatial_merge_size);
-
-        // Pre image positions
-        // Assumption: num_pre_image_tokens = 4 from the chat template
-        const pre_image_positions = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = 4 }, .i64), .s).convert(.i64);
-
-        var position_ids = zml.Tensor.iota(zml.Shape.init(.{ .b = batch_count, .s = seq_len }, .i64), .s).convert(.i64)
-            .sub(num_image_tokens).addConstant(@max(w, h, t));
-        position_ids = position_ids.dynamicUpdateSlice(.{ .s = zml.Tensor.scalar(0, .i64) }, pre_image_positions);
-
-        // Image positions
-        const iota_shape = zml.Shape.init(.{ .b = batch_count, .t = t, .h = h, .w = w }, .i64);
-        const t_index = zml.Tensor.iota(iota_shape, .t).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
-        const h_index = zml.Tensor.iota(iota_shape, .h).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
-        const w_index = zml.Tensor.iota(iota_shape, .w).convert(.i64).merge(.{ .s = .{ .t, .h, .w } }).add(num_pre_image_tokens);
-
-        const position_ids_t = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, t_index);
-        const position_ids_h = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, h_index);
-        const position_ids_w = position_ids.dynamicUpdateSlice(.{ .s = num_pre_image_tokens }, w_index);
-
-        const stacked_position_ids = zml.Tensor.stack(&.{ position_ids_t, position_ids_h, position_ids_w }, 0, .g);
-
-        // Deltas
-        const position_max_after_3d_compression = zml.Tensor.scalar(@max(w, h, t), .i64).add(num_post_image_tokens).add(num_pre_image_tokens);
-        const real_seq_len = num_pre_image_tokens.add(num_post_image_tokens).add(num_image_tokens);
-        const mrope_position_deltas = position_max_after_3d_compression.sub(real_seq_len).insertAxes(.last, .{ .b, .s });
-
-        return .{ stacked_position_ids, mrope_position_deltas };
     }
 };
 
@@ -1090,27 +982,6 @@ pub const TextModel = struct {
     }
 
     pub fn forward(
-        self: TextModel,
-        tokens: Tensor,
-        token_index: Tensor,
-        kv_cache: KvCache,
-    ) struct { Tensor, KvCache } {
-        var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
-
-        const position_ids = Tensor.arange(.{ .end = hidden_states.dim(.s) }, .i64)
-            .withTags(.{.s}).insertAxes(.s, .{.b}).broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64))
-            .add(token_index.broad(zml.Shape.init(.{ .b = hidden_states.dim(.b), .s = hidden_states.dim(.s) }, .i64)));
-
-        var updated_kv_cache = kv_cache;
-        for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i), position_ids);
-        }
-
-        hidden_states = self.norm.forward(hidden_states);
-        return .{ hidden_states, updated_kv_cache.reuseBuffer(kv_cache) };
-    }
-
-    pub fn multimodal_forward(
         self: TextModel,
         input_embeds: Tensor,
         token_index: Tensor,

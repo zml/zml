@@ -1,5 +1,0 @@
-Pillow
-safetensors
-torch
-transformers
-torchvision

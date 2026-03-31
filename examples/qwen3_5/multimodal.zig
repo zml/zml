@@ -214,7 +214,7 @@ fn compileModel(
                 allocator_,
                 io_,
                 qwen35_model_,
-                .generic_multimodal_prefill_forward,
+                .multimodal_prefill_forward,
                 .{
                     Tensor.init(.{ .b = 1, .s = prefill_layout_.token_ids.len }, .u32),
                     media_pixel_values,

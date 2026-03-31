@@ -7,7 +7,7 @@ Runs the Qwen 3.5 model with any number of input media files.
 Example usage:
   run.sh --model "/var/models/Qwen/Qwen3.5-0.8B/" --image "cat.jpg" --image "chart.png" --video "clip.mp4" --prompt "Describe all media"
 Notes:
-- Media files are expected in media_test/data.
+- Media files are expected in multimodal/data.
 - You can pass any number of --image/--video flags.
 - Lower --fps reduces sampled video frames.
 - Lower --max-pixels reduces image and video frame resolution while preserving aspect ratio.
@@ -124,7 +124,7 @@ done
 echo -e "\nZML: Running model..."
 (
   cd "${repo_root}"
-  bazel run //examples/qwen3_5:media_test --@zml//platforms:cuda=true -- \
+  bazel run //examples/qwen3_5:multimodal --@zml//platforms:cuda=true -- \
     --model="${model}" \
     --prompt="${prompt}" \
     --media-input-file="${media_inputs_file}"
