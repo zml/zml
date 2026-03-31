@@ -2,14 +2,14 @@ module(
     name = "zml",
 )
 
-bazel_dep(name = "abseil-cpp", version = "20260107.1", repo_name = "com_google_absl")
+bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_absl")
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
 bazel_dep(name = "pcre2", version = "10.45")
 bazel_dep(name = "platforms", version = "1.0.0")
-bazel_dep(name = "protobuf", version = "34.0.bcr.1", repo_name = "com_google_protobuf")
+bazel_dep(name = "protobuf", version = "33.6", repo_name = "com_google_protobuf")
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
 bazel_dep(name = "rules_cc", version = "0.2.16")
@@ -25,6 +25,7 @@ bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.0")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
+bazel_dep(name = "grpc", version = "1.74.0")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
@@ -125,10 +126,10 @@ cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "libpjrt_cuda")
+use_repo(cuda, "cuda_nvml_dev", "libpjrt_cuda")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "hipblaslt", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "amd-smi-lib", "hipblaslt", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "rocblas")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -142,7 +143,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "com_google_sentencepiece", "flashattn", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "xla")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn", "libvaxis", "linenoise", "mnist", "org_swig_swig", "translate-c", "stb", "uucode", "xla", "zigimg")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -243,4 +244,14 @@ git_override(
     module_name = "rules_zig",
     commit = "7b205b78fb21e11efe5adcc9ec1c37fa5852dc77",
     remote = "https://github.com/zml/rules_zig.git",
+)
+
+single_version_override(
+    module_name = "protobuf",
+    version = "33.6",
+)
+
+single_version_override(
+    module_name = "grpc-java",
+    version = "1.74.0",
 )

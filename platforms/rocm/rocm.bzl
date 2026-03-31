@@ -49,6 +49,7 @@ _UBUNTU_PACKAGES = {
                 "fopen64": "zmlxrocm_fopen64",
             },
         ),
+        packages.filegroup(name = "libdrm_amdgpu", srcs = ["opt/amdgpu/lib/x86_64-linux-gnu/libdrm_amdgpu.so.1"]),
     ]),
     "libtinfo6": packages.filegroup(name = "libtinfo6", srcs = ["lib/x86_64-linux-gnu/libtinfo.so.6"]),
     "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
@@ -64,6 +65,10 @@ _ROCM_PACKAGES = {
         name = "rocm_smi",
         src = "lib/librocm_smi64.so.1",
     ),
+    "amd-smi-lib": "\n".join([
+        packages.cc_library(name = "amdsmi", hdrs = ["include/amd_smi/amdsmi.h"], includes = ["include/amd_smi"]),
+        packages.filegroup(name = "libamd_smi", srcs = ["lib/libamd_smi.so.26"]),
+    ]),
     "rocprofiler-sdk": "\n".join([
         packages.load_("@zml//bazel:patchelf.bzl", "patchelf"),
         packages.patchelf(
@@ -132,7 +137,7 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = glob(["lib/rocblas/library/**"]),
         )
-        """
+        """,
     ]),
     "rocfft": packages.filegroup(name = "rocfft", srcs = ["lib/librocfft.so.0"]),
     "rocsolver": _rocm_dlopen_patchelf(
@@ -183,7 +188,7 @@ _ROCM_PACKAGES = {
             name = "runfiles",
             srcs = glob(["lib/hipblaslt/library/**"]),
         )
-        """
+        """,
     ]),
     "hipfft": packages.filegroup(name = "hipfft", srcs = ["lib/libhipfft.so.0"]),
     "hip-runtime-amd": "\n".join([
@@ -255,7 +260,7 @@ def _rocm_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libpjrt_rocm", "hipblaslt", "rocblas"],
+        root_module_direct_deps = ["amd-smi-lib", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "hipblaslt", "rocblas"],
         root_module_direct_dev_deps = [],
     )
 

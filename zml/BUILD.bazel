@@ -1,4 +1,4 @@
-load("@com_google_protobuf//upb/bazel:upb_c_proto_library.bzl", "upb_c_proto_library")
+load("@com_google_protobuf//bazel:upb_proto_library.bzl", "upb_c_proto_library")
 load("@rules_cc//cc:defs.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
@@ -45,13 +45,13 @@ zig_library(
         "mlirx.zig",
         "module.zig",
         "nn.zig",
+        "sharding.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",
         "profiler.zig",
         "safetensors.zig",
         "shape.zig",
-        "sharding.zig",
         "slice.zig",
         "tensor.zig",
         "testing.zig",
@@ -66,11 +66,11 @@ zig_library(
     ],
     deps = [
         ":posix",
-        ":profiler_options",
         ":xla_compile_options_upb",
         ":xla_data_upb",
         "//bazel",
         "//ffi:zig",
+        ":profiler_options",
         "//mlir",
         "//mlir/dialects",
         "//pjrt",
@@ -88,6 +88,7 @@ zig_library(
         "//conditions:default": [],
     }),
 )
+
 
 zig_test(
     name = "test",

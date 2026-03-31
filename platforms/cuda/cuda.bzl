@@ -39,6 +39,14 @@ _UBUNTU_PACKAGES = {
 }
 
 CUDA_PACKAGES = {
+    "cuda_nvml_dev": "\n".join([
+        packages.cc_library(
+            name = "nvml",
+            hdrs = ["include/nvml.h"],
+            includes = ["include"],
+            visibility = ["//visibility:public"],
+        ),
+    ]),
     "cuda_cudart": "\n".join([
         # Driver API only
         packages.cc_library(
@@ -275,7 +283,7 @@ def _cuda_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["libpjrt_cuda"],
+        root_module_direct_deps = ["cuda_nvml_dev", "libpjrt_cuda"],
         root_module_direct_dev_deps = [],
     )
 
