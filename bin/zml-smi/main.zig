@@ -14,7 +14,6 @@ const HostInfo = @import("zml-smi/info").host_info.HostInfo;
 const linux = @import("zml-smi/bindings/linux");
 const ProcessEnricher = linux.process.ProcessEnricher;
 const platform = @import("zml-smi/platform");
-const Worker = @import("zml-smi/worker").Worker;
 const host = linux.metrics;
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
@@ -49,19 +48,13 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    var w: Worker = .{ .poll_interval_ms = args.poll_interval };
-
     const targets = platform.detect(io);
 
-    var collector: Collector = .{
-        .arena = arena,
-        .gpa = gpa,
-        .worker = &w,
-        .io = io,
+    var collector: Collector = .init(arena, gpa, io, .{
+        .poll_interval_ms = args.poll_interval,
         .poll_only = !args.top,
-    };
+    });
     defer collector.deinit();
-    defer w.shutdown(io);
 
     var host_info: HostInfo = .{ .values = .{ .{}, .{} } };
     try host.init(&collector, &host_info);

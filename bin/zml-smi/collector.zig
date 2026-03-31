@@ -3,7 +3,7 @@ const smi_info = @import("zml-smi/info");
 const DeviceInfo = smi_info.device_info.DeviceInfo;
 const pi = smi_info.process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("zml-smi/worker").Worker;
+const Worker = @import("worker.zig").Worker;
 
 pub const Collector = struct {
     device_infos: std.ArrayList(*DeviceInfo) = .empty,
@@ -11,9 +11,19 @@ pub const Collector = struct {
     poll_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
-    worker: *Worker,
+    worker: Worker,
     io: std.Io,
-    poll_only: bool = false,
+    poll_only: bool,
+
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, options: struct { poll_interval_ms: u16, poll_only: bool = false }) Collector {
+        return .{
+            .arena = arena,
+            .gpa = gpa,
+            .io = io,
+            .worker = .{ .poll_interval_ms = options.poll_interval_ms },
+            .poll_only = options.poll_only,
+        };
+    }
 
     pub fn addDevice(self: *Collector, initial: DeviceInfo) !*DeviceInfo {
         const info = try self.arena.create(DeviceInfo);
@@ -64,10 +74,12 @@ pub const Collector = struct {
                     }
                 }
             }
-        }.f, .{ self.io, self.worker, args });
+        }.f, .{ self.io, &self.worker, args });
     }
 
     pub fn deinit(self: *Collector) void {
+        self.worker.shutdown(self.io);
+
         for (self.device_infos.items) |info| {
             self.arena.destroy(info);
         }
