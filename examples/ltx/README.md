@@ -40,12 +40,19 @@ Python (M0)                    Zig (M1)                     Python (M2)
 text encoding ──┐              Stage 1 denoiser             upsample + noise
 noise init      ├─→ inputs ──→ (30 steps × 4 passes) ──→   init for Stage 2
 sigma schedule  ┘              per block: 48 blocks          │
-                                                             ▼
-                               Zig (M3)                     Python (M4)
-                               ───────────────              ─────────────────
-                               Stage 2 denoiser             VAE decode
-                               (3 steps × 1 pass)  ──────→ video + audio
-                               per block: 48 blocks         → output.mp4
+                                                             │
+                               Zig (M3)                      │
+                               ───────────────               │
+                               Stage 2 denoiser   ◀─────────┘
+                               (3 steps × 1 pass)
+                               per block: 48 blocks
+                                        │
+                                        ▼
+                               Python (M4)
+                               ─────────────────
+                               VAE decode
+                               video + audio
+                               → output.mp4
 ```
 
 ## Running the Full Pipeline
