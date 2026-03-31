@@ -10,7 +10,7 @@ zig_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//bin/zml-smi:collector",
+        "//bin/zml-smi/collector",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:sysfs",
     ],

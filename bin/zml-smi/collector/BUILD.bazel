@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "collector",
+    import_name = "zml-smi/collector",
+    main = "collector.zig",
+    srcs = ["worker.zig"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
+    ],
+)

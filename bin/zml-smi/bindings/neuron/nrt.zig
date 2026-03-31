@@ -53,10 +53,9 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
         if (std.c.dlerror()) |err| std.log.err("neuron: dlopen: {s}", .{err});
         return error.NrtUnavailable;
     };
-
     var dynlib: std.DynLib = .{ .inner = .{ .handle = dl_handle } };
-    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.NrtUnavailable;
 
+    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.NrtUnavailable;
     const private_fns = resolveFromElf(dl_handle, io, "nrt_init") catch |err| {
         std.log.err("neuron: ELF resolution failed: {s}", .{@errorName(err)});
         return error.NrtUnavailable;

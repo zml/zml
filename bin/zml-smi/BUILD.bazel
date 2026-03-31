@@ -9,18 +9,6 @@ load("@tar.bzl//tar:tar.bzl", "tar")
 # zig libraries
 
 zig_library(
-    name = "collector",
-    import_name = "zml-smi/collector",
-    main = "collector.zig",
-    srcs = ["worker.zig"],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//bin/zml-smi/info",
-        "//bin/zml-smi/utils:double_buffer",
-    ],
-)
-
-zig_library(
     name = "platform",
     import_name = "zml-smi/platform",
     main = "platform.zig",
@@ -93,7 +81,7 @@ zig_binary(
     data = [":sandbox"],
     main = "main.zig",
     deps = [
-        ":collector",
+        "//bin/zml-smi/collector",
         ":platform",
         "//bin/zml-smi/bindings/linux",
         "//bin/zml-smi/info",
