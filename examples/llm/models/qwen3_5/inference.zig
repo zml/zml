@@ -23,11 +23,12 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
+        const model_partitions = shardings.model.numPartitionsForLogicalAxis(.model);
         return .{
             .prefill_tokens = .init(.{ .b = 1, .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .b = 1, .s = 1 }, .u32),
             .token_index = .init(.{}, .u32),
-            .kv_cache = .init(config, 1, seqlen, dtype, .f32),
+            .kv_cache = .init(config, 1, seqlen, dtype, .f32, model_partitions),
             .rng = .init(),
             .seqlen = seqlen,
             .shardings = shardings,

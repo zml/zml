@@ -41,6 +41,21 @@ fn disableXlaLogs() void {
     );
 }
 
+fn validateDeviceCount(target: Target, num_devices: usize) !void {
+    switch (target) {
+        .cpu, .cuda, .rocm, .tpu, .neuron => {
+            if (num_devices == 0) {
+                log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
+                return error.ZeroVisibleDevices;
+            }
+            if (!std.math.isPowerOfTwo(num_devices)) {
+                log.err("Platform {} requires a power-of-two device count, got {}", .{ target, num_devices });
+                return error.InvalidDeviceCount;
+            }
+        },
+    }
+}
+
 fn loadOrGetApi(allocator: std.mem.Allocator, io: std.Io, target: Target) !*const pjrt.Api {
     return switch (target) {
         inline else => |tag| @field(api_map, @tagName(tag)) orelse b: {
@@ -194,6 +209,7 @@ pub const Platform = struct {
         var named_values_buf: [16]pjrt.NamedValue = undefined;
         const pjrt_client = try pjrt.Client.init(api, options.toNamedValues(target, &named_values_buf));
         const pjrt_devices = pjrt_client.addressableDevices(api);
+        try validateDeviceCount(target, pjrt_devices.len);
         if (pjrt_devices.len > MAX_NUM_DEVICES) {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
