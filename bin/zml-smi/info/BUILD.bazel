@@ -10,5 +10,5 @@ zig_library(
         "process_info.zig",
     ],
     visibility = ["//visibility:public"],
-    deps = ["//bin/zml-smi/utils"],
+    deps = ["//bin/zml-smi/utils:double_buffer"],
 )

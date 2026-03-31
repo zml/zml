@@ -13,6 +13,6 @@ zig_library(
         "//bin/zml-smi:collector",
         "//bin/zml-smi:worker",
         "//bin/zml-smi/info",
-        "//bin/zml-smi/utils",
+        "//bin/zml-smi/utils:sysfs",
     ],
 )

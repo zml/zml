@@ -1,5 +1,5 @@
 const std = @import("std");
-const sysfs = @import("zml-smi/utils").sysfs;
+const sysfs = @import("zml-smi/sysfs");
 const tpuinfo = @import("tpuinfo.zig");
 const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;

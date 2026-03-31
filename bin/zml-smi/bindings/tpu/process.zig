@@ -1,7 +1,7 @@
 const std = @import("std");
 const smi_info = @import("zml-smi/info");
 const pi = smi_info.process_info;
-const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const DeviceInfo = smi_info.device_info.DeviceInfo;
 const Worker = @import("zml-smi/worker").Worker;
 

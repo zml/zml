@@ -1,8 +1,8 @@
 const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
-const DynLib = @import("zml-smi/utils").dynlib;
-const sandbox = @import("zml-smi/utils").sandbox;
+const DynLib = @import("zml-smi/dynlib");
+const sandbox = @import("zml-smi/sandbox");
 
 const AmdSmi = @This();
 

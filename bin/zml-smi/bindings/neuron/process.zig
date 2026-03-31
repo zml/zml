@@ -4,7 +4,7 @@ const Nrt = @import("nrt.zig");
 const smi_info = @import("zml-smi/info");
 const pi = smi_info.process_info;
 const DeviceInfo = smi_info.device_info.DeviceInfo;
-const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("zml-smi/worker").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {

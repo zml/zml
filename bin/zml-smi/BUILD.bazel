@@ -23,7 +23,7 @@ zig_library(
     deps = [
         ":worker",
         "//bin/zml-smi/info",
-        "//bin/zml-smi/utils",
+        "//bin/zml-smi/utils:double_buffer",
     ],
 )
 
@@ -106,7 +106,6 @@ zig_binary(
         "//bin/zml-smi/bindings/linux",
         "//bin/zml-smi/info",
         "//bin/zml-smi/tui",
-        "//bin/zml-smi/utils",
         "//stdx",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",

@@ -1,5 +1,5 @@
 const std = @import("std");
-const sysfs = @import("zml-smi/utils").sysfs;
+const sysfs = @import("zml-smi/sysfs");
 const host_info = @import("zml-smi/info").host_info;
 const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;

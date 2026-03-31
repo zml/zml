@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @import("c");
-const DynLib = @import("zml-smi/utils").dynlib;
+const DynLib = @import("zml-smi/dynlib");
 
 const Nvml = @This();
 

@@ -44,7 +44,7 @@ zig_library(
         "//bin/zml-smi:platform",
         "//bin/zml-smi/bindings/linux",
         "//bin/zml-smi/info",
-        "//bin/zml-smi/utils",
+        "//bin/zml-smi/utils:double_buffer",
         "@libvaxis//:vaxis",
     ],
 )

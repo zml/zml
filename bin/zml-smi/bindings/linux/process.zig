@@ -1,5 +1,5 @@
 const std = @import("std");
-const sysfs = @import("zml-smi/utils").sysfs;
+const sysfs = @import("zml-smi/sysfs");
 const pi = @import("zml-smi/info").process_info;
 
 const ProcessInfo = pi.ProcessInfo;
