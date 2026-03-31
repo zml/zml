@@ -22,7 +22,7 @@ bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.6.8")
+bazel_dep(name = "llvm", version = "0.7.0")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 
@@ -83,12 +83,10 @@ python.toolchain(python_version = "3.12")
 use_repo(python, "python_versions")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
-pip_neuron = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 
+pip_neuron = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 pip_neuron.parse(
     download_only = True,
-    hub_name = "neuron_py_deps",
-    python_version = "3.12",
     extra_pip_args = [
         "--abi=cp312",
         "--implementation=cp",
@@ -99,6 +97,8 @@ pip_neuron.parse(
         "--platform=manylinux_2_28_x86_64",
         "--platform=manylinux_2_29_x86_64",
     ],
+    hub_name = "neuron_py_deps",
+    python_version = "3.12",
     requirements_lock = "//platforms/neuron:requirements.lock.txt",
     target_platforms = ["linux_x86_64"],
 )
@@ -225,20 +225,18 @@ oci.pull(
     image = "gcr.io/distroless/cc-debian12",
     platforms = ["linux/amd64"],
 )
-
 oci.pull(
     name = "debian_12",
-    image = "docker.io/library/debian:12",
     digest = "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
+    image = "docker.io/library/debian:12",
     platforms = ["linux/amd64"],
 )
-
 use_repo(
     oci,
-    "distroless_cc_debian12",
-    "distroless_cc_debian12_linux_amd64",
     "debian_12",
     "debian_12_linux_amd64",
+    "distroless_cc_debian12",
+    "distroless_cc_debian12_linux_amd64",
 )
 
 git_override(
