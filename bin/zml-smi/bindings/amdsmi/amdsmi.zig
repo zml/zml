@@ -14,21 +14,21 @@ lib: Fns,
 gpu_handles: []c.amdsmi_processor_handle,
 
 const Fns = struct {
-    amdsmi_init: DynLib.Fn(c,"amdsmi_init"),
-    amdsmi_get_socket_handles: DynLib.Fn(c,"amdsmi_get_socket_handles"),
-    amdsmi_get_processor_handles: DynLib.Fn(c,"amdsmi_get_processor_handles"),
-    amdsmi_get_gpu_asic_info: DynLib.Fn(c,"amdsmi_get_gpu_asic_info"),
-    amdsmi_get_gpu_metrics_info: DynLib.Fn(c,"amdsmi_get_gpu_metrics_info"),
-    amdsmi_get_power_info: DynLib.Fn(c,"amdsmi_get_power_info"),
-    amdsmi_get_temp_metric: DynLib.Fn(c,"amdsmi_get_temp_metric"),
-    amdsmi_get_gpu_fan_speed: DynLib.Fn(c,"amdsmi_get_gpu_fan_speed"),
-    amdsmi_get_gpu_activity: DynLib.Fn(c,"amdsmi_get_gpu_activity"),
-    amdsmi_get_clock_info: DynLib.Fn(c,"amdsmi_get_clock_info"),
-    amdsmi_get_gpu_memory_total: DynLib.Fn(c,"amdsmi_get_gpu_memory_total"),
-    amdsmi_get_gpu_memory_usage: DynLib.Fn(c,"amdsmi_get_gpu_memory_usage"),
-    amdsmi_get_pcie_info: DynLib.Fn(c,"amdsmi_get_pcie_info"),
-    amdsmi_get_gpu_bdf_id: DynLib.Fn(c,"amdsmi_get_gpu_bdf_id"),
-    amdsmi_get_gpu_process_list: DynLib.Fn(c,"amdsmi_get_gpu_process_list"),
+    amdsmi_init: *const @TypeOf(c.amdsmi_init),
+    amdsmi_get_socket_handles: *const @TypeOf(c.amdsmi_get_socket_handles),
+    amdsmi_get_processor_handles: *const @TypeOf(c.amdsmi_get_processor_handles),
+    amdsmi_get_gpu_asic_info: *const @TypeOf(c.amdsmi_get_gpu_asic_info),
+    amdsmi_get_gpu_metrics_info: *const @TypeOf(c.amdsmi_get_gpu_metrics_info),
+    amdsmi_get_power_info: *const @TypeOf(c.amdsmi_get_power_info),
+    amdsmi_get_temp_metric: *const @TypeOf(c.amdsmi_get_temp_metric),
+    amdsmi_get_gpu_fan_speed: *const @TypeOf(c.amdsmi_get_gpu_fan_speed),
+    amdsmi_get_gpu_activity: *const @TypeOf(c.amdsmi_get_gpu_activity),
+    amdsmi_get_clock_info: *const @TypeOf(c.amdsmi_get_clock_info),
+    amdsmi_get_gpu_memory_total: *const @TypeOf(c.amdsmi_get_gpu_memory_total),
+    amdsmi_get_gpu_memory_usage: *const @TypeOf(c.amdsmi_get_gpu_memory_usage),
+    amdsmi_get_pcie_info: *const @TypeOf(c.amdsmi_get_pcie_info),
+    amdsmi_get_gpu_bdf_id: *const @TypeOf(c.amdsmi_get_gpu_bdf_id),
+    amdsmi_get_gpu_process_list: *const @TypeOf(c.amdsmi_get_gpu_process_list),
 };
 
 pub fn init(allocator: std.mem.Allocator) !AmdSmi {
@@ -38,7 +38,13 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
 
-    const fns = DynLib.open(Fns, path) orelse return error.AmdSmiUnavailable;
+    var dynlib: std.DynLib = .{ .inner = .{
+        .handle = std.c.dlopen(path, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
+            if (std.c.dlerror()) |err| std.log.err("amdsmi: dlopen: {s}", .{err});
+            return error.AmdSmiUnavailable;
+        },
+    } };
+    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.AmdSmiUnavailable;
 
     try check(fns.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
 

@@ -11,33 +11,38 @@ pub const ProcessInfo_t = c.nvmlProcessInfo_t;
 lib: Fns,
 
 const Fns = struct {
-    nvmlInit_v2: DynLib.Fn(c,"nvmlInit_v2"),
-    nvmlDeviceGetHandleByIndex_v2: DynLib.Fn(c,"nvmlDeviceGetHandleByIndex_v2"),
-    nvmlDeviceGetCount_v2: DynLib.Fn(c,"nvmlDeviceGetCount_v2"),
-    nvmlDeviceGetName: DynLib.Fn(c,"nvmlDeviceGetName"),
-    nvmlDeviceGetPowerUsage: DynLib.Fn(c,"nvmlDeviceGetPowerUsage"),
-    nvmlDeviceGetTemperature: DynLib.Fn(c,"nvmlDeviceGetTemperature"),
-    nvmlDeviceGetUtilizationRates: DynLib.Fn(c,"nvmlDeviceGetUtilizationRates"),
-    nvmlDeviceGetClockInfo: DynLib.Fn(c,"nvmlDeviceGetClockInfo"),
-    nvmlDeviceGetMaxClockInfo: DynLib.Fn(c,"nvmlDeviceGetMaxClockInfo"),
-    nvmlDeviceGetMemoryInfo: DynLib.Fn(c,"nvmlDeviceGetMemoryInfo"),
-    nvmlDeviceGetFanSpeed: DynLib.Fn(c,"nvmlDeviceGetFanSpeed"),
-    nvmlDeviceGetEnforcedPowerLimit: DynLib.Fn(c,"nvmlDeviceGetEnforcedPowerLimit"),
-    nvmlDeviceGetPcieThroughput: DynLib.Fn(c,"nvmlDeviceGetPcieThroughput"),
-    nvmlDeviceGetEncoderUtilization: DynLib.Fn(c,"nvmlDeviceGetEncoderUtilization"),
-    nvmlDeviceGetDecoderUtilization: DynLib.Fn(c,"nvmlDeviceGetDecoderUtilization"),
-    nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn(c,"nvmlDeviceGetCurrPcieLinkGeneration"),
-    nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn(c,"nvmlDeviceGetCurrPcieLinkWidth"),
-    nvmlDeviceGetMemoryBusWidth: DynLib.Fn(c,"nvmlDeviceGetMemoryBusWidth"),
-    nvmlDeviceGetComputeRunningProcesses_v3: DynLib.Fn(c,"nvmlDeviceGetComputeRunningProcesses_v3"),
-    nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn(c,"nvmlDeviceGetGraphicsRunningProcesses_v3"),
-    nvmlDeviceGetProcessUtilization: DynLib.Fn(c,"nvmlDeviceGetProcessUtilization"),
+    nvmlInit_v2: *const @TypeOf(c.nvmlInit_v2),
+    nvmlDeviceGetHandleByIndex_v2: *const @TypeOf(c.nvmlDeviceGetHandleByIndex_v2),
+    nvmlDeviceGetCount_v2: *const @TypeOf(c.nvmlDeviceGetCount_v2),
+    nvmlDeviceGetName: *const @TypeOf(c.nvmlDeviceGetName),
+    nvmlDeviceGetPowerUsage: *const @TypeOf(c.nvmlDeviceGetPowerUsage),
+    nvmlDeviceGetTemperature: *const @TypeOf(c.nvmlDeviceGetTemperature),
+    nvmlDeviceGetUtilizationRates: *const @TypeOf(c.nvmlDeviceGetUtilizationRates),
+    nvmlDeviceGetClockInfo: *const @TypeOf(c.nvmlDeviceGetClockInfo),
+    nvmlDeviceGetMaxClockInfo: *const @TypeOf(c.nvmlDeviceGetMaxClockInfo),
+    nvmlDeviceGetMemoryInfo: *const @TypeOf(c.nvmlDeviceGetMemoryInfo),
+    nvmlDeviceGetFanSpeed: *const @TypeOf(c.nvmlDeviceGetFanSpeed),
+    nvmlDeviceGetEnforcedPowerLimit: *const @TypeOf(c.nvmlDeviceGetEnforcedPowerLimit),
+    nvmlDeviceGetPcieThroughput: *const @TypeOf(c.nvmlDeviceGetPcieThroughput),
+    nvmlDeviceGetEncoderUtilization: *const @TypeOf(c.nvmlDeviceGetEncoderUtilization),
+    nvmlDeviceGetDecoderUtilization: *const @TypeOf(c.nvmlDeviceGetDecoderUtilization),
+    nvmlDeviceGetCurrPcieLinkGeneration: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkGeneration),
+    nvmlDeviceGetCurrPcieLinkWidth: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkWidth),
+    nvmlDeviceGetMemoryBusWidth: *const @TypeOf(c.nvmlDeviceGetMemoryBusWidth),
+    nvmlDeviceGetComputeRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetComputeRunningProcesses_v3),
+    nvmlDeviceGetGraphicsRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
+    nvmlDeviceGetProcessUtilization: *const @TypeOf(c.nvmlDeviceGetProcessUtilization),
 };
 
 pub fn init() Error!Nvml {
-    const fns = DynLib.open(Fns, "libnvidia-ml.so.1") orelse
-        DynLib.open(Fns, "libnvidia-ml.so") orelse
-        return error.NvmlUnavailable;
+    var dynlib: std.DynLib = .{ .inner = .{
+        .handle = std.c.dlopen("libnvidia-ml.so.1", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse
+            std.c.dlopen("libnvidia-ml.so", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
+            if (std.c.dlerror()) |err| std.log.err("nvml: dlopen: {s}", .{err});
+            return error.NvmlUnavailable;
+        },
+    } };
+    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.NvmlUnavailable;
     try check(fns.nvmlInit_v2());
     return .{ .lib = fns };
 }
