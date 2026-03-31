@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const tracy = @import("tracy");
 const zml = @import("zml");
 const stdx = zml.stdx;
 const attention = zml.attention.attention;

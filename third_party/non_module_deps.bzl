@@ -1,12 +1,13 @@
 load("//third_party/arocc:repo.bzl", arocc = "repo")
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
-load("//third_party/mnist:repo.bzl", mnist = "repo")
-load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
-load("//third_party/translate-c:repo.bzl", translate_c = "repo")
-load("//third_party/xla:repo.bzl", xla = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
+load("//third_party/mnist:repo.bzl", mnist = "repo")
+load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/stb:repo.bzl", stb = "repo")
+load("//third_party/tracy:repo.bzl", tracy = "repo")
+load("//third_party/translate-c:repo.bzl", translate_c = "repo")
+load("//third_party/xla:repo.bzl", xla = "repo")
 
 def _non_module_deps_impl(mctx):
     com_google_sentencepiece()
@@ -18,6 +19,7 @@ def _non_module_deps_impl(mctx):
     flashattn()
     linenoise()
     stb()
+    tracy()
 
     return mctx.extension_metadata(
         reproducible = True,

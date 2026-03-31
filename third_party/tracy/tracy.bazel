@@ -1,0 +1,88 @@
+load("@bazel_skylib//rules:common_settings.bzl", "bool_flag")
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
+includes = [
+    'public/tracy/TracyC.h',
+    'public/tracy/Tracy.hpp',
+    'public/tracy/TracyCUDA.hpp',
+    'public/tracy/TracyD3D11.hpp',
+    'public/tracy/TracyD3D12.hpp',
+    'public/tracy/TracyLua.hpp',
+    'public/tracy/TracyOpenCL.hpp',
+    'public/tracy/TracyOpenGL.hpp',
+    'public/tracy/TracyVulkan.hpp'
+]
+
+client_includes = [
+    'public/client/tracy_concurrentqueue.h',
+    'public/client/tracy_rpmalloc.hpp',
+    'public/client/tracy_SPSCQueue.h',
+    'public/client/TracyArmCpuTable.hpp',
+    'public/client/TracyCallstack.h',
+    'public/client/TracyCallstack.hpp',
+    'public/client/TracyDebug.hpp',
+    'public/client/TracyDxt1.hpp',
+    'public/client/TracyFastVector.hpp',
+    'public/client/TracyKCore.hpp',
+    'public/client/TracyLock.hpp',
+    'public/client/TracyProfiler.hpp',
+    'public/client/TracyRingBuffer.hpp',
+    'public/client/TracyScoped.hpp',
+    'public/client/TracyStringHelpers.hpp',
+    'public/client/TracySysPower.hpp',
+    'public/client/TracySysTime.hpp',
+    'public/client/TracySysTrace.hpp',
+    'public/client/TracyThread.hpp'
+]
+
+common_includes = [
+    'public/common/tracy_lz4.hpp',
+    'public/common/tracy_lz4hc.hpp',
+    'public/common/TracyAlign.hpp',
+    'public/common/TracyAlloc.hpp',
+    'public/common/TracyApi.h',
+    'public/common/TracyColor.hpp',
+    'public/common/TracyForceInline.hpp',
+    'public/common/TracyMutex.hpp',
+    'public/common/TracyProtocol.hpp',
+    'public/common/TracyQueue.hpp',
+    'public/common/TracySocket.hpp',
+    'public/common/TracyStackFrames.hpp',
+    'public/common/TracySystem.hpp',
+    'public/common/TracyWinFamily.hpp',
+    'public/common/TracyYield.hpp'
+]
+
+cc_library(
+    name = "client2",
+    additional_compiler_inputs = [
+        "public/common/TracySystem.cpp",
+        "public/common/tracy_lz4.cpp",
+        "public/client/TracyProfiler.cpp",
+        "public/client/TracyCallstack.cpp",
+        "public/common/TracyStackFrames.cpp",
+        "public/client/TracySysPower.cpp",
+        "public/client/TracySysTime.cpp",
+        "public/client/TracySysTrace.cpp",
+        "public/common/TracySocket.cpp",
+        "public/client/tracy_rpmalloc.cpp",
+        "public/client/TracyDxt1.cpp",
+        "public/client/TracyAlloc.cpp",
+        "public/client/TracyOverride.cpp",
+        "public/client/TracyKCore.cpp",
+    ] + glob(["public/libbacktrace/*"]),
+    defines = ["TRACY_ENABLE"],
+    hdrs = [
+        "public/common/TracyApi.h",
+        "public/tracy/TracyC.h",
+    ],
+    srcs = ["public/TracyClient.cpp"] + client_includes + common_includes + includes,
+    includes = ["public"],
+    visibility = ["//visibility:public"],
+)
+
+alias(
+    name = "tracy",
+    actual = "@zml//third_party/tracy",
+    visibility = ["//visibility:public"],
+)

@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const tracy = @import("tracy");
 const zml = @import("zml");
 const attention = zml.attention.attention;
 
@@ -93,6 +94,10 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
+        const ctx = tracy.trace(@src());
+        defer ctx.end();
+        ctx.setName("prefill");
+
         const tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{ .batch = 1, .seq = self.seqlen }, .u32));
         defer tokens_slice.free(self.allocator);
         const tokens = tokens_slice.items(u32);
@@ -143,6 +148,12 @@ pub const Session = struct {
         defer actual_seq_len_buf.deinit();
 
         generation: while (true) {
+            const ctx = tracy.trace(@src());
+            defer ctx.end();
+
+            const frame = tracy.namedFrame("decode");
+            defer frame.end();
+
             const token_id = self.generated_token_slice.items(u32)[0];
 
             if (token_id == self.config.eos_token_id) break :generation;

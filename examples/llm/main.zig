@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
+const tracy = @import("tracy");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
@@ -32,13 +33,16 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
         \\
     ;
 };
 
 pub fn main(init: std.process.Init) !void {
+    c.TracyCFree(ptr: anytype)
+    _ = tracy.___tracy_begin_sampling_profiling();
+    defer tracy.___tracy_end_sampling_profiling();
     const allocator = init.gpa;
 
     // `bazel run` executes binaries from Bazel's runfiles tree by default.
