@@ -45,7 +45,7 @@ run_binary(
         "$(location amdgpu.ids)",
     ],
     tool = ":merge_amdgpu_ids",
-    visibility = ["@zml//bin/smi:__pkg__"],
+    visibility = ["@zml//bin/zml-smi:__pkg__"],
 )
 
 copy_to_directory(

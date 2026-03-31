@@ -40,5 +40,5 @@ export const _ linksection(init_array_section) = &struct {
 pub fn path(buf: *[std.Io.Dir.max_path_bytes]u8) ?[]const u8 {
     const with_repo = runfiles_global.withSourceRepo(bazel_builtin.current_repository);
 
-    return with_repo.rlocation("zml/bin/smi/sandbox", buf) catch null;
+    return with_repo.rlocation("zml/bin/zml-smi/sandbox", buf) catch null;
 }
