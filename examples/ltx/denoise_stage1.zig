@@ -20,8 +20,8 @@ comptime {
 
 pub const std_options: std.Options = .{ .log_level = .info };
 
-/// STG perturbation is applied at this block index (0-based, so block 29 in
-/// 1-based Python convention = index 28).
+/// STG perturbation is applied at this 0-based block index.
+/// Matches LTX_2_3_PARAMS.stg_blocks=[28] in Python (also 0-based).
 const STG_BLOCK_IDX: usize = 28;
 
 /// Number of denoising steps.
