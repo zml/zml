@@ -1,0 +1,27 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "tpuinfo",
+    srcs = ["tpuinfo.cc"],
+    hdrs = ["tpuinfo.h"],
+    deps = [
+        "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
+        "@grpc//:grpc++_unsecure",
+    ],
+)
+
+zig_library(
+    name = "tpu",
+    import_name = "zml-smi/bindings/tpu",
+    srcs = [
+        "tpuinfo.zig",
+        "process.zig",
+    ],
+    main = "metrics.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":tpuinfo",
+        "//bin/zml-smi/utils",
+    ],
+)

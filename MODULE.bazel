@@ -27,6 +27,7 @@ bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
 
+bazel_dep(name = "gawk", version = "5.3.2.bcr.3")
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
 # BSDTar toolchains

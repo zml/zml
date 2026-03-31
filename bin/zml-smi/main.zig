@@ -3,21 +3,21 @@ const builtin = @import("builtin");
 
 const stdx = @import("stdx");
 
+const host = @import("bindings/linux/metrics.zig");
+const ProcessEnricher = @import("bindings/linux/process.zig").ProcessEnricher;
+const Collector = @import("collector.zig").Collector;
+const HostInfo = @import("info/host_info.zig").HostInfo;
+const platform = @import("platform.zig");
+const data = @import("tui/data.zig");
+const static_print = @import("tui/print.zig");
+const tui = @import("tui/tui.zig");
+const Worker = @import("worker.zig").Worker;
+
 pub const std_options: std.Options = .{
     .log_scope_levels = &.{
         .{ .scope = .vaxis, .level = .warn },
     },
 };
-
-const Collector = @import("collector.zig").Collector;
-const HostInfo = @import("info/host_info.zig").HostInfo;
-const ProcessEnricher = @import("bindings/linux/process.zig").ProcessEnricher;
-const platform = @import("platform.zig");
-const Worker = @import("worker.zig").Worker;
-const host = @import("bindings/linux/metrics.zig");
-const tui = @import("tui/tui.zig");
-const static_print = @import("tui/print.zig");
-const data = @import("tui/data.zig");
 
 const CliArgs = struct {
     top: bool = false,
@@ -38,7 +38,7 @@ const device_backends = if (builtin.os.tag != .macos) .{
     @import("bindings/nvml/metrics.zig"),
     @import("bindings/amdsmi/metrics.zig"),
     @import("bindings/neuron/metrics.zig"),
-    @import("bindings/tpu/metrics.zig"),
+    @import("zml-smi/bindings/tpu"),
 } else .{};
 
 pub fn main(init: std.process.Init) !void {

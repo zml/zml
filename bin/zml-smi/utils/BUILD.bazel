@@ -1,0 +1,13 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "utils",
+    import_name = "zml-smi/utils",
+    srcs = [
+        "double_buffer.zig",
+        "sandbox.zig",
+        "sysfs.zig",
+    ],
+    main = "utils.zig",
+    visibility = ["//visibility:public"],
+)

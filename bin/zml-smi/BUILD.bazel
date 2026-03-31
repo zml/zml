@@ -8,19 +8,6 @@ load("@tar.bzl//tar:mtree.bzl", "mtree_mutate", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
 load("//bazel:patchelf.bzl", "patchelf")
 
-# tpu grpc
-
-cc_library(
-    name = "tpuinfo",
-    srcs = ["bindings/tpu/libtpu/tpuinfo.cc"],
-    hdrs = ["bindings/tpu/libtpu/tpuinfo.h"],
-    strip_include_prefix = "bindings/tpu/libtpu",
-    deps = [
-        "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
-        "@grpc//:grpc++_unsecure",
-    ],
-)
-
 # smi
 
 run_binary(
@@ -91,17 +78,11 @@ zig_binary(
         "bindings/nvml/metrics.zig",
         "bindings/nvml/nvml.zig",
         "bindings/nvml/process.zig",
-        "bindings/tpu/process.zig",
-        "bindings/tpu/metrics.zig",
-        "bindings/tpu/tpuinfo.zig",
         "collector.zig",
         "info/device_info.zig",
         "info/host_info.zig",
         "info/process_info.zig",
         "platform.zig",
-        "utils/sandbox.zig",
-        "utils/double_buffer.zig",
-        "utils/sysfs.zig",
         "worker.zig",
     ],
     extra_srcs = glob([
@@ -117,7 +98,8 @@ zig_binary(
         "@platforms//os:macos": [],
         "//conditions:default": [
             "//platforms/neuron:libnrt_headers",
-            ":tpuinfo",
+            "//bin/zml-smi/bindings/tpu",
+            "//bin/zml-smi/utils",
             "@cuda_nvml_dev//:nvml",
             "@amd-smi-lib//:amdsmi",
         ],
@@ -138,39 +120,39 @@ mtree_mutate(
     strip_prefix = package_name(),
 )
 
-tar(
-    name = "archive",
-    srcs = [":zml-smi"],
-    args = [
-        "--options",
-        ",".join([
-            "zstd:compression-level=22",
-            "zstd:threads=16",
-        ]),
-    ],
-    compress = "zstd",
-    mtree = ":mtree",
-)
+# tar(
+#     name = "archive",
+#     srcs = [":zml-smi"],
+#     args = [
+#         "--options",
+#         ",".join([
+#             "zstd:compression-level=22",
+#             "zstd:threads=16",
+#         ]),
+#     ],
+#     compress = "zstd",
+#     mtree = ":mtree",
+# )
 
-oci_image(
-    name = "image_",
-    base = "@distroless_cc_debian12",
-    entrypoint = ["/zml-smi/zml-smi"],
-    tars = [
-        ":archive",
-    ],
-)
+# oci_image(
+#     name = "image_",
+#     base = "@distroless_cc_debian12",
+#     entrypoint = ["/zml-smi/zml-smi"],
+#     tars = [
+#         ":archive",
+#     ],
+# )
 
-platform_transition_filegroup(
-    name = "image",
-    srcs = [":image_"],
-    tags = ["manual"],
-    target_platform = "//platforms:linux_amd64",
-)
+# platform_transition_filegroup(
+#     name = "image",
+#     srcs = [":image_"],
+#     tags = ["manual"],
+#     target_platform = "//platforms:linux_amd64",
+# )
 
-oci_load(
-    name = "load",
-    image = ":image",
-    repo_tags = ["zmlai/zml-smi:latest"],
-    tags = ["manual"],
-)
+# oci_load(
+#     name = "load",
+#     image = ":image",
+#     repo_tags = ["zmlai/zml-smi:latest"],
+#     tags = ["manual"],
+# )
