@@ -258,7 +258,8 @@ All commands below run on the GPU server. Adjust `OUT`, `PROMPT`, and `SEED` for
 # Full mixed pipeline: "Someone walking by the beach at sunset"
 # ============================================================
 export OUT=/root/mixed_beach
-export CKPT=/root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors
+export CKPT=/root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors
+export CKPT_DISTILLED=/root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors
 export UPSAMPLER=/root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors
 export GEMMA=/root/models/gemma-3-12b-it
 export PROMPT="Someone walking by the beach at sunset"
@@ -267,19 +268,21 @@ export SEED=42
 mkdir -p $OUT/stage1_out $OUT/stage2_out
 
 # ---- M0: Python — text encode + noise init + reference trace ----
+# Stage 1 uses base model (30-step schedule), Stage 2 uses distilled (3-step schedule)
 cd /root/repos/LTX-2
 uv run /root/repos/zml/examples/ltx/export_mixed_pipeline.py \
     --output-dir $OUT \
     --prompt "$PROMPT" \
     --seed $SEED \
     --checkpoint $CKPT \
+    --stage2-checkpoint $CKPT_DISTILLED \
     --spatial-upsampler $UPSAMPLER \
-    --gemma-root $GEMMA
+    --gemma-root $GEMMA \
     --decode-video
 
 echo "M0 done" && ls -lh $OUT/stage1_inputs.safetensors $OUT/stage2_noise.safetensors $OUT/pipeline_meta.json
 
-# ---- M1: Zig Stage 1 (30 steps, 4-pass guidance) ----
+# ---- M1: Zig Stage 1 (30 steps, 4-pass guidance, base model) ----
 cd /root/repos/zml
 ulimit -s unlimited && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_stage1 -- \
     $CKPT \
@@ -302,10 +305,10 @@ uv run /root/repos/zml/examples/ltx/bridge_s1_to_s2.py \
 
 echo "M2 done" && ls -lh $OUT/stage2_inputs.safetensors
 
-# ---- M3: Zig Stage 2 (3 steps, distilled, --bf16-attn needed for 1536x1024) ----
+# ---- M3: Zig Stage 2 (3 steps, distilled model, --bf16-attn needed for 1536x1024) ----
 cd /root/repos/zml
 ulimit -s unlimited && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:denoise_e2e -- \
-    $CKPT \
+    $CKPT_DISTILLED \
     $OUT/stage2_inputs.safetensors \
     $OUT/stage2_out/ \
     --bf16-attn
@@ -319,7 +322,7 @@ uv run /root/repos/zml/examples/ltx/e2e/decode_latents.py \
     --video-latent $OUT/stage2_out/video_latent.bin \
     --audio-latent $OUT/stage2_out/audio_latent.bin \
     --output $OUT/output.mp4 \
-    --checkpoint $CKPT
+    --checkpoint $CKPT_DISTILLED
 
 echo "===== PIPELINE COMPLETE ====="
 echo "Output: $OUT/output.mp4"

@@ -6,8 +6,8 @@ capturing tensors at every boundary for validation, AND exporting the
 Stage 1 inputs and Stage 2 noise needed by the mixed Zig pipeline.
 
 Flow:
-  text enc → Stage 1 denoise (30 steps, full guidance) → upsample →
-  Stage 2 denoise (3 steps, distilled) → done
+  text enc → Stage 1 denoise (30 steps, full guidance, base model) → upsample →
+  Stage 2 denoise (3 steps, distilled model) → done
 
 Outputs:
   {out}/stage1_inputs.safetensors     — Stage 1 inputs for Zig driver (14 tensors)
@@ -25,6 +25,8 @@ Usage (on GPU server):
       --output-dir /root/mixed/ \
       --prompt "A beautiful sunset over the ocean" \
       --seed 10 \
+      --checkpoint ~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+      --stage2-checkpoint ~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
       --decode-video
 """
 
@@ -85,8 +87,13 @@ def parse_args() -> argparse.Namespace:
     # Model paths
     parser.add_argument(
         "--checkpoint", type=str,
+        default=str(Path("~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors").expanduser()),
+        help="Base model checkpoint (Stage 1 denoising, text encoder, image conditioner, upsampler, VAE)",
+    )
+    parser.add_argument(
+        "--stage2-checkpoint", type=str,
         default=str(Path("~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors").expanduser()),
-        help="Base model checkpoint (used for both Stage 1 and Stage 2)",
+        help="Distilled checkpoint for Stage 2 (3-step schedule requires distilled weights)",
     )
     parser.add_argument(
         "--spatial-upsampler", type=str,
@@ -146,6 +153,8 @@ def main() -> None:
     print(f"Prompt: {args.prompt!r}")
     print(f"Resolution: {args.width}x{args.height}, {args.num_frames} frames @ {args.frame_rate} fps")
     print(f"Seed: {args.seed}")
+    print(f"Stage 1 checkpoint: {args.checkpoint}")
+    print(f"Stage 2 checkpoint: {args.stage2_checkpoint}")
     print(f"Output: {out}")
 
     # ========================================================================
@@ -160,7 +169,7 @@ def main() -> None:
     upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
 
     stage_1_diffusion = DiffusionStage(args.checkpoint, dtype, device)
-    stage_2_diffusion = DiffusionStage(args.checkpoint, dtype, device)
+    stage_2_diffusion = DiffusionStage(args.stage2_checkpoint, dtype, device)
 
     generator = torch.Generator(device=device).manual_seed(args.seed)
     noiser = GaussianNoiser(generator=generator)
@@ -501,6 +510,7 @@ def main() -> None:
         "frame_rate": args.frame_rate,
         "num_inference_steps": args.num_inference_steps,
         "checkpoint": args.checkpoint,
+        "stage2_checkpoint": args.stage2_checkpoint,
         "spatial_upsampler": args.spatial_upsampler,
         "stage1": {
             "f_lat": f_lat_s1,
@@ -546,11 +556,11 @@ def main() -> None:
         tiling_config = TilingConfig.default()
         decode_generator = torch.Generator(device=device).manual_seed(args.seed)
 
-        video_decoder = VideoDecoder(args.checkpoint, dtype, device)
+        video_decoder = VideoDecoder(args.stage2_checkpoint, dtype, device)
         decoded_video = video_decoder(video_state_s2.latent, tiling_config, decode_generator)
         print("  Video decoded.")
 
-        audio_decoder = AudioDecoder(args.checkpoint, dtype, device)
+        audio_decoder = AudioDecoder(args.stage2_checkpoint, dtype, device)
         decoded_audio = audio_decoder(audio_state_s2.latent)
         print(f"  Audio decoded: sample_rate={decoded_audio.sampling_rate}")
 
