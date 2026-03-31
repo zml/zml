@@ -54,7 +54,7 @@ pub fn start(collector: *Collector) !void {
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
 
-            try collector.spawnPoll(pollOnce, .{ &info.neuron, dev });
+            try collector.spawnPoll(pollOnce, .{ poll_arena, &info.neuron, dev });
         }
     }
 

@@ -1,11 +1,9 @@
 const std = @import("std");
 
-pub fn poll(comptime DB: type, comptime Dev: type, comptime table: anytype) fn (DB, Dev) void {
+pub fn poll(comptime DB: type, comptime Dev: type, comptime table: anytype) fn (?*std.heap.ArenaAllocator, DB, Dev) void {
     return struct {
-        fn f(db: DB, dev: Dev) void {
-            if (@hasField(Dev, "arena")) {
-                _ = dev.arena.reset(.retain_capacity);
-            }
+        fn f(arena: ?*std.heap.ArenaAllocator, db: DB, dev: Dev) void {
+            if (arena) |a| _ = a.reset(.retain_capacity);
 
             const back = db.back();
             back.* = db.front().*;

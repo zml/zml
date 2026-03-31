@@ -21,7 +21,7 @@ pub fn start(collector: *Collector) !void {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
         const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        try collector.spawnPoll(pollOnce, .{ &info.cuda, dev });
+        try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev });
     }
 
     const processes = try collector.createProcessList();

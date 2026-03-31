@@ -22,5 +22,4 @@ pub const Worker = struct {
     ) !void {
         try self.group.concurrent(io, runFn, args);
     }
-
 };
