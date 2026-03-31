@@ -1,8 +1,8 @@
 const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
-const DynLib = @import("../dynlib.zig");
-const sandbox = @import("../../utils/sandbox.zig");
+const DynLib = @import("zml-smi/utils").dynlib;
+const sandbox = @import("zml-smi/utils").sandbox;
 
 const AmdSmi = @This();
 
@@ -14,21 +14,21 @@ lib: Fns,
 gpu_handles: []c.amdsmi_processor_handle,
 
 const Fns = struct {
-    amdsmi_init: DynLib.Fn("amdsmi_init"),
-    amdsmi_get_socket_handles: DynLib.Fn("amdsmi_get_socket_handles"),
-    amdsmi_get_processor_handles: DynLib.Fn("amdsmi_get_processor_handles"),
-    amdsmi_get_gpu_asic_info: DynLib.Fn("amdsmi_get_gpu_asic_info"),
-    amdsmi_get_gpu_metrics_info: DynLib.Fn("amdsmi_get_gpu_metrics_info"),
-    amdsmi_get_power_info: DynLib.Fn("amdsmi_get_power_info"),
-    amdsmi_get_temp_metric: DynLib.Fn("amdsmi_get_temp_metric"),
-    amdsmi_get_gpu_fan_speed: DynLib.Fn("amdsmi_get_gpu_fan_speed"),
-    amdsmi_get_gpu_activity: DynLib.Fn("amdsmi_get_gpu_activity"),
-    amdsmi_get_clock_info: DynLib.Fn("amdsmi_get_clock_info"),
-    amdsmi_get_gpu_memory_total: DynLib.Fn("amdsmi_get_gpu_memory_total"),
-    amdsmi_get_gpu_memory_usage: DynLib.Fn("amdsmi_get_gpu_memory_usage"),
-    amdsmi_get_pcie_info: DynLib.Fn("amdsmi_get_pcie_info"),
-    amdsmi_get_gpu_bdf_id: DynLib.Fn("amdsmi_get_gpu_bdf_id"),
-    amdsmi_get_gpu_process_list: DynLib.Fn("amdsmi_get_gpu_process_list"),
+    amdsmi_init: DynLib.Fn(c,"amdsmi_init"),
+    amdsmi_get_socket_handles: DynLib.Fn(c,"amdsmi_get_socket_handles"),
+    amdsmi_get_processor_handles: DynLib.Fn(c,"amdsmi_get_processor_handles"),
+    amdsmi_get_gpu_asic_info: DynLib.Fn(c,"amdsmi_get_gpu_asic_info"),
+    amdsmi_get_gpu_metrics_info: DynLib.Fn(c,"amdsmi_get_gpu_metrics_info"),
+    amdsmi_get_power_info: DynLib.Fn(c,"amdsmi_get_power_info"),
+    amdsmi_get_temp_metric: DynLib.Fn(c,"amdsmi_get_temp_metric"),
+    amdsmi_get_gpu_fan_speed: DynLib.Fn(c,"amdsmi_get_gpu_fan_speed"),
+    amdsmi_get_gpu_activity: DynLib.Fn(c,"amdsmi_get_gpu_activity"),
+    amdsmi_get_clock_info: DynLib.Fn(c,"amdsmi_get_clock_info"),
+    amdsmi_get_gpu_memory_total: DynLib.Fn(c,"amdsmi_get_gpu_memory_total"),
+    amdsmi_get_gpu_memory_usage: DynLib.Fn(c,"amdsmi_get_gpu_memory_usage"),
+    amdsmi_get_pcie_info: DynLib.Fn(c,"amdsmi_get_pcie_info"),
+    amdsmi_get_gpu_bdf_id: DynLib.Fn(c,"amdsmi_get_gpu_bdf_id"),
+    amdsmi_get_gpu_process_list: DynLib.Fn(c,"amdsmi_get_gpu_process_list"),
 };
 
 pub fn init(allocator: std.mem.Allocator) !AmdSmi {

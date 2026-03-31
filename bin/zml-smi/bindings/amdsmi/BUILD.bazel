@@ -1,0 +1,20 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "amdsmi",
+    import_name = "zml-smi/bindings/amdsmi",
+    main = "metrics.zig",
+    srcs = [
+        "amdsmi.zig",
+        "process.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi:collector",
+        "//bin/zml-smi:worker",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils",
+        "//stdx",
+        "@amd-smi-lib//:amdsmi",
+    ],
+)

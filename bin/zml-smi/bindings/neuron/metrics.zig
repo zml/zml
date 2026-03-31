@@ -1,11 +1,12 @@
 const std = @import("std");
-const sysfs = @import("../../utils/sysfs.zig");
-const device_info = @import("../../info/device_info.zig");
+const utils = @import("zml-smi/utils");
+const sysfs = utils.sysfs;
+const DoubleBuffer = utils.double_buffer.DoubleBuffer;
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const NeuronInfo = device_info.NeuronInfo;
-const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const Collector = @import("zml-smi/collector").Collector;
+const Worker = @import("zml-smi/worker").Worker;
 const Nrt = @import("nrt.zig");
 const process = @import("process.zig");
 

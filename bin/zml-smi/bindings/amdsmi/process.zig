@@ -1,9 +1,9 @@
 const std = @import("std");
 const c = std.c;
 const AmdSmi = @import("amdsmi.zig");
-const pi = @import("../../info/process_info.zig");
-const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("../../worker.zig").Worker;
+const pi = @import("zml-smi/info").process_info;
+const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const Worker = @import("zml-smi/worker").Worker;
 
 const bdf_len = "0000:00:00.0".len;
 

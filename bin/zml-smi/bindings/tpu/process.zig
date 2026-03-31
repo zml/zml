@@ -1,8 +1,9 @@
 const std = @import("std");
-const pi = @import("../../info/process_info.zig");
-const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
-const Worker = @import("../../worker.zig").Worker;
+const smi_info = @import("zml-smi/info");
+const pi = smi_info.process_info;
+const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const DeviceInfo = smi_info.device_info.DeviceInfo;
+const Worker = @import("zml-smi/worker").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
     try w.spawn(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos, dev_offset });

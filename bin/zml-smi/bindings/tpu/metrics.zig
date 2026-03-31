@@ -1,11 +1,11 @@
 const std = @import("std");
-const sysfs = @import("../../utils/sysfs.zig");
+const sysfs = @import("zml-smi/utils").sysfs;
 const tpuinfo = @import("tpuinfo.zig");
-const device_info = @import("../../info/device_info.zig");
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const TpuInfo = device_info.TpuInfo;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const Collector = @import("zml-smi/collector").Collector;
+const Worker = @import("zml-smi/worker").Worker;
 const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";

@@ -1,6 +1,6 @@
 const std = @import("std");
 const c = @import("c");
-const DynLib = @import("../dynlib.zig");
+const DynLib = @import("zml-smi/utils").dynlib;
 
 const Nvml = @This();
 
@@ -11,27 +11,27 @@ pub const ProcessInfo_t = c.nvmlProcessInfo_t;
 lib: Fns,
 
 const Fns = struct {
-    nvmlInit_v2: DynLib.Fn("nvmlInit_v2"),
-    nvmlDeviceGetHandleByIndex_v2: DynLib.Fn("nvmlDeviceGetHandleByIndex_v2"),
-    nvmlDeviceGetCount_v2: DynLib.Fn("nvmlDeviceGetCount_v2"),
-    nvmlDeviceGetName: DynLib.Fn("nvmlDeviceGetName"),
-    nvmlDeviceGetPowerUsage: DynLib.Fn("nvmlDeviceGetPowerUsage"),
-    nvmlDeviceGetTemperature: DynLib.Fn("nvmlDeviceGetTemperature"),
-    nvmlDeviceGetUtilizationRates: DynLib.Fn("nvmlDeviceGetUtilizationRates"),
-    nvmlDeviceGetClockInfo: DynLib.Fn("nvmlDeviceGetClockInfo"),
-    nvmlDeviceGetMaxClockInfo: DynLib.Fn("nvmlDeviceGetMaxClockInfo"),
-    nvmlDeviceGetMemoryInfo: DynLib.Fn("nvmlDeviceGetMemoryInfo"),
-    nvmlDeviceGetFanSpeed: DynLib.Fn("nvmlDeviceGetFanSpeed"),
-    nvmlDeviceGetEnforcedPowerLimit: DynLib.Fn("nvmlDeviceGetEnforcedPowerLimit"),
-    nvmlDeviceGetPcieThroughput: DynLib.Fn("nvmlDeviceGetPcieThroughput"),
-    nvmlDeviceGetEncoderUtilization: DynLib.Fn("nvmlDeviceGetEncoderUtilization"),
-    nvmlDeviceGetDecoderUtilization: DynLib.Fn("nvmlDeviceGetDecoderUtilization"),
-    nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn("nvmlDeviceGetCurrPcieLinkGeneration"),
-    nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn("nvmlDeviceGetCurrPcieLinkWidth"),
-    nvmlDeviceGetMemoryBusWidth: DynLib.Fn("nvmlDeviceGetMemoryBusWidth"),
-    nvmlDeviceGetComputeRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetComputeRunningProcesses_v3"),
-    nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetGraphicsRunningProcesses_v3"),
-    nvmlDeviceGetProcessUtilization: DynLib.Fn("nvmlDeviceGetProcessUtilization"),
+    nvmlInit_v2: DynLib.Fn(c,"nvmlInit_v2"),
+    nvmlDeviceGetHandleByIndex_v2: DynLib.Fn(c,"nvmlDeviceGetHandleByIndex_v2"),
+    nvmlDeviceGetCount_v2: DynLib.Fn(c,"nvmlDeviceGetCount_v2"),
+    nvmlDeviceGetName: DynLib.Fn(c,"nvmlDeviceGetName"),
+    nvmlDeviceGetPowerUsage: DynLib.Fn(c,"nvmlDeviceGetPowerUsage"),
+    nvmlDeviceGetTemperature: DynLib.Fn(c,"nvmlDeviceGetTemperature"),
+    nvmlDeviceGetUtilizationRates: DynLib.Fn(c,"nvmlDeviceGetUtilizationRates"),
+    nvmlDeviceGetClockInfo: DynLib.Fn(c,"nvmlDeviceGetClockInfo"),
+    nvmlDeviceGetMaxClockInfo: DynLib.Fn(c,"nvmlDeviceGetMaxClockInfo"),
+    nvmlDeviceGetMemoryInfo: DynLib.Fn(c,"nvmlDeviceGetMemoryInfo"),
+    nvmlDeviceGetFanSpeed: DynLib.Fn(c,"nvmlDeviceGetFanSpeed"),
+    nvmlDeviceGetEnforcedPowerLimit: DynLib.Fn(c,"nvmlDeviceGetEnforcedPowerLimit"),
+    nvmlDeviceGetPcieThroughput: DynLib.Fn(c,"nvmlDeviceGetPcieThroughput"),
+    nvmlDeviceGetEncoderUtilization: DynLib.Fn(c,"nvmlDeviceGetEncoderUtilization"),
+    nvmlDeviceGetDecoderUtilization: DynLib.Fn(c,"nvmlDeviceGetDecoderUtilization"),
+    nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn(c,"nvmlDeviceGetCurrPcieLinkGeneration"),
+    nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn(c,"nvmlDeviceGetCurrPcieLinkWidth"),
+    nvmlDeviceGetMemoryBusWidth: DynLib.Fn(c,"nvmlDeviceGetMemoryBusWidth"),
+    nvmlDeviceGetComputeRunningProcesses_v3: DynLib.Fn(c,"nvmlDeviceGetComputeRunningProcesses_v3"),
+    nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn(c,"nvmlDeviceGetGraphicsRunningProcesses_v3"),
+    nvmlDeviceGetProcessUtilization: DynLib.Fn(c,"nvmlDeviceGetProcessUtilization"),
 };
 
 pub fn init() Error!Nvml {

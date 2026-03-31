@@ -1,8 +1,8 @@
 const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
-const DynLib = @import("../dynlib.zig");
-const sandbox = @import("../../utils/sandbox.zig");
+const DynLib = @import("zml-smi/utils").dynlib;
+const sandbox = @import("zml-smi/utils").sandbox;
 
 const Nrt = @This();
 
@@ -21,14 +21,14 @@ handles: []const *c.ndl_device_t,
 device_indexes: []const c_int,
 
 const Fns = struct {
-    ndl_available_devices: DynLib.Fn("ndl_available_devices"),
-    ndl_open_device: DynLib.Fn("ndl_open_device"),
-    ndl_close_device: DynLib.Fn("ndl_close_device"),
-    ndl_get_all_apps_info: DynLib.Fn("ndl_get_all_apps_info"),
-    nds_open: DynLib.Fn("nds_open"),
-    nds_close: DynLib.Fn("nds_close"),
-    nds_get_nc_counter: DynLib.Fn("nds_get_nc_counter"),
-    nrt_get_total_nc_count: DynLib.Fn("nrt_get_total_nc_count"),
+    ndl_available_devices: DynLib.Fn(c,"ndl_available_devices"),
+    ndl_open_device: DynLib.Fn(c,"ndl_open_device"),
+    ndl_close_device: DynLib.Fn(c,"ndl_close_device"),
+    ndl_get_all_apps_info: DynLib.Fn(c,"ndl_get_all_apps_info"),
+    nds_open: DynLib.Fn(c,"nds_open"),
+    nds_close: DynLib.Fn(c,"nds_close"),
+    nds_get_nc_counter: DynLib.Fn(c,"nds_get_nc_counter"),
+    nrt_get_total_nc_count: DynLib.Fn(c,"nrt_get_total_nc_count"),
 };
 
 pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {

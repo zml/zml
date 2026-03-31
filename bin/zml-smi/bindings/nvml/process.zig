@@ -1,8 +1,8 @@
 const std = @import("std");
 const Nvml = @import("nvml.zig");
-const pi = @import("../../info/process_info.zig");
-const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("../../worker.zig").Worker;
+const pi = @import("zml-smi/info").process_info;
+const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const Worker = @import("zml-smi/worker").Worker;
 
 pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8) !void {
     try w.spawn(io, pollLoop, .{ io, w, allocator, list, nvml, dev_offset });

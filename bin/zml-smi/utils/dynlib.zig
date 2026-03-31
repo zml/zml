@@ -1,10 +1,9 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const elf = std.elf;
-const c = @import("c");
 
-pub fn Fn(comptime name: [:0]const u8) type {
-    return *const @TypeOf(@field(c, name));
+pub fn Fn(comptime C: type, comptime name: [:0]const u8) type {
+    return *const @TypeOf(@field(C, name));
 }
 
 pub fn open(comptime F: type, path: [:0]const u8) ?F {

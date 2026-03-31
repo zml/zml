@@ -2,7 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const c = @import("c");
 
-pub const Target = @import("info/device_info.zig").Target;
+pub const Target = @import("zml-smi/info").device_info.Target;
 
 fn hasDevice(io: std.Io, path: []const u8) bool {
     std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;

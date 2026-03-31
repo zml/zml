@@ -1,8 +1,9 @@
 const std = @import("std");
-const DeviceInfo = @import("info/device_info.zig").DeviceInfo;
-const pi = @import("info/process_info.zig");
-const ProcessDoubleBuffer = @import("utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("worker.zig").Worker;
+const smi_info = @import("zml-smi/info");
+const DeviceInfo = smi_info.device_info.DeviceInfo;
+const pi = smi_info.process_info;
+const ProcessDoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const Worker = @import("zml-smi/worker").Worker;
 
 pub const Collector = struct {
     device_infos: std.ArrayList(*DeviceInfo) = .empty,

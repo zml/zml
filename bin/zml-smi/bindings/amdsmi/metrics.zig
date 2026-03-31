@@ -1,11 +1,11 @@
 const std = @import("std");
 const AmdSmi = @import("amdsmi.zig");
-const device_info = @import("../../info/device_info.zig");
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const DoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer;
+const Collector = @import("zml-smi/collector").Collector;
+const Worker = @import("zml-smi/worker").Worker;
 const process = @import("process.zig");
 
 pub const target: device_info.Target = .rocm;

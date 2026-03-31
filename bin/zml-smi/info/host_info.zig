@@ -1,4 +1,4 @@
-const DoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer;
+const DoubleBuffer = @import("zml-smi/utils").double_buffer.DoubleBuffer;
 
 pub const HostInfo = DoubleBuffer(HostData);
 

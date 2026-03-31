@@ -1,11 +1,10 @@
 const std = @import("std");
-const sysfs = @import("../../utils/sysfs.zig");
-const host_info = @import("../../info/host_info.zig");
+const sysfs = @import("zml-smi/utils").sysfs;
+const host_info = @import("zml-smi/info").host_info;
 const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;
-const Worker = @import("../../worker.zig").Worker;
-
-const Collector = @import("../../collector.zig").Collector;
+const Worker = @import("zml-smi/worker").Worker;
+const Collector = @import("zml-smi/collector").Collector;
 
 pub fn init(w: *Worker, io: std.Io, collector: *Collector, info: *HostInfo) !void {
     const poll_arena = try collector.createPollArena();
