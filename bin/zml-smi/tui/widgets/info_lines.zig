@@ -1,10 +1,12 @@
 const std = @import("std");
+
 const vaxis = @import("vaxis");
 const vxfw = vaxis.vxfw;
+
 const data = @import("../data.zig");
-const theme = @import("../theme.zig");
-const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
+const ui = @import("../lib/ui.zig");
+const theme = @import("../theme.zig");
 
 const InfoLines = @This();
 
@@ -94,7 +96,6 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const total_h: u16 = @intCast(entries.len);
     return sb.finish(.{ .width = w, .height = total_h }, ui.widget(self));
 }
-
 
 fn formatUptime(arena: std.mem.Allocator, seconds: u64) std.mem.Allocator.Error![]const u8 {
     const days = seconds / 86400;
