@@ -5,7 +5,7 @@ const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const NeuronInfo = device_info.NeuronInfo;
 const Collector = @import("zml-smi/collector").Collector;
-const poll_metrics = @import("zml-smi/poll_metrics");
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const Nrt = @import("nrt.zig");
 const process = @import("process.zig");
 

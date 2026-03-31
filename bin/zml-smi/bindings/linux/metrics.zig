@@ -3,7 +3,7 @@ const sysfs = @import("zml-smi/sysfs");
 const host_info = @import("zml-smi/info").host_info;
 const HostInfo = host_info.HostInfo;
 const HostData = host_info.HostData;
-const poll_metrics = @import("zml-smi/poll_metrics");
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const Collector = @import("zml-smi/collector").Collector;
 
 pub fn init(collector: *Collector, info: *HostInfo) !void {

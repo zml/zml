@@ -5,7 +5,7 @@ const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
 const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 const Collector = @import("zml-smi/collector").Collector;
-const poll_metrics = @import("zml-smi/poll_metrics");
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const process = @import("process.zig");
 
 pub const target: device_info.Target = .rocm;

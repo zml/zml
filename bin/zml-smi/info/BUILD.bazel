@@ -7,6 +7,7 @@ zig_library(
     srcs = [
         "device_info.zig",
         "host_info.zig",
+        "poll_metrics.zig",
         "process_info.zig",
     ],
     visibility = ["//visibility:public"],
