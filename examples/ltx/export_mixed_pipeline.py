@@ -161,7 +161,7 @@ def main() -> None:
     ctx_p, ctx_n = prompt_encoder(
         [args.prompt, args.negative_prompt],
         enhance_first_prompt=False,
-        enhance_prompt_image=None,
+        enhance_prompt_image=None,      # no image-based prompt enhancement in this pipeline. Might add in the future as an option.
         enhance_prompt_seed=args.seed,
     )
     v_context_p, a_context_p = ctx_p.video_encoding, ctx_p.audio_encoding
@@ -186,7 +186,7 @@ def main() -> None:
 
     stage_1_conditionings = image_conditioner(
         lambda enc: combined_image_conditionings(
-            images=[],
+            images=[],                  # no image-based prompt enhancement in this pipeline. Might add in the future as an option.
             height=stage_1_output_shape.height,
             width=stage_1_output_shape.width,
             video_encoder=enc,
