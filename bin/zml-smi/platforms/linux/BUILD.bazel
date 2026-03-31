@@ -2,7 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "linux",
-    import_name = "zml-smi/bindings/linux",
+    import_name = "zml-smi/platforms/linux",
     main = "linux.zig",
     srcs = [
         "metrics.zig",

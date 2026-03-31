@@ -1,11 +1,11 @@
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
-    name = "amdsmi",
-    import_name = "zml-smi/bindings/amdsmi",
+    name = "neuron",
+    import_name = "zml-smi/platforms/neuron",
     main = "metrics.zig",
     srcs = [
-        "amdsmi.zig",
+        "nrt.zig",
         "process.zig",
     ],
     visibility = ["//visibility:public"],
@@ -15,7 +15,8 @@ zig_library(
         "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/utils:dynlib",
         "//bin/zml-smi/utils:sandbox",
+        "//bin/zml-smi/utils:sysfs",
+        "//platforms/neuron:libnrt_headers",
         "//stdx",
-        "@amd-smi-lib//:amdsmi",
     ],
 )

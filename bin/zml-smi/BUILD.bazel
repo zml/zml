@@ -67,7 +67,7 @@ zig_binary(
     main = "main.zig",
     deps = [
         "//bin/zml-smi/collector",
-        "//bin/zml-smi/bindings/linux",
+        "//bin/zml-smi/platforms/linux",
         "//bin/zml-smi/info",
         "//bin/zml-smi/tui",
         "//stdx",
@@ -76,10 +76,10 @@ zig_binary(
     ] + select({
         "@platforms//os:macos": [],
         "//conditions:default": [
-            "//bin/zml-smi/bindings/amdsmi",
-            "//bin/zml-smi/bindings/neuron",
-            "//bin/zml-smi/bindings/nvml",
-            "//bin/zml-smi/bindings/tpu",
+            "//bin/zml-smi/platforms/amdsmi",
+            "//bin/zml-smi/platforms/neuron",
+            "//bin/zml-smi/platforms/nvml",
+            "//bin/zml-smi/platforms/tpu",
             "//platforms/neuron:libnrt_headers",
         ],
     }),

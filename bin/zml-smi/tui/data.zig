@@ -12,7 +12,7 @@ pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
 pub const pi = smi_info.process_info;
 pub const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-pub const ProcessEnricher = @import("zml-smi/bindings/linux").process.ProcessEnricher;
+pub const ProcessEnricher = @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
 pub const history_len: usize = 500;
 

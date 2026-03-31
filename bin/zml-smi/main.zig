@@ -12,7 +12,7 @@ pub const std_options: std.Options = .{
 const Collector = @import("zml-smi/collector").Collector;
 const smi_info = @import("zml-smi/info");
 const HostInfo = smi_info.host_info.HostInfo;
-const linux = @import("zml-smi/bindings/linux");
+const linux = @import("zml-smi/platforms/linux");
 const ProcessEnricher = linux.process.ProcessEnricher;
 const host = linux.metrics;
 const c = @import("c");
@@ -37,10 +37,10 @@ const CliArgs = struct {
 };
 
 const device_backends = if (builtin.os.tag != .macos) .{
-    .{ .cuda, @import("zml-smi/bindings/nvml") },
-    .{ .rocm, @import("zml-smi/bindings/amdsmi") },
-    .{ .neuron, @import("zml-smi/bindings/neuron") },
-    .{ .tpu, @import("zml-smi/bindings/tpu") },
+    .{ .cuda, @import("zml-smi/platforms/nvml") },
+    .{ .rocm, @import("zml-smi/platforms/amdsmi") },
+    .{ .neuron, @import("zml-smi/platforms/neuron") },
+    .{ .tpu, @import("zml-smi/platforms/tpu") },
 } else .{};
 
 pub fn main(init: std.process.Init) !void {
