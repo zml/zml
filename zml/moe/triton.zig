@@ -427,7 +427,7 @@ fn validateOptions(opts: Options) !void {
 
 // Here the padding is made so that each token is aligned "in front of" its assigned experts and an expert process a contiguous block of tokens (based on block size m)
 fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, num_experts: i64, block_size_m: i64) !struct { Tensor, Tensor, Tensor } {
-    log.info("Usign triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
+    log.info("Using triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
     const topk_ids_ = topk_ids.withTags(.{ .token, .topk }).convert(.i32);
     const num_tokens = topk_ids_.dim(.token);
     const topk = topk_ids_.dim(.topk);
