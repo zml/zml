@@ -6,11 +6,6 @@ exports_files(
     visibility = ["@libpjrt_rocm//:__subpackages__"],
 )
 
-exports_files(
-    ["merge_amdgpu_ids.zig"],
-    visibility = ["@libpjrt_rocm//:__subpackages__"],
-)
-
 zig_shared_library(
     name = "zmlxrocm",
     main = "zmlxrocm.zig",
