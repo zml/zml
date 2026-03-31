@@ -11,8 +11,6 @@ const process = @import("process.zig");
 
 const base_path = "/sys/devices/virtual/neuron_device";
 
-pub const target: device_info.Target = .neuron;
-
 pub fn start(collector: *Collector) !void {
     const nrt = try collector.arena.create(Nrt);
     nrt.* = try Nrt.init(collector.arena, collector.io);

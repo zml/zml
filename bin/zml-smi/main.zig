@@ -10,11 +10,12 @@ pub const std_options: std.Options = .{
 };
 
 const Collector = @import("zml-smi/collector").Collector;
-const HostInfo = @import("zml-smi/info").host_info.HostInfo;
+const smi_info = @import("zml-smi/info");
+const HostInfo = smi_info.host_info.HostInfo;
 const linux = @import("zml-smi/bindings/linux");
 const ProcessEnricher = linux.process.ProcessEnricher;
-const platform = @import("zml-smi/platform");
 const host = linux.metrics;
+const c = @import("c");
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
 const static_print = smi_tui.print;
@@ -36,10 +37,10 @@ const CliArgs = struct {
 };
 
 const device_backends = if (builtin.os.tag != .macos) .{
-    @import("zml-smi/bindings/nvml"),
-    @import("zml-smi/bindings/amdsmi"),
-    @import("zml-smi/bindings/neuron"),
-    @import("zml-smi/bindings/tpu"),
+    .{ .cuda, @import("zml-smi/bindings/nvml") },
+    .{ .rocm, @import("zml-smi/bindings/amdsmi") },
+    .{ .neuron, @import("zml-smi/bindings/neuron") },
+    .{ .tpu, @import("zml-smi/bindings/tpu") },
 } else .{};
 
 pub fn main(init: std.process.Init) !void {
@@ -48,7 +49,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
 
-    const targets = platform.detect(io);
+    const targets = detect(io);
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
@@ -62,10 +63,11 @@ pub fn main(init: std.process.Init) !void {
     var enricher: ProcessEnricher = try .init(gpa, io);
     defer enricher.deinit();
 
-    inline for (device_backends) |backend| {
-        if (targets.contains(backend.target)) {
+    inline for (device_backends) |entry| {
+        const target, const backend = entry;
+        if (targets.contains(target)) {
             backend.start(&collector) catch |err| {
-                std.log.err("{s} skipped: {s}", .{ @tagName(backend.target), @errorName(err) });
+                std.log.err("{s} skipped: {s}", .{ @tagName(target), @errorName(err) });
             };
         }
     }
@@ -86,4 +88,34 @@ pub fn main(init: std.process.Init) !void {
     } else {
         try static_print.run(arena, io, &state);
     }
+}
+
+fn detect(io: std.Io) smi_info.Targets {
+    if (comptime builtin.os.tag == .macos) {
+        return .{};
+    }
+
+    var targets: smi_info.Targets = .{};
+    if (hasDevice(io, "/dev/nvidiactl")) {
+        targets.insert(.cuda);
+    }
+
+    if (hasDevice(io, "/dev/kfd")) {
+        targets.insert(.rocm);
+    }
+
+    if (hasDevice(io, c.NEURON_DEVICE_PREFIX ++ "0")) {
+        targets.insert(.neuron);
+    }
+
+    if (hasDevice(io, "/dev/accel0") or hasDevice(io, "/dev/vfio/0")) {
+        targets.insert(.tpu);
+    }
+
+    return targets;
+}
+
+fn hasDevice(io: std.Io, path: []const u8) bool {
+    std.Io.Dir.accessAbsolute(io, path, .{ .read = true }) catch return false;
+    return true;
 }

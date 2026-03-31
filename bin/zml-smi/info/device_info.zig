@@ -6,22 +6,6 @@ pub const Target = enum {
     rocm,
     neuron,
     tpu,
-
-    pub fn deviceLabel(self: Target) []const u8 {
-        return switch (self) {
-            .cuda, .rocm => "GPU",
-            .neuron => "NC",
-            .tpu => "TPU",
-        };
-    }
-
-    pub fn utilLabel(self: Target) []const u8 {
-        return switch (self) {
-            .cuda, .rocm => "GPU",
-            .neuron => "Core",
-            .tpu => "Duty",
-        };
-    }
 };
 
 pub const DeviceInfo = union(Target) {

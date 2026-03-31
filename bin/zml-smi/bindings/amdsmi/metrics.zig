@@ -8,8 +8,6 @@ const Collector = @import("zml-smi/collector").Collector;
 const poll_metrics = @import("zml-smi/info").poll_metrics;
 const process = @import("process.zig");
 
-pub const target: device_info.Target = .rocm;
-
 pub fn start(collector: *Collector) !void {
     const amdsmi = try collector.arena.create(AmdSmi);
     amdsmi.* = try AmdSmi.init(collector.arena);

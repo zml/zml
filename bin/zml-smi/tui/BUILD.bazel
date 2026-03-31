@@ -41,7 +41,6 @@ zig_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//bin/zml-smi:platform",
         "//bin/zml-smi/bindings/linux",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",

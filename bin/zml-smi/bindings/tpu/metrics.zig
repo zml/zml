@@ -9,8 +9,6 @@ const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";
 
-pub const target: device_info.Target = .tpu;
-
 pub fn start(collector: *Collector) !void {
     const chip = scanPciChips(collector.arena, collector.io) orelse return error.TpuUnavailable;
     const device_count = chip.chip_count * chip.devices_per_chip;

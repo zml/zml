@@ -8,21 +8,6 @@ load("@tar.bzl//tar:tar.bzl", "tar")
 
 # zig libraries
 
-zig_library(
-    name = "platform",
-    import_name = "zml-smi/platform",
-    main = "platform.zig",
-    visibility = ["//visibility:public"],
-    deps = [
-        "//bin/zml-smi/info",
-    ] + select({
-        "@platforms//os:macos": [],
-        "//conditions:default": [
-            "//platforms/neuron:libnrt_headers",
-        ],
-    }),
-)
-
 # smi
 
 run_binary(
@@ -82,7 +67,6 @@ zig_binary(
     main = "main.zig",
     deps = [
         "//bin/zml-smi/collector",
-        ":platform",
         "//bin/zml-smi/bindings/linux",
         "//bin/zml-smi/info",
         "//bin/zml-smi/tui",
@@ -96,6 +80,7 @@ zig_binary(
             "//bin/zml-smi/bindings/neuron",
             "//bin/zml-smi/bindings/nvml",
             "//bin/zml-smi/bindings/tpu",
+            "//platforms/neuron:libnrt_headers",
         ],
     }),
 )
