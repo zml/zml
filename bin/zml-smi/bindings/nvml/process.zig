@@ -2,78 +2,66 @@ const std = @import("std");
 const Nvml = @import("nvml.zig");
 const pi = @import("zml-smi/info").process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("zml-smi/worker").Worker;
+const Collector = @import("zml-smi/collector").Collector;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8) !void {
-    try w.spawn(io, pollLoop, .{ io, w, allocator, list, nvml, dev_offset });
-}
-
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8) void {
-    const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
-    io.sleep(interval, .awake) catch {};
-
-    const device_count = nvml.deviceCount() catch 0;
-    const last_seen_ts = allocator.alloc(u64, device_count) catch return;
-    defer allocator.free(last_seen_ts);
+pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8) !void {
+    const device_count: u32 = nvml.deviceCount() catch 0;
+    const last_seen_ts = try collector.arena.alloc(u64, device_count);
     @memset(last_seen_ts, 0);
 
-    while (w.isRunning()) {
-        const start: std.Io.Timestamp = .now(io, .awake);
-        const back = list.back();
+    try collector.spawnPoll(pollOnce, .{ collector.gpa, list, nvml, dev_offset, device_count, last_seen_ts });
+}
 
-        back.clearRetainingCapacity();
+fn pollOnce(allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nvml: *const Nvml, dev_offset: u8, device_count: u32, last_seen_ts: []u64) void {
+    const back = list.back();
 
-        for (0..device_count) |dev_idx| {
-            const handle = nvml.handleByIndex(@intCast(dev_idx)) catch continue;
-            const idx: u8 = @intCast(dev_idx + dev_offset);
+    back.clearRetainingCapacity();
 
-            const compute = nvml.computeRunningProcesses(allocator, handle) catch &.{};
-            defer {
-                if (compute.len > 0) {
-                    allocator.free(compute);
-                }
+    for (0..device_count) |dev_idx| {
+        const handle = nvml.handleByIndex(@intCast(dev_idx)) catch continue;
+        const idx: u8 = @intCast(dev_idx + dev_offset);
+
+        const compute = nvml.computeRunningProcesses(allocator, handle) catch &.{};
+        defer {
+            if (compute.len > 0) {
+                allocator.free(compute);
             }
-            collectFromQuery(allocator, back, idx, compute);
+        }
+        collectFromQuery(allocator, back, idx, compute);
 
-            const graphics = nvml.graphicsRunningProcesses(allocator, handle) catch &.{};
-            defer {
-                if (graphics.len > 0) {
-                    allocator.free(graphics);
-                }
+        const graphics = nvml.graphicsRunningProcesses(allocator, handle) catch &.{};
+        defer {
+            if (graphics.len > 0) {
+                allocator.free(graphics);
             }
-            collectFromQuery(allocator, back, idx, graphics);
+        }
+        collectFromQuery(allocator, back, idx, graphics);
 
-            // Apply utilization samples
-            const last_ts = last_seen_ts[dev_idx];
-            const utils = nvml.processUtilization(allocator, handle, last_ts) catch continue;
-            defer {
-                if (utils.len > 0) {
-                    allocator.free(utils);
-                }
-            }
-
-            for (utils) |sample| {
-                if (sample.smUtil > 100 or sample.timeStamp <= last_ts) {
-                    continue;
-                }
-
-                last_seen_ts[dev_idx] = @max(last_seen_ts[dev_idx], sample.timeStamp);
-
-                for (back.items) |*entry| {
-                    if (entry.pid == sample.pid and entry.device_idx == idx) {
-                        entry.dev_util_percent = @intCast(sample.smUtil);
-                    }
-                }
+        // Apply utilization samples
+        const last_ts = last_seen_ts[dev_idx];
+        const utils = nvml.processUtilization(allocator, handle, last_ts) catch continue;
+        defer {
+            if (utils.len > 0) {
+                allocator.free(utils);
             }
         }
 
-        list.swap();
+        for (utils) |sample| {
+            if (sample.smUtil > 100 or sample.timeStamp <= last_ts) {
+                continue;
+            }
 
-        const elapsed = start.untilNow(io, .awake);
-        if (elapsed.nanoseconds < interval.nanoseconds) {
-            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+            last_seen_ts[dev_idx] = @max(last_seen_ts[dev_idx], sample.timeStamp);
+
+            for (back.items) |*entry| {
+                if (entry.pid == sample.pid and entry.device_idx == idx) {
+                    entry.dev_util_percent = @intCast(sample.smUtil);
+                }
+            }
         }
     }
+
+    list.swap();
 }
 
 fn collectFromQuery(allocator: std.mem.Allocator, back: *std.ArrayList(pi.ProcessInfo), dev_idx: u8, procs: []const Nvml.ProcessInfo_t) void {

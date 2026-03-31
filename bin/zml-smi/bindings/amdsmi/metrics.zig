@@ -26,7 +26,7 @@ pub fn start(collector: *Collector) !void {
     }
 
     const processes = try collector.createProcessList();
-    try process.init(collector.worker, collector.io, collector.gpa, processes, amdsmi, dev_offset);
+    try process.init(collector, processes, amdsmi, dev_offset);
 }
 
 const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);

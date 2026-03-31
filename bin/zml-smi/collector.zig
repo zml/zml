@@ -42,7 +42,17 @@ pub const Collector = struct {
         const Args = std.meta.ArgsTuple(@TypeOf(pollOnce));
         try self.worker.spawn(self.io, struct {
             fn f(io: std.Io, w: *const Worker, a: Args) void {
-                w.pollLoop(io, pollOnce, a);
+                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
+                while (w.isRunning()) {
+                    const start: std.Io.Timestamp = .now(io, .awake);
+
+                    @call(.auto, pollOnce, a);
+
+                    const elapsed = start.untilNow(io, .awake);
+                    if (elapsed.nanoseconds < interval.nanoseconds) {
+                        io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    }
+                }
             }
         }.f, .{ self.io, self.worker, args });
     }

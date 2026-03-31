@@ -23,17 +23,4 @@ pub const Worker = struct {
         try self.group.concurrent(io, runFn, args);
     }
 
-    pub fn pollLoop(self: *const Worker, io: std.Io, comptime func: anytype, args: std.meta.ArgsTuple(@TypeOf(func))) void {
-        const interval: std.Io.Duration = .fromMilliseconds(self.poll_interval_ms);
-        while (!self.should_stop.load(.acquire)) {
-            const start: std.Io.Timestamp = .now(io, .awake);
-
-            @call(.auto, func, args);
-
-            const elapsed = start.untilNow(io, .awake);
-            if (elapsed.nanoseconds < interval.nanoseconds) {
-                io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
-            }
-        }
-    }
 };

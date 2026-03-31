@@ -60,7 +60,7 @@ pub fn start(collector: *Collector) !void {
 
     if (neuron_infos.items.len > 0) {
         const processes = try collector.createProcessList();
-        try process.init(collector.worker, collector.io, collector.gpa, processes, nrt, nc_per_device, neuron_infos.items, dev_offset);
+        try process.init(collector, processes, nrt, nc_per_device, neuron_infos.items, dev_offset);
     }
 }
 

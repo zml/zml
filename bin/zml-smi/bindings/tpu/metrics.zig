@@ -5,7 +5,6 @@ const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const TpuInfo = device_info.TpuInfo;
 const Collector = @import("zml-smi/collector").Collector;
-const Worker = @import("zml-smi/worker").Worker;
 const tpu_process = @import("process.zig");
 
 const address = "localhost:8431";
@@ -25,44 +24,40 @@ pub fn start(collector: *Collector) !void {
         try tpu_infos.append(collector.arena, info);
     }
 
-    try collector.worker.spawn(collector.io, pollAllDevices, .{ collector.io, collector.worker, tpu_infos.items });
+    try collector.spawnPoll(pollAllDevices, .{tpu_infos.items});
 
     if (tpu_infos.items.len > 0) {
         const processes = try collector.createProcessList();
-        try tpu_process.init(collector.worker, collector.io, collector.gpa, chip.devices_per_chip, tpu_infos.items, processes, dev_offset);
+        try tpu_process.init(collector, chip.devices_per_chip, tpu_infos.items, processes, dev_offset);
     }
 }
 
 const MetricKind = enum { int, double };
 
-fn pollAllDevices(io: std.Io, w: *const Worker, infos: []*DeviceInfo) void {
-    w.pollLoop(io, struct {
-        fn poll(devs: []*DeviceInfo) void {
-            var mem_used: [tpuinfo.max_devices]?u64 = undefined;
-            var mem_total: [tpuinfo.max_devices]?u64 = undefined;
-            var util: [tpuinfo.max_devices]?u64 = undefined;
+fn pollAllDevices(devs: []*DeviceInfo) void {
+    var mem_used: [tpuinfo.max_devices]?u64 = undefined;
+    var mem_total: [tpuinfo.max_devices]?u64 = undefined;
+    var util: [tpuinfo.max_devices]?u64 = undefined;
 
-            for (devs, 0..) |info, i| {
-                const front = info.tpu.front();
-                mem_used[i] = front.mem_used_bytes;
-                mem_total[i] = front.mem_total_bytes;
-                util[i] = front.util_percent;
-            }
+    for (devs, 0..) |info, i| {
+        const front = info.tpu.front();
+        mem_used[i] = front.mem_used_bytes;
+        mem_total[i] = front.mem_total_bytes;
+        util[i] = front.util_percent;
+    }
 
-            queryRaw("tpu.runtime.hbm.memory.usage.bytes", .int, mem_used[0..devs.len]);
-            queryRaw("tpu.runtime.hbm.memory.total.bytes", .int, mem_total[0..devs.len]);
-            queryRaw("tpu.runtime.tensorcore.dutycycle.percent", .double, util[0..devs.len]);
+    queryRaw("tpu.runtime.hbm.memory.usage.bytes", .int, mem_used[0..devs.len]);
+    queryRaw("tpu.runtime.hbm.memory.total.bytes", .int, mem_total[0..devs.len]);
+    queryRaw("tpu.runtime.tensorcore.dutycycle.percent", .double, util[0..devs.len]);
 
-            for (devs, 0..) |info, i| {
-                const back = info.tpu.back();
-                back.* = info.tpu.front().*;
-                back.mem_used_bytes = mem_used[i];
-                back.mem_total_bytes = mem_total[i];
-                back.util_percent = util[i];
-                info.tpu.swap();
-            }
-        }
-    }.poll, .{infos});
+    for (devs, 0..) |info, i| {
+        const back = info.tpu.back();
+        back.* = info.tpu.front().*;
+        back.mem_used_bytes = mem_used[i];
+        back.mem_total_bytes = mem_total[i];
+        back.util_percent = util[i];
+        info.tpu.swap();
+    }
 }
 
 fn queryRaw(metric_name: [:0]const u8, comptime kind: MetricKind, out: []?u64) void {

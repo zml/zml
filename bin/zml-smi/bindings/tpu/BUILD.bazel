@@ -23,7 +23,6 @@ zig_library(
     deps = [
         ":tpuinfo",
         "//bin/zml-smi:collector",
-        "//bin/zml-smi:worker",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/utils:sysfs",
