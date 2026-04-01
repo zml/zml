@@ -281,11 +281,15 @@ pub const TextModel = struct {
         self: TextModel,
         out: zml.Tensor,
         rng: zml.Tensor.Rng,
-    ) struct { zml.Tensor, zml.Tensor.Rng } {
+        token_index: ?zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
         const x = self.norm.forward(out);
         const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
         const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
-        return .{ next_tokens.convert(.u32), new_rng };
+        if (token_index) |token_idx| {
+            return .{ next_tokens.convert(.u32), new_rng, token_idx.addConstant(1) };
+        }
+        return .{ next_tokens.convert(.u32), new_rng, null };
     }
 };
 
@@ -332,6 +336,7 @@ pub const TransformerLayer = struct {
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
+        _ = config;
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
 
@@ -345,7 +350,7 @@ pub const TransformerLayer = struct {
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, config, moe_metadata, moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
     }
@@ -359,7 +364,8 @@ pub const TransformerLayer = struct {
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
-        _ = token_index; // autofix
+        _ = config;
+        _ = token_index;
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
 
@@ -373,7 +379,7 @@ pub const TransformerLayer = struct {
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, config, moe_metadata, moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1).reuseBuffer(x0), updated_kv_cache };
     }
@@ -387,6 +393,7 @@ pub const TransformerLayer = struct {
         moe_metadata: zml.moe.Metadata,
         moe_parameters: zml.moe.Parameters,
     ) struct { zml.Tensor, KvCache } {
+        _ = config;
         const residual0 = x0;
         const normalized_x0 = self.input_layernorm.forward(x0);
 
@@ -409,7 +416,7 @@ pub const TransformerLayer = struct {
         const residual1 = x1;
         const normalized_hidden = self.post_attention_layernorm.forward(x1);
 
-        const moe_output = self.moe.forward(normalized_hidden, config, moe_metadata, moe_parameters);
+        const moe_output = self.moe.forward(normalized_hidden, moe_metadata, moe_parameters);
 
         return .{ moe_output.add(residual1), updated_kv_cache };
     }
@@ -599,8 +606,8 @@ const Router = struct {
         const router_logits = self.router.forward(x).convert(.f32);
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
-        var router_scores = routing.values.softmax(.top_expert);
-        router_scores = router_scores.div(router_scores.sum(.top_expert));
+        const router_scores = routing.values.softmax(.top_expert);
+        //router_scores = router_scores.div(router_scores.sum(.top_expert));
         return .{ router_scores, topk_ids };
     }
 };
@@ -622,13 +629,11 @@ pub const Moe = struct {
         };
     }
 
-    pub fn forward(self: Moe, x: zml.Tensor, config: Config, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
-        const num_experts_per_tok: u32 = config.text_config.num_experts_per_tok.?;
+    pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
 
         const moe_output = zml.moe.moe(
             x,
-            null,
             topk_ids,
             routing_scores,
             self.gate_up_proj,
@@ -637,14 +642,14 @@ pub const Moe = struct {
             self.down_proj,
             null,
             null,
-            num_experts_per_tok,
             moe_metadata,
             moe_parameters,
         ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
 
         const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
         const shared = self.shared_expert.forward(x).mul(shared_gate);
-        return moe_output.convert(shared.dtype()).reshape(shared.shape()).add(shared);
+
+        return moe_output.add(shared);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Moe)) void {

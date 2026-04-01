@@ -110,7 +110,6 @@ def compile_fused_moe_kernel(cfg: dict) -> str:
     kwargs = {
         "a_ptr": FakeTensor(cfg["a_dtype"], a_shape),
         "b_ptr": FakeTensor(cfg["b_dtype"], b_shape),
-        "c_ptr": FakeTensor(cfg["c_dtype"], c_shape),
         "b_bias_ptr": FakeTensor(cfg.get("b_bias_dtype", "bf16"), (num_experts, out_features)),
         "a_scale_ptr": FakeTensor(cfg.get("a_scale_dtype", "fp32"), a_scale_shape),
         "b_scale_ptr": FakeTensor(cfg.get("b_scale_dtype", "fp32"), b_scale_shape),
@@ -154,7 +153,7 @@ def compile_fused_moe_kernel(cfg: dict) -> str:
         "HAS_BIAS": has_bias,
         "num_warps": num_warps,
         "num_stages": num_stages,
-        "out_ptr": FakeTensor(cfg["c_dtype"], c_shape),
+        "c_ptr": FakeTensor(cfg["c_dtype"], c_shape),
     }
 
     em_effective = max_num_tokens_padded
