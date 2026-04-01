@@ -93,7 +93,7 @@ pub fn name(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) 
     var info: c.amdsmi_asic_info_t = undefined;
     try check(self.lib.amdsmi_get_gpu_asic_info(handle, &info));
     @memcpy(buf, &info.market_name);
-    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: AmdSmi, handle: Handle) Error!u32 {

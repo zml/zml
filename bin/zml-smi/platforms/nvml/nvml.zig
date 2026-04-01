@@ -4,6 +4,7 @@ const DynLib = @import("zml-smi/dynlib");
 
 const Nvml = @This();
 
+pub const driver_version_buf_size = c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE;
 pub const Error = ReturnError || error{NvmlUnavailable};
 pub const Handle = c.nvmlDevice_t;
 pub const ProcessInfo_t = c.nvmlProcessInfo_t;
@@ -62,9 +63,11 @@ pub fn deviceCount(self: Nvml) Error!u32 {
     return @intCast(count);
 }
 
-pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[256]u8) Error![:0]const u8 {
+pub const name_buf_len = c.NVML_DEVICE_NAME_V2_BUFFER_SIZE;
+
+pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[c.NVML_DEVICE_NAME_V2_BUFFER_SIZE]u8) Error![:0]const u8 {
     try check(self.lib.nvmlDeviceGetName(handle, buf, buf.len));
-    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
@@ -183,9 +186,9 @@ pub fn pcieSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     return speed;
 }
 
-pub fn driverVersion(self: Nvml, buf: *[256]u8) Error![:0]const u8 {
+pub fn driverVersion(self: Nvml, buf: *[c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8) Error![:0]const u8 {
     try check(self.lib.nvmlSystemGetDriverVersion(buf, buf.len));
-    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn cudaDriverVersionMajor(v: c_int) c_int {

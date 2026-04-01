@@ -37,7 +37,7 @@ const PrivateFns = struct {
     nds_get_nc_counter: *const @TypeOf(c.nds_get_nc_counter),
 };
 
-pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
+pub fn init(allocator: std.mem.Allocator, io: std.Io) !Nrt {
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const sandbox_path = sandbox.path(&path_buf) orelse {
         std.log.err("neuron: sandbox path unavailable", .{});
@@ -78,8 +78,9 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
 
         if (private_fns.ndl_open_device(device_idx, &t, &dev) == 0) {
             if (dev) |d| {
-                handle_list.append(allocator, d) catch continue;
-                index_list.append(allocator, device_idx) catch continue;
+                errdefer _ = private_fns.ndl_close_device(d);
+                try handle_list.append(allocator, d);
+                try index_list.append(allocator, device_idx);
             }
         }
     }
@@ -87,8 +88,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) Error!Nrt {
     return .{
         .lib = fns,
         .private_lib = private_fns,
-        .handles = handle_list.toOwnedSlice(allocator) catch return error.NrtUnavailable,
-        .device_indexes = index_list.toOwnedSlice(allocator) catch return error.NrtUnavailable,
+        .handles = try handle_list.toOwnedSlice(allocator),
+        .device_indexes = try index_list.toOwnedSlice(allocator),
     };
 }
 

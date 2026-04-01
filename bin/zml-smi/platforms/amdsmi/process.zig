@@ -39,7 +39,10 @@ fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer
             const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
 
             if (devnull >= 0) {
-                _ = c.dup2(devnull, c.STDERR_FILENO);
+                if (saved >= 0) {
+                    _ = c.dup2(devnull, c.STDERR_FILENO);
+                }
+
                 _ = c.close(devnull);
             }
 

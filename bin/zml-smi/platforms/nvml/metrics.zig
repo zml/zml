@@ -41,14 +41,14 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = undefined;
+        var buf: [Nvml.name_buf_len]u8 = undefined;
         const slice = try self.nvml.name(self.handle, &buf);
 
         return try arena.dupe(u8, slice);
     }
 
     fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = undefined;
+        var buf: [Nvml.driver_version_buf_size]u8 = undefined;
         const slice = try self.nvml.driverVersion(&buf);
 
         return try arena.dupe(u8, slice);

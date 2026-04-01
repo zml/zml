@@ -47,8 +47,9 @@ fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer
 
                 const dev_idx: u32 = @intCast(dev_i * nc_per_device + ci);
 
+                const pid = std.math.cast(u32, app.pid) orelse continue;
                 var info: pi.ProcessInfo = .{
-                    .pid = @bitCast(app.pid),
+                    .pid = pid,
                     .device_idx = @intCast(dev_idx + dev_offset),
                     .dev_mem_kib = @intCast(app.device_mem_size / 1024),
                 };
