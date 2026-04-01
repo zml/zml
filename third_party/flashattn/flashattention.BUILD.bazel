@@ -3,11 +3,11 @@ load("@rules_cc//cc:cc_library.bzl", "cc_library")
 filegroup(
     name = "libflashattn",
     visibility = ["//visibility:public"],
-    srcs = ["flashattn/libflashattn.so"],
+    srcs = ["flashattn/lib/libflashattn.so"],
 )
 
 cc_library(
     name = "c",
-    hdrs = ["flashattn/flashattn.h"],
+    hdrs = ["flashattn/include/capi.h"],
     visibility = ["//visibility:public"],
 )
