@@ -34,7 +34,7 @@ pub const CompilationParameters = struct {
             .rng = .init(),
             .prefill_moe_metadata = initMoeMetadata(mdl, @intCast(seqlen), 1, moe_backend),
             .decode_moe_metadata = initMoeMetadata(mdl, 1, 1, moe_backend),
-            .moe_parameters = .init(.fromBackend(moe_backend)),
+            .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok)),
             .seqlen = seqlen,
             .shardings = shardings,
         };
@@ -109,7 +109,9 @@ fn compileSelfAttnLayerExe(
     label: []const u8,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start(label, 1);
+    const compiling_label = try std.fmt.allocPrint(allocator, "Compiling {s}...", .{label});
+    defer allocator.free(compiling_label);
+    var node = progress.start(compiling_label, 1);
     defer node.end();
 
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -134,7 +136,9 @@ fn compileLinearAttnLayerExe(
     label: []const u8,
 ) !zml.Exe {
     progress.increaseEstimatedTotalItems(1);
-    var node = progress.start(label, 1);
+    const compiling_label = try std.fmt.allocPrint(allocator, "Compiling {s}...", .{label});
+    defer allocator.free(compiling_label);
+    var node = progress.start(compiling_label, 1);
     defer node.end();
 
     const now: std.Io.Timestamp = .now(io, .awake);
@@ -247,7 +251,7 @@ fn compileModel(
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "Compiling prefill full-attention layer...");
+            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "prefill full-attention layer...");
         }
     }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, progress });
     errdefer if (prefill_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -267,7 +271,7 @@ fn compileModel(
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "Compiling decode full-attention layer...");
+            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "decode full-attention layer...");
         }
     }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, progress });
     errdefer if (decode_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -294,7 +298,7 @@ fn compileModel(
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "Compiling prefill linear-attention layer...");
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "prefill linear-attention layer...");
         }
     }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, progress });
     errdefer if (prefill_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -314,7 +318,7 @@ fn compileModel(
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "Compiling decode linear-attention layer...");
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "decode linear-attention layer...");
         }
     }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, progress });
     errdefer if (decode_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
@@ -343,7 +347,7 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill sampling [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ prefill_hidden_, rng_ }, .{ .shardings = &shardings_ });
+            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ prefill_hidden_, rng_, null }, .{ .shardings = &shardings_ });
         }
     }.call, .{ allocator, io, platform, qwen35_model.text_model, prefill_hidden, parameters.rng, all_shardings, progress });
     errdefer if (prefill_sampling_future.cancel(io)) |v| {
@@ -359,6 +363,7 @@ fn compileModel(
             model_: model.TextModel,
             decode_hidden_: zml.Tensor,
             rng_: zml.Tensor.Rng,
+            token_index_: zml.Tensor,
             shardings_: [2]zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
@@ -367,9 +372,9 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode sampling [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ decode_hidden_, rng_ }, .{ .shardings = &shardings_ });
+            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ decode_hidden_, rng_, token_index_ }, .{ .shardings = &shardings_ });
         }
-    }.call, .{ allocator, io, platform, qwen35_model.text_model, decode_hidden, parameters.rng, all_shardings, progress });
+    }.call, .{ allocator, io, platform, qwen35_model.text_model, decode_hidden, parameters.rng, token_index, all_shardings, progress });
     errdefer if (decode_sampling_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -410,8 +415,7 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
             .out = layer.moe.down_proj.dim(.d),
         }, layer.moe.down_proj.dtype());
         const first_out = zml.Shape.init(.{
-            .token = batch_size * token_len,
-            .topk = num_experts_per_tok,
+            .total_tokens = batch_size * token_len * num_experts_per_tok,
             .out = layer.moe.gate_up_proj.dim(.dout),
         }, .bf16);
         const second_out = zml.Shape.init(.{
@@ -435,11 +439,11 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
     }
 
     return switch (backend) {
-        .triton => .init(.{ .triton = .{
-            .w1_zero_bias_shape = w1_zero_bias_shape,
-            .w2_zero_bias_shape = w2_zero_bias_shape,
-            .first_out_shape = first_out_shape,
-            .second_out_shape = second_out_shape,
-        } }),
+        .triton => .init(.{
+            .triton = .{
+                .w1_zero_bias_shape = w1_zero_bias_shape,
+                .w2_zero_bias_shape = w2_zero_bias_shape,
+            },
+        }),
     };
 }

@@ -319,13 +319,13 @@ pub const Session = struct {
         var current_token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
         defer current_token_buffer.deinit();
 
+        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32, replicated_sharding);
+        defer token_index_buffer.deinit();
+
         var self_attn_layer_index: usize = 0;
         var linear_attn_layer_index: usize = 0;
 
         generation: while (true) {
-            var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, @intCast(all_tokens.items.len)), .u32, replicated_sharding);
-            defer token_index_buffer.deinit();
-
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
@@ -365,6 +365,7 @@ pub const Session = struct {
                             self.compiled_model.loaded_model.inner.config,
                             self.decode_moe_metadata_buffers,
                         });
+
                         exe.call(decode_full_layer_args.?, &decode_full_layer_results.?);
                         decode_full_layer_results.?.fill(.{ &decode_hidden_buffer, &self.kv_cache_buffers.self_attn });
 
@@ -384,6 +385,7 @@ pub const Session = struct {
                             self.compiled_model.loaded_model.inner.config,
                             self.decode_moe_metadata_buffers,
                         });
+
                         exe.call(decode_linear_layer_args.?, &decode_linear_layer_results.?);
                         decode_linear_layer_results.?.fill(.{ &decode_hidden_buffer, &self.kv_cache_buffers.gated_delta_net });
 
@@ -392,9 +394,9 @@ pub const Session = struct {
                 }
             }
 
-            sampling_decode_args.set(.{ self.model_buffers.text_model, decode_hidden_buffer, self.rng_buffers });
+            sampling_decode_args.set(.{ self.model_buffers.text_model, decode_hidden_buffer, self.rng_buffers, token_index_buffer });
             self.compiled_model.decode_sampling_exe.call(sampling_decode_args, &sampling_decode_results);
-            sampling_decode_results.fill(.{ &current_token_buffer, &self.rng_buffers });
+            sampling_decode_results.fill(.{ &current_token_buffer, &self.rng_buffers, &token_index_buffer });
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
@@ -408,22 +410,20 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     const im_start = tokenizer.tokenToId("<|im_start|>") orelse special_tokens.im_start_token_id;
     const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
     const think = tokenizer.tokenToId("<think>") orelse return error.NoSuchToken;
-    const newline = try encodeSingleToken(&encoder, "\n");
-    const user_prefix = try encoder.encode("user\n");
-    const assistant_prefix = try encoder.encode("assistant\n");
+    const newline = (try encoder.encode("\n"))[0];
+    const user_prefix = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
+    const assistant_prefix = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
     const encoded_prompt = try encoder.encode(prompt);
 
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + user_prefix.len + assistant_prefix.len + 8);
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 32);
     if (!is_first_turn) {
         try tokens.appendSlice(allocator, &.{ im_end, newline });
     }
 
-    try tokens.append(allocator, im_start);
-    try tokens.appendSlice(allocator, user_prefix);
+    try tokens.appendSlice(allocator, &.{ im_start, user_prefix, newline });
     try tokens.appendSlice(allocator, encoded_prompt);
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
-    try tokens.appendSlice(allocator, assistant_prefix);
-    try tokens.appendSlice(allocator, &.{ think, newline });
+    try tokens.appendSlice(allocator, &.{ assistant_prefix, newline, think, newline });
 
     return tokens.toOwnedSlice(allocator);
 }
