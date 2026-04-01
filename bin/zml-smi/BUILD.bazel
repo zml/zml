@@ -128,6 +128,7 @@ zig_binary(
 mtree_spec(
     name = "mtree_spec",
     srcs = [":zml-smi"],
+    tags = ["manual"],
 )
 
 # Use this genrule until mtree_mutate is fixed
@@ -136,6 +137,7 @@ genrule(
     srcs = [":mtree_spec"],
     outs = ["mtree.txt"],
     cmd = """sed -e '/type=dir/d' -e 's#^bin/##g' $< > $@""",
+    tags = ["manual"],
 )
 
 # mtree_mutate(
@@ -156,6 +158,7 @@ tar(
     ],
     compress = "zstd",
     mtree = ":mtree",
+    tags = ["manual"],
 )
 
 oci_image(
@@ -165,6 +168,7 @@ oci_image(
     tars = [
         ":archive",
     ],
+    tags = ["manual"],
 )
 
 platform_transition_filegroup(
