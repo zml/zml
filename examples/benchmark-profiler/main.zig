@@ -17,6 +17,11 @@ const Mode = enum {
     both,
 };
 
+const MatmulReinjectSide = enum {
+    lhs,
+    rhs,
+};
+
 const CliArgs = struct {
     pub const help =
         \\ benchmark_profiler [options]
@@ -31,7 +36,8 @@ const CliArgs = struct {
         \\   --matmulM=<m>               MATMUL left rows (default: 4096)
         \\   --matmulK=<k>               Shared MATMUL axis (default: 4096)
         \\   --matmulN=<n>               MATMUL right cols (default: 4096)
-        \\   --matmulCalls=<n>           MATMUL profiled call count (default: 1)
+        \\   --matmulCalls=<n>           MATMUL profiled pipeline depth (default: 1)
+        \\   --matmulPipelines=<m>       MATMUL profiled pipeline repeats (default: 1)
         \\   --xprofDir=<path>           xprof repository path (default: /tmp/xprof)
         \\   --sessionId=<name>          Base xprof session id (default: benchmark-profiler)
         \\
@@ -52,6 +58,7 @@ const CliArgs = struct {
     matmulK: usize = 4096,
     matmulN: usize = 4096,
     matmulCalls: usize = 1,
+    matmulPipelines: usize = 1,
 
     xprofDir: []const u8 = "/tmp/xprof",
     sessionId: []const u8 = "benchmark-profiler",
@@ -72,13 +79,23 @@ fn validateArgs(args: CliArgs) !void {
         .matmul => {
             if (args.matmulM == 0 or args.matmulK == 0 or args.matmulN == 0) return error.InvalidMatmulShape;
             if (args.matmulCalls == 0) return error.InvalidMatmulCalls;
+            if (args.matmulPipelines == 0) return error.InvalidMatmulPipelines;
+            if (args.matmulK != args.matmulN and args.matmulM != args.matmulK) return error.InvalidMatmulPipelineShape;
+            _ = try matmulTotalCalls(args);
         },
         .both => {
             if (args.saxpySize == 0) return error.InvalidSaxpySize;
             if (args.matmulM == 0 or args.matmulK == 0 or args.matmulN == 0) return error.InvalidMatmulShape;
             if (args.matmulCalls == 0) return error.InvalidMatmulCalls;
+            if (args.matmulPipelines == 0) return error.InvalidMatmulPipelines;
+            if (args.matmulK != args.matmulN and args.matmulM != args.matmulK) return error.InvalidMatmulPipelineShape;
+            _ = try matmulTotalCalls(args);
         },
     }
+}
+
+fn matmulTotalCalls(args: CliArgs) !usize {
+    return std.math.mul(usize, args.matmulCalls, args.matmulPipelines) catch error.InvalidMatmulTotalCalls;
 }
 
 fn saxpy(a: zml.Tensor, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
@@ -147,6 +164,50 @@ fn runCalls(io: std.Io, exe: *const zml.Exe, exe_args: zml.Exe.Arguments, exe_re
     for (0..call_count) |_| {
         try runCallAndAwait(io, exe, exe_args, exe_results);
     }
+}
+
+fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
+    if (a._shards.len != b._shards.len) return false;
+    for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
+        if (a_shard != b_shard) return false;
+    }
+    return true;
+}
+
+fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
+    if (!sameBufferHandle(dst.*, src.*)) {
+        dst.deinit();
+    }
+    dst.* = src.*;
+}
+
+fn selectMatmulReinjectSide(args: CliArgs) MatmulReinjectSide {
+    if (args.matmulK == args.matmulN) return .lhs;
+    return .rhs;
+}
+
+fn runMatmulPipelineCalls(
+    io: std.Io,
+    exe: *const zml.Exe,
+    exe_args: *zml.Exe.Arguments,
+    exe_results: *zml.Exe.Results,
+    lhs_buffer: *zml.Buffer,
+    rhs_buffer: *zml.Buffer,
+    reinject_side: MatmulReinjectSide,
+    call_count: usize,
+) !void {
+    _ = reinject_side; // autofix
+    var out = lhs_buffer.*;
+    for (0..call_count) |_| {
+        exe_args.set(.{ out, rhs_buffer.* });
+        exe.call(exe_args.*, exe_results);
+        out = exe_results.get(zml.Buffer);
+        // switch (reinject_side) {
+        //     .lhs => replaceBuffer(lhs_buffer, &out),
+        //     .rhs => replaceBuffer(rhs_buffer, &out),
+        // }
+    }
+    _ = try out.await(io);
 }
 
 fn runSaxpyProfile(
@@ -220,6 +281,8 @@ fn runMatmulProfile(
     sharding: zml.sharding.Sharding,
     args: CliArgs,
 ) !void {
+    const total_calls = try matmulTotalCalls(args);
+
     const lhs_shape = zml.Shape.init(.{ .m = args.matmulM, .k = args.matmulK }, args.dtype);
     const rhs_shape = zml.Shape.init(.{ .k = args.matmulK, .n = args.matmulN }, args.dtype);
 
@@ -243,15 +306,24 @@ fn runMatmulProfile(
     defer lhs_buffer.deinit();
     var rhs_buffer = try createFilledBuffer(allocator, io, platform, rhs_shape, sharding, 0.5);
     defer rhs_buffer.deinit();
+    const reinject_side = selectMatmulReinjectSide(args);
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
-    exe_args.set(.{ lhs_buffer, rhs_buffer });
 
-    log.info("Running MATMUL warmup...", .{});
-    try runCalls(io, &exe, exe_args, &exe_results, 1);
+    // log.info("Running MATMUL warmup...", .{});
+    // try runMatmulPipelineCalls(
+    //     io,
+    //     &exe,
+    //     &exe_args,
+    //     &exe_results,
+    //     &lhs_buffer,
+    //     &rhs_buffer,
+    //     reinject_side,
+    //     1,
+    // );
 
     const session_id = try withSessionSuffix(allocator, args.sessionId, "matmul");
     defer allocator.free(session_id);
@@ -269,11 +341,31 @@ fn runMatmulProfile(
     }
 
     log.info(
-        "Profiling MATMUL compute with {d} exe.call(s) on {d}x{d} * {d}x{d}",
-        .{ args.matmulCalls, args.matmulM, args.matmulK, args.matmulK, args.matmulN },
+        "Profiling MATMUL compute pipeline with {d} call(s)/pipeline x {d} pipeline(s) = {d} total exe.call(s) on {d}x{d} * {d}x{d} (reinjecting into {s})",
+        .{
+            args.matmulCalls,
+            args.matmulPipelines,
+            total_calls,
+            args.matmulM,
+            args.matmulK,
+            args.matmulK,
+            args.matmulN,
+            @tagName(reinject_side),
+        },
     );
     const started_at: std.Io.Timestamp = .now(io, .awake);
-    try runCalls(io, &exe, exe_args, &exe_results, args.matmulCalls);
+    for (0..args.matmulPipelines) |_| {
+        try runMatmulPipelineCalls(
+            io,
+            &exe,
+            &exe_args,
+            &exe_results,
+            &lhs_buffer,
+            &rhs_buffer,
+            reinject_side,
+            args.matmulCalls,
+        );
+    }
     log.info("MATMUL profiled window elapsed: {f}", .{started_at.untilNow(io, .awake)});
 }
 
