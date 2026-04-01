@@ -63,6 +63,7 @@ copy_to_directory(
 
 zig_binary(
     name = "zml-smi",
+    visibility = ["//visibility:public"],
     data = [":sandbox"],
     main = "main.zig",
     deps = [
