@@ -29,6 +29,7 @@ const Fns = struct {
     nvmlDeviceGetCurrPcieLinkGeneration: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkGeneration),
     nvmlDeviceGetCurrPcieLinkWidth: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkWidth),
     nvmlDeviceGetMemoryBusWidth: *const @TypeOf(c.nvmlDeviceGetMemoryBusWidth),
+    nvmlDeviceGetPcieSpeed: *const @TypeOf(c.nvmlDeviceGetPcieSpeed),
     nvmlDeviceGetComputeRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetComputeRunningProcesses_v3),
     nvmlDeviceGetGraphicsRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
     nvmlDeviceGetProcessUtilization: *const @TypeOf(c.nvmlDeviceGetProcessUtilization),
@@ -172,6 +173,12 @@ pub fn pcieLinkWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
     try check(self.lib.nvmlDeviceGetCurrPcieLinkWidth(handle, &width));
     return width;
+}
+
+pub fn pcieSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+    var speed: c_uint = 0;
+    try check(self.lib.nvmlDeviceGetPcieSpeed(handle, &speed));
+    return speed;
 }
 
 pub fn memBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {

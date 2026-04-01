@@ -117,6 +117,10 @@ const Device = struct {
         return @intCast(try self.nvml.pcieRxKBps(self.handle));
     }
 
+    pub fn pcieBandwidth(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieSpeed(self.handle));
+    }
+
     pub fn pcieLinkGen(self: Device) !u64 {
         return @intCast(try self.nvml.pcieLinkGen(self.handle));
     }
@@ -144,6 +148,7 @@ const metrics = .{
     .{ .field = "mem_bus_width", .query = Device.memBusWidth },
     .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
     .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
+    .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
     .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };
