@@ -150,7 +150,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_len });
     const prefill_tokens = Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = Tensor.init(.{ .b = 1, .s = 1 }, .u32);
-    const token_index = Tensor.init(.{}, .u32);
+    const token_index = Tensor.init(.{}, .i64);
 
     const rng = zml.Tensor.Rng.init();
 
@@ -172,7 +172,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
     }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
@@ -197,7 +197,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
     }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
     errdefer if (decode_future.cancel(io)) |v| {
@@ -219,9 +219,9 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeniz
     const encoded_prompt = try encoder.encode(prompt);
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 1);
 
-    try tokens.append(allocator, qwen_model.special_tokens.im_start_token_id);
+    try tokens.append(allocator, qwen_model.auto_config.im_start_token_id);
     try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.append(allocator, qwen_model.special_tokens.im_end_token_id);
+    try tokens.append(allocator, qwen_model.auto_config.im_end_token_id);
 
     return tokens.toOwnedSlice(allocator);
 }
@@ -254,7 +254,7 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
-        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
+        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, 0), .i64, replicated_sharding);
         defer prefill_token_index_buffer.deinit();
 
         prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, rng_buffers });
@@ -292,9 +292,9 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         }
 
         if (i == output_tokens_len) break :generation;
-        if (generated_token == qwen_model.special_tokens.end_of_text_token_id) break :generation;
+        if (generated_token == qwen_model.auto_config.end_of_text_token_id) break :generation;
 
-        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(input_token_ids.len + i)), .u32, replicated_sharding);
+        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, @intCast(input_token_ids.len + i)), .i64, replicated_sharding);
         defer token_index_buffer.deinit();
 
         decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });

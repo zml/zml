@@ -783,7 +783,7 @@ pub const Tensor = struct {
         return _result(self._shape, op.result(0));
     }
 
-    fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
+    pub fn convolution(self: Tensor, other: Tensor, opts: dialects.stablehlo.ConvolutionOpts) Tensor {
         stdx.debug.assert(self.rank() == other.rank(), "convolution expects tensor ranks to match, got {} and {}", .{ self.rank(), other.rank() });
         const N = self.rank();
         stdx.debug.guard(opts.window_strides.len == N - 2, @src());
@@ -2053,7 +2053,6 @@ pub const Tensor = struct {
         if (args.start != 0) {
             res = res.addConstant(args.start);
         }
-
         return res;
     }
 

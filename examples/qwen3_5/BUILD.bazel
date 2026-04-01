@@ -11,3 +11,39 @@ zig_binary(
         "//zml",
     ],
 )
+
+zig_binary(
+    name = "image_test",
+    srcs = ["qwen3_5.zig"],
+    main = "image_test.zig",
+    data = glob(["safetensors/*.safetensors"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "video_test",
+    srcs = ["qwen3_5.zig"],
+    main = "video_test.zig",
+    data = glob(["safetensors/*.safetensors"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "media_test",
+    srcs = ["qwen3_5.zig"],
+    main = "media_test.zig",
+    data = glob(["safetensors/*.safetensors"]),
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)
