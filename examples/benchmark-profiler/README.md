@@ -53,6 +53,7 @@ bazel run //examples/benchmark-profiler:benchmark_profiler \
 ### MATMUL compute profile
 
 ```bash
+export TPU_VISIBLE_DEVICES=0
 bazel run //examples/benchmark-profiler:benchmark_profiler \
   --@zml//platforms:tpu=true \
   --@zml//platforms:cpu=false -- \
@@ -61,8 +62,8 @@ bazel run //examples/benchmark-profiler:benchmark_profiler \
   --matmulM=8192 \
   --matmulK=8192 \
   --matmulN=8192 \
-  --matmulCalls=3 \
-  --matmulPipelines=5 \
+  --matmulCalls=5 \
+  --matmulPipelines=1 \
   --sessionId=dispatch \
   --xprofDir=/tmp/xprof
 ```

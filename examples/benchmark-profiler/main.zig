@@ -193,21 +193,17 @@ fn runMatmulPipelineCalls(
     exe_results: *zml.Exe.Results,
     lhs_buffer: *zml.Buffer,
     rhs_buffer: *zml.Buffer,
-    reinject_side: MatmulReinjectSide,
+    out_slice: zml.Slice,
     call_count: usize,
 ) !void {
-    _ = reinject_side; // autofix
     var out = lhs_buffer.*;
     for (0..call_count) |_| {
         exe_args.set(.{ out, rhs_buffer.* });
         exe.call(exe_args.*, exe_results);
         out = exe_results.get(zml.Buffer);
-        // switch (reinject_side) {
-        //     .lhs => replaceBuffer(lhs_buffer, &out),
-        //     .rhs => replaceBuffer(rhs_buffer, &out),
-        // }
+        try out.toSlice(io, out_slice);
+        // _ = try out.await(io);
     }
-    _ = try out.await(io);
 }
 
 fn runSaxpyProfile(
@@ -306,7 +302,9 @@ fn runMatmulProfile(
     defer lhs_buffer.deinit();
     var rhs_buffer = try createFilledBuffer(allocator, io, platform, rhs_shape, sharding, 0.5);
     defer rhs_buffer.deinit();
-    const reinject_side = selectMatmulReinjectSide(args);
+    const out_shape = zml.Shape.init(.{ .m = args.matmulM, .n = args.matmulN }, args.dtype);
+    const out_slice = try zml.Slice.alloc(allocator, out_shape);
+    defer out_slice.free(allocator);
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
@@ -341,7 +339,7 @@ fn runMatmulProfile(
     }
 
     log.info(
-        "Profiling MATMUL compute pipeline with {d} call(s)/pipeline x {d} pipeline(s) = {d} total exe.call(s) on {d}x{d} * {d}x{d} (reinjecting into {s})",
+        "Profiling MATMUL compute pipeline with {d} call(s)/pipeline x {d} pipeline(s) = {d} total exe.call(s) on {d}x{d} * {d}x{d}",
         .{
             args.matmulCalls,
             args.matmulPipelines,
@@ -350,7 +348,6 @@ fn runMatmulProfile(
             args.matmulK,
             args.matmulK,
             args.matmulN,
-            @tagName(reinject_side),
         },
     );
     const started_at: std.Io.Timestamp = .now(io, .awake);
@@ -362,7 +359,7 @@ fn runMatmulProfile(
             &exe_results,
             &lhs_buffer,
             &rhs_buffer,
-            reinject_side,
+            out_slice,
             args.matmulCalls,
         );
     }
