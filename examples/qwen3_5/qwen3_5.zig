@@ -325,8 +325,10 @@ pub const MultimodalPrompt = struct {
         defer media_metadata_list.deinit(allocator);
         var cursor: Cursor = .{};
 
-        // Chat prefix: <im_start> user \n
+        // User text input
         try appendTextTokens(allocator, &token_acc, &cursor, &.{ im_start_id, user_id, newline_id });
+        const prompt_tokens = try encoder.encode(text_prompt);
+        try appendTextTokens(allocator, &token_acc, &cursor, prompt_tokens);
 
         // Adding each media placeholder block
         for (media) |m| {
@@ -371,9 +373,7 @@ pub const MultimodalPrompt = struct {
             }
         }
 
-        // User text + assistant prefix.
-        const prompt_tokens = try encoder.encode(text_prompt);
-        try appendTextTokens(allocator, &token_acc, &cursor, prompt_tokens);
+        // Assistant prefix and think setup
         try appendTextTokens(allocator, &token_acc, &cursor, &.{ im_end_id, newline_id, im_start_id, assistant_id, newline_id });
         const think_text = if (options.enable_thinking) "<think>" else "<think> </think>";
         try appendTextTokens(allocator, &token_acc, &cursor, try encoder.encode(think_text));
