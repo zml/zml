@@ -26,7 +26,6 @@ def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
-    c_ptr,
     b_bias_ptr,
     a_scale_ptr,
     b_scale_ptr,
@@ -75,7 +74,7 @@ def fused_moe_kernel(
     use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     HAS_BIAS: tl.constexpr,
-    out_ptr,
+    c_ptr,
 ):
     """
     Implements the fused computation for a Mixture of Experts (MOE) using
