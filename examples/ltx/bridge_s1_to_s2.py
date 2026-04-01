@@ -172,6 +172,14 @@ def main() -> None:
         f"expected [1, 128, {s2['f_lat']}, {s2['h_lat']}, {s2['w_lat']}]"
     )
 
+    # Save upscaled video as a reference for Zig upsampler validation
+    upscaled_ref_path = args.output.parent / "upsampled_ref.safetensors"
+    save_file(
+        {"upscaled_video_latent": upscaled_video.detach().cpu().contiguous()},
+        str(upscaled_ref_path),
+    )
+    print(f"  Saved upsampler reference: {upscaled_ref_path}")
+
     # ========================================================================
     # Unpatchify Stage 1 audio: [1, T_a, 128] → [1, 8, T_a, 16]
     # ========================================================================

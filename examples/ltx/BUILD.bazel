@@ -32,11 +32,24 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "upsample",
+    main = "upsample.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
         ":ltx",
         ":denoise_e2e",
         ":denoise_stage1",
+        ":upsample",
     ],
 )

@@ -2540,4 +2540,320 @@ pub fn forwardPreprocess(
     };
 }
 
+// ============================================================================
+// Section 10: Latent Upsampler (stage 1 → stage 2 bridge)
+// Python ref: ltx_core/model/upsampler/model.py — LatentUpsampler
+//             ltx_core/model/upsampler/res_block.py — ResBlock
+//             ltx_core/model/video_vae/ops.py — PerChannelStatistics
+// ============================================================================
+
+/// Weight struct for a 3D convolution (Conv3d).
+/// Shape: weight [C_out, C_in, D, H, W], bias [C_out].
+pub const Conv3dWeight = struct {
+    weight: Tensor,
+    bias: Tensor,
+};
+
+/// Weight struct for a 2D convolution (Conv2d).
+/// Shape: weight [C_out, C_in, H, W], bias [C_out].
+pub const Conv2dWeight = struct {
+    weight: Tensor,
+    bias: Tensor,
+};
+
+/// GroupNorm weight struct (gamma/beta).
+/// Python: torch.nn.GroupNorm(num_groups, num_channels).
+pub const GroupNormWeight = struct {
+    weight: Tensor, // gamma, shape [C]
+    bias: Tensor, // beta, shape [C]
+};
+
+/// ResBlock for the upsampler: conv1→norm1→silu→conv2→norm2→silu(x+residual).
+/// Python ref: ltx_core/model/upsampler/res_block.py
+pub const UpsamplerResBlock = struct {
+    conv1: Conv3dWeight,
+    norm1: GroupNormWeight,
+    conv2: Conv3dWeight,
+    norm2: GroupNormWeight,
+};
+
+/// Full parameter set for the LatentUpsampler CNN.
+/// Checkpoint: ltx-2.3-spatial-upscaler-x2-1.1.safetensors (72 keys)
+pub const UpsamplerParams = struct {
+    initial_conv: Conv3dWeight,
+    initial_norm: GroupNormWeight,
+    res_block_0: UpsamplerResBlock,
+    res_block_1: UpsamplerResBlock,
+    res_block_2: UpsamplerResBlock,
+    res_block_3: UpsamplerResBlock,
+    /// Conv2d for spatial upsample (operates on (B*F, C, H, W), then PixelShuffle).
+    upsampler_conv: Conv2dWeight,
+    post_res_block_0: UpsamplerResBlock,
+    post_res_block_1: UpsamplerResBlock,
+    post_res_block_2: UpsamplerResBlock,
+    post_res_block_3: UpsamplerResBlock,
+    final_conv: Conv3dWeight,
+};
+
+/// Per-channel statistics for normalize / un_normalize.
+/// From main checkpoint: vae.per_channel_statistics.{mean-of-means, std-of-means}
+pub const PerChannelStats = struct {
+    mean_of_means: Tensor, // [128]
+    std_of_means: Tensor, // [128]
+};
+
+/// Load UpsamplerParams from an upsampler safetensors checkpoint.
+pub fn initUpsamplerParams(store: zml.io.TensorStore.View) UpsamplerParams {
+    const ic = store.withPrefix("initial_conv");
+    const in_ = store.withPrefix("initial_norm");
+    const fc = store.withPrefix("final_conv");
+    // upsampler.0 is the Conv2d inside nn.Sequential
+    const us = store.withPrefix("upsampler").withLayer(0);
+
+    return .{
+        .initial_conv = .{
+            .weight = ic.createTensor("weight", null, null),
+            .bias = ic.createTensor("bias", null, null),
+        },
+        .initial_norm = .{
+            .weight = in_.createTensor("weight", null, null),
+            .bias = in_.createTensor("bias", null, null),
+        },
+        .res_block_0 = initResBlockParams(store.withPrefix("res_blocks").withLayer(0)),
+        .res_block_1 = initResBlockParams(store.withPrefix("res_blocks").withLayer(1)),
+        .res_block_2 = initResBlockParams(store.withPrefix("res_blocks").withLayer(2)),
+        .res_block_3 = initResBlockParams(store.withPrefix("res_blocks").withLayer(3)),
+        .upsampler_conv = .{
+            .weight = us.createTensor("weight", null, null),
+            .bias = us.createTensor("bias", null, null),
+        },
+        .post_res_block_0 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(0)),
+        .post_res_block_1 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(1)),
+        .post_res_block_2 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(2)),
+        .post_res_block_3 = initResBlockParams(store.withPrefix("post_upsample_res_blocks").withLayer(3)),
+        .final_conv = .{
+            .weight = fc.createTensor("weight", null, null),
+            .bias = fc.createTensor("bias", null, null),
+        },
+    };
+}
+
+fn initResBlockParams(store: zml.io.TensorStore.View) UpsamplerResBlock {
+    const c1 = store.withPrefix("conv1");
+    const n1 = store.withPrefix("norm1");
+    const c2 = store.withPrefix("conv2");
+    const n2 = store.withPrefix("norm2");
+    return .{
+        .conv1 = .{
+            .weight = c1.createTensor("weight", null, null),
+            .bias = c1.createTensor("bias", null, null),
+        },
+        .norm1 = .{
+            .weight = n1.createTensor("weight", null, null),
+            .bias = n1.createTensor("bias", null, null),
+        },
+        .conv2 = .{
+            .weight = c2.createTensor("weight", null, null),
+            .bias = c2.createTensor("bias", null, null),
+        },
+        .norm2 = .{
+            .weight = n2.createTensor("weight", null, null),
+            .bias = n2.createTensor("bias", null, null),
+        },
+    };
+}
+
+/// Load PerChannelStats from the main model checkpoint.
+/// Keys: vae.per_channel_statistics.mean-of-means, vae.per_channel_statistics.std-of-means
+pub fn initPerChannelStats(store: zml.io.TensorStore.View) PerChannelStats {
+    const pcs = store.withPrefix("vae").withPrefix("per_channel_statistics");
+    return .{
+        .mean_of_means = pcs.createTensor("mean-of-means", null, null),
+        .std_of_means = pcs.createTensor("std-of-means", null, null),
+    };
+}
+
+// --- Upsampler forward ops ---
+
+/// Conv3d forward: input [B, C_in, D, H, W], kernel [C_out, C_in, kD, kH, kW].
+/// Padding=1 on all spatial dims (same padding for kernel_size=3).
+fn forwardConv3d(input: Tensor, w: Conv3dWeight) Tensor {
+    const conv_out = input.conv3d(w.weight, .{
+        .padding = &.{ 1, 1, 1, 1, 1, 1 }, // padding=1 on each side of D, H, W
+    });
+    // Broadcast bias [C_out] → [B, C_out, D, H, W]
+    return conv_out.add(w.bias.reshape(
+        conv_out.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1),
+    ).broad(conv_out.shape()));
+}
+
+/// Conv2d forward: input [B, C_in, H, W], kernel [C_out, C_in, kH, kW].
+/// Padding=1 on all spatial dims (same padding for kernel_size=3).
+fn forwardConv2d(input: Tensor, w: Conv2dWeight) Tensor {
+    const conv_out = input.conv2d(w.weight, .{
+        .padding = &.{ 1, 1, 1, 1 },
+    });
+    // Broadcast bias [C_out] → [B, C_out, H, W]
+    return conv_out.add(w.bias.reshape(
+        conv_out.shape().set(0, 1).set(2, 1).set(3, 1),
+    ).broad(conv_out.shape()));
+}
+
+/// GroupNorm forward for 5D tensors [B, C, D, H, W].
+/// Python: torch.nn.GroupNorm(num_groups, C).
+fn forwardGroupNorm(input: Tensor, w: GroupNormWeight, comptime num_groups: i64) Tensor {
+    const B = input.dim(0);
+    const C = input.dim(1);
+    const D = input.dim(2);
+    const H = input.dim(3);
+    const W = input.dim(4);
+    const channels_per_group = @divExact(C, num_groups);
+
+    // Reshape: [B, C, D, H, W] → [B, G, C/G, D, H, W]
+    const grouped = input.reshape(.{ B, num_groups, channels_per_group, D, H, W });
+
+    // Compute mean and variance over axes 2..5 (C/G, D, H, W)
+    const grouped_f32 = grouped.convert(.f32);
+
+    // Reduce over axes [2, 3, 4, 5] from last to first for stable indices
+    var reduced_mean = grouped_f32;
+    reduced_mean = reduced_mean.mean(5);
+    reduced_mean = reduced_mean.mean(4);
+    reduced_mean = reduced_mean.mean(3);
+    reduced_mean = reduced_mean.mean(2);
+    // reduced_mean shape: [B, G]
+
+    // Variance: E[(x - mean)^2]
+    const centered = grouped_f32.sub(reduced_mean.broadcastLeft(grouped_f32.shape()));
+    var reduced_var = centered.mul(centered);
+    reduced_var = reduced_var.mean(5);
+    reduced_var = reduced_var.mean(4);
+    reduced_var = reduced_var.mean(3);
+    reduced_var = reduced_var.mean(2);
+
+    // Normalize: (x - mean) / sqrt(var + eps)
+    const eps: f32 = 1e-5;
+    const inv_std = reduced_var.addConstant(eps).rsqrt();
+    const normed = centered.mul(inv_std.broadcastLeft(grouped_f32.shape()));
+
+    // Reshape back in f32: [B, G, C/G, D, H, W] → [B, C, D, H, W]
+    const normed_5d = normed.reshape(.{ B, C, D, H, W });
+
+    // Apply affine in f32: gamma * x + beta, then convert to input dtype.
+    // Keeping f32 through the affine avoids precision loss when gamma is large.
+    const affine_shape = input.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1);
+    const gamma = w.weight.convert(.f32).reshape(affine_shape).broad(normed_5d.shape());
+    const beta = w.bias.convert(.f32).reshape(affine_shape).broad(normed_5d.shape());
+    return normed_5d.mul(gamma).add(beta).convert(input.dtype());
+}
+
+/// PixelShuffle 2D: rearrange (B, C*r*r, H, W) → (B, C, H*r, W*r).
+/// Pure reshape + transpose, no learnable parameters.
+fn forwardPixelShuffle2d(input: Tensor, comptime upscale_factor: i64) Tensor {
+    const B = input.dim(0);
+    const C_total = input.dim(1);
+    const H = input.dim(2);
+    const W = input.dim(3);
+    const C = @divExact(C_total, upscale_factor * upscale_factor);
+    const r = upscale_factor;
+
+    // (B, C*r*r, H, W) → (B, C, r, r, H, W)
+    const s1 = input.reshape(.{ B, C, r, r, H, W });
+    // → (B, C, H, r, W, r)
+    const s2 = s1.transpose(.{ 0, 1, 4, 2, 5, 3 });
+    // → (B, C, H*r, W*r)
+    return s2.reshape(.{ B, C, H * r, W * r });
+}
+
+/// Forward pass for a single upsampler ResBlock.
+/// Python: conv1→norm1→silu→conv2→norm2→silu(x+residual)
+fn forwardResBlock(x: Tensor, rb: UpsamplerResBlock) Tensor {
+    const residual = x;
+    var h = forwardConv3d(x, rb.conv1);
+    h = forwardGroupNorm(h, rb.norm1, 32);
+    h = h.silu();
+    h = forwardConv3d(h, rb.conv2);
+    h = forwardGroupNorm(h, rb.norm2, 32);
+    return h.add(residual).silu();
+}
+
+/// Full upsampler forward: un_normalize → LatentUpsampler CNN → normalize.
+///
+/// Input: [B, 128, F, H, W] bf16 (un-patchified Stage 1 latent)
+/// Output: [B, 128, F, H*2, W*2] bf16 (spatially upsampled)
+///
+/// Python ref: upsample_video() in model.py
+pub fn forwardUpsample(
+    input: Tensor,
+    params: UpsamplerParams,
+    stats: PerChannelStats,
+) Tensor {
+    const B = input.dim(0);
+    const F = input.dim(2);
+
+    // Step 1: un_normalize — x * std_of_means + mean_of_means (per-channel)
+    // Broadcast stats [128] → [B, 128, F, H, W]
+    const stats_shape = input.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1);
+    const std_broad = stats.std_of_means.reshape(stats_shape).broad(input.shape());
+    const mean_broad = stats.mean_of_means.reshape(stats_shape).broad(input.shape());
+    var x = input.mul(std_broad).add(mean_broad);
+
+    // Step 2: LatentUpsampler.forward()
+    // initial_conv → initial_norm → silu
+    x = forwardConv3d(x, params.initial_conv);
+    x = forwardGroupNorm(x, params.initial_norm, 32);
+    x = x.silu();
+
+    // 4x ResBlock (pre-upsample)
+    x = forwardResBlock(x, params.res_block_0);
+    x = forwardResBlock(x, params.res_block_1);
+    x = forwardResBlock(x, params.res_block_2);
+    x = forwardResBlock(x, params.res_block_3);
+
+    // Spatial upsample: rearrange to 2D → Conv2d → PixelShuffle(2) → back to 5D
+    // "b c f h w → (b f) c h w" requires transpose before reshape
+    const H = x.dim(3);
+    const W = x.dim(4);
+    const C = x.dim(1);
+    const x_bfchw = x.transpose(.{ 0, 2, 1, 3, 4 }); // [B, C, F, H, W] → [B, F, C, H, W]
+    const x_4d = x_bfchw.reshape(.{ B * F, C, H, W });
+    var upsampled_4d = forwardConv2d(x_4d, params.upsampler_conv);
+    upsampled_4d = forwardPixelShuffle2d(upsampled_4d, 2);
+    // "(b f) c h w → b c f h w"
+    const C_out = upsampled_4d.dim(1);
+    const H2 = upsampled_4d.dim(2);
+    const W2 = upsampled_4d.dim(3);
+    x = upsampled_4d.reshape(.{ B, F, C_out, H2, W2 }).transpose(.{ 0, 2, 1, 3, 4 });
+
+    // 4x ResBlock (post-upsample)
+    x = forwardResBlock(x, params.post_res_block_0);
+    x = forwardResBlock(x, params.post_res_block_1);
+    x = forwardResBlock(x, params.post_res_block_2);
+    x = forwardResBlock(x, params.post_res_block_3);
+
+    // final_conv
+    x = forwardConv3d(x, params.final_conv);
+
+    // Step 3: normalize — (x - mean_of_means) / std_of_means
+    const out_stats_shape = x.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1);
+    const out_std = stats.std_of_means.reshape(out_stats_shape).broad(x.shape());
+    const out_mean = stats.mean_of_means.reshape(out_stats_shape).broad(x.shape());
+    return x.sub(out_mean).div(out_std);
+}
+
+/// Unpatchify a video latent: [1, T, 128] → [1, 128, F, H, W].
+/// VideoLatentPatchifier(patch_size=1): patchify = "b c f h w → b (f h w) c"
+/// target_shape carries the [1, 128, F, H, W] dimensions.
+pub fn forwardUnpatchifyVideo(input: Tensor, target_shape: zml.Shape) Tensor {
+    const B = target_shape.dim(0);
+    const C = target_shape.dim(1);
+    const F = target_shape.dim(2);
+    const H = target_shape.dim(3);
+    const W = target_shape.dim(4);
+    // [1, F*H*W, 128] → [1, F, H, W, 128] → [1, 128, F, H, W]
+    return input
+        .reshape(.{ B, F, H, W, C })
+        .transpose(.{ 0, 4, 1, 2, 3 });
+}
+
 
