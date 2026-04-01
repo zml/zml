@@ -1,6 +1,10 @@
 const std = @import("std");
 const log = std.log;
 
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
+
 const zml = @import("zml");
 const Tensor = zml.Tensor;
 const stdx = zml.stdx;
@@ -8,39 +12,39 @@ const stdx = zml.stdx;
 const qwen35 = @import("qwen3_5.zig");
 const Qwen35 = qwen35.Qwen35;
 
-pub const std_options: std.Options = .{
-    .log_level = .info,
-};
-
 const CliArgs = struct {
     model: []const u8,
-    prompt: []const u8 = "Write me a long story about a cat",
-    len: i64 = 2048,
+    prompt: []const u8,
+    video_width: i64 = 256,
+    video_height: i64 = 256,
+    video_fps: f32 = 1.0,
+    max_seq_len: i64 = 4096,
+    gen_len: usize = 2048,
+    enable_thinking: bool = false,
 };
+
+// This demo expects a single video as raw rgb24 bytes from stdin.
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
+
     const options = Qwen35.GenOptions{
-        .max_seq_len = args.len,
+        .max_seq_len = args.max_seq_len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = 20,
             .temperature = 1.0,
         },
     };
-
-    //======================= Tensor store init ========================
 
     var vfs_file: zml.io.VFS.File = .init(allocator, init.io, .{});
     defer vfs_file.deinit();
 
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
-
     try vfs.register("file", vfs_file.io());
 
     const io = vfs.io();
-
     const repo = try zml.safetensors.resolveModelRepo(io, args.model);
 
     var registry: zml.safetensors.TensorRegistry = try .fromRepo(allocator, io, repo);
@@ -49,13 +53,9 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    //======================= Platform auto-init ========================
-
     var platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
     log.info("\n{f}", .{platform.fmtVerbose()});
-
-    //======================= Model & cache init ========================
 
     const parsed_config = try parseConfig(allocator, io, repo);
     defer parsed_config.deinit();
@@ -63,34 +63,18 @@ pub fn main(init: std.process.Init) !void {
 
     var qwen_model: Qwen35 = try .init(allocator, store.view(), config, options);
     defer qwen_model.deinit(allocator);
+
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-
-    const model_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
-    const kv_cache = qwen35.KvCache.init(
-        config,
-        1,
-        options.max_seq_len,
-        model_dtype,
-        .f32,
-    );
-    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
-    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
-
-    //======================= Progress tracking setup ========================
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
 
-    //======================= Loading tokenizer (async) ========================
-
     var tokenizer_future = try io.concurrent(loadTokenizer, .{ allocator, io, repo, &progress });
-    errdefer blk: {
+    defer blk: {
         var v = tokenizer_future.cancel(io) catch break :blk;
         v.deinit();
     }
 
-    //======================= Loading weights (async) ========================
-
-    var qwen35_buffers_future = try io.concurrent(qwen35.Qwen35.load, .{
+    var qwen_buffers_future = try io.concurrent(qwen35.Qwen35.load, .{
         &qwen_model,
         allocator,
         io,
@@ -100,42 +84,85 @@ pub fn main(init: std.process.Init) !void {
         &progress,
     });
     defer blk: {
-        var v = qwen35_buffers_future.cancel(io) catch break :blk;
+        var v = qwen_buffers_future.cancel(io) catch break :blk;
         Qwen35.unloadBuffers(&v, allocator);
     }
 
-    var tokenizer = try tokenizer_future.await(io);
-    const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
-    defer allocator.free(input_token_ids);
-    const prefill_len: usize = @intCast(options.max_seq_len);
+    const tokenizer = try tokenizer_future.await(io);
 
-    //======================= Model compilation (async) ========================
+    var media_inputs = try loadMediaInputs(
+        allocator,
+        io,
+        platform,
+        replicated_sharding,
+        qwen_model.config,
+        args.video_width,
+        args.video_height,
+        args.video_fps,
+    );
+    defer media_inputs.deinit(allocator);
 
-    var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
-    defer if (compile_result_future.cancel(io)) |v| {
+    var multimodal_prompt = try qwen35.MultimodalPrompt.init(
+        allocator,
+        qwen_model.config,
+        tokenizer,
+        args.prompt,
+        media_inputs.media_input_list,
+        .{
+            .max_seq_len = options.max_seq_len,
+            .enable_thinking = args.enable_thinking,
+        },
+    );
+    defer multimodal_prompt.deinit(allocator);
+
+    log.info("Prompt layout: {f}", .{multimodal_prompt});
+
+    const cache_dtype = qwen_model.text_model.embed_tokens.weight.dtype();
+    const kv_cache = qwen35.KvCache.init(qwen_model.config, 1, options.max_seq_len, cache_dtype, .f32);
+
+    var compile_result_future = try io.concurrent(compileModel, .{
+        allocator,
+        io,
+        platform,
+        qwen_model,
+        kv_cache,
+        &progress,
+        multimodal_prompt,
+        replicated_sharding,
+    });
+    errdefer if (compile_result_future.cancel(io)) |v| {
         v.prefill_exe.deinit();
         v.decode_exe.deinit();
     } else |_| {};
 
-    //======================= Awaiting futures ========================
+    var compile_result = try compile_result_future.await(io);
+    const qwen_buffers = try qwen_buffers_future.await(io);
 
-    const compile_result = try compile_result_future.await(io);
-    const qwen35_buffers = try qwen35_buffers_future.await(io);
-
+    defer {
+        compile_result.prefill_exe.deinit();
+        compile_result.decode_exe.deinit();
+    }
     progress.end();
 
-    //======================= Running model for prompt ========================
+    log.info(
+        "\nRunning media model {s} with {d} media input(s) on prompt:\n{s}\n",
+        .{ args.model, media_inputs.media_input_list.len, args.prompt },
+    );
 
-    log.info("\n🕹️ ZML 🕹️ running model {s} on following prompt:\n{s}\n", .{ args.model, args.prompt });
-
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    var tokenizer_decoder = try tokenizer.decoder();
-    defer tokenizer_decoder.deinit();
-
-    try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
-
-    //======================= Output check (panics if fail) ========================
-    // try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
+    try runGenerationLoop(
+        allocator,
+        io,
+        platform,
+        qwen_model,
+        qwen_buffers,
+        replicated_sharding,
+        tokenizer,
+        compile_result,
+        multimodal_prompt,
+        media_inputs.pixel_values,
+        args.gen_len,
+        kv_cache,
+    );
 }
 
 const CompileModelResult = struct {
@@ -143,16 +170,19 @@ const CompileModelResult = struct {
     decode_exe: zml.Exe,
 };
 
-fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, qwen35_model: Qwen35, kv_cache: qwen35.KvCache, progress: *std.Progress.Node, prefill_len: usize) !CompileModelResult {
+fn compileModel(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    qwen35_model: Qwen35,
+    kv_cache: qwen35.KvCache,
+    progress: *std.Progress.Node,
+    prefill_layout: qwen35.MultimodalPrompt,
+    sharding: zml.sharding.Sharding,
+) !CompileModelResult {
     const now: std.Io.Timestamp = .now(io, .awake);
-    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
     defer log.info("Compiled model [{f}]", .{now.untilNow(io, .awake)});
-    log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_len });
-    const prefill_tokens = Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
-    const decode_tokens = Tensor.init(.{ .b = 1, .s = 1 }, .u32);
-    const token_index = Tensor.init(.{}, .i64);
-
-    const rng = zml.Tensor.Rng.init();
+    log.info("Compiling model for platform {any} with prefill length {d}...", .{ platform.target, prefill_layout.token_ids.len });
 
     var prefill_future = try io.concurrent(struct {
         fn call(
@@ -160,21 +190,46 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             io_: std.Io,
             platform_: *const zml.Platform,
             qwen35_model_: Qwen35,
-            prefill_tokens_: Tensor,
-            token_index_: Tensor,
             kv_cache_: qwen35.KvCache,
-            rng_: zml.Tensor.Rng,
-            replicated_sharding_: zml.sharding.Sharding,
+            prefill_layout_: qwen35.MultimodalPrompt,
+            sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
-            var node_ = progress_.start("Compiling prefill...", 1);
-            defer node_.end();
+            var node = progress_.start("Compiling prefill...", 1);
+            defer node.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+
+            const patch_3d_size = qwen35_model_.auto_config.vision_patch_3d_size;
+            var media_pixel_values = try allocator_.alloc(Tensor, prefill_layout_.media_metadata.len);
+            defer allocator_.free(media_pixel_values);
+
+            for (prefill_layout_.media_metadata, 0..) |metadata, i| {
+                const patch_count = switch (metadata) {
+                    .image => |m| m.patch_count,
+                    .video => |m| m.patch_count,
+                };
+                media_pixel_values[i] = Tensor.init(.{ .p = patch_count, .ps = patch_3d_size }, .f32);
+            }
+
+            return platform_.compile(
+                allocator_,
+                io_,
+                qwen35_model_,
+                .multimodal_prefill_forward,
+                .{
+                    Tensor.init(.{ .b = 1, .s = prefill_layout_.token_ids.len }, .u32),
+                    media_pixel_values,
+                    Tensor.init(.{ .g = 3, .b = 1, .s = prefill_layout_.token_ids.len }, .i64),
+                    prefill_layout_.media_metadata,
+                    kv_cache_,
+                    zml.Tensor.Rng.init(),
+                },
+                .{ .shardings = &.{sharding_} },
+            );
         }
-    }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, prefill_layout, sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -185,21 +240,32 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             io_: std.Io,
             platform_: *const zml.Platform,
             qwen35_model_: Qwen35,
-            decode_tokens_: Tensor,
-            token_index_: Tensor,
             kv_cache_: qwen35.KvCache,
-            rng_: zml.Tensor.Rng,
-            replicated_sharding_: zml.sharding.Sharding,
+            sharding_: zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
-            var node_ = progress_.start("Compiling decode...", 1);
-            defer node_.end();
+            var node = progress_.start("Compiling decode...", 1);
+            defer node.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .text_forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+
+            return platform_.compile(
+                allocator_,
+                io_,
+                qwen35_model_,
+                .multimodal_decode_forward,
+                .{
+                    Tensor.init(.{ .b = 1, .s = 1 }, .u32),
+                    Tensor.init(.{}, .i64),
+                    kv_cache_,
+                    Tensor.init(.{ .b = 1, .s = 1 }, .i64),
+                    zml.Tensor.Rng.init(),
+                },
+                .{ .shardings = &.{sharding_} },
+            );
         }
-    }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, kv_cache, sharding, progress });
     errdefer if (decode_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -210,117 +276,123 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
 }
 
-//======================= Generation setup ========================
+fn runGenerationLoop(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    model: Qwen35,
+    model_buffers: zml.Bufferized(Qwen35),
+    sharding: zml.sharding.Sharding,
+    tokenizer: zml.tokenizer.Tokenizer,
+    compile_result: CompileModelResult,
+    prefill_layout: qwen35.MultimodalPrompt,
+    media_pixel_values: []zml.Buffer,
+    gen_len: usize,
+    kv_cache: qwen35.KvCache,
+) !void {
+    var kv_cache_buffers = try kv_cache.initBuffer(io, platform);
+    defer qwen35.KvCache.deinitBuffer(&kv_cache_buffers);
 
-fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8, qwen_model: Qwen35) ![]u32 {
-    var encoder = try tokenizer.encoder();
-    defer encoder.deinit();
+    // Prefill
 
-    const encoded_prompt = try encoder.encode(prompt);
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 1);
+    const prefill_seq_len: i64 = @intCast(prefill_layout.stat.total_tokens);
+    const prompt_tokens_shape = zml.Shape.init(.{ .b = 1, .s = prefill_layout.token_ids.len }, .u32);
+    var prompt_tokens_slice: zml.Slice = try .alloc(allocator, prompt_tokens_shape);
+    defer prompt_tokens_slice.free(allocator);
+    @memcpy(prompt_tokens_slice.items(u32), prefill_layout.token_ids);
+    var prompt_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prompt_tokens_slice, sharding);
+    defer prompt_tokens_buffer.deinit();
 
-    try tokens.append(allocator, qwen_model.auto_config.im_start_token_id);
-    try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.append(allocator, qwen_model.auto_config.im_end_token_id);
+    const position_ids_shape = zml.Shape.init(.{ .g = 3, .b = 1, .s = prefill_layout.token_ids.len }, .i64);
+    var position_ids_slice: zml.Slice = try .alloc(allocator, position_ids_shape);
+    defer position_ids_slice.free(allocator);
+    @memcpy(position_ids_slice.items(i64), prefill_layout.position_ids);
+    var position_ids_buffer: zml.Buffer = try .fromSlice(io, platform, position_ids_slice, sharding);
+    defer position_ids_buffer.deinit();
 
-    return tokens.toOwnedSlice(allocator);
-}
-
-fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, tokenizer_decoder: *zml.tokenizer.Tokenizer.Decoder, qwen35_buffers: zml.Bufferized(Qwen35), kv_cache_buffers: *zml.Bufferized(qwen35.KvCache), compile_result: CompileModelResult, input_token_ids: []u32, writer: *std.Io.Writer, qwen_model: Qwen35, prefill_len: usize) !void {
-    const max_seq_len: usize = @intCast(qwen_model.gen_options.max_seq_len);
-    if (input_token_ids.len > max_seq_len) return error.PromptTooLong;
-    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-
-    const prefill_tokens_shape = zml.Shape.init(.{ .b = 1, .s = prefill_len }, .u32);
-    const decode_tokens_shape = zml.Shape.init(.{ .b = 1, .s = 1 }, .u32);
-
-    const seed: u128 = 0;
-    var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, replicated_sharding);
+    var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
-    var generated_token_slice: zml.Slice = try .alloc(allocator, decode_tokens_shape);
+
+    var prefill_args = try compile_result.prefill_exe.args(allocator);
+    defer prefill_args.deinit(allocator);
+    var prefill_results = try compile_result.prefill_exe.results(allocator);
+    defer prefill_results.deinit(allocator);
+
+    const prefill_now: std.Io.Timestamp = .now(io, .awake);
+    prefill_args.set(.{ model_buffers, prompt_tokens_buffer, media_pixel_values, position_ids_buffer, kv_cache_buffers, rng_buffers });
+    compile_result.prefill_exe.call(prefill_args, &prefill_results);
+    const prefill_duration = prefill_now.untilNow(io, .awake);
+
+    var prefill_generated_token_buffer: zml.Buffer = undefined;
+    var mrope_position_deltas_buffer: zml.Buffer = undefined;
+    prefill_results.fill(.{ &prefill_generated_token_buffer, &kv_cache_buffers, &mrope_position_deltas_buffer, &rng_buffers });
+    defer prefill_generated_token_buffer.deinit();
+    defer mrope_position_deltas_buffer.deinit();
+
+    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .b = 1, .s = 1 }, .u32));
     defer generated_token_slice.free(allocator);
+    try prefill_generated_token_buffer.toSlice(io, generated_token_slice);
 
-    {
-        var prefill_args = try compile_result.prefill_exe.args(allocator);
-        defer prefill_args.deinit(allocator);
+    // Decode
 
-        var prefill_results = try compile_result.prefill_exe.results(allocator);
-        defer prefill_results.deinit(allocator);
-
-        const prefill_tokens_slice: zml.Slice = try .alloc(allocator, prefill_tokens_shape);
-        defer prefill_tokens_slice.free(allocator);
-        @memset(prefill_tokens_slice.items(u32), 0);
-        @memcpy(prefill_tokens_slice.items(u32)[0..input_token_ids.len], input_token_ids);
-
-        var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, replicated_sharding);
-        defer prefill_tokens_buffer.deinit();
-        var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, 0), .i64, replicated_sharding);
-        defer prefill_token_index_buffer.deinit();
-
-        prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, rng_buffers });
-        compile_result.prefill_exe.call(prefill_args, &prefill_results);
-
-        prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
-        try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
-        const generated_token = prefill_tokens_slice.items(u32)[input_token_ids.len - 1];
-        generated_token_slice.items(u32)[0] = generated_token;
-    }
-
-    const now: std.Io.Timestamp = .now(io, .awake);
-    const output_tokens_len = max_seq_len - input_token_ids.len - 1;
-    var num_tokens_generated: usize = 1;
-
-    var decode_args = try compile_result.decode_exe.args(allocator);
-    defer decode_args.deinit(allocator);
-
-    var decode_results = try compile_result.decode_exe.results(allocator);
-    defer decode_results.deinit(allocator);
-
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, replicated_sharding);
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
     defer current_token_buffer.deinit();
 
-    generation: for (0..output_tokens_len + 1) |i| {
-        num_tokens_generated += 1;
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+    const now: std.Io.Timestamp = .now(io, .awake);
+    var num_tokens_generated: usize = 1;
+
+    for (0..gen_len) |i| {
+        try current_token_buffer.toSlice(io, generated_token_slice);
         const generated_token = generated_token_slice.items(u32)[0];
-        if (try tokenizer_decoder.*.next(generated_token)) |chunk| {
-            // if (i % 50 == 0) {
-            //     var buf: [32]u8 = undefined;
-            //     try writer.writeAll(try std.fmt.bufPrint(&buf, "\x1b[31m{d}\x1b[0m", .{i}));
-            // }
-            try writer.writeAll(chunk);
-            try writer.flush();
+        num_tokens_generated += 1;
+        if (try tokenizer_decoder.next(generated_token)) |chunk| {
+            try stdout.interface.writeAll(chunk);
+            try stdout.interface.flush();
         }
 
-        if (i == output_tokens_len) break :generation;
-        if (generated_token == qwen_model.auto_config.end_of_text_token_id) break :generation;
+        if (generated_token == model.auto_config.end_of_text_token_id) break;
 
-        var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(i64, @intCast(input_token_ids.len + i)), .i64, replicated_sharding);
+        var token_index_buffer = try zml.Buffer.scalar(
+            io,
+            platform,
+            prefill_seq_len - 1 + @as(i64, @intCast(i)),
+            .i64,
+            sharding,
+        );
         defer token_index_buffer.deinit();
 
-        decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
+        var decode_args = try compile_result.decode_exe.args(allocator);
+        defer decode_args.deinit(allocator);
+        var decode_results = try compile_result.decode_exe.results(allocator);
+        defer decode_results.deinit(allocator);
 
+        decode_args.set(.{ model_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, mrope_position_deltas_buffer, rng_buffers });
         compile_result.decode_exe.call(decode_args, &decode_results);
 
-        decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
-
-        try current_token_buffer.toSlice(io, generated_token_slice);
+        decode_results.fill(.{ &current_token_buffer, &kv_cache_buffers, &rng_buffers });
     }
 
+    try stdout.interface.writeAll("\n");
+    try stdout.interface.flush();
     const duration = now.untilNow(io, .awake);
-    std.debug.print("\n", .{});
     log.info("Generated {} tokens in {f}: {:.3} tok/s", .{
         num_tokens_generated,
         duration,
         stdx.Io.Duration.hzFloat(stdx.Io.Duration.div(duration, num_tokens_generated)),
     });
+    log.info("Prefill duration: {:.3}s", .{
+        @as(f64, @floatFromInt(prefill_duration.nanoseconds)) / std.time.ns_per_s,
+    });
 }
-
-//======================= Load and parse setup ========================
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
     progress.increaseEstimatedTotalItems(1);
     var node = progress.start("Loading tokenizer...", 1);
     defer node.end();
+
     const bytes = b: {
         const file = try dir.openFile(io, "tokenizer.json", .{});
         defer file.close(io);
@@ -333,10 +405,6 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
 }
 
 fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.json.Parsed(qwen35.Qwen35.Config) {
-    const now: std.Io.Timestamp = .now(io, .awake);
-    log.info("Loading model config", .{});
-    defer log.info("Loaded model config [{f}]", .{now.untilNow(io, .awake)});
-
     const parsed_config = blk: {
         const config_json_file = try dir.openFile(io, "config.json", .{});
         defer config_json_file.close(io);
@@ -351,518 +419,185 @@ fn parseConfig(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir) !std.j
     return parsed_config;
 }
 
-//======================= Activation check setup ========================
+const LoadedMediaInputs = struct {
+    pixel_values: []zml.Buffer,
+    media_input_list: []qwen35.MultimodalPrompt.MediaInput,
 
-fn checkLayers(
+    fn deinit(self: *LoadedMediaInputs, allocator: std.mem.Allocator) void {
+        for (self.pixel_values) |*buffer| {
+            buffer.deinit();
+        }
+        allocator.free(self.pixel_values);
+
+        for (self.media_input_list) |media| {
+            switch (media) {
+                .image => {},
+                .video => |video| {
+                    if (video.frame_timestamps.len > 0) allocator.free(video.frame_timestamps);
+                },
+            }
+        }
+        allocator.free(self.media_input_list);
+
+        self.* = .{
+            .pixel_values = &.{},
+            .media_input_list = &.{},
+        };
+    }
+};
+
+// Reads raw rgb24 video frames from stdin and prepares a single media video input.
+fn loadMediaInputs(
     allocator: std.mem.Allocator,
     io: std.Io,
-    platform: *zml.Platform,
-    qwen_model: Qwen35,
-    qwen35_buffers: zml.Bufferized(Qwen35),
-) !void {
-    var activations_registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, "/home/tristan/zml/examples/qwen3_5/safetensors/Qwen3.5-0.8B.activations-bf16-with-caches.safetensors");
-    defer activations_registry.deinit();
+    platform: *const zml.Platform,
+    sharding: zml.sharding.Sharding,
+    config: qwen35.Qwen35.Config,
+    video_width: i64,
+    video_height: i64,
+    video_fps: f32,
+) !LoadedMediaInputs {
+    const in_channels = config.vision_config.in_channels;
+    const patch_size = config.vision_config.patch_size;
+    const temporal_patch_size = config.vision_config.temporal_patch_size;
+    const spatial_merge_size = config.vision_config.spatial_merge_size;
+    const grid_h = @divExact(video_height, patch_size);
+    const grid_w = @divExact(video_width, patch_size);
 
-    var activations_store: zml.io.TensorStore = .fromRegistry(allocator, &activations_registry);
-    defer activations_store.deinit();
+    if (@mod(video_width, patch_size) != 0 or @mod(video_height, patch_size) != 0) return error.InvalidVideoDimensions;
+    if (@mod(grid_h, spatial_merge_size) != 0 or @mod(grid_w, spatial_merge_size) != 0) return error.InvalidVideoDimensions;
 
-    const comp_opts: zml.testing.CompareOpts = .{
-        .absolute_tolerance = 1e-2,
-        .relative_tolerance = 1e-2,
-        .minimum_close_fraction = 0.999,
-    };
-    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-    const shardings = &.{replicated_sharding};
+    const frame_byte_count_i64 = video_width * video_height;
+    const frame_byte_count_i64_rgb = frame_byte_count_i64 * in_channels;
+    const frame_byte_count: usize = @intCast(frame_byte_count_i64_rgb);
 
-    // Testing embed_tokens
+    var stdin_read_buffer: [8 * 1024]u8 = undefined;
+    var stdin_reader = std.Io.File.stdin().reader(io, &stdin_read_buffer);
 
-    const EmbedTokensHarness = struct {
-        embedTokens: zml.nn.TokenEmbedding,
-        pub fn forward(self: @This(), inputIds: Tensor) Tensor {
-            return self.embedTokens.weight
-                .gather(.{ .voc = inputIds.withTags(.{ .b, .s }) }, .{});
-        }
-    };
-    const embedTokensHarness: EmbedTokensHarness = .{
-        .embedTokens = qwen_model.text_model.embed_tokens,
-    };
-    const embedTokensHarnessBuffers: zml.Bufferized(EmbedTokensHarness) = .{
-        .embedTokens = qwen35_buffers.text_model.embed_tokens,
-    };
-    try zml.testing.testLayer(
-        allocator,
-        io,
-        platform,
-        embedTokensHarness,
-        .forward,
-        activations_store.view(),
-        "model.model.embed_tokens",
-        embedTokensHarnessBuffers,
-        shardings,
-        comp_opts,
-    );
+    const frame_buffer = try allocator.alloc(u8, frame_byte_count);
+    defer allocator.free(frame_buffer);
 
-    // Testing each layer
+    var packed_frames: std.ArrayList(u8) = .empty;
+    defer packed_frames.deinit(allocator);
+    var frame_count: usize = 0;
 
-    const LayerHarness = struct {
-        layer: qwen35.TransformerLayer,
-        pub fn forward(
-            self: @This(),
-            x: Tensor,
-            cos: Tensor,
-            sin: Tensor,
-            position_ids: Tensor,
-            cache_position: Tensor,
-        ) struct { Tensor, Tensor, Tensor } {
-            _ = cos;
-            _ = sin;
-            _ = position_ids;
-            const token_index = cachePositionToTokenIndex(cache_position);
-            const tagged_x = x.withTags(.{ .b, .s, .d });
-            const kv_cache = emptyLayerKvCache(self.layer, tagged_x);
-            const output, const updated_cache = self.layer.forward(x.withTags(.{ .b, .s, .d }), token_index, kv_cache.atLayer(0));
-            return switch (self.layer.attn) {
-                .self_attn => .{
-                    output,
-                    flatKeyCache(updated_cache.self_attn),
-                    flatValueCache(updated_cache.self_attn),
-                },
-                .linear_attn => .{
-                    output,
-                    flatConvState(updated_cache.gated_delta_net),
-                    flatRecurrentState(updated_cache.gated_delta_net),
-                },
-            };
-        }
-    };
-
-    const InputLayerNormHarness = struct {
-        inputLayerNorm: qwen35.RmsNorm,
-        pub fn forward(self: @This(), x: Tensor) Tensor {
-            return self.inputLayerNorm.forward(x.withTags(.{ .b, .s, .d }));
-        }
-    };
-
-    const LinearAttnHarness = struct {
-        linearAttn: qwen35.GatedDeltaNet,
-        pub fn forward(
-            self: @This(),
-            x: Tensor,
-            cache_position: Tensor,
-        ) struct { Tensor, Tensor, Tensor } {
-            _ = cache_position;
-            const cache = emptyLinearAttnCache(self.linearAttn, x.withTags(.{ .b, .s, .d }));
-            const output, const updated_cache = self.linearAttn.forward(x.withTags(.{ .b, .s, .d }), cache);
-            return .{
-                output,
-                flatConvState(updated_cache),
-                flatRecurrentState(updated_cache),
-            };
-        }
-    };
-
-    const PostAttentionLayerNormHarness = struct {
-        postAttentionLayerNorm: qwen35.RmsNorm,
-
-        pub fn forward(self: @This(), x: Tensor) Tensor {
-            return self.postAttentionLayerNorm.forward(x.withTags(.{ .b, .s, .d }));
-        }
-    };
-
-    const MlpHarness = struct {
-        mlp: qwen35.Mlp,
-        pub fn forward(self: @This(), x: Tensor) Tensor {
-            return self.mlp.forward(x.withTags(.{ .b, .s, .d }));
-        }
-    };
-
-    const SelfAttnHarness = struct {
-        selfAttn: qwen35.SelfAttn,
-        pub fn forward(
-            self: @This(),
-            x: Tensor,
-            position_ids: Tensor,
-            cache_position: Tensor,
-            cos: Tensor,
-            sin: Tensor,
-        ) struct { Tensor, Tensor, Tensor } {
-            _ = position_ids;
-            _ = cos;
-            _ = sin;
-            const token_index = cachePositionToTokenIndex(cache_position);
-            const cache = emptySelfAttnCache(self.selfAttn, x.withTags(.{ .b, .s, .d }));
-            const output, const updated_cache = self.selfAttn.forward(x.withTags(.{ .b, .s, .d }), token_index, cache);
-            return .{
-                output,
-                flatKeyCache(updated_cache),
-                flatValueCache(updated_cache),
-            };
-        }
-    };
-
-    const layers_to_test = .{ 0, 3 };
-    for (qwen_model.text_model.layers, qwen35_buffers.text_model.layers, 0..) |layer, layer_buffers, layer_index| {
-        const should_test = inline for (layers_to_test) |test_idx| {
-            if (layer_index == test_idx) break true;
-        } else false;
-        if (!should_test) {
-            continue;
-        }
-        var name_buf: [128]u8 = undefined;
-
-        const layer_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}", .{layer_index});
-        const layerHarness: LayerHarness = .{
-            .layer = layer,
-        };
-        const layerHarnessBuffers: zml.Bufferized(LayerHarness) = .{
-            .layer = layer_buffers,
-        };
-        try zml.testing.testLayer(
-            allocator,
-            io,
-            platform,
-            layerHarness,
-            .forward,
-            activations_store.view(),
-            layer_name,
-            layerHarnessBuffers,
-            shardings,
-            comp_opts,
-        );
-
-        // Testing input_layernorm
-
-        const input_layernorm_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.input_layernorm", .{layer_index});
-        const inputLayerNormHarness: InputLayerNormHarness = .{ .inputLayerNorm = layer.input_layernorm };
-        const inputLayerNormHarnessBuffers: zml.Bufferized(InputLayerNormHarness) = .{ .inputLayerNorm = layer_buffers.input_layernorm };
-        try zml.testing.testLayer(
-            allocator,
-            io,
-            platform,
-            inputLayerNormHarness,
-            .forward,
-            activations_store.view(),
-            input_layernorm_name,
-            inputLayerNormHarnessBuffers,
-            shardings,
-            comp_opts,
-        );
-
-        // Testing attention (full or linear)
-
-        switch (layer.attn) {
-            .self_attn => |self_attn| {
-                const attn_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.self_attn", .{layer_index});
-                const selfAttnHarness: SelfAttnHarness = .{
-                    .selfAttn = self_attn,
-                };
-                const selfAttnHarnessBuffers: zml.Bufferized(SelfAttnHarness) = .{
-                    .selfAttn = switch (layer_buffers.attn) {
-                        .self_attn => |buffered_self_attn| buffered_self_attn,
-                        else => unreachable,
-                    },
-                };
-                try zml.testing.testLayer(
-                    allocator,
-                    io,
-                    platform,
-                    selfAttnHarness,
-                    .forward,
-                    activations_store.view(),
-                    attn_name,
-                    selfAttnHarnessBuffers,
-                    shardings,
-                    comp_opts,
-                );
-            },
-            .linear_attn => |linear_attn| {
-                const attn_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.linear_attn", .{layer_index});
-                const linearAttnHarness: LinearAttnHarness = .{
-                    .linearAttn = linear_attn,
-                };
-                const linearAttnHarnessBuffers: zml.Bufferized(LinearAttnHarness) = .{
-                    .linearAttn = switch (layer_buffers.attn) {
-                        .linear_attn => |buffered_linear_attn| buffered_linear_attn,
-                        else => unreachable,
-                    },
-                };
-                try zml.testing.testLayer(
-                    allocator,
-                    io,
-                    platform,
-                    linearAttnHarness,
-                    .forward,
-                    activations_store.view(),
-                    attn_name,
-                    linearAttnHarnessBuffers,
-                    shardings,
-                    comp_opts,
-                );
-            },
-        }
-
-        // Testing post_attention_layernorm
-
-        const post_attention_layernorm_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.post_attention_layernorm", .{layer_index});
-        const postAttentionLayerNormHarness: PostAttentionLayerNormHarness = .{ .postAttentionLayerNorm = layer.post_attention_layernorm };
-        const postAttentionLayerNormHarnessBuffers: zml.Bufferized(PostAttentionLayerNormHarness) = .{
-            .postAttentionLayerNorm = layer_buffers.post_attention_layernorm,
-        };
-        try zml.testing.testLayer(
-            allocator,
-            io,
-            platform,
-            postAttentionLayerNormHarness,
-            .forward,
-            activations_store.view(),
-            post_attention_layernorm_name,
-            postAttentionLayerNormHarnessBuffers,
-            shardings,
-            comp_opts,
-        );
-
-        const mlp_name = try std.fmt.bufPrint(&name_buf, "model.model.layers.{d}.mlp", .{layer_index});
-        const mlpHarness: MlpHarness = .{ .mlp = layer.mlp };
-        const mlpHarnessBuffers: zml.Bufferized(MlpHarness) = .{ .mlp = layer_buffers.mlp };
-        try zml.testing.testLayer(
-            allocator,
-            io,
-            platform,
-            mlpHarness,
-            .forward,
-            activations_store.view(),
-            mlp_name,
-            mlpHarnessBuffers,
-            shardings,
-            comp_opts,
-        );
+    while (true) {
+        const eof = try readFrameFromReader(&stdin_reader, frame_buffer);
+        if (eof) break;
+        try packed_frames.appendSlice(allocator, frame_buffer);
+        frame_count += 1;
     }
 
-    // Testing text_model.norm
+    if (frame_count == 0) return error.EmptyVideoInput;
 
-    const ModelNormHarness = struct {
-        norm: qwen35.RmsNorm,
-        pub fn forward(self: @This(), x: Tensor) Tensor {
-            return self.norm.forward(x.withTags(.{ .b, .s, .d }));
+    const temporal_patch_size_usize: usize = @intCast(temporal_patch_size);
+    const grid_t_usize = try std.math.divCeil(usize, frame_count, temporal_patch_size_usize);
+    const grid_t: i64 = @intCast(grid_t_usize);
+    const patch_count = grid_t * grid_h * grid_w;
+    const patch_3d_size = in_channels * temporal_patch_size * patch_size * patch_size;
+
+    var pixel_values_slice = try zml.Slice.alloc(allocator, zml.Shape.init(.{ .p = patch_count, .ps = patch_3d_size }, .f32));
+    defer pixel_values_slice.free(allocator);
+    const pixel_values = pixel_values_slice.items(f32);
+
+    const video_width_usize: usize = @intCast(video_width);
+    const patch_size_usize: usize = @intCast(patch_size);
+    const grid_h_usize: usize = @intCast(grid_h);
+    const grid_w_usize: usize = @intCast(grid_w);
+    const spatial_merge_size_usize: usize = @intCast(spatial_merge_size);
+    const merged_h_usize = @divExact(grid_h_usize, spatial_merge_size_usize);
+    const merged_w_usize = @divExact(grid_w_usize, spatial_merge_size_usize);
+    const ps_usize: usize = @intCast(patch_3d_size);
+
+    const image_mean = [3]f32{ 0.48145466, 0.4578275, 0.40821073 };
+    const image_std = [3]f32{ 0.26862954, 0.2613026, 0.2757771 };
+
+    var patch_index: usize = 0;
+    for (0..grid_t_usize) |t_idx| {
+        for (0..merged_h_usize) |gh_block| {
+            for (0..merged_w_usize) |gw_block| {
+                for (0..spatial_merge_size_usize) |gh_local| {
+                    for (0..spatial_merge_size_usize) |gw_local| {
+                        const gh = gh_block * spatial_merge_size_usize + gh_local;
+                        const gw = gw_block * spatial_merge_size_usize + gw_local;
+
+                        const patch_offset = patch_index * ps_usize;
+                        var patch_elem: usize = 0;
+
+                        for (0..3) |c| {
+                            for (0..temporal_patch_size_usize) |tt| {
+                                const source_frame = @min(t_idx * temporal_patch_size_usize + tt, frame_count - 1);
+                                const frame_offset = source_frame * frame_byte_count;
+                                const y_base = gh * patch_size_usize;
+                                const x_base = gw * patch_size_usize;
+
+                                for (0..patch_size_usize) |py| {
+                                    for (0..patch_size_usize) |px| {
+                                        const y = y_base + py;
+                                        const x = x_base + px;
+                                        const byte_index = frame_offset + ((y * video_width_usize + x) * 3 + c);
+                                        const raw = @as(f32, @floatFromInt(packed_frames.items[byte_index])) / 255.0;
+                                        pixel_values[patch_offset + patch_elem] = (raw - image_mean[c]) / image_std[c];
+                                        patch_elem += 1;
+                                    }
+                                }
+                            }
+                        }
+
+                        patch_index += 1;
+                    }
+                }
+            }
         }
-    };
-    const modelNormHarness: ModelNormHarness = .{
-        .norm = qwen_model.text_model.norm,
-    };
-    const modelNormHarnessBuffers: zml.Bufferized(ModelNormHarness) = .{
-        .norm = qwen35_buffers.text_model.norm,
-    };
-    try zml.testing.testLayer(
-        allocator,
-        io,
-        platform,
-        modelNormHarness,
-        .forward,
-        activations_store.view(),
-        "model.model.norm",
-        modelNormHarnessBuffers,
-        shardings,
-        comp_opts,
+    }
+    stdx.debug.assert(
+        patch_index == @as(usize, @intCast(patch_count)),
+        "patch_index mismatch: got={d} expected={d}",
+        .{ patch_index, patch_count },
     );
 
-    // Testing full model
+    var pixel_values_buffer = try zml.Buffer.fromSlice(io, platform, pixel_values_slice, sharding);
+    errdefer pixel_values_buffer.deinit();
 
-    const ModelHarness = struct {
-        model: qwen35.TextModel,
-        config: Qwen35.Config,
-        cache: qwen35.KvCache,
-        pub fn forward(
-            self: @This(),
-            tokens: Tensor,
-            cos: Tensor,
-            sin: Tensor,
-            position_ids: Tensor,
-        ) struct { Tensor } {
-            _ = cos;
-            _ = sin;
-            _ = position_ids;
-            const tagged_tokens = tokens.withTags(.{ .b, .s });
-            return .{self.model.forward(tagged_tokens, Tensor.scalar(@as(u32, 0), .u32), self.cache)[0]};
+    const timestamps = try allocator.alloc(f32, grid_t_usize);
+    errdefer allocator.free(timestamps);
+    for (timestamps, 0..) |*ts, i| {
+        ts.* = @as(f32, @floatFromInt(i * temporal_patch_size_usize)) / video_fps;
+    }
+
+    var pixel_value_buffers = try allocator.alloc(zml.Buffer, 1);
+    errdefer allocator.free(pixel_value_buffers);
+    pixel_value_buffers[0] = pixel_values_buffer;
+
+    var media_input_list = try allocator.alloc(qwen35.MultimodalPrompt.MediaInput, 1);
+    errdefer allocator.free(media_input_list);
+    media_input_list[0] = .{
+        .video = .{
+            .grid_thw = .{ grid_t, grid_h, grid_w },
+            .frame_timestamps = timestamps,
+        },
+    };
+
+    log.info(
+        "Loaded stdin video: frames={d}, grid_thw={any}, patch_count={d}, width={d}, height={d}, fps={d:.3}",
+        .{ frame_count, [3]i64{ grid_t, grid_h, grid_w }, patch_count, video_width, video_height, video_fps },
+    );
+
+    return .{
+        .pixel_values = pixel_value_buffers,
+        .media_input_list = media_input_list,
+    };
+}
+
+fn readFrameFromReader(reader: anytype, frame_buffer: []u8) !bool {
+    var offset: usize = 0;
+    while (offset < frame_buffer.len) {
+        const read_n = try reader.interface.readSliceShort(frame_buffer[offset..]);
+        if (read_n == 0) {
+            if (offset == 0) return true;
+            return error.TruncatedVideoFrame;
         }
-    };
-    const modelHarness: ModelHarness = .{
-        .model = qwen_model.text_model,
-        .config = qwen_model.config,
-        .cache = initKvCache(qwen_model.text_model.embed_tokens.weight.dtype(), qwen_model.config, qwen_model.gen_options),
-    };
-    var modelHarnessCacheBuffers = try modelHarness.cache.initBuffer(io, platform);
-    defer qwen35.KvCache.deinitBuffer(&modelHarnessCacheBuffers);
-    try zeroKvCacheBuffers(allocator, io, platform, replicated_sharding, &modelHarnessCacheBuffers);
-    const modelHarnessBuffers: zml.Bufferized(ModelHarness) = .{
-        .model = qwen35_buffers.text_model,
-        .cache = modelHarnessCacheBuffers,
-    };
-    try zml.testing.testLayer(
-        allocator,
-        io,
-        platform,
-        modelHarness,
-        .forward,
-        activations_store.view(),
-        "model.model",
-        modelHarnessBuffers,
-        shardings,
-        comp_opts,
-    );
-}
-
-fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, buffer: *zml.Buffer) !void {
-    const shape = buffer.shape();
-    const zero_slice: zml.Slice = try .alloc(allocator, shape);
-    defer zero_slice.free(allocator);
-    @memset(zero_slice.data(), 0);
-
-    var zeroed = try zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
-    errdefer zeroed.deinit();
-    buffer.deinit();
-    buffer.* = zeroed;
-}
-
-fn zeroKvCacheBuffers(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    platform: *zml.Platform,
-    sharding: zml.sharding.Sharding,
-    cache: *zml.Bufferized(qwen35.KvCache),
-) !void {
-    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.k);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.self_attn.v);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.conv_state);
-    try zeroBuffer(allocator, io, platform, sharding, &cache.gated_delta_net.recurrent_state);
-}
-
-fn initLinearAttnCache(dtype: zml.DataType, config: Qwen35.Config, options: Qwen35.GenOptions) qwen35.KvCache.GatedDeltaNetCache {
-    return qwen35.KvCache.init(
-        config,
-        1,
-        options.max_seq_len,
-        dtype,
-        .f32,
-    ).gated_delta_net;
-}
-
-fn initSelfAttnCache(dtype: zml.DataType, config: Qwen35.Config, options: Qwen35.GenOptions) qwen35.KvCache.SelfAttnCache {
-    return qwen35.KvCache.init(
-        config,
-        1,
-        options.max_seq_len,
-        dtype,
-        .f32,
-    ).self_attn;
-}
-
-fn initKvCache(dtype: zml.DataType, config: Qwen35.Config, options: Qwen35.GenOptions) qwen35.KvCache {
-    return qwen35.KvCache.init(
-        config,
-        1,
-        options.max_seq_len,
-        dtype,
-        .f32,
-    );
-}
-
-fn zeroTensor(shape: zml.Shape) Tensor {
-    return Tensor.constant(shape.dtype().zero()).broad(shape);
-}
-
-fn cachePositionToTokenIndex(cache_position: Tensor) Tensor {
-    return cache_position.withTags(.{.s}).slice1d(.s, .{ .start = 0, .end = 1 }).squeeze(.s).convert(.u32);
-}
-
-fn emptySelfAttnCache(self_attn: qwen35.SelfAttn, x: Tensor) qwen35.KvCache.SelfAttnCache {
-    const cache_shape = zml.Shape.init(.{
-        .b = x.dim(.b),
-        .layer = 1,
-        .s = x.dim(.s),
-        .h = self_attn.num_kv_heads,
-        .hd = self_attn.head_dim,
-    }, x.dtype());
-
-    return .{
-        .k = zeroTensor(cache_shape),
-        .v = zeroTensor(cache_shape),
-        .layer_index = Tensor.scalar(@as(u32, 0), .u32),
-    };
-}
-
-fn emptyLinearAttnCache(linear_attn: qwen35.GatedDeltaNet, x: Tensor) qwen35.KvCache.GatedDeltaNetCache {
-    const conv_dim = 2 * linear_attn.num_k_heads * linear_attn.head_k_dim + linear_attn.num_v_heads * linear_attn.head_v_dim;
-    const left_pad = linear_attn.conv_kernel_size - 1;
-    const conv_shape = zml.Shape.init(.{
-        .b = x.dim(.b),
-        .layer = 1,
-        .s = left_pad,
-        .mix = conv_dim,
-    }, x.dtype());
-    const recurrent_shape = zml.Shape.init(.{
-        .b = x.dim(.b),
-        .layer = 1,
-        .vh = linear_attn.num_v_heads,
-        .khd = linear_attn.head_k_dim,
-        .vhd = linear_attn.head_v_dim,
-    }, .f32);
-
-    return .{
-        .conv_state = zeroTensor(conv_shape),
-        .recurrent_state = zeroTensor(recurrent_shape),
-        .layer_index = Tensor.scalar(@as(u32, 0), .u32),
-    };
-}
-
-fn dummySelfAttnCache(dtype: zml.DataType, batch_dim: i64, seq_len: i64) qwen35.KvCache.SelfAttnCache {
-    const shape = zml.Shape.init(.{ .b = batch_dim, .layer = 1, .s = seq_len, .h = 1, .hd = 1 }, dtype);
-    return .{
-        .k = zeroTensor(shape),
-        .v = zeroTensor(shape),
-        .layer_index = Tensor.scalar(@as(u32, 0), .u32),
-    };
-}
-
-fn dummyLinearAttnCache(conv_dtype: zml.DataType, batch_dim: i64) qwen35.KvCache.GatedDeltaNetCache {
-    return .{
-        .conv_state = zeroTensor(zml.Shape.init(.{ .b = batch_dim, .layer = 1, .s = 1, .mix = 1 }, conv_dtype)),
-        .recurrent_state = zeroTensor(zml.Shape.init(.{ .b = batch_dim, .layer = 1, .vh = 1, .khd = 1, .vhd = 1 }, .f32)),
-        .layer_index = Tensor.scalar(@as(u32, 0), .u32),
-    };
-}
-
-const single_full_layer_types = [_]qwen35.Qwen35.LayerType{.full_attention};
-const single_linear_layer_types = [_]qwen35.Qwen35.LayerType{.linear_attention};
-
-fn emptyLayerKvCache(layer: qwen35.TransformerLayer, x: Tensor) qwen35.KvCache {
-    return .{
-        .layer_types = switch (layer.attn) {
-            .self_attn => single_full_layer_types[0..],
-            .linear_attn => single_linear_layer_types[0..],
-        },
-        .self_attn = switch (layer.attn) {
-            .self_attn => |self_attn| emptySelfAttnCache(self_attn, x),
-            .linear_attn => dummySelfAttnCache(x.dtype(), x.dim(.b), x.dim(.s)),
-        },
-        .gated_delta_net = switch (layer.attn) {
-            .linear_attn => |linear_attn| emptyLinearAttnCache(linear_attn, x),
-            .self_attn => dummyLinearAttnCache(x.dtype(), x.dim(.b)),
-        },
-    };
-}
-
-fn flatKeyCache(cache: qwen35.KvCache.SelfAttnCache) Tensor {
-    return cache.keys().transpose(.{ .b, .h, .s, .hd });
-}
-
-fn flatValueCache(cache: qwen35.KvCache.SelfAttnCache) Tensor {
-    return cache.values().transpose(.{ .b, .h, .s, .hd });
-}
-
-fn flatConvState(cache: qwen35.KvCache.GatedDeltaNetCache) Tensor {
-    return cache.convState().transpose(.{ .b, .mix, .s });
-}
-
-fn flatRecurrentState(cache: qwen35.KvCache.GatedDeltaNetCache) Tensor {
-    return cache.recurrentState();
+        offset += read_n;
+    }
+    return false;
 }

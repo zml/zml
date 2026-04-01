@@ -1766,16 +1766,11 @@ pub const KvCache = struct {
     }
 
     fn writeAllZeros(writer: *std.Io.Writer, len: usize) !void {
-        var zero_chunk: [4096]u8 = [_]u8{0} ** 4096;
+        const zero_chunk: [4096]u8 = [_]u8{0} ** 4096;
         var remaining = len;
         while (remaining > 0) {
             const chunk_len = @min(remaining, zero_chunk.len);
-            var written_total: usize = 0;
-            while (written_total < chunk_len) {
-                const wrote = try writer.vtable.drain(writer, &.{zero_chunk[written_total..chunk_len]}, 1);
-                if (wrote == 0) return error.WriteFailed;
-                written_total += wrote;
-            }
+            try writer.writeAll(zero_chunk[0..chunk_len]);
             remaining -= chunk_len;
         }
     }
