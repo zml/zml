@@ -1,0 +1,7 @@
+av
+numpy
+Pillow
+safetensors
+torch
+transformers
+torchvision
