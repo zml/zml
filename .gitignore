@@ -23,6 +23,12 @@ zig-out/
 # Data files
 *.wav
 *.ecdc
+*.bmp
+*.jpg
+*.jpeg
+*.png
+*.mov
+*.mp4
 
 # Python slope
 .venv
