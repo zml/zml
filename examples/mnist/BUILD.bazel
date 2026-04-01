@@ -26,6 +26,7 @@ zig_binary(
 mtree_spec(
     name = "mtree",
     srcs = [":mnist"],
+    tags = ["manual"],
 )
 
 tar(
@@ -37,6 +38,7 @@ tar(
     ],
     compress = "zstd",
     mtree = ":mtree",
+    tags = ["manual"],
 )
 
 expand_template(
@@ -55,6 +57,7 @@ expand_template(
         "/{}/mnist.runfiles/:model".format(package_name()),
         "/{}/mnist.runfiles/:data".format(package_name()),
     ],
+    tags = ["manual"],
 )
 
 # The actual docker image, with entrypoint, created from tar archive
@@ -63,6 +66,7 @@ oci_image(
     base = "@distroless_cc_debian12",
     entrypoint = ":entrypoint",
     tars = [":archive"],
+    tags = ["manual"],
 )
 
 # We always want to create the image for Linux
@@ -70,6 +74,7 @@ platform_transition_filegroup(
     name = "image",
     srcs = [":image_"],
     target_platform = "@zml//platforms:linux_amd64",
+    tags = ["manual"],
 )
 
 # Load will immediately load the image (eg: docker load)
@@ -79,6 +84,7 @@ oci_load(
     repo_tags = [
         "distroless/mnist:latest",
     ],
+    tags = ["manual"],
 )
 
 # Bazel target for pushing the Linux image to our docker registry
@@ -88,4 +94,5 @@ oci_push(
     remote_tags = ["latest"],
     # override with -- --repository foo.bar/org/image
     repository = "index.docker.io/steeve/mnist",
+    tags = ["manual"],
 )
