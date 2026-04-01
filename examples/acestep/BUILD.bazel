@@ -1,0 +1,17 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "acestep",
+    args = [
+        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//",
+        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//model.safetensors",
+        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json",
+        "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//model.safetensors",
+    ],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bazel",
+        "//zml",
+    ],
+)

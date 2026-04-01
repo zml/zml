@@ -1,0 +1,104 @@
+BEGIN: formatted
+<|im_start|>system
+# Instruction
+Expand the user's input into a more detailed and specific musical description:
+
+<|im_end|>
+<|im_start|>user
+a chill guitar melody
+
+instrumental: true<|im_end|>
+<|im_start|>assistant
+
+END
+
+END
+BEGIN: tokenized
+['<|im_start|>', 'system', 'Ċ', '#', 'ĠInstruction', 'Ċ', 'Expand', 'Ġthe', 'Ġuser', "'s", 'Ġinput', 'Ġinto', 'Ġa', 'Ġmore', 'Ġdetailed', 'Ġand', 'Ġspecific', 'Ġmusical', 'Ġdescription', ':ĊĊ', '<|im_end|>', 'Ċ', '<|im_start|>', 'user', 'Ċ', 'a', 'Ġchill', 'Ġguitar', 'Ġmelody', 'ĊĊ', 'instrument', 'al', ':', 'Ġtrue', '<|im_end|>', 'Ċ', '<|im_start|>', 'assistant', 'Ċ']
+END
+
+BEGIN: tokens ids
+[151644, 8948, 198,
+2, 29051, 198, 38946, 279, 1196, 594, 1946, 1119, 264, 803, 11682, 323, 3151, 17795, 4008, 1447,
+151645, 198,
+151644, 872, 198,
+64, 36301, 16986, 61584, 271, 66368, 278, 25, 830,
+151645, 198,
+151644, 77091, 198]
+END
+
+{151644, 8948, 198,
+2, 29051, 198, 38946, 279, 1196, 594, 1946, 1119, 264, 803, 11682, 323, 3151, 17795, 4008, 1447,
+151645, 198,
+151644, 872, 198,
+64, 36301, 16986, 61584, 271, 66368, 278, 25, 830,
+151645, 198,
+151644, 77091, 198 }
+
+
+Debug output text: <think>
+bpm: 50
+caption: A clean, melodic electric guitar loop with a touch of chorus effect establishes
+  a chill, introspective mood. This is quickly joined by a crisp, modern hip-hop drum
+  machine beat and a smooth, rounded synth bassline. The arrangement is built on this
+  repeating instrumental loop, creating a hypnotic and laid-back atmosphere. A brief
+  breakdown occurs midway through, where the drums drop out to feature a more atmospheric
+  and pensive guitar melody before the main groove returns to carry the track to a clean fade-out.
+duration: 178
+genres:Lo-fi hip hop
+keyscale: B major
+language: unknown
+timesignature: 4
+
+######################################################################################################
+######################################################################################################
+######################################################################################################
+
+BEGIN: formatted
+<|im_start|>system
+# Instruction
+Generate audio semantic tokens based on the given conditions:
+
+<|im_end|>
+<|im_start|>user
+# Caption
+A clean, melodic electric guitar plays a catchy, looping riff with a slightly jazzy, neo-soul flavor. The tone is bright and articulate, with a touch of light reverb adding space to the mix. The performance is relaxed and groovy, establishing a chill and introspective mood before ending abruptly.
+
+# Lyric
+[Instrumental]
+<|im_end|>
+<|im_start|>assistant
+<think>
+bpm: 80
+duration: 36
+keyscale: E major
+language: unknown
+timesignature: 4
+</think>
+
+<|im_end|>
+
+END
+BEGIN: tokenized
+['<|im_start|>', 'system', 'Ċ', '#', 'ĠInstruction', 'Ċ', 'Generate', 'Ġaudio', 'Ġsemantic', 'Ġtokens', 'Ġbased', 'Ġon', 'Ġthe', 'Ġgiven', 'Ġconditions', ':ĊĊ', '<|im_end|>', 'Ċ', '<|im_start|>', 'user', 'Ċ', '#', 'ĠCaption', 'Ċ', 'A', 'Ġclean', ',', 'Ġmel', 'odic', 'Ġelectric', 'Ġguitar', 'Ġplays', 'Ġa', 'Ġcatchy', ',', 'Ġlooping', 'Ġriff', 'Ġwith', 'Ġa', 'Ġslightly', 'Ġj', 'az', 'zy', ',', 'Ġneo', '-s', 'oul', 'Ġflavor', '.', 'ĠThe', 'Ġtone', 'Ġis', 'Ġbright', 'Ġand', 'Ġarticulate', ',', 'Ġwith', 'Ġa', 'Ġtouch', 'Ġof', 'Ġlight', 'Ġre', 'verb', 'Ġadding', 'Ġspace', 'Ġto', 'Ġthe', 'Ġmix', '.', 'ĠThe', 'Ġperformance', 'Ġis', 'Ġrelaxed', 'Ġand', 'Ġgro', 'ovy', ',', 'Ġestablishing', 'Ġa', 'Ġchill', 'Ġand', 'Ġintros', 'pective', 'Ġmood', 'Ġbefore', 'Ġending', 'Ġabruptly', '.ĊĊ', '#', 'ĠLy', 'ric', 'Ċ', '[', 'Instrument', 'al', ']Ċ', '<|im_end|>', 'Ċ', '<|im_start|>', 'assistant', 'Ċ', '<think>', 'Ċ', 'b', 'pm', ':', 'Ġ', '8', '0', 'Ċ', 'duration', ':', 'Ġ', '3', '6', 'Ċ', 'keys', 'cale', ':', 'ĠE', 'Ġmajor', 'Ċ', 'language', ':', 'Ġunknown', 'Ċ', 'times', 'ign', 'ature', ':', 'Ġ', '4', 'Ċ', '</think>', 'ĊĊ', '<|im_end|>', 'Ċ']
+END
+BEGIN: tokens ids
+{ 151644, 8948, 198,
+2, 29051, 198,
+31115, 7699, 41733, 11211, 3118, 389, 279, 2661, 4682, 1447,
+151645, 198,
+151644, 872, 198,
+2, 37600, 198,
+32, 4240, 11, 10581, 52760, 9072, 16986, 11088, 264, 85505, 11, 62587, 80250, 448, 264, 10078, 502, 1370, 4246, 11, 35082, 1331, 10965, 17172, 13, 576, 16232, 374, 9906, 323, 68218, 11, 448, 264, 5796, 315, 3100, 312, 22328, 7842, 3550, 311, 279, 6514, 13, 576, 5068, 374, 30367, 323, 10487, 61515, 11, 30592, 264, 36301, 323, 25528, 9085, 19671, 1573, 13391, 59745, 382,
+2, 15953,
+2216, 198, 58, 56324, 278, 921,
+151645, 198,
+151644, 77091, 198,
+151667, 198,
+65, 5187, 25, 220, 23, 15, 198, 17021, 25, 220, 18, 21, 198, 10563, 2246, 25, 468, 3598, 198, 11528, 25, 9788, 198, 15136, 622, 1568, 25, 220, 19,
+198,
+151668, 271,
+151645, 198 }
+END
+
+Debug output text: <|audio_code_35847|><|audio_code_11917|><|audio_code_16434|><|audio_code_53412|><|audio_code_26676|><|audio_code_2567|><|audio_code_18460|><|audio_code_16391|><|audio_code_51205|><|audio_code_2109|><|audio_code_12543|><|audio_code_1040|><|audio_code_51776|><|audio_code_9768|><|audio_code_10944|><|audio_code_46145|><|audio_code_53552|><|audio_code_61545|><|audio_code_49427|><|audio_code_5808|><|audio_code_7360|><|audio_code_31987|><|audio_code_42496|><|audio_code_58408|><|audio_code_50705|><|audio_code_570|><|audio_code_63055|><|audio_code_57598|><|audio_code_60144|><|audio_code_2233|><|audio_code_35348|><|audio_code_4163|><|audio_code_41522|><|audio_code_40110|><|audio_code_21004|><|audio_code_4615|><|audio_code_21020|><|audio_code_16391|><|audio_code_51205|><|audio_code_2109|><|audio_code_9983|><|audio_code_1040|><|audio_code_51776|><|aud...
