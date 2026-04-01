@@ -170,7 +170,7 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
     var remaining: usize = fields.len;
 
     const ehdr: *const elf.ElfN.Ehdr = @ptrCast(@alignCast(mmap));
-    const shdrs = @as([*]const elf.ElfN.Shdr, @ptrCast(@alignCast(mmap[ehdr.shoff..])))[0..ehdr.shnum];
+    const shdrs: []const elf.ElfN.Shdr = @as([*]const elf.ElfN.Shdr, @ptrCast(@alignCast(mmap[ehdr.shoff..])))[0..ehdr.shnum];
 
     for (shdrs) |sh| {
         if (sh.type != .SYMTAB) continue;
