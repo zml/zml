@@ -303,8 +303,9 @@ fn runMatmulProfile(
     var rhs_buffer = try createFilledBuffer(allocator, io, platform, rhs_shape, sharding, 0.5);
     defer rhs_buffer.deinit();
     const out_shape = zml.Shape.init(.{ .m = args.matmulM, .n = args.matmulN }, args.dtype);
-    const out_slice = try zml.Slice.alloc(allocator, out_shape);
-    defer out_slice.free(allocator);
+    var zml_allocator = zml.mem.DmaAllocator.init(allocator, &platform.devices[0]);
+    const out_slice = try zml.Slice.alloc(zml_allocator.allocator(), out_shape);
+    defer out_slice.free(zml_allocator.allocator());
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
