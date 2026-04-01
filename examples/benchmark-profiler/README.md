@@ -18,7 +18,9 @@ bazel build //examples/benchmark-profiler:benchmark_profiler
 ### SAXPY dispatch profile
 
 ```bash
-bazel run //examples/benchmark-profiler:benchmark_profiler -- \
+bazel run //examples/benchmark-profiler:benchmark_profiler \
+  --@zml//platforms:tpu=true \
+  --@zml//platforms:cpu=false -- \
   --mode=saxpy \
   --dtype=f32 \
   --saxpySize=4096 \
@@ -29,13 +31,15 @@ bazel run //examples/benchmark-profiler:benchmark_profiler -- \
 ### MATMUL compute profile
 
 ```bash
-bazel run //examples/benchmark-profiler:benchmark_profiler -- \
+bazel run //examples/benchmark-profiler:benchmark_profiler \
+  --@zml//platforms:tpu=true \
+  --@zml//platforms:cpu=false -- \
   --mode=matmul \
   --dtype=f16 \
-  --matmulM=4096 \
-  --matmulK=4096 \
-  --matmulN=4096 \
-  --matmulCalls=1 \
+  --matmulM=8192 \
+  --matmulK=8192 \
+  --matmulN=8192 \
+  --matmulCalls=5 \
   --sessionId=compute \
   --xprofDir=/tmp/xprof
 ```
