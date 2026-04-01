@@ -17,7 +17,11 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
+        const initial: GpuInfo = .{
+            .name = dev.name(collector.arena) catch null,
+            .driver_version = dev.driverVersion(collector.arena) catch null,
+            .cuda_driver_version = dev.cudaDriverVersion(collector.arena) catch null,
+        };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
         try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev }, .{});
     }
@@ -37,10 +41,25 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = .{0} ** 256;
+        var buf: [256]u8 = undefined;
         const slice = try self.nvml.name(self.handle, &buf);
 
         return try arena.dupe(u8, slice);
+    }
+
+    fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        var buf: [256]u8 = undefined;
+        const slice = try self.nvml.driverVersion(&buf);
+
+        return try arena.dupe(u8, slice);
+    }
+
+    fn cudaDriverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        const v = try self.nvml.cudaDriverVersion();
+        return try std.fmt.allocPrint(arena, "{}.{}", .{
+            Nvml.cudaDriverVersionMajor(v),
+            Nvml.cudaDriverVersionMinor(v),
+        });
     }
 
     // Power

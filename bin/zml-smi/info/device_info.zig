@@ -17,6 +17,8 @@ pub const DeviceInfo = union(Target) {
 
 pub const GpuInfo = struct {
     name: ?[]const u8 = null,
+    driver_version: ?[]const u8 = null,
+    cuda_driver_version: ?[]const u8 = null,
 
     // Utilization
     util_percent: ?u64 = null,
@@ -53,6 +55,7 @@ pub const GpuInfo = struct {
 
 pub const NeuronInfo = struct {
     name: ?[]const u8 = null,
+    driver_version: ?[]const u8 = null,
 
     util_percent: ?u64 = null,
     mem_used_bytes: ?u64 = null,

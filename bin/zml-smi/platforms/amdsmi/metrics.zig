@@ -17,7 +17,10 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
+        const initial: GpuInfo = .{
+            .name = dev.name(collector.arena) catch null,
+            .driver_version = dev.driverVersion(collector.arena) catch null,
+        };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
         try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev }, .{});
     }
@@ -37,9 +40,14 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [AmdSmi.name_buf_len]u8 = .{0} ** AmdSmi.name_buf_len;
+        var buf: [AmdSmi.name_buf_len]u8 = undefined;
         const slice = try self.amdsmi.name(self.handle, &buf);
 
+        return try arena.dupe(u8, slice);
+    }
+
+    fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        const slice = try self.amdsmi.driverVersion(self.handle);
         return try arena.dupe(u8, slice);
     }
 

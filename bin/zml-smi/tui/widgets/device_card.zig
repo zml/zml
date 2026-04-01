@@ -61,7 +61,25 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
         .neuron => .{ "NC", "Core" },
         .tpu => .{ "TPU", "Duty" },
     };
-    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ device_label, i, cf.name });
+    const driver_ver: []const u8 = switch (dev.*) {
+        .cuda => |*sv| blk: {
+            const gpu = sv.front();
+            const drv = gpu.driver_version orelse "";
+            const cuda = gpu.cuda_driver_version orelse "";
+            break :blk if (drv.len > 0 and cuda.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " ({s}, CUDA {s})", .{ drv, cuda })
+            else if (drv.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " ({s})", .{drv})
+            else if (cuda.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " (CUDA {s})", .{cuda})
+            else
+                @as([]const u8, "");
+        },
+        .rocm => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
+        .neuron => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
+        else => "",
+    };
+    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{ device_label, i, cf.name, driver_ver });
 
     const dev_suffix = switch (dev.*) {
         .cuda, .rocm => |*sv| blk: {

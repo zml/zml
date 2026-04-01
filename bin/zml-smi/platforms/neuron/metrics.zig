@@ -26,6 +26,11 @@ pub fn start(collector: *Collector) !void {
     var neuron_infos: std.ArrayList(*DeviceInfo) = .{};
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
+    const nrt_ver: ?[]const u8 = if (nrt.version()) |v|
+        collector.arena.dupe(u8, v) catch null
+    else |_|
+        null;
+
     for (nrt.handles, nrt.device_indexes) |dev_handle, device_idx| {
         const device_type = Nrt.deviceType(dev_handle);
         const mem_per_device: u64 = switch (device_type) {
@@ -48,7 +53,10 @@ pub fn start(collector: *Collector) !void {
                 .nc_per_device = nc_per_device,
             };
 
-            const initial: NeuronInfo = .{ .name = dev.name(collector.arena) catch null };
+            const initial: NeuronInfo = .{
+                .name = dev.name(collector.arena) catch null,
+                .driver_version = nrt_ver,
+            };
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
             try collector.spawnPoll(pollOnce, .{ poll_arena, &info.neuron, dev }, .{ .needs_warmup = true });

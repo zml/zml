@@ -33,6 +33,8 @@ const Fns = struct {
     nvmlDeviceGetComputeRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetComputeRunningProcesses_v3),
     nvmlDeviceGetGraphicsRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
     nvmlDeviceGetProcessUtilization: *const @TypeOf(c.nvmlDeviceGetProcessUtilization),
+    nvmlSystemGetCudaDriverVersion_v2: *const @TypeOf(c.nvmlSystemGetCudaDriverVersion_v2),
+    nvmlSystemGetDriverVersion: *const @TypeOf(c.nvmlSystemGetDriverVersion),
 };
 
 pub fn init() Error!Nvml {
@@ -62,7 +64,7 @@ pub fn deviceCount(self: Nvml) Error!u32 {
 
 pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[256]u8) Error![:0]const u8 {
     try check(self.lib.nvmlDeviceGetName(handle, buf, buf.len));
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
+    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
@@ -179,6 +181,25 @@ pub fn pcieSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var speed: c_uint = 0;
     try check(self.lib.nvmlDeviceGetPcieSpeed(handle, &speed));
     return speed;
+}
+
+pub fn driverVersion(self: Nvml, buf: *[256]u8) Error![:0]const u8 {
+    try check(self.lib.nvmlSystemGetDriverVersion(buf, buf.len));
+    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
+}
+
+pub fn cudaDriverVersionMajor(v: c_int) c_int {
+    return @divTrunc(v, 1000);
+}
+
+pub fn cudaDriverVersionMinor(v: c_int) c_int {
+    return @divTrunc(@mod(v, 1000), 10);
+}
+
+pub fn cudaDriverVersion(self: Nvml) Error!c_int {
+    var version: c_int = 0;
+    try check(self.lib.nvmlSystemGetCudaDriverVersion_v2(&version));
+    return version;
 }
 
 pub fn memBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {

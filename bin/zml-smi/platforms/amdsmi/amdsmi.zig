@@ -29,6 +29,7 @@ const Fns = struct {
     amdsmi_get_pcie_info: *const @TypeOf(c.amdsmi_get_pcie_info),
     amdsmi_get_gpu_bdf_id: *const @TypeOf(c.amdsmi_get_gpu_bdf_id),
     amdsmi_get_gpu_process_list: *const @TypeOf(c.amdsmi_get_gpu_process_list),
+    amdsmi_get_gpu_driver_info: *const @TypeOf(c.amdsmi_get_gpu_driver_info),
 };
 
 pub fn init(allocator: std.mem.Allocator) !AmdSmi {
@@ -92,7 +93,7 @@ pub fn name(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) 
     var info: c.amdsmi_asic_info_t = undefined;
     try check(self.lib.amdsmi_get_gpu_asic_info(handle, &info));
     @memcpy(buf, &info.market_name);
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
+    return std.mem.span(@as([*:0]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: AmdSmi, handle: Handle) Error!u32 {
@@ -196,6 +197,12 @@ pub fn bdfId(self: AmdSmi, handle: Handle) Error!u64 {
     var bdf_id: u64 = 0;
     try check(self.lib.amdsmi_get_gpu_bdf_id(handle, &bdf_id));
     return bdf_id;
+}
+
+pub fn driverVersion(self: AmdSmi, handle: Handle) Error![:0]const u8 {
+    var info: c.amdsmi_driver_info_t = std.mem.zeroes(c.amdsmi_driver_info_t);
+    try check(self.lib.amdsmi_get_gpu_driver_info(handle, &info));
+    return std.mem.span(@as([*c]const u8, @ptrCast(&info.driver_version)));
 }
 
 pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {

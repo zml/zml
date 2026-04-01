@@ -24,6 +24,7 @@ device_indexes: []const c_int,
 
 const Fns = struct {
     nrt_get_total_nc_count: *const @TypeOf(c.nrt_get_total_nc_count),
+    nrt_get_version: *const @TypeOf(c.nrt_get_version),
 };
 
 const PrivateFns = struct {
@@ -124,6 +125,14 @@ pub fn ncCounter(self: Nrt, inst: *c.nds_instance_t, pnc_index: c_int, counter_i
     return value;
 }
 
+pub fn version(self: Nrt) Error![:0]const u8 {
+    var ver: c.nrt_version_t = std.mem.zeroes(c.nrt_version_t);
+    if (self.lib.nrt_get_version(&ver, @sizeOf(c.nrt_version_t)) != 0) {
+        return error.nrt_error;
+    }
+    return std.mem.span(@as([*c]const u8, @ptrCast(&ver.rt_detail)));
+}
+
 pub fn totalNcCount(self: Nrt) Error!u32 {
     var count: u32 = 0;
     if (self.lib.nrt_get_total_nc_count(&count) != 0) {
@@ -150,7 +159,7 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
     if (dladdr(sym_addr, &dl_info) == 0) return error.DladdrFailed;
 
     const elf_base = @intFromPtr(dl_info.dli_fbase);
-    const elf_path = std.mem.sliceTo(dl_info.dli_fname, 0);
+    const elf_path = std.mem.span(dl_info.dli_fname);
 
     const file = try std.Io.Dir.openFileAbsolute(io, elf_path, .{});
     defer file.close(io);
@@ -173,13 +182,17 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
     const shdrs: []const elf.ElfN.Shdr = @as([*]const elf.ElfN.Shdr, @ptrCast(@alignCast(mmap[ehdr.shoff..])))[0..ehdr.shnum];
 
     for (shdrs) |sh| {
-        if (sh.type != .SYMTAB) continue;
+        if (sh.type != .SYMTAB) {
+            continue;
+        }
 
         const strtab_sh = shdrs[sh.link];
         const strtab: []const u8 = mmap[strtab_sh.offset..][0..strtab_sh.size];
 
         for (std.mem.bytesAsSlice(elf.ElfN.Sym, mmap[sh.offset..][0..sh.size])) |s| {
-            if (s.value == 0) continue;
+            if (s.value == 0) {
+                continue;
+            }
 
             const sym_name = std.mem.span(@as([*c]const u8, @ptrCast(strtab[@as(usize, s.name)..])));
 
@@ -190,11 +203,15 @@ fn resolveFromElf(handle: *anyopaque, io: std.Io, comptime known_sym: [:0]const 
                 }
             }
 
-            if (remaining == 0) return result;
+            if (remaining == 0) {
+                return result;
+            }
         }
     }
 
-    if (remaining > 0) return error.SymbolResolutionFailed;
+    if (remaining > 0) {
+        return error.SymbolResolutionFailed;
+    }
     return result;
 }
 
