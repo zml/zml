@@ -16,6 +16,7 @@ const linux = @import("zml-smi/platforms/linux");
 const ProcessEnricher = linux.process.ProcessEnricher;
 const host = linux.metrics;
 const c = @import("c");
+const csv = @import("zml-smi/csv");
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
 const static_print = smi_tui.print;
@@ -23,13 +24,15 @@ const data = smi_tui.data;
 
 const CliArgs = struct {
     top: bool = false,
+    csv: bool = false,
     tui_refresh_rate: u16 = 100,
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--tui-refresh-rate MS] [--poll-interval MS]
+        \\ zml-smi [--top] [--csv] [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
+        \\ --csv               Output device metrics as CSV
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
         \\ --poll-interval     Device polling interval in ms (default: 500)
         \\
@@ -83,7 +86,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer state.deinit(arena);
 
-    if (args.top) {
+    if (args.csv) {
+        var csv_buf: [4096]u8 = undefined;
+        var csv_writer = std.Io.File.stdout().writer(io, &csv_buf);
+
+        try csv.write(&csv_writer.interface, collector.device_infos.items);
+        try csv_writer.flush();
+    } else if (args.top) {
         try tui.run(gpa, io, &state);
     } else {
         try static_print.run(arena, io, &state);
