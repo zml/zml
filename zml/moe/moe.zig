@@ -3,6 +3,7 @@ const zml = @import("../zml.zig");
 const triton = @import("triton.zig");
 
 pub const Backend = enum {
+    // Could select a more specific name like "triton_sm90_bf16"
     triton,
 
     pub fn auto(platform: *const zml.Platform, weights_dtype: zml.DataType) !Backend {
@@ -25,14 +26,14 @@ pub const Backend = enum {
     }
 
     pub fn load(backend: Backend, allocator: std.mem.Allocator) !void {
-        _ = allocator; // autofix
+        _ = allocator;
         return switch (backend) {
             .triton => {},
         };
     }
 
     pub fn register(backend: Backend, platform: *zml.Platform) !void {
-        _ = platform; // autofix
+        _ = platform;
         return switch (backend) {
             .triton => {},
         };
@@ -45,9 +46,9 @@ pub const Parameters = union(Backend) {
     pub const InitOptions = union(Backend) {
         triton: triton.Parameters.InitOptions,
 
-        pub fn fromBackend(backend: Backend) InitOptions {
+        pub fn fromBackend(backend: Backend, num_experts_per_tok: ?u32) InitOptions {
             return switch (backend) {
-                .triton => .{ .triton = .{} },
+                .triton => .{ .triton = .{ .num_experts_per_tok = num_experts_per_tok.? } },
             };
         }
     };
@@ -93,7 +94,6 @@ pub const Metadata = union(Backend) {
 
 pub fn moe(
     input: zml.Tensor,
-    tokens_mask: ?zml.Tensor,
     topk_ids: zml.Tensor,
     topk_weights: zml.Tensor,
     weights_gate_up: zml.Tensor,
@@ -102,12 +102,9 @@ pub fn moe(
     weights_down: zml.Tensor,
     scales_down: ?zml.Tensor,
     bias_down: ?zml.Tensor,
-    num_experts_per_tok: u32,
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
-    _ = tokens_mask; // autofix
-    _ = num_experts_per_tok; // autofix
     return switch (parameters) {
         .triton => b: {
             const triton_metadata = switch (metadata) {
