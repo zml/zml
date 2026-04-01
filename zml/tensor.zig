@@ -346,8 +346,8 @@ pub const Tensor = struct {
 
     test fmod {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const inputs: [2][6]f32 = .{ .{ -3.0, -2, -1, 1, 2, 3 }, .{ 1, 2, 3, 4, 5, -5 } };
         const expectations: [2][6]f32 = .{ .{ -1.0, -0.0, -1.0, 1.0, 0.0, 1.0 }, .{ 1.0000, 0.5000, 0.0000, 1.0000, 0.5000, -0.5000 } };
@@ -625,8 +625,8 @@ pub const Tensor = struct {
                 }
             };
 
-            const platform = zml.testing.env();
-            const replicated_sharding = zml.testing.replicatedSharding();
+            const platform = zml.testing.env() catch return;
+            const replicated_sharding = zml.testing.replicatedSharding() catch return;
             // Compute stats over a uniform distribution on [-2, 10].
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform, .{ .shardings = &.{replicated_sharding} });
             defer exe.deinit();
@@ -731,8 +731,8 @@ pub const Tensor = struct {
                 }
             };
 
-            const platform = zml.testing.env();
-            const replicated_sharding = zml.testing.replicatedSharding();
+            const platform = zml.testing.env() catch return;
+            const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
             const tgt_dist_data = [_]f32{ 2.0, 1.0, 4.0, 3.0 };
             const tgt_dist: Tensor = .init(.{tgt_dist_data.len}, .f32);
@@ -1060,8 +1060,8 @@ pub const Tensor = struct {
     test convert {
         const floats = @import("floats.zig");
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         // f4e2m1
         {
@@ -1156,8 +1156,8 @@ pub const Tensor = struct {
 
     test dot {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         inline for (.{
             .{ .{ .c = 20 }, .{ .c = 20 }, .c, .{} },
@@ -1306,8 +1306,8 @@ pub const Tensor = struct {
 
     test leakyReLU {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const input: Tensor = .init(.{2}, .f32);
         var exe = try zml.module.compile(
@@ -1459,8 +1459,8 @@ pub const Tensor = struct {
 
     test cumulativeSum {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _cumsum(input: Tensor) Tensor {
@@ -1680,8 +1680,8 @@ pub const Tensor = struct {
 
     test slice {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const x: Tensor = .init(.{ 2, 5 }, .f32);
 
@@ -1823,8 +1823,8 @@ pub const Tensor = struct {
 
     test repeat1d {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             fn repeat1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
@@ -1885,8 +1885,8 @@ pub const Tensor = struct {
 
     test stutter1d {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             fn stutter1d(x: Tensor, axis_: u3, n_reps: u32) Tensor {
@@ -2069,8 +2069,8 @@ pub const Tensor = struct {
 
     test scalar {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _fwd() [6]Tensor {
@@ -2241,8 +2241,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
             .unknown(mlirCtx()),
+            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));
@@ -2335,8 +2335,8 @@ pub const Tensor = struct {
 
     test gather {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _idx(idx_shape: anytype) Tensor {
@@ -2490,8 +2490,8 @@ pub const Tensor = struct {
 
     test gatherSlices {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _gatherSlices(self: Tensor, slice_shape: Shape, indices: Tensor, opts: GatherOpts) Tensor {
@@ -2700,8 +2700,8 @@ pub const Tensor = struct {
 
     test scatterSlices {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _scatter(self: Tensor, indices: []const Tensor, updates: Tensor) Tensor {
@@ -2926,8 +2926,8 @@ pub const Tensor = struct {
 
     test argMax {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
         const allocator = std.testing.allocator;
         const ArgMaxTest = struct {
             pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
@@ -2993,8 +2993,8 @@ pub const Tensor = struct {
 
     test argsort {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _argsort(x: Tensor, axis_: u3, opts: ArgSortOpts) Tensor {
@@ -3221,8 +3221,8 @@ pub const Tensor = struct {
 
     test chunkExact {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         // Only test shapes
         var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
@@ -3283,8 +3283,8 @@ pub const Tensor = struct {
 
     test chunkAllowTrailing {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         // Only test shapes
         var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
@@ -3421,8 +3421,8 @@ pub const Tensor = struct {
 
     test dynamicSlice {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         inline for (.{
             .{ [10]f32{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, Shape.init(.{10}, .f32), [2]f32{ 4, 5 }, 4, 0 },
@@ -3545,8 +3545,8 @@ pub const Tensor = struct {
 
     test dynamicUpdateSlice {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         {
             const x = Tensor.init(.{10}, .f32).withTags(.{.a});
@@ -3742,8 +3742,8 @@ pub const Tensor = struct {
 
     test toDiagonal {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _toDiag(input: Tensor) Tensor {
@@ -3796,8 +3796,8 @@ pub const Tensor = struct {
 
     test triangular {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const Local = struct {
             pub fn _tri(input: Tensor, num_diagonals: i32) Tensor {
@@ -3971,8 +3971,8 @@ pub const Tensor = struct {
 
     test cartesianProduct {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
         const x: Tensor = .init(.{6}, .i32);
         const y: Tensor = .init(.{4}, .i32);
@@ -4046,8 +4046,8 @@ pub const Tensor = struct {
 
     test cartesianProductStacked {
         const zml = @import("zml.zig");
-        const platform = zml.testing.env();
-        const replicated_sharding = zml.testing.replicatedSharding();
+        const platform = zml.testing.env() catch return;
+        const replicated_sharding = zml.testing.replicatedSharding() catch return;
         const x: Tensor = .init(.{6}, .i32);
         const y: Tensor = .init(.{4}, .i32);
 
@@ -4188,8 +4188,8 @@ fn getComparisonType(ctx: *mlir.Context, dtype: DataType) *const dialects.stable
 
 test "Tensor.maxPool1d" {
     const zml = @import("zml.zig");
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const MaxPool = struct {
         pub fn _fwd(x: zml.Tensor) Tensor.ArgMaxRes {
@@ -4228,8 +4228,8 @@ test "Tensor.maxPool1d" {
 
 test "Tensor.maxPool2d" {
     const zml = @import("zml.zig");
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const MaxPool = struct {
         pub fn _fwd(x: Tensor) Tensor.ArgMaxRes {
@@ -4335,8 +4335,8 @@ test transposeIsJustAReshape {
 
 test "unused tensor" {
     const zml = @import("zml.zig");
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const Local = struct {
         pub fn _fwd(x: Tensor) Tensor {

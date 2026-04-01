@@ -23,7 +23,7 @@ const FuncOpArgs = struct {
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .{};
-    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .{};
+    var results_buffer: stdx.BoundedArray(*const mlir.Type, 128) = .{};
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .{};
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{

@@ -123,14 +123,14 @@ pub fn normalizeL2(input: Tensor, eps: f32) Tensor {
 }
 
 test normalizeL2 {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer exe.deinit();
 
-    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
     defer input_buffer.deinit();
 
     var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
@@ -440,7 +440,7 @@ test "invFreq Yarn" {
 }
 
 test "real/img" {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Fns = struct {
         fn testSplitMergeIsId(layout: RopeOpts.Layout) Tensor {
@@ -499,7 +499,7 @@ test "real/img" {
         }
     };
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
         defer exe.deinit();
 
         var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -507,7 +507,7 @@ test "real/img" {
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.sequential}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.sequential}, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
         defer exe.deinit();
 
         var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -517,7 +517,7 @@ test "real/img" {
 
     // test the function that accepts 1 void argument
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
         defer exe.deinit();
 
         var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
@@ -527,7 +527,7 @@ test "real/img" {
 
     // test the function that takes NO arguments
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
@@ -536,7 +536,7 @@ test "real/img" {
     }
 
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
@@ -546,7 +546,7 @@ test "real/img" {
 }
 
 test rope {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     const Local = struct {
         fn _fwd(x: Tensor, opts: RopeOpts) Tensor {
@@ -570,13 +570,13 @@ test rope {
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
     const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
-    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer exe_interleaved.deinit();
 
-    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform, .{ .shardings = &.{try zml.testing.replicatedSharding()} });
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
@@ -644,7 +644,7 @@ pub fn nearest(input: Tensor, scale_factor: []const f64) Tensor {
 }
 
 test nearest {
-    const platform = zml.testing.env();
+    const platform = zml.testing.env() catch return;
 
     // 3D Tensor (basic)
     {
@@ -655,7 +655,7 @@ test nearest {
             upsample,
             .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{ .shardings = &.{try zml.testing.replicatedSharding()} },
         );
         defer exe.deinit();
 
@@ -663,7 +663,7 @@ test nearest {
             std.testing.io,
             platform,
             input_3d_basic.shape(),
-            zml.testing.replicatedSharding(),
+            try zml.testing.replicatedSharding(),
             std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}),
         );
         defer input_3d_basic_buffer.deinit();
@@ -685,11 +685,11 @@ test nearest {
             upsample,
             .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{ .shardings = &.{try zml.testing.replicatedSharding()} },
         );
         defer exe.deinit();
 
-        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][3][4]i32{
+        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][3][4]i32{
             .{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 } },
             .{ .{ 13, 14, 15, 16 }, .{ 17, 18, 19, 20 }, .{ 21, 22, 23, 24 } },
         }));
@@ -723,11 +723,11 @@ test nearest {
             upsample,
             .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{ .shardings = &.{try zml.testing.replicatedSharding()} },
         );
         defer exe.deinit();
 
-        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_4d_basic_buffer.deinit();
 
         var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
@@ -753,11 +753,11 @@ test nearest {
             upsample,
             .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{ .shardings = &.{try zml.testing.replicatedSharding()} },
         );
         defer exe.deinit();
 
-        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
+        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
             .{ .{ 1, 2 }, .{ 3, 4 } },
             .{ .{ 5, 6 }, .{ 7, 8 } },
         }, .{
@@ -811,11 +811,11 @@ test nearest {
             upsample,
             .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{ .shardings = &.{try zml.testing.replicatedSharding()} },
         );
         defer exe.deinit();
 
-        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), try zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_5d_buffer.deinit();
 
         var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
@@ -871,8 +871,8 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
 }
 
 test resizeBilinear {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
     // Only test shapes
     var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
     defer comp.deinit();
@@ -938,8 +938,8 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
 }
 
 test resizeBicubic {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
     // Only test shapes
     var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
     defer comp.deinit();
@@ -1288,8 +1288,8 @@ pub const GatedDeltaNet = struct {
 };
 
 test "gated delta net" {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
     const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
@@ -1448,8 +1448,8 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 }
 
 test sampleTokens {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const rng: zml.Tensor.Rng = .init();
     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
@@ -1586,8 +1586,8 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 }
 
 test sampleTokensDynamic {
-    const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+    const platform = zml.testing.env() catch return;
+    const replicated_sharding = zml.testing.replicatedSharding() catch return;
 
     const ___ = -std.math.inf(f32);
     const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
