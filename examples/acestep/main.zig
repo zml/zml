@@ -4,6 +4,8 @@ const log = std.log;
 const zml = @import("zml");
 const stdx = zml.stdx;
 
+const dialects = @import("mlir/dialects");
+
 const Acestep = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
@@ -61,7 +63,7 @@ const Acestep = struct {
             .shardings = shardings,
             .parallelism = 1,
             .dma_chunks = 1,
-            .dma_chunk_size = 16 * 1024 * 1024,
+            .dma_chunk_size = 128 * 1024 * 1024,
         });
     }
 
@@ -83,10 +85,15 @@ const Acestep = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
+        phase_mask: zml.Tensor,
+        repetition_pos_penalty: zml.Tensor,
+        repetition_neg_penalty: zml.Tensor,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         std.log.debug("FWD : ACESTEP", .{});
         var updated_kv_cache = kv_cache;
+        // embbed input tokens
         var output = self.embed_tokens.forward(tokens.withPartialTags(.{.s})).withPartialTags(.{.d});
+        // forward pass on the neural network layers
         for (self.layers, 0..) |layer, i| {
             output, updated_kv_cache = layer.forward(
                 output,
@@ -94,8 +101,17 @@ const Acestep = struct {
                 updated_kv_cache.atLayer(i),);
         }
         output = self.norm.forward(output);
+        // compute logits for the output tokens
         const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
-        const next_tokens = logits.argMax(.voc).indices.squeeze(.voc);
+        // apply repetition penalty
+        const zero = zml.Tensor.scalar(0.0, .bf16);
+        const logits_positive = zml.Tensor.cmp(logits, dialects.stablehlo.ComparisonDirection.Direction.GE, zero.broad(logits.shape()));
+        const repetition_penalty = zml.Tensor.select(logits_positive, repetition_pos_penalty, repetition_neg_penalty);
+        const penalized_logits = logits.mul(repetition_penalty);
+        // apply phase mask to select tokens from the valid subset
+        const masked_logits = penalized_logits.add(phase_mask.broad(logits.shape()));
+        // return result
+        const next_tokens = masked_logits.argMax(.voc).indices.squeeze(.voc);
         return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache.reuseBuffer(kv_cache), rng };
     }
 };
@@ -399,8 +415,17 @@ const AcestepParams = struct {
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
     kv_cache: KvCache,
+    phase_mask: zml.Tensor,
+    pos_penalty: zml.Tensor,
+    neg_penalty: zml.Tensor,
     rng: zml.Tensor.Rng,
     shardings: Shardings,
+};
+
+const AcestepPhase = struct {
+    phase1: bool,
+    phase1_mask: []zml.floats.BFloat16,
+    phase2_mask: []zml.floats.BFloat16,
 };
 
 const CompileModelResult = struct {
@@ -545,6 +570,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Specify shapes of input arguments
     const dtype = acestep_model.embed_tokens.weight.dtype();
+    const voc_size: usize = @intCast(acestep_model.embed_tokens.weight.dim(.voc));
     const acestep_parameters: AcestepParams = .{
         .prefill_tokens = .init(.{ .s = acestep_options.seq_len }, .u32),
         .decode_tokens = .init(.{ .s = 1 }, .u32),
@@ -555,6 +581,7 @@ pub fn main(init: std.process.Init) !void {
             .h = config.num_key_value_heads,
             .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
         }, dtype)),
+        .phase_mask = .init( .{ .voc = voc_size }, dtype),
         .rng = .init(),
         .shardings = try .init(platform),
     };
@@ -577,6 +604,39 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
     defer tokenizer.deinit();
 
+    // Initialize masks for phases I and II
+    var tokenizer_decoder = try tokenizer.decoder();
+    defer tokenizer_decoder.deinit();
+    var tokens_audio: std.ArrayList(zml.floats.BFloat16) = try .initCapacity(allocator, voc_size);
+    var tokens_text: std.ArrayList(zml.floats.BFloat16) = try .initCapacity(allocator, voc_size);
+    for (0..voc_size) |i| {
+        const token_slice = try allocator.alloc(u32, 1);
+        defer allocator.free(token_slice);
+        token_slice[0] = @intCast(i);
+        const chunk = try tokenizer_decoder.decode(token_slice);
+        const l = chunk.len;
+        if (l < 16) {
+            try tokens_audio.append(allocator, zml.floats.BFloat16.fromF32(-1e10));
+            try tokens_text.append(allocator, zml.floats.BFloat16.fromF32(0.0));
+        } else {
+            if (std.mem.eql(u8, chunk[0..12], "<|audio_code")) {
+                try tokens_audio.append(allocator, zml.floats.BFloat16.fromF32(0.0));
+                try tokens_text.append(allocator, zml.floats.BFloat16.fromF32(-1e10));
+            } else {
+                try tokens_audio.append(allocator, zml.floats.BFloat16.fromF32(-1e10));
+                try tokens_text.append(allocator, zml.floats.BFloat16.fromF32(0.0));
+            }
+        }
+    }
+    const eos_id = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
+    tokens_audio.items[eos_id] = zml.floats.BFloat16.fromF32(0.0);
+    tokens_text.items[eos_id] = zml.floats.BFloat16.fromF32(0.0);
+    var acestep_phase: AcestepPhase = .{
+        .phase1 = true,
+        .phase1_mask = tokens_text.items,
+        .phase2_mask = tokens_audio.items,
+    };
+    
     // Test on one prompt
     const prompt = "a chill guitar melody\n\ninstrumental: true";
     std.log.debug("Start inspiration, raw prompt:\n{s}", .{prompt});
@@ -584,53 +644,55 @@ pub fn main(init: std.process.Init) !void {
     defer allocator.free(inspi_tokens);
 
     if (false) {
-        const inspi_result = try generateText(
-            allocator,
-            io,
-            acestep_buffers,
-            compiled_model.prefill_exe,
-            compiled_model.decode_exe,
-            &acestep_kv_cache_buffers,
-            tokenizer,
-            inspi_tokens,
-            config,
-            acestep_options,
-            0,
-            platform,
-            acestep_parameters.shardings.replicated,
-        );
-        defer allocator.free(inspi_result);
+        const inspi_result =
+            \\<think>
+            \\bpm: 80
+            \\caption: A clean, melodic electric guitar plays a catchy, looping riff with a slightly
+            \\  jazzy, neo-soul flavor. The tone is bright and articulate, with a touch of light
+            \\  reverb adding space to the mix. The performance is relaxed and groovy, establishing
+            \\  a chill and introspective mood before ending abruptly.
+            \\duration: 36
+            \\genres: neo-soul
+            \\keyscale: E major
+            \\language: unknown
+            \\timesignature: 4
+            \\</think>
+            \\
+            \\# Lyric
+            \\[Instrumental]
+            \\<|im_end|>
+        ;
+        _=inspi_result;
     }
 
-    const inspi_result =
-        \\<think>
-        \\bpm: 80
-        \\caption: A clean, melodic electric guitar plays a catchy, looping riff with a slightly
-        \\  jazzy, neo-soul flavor. The tone is bright and articulate, with a touch of light
-        \\  reverb adding space to the mix. The performance is relaxed and groovy, establishing
-        \\  a chill and introspective mood before ending abruptly.
-        \\duration: 36
-        \\genres: neo-soul
-        \\keyscale: E major
-        \\language: unknown
-        \\timesignature: 4
-        \\</think>
-        \\
-        \\# Lyric
-        \\[Instrumental]
-        \\<|im_end|>
-    ;
+    const inspi_result = try generateText(
+        allocator,
+        io,
+        acestep_buffers,
+        compiled_model.prefill_exe,
+        compiled_model.decode_exe,
+        &acestep_kv_cache_buffers,
+        tokenizer,
+        inspi_tokens,
+        config,
+        acestep_options,
+        acestep_phase,
+        0,
+        platform,
+        acestep_parameters.shardings.replicated,
+    );
+    defer allocator.free(inspi_result);
+    
     defer allocator.free(inspi_result);
 
     const metadata: AudioMetadata = try .initFromString(allocator, inspi_result);
     defer metadata.deinit(allocator);
 
     std.log.debug("Start generation", .{});
+    acestep_phase.phase1 = false;
     const gen_tokens = try tokenizeGenerationPrompt(allocator, tokenizer, metadata);
     defer allocator.free(gen_tokens);
     
-    //std.log.debug("Generation tokens ids\n{any}", .{gen_tokens});
-
     const gen_result = try generateText(
         allocator,
         io,
@@ -642,6 +704,7 @@ pub fn main(init: std.process.Init) !void {
         gen_tokens,
         config,
         acestep_options,
+        acestep_phase,
         0,
         platform,
         acestep_parameters.shardings.replicated,
@@ -670,8 +733,8 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platfor
         .shardings = &parameters.shardings.all(),
     };
     // Compile the model twice, one for prefill, one for generation.
-    const prefill_exe = try platform.compile(allocator, io, model, .forward, .{ parameters.prefill_tokens, parameters.token_index, parameters.kv_cache, parameters.rng }, opts);
-    const decode_exe = try platform.compile(allocator, io, model, .forward, .{ parameters.decode_tokens, parameters.token_index, parameters.kv_cache, parameters.rng }, opts);
+    const prefill_exe = try platform.compile(allocator, io, model, .forward, .{ parameters.prefill_tokens, parameters.token_index, parameters.kv_cache, parameters.rng, parameters.phase_mask, parameters.pos_penalty, parameters.neg_penalty }, opts);
+    const decode_exe = try platform.compile(allocator, io, model, .forward, .{ parameters.decode_tokens, parameters.token_index, parameters.kv_cache, parameters.rng, parameters.phase_mask, parameters.pos_penalty, parameters.neg_penalty }, opts);
     return .{ .prefill_exe = prefill_exe, .decode_exe = decode_exe };
 }
 
@@ -762,6 +825,7 @@ pub fn generateText(
     prompt_tok: []const u32,
     config: Acestep.Config,
     options: Acestep.Options,
+    phase: AcestepPhase,
     seed: u128,
     platform: *zml.Platform,
     sharding: zml.sharding.Sharding,
@@ -791,9 +855,43 @@ pub fn generateText(
     defer prefill_tokens_buffer.deinit();
     var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, sharding);
     defer prefill_token_pos_buffer.deinit();
-
+    
+    const voc_len = phase.phase1_mask.len;
+    
+    const mask_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .bf16));
+    defer mask_slice.free(allocator);
+    @memcpy(mask_slice.items(zml.floats.BFloat16)[0..phase.phase1_mask.len], if (phase.phase1) phase.phase1_mask else phase.phase2_mask);
+    var phase_mask_buffer: zml.Buffer = try .fromSlice(io, platform, mask_slice, sharding);
+    defer phase_mask_buffer.deinit();
+    
+    const pen_value = zml.floats.BFloat16.fromF32(2.0);
+    const pos_pen_values: []zml.floats.BFloat16 = allocator.alloc(zml.floats.BFloat16, voc_len);
+    const neg_pen_values: []zml.floats.BFloat16 = allocator.alloc(zml.floats.BFloat16, voc_len);
+    defer allocator.free(pos_pen_values);
+    defer allocator.free(neg_pen_values);
+    const one = zml.floats.BFloat16.fromF32(1.0);
+    for (0..voc_len) |i| {
+        pos_pen_values[i] = one;
+        neg_pen_values[i] = one;
+    }
+    for (0..prompt_tok.len) |i| {
+        const token_id = prompt_tok[i];
+        pos_pen_values[token_id] /= pen_value;
+        neg_pen_values[token_id] *= pen_value;
+    }
+    const pos_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .bf16));
+    const neg_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .bf16));
+    defer pos_pen_slice.free(allocator);
+    defer neg_pen_slice.free(allocator);
+    @memcpy(pos_pen_slice.items(zml.floats.BFloat16)[0..voc_len], pos_pen_values);
+    @memcpy(neg_pen_slice.items(zml.floats.BFloat16)[0..voc_len], neg_pen_values);
+    var pos_pen_buffer: zml.Buffer = try .fromSlice(io, platform, pos_pen_slice, sharding);
+    var neg_pen_buffer: zml.Buffer = try .fromSlice(io, platform, neg_pen_slice, sharding);
+    defer pos_pen_buffer.deinit();
+    defer neg_pen_buffer.deinit();
+    
     std.log.debug("Run prefill", .{});
-    prefill_args.set(.{ acestep_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers });
+    prefill_args.set(.{ acestep_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buffer, neg_pen_buffer });
     prefill_exe.call(prefill_args, &prefill_results);
     prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
 
@@ -827,6 +925,8 @@ pub fn generateText(
             try writer.writeAll(chunk);
             try writer.flush();
         }
+        pos_pen_values[generated_token] /= pen_value;
+        neg_pen_values[generated_token] *= pen_value;
 
         // check for eos
         if (i == output_tokens_len) break :generation;
@@ -843,7 +943,7 @@ pub fn generateText(
         var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice, sharding);
         defer token_pos_buffer.deinit();
         // call to generate the next token
-        decode_args.set(.{ acestep_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{ acestep_buffers, current_token_buffer, token_pos_buffer, kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buffer, neg_pen_buffer });
         decode_exe.call(decode_args, &decode_results);
         decode_results.fill(.{ &current_token_buffer, kv_cache_buffers, &rng_buffers });
         // extract the generated token from the buffer
