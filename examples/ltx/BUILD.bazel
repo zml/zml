@@ -44,6 +44,18 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "bridge",
+    main = "bridge.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
@@ -51,5 +63,6 @@ build_test(
         ":denoise_e2e",
         ":denoise_stage1",
         ":upsample",
+        ":bridge",
     ],
 )

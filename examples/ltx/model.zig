@@ -2856,4 +2856,19 @@ pub fn forwardUnpatchifyVideo(input: Tensor, target_shape: zml.Shape) Tensor {
         .transpose(.{ 0, 4, 1, 2, 3 });
 }
 
+/// Patchify a video latent: [1, 128, F, H, W] → [1, F*H*W, 128].
+/// VideoLatentPatchifier(patch_size=1): patchify = "b c f h w → b (f h w) c"
+/// Inverse of forwardUnpatchifyVideo.
+pub fn forwardPatchifyVideo(input: Tensor) Tensor {
+    const B = input.dim(0);
+    const C = input.dim(1);
+    const F = input.dim(2);
+    const H = input.dim(3);
+    const W = input.dim(4);
+    // [1, 128, F, H, W] → [1, F, H, W, 128] → [1, F*H*W, 128]
+    return input
+        .transpose(.{ 0, 2, 3, 4, 1 })
+        .reshape(.{ B, F * H * W, C });
+}
+
 
