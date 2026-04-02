@@ -31,16 +31,15 @@ pub const std_options: std.Options = .{ .log_level = .info };
 // ============================================================================
 
 const StageMeta = struct {
-    latent_h: i64,
-    latent_w: i64,
-    latent_f: i64,
-    num_audio_tokens: i64,
+    h_lat: i64,
+    w_lat: i64,
+    f_lat: i64,
+    t_audio: i64,
     sigma_0: f64 = 0,
-    num_steps: i64 = 0,
 };
 
 const PipelineMeta = struct {
-    fps: f64,
+    frame_rate: f64,
     stage1: StageMeta,
     stage2: StageMeta,
 };
@@ -155,19 +154,19 @@ pub fn main(init: std.process.Init) !void {
     const pipe_meta = try loadPipelineMeta(allocator, io, args.meta);
     const s1 = pipe_meta.stage1;
     const s2 = pipe_meta.stage2;
-    const fps = pipe_meta.fps;
+    const fps = pipe_meta.frame_rate;
     const sigma_0: f32 = @floatCast(s2.sigma_0);
 
-    std.log.info("  Stage 1: F={d} H={d} W={d} T_a={d}", .{ s1.latent_f, s1.latent_h, s1.latent_w, s1.num_audio_tokens });
-    std.log.info("  Stage 2: F={d} H={d} W={d} T_a={d} sigma_0={d:.6}", .{ s2.latent_f, s2.latent_h, s2.latent_w, s2.num_audio_tokens, sigma_0 });
+    std.log.info("  Stage 1: F={d} H={d} W={d} T_a={d}", .{ s1.f_lat, s1.h_lat, s1.w_lat, s1.t_audio });
+    std.log.info("  Stage 2: F={d} H={d} W={d} T_a={d} sigma_0={d:.6}", .{ s2.f_lat, s2.h_lat, s2.w_lat, s2.t_audio, sigma_0 });
     std.log.info("  fps={d:.1}", .{fps});
 
-    const F = s1.latent_f;
-    const H_s1 = s1.latent_h;
-    const W_s1 = s1.latent_w;
-    const H_s2 = s2.latent_h;
-    const W_s2 = s2.latent_w;
-    const T_a: i64 = s1.num_audio_tokens;
+    const F = s1.f_lat;
+    const H_s1 = s1.h_lat;
+    const W_s1 = s1.w_lat;
+    const H_s2 = s2.h_lat;
+    const W_s2 = s2.w_lat;
+    const T_a: i64 = s1.t_audio;
     const C: i64 = 128;
     const T_v1 = F * H_s1 * W_s1;
     const T_v2 = F * H_s2 * W_s2;
@@ -516,22 +515,20 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer reader.deinit();
 
     const JsonMeta = struct {
-        fps: f64,
+        frame_rate: f64,
         stage1: struct {
-            latent_h: i64,
-            latent_w: i64,
-            latent_f: i64,
-            num_audio_tokens: i64,
+            h_lat: i64,
+            w_lat: i64,
+            f_lat: i64,
+            t_audio: i64,
             sigma_0: f64 = 0,
-            num_steps: i64 = 0,
         },
         stage2: struct {
-            latent_h: i64,
-            latent_w: i64,
-            latent_f: i64,
-            num_audio_tokens: i64,
+            h_lat: i64,
+            w_lat: i64,
+            f_lat: i64,
+            t_audio: i64,
             sigma_0: f64 = 0,
-            num_steps: i64 = 0,
         },
     };
 
@@ -540,22 +537,20 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     const v = parsed.value;
 
     return .{
-        .fps = v.fps,
+        .frame_rate = v.frame_rate,
         .stage1 = .{
-            .latent_h = v.stage1.latent_h,
-            .latent_w = v.stage1.latent_w,
-            .latent_f = v.stage1.latent_f,
-            .num_audio_tokens = v.stage1.num_audio_tokens,
+            .h_lat = v.stage1.h_lat,
+            .w_lat = v.stage1.w_lat,
+            .f_lat = v.stage1.f_lat,
+            .t_audio = v.stage1.t_audio,
             .sigma_0 = v.stage1.sigma_0,
-            .num_steps = v.stage1.num_steps,
         },
         .stage2 = .{
-            .latent_h = v.stage2.latent_h,
-            .latent_w = v.stage2.latent_w,
-            .latent_f = v.stage2.latent_f,
-            .num_audio_tokens = v.stage2.num_audio_tokens,
+            .h_lat = v.stage2.h_lat,
+            .w_lat = v.stage2.w_lat,
+            .f_lat = v.stage2.f_lat,
+            .t_audio = v.stage2.t_audio,
             .sigma_0 = v.stage2.sigma_0,
-            .num_steps = v.stage2.num_steps,
         },
     };
 }
