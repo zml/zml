@@ -56,6 +56,18 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "inference",
+    main = "inference.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
@@ -64,5 +76,6 @@ build_test(
         ":denoise_stage1",
         ":upsample",
         ":bridge",
+        ":inference",
     ],
 )

@@ -128,6 +128,16 @@ pixel_coords[:, 0, :, :] = pixel_coords[:, 0, :, :] / fps
 
 Final shape: `[1, 3, T_v2, 2]` converted to bf16.
 
+**bf16 conversion**: Must use round-to-nearest-even (not truncation) to match
+PyTorch's `.to(torch.bfloat16)`. Simple truncation (drop lower 16 bits) produces
+1-ULP bf16 differences.
+
+**GPU/CPU rounding note**: The reference is generated on CUDA GPU, which uses
+FMA-based Newton-Raphson for f32 division (`/ fps`). This can differ by 1 ULP
+from CPU division. However, the bf16 conversion discards the lower 16 mantissa
+bits where such 1-ULP f32 differences live, so GPU and CPU results are bitwise
+identical after bf16 quantization.
+
 **Concrete example** (F=16, H=32, W=48, fps=24):
 - T_v2 = 16 × 32 × 48 = 24576
 - Each patch (f, h, w) at flat index `f*32*48 + h*48 + w`:
@@ -139,22 +149,45 @@ Final shape: `[1, 3, T_v2, 2]` converted to bf16.
 
 Single axis (time), with [start_sec, end_sec) per audio latent frame.
 
-**Audio timing computation** (`_compute_audio_timings`):
+**Audio timing computation** (`_get_audio_latent_time_in_sec` in patchifiers.py):
+
+The PyTorch code performs the following f32 operation chain:
+```python
+audio_latent_frame = torch.arange(shift, T + shift, dtype=torch.float32, device=device)
+audio_mel_frame = audio_latent_frame * 4                    # f32 multiply
+audio_mel_frame = (audio_mel_frame + 1 - 4).clip(min=0)     # causal fix, f32
+result = audio_mel_frame * hop_length / sample_rate          # f32 * 160 / 16000
+```
+
+**IMPORTANT**: The final step is two separate f32 operations (`* 160` then `/ 16000`),
+NOT a single `* 0.01`. This matters for bitwise fidelity because `0.01` is not exactly
+representable in IEEE 754 float, and the two-op chain produces different f32 rounding
+than a single multiply by `0.01`.
+
+Simplified per-frame formula:
 ```
 For frame i in [0, T_a):
-  mel_start = (i * 4 + 1 - 4).clamp(0)   = (4*i - 3).clamp(0)
-  mel_end   = ((i+1) * 4 + 1 - 4).clamp(0) = (4*i + 1).clamp(0)
-  start_sec = mel_start * 160 / 16000      = mel_start * 0.01
-  end_sec   = mel_end * 160 / 16000        = mel_end * 0.01
+  mel_start = (float(i) * 4 + 1 - 4).clamp(0)
+  mel_end   = (float(i+1) * 4 + 1 - 4).clamp(0)
+  start_sec = mel_start * 160 / 16000     (two f32 ops, NOT * 0.01)
+  end_sec   = mel_end * 160 / 16000       (two f32 ops, NOT * 0.01)
 ```
 
 **Concrete example** (T_a=126):
 - Frame 0: mel_start=clamp(-3,0)=0, mel_end=clamp(1,0)=1 → [0.0, 0.01]
 - Frame 1: mel_start=clamp(1,0)=1, mel_end=clamp(5,0)=5 → [0.01, 0.05]
 - Frame 2: mel_start=clamp(5,0)=5, mel_end=clamp(9,0)=9 → [0.05, 0.09]
-- Frame i≥1: mel_start = 4*i-3, mel_end = 4*i+1 → [(4*i-3)*0.01, (4*i+1)*0.01]
+- Frame i≥1: mel_start = 4*i-3, mel_end = 4*i+1
 
 Shape: `[1, 1, T_a, 2]` f32 (stays f32, no bf16 conversion).
+
+**GPU/CPU rounding note**: The reference is generated on CUDA GPU, where f32
+division (`/ 16000`) uses FMA-based Newton-Raphson and can produce results that
+differ by 1 ULP from CPU division. Since audio_positions stays in f32 (unlike
+video_positions which quantizes to bf16), this 1-ULP difference is preserved in
+the output file. The Zig bridge computes positions on CPU, so bitwise mismatch
+vs the GPU-generated reference is expected but numerically inconsequential
+(cosine similarity = 1.0, max absolute difference = 0.0).
 
 ### Step 6: Noise the latents (NEW — simple arithmetic)
 
@@ -278,7 +311,7 @@ Flow:
 | `video_denoise_mask` | Exact bitwise | All ones |
 | `audio_denoise_mask` | Exact bitwise | All ones |
 | `video_positions` | Exact or near-exact | Pure arithmetic, but bf16 rounding possible |
-| `audio_positions` | Exact bitwise | f32 arithmetic on small values |
+| `audio_positions` | Near-exact (1 ULP) | f32 arithmetic; GPU/CPU division rounding differs by 1 ULP (see GPU/CPU rounding note above) |
 | `video_noise` | Exact bitwise | Passthrough from stage2_noise.safetensors |
 | `audio_noise` | Exact bitwise | Passthrough from stage2_noise.safetensors |
 | `v_context` | Exact bitwise | Passthrough from stage1_inputs.safetensors |

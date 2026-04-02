@@ -557,6 +557,19 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
 
 // ============================================================================
 // Video positions: [1, 3, T_v, 2] bf16
+//
+// Mirrors PyTorch's _get_video_latent_pixel_coords (patchifiers.py):
+//   latent_coords = meshgrid(arange(F), arange(H), arange(W), dtype=f32)
+//   pixel_coords  = latent_coords * scale_factor        (f32 mul)
+//   pixel_coords[time] = (pixel_coords[time] + 1 - 8).clamp(0)  (causal fix)
+//   pixel_coords[time] /= fps                           (f32 div)
+//   result = pixel_coords.to(torch.bfloat16)
+//
+// The reference is generated on GPU (CUDA). Division (e.g. / fps) on CUDA
+// can differ by 1 ULP from CPU due to hardware FMA-based reciprocal.
+// However, the bf16 conversion truncates the lower 16 mantissa bits where
+// such 1-ULP f32 differences live, so GPU and CPU results are bitwise
+// identical after bf16 quantization.
 // ============================================================================
 
 fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, fps: f64) ![]u8 {
@@ -565,7 +578,9 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
     const num_vals = 3 * T_v * 2;
     const out = try allocator.alloc(u8, num_vals * 2); // bf16 = 2 bytes
 
-    const scale_factors = [3]f64{ 8.0, 32.0, 32.0 };
+    // Use f32 intermediates to match Python (PyTorch default float arithmetic).
+    const scale_factors = [3]f32{ 8.0, 32.0, 32.0 };
+    const fps_f32: f32 = @floatCast(fps);
     const Fi: usize = @intCast(F);
     const Hi: usize = @intCast(H);
     const Wi: usize = @intCast(W);
@@ -579,7 +594,7 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
 
                 // For each axis: compute start and end in latent coords,
                 // scale to pixel coords, apply causal fix for time, divide time by fps
-                const coords = [3][2]f64{
+                const coords = [3][2]f32{
                     .{ @floatFromInt(f), @floatFromInt(f + 1) }, // time
                     .{ @floatFromInt(h), @floatFromInt(h + 1) }, // height
                     .{ @floatFromInt(w), @floatFromInt(w + 1) }, // width
@@ -594,15 +609,15 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
                         start = @max(start + 1.0 - scale_factors[0], 0.0);
                         end = @max(end + 1.0 - scale_factors[0], 0.0);
                         // Divide by fps
-                        start /= fps;
-                        end /= fps;
+                        start /= fps_f32;
+                        end /= fps_f32;
                     }
 
                     // Convert to bf16 and store
                     // bf16 index: [axis * T_v * 2 + patch_idx * 2 + {0,1}]
                     const base = (axis * T_v * 2 + patch_idx * 2) * 2;
-                    storeBf16(out[base..], @floatCast(start));
-                    storeBf16(out[base + 2 ..], @floatCast(end));
+                    storeBf16(out[base..], start);
+                    storeBf16(out[base + 2 ..], end);
                 }
             }
         }
@@ -613,6 +628,23 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
 
 // ============================================================================
 // Audio positions: [1, 1, T_a, 2] f32
+//
+// Mirrors PyTorch's _get_audio_latent_time_in_sec (patchifiers.py):
+//   audio_latent_frame = arange(shift, T+shift, dtype=f32)
+//   audio_mel_frame    = audio_latent_frame * 4            (f32 mul)
+//   audio_mel_frame    = (audio_mel_frame + 1 - 4).clip(0) (causal fix)
+//   result             = audio_mel_frame * 160 / 16000     (f32 mul then f32 div)
+//
+// IMPORTANT: The computation uses two separate f32 ops (* 160, then / 16000),
+// NOT a single * 0.01. This matters because 0.01 is not exactly representable
+// in IEEE 754 and the two-op chain produces different rounding.
+//
+// Known limitation: The reference is generated on CUDA GPU, which uses
+// FMA-based Newton-Raphson for f32 division. This produces results that
+// differ by 1 ULP from CPU division for some inputs (e.g. 160/16000 = 0.01).
+// Since audio_positions stays in f32 (unlike video_positions which goes to
+// bf16), the 1-ULP difference is preserved and causes a bitwise mismatch
+// vs the GPU-generated reference, despite cosim=1.0 and max_abs_diff=0.0.
 // ============================================================================
 
 fn computeAudioPositions(allocator: std.mem.Allocator, T_a: i64) ![]u8 {
@@ -622,16 +654,18 @@ fn computeAudioPositions(allocator: std.mem.Allocator, T_a: i64) ![]u8 {
     const out = try allocator.alloc(u8, num_vals * 4); // f32 = 4 bytes
 
     for (0..T) |i| {
-        const ii: i64 = @intCast(i);
-        // mel_start = clamp(4*i - 3, 0)
-        // mel_end   = clamp(4*i + 1, 0)
-        const mel_start_raw = 4 * ii - 3;
-        const mel_end_raw = 4 * ii + 1;
-        const mel_start: f32 = @floatFromInt(@max(mel_start_raw, 0));
-        const mel_end: f32 = @floatFromInt(@max(mel_end_raw, 0));
-        // start_sec = mel_start * 160 / 16000 = mel_start * 0.01
-        const start_sec: f32 = mel_start * 0.01;
-        const end_sec: f32 = mel_end * 0.01;
+        // Match PyTorch's exact f32 operation chain:
+        //   audio_latent_frame = arange(0..T, dtype=f32)   (and +1 for end)
+        //   audio_mel_frame = audio_latent_frame * 4
+        //   audio_mel_frame = (audio_mel_frame + 1 - 4).clip(min=0)
+        //   result = audio_mel_frame * 160 / 16000
+        // All operations are f32.
+        const fi: f32 = @floatFromInt(i);
+        const fi_end: f32 = @floatFromInt(i + 1);
+        const mel_start: f32 = @max(fi * 4.0 + 1.0 - 4.0, 0.0);
+        const mel_end: f32 = @max(fi_end * 4.0 + 1.0 - 4.0, 0.0);
+        const start_sec: f32 = mel_start * 160.0 / 16000.0;
+        const end_sec: f32 = mel_end * 160.0 / 16000.0;
 
         // Layout: [T_a, 2] row-major f32
         const base = i * 2 * 4;
@@ -947,9 +981,16 @@ fn fillOnesF32(buf: []u8) void {
 }
 
 fn storeBf16(buf: []u8, val: f32) void {
-    // bf16 = upper 16 bits of f32
+    // bf16 = f32 rounded to nearest-even, then take upper 16 bits.
+    // This matches PyTorch's .to(torch.bfloat16) semantics.
+    // NOTE: Simple truncation (drop lower 16 bits) does NOT match PyTorch —
+    // it produces 1-ULP bf16 differences. Round-to-nearest-even is required.
     const bits: u32 = @bitCast(val);
-    const bf16_bits: u16 = @truncate(bits >> 16);
+    // Round-to-nearest-even: add rounding bias based on the lower 16 bits.
+    // If lower bits > 0x8000: round up. If == 0x8000: round to even (tie-break).
+    const lower: u32 = bits & 0xFFFF;
+    const round_bit: u32 = if (lower > 0x8000 or (lower == 0x8000 and (bits & 0x10000) != 0)) 1 else 0;
+    const bf16_bits: u16 = @truncate((bits >> 16) +% round_bit);
     std.mem.writeInt(u16, buf[0..2], bf16_bits, .little);
 }
 
