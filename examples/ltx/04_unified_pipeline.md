@@ -136,6 +136,25 @@ Note: `--stage2-ckpt` is also used by the bridge (for `per_channel_statistics`).
 In the current bridge, this is `--main-ckpt`, but for the unified binary
 the distilled checkpoint is the natural source (it contains the same VAE stats).
 
+#### Example command
+
+```bash
+bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference -- \
+  --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+  --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+  --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+  --stage1-inputs $OUT/stage1_inputs.safetensors \
+  --stage2-noise $OUT/stage2_noise.safetensors \
+  --meta $OUT/pipeline_meta.json \
+  --output-dir $OUT/unified \
+  --bf16-attn-stage2
+```
+
+The `--bf16-attn-stage2` flag is recommended to avoid OOM on Stage 2
+(larger token count after spatial upsample). Stage 1 defaults to f32 attention.
+Add `--dump-intermediates` to also write `stage1_video_latent.bin` and
+`stage1_audio_latent.bin` for debugging.
+
 ### 2. Memory management strategy
 
 **Problem:** The three stages combined would hold all weights + intermediates in
