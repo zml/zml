@@ -104,22 +104,22 @@ pub fn main(init: std.process.Init) !void {
         Qwen35.unloadBuffers(&v, allocator);
     }
 
-    var tokenizer = try tokenizer_future.await(io);
-    const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
-    defer allocator.free(input_token_ids);
-    const prefill_len: usize = @intCast(options.max_seq_len);
+    // var tokenizer = try tokenizer_future.await(io);
+    // const input_token_ids = try tokenizePrompt(allocator, tokenizer, args.prompt, qwen_model);
+    // defer allocator.free(input_token_ids);
+    // const prefill_len: usize = @intCast(options.max_seq_len);
 
     //======================= Model compilation (async) ========================
 
-    var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
-    defer if (compile_result_future.cancel(io)) |v| {
-        v.prefill_exe.deinit();
-        v.decode_exe.deinit();
-    } else |_| {};
+    // var compile_result_future = try io.concurrent(compileModel, .{ allocator, io, platform, qwen_model, kv_cache, &progress, prefill_len });
+    // defer if (compile_result_future.cancel(io)) |v| {
+    //     v.prefill_exe.deinit();
+    //     v.decode_exe.deinit();
+    // } else |_| {};
 
     //======================= Awaiting futures ========================
 
-    const compile_result = try compile_result_future.await(io);
+    // const compile_result = try compile_result_future.await(io);
     const qwen35_buffers = try qwen35_buffers_future.await(io);
 
     progress.end();
@@ -128,14 +128,14 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n🕹️ ZML 🕹️ running model {s} on following prompt:\n{s}\n", .{ args.model, args.prompt });
 
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    var tokenizer_decoder = try tokenizer.decoder();
-    defer tokenizer_decoder.deinit();
+    // var stdout = std.Io.File.stdout().writer(io, &.{});
+    // var tokenizer_decoder = try tokenizer.decoder();
+    // defer tokenizer_decoder.deinit();
 
-    try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
+    // try runAndGenerate(allocator, io, platform, &tokenizer_decoder, qwen35_buffers, &kv_cache_buffers, compile_result, input_token_ids, &stdout.interface, qwen_model, prefill_len);
 
     //======================= Output check (panics if fail) ========================
-    // try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
+    try checkLayers(allocator, io, platform, qwen_model, qwen35_buffers);
 }
 
 const CompileModelResult = struct {
@@ -387,6 +387,11 @@ fn checkLayers(
     };
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
     const shardings = &.{replicated_sharding};
+
+    if (activations_store.view().getShape("model.model.embed_tokens.in.0") == null) {
+        try checkMixedPrefillCaches(allocator, io, platform, qwen_model, qwen35_buffers, activations_store.view(), replicated_sharding, comp_opts);
+        return;
+    }
 
     // Testing embed_tokens
 
@@ -724,6 +729,145 @@ fn checkLayers(
         shardings,
         comp_opts,
     );
+
+    try checkMixedPrefillCaches(allocator, io, platform, qwen_model, qwen35_buffers, activations_store.view(), replicated_sharding, comp_opts);
+}
+
+fn checkMixedPrefillCaches(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    qwen_model: Qwen35,
+    qwen35_buffers: zml.Bufferized(Qwen35),
+    activations_store: zml.io.TensorStore.View,
+    replicated_sharding: zml.sharding.Sharding,
+    comp_opts: zml.testing.CompareOpts,
+) !void {
+    const prompt_tokens_shape = activations_store.getShape("model.model.in.0") orelse return error.NotFound;
+    stdx.debug.assert(prompt_tokens_shape.rank() == 2, "Expected model.model.in.0 to be rank-2, got {f}", .{prompt_tokens_shape});
+
+    const actual_seq_len: i64 = prompt_tokens_shape.dims()[1];
+    const prefill_len: i64 = qwen_model.gen_options.max_seq_len;
+    stdx.debug.assert(prefill_len > actual_seq_len, "Mixed prefill cache check needs max_seq_len > prompt len, got max_seq_len={} prompt_len={}", .{ prefill_len, actual_seq_len });
+
+    const prompt_tokens = try loadSliceFromStore(allocator, io, activations_store, "model.model.in.0");
+    defer prompt_tokens.free(allocator);
+
+    var padded_tokens = try zml.Slice.alloc(allocator, zml.Shape.init(.{ 1, prefill_len }, prompt_tokens.shape.dtype()));
+    defer padded_tokens.free(allocator);
+    @memset(padded_tokens.data(), 0);
+    @memcpy(padded_tokens.data()[0..prompt_tokens.data().len], prompt_tokens.data());
+
+    var padded_tokens_buffer = try zml.Buffer.fromSlice(io, platform, padded_tokens, replicated_sharding);
+    defer padded_tokens_buffer.deinit();
+    var seq_len_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(actual_seq_len)), .u32, replicated_sharding);
+    defer seq_len_buffer.deinit();
+
+    const mixed_prefill_cache = initKvCache(qwen_model.text_model.embed_tokens.weight.dtype(), qwen_model.config, qwen_model.gen_options);
+    var cache_buffers = try mixed_prefill_cache.initBuffer(io, platform);
+    defer qwen35.KvCache.deinitBuffer(&cache_buffers);
+    try zeroKvCacheBuffers(allocator, io, platform, replicated_sharding, &cache_buffers);
+
+    const MixedPrefillCacheHarness = struct {
+        model: qwen35.TextModel,
+        actual_seq_len: i64,
+
+        pub fn forward(self: @This(), tokens: Tensor, seq_len: Tensor, kv_cache: qwen35.KvCache) struct { Tensor, Tensor, Tensor, Tensor } {
+            const forward_result = self.model.forward(tokens.withTags(.{ .b, .s }), Tensor.scalar(@as(u32, 0), .u32), seq_len, kv_cache);
+            const updated_cache = forward_result[1];
+            return .{
+                updated_cache.self_attn.k.slice1d(.s, .{ .start = 0, .end = self.actual_seq_len }),
+                updated_cache.self_attn.v.slice1d(.s, .{ .start = 0, .end = self.actual_seq_len }),
+                updated_cache.gated_delta_net.conv_state,
+                updated_cache.gated_delta_net.recurrent_state,
+            };
+        }
+    };
+
+    const harness: MixedPrefillCacheHarness = .{
+        .model = qwen_model.text_model,
+        .actual_seq_len = actual_seq_len,
+    };
+    const harness_buffers: zml.Bufferized(MixedPrefillCacheHarness) = .{
+        .model = qwen35_buffers.text_model,
+    };
+    const padded_tokens_tensor = zml.Tensor.fromShape(padded_tokens.shape).withTags(.{ .b, .s });
+    const seq_len_tensor = zml.Tensor.init(.{}, .u32);
+    const exe = try platform.compile(
+        allocator,
+        io,
+        harness,
+        .forward,
+        .{ padded_tokens_tensor, seq_len_tensor, mixed_prefill_cache },
+        .{ .shardings = &.{replicated_sharding} },
+    );
+    defer exe.deinit();
+
+    var actual_key_cache, var actual_value_cache, var actual_conv_state, var actual_recurrent_state = try zml.testing.autoCall(
+        allocator,
+        io,
+        &exe,
+        MixedPrefillCacheHarness.forward,
+        .{ harness_buffers, padded_tokens_buffer, seq_len_buffer, cache_buffers },
+    );
+    defer actual_key_cache.deinit();
+    defer actual_value_cache.deinit();
+    defer actual_conv_state.deinit();
+    defer actual_recurrent_state.deinit();
+    var actual_recurrent_state_bf16 = try convertBufferF32ToBf16(allocator, io, platform, replicated_sharding, actual_recurrent_state);
+    defer actual_recurrent_state_bf16.deinit();
+
+    var expected_key_cache = try loadBufferFromStore(allocator, io, platform, activations_store, "model.model.cache_out.self_attn.k", replicated_sharding);
+    defer expected_key_cache.deinit();
+    var expected_value_cache = try loadBufferFromStore(allocator, io, platform, activations_store, "model.model.cache_out.self_attn.v", replicated_sharding);
+    defer expected_value_cache.deinit();
+    var expected_conv_state = try loadBufferFromStore(allocator, io, platform, activations_store, "model.model.cache_out.gated_delta_net.conv_state", replicated_sharding);
+    defer expected_conv_state.deinit();
+    var expected_recurrent_state = try loadBufferFromStore(allocator, io, platform, activations_store, "model.model.cache_out.gated_delta_net.recurrent_state", replicated_sharding);
+    defer expected_recurrent_state.deinit();
+
+    var failed = false;
+
+    log.info("Comparing self_attn.k: actual={f} expected={f}", .{ actual_key_cache.shape(), expected_key_cache.shape() });
+    zml.testing.expectClose(io, actual_key_cache, expected_key_cache, comp_opts) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            log.err("self_attn.k mismatch", .{});
+            failed = true;
+        },
+        else => return err,
+    };
+
+    log.info("Comparing self_attn.v: actual={f} expected={f}", .{ actual_value_cache.shape(), expected_value_cache.shape() });
+    zml.testing.expectClose(io, actual_value_cache, expected_value_cache, comp_opts) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            log.err("self_attn.v mismatch", .{});
+            failed = true;
+        },
+        else => return err,
+    };
+
+    log.info("Comparing gated_delta_net.conv_state: actual={f} expected={f}", .{ actual_conv_state.shape(), expected_conv_state.shape() });
+    zml.testing.expectClose(io, actual_conv_state, expected_conv_state, comp_opts) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            log.err("gated_delta_net.conv_state mismatch", .{});
+            failed = true;
+        },
+        else => return err,
+    };
+
+    log.info("Comparing gated_delta_net.recurrent_state: actual={f} expected={f}", .{ actual_recurrent_state_bf16.shape(), expected_recurrent_state.shape() });
+    zml.testing.expectClose(io, actual_recurrent_state_bf16, expected_recurrent_state, comp_opts) catch |err| switch (err) {
+        error.TestUnexpectedResult => {
+            log.err("gated_delta_net.recurrent_state mismatch", .{});
+            failed = true;
+        },
+        else => return err,
+    };
+
+    if (failed) {
+        return error.TestUnexpectedResult;
+    }
+    log.info("✅ mixed prefill caches match reference for runtime seq_len={} with compile-time max_seq_len={}", .{ actual_seq_len, prefill_len });
 }
 
 fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, buffer: *zml.Buffer) !void {
@@ -736,6 +880,58 @@ fn zeroBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform,
     errdefer zeroed.deinit();
     buffer.deinit();
     buffer.* = zeroed;
+}
+
+fn loadSliceFromStore(allocator: std.mem.Allocator, io: std.Io, store: zml.io.TensorStore.View, key: []const u8) !zml.Slice {
+    const shape = store.getShape(key) orelse return error.NotFound;
+    const slice = try zml.Slice.alloc(allocator, shape);
+    errdefer slice.free(allocator);
+
+    var io_buffer: [8 * 1024]u8 = undefined;
+    var reader = try store.getReader(key, io, &io_buffer);
+    defer reader.deinit();
+    _ = try reader.interface.readSliceAll(slice.data());
+    return slice;
+}
+
+fn loadBufferFromStore(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    store: zml.io.TensorStore.View,
+    key: []const u8,
+    sharding: zml.sharding.Sharding,
+) !zml.Buffer {
+    const slice = try loadSliceFromStore(allocator, io, store, key);
+    defer slice.free(allocator);
+    return zml.Buffer.fromSlice(io, platform, slice, sharding);
+}
+
+fn convertBufferF32ToBf16(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    buffer: zml.Buffer,
+) !zml.Buffer {
+    const input_slice = try buffer.toSliceAlloc(allocator, io);
+    defer input_slice.free(allocator);
+
+    stdx.debug.assert(input_slice.dtype() == .f32, "Expected f32 buffer, got {}", .{input_slice.dtype()});
+
+    const bf16_shape = zml.Shape.init(input_slice.shape.dims(), .bf16);
+    var bf16_slice = try zml.Slice.alloc(allocator, bf16_shape);
+    errdefer bf16_slice.free(allocator);
+
+    const src = input_slice.constItems(f32);
+    const dst = bf16_slice.items(zml.floats.BFloat16);
+    for (src, dst) |src_val, *dst_val| {
+        dst_val.* = zml.floats.BFloat16.fromF32(src_val);
+    }
+
+    const bf16_buffer = try zml.Buffer.fromSlice(io, platform, bf16_slice, sharding);
+    bf16_slice.free(allocator);
+    return bf16_buffer;
 }
 
 fn zeroKvCacheBuffers(

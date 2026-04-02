@@ -309,7 +309,7 @@ pub fn testLayer(
     defer arena.deinit();
 
     const forward = @field(@TypeOf(layer), @tagName(func));
-    const ArgsT = stdx.meta.Tail(stdx.meta.FnArgs(forward));
+    const ArgsT = stdx.meta.Tail(std.meta.ArgsTuple(@TypeOf(forward)));
 
     var args: ArgsT = undefined;
 

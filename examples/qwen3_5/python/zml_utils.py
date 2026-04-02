@@ -58,6 +58,7 @@ class ActivationCollector:
         mods = named_modules(model)
         self.outs = {id(module): (name, None, None) for name, module in mods}
         self.pending_inputs = {}
+        self.named_tensors = {}
 
     def __call__(self, *args, **kwargs):
         """Call the wrapped model with the given arguments.
@@ -65,20 +66,22 @@ class ActivationCollector:
         Return the model output and the activations.
         """
         self.count = 0
-        pre_hook = torch.nn.modules.module.register_module_forward_pre_hook(
-            self.log_activation_pre_hook
-        )
-        hook = torch.nn.modules.module.register_module_forward_hook(
-            self.log_activation_hook
-        )
+        self.named_tensors = {}
+        hook_handles = []
+        for module_id in self.outs:
+            module = _resolve_module_by_id(self.model, module_id)
+            if module is None:
+                continue
+            hook_handles.append(module.register_forward_pre_hook(self.log_activation_pre_hook, with_kwargs=True))
+            hook_handles.append(module.register_forward_hook(self.log_activation_hook, with_kwargs=True))
 
         try:
             res = self.model(*args, **kwargs)
         except ActivationCollector.CollectionOver:
             res = None
         finally:
-            pre_hook.remove()
-            hook.remove()
+            for handle in hook_handles:
+                handle.remove()
             self.pending_inputs.clear()
 
         tensors = {}
@@ -104,20 +107,22 @@ class ActivationCollector:
         for k, v in tensors.items():
             print(k, "->", v.shape, v.dtype)
 
+        tensors.update(self.named_tensors)
         return res, tensors
 
-    def log_activation_pre_hook(self, module, input) -> None:
+    def log_activation_pre_hook(self, module, input, kwargs) -> None:
         name, prev_out, _ = self.outs.get(id(module), (None, None, None))
         if self.stop_after_first_step and prev_out is not None:
             print(f"stopping collection cause {name} was already recorded or stop_after_first_step was set to `True`")
             raise ActivationCollector.CollectionOver()
 
         inputs = [i.detach().cpu() for i in _flatten(input)]
-        kwargs = inspect.stack()[1].frame.f_locals.get("kwargs", {})
         inputs.extend(self._extra_inputs(module, name, kwargs))
+        if self.include_layer_caches:
+            self._record_named_cache_tensors(name, kwargs, "cache_in")
         self.pending_inputs[id(module)] = inputs
 
-    def log_activation_hook(self, module, input, out) -> None:
+    def log_activation_hook(self, module, input, kwargs, out) -> None:
         name, prev_out, prev_in = self.outs.get(id(module), (None, None, None))
 
         if prev_out is None:
@@ -130,9 +135,10 @@ class ActivationCollector:
 
         assert out is not None
         outs = [o.detach().cpu() for o in _flatten(out)]
-        kwargs = inspect.stack()[1].frame.f_locals.get("kwargs", {})
         if self.include_layer_caches:
             outs.extend(self._cache_tensors_for_module(module, name, kwargs))
+            self._record_named_cache_tensors(name, kwargs, "cache_out")
+            self._record_named_cache_tensors_from_output(name, out, "cache_out")
 
         inputs = self.pending_inputs.pop(id(module), None)
         if inputs is None:
@@ -162,6 +168,22 @@ class ActivationCollector:
             return []
 
         return _cache_tensors_for_layer(cache, layer_idx)
+
+    def _record_named_cache_tensors(self, name, kwargs, cache_direction: str):
+        cache = kwargs.get("past_key_values") or kwargs.get("cache_params")
+        if cache is None:
+            return
+
+        for suffix, tensor in _named_cache_tensors_for_module(cache, name).items():
+            self.named_tensors[f"{name}.{cache_direction}.{suffix}"] = tensor
+
+    def _record_named_cache_tensors_from_output(self, name, out, cache_direction: str):
+        cache = getattr(out, "past_key_values", None) or getattr(out, "cache_params", None)
+        if cache is None:
+            return
+
+        for suffix, tensor in _named_cache_tensors_for_module(cache, name).items():
+            self.named_tensors[f"{name}.{cache_direction}.{suffix}"] = tensor
 
 
 def save_with_confirmation(filename: str, tensors: dict):
@@ -224,6 +246,106 @@ def _cache_tensors_for_layer(cache, layer_idx: int):
     return [tensor for tensor in tensors if tensor.numel() > 0]
 
 
+def _named_cache_tensors_for_module(cache, name: str) -> dict[str, torch.Tensor]:
+    layer_idx = _layer_index_from_name(name)
+    if layer_idx is not None:
+        return _named_cache_tensors_for_layer(cache, layer_idx)
+    if name == "model.model":
+        return _named_full_cache_tensors(cache)
+    return {}
+
+
+def _named_cache_tensors_for_layer(cache, layer_idx: int) -> dict[str, torch.Tensor]:
+    if hasattr(cache, "layers"):
+        return _named_cache_tensors_for_dynamic_cache_layer(cache, layer_idx)
+
+    key_cache = getattr(cache, "key_cache", None)
+    value_cache = getattr(cache, "value_cache", None)
+    conv_states = getattr(cache, "conv_states", None)
+    recurrent_states = getattr(cache, "recurrent_states", None)
+    if any(x is None for x in (key_cache, value_cache, conv_states, recurrent_states)):
+        return {}
+
+    device = _cache_device((key_cache, value_cache, conv_states, recurrent_states), layer_idx)
+    tensors = {
+        "self_attn.key_cache": _clone_cache_tensor(key_cache[layer_idx], device),
+        "self_attn.value_cache": _clone_cache_tensor(value_cache[layer_idx], device),
+        "linear_attn.conv_state": _trim_conv_state_tensor(conv_states[layer_idx], device),
+        "linear_attn.recurrent_state": _clone_cache_tensor(recurrent_states[layer_idx], device),
+    }
+    return {name: tensor for name, tensor in tensors.items() if tensor.numel() > 0}
+
+
+def _named_full_cache_tensors(cache) -> dict[str, torch.Tensor]:
+    if hasattr(cache, "layers"):
+        return _named_full_cache_tensors_from_dynamic_cache(cache)
+
+    key_cache = getattr(cache, "key_cache", None)
+    value_cache = getattr(cache, "value_cache", None)
+    conv_states = getattr(cache, "conv_states", None)
+    recurrent_states = getattr(cache, "recurrent_states", None)
+    if any(x is None for x in (key_cache, value_cache, conv_states, recurrent_states)):
+        return {}
+
+    tensors = {
+        "self_attn.k": _stack_cache_list(key_cache, lambda tensor: tensor.transpose(1, 2).contiguous()),
+        "self_attn.v": _stack_cache_list(value_cache, lambda tensor: tensor.transpose(1, 2).contiguous()),
+        "gated_delta_net.conv_state": _stack_cache_list(
+            conv_states,
+            lambda tensor: _trim_conv_state_tensor(tensor, tensor.device).transpose(1, 2).contiguous(),
+        ),
+        "gated_delta_net.recurrent_state": _stack_cache_list(recurrent_states, lambda tensor: tensor),
+    }
+    return {name: tensor for name, tensor in tensors.items() if tensor is not None and tensor.numel() > 0}
+
+
+def _named_cache_tensors_for_dynamic_cache_layer(cache, layer_idx: int) -> dict[str, torch.Tensor]:
+    layers = getattr(cache, "layers", None)
+    if layers is None or layer_idx >= len(layers):
+        return {}
+
+    layer = layers[layer_idx]
+    if layer is None:
+        return {}
+
+    tensors = {}
+    if hasattr(layer, "keys") and hasattr(layer, "values"):
+        tensors["self_attn.key_cache"] = _clone_cache_tensor(layer.keys, layer.keys.device)
+        tensors["self_attn.value_cache"] = _clone_cache_tensor(layer.values, layer.values.device)
+    if hasattr(layer, "conv_states") and hasattr(layer, "recurrent_states"):
+        tensors["linear_attn.conv_state"] = _trim_conv_state_tensor(layer.conv_states, layer.conv_states.device)
+        tensors["linear_attn.recurrent_state"] = _clone_cache_tensor(layer.recurrent_states, layer.recurrent_states.device)
+    return {name: tensor for name, tensor in tensors.items() if tensor.numel() > 0}
+
+
+def _named_full_cache_tensors_from_dynamic_cache(cache) -> dict[str, torch.Tensor]:
+    self_attn_keys = []
+    self_attn_values = []
+    conv_states = []
+    recurrent_states = []
+
+    for layer in cache.layers:
+        if layer is None:
+            continue
+        if hasattr(layer, "keys") and hasattr(layer, "values"):
+            self_attn_keys.append(layer.keys.transpose(1, 2).contiguous().detach().clone().cpu())
+            self_attn_values.append(layer.values.transpose(1, 2).contiguous().detach().clone().cpu())
+        if hasattr(layer, "conv_states") and hasattr(layer, "recurrent_states"):
+            conv_states.append(_trim_conv_state_tensor(layer.conv_states, layer.conv_states.device).transpose(1, 2).contiguous())
+            recurrent_states.append(layer.recurrent_states.detach().clone().cpu())
+
+    tensors = {}
+    if self_attn_keys:
+        tensors["self_attn.k"] = torch.stack(self_attn_keys, dim=1)
+    if self_attn_values:
+        tensors["self_attn.v"] = torch.stack(self_attn_values, dim=1)
+    if conv_states:
+        tensors["gated_delta_net.conv_state"] = torch.stack(conv_states, dim=1)
+    if recurrent_states:
+        tensors["gated_delta_net.recurrent_state"] = torch.stack(recurrent_states, dim=1)
+    return tensors
+
+
 def _cache_device(cache_lists: Iterable[list], layer_idx: int):
     for cache_list in cache_lists:
         tensor = cache_list[layer_idx]
@@ -236,6 +358,24 @@ def _clone_cache_tensor(tensor, device):
     if tensor is None:
         return torch.empty(0, device=device)
     return tensor.detach().clone().cpu()
+
+
+def _trim_conv_state_tensor(tensor, device):
+    if tensor is None:
+        return torch.empty(0, device=device)
+    trimmed = tensor[..., 1:] if tensor.shape[-1] > 0 else tensor
+    return trimmed.detach().clone().cpu()
+
+
+def _stack_cache_list(cache_list: list, transform):
+    tensors = []
+    for tensor in cache_list:
+        if tensor is None or tensor.numel() == 0:
+            continue
+        tensors.append(transform(tensor).detach().clone().cpu())
+    if not tensors:
+        return None
+    return torch.stack(tensors, dim=1)
 
 
 def named_modules(model):
@@ -252,6 +392,13 @@ def named_modules(model):
                     yield f"{root}.{k}", v
                 else:
                     yield root, v
+
+
+def _resolve_module_by_id(model, module_id):
+    for _, module in named_modules(model):
+        if id(module) == module_id:
+            return module
+    return None
 
 
 def read_layer_config(model: torch.nn.Module) -> dict:
