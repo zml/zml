@@ -1,12 +1,12 @@
 const std = @import("std");
 
-const zml = @import("zml.zig");
-
-pub const paged_attention = @import("attention/paged_attention.zig");
 pub const flashattn = @import("attention/flashattn.zig");
+pub const paged_attention = @import("attention/paged_attention.zig");
+const zml = @import("zml.zig");
 
 pub const Backend = enum {
     vanilla,
+    attnd,
     cuda_fa2,
     cuda_fa3,
 
@@ -31,17 +31,20 @@ pub const Backend = enum {
 
 pub const Parameters = union(Backend) {
     vanilla: void,
+    attnd: void,
     cuda_fa2: flashattn.fa2.Parameters,
     cuda_fa3: flashattn.fa3.Parameters,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        attnd: void,
         cuda_fa2: flashattn.fa2.Parameters.InitOptions,
         cuda_fa3: flashattn.fa3.Parameters.InitOptions,
 
         pub fn fromBackend(backend: Backend) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .attnd => .{ .attnd = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{} },
                 .cuda_fa3 => .{ .cuda_fa3 = .{} },
             };
@@ -51,6 +54,7 @@ pub const Parameters = union(Backend) {
     pub fn init(opts: InitOptions) Parameters {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .attnd => .{ .attnd = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = .init(v) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = .init(v) },
         };
@@ -59,17 +63,20 @@ pub const Parameters = union(Backend) {
 
 pub const Metadata = union(Backend) {
     vanilla: void,
+    attnd: void,
     cuda_fa2: flashattn.fa2.Metadata,
     cuda_fa3: flashattn.fa3.Metadata,
 
     pub const InitOptions = union(Backend) {
         vanilla: void,
+        attnd: void,
         cuda_fa2: flashattn.fa2.Metadata.InitOptions,
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
+                .attnd => .{ .attnd = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
             };
@@ -79,6 +86,7 @@ pub const Metadata = union(Backend) {
     pub fn init(opts: InitOptions) Metadata {
         return switch (opts) {
             .vanilla => .{ .vanilla = {} },
+            .attnd => .{ .attnd = {} },
             .cuda_fa2 => |o| .{ .cuda_fa2 = flashattn.fa2.Metadata.init(o) },
             .cuda_fa3 => |o| .{ .cuda_fa3 = flashattn.fa3.Metadata.init(o) },
         };
@@ -87,6 +95,7 @@ pub const Metadata = union(Backend) {
     pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
+            .attnd => .{ .attnd = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },
             .cuda_fa3 => |v| .{ .cuda_fa3 = try v.initBuffer(io, platform, sharding) },
         };
@@ -95,6 +104,7 @@ pub const Metadata = union(Backend) {
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         switch (self.*) {
             .vanilla => {},
+            .attnd => {},
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
         }
@@ -114,6 +124,7 @@ pub fn causal(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tens
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
             break :b attn_output;
         },
+        .attnd => unreachable,
         .cuda_fa2 => flashattn.fa2.causal(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
         .cuda_fa3 => flashattn.fa3.causal(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
     };
