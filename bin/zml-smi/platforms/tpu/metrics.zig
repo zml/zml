@@ -22,7 +22,7 @@ pub fn start(collector: *Collector) !void {
         try tpu_infos.append(collector.arena, info);
     }
 
-    try collector.spawnPoll(pollAllDevices, .{tpu_infos.items}, .{});
+    try collector.spawnPoll(pollAllDevices, .{tpu_infos.items});
 
     if (tpu_infos.items.len > 0) {
         const processes = try collector.createProcessList();

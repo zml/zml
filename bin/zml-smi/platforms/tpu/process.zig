@@ -6,7 +6,7 @@ const DeviceInfo = smi_info.device_info.DeviceInfo;
 const Collector = @import("zml-smi/collector").Collector;
 
 pub fn init(collector: *Collector, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
-    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, devices_per_chip, device_infos, dev_offset }, .{});
+    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, devices_per_chip, device_infos, dev_offset });
 }
 
 fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {

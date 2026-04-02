@@ -22,7 +22,7 @@ pub fn start(collector: *Collector) !void {
             .driver_version = dev.driverVersion(collector.arena) catch null,
         };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
-        try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev }, .{});
+        try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev });
     }
 
     const processes = try collector.createProcessList();

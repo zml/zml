@@ -23,7 +23,7 @@ pub fn start(collector: *Collector) !void {
             .cuda_driver_version = dev.cudaDriverVersion(collector.arena) catch null,
         };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev }, .{});
+        try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev });
     }
 
     const processes = try collector.createProcessList();

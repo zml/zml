@@ -20,7 +20,7 @@ pub fn init(collector: *Collector, info: *HostInfo) !void {
     info.back().* = initial;
     info.swap();
 
-    try collector.spawnPoll(pollOnce, .{ poll_arena, info, host }, .{});
+    try collector.spawnPoll(pollOnce, .{ poll_arena, info, host });
 }
 
 const pollOnce = poll_metrics.poll(*HostInfo, Host, metrics);
