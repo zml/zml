@@ -126,12 +126,15 @@ pub fn ncCounter(self: Nrt, inst: *c.nds_instance_t, pnc_index: c_int, counter_i
     return value;
 }
 
-pub fn version(self: Nrt) Error![:0]const u8 {
+pub const version_buf_len = c.RT_VERSION_DETAIL_LEN;
+
+pub fn version(self: Nrt, buf: *[version_buf_len]u8) Error![:0]const u8 {
     var ver: c.nrt_version_t = std.mem.zeroes(c.nrt_version_t);
     if (self.lib.nrt_get_version(&ver, @sizeOf(c.nrt_version_t)) != 0) {
         return error.nrt_error;
     }
-    return std.mem.span(@as([*c]const u8, @ptrCast(&ver.rt_detail)));
+    @memcpy(buf, &ver.rt_detail);
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn totalNcCount(self: Nrt) Error!u32 {

@@ -47,7 +47,8 @@ const Device = struct {
     }
 
     fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        const slice = try self.amdsmi.driverVersion(self.handle);
+        var buf: [AmdSmi.driver_version_buf_len]u8 = undefined;
+        const slice = try self.amdsmi.driverVersion(self.handle, &buf);
         return try arena.dupe(u8, slice);
     }
 

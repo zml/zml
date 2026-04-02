@@ -26,7 +26,8 @@ pub fn start(collector: *Collector) !void {
     var neuron_infos: std.ArrayList(*DeviceInfo) = .{};
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
-    const nrt_ver: ?[]const u8 = if (nrt.version()) |v|
+    var ver_buf: [Nrt.version_buf_len]u8 = undefined;
+    const nrt_ver: ?[]const u8 = if (nrt.version(&ver_buf)) |v|
         collector.arena.dupe(u8, v) catch null
     else |_|
         null;

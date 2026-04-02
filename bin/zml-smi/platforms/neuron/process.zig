@@ -7,12 +7,19 @@ const DeviceInfo = smi_info.device_info.DeviceInfo;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Collector = @import("zml-smi/collector").Collector;
 
+const DeltaState = struct {
+    prev_total_us: u64 = 0,
+    prev_timestamp: ?std.Io.Timestamp = null,
+};
+
 pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) !void {
     if (nrt.handles.len == 0) return;
-    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, nrt, nc_per_device, device_infos, dev_offset }, .{});
+    const delta_states = try collector.arena.alloc(DeltaState, device_infos.len);
+    @memset(delta_states, .{});
+    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, nrt, nc_per_device, device_infos, dev_offset, delta_states }, .{});
 }
 
-fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
+fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, device_infos: []*DeviceInfo, dev_offset: u8, delta_states: []DeltaState) void {
     const back = list.back();
 
     back.clearRetainingCapacity();
@@ -73,13 +80,14 @@ fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer
                 break;
             }
 
+            const ds = &delta_states[dev_idx];
+            const prev_us = ds.prev_total_us;
+            ds.prev_total_us = total_us_per_core[ci];
+
             const ni_back = device_infos[dev_idx].neuron.back();
             ni_back.* = device_infos[dev_idx].neuron.front().*;
-            const prev_us = ni_back.prev_total_us;
 
-            ni_back.prev_total_us = total_us_per_core[ci];
-
-            if (ni_back.prev_timestamp) |prev| {
+            if (ds.prev_timestamp) |prev| {
                 const elapsed = prev.untilNow(io, .awake);
                 const elapsed_us: u64 = @intCast(@divFloor(elapsed.nanoseconds, std.time.ns_per_us));
 
@@ -89,7 +97,7 @@ fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer
                 }
             }
 
-            ni_back.prev_timestamp = now;
+            ds.prev_timestamp = now;
             device_infos[dev_idx].neuron.swap();
         }
     }

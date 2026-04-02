@@ -199,10 +199,13 @@ pub fn bdfId(self: AmdSmi, handle: Handle) Error!u64 {
     return bdf_id;
 }
 
-pub fn driverVersion(self: AmdSmi, handle: Handle) Error![:0]const u8 {
+pub const driver_version_buf_len = @typeInfo(@TypeOf(@as(c.amdsmi_driver_info_t, undefined).driver_version)).array.len;
+
+pub fn driverVersion(self: AmdSmi, handle: Handle, buf: *[driver_version_buf_len]u8) Error![:0]const u8 {
     var info: c.amdsmi_driver_info_t = std.mem.zeroes(c.amdsmi_driver_info_t);
     try check(self.lib.amdsmi_get_gpu_driver_info(handle, &info));
-    return std.mem.span(@as([*c]const u8, @ptrCast(&info.driver_version)));
+    @memcpy(buf, &info.driver_version);
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {

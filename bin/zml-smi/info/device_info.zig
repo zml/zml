@@ -61,10 +61,6 @@ pub const NeuronInfo = struct {
     mem_used_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
 
-    // Utilization delta tracking (written by metrics worker)
-    prev_total_us: u64 = 0,
-    prev_timestamp: ?std.Io.Timestamp = null,
-
     // Neuron per-core HBM breakdown (bytes)
     nc_tensors: ?u64 = null,
     nc_constants: ?u64 = null,
