@@ -79,6 +79,14 @@ pub const Qwen35 = struct {
     vision_model: VisionModel,
     lm_head: zml.nn.Linear,
 
+    pub const ChunkMediaInsert = struct {
+        grid_thw: [3]i64,
+        pad_token_start: i64,
+        pad_token_count: i64,
+        pad_token_media_embed_offset: i64,
+        temporal_offset: i64 = 0,
+    };
+
     config: Config,
     gen_options: GenOptions,
     auto_config: AutoConfig,
@@ -211,6 +219,47 @@ pub const Qwen35 = struct {
 
         const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
 
+        return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
+    }
+
+    pub fn multimodal_chunk_prefill_forward(
+        self: Qwen35,
+        tokens: Tensor,
+        media_pixel_values: Tensor,
+        position_ids: Tensor,
+        media_insert: ChunkMediaInsert,
+        kv_cache: KvCache,
+        rng: Tensor.Rng,
+    ) struct { Tensor, KvCache, Tensor, Tensor.Rng } {
+        stdx.debug.assert(media_insert.grid_thw[0] == 1, "multimodal_chunk_prefill_forward expects grid_thw.t == 1, got {d}", .{media_insert.grid_thw[0]});
+
+        const text_embeds = self.text_model.embed_tokens.forward(tokens.withPartialTags(.{.s}));
+        const vision_embeds = self.vision_model.forward(media_pixel_values, media_insert.grid_thw);
+        const media_chunk = vision_embeds.dynamicSlice1d(
+            vision_embeds.axis(.s),
+            .{
+                .start = zml.Tensor.scalar(media_insert.pad_token_media_embed_offset, .i64),
+                .len = @intCast(media_insert.pad_token_count),
+            },
+        ).convert(text_embeds.dtype());
+        const text_with_vision_embeds = text_embeds.dynamicUpdateSlice(
+            .{ .s = zml.Tensor.scalar(media_insert.pad_token_start, .i64) },
+            media_chunk,
+        );
+
+        const text_model_output, const updated_kv_cache = self.text_model.forward(
+            text_with_vision_embeds,
+            zml.Tensor.scalar(@as(i64, 0), .i64),
+            kv_cache,
+            position_ids,
+        );
+
+        const last_pos = zml.Tensor.scalar(tokens.dim(.s) - 1, .i64);
+        const last_hidden = text_model_output.dynamicSlice1d(text_model_output.axis(.s), .{ .start = last_pos, .len = 1 });
+        const position_max = position_ids.max(.g).max(.b).max(.s).convert(.i64).asScalar();
+        const mrope_position_deltas = position_max.addConstant(1 - tokens.dim(.s)).insertAxes(.last, .{ .b, .s });
+
+        const sampled_tokens, const new_rng = self.sampleTokens(last_hidden, rng);
         return .{ sampled_tokens.convert(tokens.dtype()), updated_kv_cache, mrope_position_deltas, new_rng };
     }
 
@@ -1326,7 +1375,7 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
-    fn recurrent_gated_delta_rule(query: Tensor, key: Tensor, value: Tensor, g: Tensor, beta: Tensor, initial_state: ?Tensor) struct { Tensor, Tensor } {
+    fn recurrent_gated_delta_rule(query: Tensor, key: Tensor, value: Tensor, g: Tensor, beta: Tensor, initial_state: Tensor) struct { Tensor, Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
@@ -1339,15 +1388,7 @@ pub const GatedDeltaNet = struct {
             beta.convert(.f32).rename(.{ .vh = .h }),
         };
 
-        const initial_recurrent_state = if (initial_state) |state|
-            state.convert(.f32).transpose(.{ .b, .vh, .vhd, .khd }).rename(.{ .vh = .h, .vhd = .v, .khd = .k })
-        else
-            Tensor.constant(zml.DataType.zero(.f32)).broad(zml.Shape.init(.{
-                .b = value.dim(.b),
-                .h = value.dim(.vh),
-                .v = value.dim(.vhd),
-                .k = query.dim(.khd),
-            }, .f32));
+        const initial_recurrent_state = initial_state.convert(.f32).transpose(.{ .b, .vh, .vhd, .khd }).rename(.{ .vh = .h, .vhd = .v, .khd = .k });
 
         const result = zml.nn.GatedDeltaNet.forward(
             query_f32,
@@ -1381,11 +1422,7 @@ pub const GatedDeltaNet = struct {
         const left_pad = self.conv_kernel_size - 1;
 
         const projected_qkv = self.in_proj_qkv.forward(x).rename(.{ .dout = .mix });
-        const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
-        const conv_input = if (use_cached_state)
-            Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
-        else
-            projected_qkv;
+        const conv_input = Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s);
 
         const kernel = self.conv1d_weight;
         var mixed_qkv = Tensor.conv1d(
@@ -1407,9 +1444,7 @@ pub const GatedDeltaNet = struct {
         )
             .silu();
 
-        if (use_cached_state) {
-            mixed_qkv = mixed_qkv.slice1d(.s, .{ .start = mixed_qkv.dim(.s) - 1, .end = mixed_qkv.dim(.s) });
-        }
+        mixed_qkv = mixed_qkv.slice1d(.s, .{ .start = mixed_qkv.dim(.s) - x.dim(.s), .end = mixed_qkv.dim(.s) });
 
         const z = self.in_proj_z.forward(x).splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim });
         const b = self.in_proj_b.forward(x).rename(.{ .dout = .vh });
@@ -1438,7 +1473,7 @@ pub const GatedDeltaNet = struct {
             value,
             g,
             beta,
-            if (use_cached_state) cache.recurrentState() else null,
+            cache.recurrentState(),
         );
 
         const core_attn_out_normed = self.norm
@@ -1633,8 +1668,8 @@ pub const KvCache = struct {
         pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform) !zml.Bufferized(GatedDeltaNetCache) {
             const sharding = try zml.sharding.replicatedSharding(platform);
             return .{
-                .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), sharding, .{}),
-                .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), sharding, .{}),
+                .conv_state = try KvCache.zeroInitializedBuffer(io, platform, self.conv_state.shape(), sharding),
+                .recurrent_state = try KvCache.zeroInitializedBuffer(io, platform, self.recurrent_state.shape(), sharding),
                 .layer_index = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
             };
         }
