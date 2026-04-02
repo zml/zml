@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
-const attention = zml.attention.attention;
+const attention = zml.attention;
 
 const common = @import("../common.zig");
 const model = @import("model.zig");

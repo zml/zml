@@ -18,7 +18,7 @@ const Args = struct {
     prompt: ?[]const u8 = null,
     seqlen: u32 = 2048,
     topk: u32 = 4,
-    backend: ?zml.attention.attention.Backend = null,
+    backend: ?zml.attention.Backend = null,
     single: bool = false,
 
     pub const help =
@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     log.info("\n{f}", .{platform.fmtVerbose()});
 
     const backend = args.backend orelse b: {
-        const selected = zml.attention.attention.Backend.auto(platform);
+        const selected = zml.attention.Backend.auto(platform);
         log.info("Selected backend: {}", .{selected});
         break :b selected;
     };

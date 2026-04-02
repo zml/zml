@@ -103,7 +103,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
+        backend: zml.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,
@@ -198,8 +198,8 @@ pub const Model = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache,
         rng: zml.Tensor.Rng,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
         const out, const updated_kv_cache = self.model.forward(
@@ -286,8 +286,8 @@ pub const Llama = struct {
         tokens: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         const embeds = embed_tokensForward(self.embed_tokens, tokens);
         var hidden = embeds;
@@ -338,8 +338,8 @@ pub const TransformerLayer = struct {
         x0: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         // Self Attention
         //log.debug("TransformerLayer({f}) -> {f}", .{ x0, self.input_layernorm.forward(x0) });
@@ -469,7 +469,7 @@ pub const SelfAttn = struct {
         if (self.k_norm) |*k_norm| RmsNorm.unloadBuffers(k_norm);
     }
 
-    /// Self zml.attention.attention.
+    /// Self zml.attention.
     ///   - If token_index is set, x is assumed to be the representation of one new token,
     /// and kv_cache will be read for the previous tokens.
     ///   - If token_index is not set, x is assumed to be the representation of all tokens
@@ -481,8 +481,8 @@ pub const SelfAttn = struct {
         x: zml.Tensor,
         token_index: zml.Tensor,
         kv_cache: KvCache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
@@ -521,7 +521,7 @@ pub const SelfAttn = struct {
         k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
         v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
-        const attn_output = zml.attention.attention.attention(
+        const attn_output = zml.attention.causal(
             q,
             k,
             v,

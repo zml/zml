@@ -2,7 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 const stdx = zml.stdx;
-const attention = zml.attention.attention;
+const attention = zml.attention;
 
 const common = @import("../common.zig");
 const inference = @import("inference.zig");
@@ -115,7 +115,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
+        backend: zml.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,
@@ -213,8 +213,8 @@ pub const Model = struct {
         actual_seq_len: zml.Tensor,
         rng: zml.Tensor.Rng,
         cache_: Cache,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
         conv_parameters: ConvParameters,
     ) struct { zml.Tensor, Cache, zml.Tensor.Rng } {
         stdx.debug.assert(tokens.shape().hasTags(.{ .batch, .seq }), "Tokens should have tags {{.batch, .seq}}, got {f}", .{tokens.shape()});
@@ -330,8 +330,8 @@ pub const DecoderLayer = struct {
         cache_: Cache,
         conv_cache_index_: zml.Tensor,
         kv_cache_index_: zml.Tensor,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
         conv_parameters: ConvParameters,
     ) struct { zml.Tensor, Cache, zml.Tensor, zml.Tensor } {
         var cache = cache_;
@@ -491,8 +491,8 @@ pub const Attention = struct {
         tokens_position_offset: zml.Tensor,
         kv_cache: KvCache,
         cache_index: zml.Tensor,
-        attention_metadata: zml.attention.attention.Metadata,
-        attention_parameters: zml.attention.attention.Parameters,
+        attention_metadata: zml.attention.Metadata,
+        attention_parameters: zml.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
         var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
@@ -519,8 +519,8 @@ pub const Attention = struct {
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
-            .vanilla => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }),
-            else => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
+            .vanilla => zml.attention.causal(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }),
+            else => zml.attention.causal(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
         };
 
         return .{ self.out_proj.forward(attn).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
