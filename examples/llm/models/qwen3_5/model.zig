@@ -668,7 +668,7 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
-    fn recurrent_gated_delta_rule(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, initial_state: ?zml.Tensor) struct { zml.Tensor, zml.Tensor } {
+    fn recurrent_gated_delta_rule(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, seq_len: zml.Tensor, initial_state: ?zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
@@ -697,6 +697,7 @@ pub const GatedDeltaNet = struct {
             value_f32,
             alpha_f32,
             beta_f32,
+            seq_len,
             .{ .s = initial_recurrent_state },
         );
 
@@ -706,14 +707,11 @@ pub const GatedDeltaNet = struct {
         };
     }
 
-    fn buildUpdatedConvState(input: zml.Tensor, left_pad: i64) zml.Tensor {
-        const copy_len = @min(input.dim(.s), left_pad);
-        const tail = input.slice1d(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
-        if (copy_len == left_pad) return tail;
-
-        const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad - copy_len, .mix = input.dim(.mix) }, input.dtype());
+    fn buildUpdatedConvState(input: zml.Tensor, valid_seq_len: zml.Tensor, left_pad: i64) zml.Tensor {
+        const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad, .mix = input.dim(.mix) }, input.dtype());
         const padding = zml.Tensor.constant(input.dtype().zero()).broad(padding_shape);
-        return zml.Tensor.concatenate(&.{ padding, tail }, .s);
+        const padded_input = zml.Tensor.concatenate(&.{ padding, input }, .s);
+        return padded_input.dynamicSlice(.{ .s = zml.Tensor.DynSlice{ .start = valid_seq_len.convert(.i32), .len = left_pad } });
     }
 
     pub fn forward(self: GatedDeltaNet, x: zml.Tensor, cache: KvCache.GatedDeltaNetCache) struct { zml.Tensor, KvCache.GatedDeltaNetCache } {
@@ -729,6 +727,10 @@ pub const GatedDeltaNet = struct {
             zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
         else
             projected_qkv;
+        const valid_conv_seq_len = if (use_cached_state)
+            zml.Tensor.scalar(conv_input.dim(.s), .i32)
+        else
+            zml.Tensor.scalar(x.dim(.s), .i32);
 
         const kernel = self.conv1d_weight;
         var mixed_qkv = zml.Tensor.conv1d(
@@ -785,6 +787,7 @@ pub const GatedDeltaNet = struct {
             value,
             g,
             beta,
+            zml.Tensor.scalar(x.dim(.s), .i32),
             if (use_cached_state) cache.recurrentState() else null,
         );
 
@@ -798,7 +801,7 @@ pub const GatedDeltaNet = struct {
 
         const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(
-            buildUpdatedConvState(conv_input, left_pad),
+            buildUpdatedConvState(conv_input, valid_conv_seq_len, left_pad),
             last_recurrent_state,
         );
         return .{ output, updated_cache };

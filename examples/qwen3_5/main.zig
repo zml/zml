@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const options = Qwen35.GenOptions{
         .max_seq_len = args.len,
         .sampling_strategy = .{
-            .topk = 1,
+            .topk = 20,
             .temperature = 1.0,
         },
     };
@@ -151,6 +151,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     const prefill_tokens = Tensor.init(.{ .b = 1, .s = prefill_len }, .u32);
     const decode_tokens = Tensor.init(.{ .b = 1, .s = 1 }, .u32);
     const token_index = Tensor.init(.{}, .u32);
+    const seq_len = Tensor.init(.{}, .u32);
 
     const rng = zml.Tensor.Rng.init();
 
@@ -162,6 +163,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             qwen35_model_: Qwen35,
             prefill_tokens_: Tensor,
             token_index_: Tensor,
+            seq_len_: Tensor,
             kv_cache_: qwen35.KvCache,
             rng_: zml.Tensor.Rng,
             replicated_sharding_: zml.sharding.Sharding,
@@ -172,9 +174,9 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ prefill_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ prefill_tokens_, token_index_, seq_len_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
-    }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, prefill_tokens, token_index, seq_len, kv_cache, rng, replicated_sharding, progress });
     errdefer if (prefill_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -187,6 +189,7 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             qwen35_model_: Qwen35,
             decode_tokens_: Tensor,
             token_index_: Tensor,
+            seq_len_: Tensor,
             kv_cache_: qwen35.KvCache,
             rng_: zml.Tensor.Rng,
             replicated_sharding_: zml.sharding.Sharding,
@@ -197,9 +200,9 @@ fn compileModel(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ decode_tokens_, token_index_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
+            return platform_.compile(allocator_, io_, qwen35_model_, .forward, .{ decode_tokens_, token_index_, seq_len_, kv_cache_, rng_ }, .{ .shardings = &.{replicated_sharding_} });
         }
-    }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, kv_cache, rng, replicated_sharding, progress });
+    }.call, .{ allocator, io, platform, qwen35_model, decode_tokens, token_index, seq_len, kv_cache, rng, replicated_sharding, progress });
     errdefer if (decode_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -217,11 +220,18 @@ fn tokenizePrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeniz
     defer encoder.deinit();
 
     const encoded_prompt = try encoder.encode(prompt);
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 1);
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 10);
 
     try tokens.append(allocator, qwen_model.special_tokens.im_start_token_id);
+    try tokens.append(allocator, tokenizer.tokenToId("user").?);
+    try tokens.append(allocator, tokenizer.tokenToId("\\n").?);
     try tokens.appendSlice(allocator, encoded_prompt);
     try tokens.append(allocator, qwen_model.special_tokens.im_end_token_id);
+    try tokens.append(allocator, qwen_model.special_tokens.im_start_token_id);
+    try tokens.append(allocator, tokenizer.tokenToId("assistant").?);
+    try tokens.append(allocator, tokenizer.tokenToId("\\n").?);
+    try tokens.append(allocator, tokenizer.tokenToId("<think>").?);
+    try tokens.append(allocator, tokenizer.tokenToId("</think>").?);
 
     return tokens.toOwnedSlice(allocator);
 }
@@ -256,8 +266,10 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
         defer prefill_tokens_buffer.deinit();
         var prefill_token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 0), .u32, replicated_sharding);
         defer prefill_token_index_buffer.deinit();
+        var prefill_seq_len_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(input_token_ids.len)), .u32, replicated_sharding);
+        defer prefill_seq_len_buffer.deinit();
 
-        prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, kv_cache_buffers, rng_buffers });
+        prefill_args.set(.{ qwen35_buffers, prefill_tokens_buffer, prefill_token_index_buffer, prefill_seq_len_buffer, kv_cache_buffers, rng_buffers });
         compile_result.prefill_exe.call(prefill_args, &prefill_results);
 
         prefill_results.fill(.{ &prefill_tokens_buffer, kv_cache_buffers, &rng_buffers });
@@ -296,8 +308,10 @@ fn runAndGenerate(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platf
 
         var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(input_token_ids.len + i)), .u32, replicated_sharding);
         defer token_index_buffer.deinit();
+        var seq_len_buffer = try zml.Buffer.scalar(io, platform, @as(u32, 1), .u32, replicated_sharding);
+        defer seq_len_buffer.deinit();
 
-        decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, kv_cache_buffers, rng_buffers });
+        decode_args.set(.{ qwen35_buffers, current_token_buffer, token_index_buffer, seq_len_buffer, kv_cache_buffers, rng_buffers });
 
         compile_result.decode_exe.call(decode_args, &decode_results);
 
@@ -418,9 +432,10 @@ fn checkLayers(
             _ = sin;
             _ = position_ids;
             const token_index = cachePositionToTokenIndex(cache_position);
+            const seq_len = cache_position.withTags(.{.s}).slice1d(.s, .{ .start = 0, .end = 1 }).squeeze(.s).add(Tensor.scalar(1, cache_position.dtype())).convert(.u32);
             const tagged_x = x.withTags(.{ .b, .s, .d });
             const kv_cache = emptyLayerKvCache(self.layer, tagged_x);
-            const output, const updated_cache = self.layer.forward(x.withTags(.{ .b, .s, .d }), token_index, kv_cache.atLayer(0));
+            const output, const updated_cache = self.layer.forward(x.withTags(.{ .b, .s, .d }), token_index, seq_len, kv_cache.atLayer(0));
             return switch (self.layer.attn) {
                 .self_attn => .{
                     output,
@@ -452,7 +467,7 @@ fn checkLayers(
         ) struct { Tensor, Tensor, Tensor } {
             _ = cache_position;
             const cache = emptyLinearAttnCache(self.linearAttn, x.withTags(.{ .b, .s, .d }));
-            const output, const updated_cache = self.linearAttn.forward(x.withTags(.{ .b, .s, .d }), cache);
+            const output, const updated_cache = self.linearAttn.forward(x.withTags(.{ .b, .s, .d }), Tensor.scalar(x.dim(.s), .u32), cache);
             return .{
                 output,
                 flatConvState(updated_cache),
@@ -682,7 +697,7 @@ fn checkLayers(
             _ = sin;
             _ = position_ids;
             const tagged_tokens = tokens.withTags(.{ .b, .s });
-            return .{self.model.forward(tagged_tokens, Tensor.scalar(@as(u32, 0), .u32), self.cache)[0]};
+            return .{self.model.forward(tagged_tokens, Tensor.scalar(@as(u32, 0), .u32), Tensor.scalar(tokens.dim(.s), .u32), self.cache)[0]};
         }
     };
     const modelHarness: ModelHarness = .{

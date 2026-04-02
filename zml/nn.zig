@@ -1206,16 +1206,18 @@ pub const GatedDeltaNet = struct {
         values: Tensor,
         alphas: Tensor,
         betas: Tensor,
+        seq_len: Tensor,
         initial_state: State,
     ) Output {
-        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, state: {f}) is invalid ! ";
-        const err_args = .{ queries, keys, values, alphas, betas, initial_state.s };
+        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, seq_len: {f}, state: {f}) is invalid ! ";
+        const err_args = .{ queries, keys, values, alphas, betas, seq_len, initial_state.s };
 
         stdx.debug.assert(queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "queries is missing tags {{.s, .h, .k}}", err_args);
         stdx.debug.assert(keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "keys is missing tags {{.s, .h, .k}}", err_args);
         stdx.debug.assert(values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "values is missing tags {{.s, .h, .v}}", err_args);
         stdx.debug.assert(alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tags {{.s, .h}}", err_args);
         stdx.debug.assert(betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tags {{.s, .h}}", err_args);
+        stdx.debug.assert(seq_len.shape().rank() == 0, err_template ++ "seq_len must be a scalar.", err_args);
         stdx.debug.assert(initial_state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "initial_state.s is missing tags {{.h, .v, .k}}", err_args);
 
         _ = collectDims(.{ .s, .h }, &.{ queries, keys, values, alphas, betas }, .strict) catch {
@@ -1242,7 +1244,7 @@ pub const GatedDeltaNet = struct {
             .values = values,
             .alphas = alphas,
             .betas = betas,
-            .seq_len = Tensor.scalar(queries.dim(.s), .i32),
+            .seq_len = seq_len.convert(.i32),
         };
 
         const Local = struct {
