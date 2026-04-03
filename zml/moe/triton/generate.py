@@ -10,6 +10,7 @@ from triton.runtime.driver import driver as runtime_driver
 from fake_plugin.compiler import Backend as FakeCompilerBackend
 from fake_plugin.driver import Driver as FakeDriver
 from triton_kernels.moe import (
+    per_token_group_quant_fp8,
     fused_moe_kernel,
     moe_align_block_size_kernel,
     count_and_sort_expert_tokens_kernel,
@@ -18,7 +19,7 @@ from triton_kernels.moe import (
 
 class FakeTensor:
     def __init__(self, dtype: str, shape, strides=None):
-        self.dtype = dtype
+        self.dtype = "fp8e4nv" if dtype == "f8e4m3fn" else dtype
         self.shape = tuple(shape)
         self._strides = tuple(strides) if strides is not None else contiguous_strides(self.shape)
 
@@ -226,6 +227,40 @@ def compile_align_block_size_kernel(cfg: dict) -> str:
     return kernel.asm["ttir"]
 
 
+def compile_activation_quant_fp8_kernel(cfg: dict) -> str:
+    num_rows = cfg["num_rows"]
+    num_columns = cfg["num_columns"]
+    group_size = cfg["group_size"]
+    block = cfg["block"]
+    groups_per_row = num_columns // group_size
+
+    if num_columns % group_size != 0:
+        raise ValueError("num_columns must be divisible by group_size")
+
+    y_shape = (num_rows, num_columns)
+    y_q_shape = (num_rows, num_columns)
+    y_s_shape = (num_rows, groups_per_row)
+
+    kernel = per_token_group_quant_fp8.warmup(
+        grid=(num_rows * groups_per_row,),
+        y_ptr=FakeTensor(cfg["input_dtype"], y_shape),
+        y_q_ptr=FakeTensor(cfg["output_dtype"], y_q_shape),
+        y_s_ptr=FakeTensor(cfg.get("scale_dtype", "bf16"), y_s_shape),
+        group_size_ptr=FakeTensor(cfg.get("group_size_dtype", "i64"), (1,)),
+        y_num_columns_ptr=FakeTensor(cfg.get("num_columns_dtype", "i64"), (1,)),
+        y_row_stride_ptr=FakeTensor(cfg.get("row_stride_dtype", "i64"), (1,)),
+        eps_ptr=FakeTensor(cfg.get("eps_dtype", "fp32"), (1,)),
+        fp8_min=cfg["fp8_min"],
+        fp8_max=cfg["fp8_max"],
+        use_ue8m0=cfg.get("use_ue8m0", False),
+        BLOCK=block,
+        num_warps=1,
+        num_stages=1,
+    )
+
+    return kernel.asm["ttir"]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate TTIR for wrapped MoE Triton kernels")
     parser.add_argument("--config", required=True, help="Raw JSON string")
@@ -236,6 +271,8 @@ def main() -> None:
     register_fake_backend()
     if cfg.get("kernel_family") == "align_block_size":
         ttir = compile_align_block_size_kernel(cfg)
+    elif cfg.get("kernel_family") == "activation_quant_fp8":
+        ttir = compile_activation_quant_fp8_kernel(cfg)
     else:
         ttir = compile_fused_moe_kernel(cfg)
     print(ttir)

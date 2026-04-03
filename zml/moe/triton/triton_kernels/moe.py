@@ -1,6 +1,69 @@
 import triton
 import triton.language as tl
 
+@triton.jit
+def per_token_group_quant_fp8(
+    # Pointers to inputs and output
+    y_ptr,
+    group_size_ptr,
+    # Num columns of y
+    y_num_columns_ptr,
+    y_row_stride_ptr,
+    # Avoid to divide zero
+    eps_ptr,
+    # Information for float8
+    fp8_min: tl.constexpr,
+    fp8_max: tl.constexpr,
+    use_ue8m0: tl.constexpr,
+    # Meta-parameters
+    BLOCK: tl.constexpr,
+    y_q_ptr,
+    y_s_ptr,
+):
+    """A Triton-accelerated function to perform per-token-group
+    quantization on a tensor.
+    This function converts the tensor values into float8 values.
+    """
+    group_size = tl.load(group_size_ptr)
+    y_num_columns = tl.load(y_num_columns_ptr)
+    y_row_stride = tl.load(y_row_stride_ptr)
+    eps = tl.load(eps_ptr)
+
+
+    groups_per_row = y_num_columns // group_size
+
+    # Map the program id to the row of X and Y it should compute.
+    g_id = tl.program_id(0)
+    row = g_id // groups_per_row
+    row_g_id = g_id % groups_per_row
+
+    # Ensure offset calculations use int64 to prevent overflow
+    y_ptr_offset = (row.to(tl.int64) * y_row_stride) + (
+        row_g_id.to(tl.int64) * group_size
+    )
+    y_ptr += y_ptr_offset
+
+    y_q_ptr_offset = g_id.to(tl.int64) * group_size
+    y_q_ptr += y_q_ptr_offset
+    y_s_ptr += g_id
+
+    cols = tl.arange(0, BLOCK)  # N <= BLOCK
+    mask = cols < group_size
+
+    y = tl.load(y_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+    # Quant
+    # Use multiply-by-reciprocal instead of division to match PyTorch's
+    # tensor/scalar division precision (GPU fast-division for constexpr
+    # divisors can introduce 1-ULP error that flips FP8 quantization at
+    # representable-value boundaries).
+    _absmax = tl.maximum(tl.max(tl.abs(y)), eps)
+    scale_raw = _absmax * (1.0 / fp8_max)
+    y_s = tl.math.exp2(tl.ceil(tl.log2(scale_raw))) if use_ue8m0 else scale_raw
+    y_q = tl.clamp(y / y_s, fp8_min, fp8_max).to(y_q_ptr.dtype.element_ty)
+
+    tl.store(y_q_ptr + cols, y_q, mask=mask)
+    tl.store(y_s_ptr, y_s)
+
 
 @triton.jit
 def write_zeros_to_output(
@@ -20,6 +83,8 @@ def write_zeros_to_output(
     c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
+
+
 
 @triton.jit
 def fused_moe_kernel(
@@ -135,13 +200,13 @@ def fused_moe_kernel(
     stride_bn_block = (stride_bn_raw // 16) * 16
     stride_cm_block = (stride_cm_raw // 16) * 16
     stride_cn_block = stride_cn_raw
-    stride_asm_block = (stride_asm_raw // 16) * 16
-    stride_ask_block = (stride_ask_raw // 16) * 16
+    stride_asm_block = stride_asm_raw
+    stride_ask_block = stride_ask_raw
     stride_bse_block = (stride_bse_raw // 16) * 16
-    stride_bsk_block = (stride_bsk_raw // 16) * 16
-    stride_bsn_block = (stride_bsn_raw // 16) * 16
-    stride_bbe_block = (stride_bbe_raw // 16) * 16
-    stride_bbn_block = (stride_bbn_raw // 16) * 16
+    stride_bsk_block = stride_bsk_raw
+    stride_bsn_block = stride_bsn_raw
+    stride_bbe_block = stride_bbe_raw
+    stride_bbn_block = stride_bbn_raw
 
     # -----------------------------------------------------------
     # Map program ids `pid` to the block of C it should compute.
