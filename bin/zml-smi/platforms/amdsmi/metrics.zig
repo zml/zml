@@ -1,14 +1,12 @@
 const std = @import("std");
 const AmdSmi = @import("amdsmi.zig");
-const device_info = @import("../../info/device_info.zig");
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
+const Collector = @import("zml-smi/collector").Collector;
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const process = @import("process.zig");
-
-pub const target: device_info.Target = .rocm;
 
 pub fn start(collector: *Collector) !void {
     const amdsmi = try collector.arena.create(AmdSmi);
@@ -19,17 +17,19 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
+        const initial: GpuInfo = .{
+            .name = dev.name(collector.arena) catch null,
+            .driver_version = dev.driverVersion(collector.arena) catch null,
+        };
         const info = try collector.addDevice(.{ .rocm = .{ .values = .{ initial, initial } } });
-
-        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.rocm, dev });
+        try collector.spawnPoll(pollOnce, .{ null, &info.rocm, dev });
     }
 
     const processes = try collector.createProcessList();
-    try process.init(collector.worker, collector.io, collector.gpa, processes, amdsmi, dev_offset);
+    try process.init(collector, processes, amdsmi, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     amdsmi: *const AmdSmi,
@@ -40,9 +40,15 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [AmdSmi.name_buf_len]u8 = .{0} ** AmdSmi.name_buf_len;
+        var buf: [AmdSmi.name_buf_len]u8 = undefined;
         const slice = try self.amdsmi.name(self.handle, &buf);
 
+        return try arena.dupe(u8, slice);
+    }
+
+    fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        var buf: [AmdSmi.driver_version_buf_len]u8 = undefined;
+        const slice = try self.amdsmi.driverVersion(self.handle, &buf);
         return try arena.dupe(u8, slice);
     }
 

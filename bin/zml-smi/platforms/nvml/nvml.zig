@@ -1,9 +1,10 @@
 const std = @import("std");
 const c = @import("c");
-const DynLib = @import("../dynlib.zig");
+const DynLib = @import("zml-smi/dynlib");
 
 const Nvml = @This();
 
+pub const driver_version_buf_size = c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE;
 pub const Error = ReturnError || error{NvmlUnavailable};
 pub const Handle = c.nvmlDevice_t;
 pub const ProcessInfo_t = c.nvmlProcessInfo_t;
@@ -11,33 +12,41 @@ pub const ProcessInfo_t = c.nvmlProcessInfo_t;
 lib: Fns,
 
 const Fns = struct {
-    nvmlInit_v2: DynLib.Fn("nvmlInit_v2"),
-    nvmlDeviceGetHandleByIndex_v2: DynLib.Fn("nvmlDeviceGetHandleByIndex_v2"),
-    nvmlDeviceGetCount_v2: DynLib.Fn("nvmlDeviceGetCount_v2"),
-    nvmlDeviceGetName: DynLib.Fn("nvmlDeviceGetName"),
-    nvmlDeviceGetPowerUsage: DynLib.Fn("nvmlDeviceGetPowerUsage"),
-    nvmlDeviceGetTemperature: DynLib.Fn("nvmlDeviceGetTemperature"),
-    nvmlDeviceGetUtilizationRates: DynLib.Fn("nvmlDeviceGetUtilizationRates"),
-    nvmlDeviceGetClockInfo: DynLib.Fn("nvmlDeviceGetClockInfo"),
-    nvmlDeviceGetMaxClockInfo: DynLib.Fn("nvmlDeviceGetMaxClockInfo"),
-    nvmlDeviceGetMemoryInfo: DynLib.Fn("nvmlDeviceGetMemoryInfo"),
-    nvmlDeviceGetFanSpeed: DynLib.Fn("nvmlDeviceGetFanSpeed"),
-    nvmlDeviceGetEnforcedPowerLimit: DynLib.Fn("nvmlDeviceGetEnforcedPowerLimit"),
-    nvmlDeviceGetPcieThroughput: DynLib.Fn("nvmlDeviceGetPcieThroughput"),
-    nvmlDeviceGetEncoderUtilization: DynLib.Fn("nvmlDeviceGetEncoderUtilization"),
-    nvmlDeviceGetDecoderUtilization: DynLib.Fn("nvmlDeviceGetDecoderUtilization"),
-    nvmlDeviceGetCurrPcieLinkGeneration: DynLib.Fn("nvmlDeviceGetCurrPcieLinkGeneration"),
-    nvmlDeviceGetCurrPcieLinkWidth: DynLib.Fn("nvmlDeviceGetCurrPcieLinkWidth"),
-    nvmlDeviceGetMemoryBusWidth: DynLib.Fn("nvmlDeviceGetMemoryBusWidth"),
-    nvmlDeviceGetComputeRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetComputeRunningProcesses_v3"),
-    nvmlDeviceGetGraphicsRunningProcesses_v3: DynLib.Fn("nvmlDeviceGetGraphicsRunningProcesses_v3"),
-    nvmlDeviceGetProcessUtilization: DynLib.Fn("nvmlDeviceGetProcessUtilization"),
+    nvmlInit_v2: *const @TypeOf(c.nvmlInit_v2),
+    nvmlDeviceGetHandleByIndex_v2: *const @TypeOf(c.nvmlDeviceGetHandleByIndex_v2),
+    nvmlDeviceGetCount_v2: *const @TypeOf(c.nvmlDeviceGetCount_v2),
+    nvmlDeviceGetName: *const @TypeOf(c.nvmlDeviceGetName),
+    nvmlDeviceGetPowerUsage: *const @TypeOf(c.nvmlDeviceGetPowerUsage),
+    nvmlDeviceGetTemperature: *const @TypeOf(c.nvmlDeviceGetTemperature),
+    nvmlDeviceGetUtilizationRates: *const @TypeOf(c.nvmlDeviceGetUtilizationRates),
+    nvmlDeviceGetClockInfo: *const @TypeOf(c.nvmlDeviceGetClockInfo),
+    nvmlDeviceGetMaxClockInfo: *const @TypeOf(c.nvmlDeviceGetMaxClockInfo),
+    nvmlDeviceGetMemoryInfo: *const @TypeOf(c.nvmlDeviceGetMemoryInfo),
+    nvmlDeviceGetFanSpeed: *const @TypeOf(c.nvmlDeviceGetFanSpeed),
+    nvmlDeviceGetEnforcedPowerLimit: *const @TypeOf(c.nvmlDeviceGetEnforcedPowerLimit),
+    nvmlDeviceGetPcieThroughput: *const @TypeOf(c.nvmlDeviceGetPcieThroughput),
+    nvmlDeviceGetEncoderUtilization: *const @TypeOf(c.nvmlDeviceGetEncoderUtilization),
+    nvmlDeviceGetDecoderUtilization: *const @TypeOf(c.nvmlDeviceGetDecoderUtilization),
+    nvmlDeviceGetCurrPcieLinkGeneration: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkGeneration),
+    nvmlDeviceGetCurrPcieLinkWidth: *const @TypeOf(c.nvmlDeviceGetCurrPcieLinkWidth),
+    nvmlDeviceGetMemoryBusWidth: *const @TypeOf(c.nvmlDeviceGetMemoryBusWidth),
+    nvmlDeviceGetPcieSpeed: *const @TypeOf(c.nvmlDeviceGetPcieSpeed),
+    nvmlDeviceGetComputeRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetComputeRunningProcesses_v3),
+    nvmlDeviceGetGraphicsRunningProcesses_v3: *const @TypeOf(c.nvmlDeviceGetGraphicsRunningProcesses_v3),
+    nvmlDeviceGetProcessUtilization: *const @TypeOf(c.nvmlDeviceGetProcessUtilization),
+    nvmlSystemGetCudaDriverVersion_v2: *const @TypeOf(c.nvmlSystemGetCudaDriverVersion_v2),
+    nvmlSystemGetDriverVersion: *const @TypeOf(c.nvmlSystemGetDriverVersion),
 };
 
 pub fn init() Error!Nvml {
-    const fns = DynLib.open(Fns, "libnvidia-ml.so.1") orelse
-        DynLib.open(Fns, "libnvidia-ml.so") orelse
-        return error.NvmlUnavailable;
+    var dynlib: std.DynLib = .{ .inner = .{
+        .handle = std.c.dlopen("libnvidia-ml.so.1", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse
+            std.c.dlopen("libnvidia-ml.so", .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
+            if (std.c.dlerror()) |err| std.log.err("nvml: dlopen: {s}", .{err});
+            return error.NvmlUnavailable;
+        },
+    } };
+    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.NvmlUnavailable;
     try check(fns.nvmlInit_v2());
     return .{ .lib = fns };
 }
@@ -54,9 +63,11 @@ pub fn deviceCount(self: Nvml) Error!u32 {
     return @intCast(count);
 }
 
-pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[256]u8) Error![:0]const u8 {
+pub const name_buf_len = c.NVML_DEVICE_NAME_V2_BUFFER_SIZE;
+
+pub fn name(self: Nvml, handle: c.nvmlDevice_t, buf: *[c.NVML_DEVICE_NAME_V2_BUFFER_SIZE]u8) Error![:0]const u8 {
     try check(self.lib.nvmlDeviceGetName(handle, buf, buf.len));
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
@@ -167,6 +178,31 @@ pub fn pcieLinkWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
     var width: c_uint = 0;
     try check(self.lib.nvmlDeviceGetCurrPcieLinkWidth(handle, &width));
     return width;
+}
+
+pub fn pcieSpeed(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {
+    var speed: c_uint = 0;
+    try check(self.lib.nvmlDeviceGetPcieSpeed(handle, &speed));
+    return speed;
+}
+
+pub fn driverVersion(self: Nvml, buf: *[c.NVML_SYSTEM_DRIVER_VERSION_BUFFER_SIZE]u8) Error![:0]const u8 {
+    try check(self.lib.nvmlSystemGetDriverVersion(buf, buf.len));
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
+}
+
+pub fn cudaDriverVersionMajor(v: c_int) c_int {
+    return @divTrunc(v, 1000);
+}
+
+pub fn cudaDriverVersionMinor(v: c_int) c_int {
+    return @divTrunc(@mod(v, 1000), 10);
+}
+
+pub fn cudaDriverVersion(self: Nvml) Error!c_int {
+    var version: c_int = 0;
+    try check(self.lib.nvmlSystemGetCudaDriverVersion_v2(&version));
+    return version;
 }
 
 pub fn memBusWidth(self: Nvml, handle: c.nvmlDevice_t) Error!c_uint {

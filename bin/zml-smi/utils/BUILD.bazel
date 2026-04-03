@@ -1,0 +1,30 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "double_buffer",
+    import_name = "zml-smi/double_buffer",
+    main = "double_buffer.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
+    name = "dynlib",
+    import_name = "zml-smi/dynlib",
+    main = "dynlib.zig",
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
+    name = "sandbox",
+    import_name = "zml-smi/sandbox",
+    main = "sandbox.zig",
+    visibility = ["//visibility:public"],
+    deps = ["@rules_zig//zig/runfiles"],
+)
+
+zig_library(
+    name = "sysfs",
+    import_name = "zml-smi/sysfs",
+    main = "sysfs.zig",
+    visibility = ["//visibility:public"],
+)

@@ -1,17 +1,18 @@
 const std = @import("std");
-const di = @import("../info/device_info.zig");
+const smi_info = @import("zml-smi/info");
+const di = smi_info.device_info;
 pub const DeviceInfo = di.DeviceInfo;
 pub const GpuInfo = di.GpuInfo;
 pub const NeuronInfo = di.NeuronInfo;
 pub const TpuInfo = di.TpuInfo;
 pub const Target = di.Target;
-pub const Targets = @import("../platform.zig").Targets;
-const hi = @import("../info/host_info.zig");
+pub const Targets = smi_info.Targets;
+const hi = smi_info.host_info;
 pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
-pub const pi = @import("../info/process_info.zig");
-pub const ProcessDoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-pub const ProcessEnricher = @import("../bindings/linux/process.zig").ProcessEnricher;
+pub const pi = smi_info.process_info;
+pub const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+pub const ProcessEnricher = @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
 pub const history_len: usize = 500;
 

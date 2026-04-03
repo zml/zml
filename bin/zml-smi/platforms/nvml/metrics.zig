@@ -1,14 +1,12 @@
 const std = @import("std");
 const Nvml = @import("nvml.zig");
-const device_info = @import("../../info/device_info.zig");
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const GpuInfo = device_info.GpuInfo;
-const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
+const Collector = @import("zml-smi/collector").Collector;
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const process = @import("process.zig");
-
-pub const target: device_info.Target = .cuda;
 
 pub fn start(collector: *Collector) !void {
     const nvml = try collector.arena.create(Nvml);
@@ -19,16 +17,20 @@ pub fn start(collector: *Collector) !void {
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;
-        const initial: GpuInfo = .{ .name = dev.name(collector.arena) catch null };
+        const initial: GpuInfo = .{
+            .name = dev.name(collector.arena) catch null,
+            .driver_version = dev.driverVersion(collector.arena) catch null,
+            .cuda_driver_version = dev.cudaDriverVersion(collector.arena) catch null,
+        };
         const info = try collector.addDevice(.{ .cuda = .{ .values = .{ initial, initial } } });
-        try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.cuda, dev });
+        try collector.spawnPoll(pollOnce, .{ null, &info.cuda, dev });
     }
 
     const processes = try collector.createProcessList();
-    try process.init(collector.worker, collector.io, collector.gpa, processes, nvml, dev_offset);
+    try process.init(collector, processes, nvml, dev_offset);
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(GpuInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(GpuInfo), Device, metrics);
 
 const Device = struct {
     nvml: *const Nvml,
@@ -39,10 +41,25 @@ const Device = struct {
     }
 
     fn name(self: Device, arena: std.mem.Allocator) ![]const u8 {
-        var buf: [256]u8 = .{0} ** 256;
+        var buf: [Nvml.name_buf_len]u8 = undefined;
         const slice = try self.nvml.name(self.handle, &buf);
 
         return try arena.dupe(u8, slice);
+    }
+
+    fn driverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        var buf: [Nvml.driver_version_buf_size]u8 = undefined;
+        const slice = try self.nvml.driverVersion(&buf);
+
+        return try arena.dupe(u8, slice);
+    }
+
+    fn cudaDriverVersion(self: Device, arena: std.mem.Allocator) ![]const u8 {
+        const v = try self.nvml.cudaDriverVersion();
+        return try std.fmt.allocPrint(arena, "{}.{}", .{
+            Nvml.cudaDriverVersionMajor(v),
+            Nvml.cudaDriverVersionMinor(v),
+        });
     }
 
     // Power
@@ -119,6 +136,10 @@ const Device = struct {
         return @intCast(try self.nvml.pcieRxKBps(self.handle));
     }
 
+    pub fn pcieBandwidth(self: Device) !u64 {
+        return @intCast(try self.nvml.pcieSpeed(self.handle));
+    }
+
     pub fn pcieLinkGen(self: Device) !u64 {
         return @intCast(try self.nvml.pcieLinkGen(self.handle));
     }
@@ -146,6 +167,7 @@ const metrics = .{
     .{ .field = "mem_bus_width", .query = Device.memBusWidth },
     .{ .field = "pcie_tx_kbps", .query = Device.pcieTx },
     .{ .field = "pcie_rx_kbps", .query = Device.pcieRx },
+    .{ .field = "pcie_bandwidth_mbps", .query = Device.pcieBandwidth },
     .{ .field = "pcie_link_gen", .query = Device.pcieLinkGen },
     .{ .field = "pcie_link_width", .query = Device.pcieLinkWidth },
 };

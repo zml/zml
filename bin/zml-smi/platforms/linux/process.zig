@@ -1,6 +1,6 @@
 const std = @import("std");
-const sysfs = @import("../../utils/sysfs.zig");
-const pi = @import("../../info/process_info.zig");
+const sysfs = @import("zml-smi/sysfs");
+const pi = @import("zml-smi/info").process_info;
 
 const ProcessInfo = pi.ProcessInfo;
 
@@ -59,7 +59,7 @@ pub const ProcessEnricher = struct {
             if (delta_total > 0) {
                 if (self.prev_ticks.get(info.pid)) |prev| {
                     const delta_proc = ticks -| prev;
-                    info.cpu_percent = @intCast(@min(delta_proc * 1000 / delta_total, std.math.maxInt(u16)));
+                    info.cpu_percent = @intCast(@min(delta_proc *| 1000 / delta_total, std.math.maxInt(u16)));
                 }
             }
 

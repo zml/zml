@@ -56,8 +56,30 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
     };
     const mem_pct: u8 = if (cf.mem_total > 0) @intCast(@min(cf.mem_used * 100 / cf.mem_total, 100)) else 0;
 
-    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}", .{ target.deviceLabel(), i, cf.name });
-    const util_label = target.utilLabel();
+    const device_label, const util_label = switch (target) {
+        .cuda, .rocm => .{ "GPU", "GPU" },
+        .neuron => .{ "NC", "Core" },
+        .tpu => .{ "TPU", "Duty" },
+    };
+    const driver_ver: []const u8 = switch (dev.*) {
+        .cuda => |*sv| blk: {
+            const gpu = sv.front();
+            const drv = gpu.driver_version orelse "";
+            const cuda = gpu.cuda_driver_version orelse "";
+            break :blk if (drv.len > 0 and cuda.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " ({s}, CUDA {s})", .{ drv, cuda })
+            else if (drv.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " ({s})", .{drv})
+            else if (cuda.len > 0)
+                try std.fmt.allocPrint(ctx.arena, " (CUDA {s})", .{cuda})
+            else
+                @as([]const u8, "");
+        },
+        .rocm => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
+        .neuron => |*sv| if (sv.front().driver_version) |v| try std.fmt.allocPrint(ctx.arena, " ({s})", .{v}) else "",
+        else => "",
+    };
+    const card_title = try std.fmt.allocPrint(ctx.arena, "{s} {d}: {s}{s}", .{ device_label, i, cf.name, driver_ver });
 
     const dev_suffix = switch (dev.*) {
         .cuda, .rocm => |*sv| blk: {

@@ -1,17 +1,17 @@
 const std = @import("std");
-const sysfs = @import("../../utils/sysfs.zig");
-const device_info = @import("../../info/device_info.zig");
+const sysfs = @import("zml-smi/sysfs");
+const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
+const device_info = @import("zml-smi/info").device_info;
 const DeviceInfo = device_info.DeviceInfo;
 const NeuronInfo = device_info.NeuronInfo;
-const DoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer;
-const Collector = @import("../../collector.zig").Collector;
-const Worker = @import("../../worker.zig").Worker;
+const Collector = @import("zml-smi/collector").Collector;
+const poll_metrics = @import("zml-smi/info").poll_metrics;
 const Nrt = @import("nrt.zig");
 const process = @import("process.zig");
 
 const base_path = "/sys/devices/virtual/neuron_device";
 
-pub const target: device_info.Target = .neuron;
+pub const UtilAtomic = std.atomic.Value(u64);
 
 pub fn start(collector: *Collector) !void {
     const nrt = try collector.arena.create(Nrt);
@@ -24,10 +24,21 @@ pub fn start(collector: *Collector) !void {
     const total_nc = nrt.totalNcCount() catch return;
     const nc_per_device = total_nc / @as(u32, @intCast(nrt.handles.len));
 
+    const total_cores = @as(usize, nrt.handles.len) * nc_per_device;
+    const util_buf = try collector.arena.alloc(UtilAtomic, total_cores);
+    for (util_buf) |*u| u.* = .init(0);
+
     const GiB: u64 = 1024 * 1024 * 1024;
     var neuron_infos: std.ArrayList(*DeviceInfo) = .{};
     const dev_offset: u8 = @intCast(collector.device_infos.items.len);
 
+    var ver_buf: [Nrt.version_buf_len]u8 = undefined;
+    const nrt_ver: ?[]const u8 = if (nrt.version(&ver_buf)) |v|
+        collector.arena.dupe(u8, v) catch null
+    else |_|
+        null;
+
+    var flat_core: usize = 0;
     for (nrt.handles, nrt.device_indexes) |dev_handle, device_idx| {
         const device_type = Nrt.deviceType(dev_handle);
         const mem_per_device: u64 = switch (device_type) {
@@ -48,23 +59,37 @@ pub fn start(collector: *Collector) !void {
                 .core_idx = @intCast(ci),
                 .mem_per_device = mem_per_device,
                 .nc_per_device = nc_per_device,
+                .util_src = &util_buf[flat_core],
             };
 
-            const initial: NeuronInfo = .{ .name = dev.name(collector.arena) catch null };
+            const initial: NeuronInfo = .{
+                .name = dev.name(collector.arena) catch null,
+                .driver_version = nrt_ver,
+            };
             const info = try collector.addDevice(.{ .neuron = .{ .values = .{ initial, initial } } });
             try neuron_infos.append(collector.arena, info);
-
-            try collector.worker.spawn(collector.io, pollDevice, .{ collector.io, collector.worker, &info.neuron, dev });
+            try collector.spawnPoll(pollOnce, .{ poll_arena, &info.neuron, dev });
+            flat_core += 1;
         }
     }
 
     if (neuron_infos.items.len > 0) {
         const processes = try collector.createProcessList();
-        try process.init(collector.worker, collector.io, collector.gpa, processes, nrt, nc_per_device, neuron_infos.items, dev_offset);
+        const warmup = collector.poll_only;
+        try process.init(collector, processes, nrt, nc_per_device, util_buf, dev_offset, warmup);
+
+        if (warmup) {
+            for (neuron_infos.items, util_buf) |info, *u| {
+                const back = info.neuron.back();
+                back.* = info.neuron.front().*;
+                back.util_percent = u.load(.acquire);
+                info.neuron.swap();
+            }
+        }
     }
 }
 
-const pollDevice = Worker.pollMetrics(*DoubleBuffer(NeuronInfo), Device, metrics);
+const pollOnce = poll_metrics.poll(*DoubleBuffer(NeuronInfo), Device, metrics);
 
 const Device = struct {
     io: std.Io,
@@ -73,6 +98,11 @@ const Device = struct {
     core_idx: u32,
     mem_per_device: u64 = 0,
     nc_per_device: u32 = 1,
+    util_src: *const UtilAtomic,
+
+    pub fn utilPercent(self: Device) !u64 {
+        return self.util_src.load(.acquire);
+    }
 
     fn devicePath(self: Device, sub_path: []const u8) ![]const u8 {
         return std.fmt.allocPrint(self.arena.allocator(), base_path ++ "/neuron{d}/{s}", .{ self.device_idx, sub_path });
@@ -154,6 +184,7 @@ const Device = struct {
 };
 
 const metrics = .{
+    .{ .field = "util_percent", .query = Device.utilPercent },
     .{ .field = "mem_total_bytes", .query = Device.memTotal },
     .{ .field = "mem_used_bytes", .query = Device.memUsed },
     .{ .field = "nc_tensors", .query = Device.tensors },

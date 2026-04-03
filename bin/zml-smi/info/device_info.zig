@@ -1,27 +1,11 @@
 const std = @import("std");
-const DoubleBuffer = @import("../utils/double_buffer.zig").DoubleBuffer;
+const DoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer;
 
 pub const Target = enum {
     cuda,
     rocm,
     neuron,
     tpu,
-
-    pub fn deviceLabel(self: Target) []const u8 {
-        return switch (self) {
-            .cuda, .rocm => "GPU",
-            .neuron => "NC",
-            .tpu => "TPU",
-        };
-    }
-
-    pub fn utilLabel(self: Target) []const u8 {
-        return switch (self) {
-            .cuda, .rocm => "GPU",
-            .neuron => "Core",
-            .tpu => "Duty",
-        };
-    }
 };
 
 pub const DeviceInfo = union(Target) {
@@ -33,6 +17,8 @@ pub const DeviceInfo = union(Target) {
 
 pub const GpuInfo = struct {
     name: ?[]const u8 = null,
+    driver_version: ?[]const u8 = null,
+    cuda_driver_version: ?[]const u8 = null,
 
     // Utilization
     util_percent: ?u64 = null,
@@ -69,14 +55,11 @@ pub const GpuInfo = struct {
 
 pub const NeuronInfo = struct {
     name: ?[]const u8 = null,
+    driver_version: ?[]const u8 = null,
 
     util_percent: ?u64 = null,
     mem_used_bytes: ?u64 = null,
     mem_total_bytes: ?u64 = null,
-
-    // Utilization delta tracking (written by metrics worker)
-    prev_total_us: u64 = 0,
-    prev_timestamp: ?std.Io.Timestamp = null,
 
     // Neuron per-core HBM breakdown (bytes)
     nc_tensors: ?u64 = null,

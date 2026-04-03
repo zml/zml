@@ -1,8 +1,8 @@
 const std = @import("std");
 const c = @import("c");
 const stdx = @import("stdx");
-const DynLib = @import("../dynlib.zig");
-const sandbox = @import("../../utils/sandbox.zig");
+const DynLib = @import("zml-smi/dynlib");
+const sandbox = @import("zml-smi/sandbox");
 
 const AmdSmi = @This();
 
@@ -14,21 +14,22 @@ lib: Fns,
 gpu_handles: []c.amdsmi_processor_handle,
 
 const Fns = struct {
-    amdsmi_init: DynLib.Fn("amdsmi_init"),
-    amdsmi_get_socket_handles: DynLib.Fn("amdsmi_get_socket_handles"),
-    amdsmi_get_processor_handles: DynLib.Fn("amdsmi_get_processor_handles"),
-    amdsmi_get_gpu_asic_info: DynLib.Fn("amdsmi_get_gpu_asic_info"),
-    amdsmi_get_gpu_metrics_info: DynLib.Fn("amdsmi_get_gpu_metrics_info"),
-    amdsmi_get_power_info: DynLib.Fn("amdsmi_get_power_info"),
-    amdsmi_get_temp_metric: DynLib.Fn("amdsmi_get_temp_metric"),
-    amdsmi_get_gpu_fan_speed: DynLib.Fn("amdsmi_get_gpu_fan_speed"),
-    amdsmi_get_gpu_activity: DynLib.Fn("amdsmi_get_gpu_activity"),
-    amdsmi_get_clock_info: DynLib.Fn("amdsmi_get_clock_info"),
-    amdsmi_get_gpu_memory_total: DynLib.Fn("amdsmi_get_gpu_memory_total"),
-    amdsmi_get_gpu_memory_usage: DynLib.Fn("amdsmi_get_gpu_memory_usage"),
-    amdsmi_get_pcie_info: DynLib.Fn("amdsmi_get_pcie_info"),
-    amdsmi_get_gpu_bdf_id: DynLib.Fn("amdsmi_get_gpu_bdf_id"),
-    amdsmi_get_gpu_process_list: DynLib.Fn("amdsmi_get_gpu_process_list"),
+    amdsmi_init: *const @TypeOf(c.amdsmi_init),
+    amdsmi_get_socket_handles: *const @TypeOf(c.amdsmi_get_socket_handles),
+    amdsmi_get_processor_handles: *const @TypeOf(c.amdsmi_get_processor_handles),
+    amdsmi_get_gpu_asic_info: *const @TypeOf(c.amdsmi_get_gpu_asic_info),
+    amdsmi_get_gpu_metrics_info: *const @TypeOf(c.amdsmi_get_gpu_metrics_info),
+    amdsmi_get_power_info: *const @TypeOf(c.amdsmi_get_power_info),
+    amdsmi_get_temp_metric: *const @TypeOf(c.amdsmi_get_temp_metric),
+    amdsmi_get_gpu_fan_speed: *const @TypeOf(c.amdsmi_get_gpu_fan_speed),
+    amdsmi_get_gpu_activity: *const @TypeOf(c.amdsmi_get_gpu_activity),
+    amdsmi_get_clock_info: *const @TypeOf(c.amdsmi_get_clock_info),
+    amdsmi_get_gpu_memory_total: *const @TypeOf(c.amdsmi_get_gpu_memory_total),
+    amdsmi_get_gpu_memory_usage: *const @TypeOf(c.amdsmi_get_gpu_memory_usage),
+    amdsmi_get_pcie_info: *const @TypeOf(c.amdsmi_get_pcie_info),
+    amdsmi_get_gpu_bdf_id: *const @TypeOf(c.amdsmi_get_gpu_bdf_id),
+    amdsmi_get_gpu_process_list: *const @TypeOf(c.amdsmi_get_gpu_process_list),
+    amdsmi_get_gpu_driver_info: *const @TypeOf(c.amdsmi_get_gpu_driver_info),
 };
 
 pub fn init(allocator: std.mem.Allocator) !AmdSmi {
@@ -38,7 +39,13 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     var lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const path = try stdx.Io.Dir.path.bufJoinZ(&lib_path_buf, &.{ sandbox_path, "lib", "libamd_smi.so.26" });
 
-    const fns = DynLib.open(Fns, path) orelse return error.AmdSmiUnavailable;
+    var dynlib: std.DynLib = .{ .inner = .{
+        .handle = std.c.dlopen(path, .{ .LAZY = true, .GLOBAL = true, .NODELETE = true }) orelse {
+            if (std.c.dlerror()) |err| std.log.err("amdsmi: dlopen: {s}", .{err});
+            return error.AmdSmiUnavailable;
+        },
+    } };
+    const fns = DynLib.lookupStruct(&dynlib, Fns) catch return error.AmdSmiUnavailable;
 
     try check(fns.amdsmi_init(c.AMDSMI_INIT_AMD_GPUS));
 
@@ -86,7 +93,7 @@ pub fn name(self: AmdSmi, handle: Handle, buf: *[c.AMDSMI_MAX_STRING_LENGTH]u8) 
     var info: c.amdsmi_asic_info_t = undefined;
     try check(self.lib.amdsmi_get_gpu_asic_info(handle, &info));
     @memcpy(buf, &info.market_name);
-    return std.mem.sliceTo(@as([*:0]const u8, @ptrCast(buf)), 0);
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn powerUsage(self: AmdSmi, handle: Handle) Error!u32 {
@@ -190,6 +197,15 @@ pub fn bdfId(self: AmdSmi, handle: Handle) Error!u64 {
     var bdf_id: u64 = 0;
     try check(self.lib.amdsmi_get_gpu_bdf_id(handle, &bdf_id));
     return bdf_id;
+}
+
+pub const driver_version_buf_len = @typeInfo(@TypeOf(@as(c.amdsmi_driver_info_t, undefined).driver_version)).array.len;
+
+pub fn driverVersion(self: AmdSmi, handle: Handle, buf: *[driver_version_buf_len]u8) Error![:0]const u8 {
+    var info: c.amdsmi_driver_info_t = std.mem.zeroes(c.amdsmi_driver_info_t);
+    try check(self.lib.amdsmi_get_gpu_driver_info(handle, &info));
+    @memcpy(buf, &info.driver_version);
+    return std.mem.span(@as([*c]const u8, @ptrCast(buf)));
 }
 
 pub fn processList(self: AmdSmi, allocator: std.mem.Allocator, handle: Handle) (Error || error{OutOfMemory})![]const ProcInfo {

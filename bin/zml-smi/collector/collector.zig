@@ -1,7 +1,8 @@
 const std = @import("std");
-const DeviceInfo = @import("info/device_info.zig").DeviceInfo;
-const pi = @import("info/process_info.zig");
-const ProcessDoubleBuffer = @import("utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const smi_info = @import("zml-smi/info");
+const DeviceInfo = smi_info.device_info.DeviceInfo;
+const pi = smi_info.process_info;
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Worker = @import("worker.zig").Worker;
 
 pub const Collector = struct {
@@ -10,8 +11,19 @@ pub const Collector = struct {
     poll_arenas: std.ArrayList(*std.heap.ArenaAllocator) = .empty,
     arena: std.mem.Allocator,
     gpa: std.mem.Allocator,
-    worker: *Worker,
+    worker: Worker,
     io: std.Io,
+    poll_only: bool,
+
+    pub fn init(arena: std.mem.Allocator, gpa: std.mem.Allocator, io: std.Io, options: struct { poll_interval_ms: u16, poll_only: bool = false }) Collector {
+        return .{
+            .arena = arena,
+            .gpa = gpa,
+            .io = io,
+            .worker = .{ .poll_interval_ms = options.poll_interval_ms },
+            .poll_only = options.poll_only,
+        };
+    }
 
     pub fn addDevice(self: *Collector, initial: DeviceInfo) !*DeviceInfo {
         const info = try self.arena.create(DeviceInfo);
@@ -37,7 +49,31 @@ pub const Collector = struct {
         return poll_arena;
     }
 
+    pub fn spawnPoll(self: *Collector, comptime pollOnce: anytype, args: std.meta.ArgsTuple(@TypeOf(pollOnce))) !void {
+        @call(.auto, pollOnce, args);
+        if (self.poll_only) return;
+
+        const Args = std.meta.ArgsTuple(@TypeOf(pollOnce));
+        try self.worker.spawn(self.io, struct {
+            fn f(io: std.Io, w: *const Worker, a: Args) void {
+                const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
+                while (w.isRunning()) {
+                    const start: std.Io.Timestamp = .now(io, .awake);
+
+                    @call(.auto, pollOnce, a);
+
+                    const elapsed = start.untilNow(io, .awake);
+                    if (elapsed.nanoseconds < interval.nanoseconds) {
+                        io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+                    }
+                }
+            }
+        }.f, .{ self.io, &self.worker, args });
+    }
+
     pub fn deinit(self: *Collector) void {
+        self.worker.shutdown(self.io);
+
         for (self.device_infos.items) |info| {
             self.arena.destroy(info);
         }

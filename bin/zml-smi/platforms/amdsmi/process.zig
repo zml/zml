@@ -1,23 +1,15 @@
 const std = @import("std");
 const c = std.c;
 const AmdSmi = @import("amdsmi.zig");
-const pi = @import("../../info/process_info.zig");
-const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const Worker = @import("../../worker.zig").Worker;
+const pi = @import("zml-smi/info").process_info;
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const Collector = @import("zml-smi/collector").Collector;
 
 const bdf_len = "0000:00:00.0".len;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) !void {
-    try w.spawn(io, pollLoop, .{ io, w, allocator, list, amdsmi, dev_offset });
-}
-
-fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) void {
-    const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
-    io.sleep(interval, .awake) catch {};
-
+pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) !void {
     const device_count = amdsmi.deviceCount();
-    const pci_slots = allocator.alloc(?[bdf_len]u8, device_count) catch return;
-    defer allocator.free(pci_slots);
+    const pci_slots = try collector.arena.alloc(?[bdf_len]u8, device_count);
 
     for (pci_slots, 0..) |*slot, i| {
         const handle = amdsmi.handleByIndex(@intCast(i)) catch {
@@ -31,56 +23,55 @@ fn pollLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *P
         });
     }
 
-    while (w.isRunning()) {
-        const start: std.Io.Timestamp = .now(io, .awake);
-        const back = list.back();
+    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, amdsmi, dev_offset, device_count, pci_slots });
+}
 
-        back.clearRetainingCapacity();
+fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8, device_count: u32, pci_slots: []?[bdf_len]u8) void {
+    const back = list.back();
 
-        for (0..device_count) |dev_idx| {
-            const handle = amdsmi.handleByIndex(@intCast(dev_idx)) catch continue;
+    back.clearRetainingCapacity();
 
-            const procs = blk: {
-                const saved = c.dup(c.STDERR_FILENO);
-                const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+    for (0..device_count) |dev_idx| {
+        const handle = amdsmi.handleByIndex(@intCast(dev_idx)) catch continue;
 
-                if (devnull >= 0) {
+        const procs = blk: {
+            const saved = c.dup(c.STDERR_FILENO);
+            const devnull = c.open("/dev/null", .{ .ACCMODE = .WRONLY });
+
+            if (devnull >= 0) {
+                if (saved >= 0) {
                     _ = c.dup2(devnull, c.STDERR_FILENO);
-                    _ = c.close(devnull);
                 }
 
-                defer if (saved >= 0) {
-                    _ = c.dup2(saved, c.STDERR_FILENO);
-                    _ = c.close(saved);
-                };
-
-                break :blk amdsmi.processList(allocator, handle) catch continue;
-            };
-            defer {
-                if (procs.len > 0) {
-                    allocator.free(procs);
-                }
+                _ = c.close(devnull);
             }
 
-            const pci_slot = if (dev_idx < pci_slots.len) &(pci_slots[dev_idx] orelse continue) else continue;
+            defer if (saved >= 0) {
+                _ = c.dup2(saved, c.STDERR_FILENO);
+                _ = c.close(saved);
+            };
 
-            for (procs) |proc| {
-                back.append(allocator, .{
-                    .pid = proc.pid,
-                    .device_idx = @intCast(dev_idx + dev_offset),
-                    .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
-                    .dev_mem_kib = readProcessGpuVram(io, proc.pid, pci_slot),
-                }) catch break;
+            break :blk amdsmi.processList(allocator, handle) catch continue;
+        };
+        defer {
+            if (procs.len > 0) {
+                allocator.free(procs);
             }
         }
 
-        list.swap();
+        const pci_slot = if (dev_idx < pci_slots.len) &(pci_slots[dev_idx] orelse continue) else continue;
 
-        const elapsed = start.untilNow(io, .awake);
-        if (elapsed.nanoseconds < interval.nanoseconds) {
-            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
+        for (procs) |proc| {
+            back.append(allocator, .{
+                .pid = proc.pid,
+                .device_idx = @intCast(dev_idx + dev_offset),
+                .dev_util_percent = @intCast(proc.engine_usage.gfx + proc.engine_usage.enc),
+                .dev_mem_kib = readProcessGpuVram(io, proc.pid, pci_slot),
+            }) catch break;
         }
     }
+
+    list.swap();
 }
 
 /// Reads per-GPU VRAM from /proc/<pid>/fdinfo/, filtered by PCI slot.
