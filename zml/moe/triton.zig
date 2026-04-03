@@ -96,6 +96,247 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.s
     return zml.Buffer.fromSlice(io, platform, zero_slice, sharding);
 }
 
+pub fn fusedExpertsImpl(
+    hidden_states: Tensor,
+    w1: Tensor,
+    w2: Tensor,
+    topk_weights: Tensor,
+    topk_ids: Tensor,
+    metadata: Metadata,
+    opts: Options,
+) !Tensor {
+    try validateOptions(opts);
+    // Retrieve the kernel config from json or default
+    const options = applyJsonTokenConfig(opts, hidden_states.dim(0)) catch |err| fallback: {
+        log.warn("Failed to load MoE launch config from JSON ({}), falling back to built-in token heuristic", .{err});
+        break :fallback applyDefaultTokenConfig(opts, hidden_states.dim(0), w1.dim(0));
+    };
+
+    const b = hidden_states.dim(.b);
+    const s = hidden_states.dim(.s);
+
+    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
+    const gate_up = w1.withTags(.{ .expert, .out, .in });
+    const down = w2.withTags(.{ .expert, .out, .mid });
+    const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
+    const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
+
+    if (hidden.dtype() != .bf16) return error.UnsupportedType;
+    if (gate_up.dtype() != .bf16 and gate_up.dtype() != .f8e4m3fn) return error.UnsupportedType;
+    if (down.dtype() != .bf16 and down.dtype() != .f8e4m3fn) return error.UnsupportedType;
+    if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
+    if (ids.dtype() != .i32) return error.UnsupportedType;
+    if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
+    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
+    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+    if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
+    if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
+    if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+
+    const block_size_m = options.block_size_m;
+    const num_experts = gate_up.dim(.expert);
+    const num_assignments = hidden.dim(.token) * ids.dim(.topk);
+    const sparsity_factor: i64 = 4;
+    const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
+
+    const max_num_tokens_padded = if (naive_block_assignment)
+        num_assignments * block_size_m
+    else if (num_assignments < num_experts)
+        num_assignments * block_size_m
+    else
+        num_assignments + num_experts * (block_size_m - 1);
+
+    var threaded_io: std.Io.Threaded = .init_single_threaded;
+    threaded_io.allocator = std.heap.c_allocator;
+    defer threaded_io.deinit();
+
+    const io = threaded_io.io();
+
+    const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
+        // In the naive path each M-block corresponds to exactly one (token, topk) assignment.
+        log.info("Using naive block assignment for MoE kernels, the tokens repartition across experts is sparse. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
+        const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
+        const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
+        const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
+        break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
+    } else try alignBlockSize(std.heap.c_allocator, io, ids, num_experts, block_size_m);
+
+    var hidden_quant = hidden;
+    var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
+
+    // If fp8 quantized model, quantize activations to fp8 with per-token-group quantization
+    if (gate_up.dtype() == .f8e4m3fn) {
+        hidden_quant, a_scale = try quantizePerTokenGroupFp8(std.heap.c_allocator, io, hidden, fp8ActivationGroupSize(hidden));
+    }
+
+    // Build the moe matmul kernels configs
+    const first_generation_config = makeGenerationConfig(
+        hidden_quant,
+        gate_up,
+        max_num_tokens_padded,
+        num_assignments,
+        options,
+        naive_block_assignment,
+        ids.dim(.topk),
+        false,
+        false,
+        .bf16,
+    );
+
+    const ttir_first_matmul = generateTtir(std.heap.c_allocator, io, first_generation_config) catch |err| {
+        log.err("Failed to generate TTIR for first MoE matmul: {}", .{err});
+        return err;
+    };
+
+    defer std.heap.c_allocator.free(ttir_first_matmul);
+    var b_bias = opts.w1_bias orelse metadata.w1_zero_bias.?;
+    var b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
+
+    const first_out = callFusedKernel(
+        hidden_quant,
+        gate_up,
+        b_bias,
+        a_scale,
+        b_scale,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        ttir_first_matmul,
+        first_generation_config,
+        max_num_tokens_padded,
+        num_assignments,
+        Shape.init(.{ .token = hidden_quant.dim(.token) * ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16),
+    );
+
+    const first_flat = first_out.reshape(.{ .g = num_assignments, .out = gate_up.dim(.out) });
+
+    const gate, const up = zml.nn.splitRealImg(first_flat, .sequential);
+    const activated = gate.silu().mul(up);
+
+    var activated_quant = activated;
+    a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
+    if (down.dtype() == .f8e4m3fn) {
+        activated_quant, a_scale = try quantizePerTokenGroupFp8(std.heap.c_allocator, io, activated, fp8ActivationGroupSize(activated));
+    }
+
+    const second_generation_config = makeGenerationConfig(
+        activated_quant,
+        down,
+        max_num_tokens_padded,
+        num_assignments,
+        options,
+        naive_block_assignment,
+        1,
+        true, // is second matmul
+        false,
+        .bf16,
+    );
+    const ttir_second_matmul = generateTtir(std.heap.c_allocator, io, second_generation_config) catch |err| {
+        log.err("Failed to generate TTIR for second MoE matmul: {}", .{err});
+        return err;
+    };
+    defer std.heap.c_allocator.free(ttir_second_matmul);
+    b_bias = opts.w2_bias orelse metadata.w2_zero_bias.?;
+    b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
+
+    const second_out = callFusedKernel(
+        activated_quant,
+        down,
+        b_bias,
+        a_scale,
+        b_scale,
+        weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        ttir_second_matmul,
+        second_generation_config,
+        max_num_tokens_padded,
+        num_assignments,
+        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, .bf16),
+    );
+
+    const output = second_out.sum(.topk).squeeze(.topk);
+
+    return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
+}
+
+fn callFusedKernel(
+    a: Tensor,
+    b: Tensor,
+    b_bias: Tensor,
+    a_scale: Tensor,
+    b_scale: Tensor,
+    topk_weights: Tensor,
+    sorted_token_ids: Tensor,
+    expert_ids: Tensor,
+    num_tokens_post_padded: Tensor,
+    ttir: [:0]const u8,
+    config: GenerationConfig,
+    max_num_tokens_padded: i64,
+    num_valid_tokens: i64,
+    output_shape: Shape,
+) Tensor {
+    const block_size_m: i64 = @intCast(config.block_size_m);
+    const block_size_n: i64 = @intCast(config.block_size_n);
+    const m_tokens = a.dim(0);
+    const em_effective = if (m_tokens < block_size_m)
+        @min(max_num_tokens_padded, num_valid_tokens * block_size_m)
+    else
+        max_num_tokens_padded;
+    const grid_x = ceilDiv(em_effective, block_size_m) * ceilDiv(b.dim(1), block_size_n);
+
+    const stride_asm: i64 = if (config.group_k > 0 and a_scale.rank() == 2) a_scale.dim(1) else 0;
+    const stride_ask: i64 = if (config.group_k > 0 and a_scale.rank() == 2) 1 else 0;
+    const stride_bse: i64 = if (config.group_k > 0 and config.group_n > 0 and b_scale.rank() == 3)
+        b_scale.dim(1) * b_scale.dim(2)
+    else
+        0;
+    const stride_bsk: i64 = if (config.group_k > 0 and config.group_n > 0 and b_scale.rank() == 3) 1 else 0;
+    const stride_bsn: i64 = if (config.group_k > 0 and config.group_n > 0 and b_scale.rank() == 3) b_scale.dim(2) else 0;
+
+    const inputs = .{
+        a,
+        b,
+        b_bias,
+        a_scale,
+        b_scale,
+        topk_weights,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        i64s(b.dim(1)),
+        i64s(b.dim(2)),
+        i64s(em_effective),
+        i64s(num_valid_tokens),
+        i64s(a.dim(1)),
+        i64s(b.dim(1) * b.dim(2)),
+        i64s(b.dim(2)),
+        i64s(b.dim(.out)),
+        i64s(stride_asm),
+        i64s(stride_ask),
+        i64s(stride_bse),
+        i64s(stride_bsk),
+        i64s(stride_bsn),
+        i64s(0),
+        i64s(0),
+    };
+    const outputs = ops.triton(inputs, .{output_shape}, .{
+        .name = "fused_moe_kernel",
+        .ir = ttir,
+        .grid = .{
+            @intCast(grid_x),
+            1,
+            1,
+        },
+        .num_stages = @intCast(config.num_stages),
+        .num_warps = @intCast(config.num_warps),
+        .output_operand_aliases = &.{},
+    });
+    return outputs[0];
+}
+
 fn makeGenerationConfig(
     a: Tensor,
     b: Tensor,
@@ -106,11 +347,14 @@ fn makeGenerationConfig(
     top_k: i64,
     mul_routed_weight: bool,
     has_bias: bool,
+    output_dtype: DataType,
 ) GenerationConfig {
+    var use_fp8 = opts.use_fp8_w8a8;
+    if (b.dtype() == .f8e4m3fn) use_fp8 = true;
     return .{
         .a_dtype = a.dtype(),
         .b_dtype = b.dtype(),
-        .c_dtype = b.dtype(),
+        .c_dtype = output_dtype,
         .num_tokens = @intCast(a.dim(0)),
         .top_k = @intCast(top_k),
         .num_experts = @intCast(b.dim(0)),
@@ -122,8 +366,13 @@ fn makeGenerationConfig(
         .block_size_n = @intCast(opts.block_size_n),
         .block_size_k = @intCast(opts.block_size_k),
         .group_size_m = @intCast(opts.group_size_m),
+        .group_n = if (use_fp8) 128 else 0,
+        .group_k = if (use_fp8) 128 else 0,
         .naive_block_assignment = naive_block_assignment,
-        .compute_type = b.dtype(),
+        .a_scale_dtype = if (use_fp8) .bf16 else null,
+        .b_scale_dtype = if (use_fp8) .bf16 else null,
+        .compute_type = .bf16,
+        .use_fp8_w8a8 = use_fp8,
         .num_warps = @intCast(opts.num_warps),
         .num_stages = @intCast(opts.num_stages),
         .mul_routed_weight = mul_routed_weight,
@@ -158,6 +407,21 @@ const AlignBlockSizeGenerationConfig = struct {
     sort_grid_x: usize,
 };
 
+const QuantGenerationConfig = struct {
+    kernel_family: []const u8 = "activation_quant_fp8",
+    num_rows: usize,
+    num_columns: usize,
+    group_size: usize,
+    block: usize,
+    input_dtype: DataType,
+    output_dtype: DataType,
+    scale_dtype: DataType = .bf16,
+    eps: f32 = 1e-6,
+    fp8_min: f32,
+    fp8_max: f32,
+    use_ue8m0: bool = false,
+};
+
 fn getGenerateBinPath(allocator: std.mem.Allocator) ![]const u8 {
     const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch |err| {
         log.err("Failed to initialize runfiles for MoE Triton backend: {}", .{err});
@@ -177,8 +441,6 @@ fn getGenerateBinPath(allocator: std.mem.Allocator) ![]const u8 {
         );
         return error.MissingTritonGeneratorRunfile;
     };
-
-    // log.info("Sandbox path for MoE Triton backend: {s}", .{sandbox_dir});
 
     const path = std.fs.path.join(allocator, &.{ sandbox_dir, "bin", "generate" }) catch |err| {
         log.err("Failed to construct path to MoE Triton generator binary: {}", .{err});
@@ -205,12 +467,22 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
     switch (result.term) {
         .exited => |exit_code| {
             if (exit_code != 0) {
-                std.log.err("Failed to generate MoE matmul TTIR. Stderr: {s}", .{result.stderr});
+                log.err("Failed to generate MoE matmul TTIR with exit code {d}", .{exit_code});
+                log.err("TTIR generation config: {f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+                if (result.stderr.len != 0) log.err("Generator stderr: {s}", .{result.stderr});
+                if (result.stdout.len != 0) log.err("Generator stdout: {s}", .{result.stdout});
+                return error.TritonTtirGenerationFailed;
             }
         },
         else => {},
     }
-    return try allocator.dupeZ(u8, result.stdout);
+    if (result.stderr.len != 0) {
+        log.warn("MoE matmul TTIR generator emitted diagnostics: {s}", .{result.stderr});
+    }
+
+    const ttir = try allocator.dupeZ(u8, result.stdout);
+    errdefer allocator.free(ttir);
+    return ttir;
 }
 
 fn generateAlignBlockSizeTtir(
@@ -253,12 +525,56 @@ fn generateAlignBlockSizeTtir(
     switch (result.term) {
         .exited => |exit_code| {
             if (exit_code != 0) {
-                std.log.err("Failed to generate align block size TTIR ({s}). Stderr: {s}", .{ kernel.kernelName(), result.stderr });
+                log.err("Failed to generate align block size TTIR `{s}` with exit code {d}", .{ kernel.kernelName(), exit_code });
+                log.err("TTIR generation config: {f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+                if (result.stderr.len != 0) log.err("Generator stderr: {s}", .{result.stderr});
+                if (result.stdout.len != 0) log.err("Generator stdout: {s}", .{result.stdout});
+                return error.TritonTtirGenerationFailed;
             }
         },
         else => {},
     }
-    return try allocator.dupeZ(u8, result.stdout);
+    if (result.stderr.len != 0) {
+        log.warn("Align block size TTIR generator emitted diagnostics: {s}", .{result.stderr});
+    }
+
+    const ttir = try allocator.dupeZ(u8, result.stdout);
+    errdefer allocator.free(ttir);
+    return ttir;
+}
+
+fn generateQuantTtir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    config: QuantGenerationConfig,
+) ![:0]const u8 {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+
+    var list: std.ArrayList([]const u8) = .empty;
+    try list.append(arena.allocator(), try getGenerateBinPath(arena.allocator()));
+    try list.append(arena.allocator(), "--config");
+    try list.append(arena.allocator(), try std.fmt.allocPrint(arena.allocator(), "{f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })}));
+    const result = try std.process.run(arena.allocator(), io, .{ .argv = list.items });
+    switch (result.term) {
+        .exited => |exit_code| {
+            if (exit_code != 0) {
+                log.err("Failed to generate activation quantization TTIR with exit code {d}", .{exit_code});
+                log.err("TTIR generation config: {f}", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+                if (result.stderr.len != 0) log.err("Generator stderr: {s}", .{result.stderr});
+                if (result.stdout.len != 0) log.err("Generator stdout: {s}", .{result.stdout});
+                return error.TritonTtirGenerationFailed;
+            }
+        },
+        else => {},
+    }
+    if (result.stderr.len != 0) {
+        log.warn("Activation quantization TTIR generator emitted diagnostics: {s}", .{result.stderr});
+    }
+
+    const ttir = try allocator.dupeZ(u8, result.stdout);
+    errdefer allocator.free(ttir);
+    return ttir;
 }
 
 pub const Options = struct {
@@ -291,7 +607,7 @@ pub const Options = struct {
     dynamic_launch_by_num_tokens: bool = true,
 };
 
-fn applyTokenBasedLaunchConfig(opts: Options, num_tokens: i64, num_experts: i64) Options {
+fn applyDefaultTokenConfig(opts: Options, num_tokens: i64, num_experts: i64) Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
@@ -347,7 +663,7 @@ fn jsonValueAsI64(v: std.json.Value) !i64 {
     };
 }
 
-fn applyTokenBasedLaunchConfigFromJson(opts: Options, num_tokens: i64) !Options {
+fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
@@ -412,6 +728,63 @@ fn ceilDiv(a: i64, b: i64) i64 {
     return @divFloor(a + b - 1, b);
 }
 
+fn fp8ActivationGroupSize(x: Tensor) i64 {
+    const group_size: i64 = 128;
+    stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "FP8 activation width must be divisible by {d}, got {d}", .{ group_size, x.dim(1) });
+    return group_size;
+}
+
+fn quantizePerTokenGroupFp8(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    x: Tensor,
+    group_size: i64,
+) !struct { Tensor, Tensor } {
+    stdx.debug.assert(x.rank() == 2, "expected a rank-2 activation matrix, got {f}", .{x.shape()});
+    stdx.debug.assert(@mod(x.dim(1), group_size) == 0, "activation width must be divisible by group size {d}, got {d}", .{ group_size, x.dim(1) });
+
+    const config = QuantGenerationConfig{
+        .num_rows = @intCast(x.dim(0)),
+        .num_columns = @intCast(x.dim(1)),
+        .group_size = @intCast(group_size),
+        .block = @intCast(group_size),
+        .input_dtype = x.dtype(),
+        .output_dtype = .f8e4m3fn,
+        .scale_dtype = .bf16,
+        .eps = 1e-6,
+        .fp8_min = -448.0,
+        .fp8_max = 448.0,
+        .use_ue8m0 = false,
+    };
+
+    const ttir = try generateQuantTtir(allocator, io, config);
+    defer allocator.free(ttir);
+
+    const groups_per_row = @divExact(x.dim(1), group_size);
+    const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, .f8e4m3fn));
+    const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, .bf16));
+
+    const inputs = .{
+        x,
+
+        i64s(group_size),
+        i64s(x.dim(1)),
+        i64s(x.dim(1)),
+        Tensor.scalar(1e-6, .f32),
+    };
+
+    const outputs = ops.triton(inputs, .{ quantized.shape(), scales.shape() }, .{
+        .name = "per_token_group_quant_fp8",
+        .ir = ttir,
+        .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
+        .num_stages = 1,
+        .num_warps = 1,
+        .output_operand_aliases = &.{},
+    });
+
+    return .{ outputs[0], outputs[1] };
+}
+
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
     if (!std.mem.eql(u8, opts.activation, "silu")) return error.UnsupportedActivation;
@@ -420,7 +793,7 @@ fn validateOptions(opts: Options) !void {
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
     if (opts.global_num_experts != -1) return error.UnsupportedOption;
     if (opts.expert_map != null) return error.UnsupportedOption;
-    if (opts.w1_scale != null or opts.w2_scale != null or opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
+    if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;
 }
@@ -497,7 +870,12 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
             .grid = .{ 2, 1, 1 },
             .num_stages = 1,
             .num_warps = 8,
-            .output_operand_aliases = &.{ 1, 2, 3, 4 },
+            .output_operand_aliases = &.{
+                .{ .output_index = 0, .operand_index = 1 },
+                .{ .output_index = 1, .operand_index = 2 },
+                .{ .output_index = 2, .operand_index = 3 },
+                .{ .output_index = 3, .operand_index = 4 },
+            },
         });
         sorted_token_ids = outputs[0];
         expert_ids = outputs[1];
@@ -517,227 +895,14 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
             .grid = .{ @intCast(sort_grid_x), 1, 1 },
             .num_stages = 1,
             .num_warps = 4,
-            .output_operand_aliases = &.{ 1, 2 },
+            .output_operand_aliases = &.{
+                .{ .output_index = 0, .operand_index = 1 },
+                .{ .output_index = 1, .operand_index = 2 },
+            },
         });
         sorted_token_ids = outputs[0];
         cumsums = outputs[1];
     }
 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
-}
-
-fn callFusedKernel(
-    a: Tensor,
-    b: Tensor,
-    b_bias: Tensor,
-    a_scale: Tensor,
-    b_scale: Tensor,
-    topk_weights: Tensor,
-    sorted_token_ids: Tensor,
-    expert_ids: Tensor,
-    num_tokens_post_padded: Tensor,
-    ttir: [:0]const u8,
-    config: GenerationConfig,
-    max_num_tokens_padded: i64,
-    num_valid_tokens: i64,
-    output_shape: Shape,
-) Tensor {
-    const block_size_m: i64 = @intCast(config.block_size_m);
-    const block_size_n: i64 = @intCast(config.block_size_n);
-    const m_tokens = a.dim(0);
-    const em_effective = if (m_tokens < block_size_m)
-        @min(max_num_tokens_padded, num_valid_tokens * block_size_m)
-    else
-        max_num_tokens_padded;
-    const grid_x = ceilDiv(em_effective, block_size_m) * ceilDiv(b.dim(1), block_size_n);
-
-    const inputs = .{
-        a,
-        b,
-        b_bias,
-        a_scale,
-        b_scale,
-        topk_weights,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        i64s(b.dim(1)),
-        i64s(b.dim(2)),
-        i64s(max_num_tokens_padded),
-        i64s(num_valid_tokens),
-        i64s(a.dim(1)),
-        i64s(b.dim(1) * b.dim(2)),
-        i64s(b.dim(2)),
-        i64s(b.dim(.out)),
-        i64s(0),
-        i64s(0),
-        i64s(0),
-        i64s(0),
-        i64s(0),
-        i64s(0),
-        i64s(0),
-    };
-    const outputs = ops.triton(inputs, .{output_shape}, .{
-        .name = "fused_moe_kernel",
-        .ir = ttir,
-        .grid = .{
-            @intCast(grid_x),
-            1,
-            1,
-        },
-        .num_stages = @intCast(config.num_stages),
-        .num_warps = @intCast(config.num_warps),
-        .output_operand_aliases = &.{},
-    });
-    return outputs[0];
-}
-
-// Call the fused moe kernels and reduce across top k experts
-pub fn fusedExpertsImpl(
-    hidden_states: Tensor,
-    w1: Tensor,
-    w2: Tensor,
-    topk_weights: Tensor,
-    topk_ids: Tensor,
-    metadata: Metadata,
-    opts: Options,
-) !Tensor {
-    try validateOptions(opts);
-    const effective_opts = applyTokenBasedLaunchConfigFromJson(opts, hidden_states.dim(0)) catch |err| fallback: {
-        log.warn("Failed to load MoE launch config from JSON ({}), falling back to built-in token heuristic", .{err});
-        break :fallback applyTokenBasedLaunchConfig(opts, hidden_states.dim(0), w1.dim(0));
-    };
-
-    const b = hidden_states.dim(.b);
-    const s = hidden_states.dim(.s);
-
-    const hidden = hidden_states.reshape(.{ .token = b * s, .in = hidden_states.dim(.d) }).withTags(.{ .token, .in });
-    const gate_up = w1.withTags(.{ .expert, .out, .in });
-    const down = w2.withTags(.{ .expert, .out, .mid });
-    const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
-    const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
-
-    if (hidden.dtype() != .bf16) return error.UnsupportedType;
-    if (gate_up.dtype() != .bf16 or down.dtype() != .bf16) return error.UnsupportedType;
-    if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
-    if (ids.dtype() != .i32) return error.UnsupportedType;
-    if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
-    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
-    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
-    if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
-    if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
-    if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
-
-    const block_size_m = effective_opts.block_size_m;
-    const num_experts = gate_up.dim(.expert);
-    const num_assignments = hidden.dim(.token) * ids.dim(.topk);
-    const sparsity_factor: i64 = 4;
-    const naive_block_assignment = num_assignments * sparsity_factor <= num_experts;
-
-    const max_num_tokens_padded = if (naive_block_assignment)
-        num_assignments * block_size_m
-    else if (num_assignments < num_experts)
-        num_assignments * block_size_m
-    else
-        num_assignments + num_experts * (block_size_m - 1);
-
-    var threaded_io: std.Io.Threaded = .init_single_threaded;
-    threaded_io.allocator = std.heap.c_allocator;
-    defer threaded_io.deinit();
-
-    const io = threaded_io.io();
-
-    const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
-        // In the naive path each M-block corresponds to exactly one (token, topk) assignment.
-        log.info("Using naive block assignment for MoE kernels, the tokens repartition across experts is sparse. Num assignments: {d}, Num experts: {d}", .{ num_assignments, num_experts });
-        const naive_sorted_ids = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
-        const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
-        const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
-        break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
-    } else try alignBlockSize(std.heap.c_allocator, io, ids, num_experts, block_size_m);
-
-    const first_generation_config = makeGenerationConfig(
-        hidden,
-        gate_up,
-        max_num_tokens_padded,
-        num_assignments,
-        effective_opts,
-        naive_block_assignment,
-        ids.dim(.topk),
-        false,
-        false,
-    );
-
-    const ttir_first_matmul = generateTtir(std.heap.c_allocator, io, first_generation_config) catch |err| {
-        log.err("Failed to generate TTIR for first MoE matmul: {}", .{err});
-        return err;
-    };
-
-    defer std.heap.c_allocator.free(ttir_first_matmul);
-    var b_bias = opts.w1_bias orelse metadata.w1_zero_bias.?;
-    var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
-    var b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
-
-    const first_out = callFusedKernel(
-        hidden,
-        gate_up,
-        b_bias,
-        a_scale,
-        b_scale,
-        weights,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        ttir_first_matmul,
-        first_generation_config,
-        max_num_tokens_padded,
-        num_assignments,
-        Shape.init(.{ .token = hidden.dim(.token) * ids.dim(.topk), .out = gate_up.dim(.out) }, gate_up.dtype()),
-    );
-
-    const first_flat = first_out.reshape(.{ .g = num_assignments, .out = gate_up.dim(.out) });
-
-    const gate, const up = zml.nn.splitRealImg(first_flat, .sequential);
-    const activated = gate.silu().mul(up);
-
-    const second_generation_config = makeGenerationConfig(
-        activated,
-        down,
-        max_num_tokens_padded,
-        num_assignments,
-        effective_opts,
-        naive_block_assignment,
-        1,
-        true, // is_second_matmul
-        false,
-    );
-    const ttir_second_matmul = generateTtir(std.heap.c_allocator, io, second_generation_config) catch |err| {
-        log.err("Failed to generate TTIR for second MoE matmul: {}", .{err});
-        return err;
-    };
-    defer std.heap.c_allocator.free(ttir_second_matmul);
-    b_bias = opts.w2_bias orelse metadata.w2_zero_bias.?;
-    a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
-    b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
-
-    const second_out = callFusedKernel(
-        activated,
-        down,
-        b_bias,
-        a_scale,
-        b_scale,
-        weights,
-        sorted_token_ids,
-        expert_ids,
-        num_tokens_post_padded,
-        ttir_second_matmul,
-        second_generation_config,
-        max_num_tokens_padded,
-        num_assignments,
-        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, down.dtype()),
-    );
-
-    const output = second_out.sum(.topk).squeeze(.topk);
-
-    return output.reshape(.{ .b = b, .token = s, .out = down.dim(.out) });
 }
