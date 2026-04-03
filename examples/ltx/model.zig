@@ -1421,6 +1421,8 @@ pub fn computeSigmaSchedule(
     return sigmas;
 }
 
+// Values taken from regular 30-step schedule 
+// https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-core/src/ltx_core/components/schedulers.py
 pub const stage1_default_schedule = struct {
     pub const num_steps: usize = 30;
     pub const max_shift: f32 = 2.05;
