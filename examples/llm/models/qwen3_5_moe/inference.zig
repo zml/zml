@@ -404,24 +404,25 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
     var second_out_shape: ?zml.Shape = null;
 
     const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok.?;
+    const num_experts = qwen_model.config.text_config.num_experts.?;
 
     for (qwen_model.text_model.layers) |layer| {
         const gate_up_shape = zml.Shape.init(.{
-            .expert = layer.moe.gate_up_proj.dim(.expert),
-            .out = layer.moe.gate_up_proj.dim(.dout),
-        }, layer.moe.gate_up_proj.dtype());
+            .expert = num_experts,
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout),
+        }, .bf16);
         const down_shape = zml.Shape.init(.{
-            .expert = layer.moe.down_proj.dim(.expert),
-            .out = layer.moe.down_proj.dim(.d),
-        }, layer.moe.down_proj.dtype());
+            .expert = num_experts,
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.d),
+        }, .bf16);
         const first_out = zml.Shape.init(.{
             .total_tokens = batch_size * token_len * num_experts_per_tok,
-            .out = layer.moe.gate_up_proj.dim(.dout),
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout) * 2,
         }, .bf16);
         const second_out = zml.Shape.init(.{
             .token = batch_size * token_len,
             .topk = num_experts_per_tok,
-            .out = layer.moe.down_proj.dim(.d),
+            .out = layer.moe.shared_expert.down_proj.weight.dim(.d),
         }, .bf16);
 
         if (w1_zero_bias_shape == null) {

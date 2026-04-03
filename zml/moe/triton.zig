@@ -420,7 +420,7 @@ fn validateOptions(opts: Options) !void {
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
     if (opts.global_num_experts != -1) return error.UnsupportedOption;
     if (opts.expert_map != null) return error.UnsupportedOption;
-    if (opts.w1_scale != null or opts.w2_scale != null or opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
+    if (opts.w1_zp != null or opts.w2_zp != null) return error.UnsupportedOption;
     if (opts.a1_scale != null or opts.a2_scale != null or opts.block_shape != null) return error.UnsupportedOption;
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;
 }
@@ -618,7 +618,7 @@ pub fn fusedExpertsImpl(
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
     if (hidden.dtype() != .bf16) return error.UnsupportedType;
-    if (gate_up.dtype() != .bf16 or down.dtype() != .bf16) return error.UnsupportedType;
+    // if (gate_up.dtype() != .bf16 or down.dtype() != .bf16) return error.UnsupportedType;
     if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
     if (ids.dtype() != .i32) return error.UnsupportedType;
     if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
@@ -692,7 +692,7 @@ pub fn fusedExpertsImpl(
         first_generation_config,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = hidden.dim(.token) * ids.dim(.topk), .out = gate_up.dim(.out) }, gate_up.dtype()),
+        Shape.init(.{ .token = hidden.dim(.token) * ids.dim(.topk), .out = gate_up.dim(.out) }, hidden.dtype()),
     );
 
     const first_flat = first_out.reshape(.{ .g = num_assignments, .out = gate_up.dim(.out) });
@@ -734,7 +734,7 @@ pub fn fusedExpertsImpl(
         second_generation_config,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, down.dtype()),
+        Shape.init(.{ .token = b * s, .topk = ids.dim(.topk), .out = down.dim(.out) }, hidden.dtype()),
     );
 
     const output = second_out.sum(.topk).squeeze(.topk);
