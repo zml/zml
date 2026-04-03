@@ -1,0 +1,26 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+genrule(
+    name = "asm_src",
+    outs = ["stamp.S"],
+    cmd = """\
+echo ".section .rodata" > $(@)
+cat bazel-out/stable-status.txt bazel-out/volatile-status.txt | sed -Ee's/^(\\w+) (.*)/.globl \\1\\n\\1:\\n  .asciz "\\2"/g' >> $(@)
+""",
+    stamp = -1,
+)
+
+cc_library(
+    name = "asm",
+    srcs = [":asm_src"],
+    visibility = ["//visibility:public"],
+)
+
+zig_library(
+    name = "zig",
+    import_name = "bazel/stamp",
+    main = "stamp.zig",
+    deps = [":asm"],
+    visibility = ["//visibility:public"],
+)
