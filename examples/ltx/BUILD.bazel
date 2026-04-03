@@ -68,6 +68,42 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "vae_decode",
+    main = "vae_decode.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "audio_vae_decode",
+    main = "audio_vae_decode.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "vocoder_decode",
+    main = "vocoder_decode.zig",
+    srcs = [
+        "model.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
@@ -77,5 +113,8 @@ build_test(
         ":upsample",
         ":bridge",
         ":inference",
+        ":vae_decode",
+        ":audio_vae_decode",
+        ":vocoder_decode",
     ],
 )

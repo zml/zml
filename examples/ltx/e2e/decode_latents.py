@@ -31,8 +31,10 @@ from ltx_pipelines.utils.media_io import encode_video
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Decode Zig latents to MP4")
-    parser.add_argument("--inputs", type=Path, required=True,
-                        help="Path to stage2_inputs.safetensors (for metadata)")
+    parser.add_argument("--inputs", type=Path, default=None,
+                        help="Path to stage2_inputs.safetensors (for metadata, optional if --meta given)")
+    parser.add_argument("--meta", type=Path, default=None,
+                        help="Path to pipeline_meta.json (alternative metadata source)")
     parser.add_argument("--video-latent", type=Path, required=True,
                         help="Path to video_latent.bin from Zig denoiser")
     parser.add_argument("--audio-latent", type=Path, required=True,
@@ -56,22 +58,42 @@ def main() -> None:
     dtype = torch.bfloat16
 
     # ========================================================================
-    # Read metadata from the input safetensors
+    # Read metadata
     # ========================================================================
-    print("Reading metadata from input file...")
-    with safe_open(str(args.inputs), framework="pt") as f:
-        metadata = f.metadata()
+    metadata = None
+    if args.inputs is not None:
+        print("Reading metadata from input file...")
+        with safe_open(str(args.inputs), framework="pt") as f:
+            metadata = f.metadata()
 
-    num_frames = int(metadata["num_frames"])
-    height = int(metadata["height"])
-    width = int(metadata["width"])
-    fps = float(metadata["fps"])
-    f_lat = int(metadata["f_lat"])
-    h_lat = int(metadata["h_lat"])
-    w_lat = int(metadata["w_lat"])
-    t_aud = int(metadata["t_aud"])
-    v_tokens = int(metadata["video_latent_tokens"])
-    a_tokens = int(metadata["audio_latent_tokens"])
+    if metadata is not None and "num_frames" in metadata:
+        num_frames = int(metadata["num_frames"])
+        height = int(metadata["height"])
+        width = int(metadata["width"])
+        fps = float(metadata["fps"])
+        f_lat = int(metadata["f_lat"])
+        h_lat = int(metadata["h_lat"])
+        w_lat = int(metadata["w_lat"])
+        t_aud = int(metadata["t_aud"])
+        v_tokens = int(metadata["video_latent_tokens"])
+        a_tokens = int(metadata["audio_latent_tokens"])
+    elif args.meta is not None:
+        print(f"Reading metadata from {args.meta}...")
+        with open(args.meta) as f:
+            meta = json.load(f)
+        num_frames = meta["num_frames"]
+        height = meta["height"]
+        width = meta["width"]
+        fps = meta["frame_rate"]
+        # Use stage2 dimensions (the final denoised latent)
+        f_lat = meta["stage2"]["f_lat"]
+        h_lat = meta["stage2"]["h_lat"]
+        w_lat = meta["stage2"]["w_lat"]
+        t_aud = meta["stage2"]["t_audio"]
+        v_tokens = f_lat * h_lat * w_lat
+        a_tokens = t_aud
+    else:
+        raise ValueError("No metadata found. Provide --meta pipeline_meta.json or --inputs with embedded metadata.")
 
     print(f"  Resolution: {width}x{height}, {num_frames} frames @ {fps} fps")
     print(f"  Video latent: F={f_lat}, H={h_lat}, W={w_lat} → {v_tokens} tokens")

@@ -303,12 +303,37 @@ pub fn main(init: std.process.Init) !void {
     bridge.a_clean.deinit();
 
     // ========================================================================
-    // Write final outputs
+    // Write denoised latents (for downstream tools / debugging)
     // ========================================================================
     std.log.info("", .{});
-    std.log.info("Writing final outputs...", .{});
+    std.log.info("Writing denoised latents...", .{});
     try writeBuffer(allocator, io, s2.v_latent, args.output_dir, "video_latent.bin");
     try writeBuffer(allocator, io, s2.a_latent, args.output_dir, "audio_latent.bin");
+
+    // ========================================================================
+    // Phase 4: Video VAE Decode
+    // ========================================================================
+    std.log.info("", .{});
+    std.log.info("=== Phase 4: Video VAE Decode ===", .{});
+
+    try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, args.output_dir);
+
+    // ========================================================================
+    // Phase 5: Audio VAE Decode
+    // ========================================================================
+    std.log.info("", .{});
+    std.log.info("=== Phase 5: Audio VAE Decode ===", .{});
+
+    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta, args.output_dir);
+
+    // ========================================================================
+    // Phase 6: Vocoder + BWE (mel → 48kHz waveform)
+    // ========================================================================
+    std.log.info("", .{});
+    std.log.info("=== Phase 6: Vocoder + BWE ===", .{});
+
+    try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel, args.output_dir);
+    audio_mel.deinit();
 
     s2.deinit();
 
@@ -1762,6 +1787,476 @@ fn sigma1dBuffer(
 ) !zml.Buffer {
     const shape = zml.Shape.init(.{ .b = 1 }, .f32);
     return zml.Buffer.fromBytes(io, platform, shape, sharding, std.mem.asBytes(&sigma));
+}
+
+// ============================================================================
+// Phase 4: Video VAE Decode
+// ============================================================================
+
+fn runVideoVaeDecode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    ckpt_path: []const u8,
+    v_latent_patchified: zml.Buffer,
+    pipe_meta: PipelineMeta,
+    output_dir: []const u8,
+) !void {
+    const s2 = pipe_meta.stage2;
+    const F = s2.f_lat;
+    const H = s2.h_lat;
+    const W = s2.w_lat;
+    const C: i64 = 128;
+    const T_v = F * H * W;
+
+    // ---- Open checkpoint store (reuse main checkpoint for VAE + per_channel_stats) ----
+    std.log.info("Opening checkpoint for VAE decoder...", .{});
+    var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
+        std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
+        return err;
+    };
+    defer ckpt_reg.deinit();
+    var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
+    defer ckpt_store.deinit();
+
+    // ========================================================================
+    // Step 1: Unpatchify latent — [1, T_v, 128] → [1, 128, F, H, W]
+    // ========================================================================
+    std.log.info("Compiling unpatchify for VAE input...", .{});
+    const patchified_shape = zml.Shape.init(.{ 1, T_v, C }, .bf16);
+    const video_5d_shape = zml.Shape.init(.{ 1, C, F, H, W }, .bf16);
+
+    var unpatch_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardUnpatchifyVideo,
+        .{
+            zml.Tensor.fromShape(patchified_shape),
+            video_5d_shape,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer unpatch_exe.deinit();
+
+    std.log.info("Running unpatchify...", .{});
+    var unpatch_args = try unpatch_exe.args(allocator);
+    defer unpatch_args.deinit(allocator);
+    var unpatch_results = try unpatch_exe.results(allocator);
+    defer unpatch_results.deinit(allocator);
+    unpatch_args.set(.{v_latent_patchified});
+    unpatch_exe.call(unpatch_args, &unpatch_results);
+    const v_latent_5d = unpatch_results.get(zml.Buffer);
+    std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape()});
+
+    // ========================================================================
+    // Step 2: Load VAE decoder weights + per-channel stats
+    // ========================================================================
+    std.log.info("Loading VAE decoder weights...", .{});
+    var vae_params = model.initVideoVaeDecoderParams(ckpt_store.view());
+    const vae_bufs = try zml.io.load(
+        model.VideoVaeDecoderParams,
+        &vae_params,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    std.log.info("Loading per-channel statistics...", .{});
+    var stats_shape = model.initPerChannelStats(ckpt_store.view());
+    const stats_bufs = try zml.io.load(
+        model.PerChannelStats,
+        &stats_shape,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    // ========================================================================
+    // Step 3: Compile and run the VAE decoder
+    // ========================================================================
+    std.log.info("Compiling VAE decoder...", .{});
+    var vae_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardVideoVaeDecode,
+        .{
+            zml.Tensor.fromShape(v_latent_5d.shape()),
+            stats_shape,
+            vae_params,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer vae_exe.deinit();
+
+    std.log.info("Running VAE decode...", .{});
+    var vae_args = try vae_exe.args(allocator);
+    defer vae_args.deinit(allocator);
+    var vae_results = try vae_exe.results(allocator);
+    defer vae_results.deinit(allocator);
+    vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
+    vae_exe.call(vae_args, &vae_results);
+    const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
+    std.log.info("  Decoded video: {any}", .{decoded_video.shape()});
+
+    // ========================================================================
+    // Step 4: Post-process to uint8 and write frames.bin
+    // ========================================================================
+    std.log.info("Post-processing decoded video to frames...", .{});
+
+    // Download bf16 tensor to host
+    const decoded_slice = try decoded_video.toSliceAlloc(allocator, io);
+    defer decoded_slice.free(allocator);
+
+    // Decode shape: [1, 3, F_out, H_out, W_out]
+    const F_out: usize = @intCast(decoded_video.shape().dim(2));
+    const H_out: usize = @intCast(decoded_video.shape().dim(3));
+    const W_out: usize = @intCast(decoded_video.shape().dim(4));
+
+    const num_pixels = F_out * H_out * W_out * 3;
+    const frames_u8 = try allocator.alloc(u8, num_pixels);
+    defer allocator.free(frames_u8);
+
+    // Convert bf16 [1, 3, F, H, W] → u8 [F, H, W, 3] (NHWC)
+    // (x + 1) / 2 * 255, clamped to [0, 255]
+    const bf16_data = decoded_slice.constData();
+    for (0..F_out) |f| {
+        for (0..H_out) |h| {
+            for (0..W_out) |w| {
+                for (0..3) |c| {
+                    // bf16 layout: [1, 3, F, H, W] → offset = c*F*H*W + f*H*W + h*W + w
+                    const src_idx = (c * F_out * H_out * W_out + f * H_out * W_out + h * W_out + w) * 2;
+                    // Read bf16 as u16, convert to f32
+                    const bf16_bits = std.mem.readInt(u16, bf16_data[src_idx..][0..2], .little);
+                    const f32_bits: u32 = @as(u32, bf16_bits) << 16;
+                    const val: f32 = @bitCast(f32_bits);
+                    // (val + 1) / 2 * 255, clamped
+                    const normalized = @min(@max((val + 1.0) * 0.5, 0.0), 1.0);
+                    const pixel: u8 = @intFromFloat(normalized * 255.0);
+                    // NHWC layout: f*H*W*3 + h*W*3 + w*3 + c
+                    frames_u8[f * H_out * W_out * 3 + h * W_out * 3 + w * 3 + c] = pixel;
+                }
+            }
+        }
+    }
+
+    // Write frames.bin (kept for debugging)
+    try writeRawBytes(allocator, io, frames_u8, output_dir, "frames.bin");
+    std.log.info("  Video frames: {d}x{d}, {d} frames", .{ W_out, H_out, F_out });
+
+    // Pipe frames to ffmpeg → output.mp4
+    try pipeToFfmpeg(allocator, io, frames_u8, W_out, H_out, pipe_meta.frame_rate, output_dir);
+}
+
+fn pipeToFfmpeg(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    frames_u8: []const u8,
+    width: usize,
+    height: usize,
+    fps: f64,
+    output_dir: []const u8,
+) !void {
+    const output_path = try std.fs.path.join(allocator, &.{ output_dir, "output.mp4" });
+    defer allocator.free(output_path);
+
+    var size_buf: [32]u8 = undefined;
+    const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ width, height }) catch unreachable;
+
+    var fps_buf: [16]u8 = undefined;
+    const fps_str = std.fmt.bufPrint(&fps_buf, "{d:.0}", .{fps}) catch unreachable;
+
+    std.log.info("Encoding video with ffmpeg → {s}", .{output_path});
+
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            "ffmpeg", "-y",
+            "-f",       "rawvideo",
+            "-pix_fmt", "rgb24",
+            "-s",       size_str,
+            "-r",       fps_str,
+            "-i",       "pipe:0",
+            "-c:v",     "libx264",
+            "-pix_fmt", "yuv420p",
+            output_path,
+        },
+        .stdin = .pipe,
+        .stdout = .inherit,
+        .stderr = .inherit,
+    });
+
+    // Write all frame data to ffmpeg's stdin
+    const stdin_file = child.stdin.?;
+    var write_buf: [64 * 1024]u8 = undefined;
+    var writer = stdin_file.writer(io, &write_buf);
+    try writer.interface.writeAll(frames_u8);
+    try writer.interface.flush();
+    stdin_file.close(io);
+    child.stdin = null;
+
+    // Wait for ffmpeg to finish
+    const term = try child.wait(io);
+    switch (term) {
+        .exited => |code| {
+            if (code != 0) {
+                std.log.err("ffmpeg exited with code {d}", .{code});
+                return error.FfmpegFailed;
+            }
+        },
+        else => {
+            std.log.err("ffmpeg terminated abnormally", .{});
+            return error.FfmpegFailed;
+        },
+    }
+
+    std.log.info("  Wrote {s}", .{output_path});
+}
+
+// Phase 5: Audio VAE Decode
+// ============================================================================
+
+fn runAudioVaeDecode(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    ckpt_path: []const u8,
+    a_latent_patchified: zml.Buffer,
+    pipe_meta: PipelineMeta,
+    output_dir: []const u8,
+) !zml.Buffer {
+    const T_aud = pipe_meta.stage2.t_audio;
+
+    // ---- Open checkpoint store ----
+    std.log.info("Opening checkpoint for audio VAE decoder...", .{});
+    var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
+        std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
+        return err;
+    };
+    defer ckpt_reg.deinit();
+    var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
+    defer ckpt_store.deinit();
+
+    // ========================================================================
+    // Step 1: Unpatchify audio latent — [1, T_aud, 128] → [1, 8, T_aud, 16]
+    // ========================================================================
+    std.log.info("Compiling unpatchify for audio input...", .{});
+    const patchified_shape = zml.Shape.init(.{ 1, T_aud, 128 }, .bf16);
+
+    var unpatch_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardUnpatchifyAudio,
+        .{
+            zml.Tensor.fromShape(patchified_shape),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer unpatch_exe.deinit();
+
+    std.log.info("Running audio unpatchify...", .{});
+    var unpatch_args = try unpatch_exe.args(allocator);
+    defer unpatch_args.deinit(allocator);
+    var unpatch_results = try unpatch_exe.results(allocator);
+    defer unpatch_results.deinit(allocator);
+    unpatch_args.set(.{a_latent_patchified});
+    unpatch_exe.call(unpatch_args, &unpatch_results);
+    const a_latent_4d = unpatch_results.get(zml.Buffer);
+    std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape()});
+
+    // ========================================================================
+    // Step 2: Load audio VAE decoder weights + per-channel stats
+    // ========================================================================
+    std.log.info("Loading audio VAE decoder weights...", .{});
+    var audio_vae_params = model.initAudioVaeDecoderParams(ckpt_store.view());
+    const audio_vae_bufs = try zml.io.load(
+        model.AudioVaeDecoderParams,
+        &audio_vae_params,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    std.log.info("Loading audio per-channel statistics...", .{});
+    var audio_stats_shape = model.initAudioPerChannelStats(ckpt_store.view());
+    const audio_stats_bufs = try zml.io.load(
+        model.AudioPerChannelStats,
+        &audio_stats_shape,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    // ========================================================================
+    // Step 3: Compile and run the audio VAE decoder
+    // ========================================================================
+    std.log.info("Compiling audio VAE decoder...", .{});
+    var audio_vae_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardAudioVaeDecode,
+        .{
+            zml.Tensor.fromShape(a_latent_4d.shape()),
+            audio_stats_shape,
+            audio_vae_params,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer audio_vae_exe.deinit();
+
+    std.log.info("Running audio VAE decode...", .{});
+    var audio_vae_args = try audio_vae_exe.args(allocator);
+    defer audio_vae_args.deinit(allocator);
+    var audio_vae_results = try audio_vae_exe.results(allocator);
+    defer audio_vae_results.deinit(allocator);
+    audio_vae_args.set(.{ a_latent_4d, audio_stats_bufs, audio_vae_bufs });
+    audio_vae_exe.call(audio_vae_args, &audio_vae_results);
+    const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
+    std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape()});
+
+    // Write mel spectrogram for debugging
+    try writeBuffer(allocator, io, decoded_audio, output_dir, "audio_mel.bin");
+    std.log.info("  Audio mel spectrogram written.", .{});
+
+    return decoded_audio;
+}
+
+// ============================================================================
+// Phase 6: Vocoder + BWE (mel spectrogram → 48kHz stereo waveform)
+// ============================================================================
+
+fn runVocoderWithBWE(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    ckpt_path: []const u8,
+    audio_mel: zml.Buffer,
+    output_dir: []const u8,
+) !void {
+    // ---- Open checkpoint store ----
+    std.log.info("Opening checkpoint for vocoder...", .{});
+    var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
+        std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
+        return err;
+    };
+    defer ckpt_reg.deinit();
+    var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
+    defer ckpt_store.deinit();
+
+    // ---- Load vocoder weights (split: main 667, BWE pipeline 559) ----
+    std.log.info("Loading main vocoder weights...", .{});
+    var main_voc_params: model.MainVocoderParams = undefined;
+    model.initMainVocoderParams(&main_voc_params, ckpt_store.view().withPrefix("vocoder").withPrefix("vocoder"));
+    const main_voc_bufs = try zml.io.load(
+        model.MainVocoderParams,
+        &main_voc_params,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    std.log.info("Loading BWE pipeline weights...", .{});
+    var bwe_params: model.BWEPipelineParams = undefined;
+    model.initBWEPipelineParams(&bwe_params, ckpt_store.view());
+    const bwe_bufs = try zml.io.load(
+        model.BWEPipelineParams,
+        &bwe_params,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        },
+    );
+
+    // ---- Stage 1: Main vocoder — mel → 16kHz waveform ----
+    std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape()});
+    var main_voc_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardMainVocoder,
+        .{ zml.Tensor.fromShape(audio_mel.shape()), &main_voc_params },
+        .{ .shardings = &.{sharding} },
+    );
+    defer main_voc_exe.deinit();
+
+    std.log.info("Running main vocoder...", .{});
+    var main_voc_args = try main_voc_exe.args(allocator);
+    defer main_voc_args.deinit(allocator);
+    var main_voc_results = try main_voc_exe.results(allocator);
+    defer main_voc_results.deinit(allocator);
+    main_voc_args.set(.{ audio_mel, &main_voc_bufs });
+    main_voc_exe.call(main_voc_args, &main_voc_results);
+    const waveform_16k = main_voc_results.get(zml.Buffer);
+    std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape()});
+
+    // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
+    std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape()});
+    var bwe_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardBWEPipeline,
+        .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
+        .{ .shardings = &.{sharding} },
+    );
+    defer bwe_exe.deinit();
+
+    std.log.info("Running BWE pipeline...", .{});
+    var bwe_args = try bwe_exe.args(allocator);
+    defer bwe_args.deinit(allocator);
+    var bwe_results = try bwe_exe.results(allocator);
+    defer bwe_results.deinit(allocator);
+    bwe_args.set(.{ waveform_16k, &bwe_bufs });
+    bwe_exe.call(bwe_args, &bwe_results);
+    const waveform = bwe_results.get(zml.Buffer);
+    std.log.info("  48kHz waveform: {any}", .{waveform.shape()});
+
+    // ---- Write output ----
+    try writeBuffer(allocator, io, waveform, output_dir, "waveform.bin");
+    std.log.info("  Waveform written to waveform.bin", .{});
+}
+
+fn writeRawBytes(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    data: []const u8,
+    dir: []const u8,
+    filename: []const u8,
+) !void {
+    const path = try std.fs.path.join(allocator, &.{ dir, filename });
+    defer allocator.free(path);
+
+    const file = try std.Io.Dir.createFile(.cwd(), io, path, .{});
+    defer file.close(io);
+
+    var write_buf: [64 * 1024]u8 = undefined;
+    var writer = file.writer(io, &write_buf);
+    try writer.interface.writeAll(data);
+    try writer.interface.flush();
+
+    std.log.info("  Wrote {s} ({d} bytes)", .{ path, data.len });
 }
 
 fn writeBuffer(
