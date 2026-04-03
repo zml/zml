@@ -76,11 +76,13 @@ const Acestep = struct {
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Acestep)) void {
+        std.log.info("deinit ACEMODEL", .{});
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
         RmsNorm.unloadBuffers(&self.norm);
+        std.log.info("deinit ACEMODEL done", .{});
     }
 
     pub fn forward(
@@ -350,6 +352,7 @@ pub const KvCache = struct {
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(KvCache)) void {
+        std.log.info("deinit kv cache", .{});
         self.k.deinit();
         self.v.deinit();
         self.layer_index.deinit();
@@ -434,6 +437,11 @@ const AcestepPhase = struct {
     phase1: bool,
     phase1_mask: []zml.floats.BFloat16,
     phase2_mask: []zml.floats.BFloat16,
+    
+    pub fn deinit(self: AcestepPhase, allocator: std.mem.Allocator) void {
+        allocator.free(self.phase1_mask);
+        allocator.free(self.phase2_mask);
+    }
 };
 
 const CompileModelResult = struct {
@@ -515,6 +523,7 @@ const AudioMetadata = struct {
     }
 
     pub fn deinit(self: AudioMetadata, allocator: std.mem.Allocator) void {
+        std.log.info("deinit audio metadata", .{});
         allocator.free(self.bpm);
         allocator.free(self.caption);
         allocator.free(self.duration);
@@ -533,7 +542,10 @@ pub fn main(init: std.process.Init) !void {
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
+    defer {
+        std.log.info("deinit platform", .{});
+        platform.deinit(allocator);
+    }
 
     // Parse program args
     const process_args = try init.minimal.args.toSlice(arena.allocator());
@@ -549,8 +561,11 @@ pub fn main(init: std.process.Init) !void {
 
     // Read model shapes.
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, model_path);
-    defer registry.deinit();
-
+    defer {
+        std.log.info("deinit registry", .{});
+        registry.deinit();
+    }
+    
     // Print model shapes
     const tensors: zml.safetensors.Tensors = registry.tensors;
     const data = tensors.entries;
@@ -566,15 +581,24 @@ pub fn main(init: std.process.Init) !void {
 
     // Init model
     const parsed_config = try parseConfig(allocator, io, model_repo);
-    defer parsed_config.deinit();
+    defer {
+        std.log.info("deinit config", .{});
+        parsed_config.deinit();
+    }
     const config = parsed_config.value;
     const acestep_options: Acestep.Options = .{
         .seq_len = 512,
     };
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
-    defer store.deinit();
+    defer {
+        std.log.info("deinit store", .{});
+        store.deinit();
+    }
     const acestep_model: Acestep = try .init(allocator, store.view().withPrefix("model"), config);
-    defer acestep_model.deinit(allocator);
+    defer {
+        std.log.info("deinit model", .{});
+        acestep_model.deinit(allocator);
+    }
 
     // Specify shapes of input arguments
     const dtype = acestep_model.embed_tokens.weight.dtype();
@@ -600,8 +624,14 @@ pub fn main(init: std.process.Init) !void {
     // Compile the prefill and decode models
     std.log.info("Compile prefill/decode", .{});
     var compiled_model = try compileModel(allocator, io, platform, acestep_model, acestep_parameters);
-    defer compiled_model.prefill_exe.deinit();
-    defer compiled_model.decode_exe.deinit();
+    defer {
+        std.log.info("deinit prefill exe", .{});
+        compiled_model.prefill_exe.deinit();
+    }
+    defer {
+        std.log.info("deinit decode exe", .{});
+        compiled_model.decode_exe.deinit();
+    }
 
     // Fill the buffers with weights
     std.log.info("Load buffers", .{});
@@ -613,16 +643,23 @@ pub fn main(init: std.process.Init) !void {
     // Initialize tokenizer
     std.log.info("Initialize tokenizer", .{});
     var tokenizer: zml.tokenizer.Tokenizer = try .fromFile(allocator, io, tokenizer_path);
-    defer tokenizer.deinit();
+    defer {
+        std.log.info("deinit tokenizer", .{});
+        tokenizer.deinit();
+    }
 
     // Initialize masks for phases I and II
     var acestep_phase = try buildTokenMasks(allocator, tokenizer, voc_size);
+    defer acestep_phase.deinit(allocator);
     
     // Test on one prompt
     const prompt = "a chill guitar melody\n\ninstrumental: true";
     std.log.info("Start inspiration, raw prompt:\n{s}", .{prompt});
     const inspi_tokens = try tokenizeInspirationPrompt(allocator, tokenizer, prompt);
-    defer allocator.free(inspi_tokens);
+    defer {
+        std.log.info("deinit inspi tokens", .{});
+        allocator.free(inspi_tokens);
+    }
 
     if (false) {
         //_=inspi_result;
@@ -642,9 +679,12 @@ pub fn main(init: std.process.Init) !void {
             platform,
             acestep_parameters.shardings.replicated,
         );
-        defer allocator.free(inspi_result);
+        defer {
+            std.log.info("deinit inspi result", .{});
+            allocator.free(inspi_result);
+        }
     }
-
+    
     const inspi_result =
         \\<think>
         \\bpm: 80
@@ -663,8 +703,6 @@ pub fn main(init: std.process.Init) !void {
         \\[Instrumental]
         \\<|im_end|>
     ;
-    
-    defer allocator.free(inspi_result);
 
     const metadata: AudioMetadata = try .initFromString(allocator, inspi_result);
     defer metadata.deinit(allocator);
@@ -673,7 +711,7 @@ pub fn main(init: std.process.Init) !void {
     acestep_phase.phase1 = false;
     const gen_tokens = try tokenizeGenerationPrompt(allocator, tokenizer, metadata);
     defer allocator.free(gen_tokens);
-    
+        
     const gen_result = try generateText(
         allocator,
         io,
@@ -750,8 +788,8 @@ fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokeni
     tokens_text.items[eos_id] = zml.floats.BFloat16.fromF32(0.0);
     return .{
         .phase1 = true,
-        .phase1_mask = tokens_text.items,
-        .phase2_mask = tokens_audio.items,
+        .phase1_mask = try tokens_text.toOwnedSlice(allocator),
+        .phase2_mask = try tokens_audio.toOwnedSlice(allocator),
     };
 }
 
@@ -794,6 +832,7 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     defer encoder.deinit();
     
     var prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer prompt.deinit(allocator);
     try prompt.appendSlice(allocator, "<|im_start|>system\n");
     try prompt.appendSlice(allocator, "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
     try prompt.appendSlice(allocator, "<|im_end|>\n");
@@ -819,9 +858,8 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     try prompt.appendSlice(allocator, "\n</think>\n\n");
     try prompt.appendSlice(allocator, "<|im_end|>\n");
     
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 10);
-    const prompt_slice = try prompt.toOwnedSlice(allocator);
-    try tokens.appendSlice(allocator, try encoder.encode(prompt_slice));
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
+    try tokens.appendSlice(allocator, try encoder.encode(prompt.items));
     return tokens.toOwnedSlice(allocator);
 }
 
@@ -936,7 +974,9 @@ pub fn generateText(
     generation: for (0..output_tokens_len + 1) |i| {
         // collect and print generated sequence
         num_tokens_generated += 1;
-        const generated_token = generated_token_slice.items(u32)[0];
+        var generated_token = generated_token_slice.items(u32)[0];
+        if (num_tokens_generated == 5) generated_token = 151645;
+        
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try result.appendSlice(allocator, chunk);
             try writer.writeAll(chunk);
