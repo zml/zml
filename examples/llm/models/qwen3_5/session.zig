@@ -174,17 +174,15 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
     const think = tokenizer.tokenToId("<think>") orelse return error.NoSuchToken;
     const newline = try encodeSingleToken(&encoder, "\n");
-    const encoded_prompt: []u32 = try allocator.dupe(u32, try encoder.encode(prompt));
-    defer allocator.free(encoded_prompt);
 
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 16);
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     if (!is_first_turn) {
         try tokens.appendSlice(allocator, &.{ im_end, newline });
     }
 
     try tokens.append(allocator, im_start);
     try tokens.appendSlice(allocator, try encoder.encode("user\n"));
-    try tokens.appendSlice(allocator, encoded_prompt);
+    try tokens.appendSlice(allocator, try encoder.encode(prompt));
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
     try tokens.appendSlice(allocator, try encoder.encode("assistant\n"));
     try tokens.appendSlice(allocator, &.{ think, newline });
