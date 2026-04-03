@@ -81,8 +81,7 @@ uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-python.toolchain(python_version = "3.14")
-use_repo(python, "python_versions", "python_3_14")
+use_repo(python, "python_versions", "python_3_12")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 
@@ -119,7 +118,7 @@ use_repo(pip, "huggingface_hub")
 pip.parse(
     download_only = True,
     hub_name = "triton_py_deps",
-    python_version = "3.14",
+    python_version = "3.12",
     requirements_lock = "//zml/moe/triton:requirements.lock.txt",
 )
 use_repo(pip, "triton_py_deps")
