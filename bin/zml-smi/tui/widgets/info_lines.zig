@@ -7,6 +7,7 @@ const data = @import("../data.zig");
 const compose = @import("../lib/compose.zig");
 const ui = @import("../lib/ui.zig");
 const theme = @import("../theme.zig");
+const stamp = @import("bazel/stamp");
 
 const InfoLines = @This();
 
@@ -50,7 +51,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});
     const values = [entry_count][]const u8{
-        "v0.3",
+        stamp.stamp("STABLE_ZML_SMI_VERSION"),
         hostname_str,
         kernel_str,
         cpu_str,
