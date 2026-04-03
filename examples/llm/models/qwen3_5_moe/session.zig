@@ -145,8 +145,8 @@ pub const Session = struct {
             .seqlen = compiled_model.params.seqlen,
             .eos_token_id = compiled_model.loaded_model.inner.special_tokens.end_of_text_token_id,
             .special_tokens = compiled_model.loaded_model.inner.special_tokens,
-            .think_start = tokenizer.tokenToId("<think>"),
-            .think_end = tokenizer.tokenToId("</think>"),
+            .think_start = tokenizer.tokenId("<think>"),
+            .think_end = tokenizer.tokenId("</think>"),
         };
     }
 
@@ -274,7 +274,11 @@ pub const Session = struct {
         var sampling_prefill_results = try self.compiled_model.prefill_sampling_exe.results(self.allocator);
         defer sampling_prefill_results.deinit(self.allocator);
 
-        sampling_prefill_args.set(.{ self.model_buffers.text_model, prefill_hidden_buffer, self.rng_buffers });
+        sampling_prefill_args.set(.{ .{
+            .norm = self.model_buffers.text_model.norm,
+            .lm_head = self.model_buffers.text_model.lm_head,
+            .gen_options = self.compiled_model.loaded_model.inner.text_model.gen_options,
+        }, prefill_hidden_buffer, self.rng_buffers });
         self.compiled_model.prefill_sampling_exe.call(sampling_prefill_args, &sampling_prefill_results);
         sampling_prefill_results.fill(.{ &prefill_tokens_buffer, &self.rng_buffers });
 
@@ -329,16 +333,15 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            if (try decoder.next(token_id)) |token| {
-                if (self.think_start) |think_start| if (token_id == think_start) {
-                    try stdout.writeAll("\x1b[2m");
-                };
-                try stdout.writeAll(token);
-                if (self.think_end) |think_end| if (token_id == think_end) {
-                    try stdout.writeAll("\x1b[0m");
-                };
-                try stdout.flush();
-            }
+            const token = try decoder.feed_one(token_id);
+            if (self.think_start) |think_start| if (token_id == think_start) {
+                try stdout.writeAll("\x1b[2m");
+            };
+            try stdout.writeAll(token);
+            if (self.think_end) |think_end| if (token_id == think_end) {
+                try stdout.writeAll("\x1b[0m");
+            };
+            try stdout.flush();
 
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
@@ -394,7 +397,11 @@ pub const Session = struct {
                 }
             }
 
-            sampling_decode_args.set(.{ self.model_buffers.text_model, decode_hidden_buffer, self.rng_buffers, token_index_buffer });
+            sampling_decode_args.set(.{ .{
+                .norm = self.model_buffers.text_model.norm,
+                .lm_head = self.model_buffers.text_model.lm_head,
+                .gen_options = self.compiled_model.loaded_model.inner.text_model.gen_options,
+            }, decode_hidden_buffer, self.rng_buffers, token_index_buffer });
             self.compiled_model.decode_sampling_exe.call(sampling_decode_args, &sampling_decode_results);
             sampling_decode_results.fill(.{ &current_token_buffer, &self.rng_buffers, &token_index_buffer });
 
@@ -407,23 +414,23 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    const im_start = tokenizer.tokenToId("<|im_start|>") orelse special_tokens.im_start_token_id;
-    const im_end = tokenizer.tokenToId("<|im_end|>") orelse special_tokens.im_end_token_id;
-    const think = tokenizer.tokenToId("<think>") orelse return error.NoSuchToken;
-    const newline = (try encoder.encode("\n"))[0];
-    const user_prefix = tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-    const assistant_prefix = tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-    const encoded_prompt = try encoder.encode(prompt);
+    const im_start = tokenizer.tokenId("<|im_start|>") orelse special_tokens.im_start_token_id;
+    const im_end = tokenizer.tokenId("<|im_end|>") orelse special_tokens.im_end_token_id;
 
-    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, encoded_prompt.len + 32);
+    var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len + 32);
     if (!is_first_turn) {
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
+        try tokens.append(allocator, im_end);
+        try encoder.encodeAppend(allocator, &tokens, "\n");
     }
 
-    try tokens.appendSlice(allocator, &.{ im_start, user_prefix, newline });
-    try tokens.appendSlice(allocator, encoded_prompt);
-    try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
-    try tokens.appendSlice(allocator, &.{ assistant_prefix, newline, think, newline });
+    try tokens.append(allocator, im_start);
+    try encoder.encodeAppend(allocator, &tokens, "user\n");
+    try encoder.encodeAppend(allocator, &tokens, prompt);
+    try tokens.append(allocator, im_end);
+    try encoder.encodeAppend(allocator, &tokens, "\n");
+    try tokens.append(allocator, im_start);
+    try encoder.encodeAppend(allocator, &tokens, "assistant\n");
+    try encoder.encodeAppend(allocator, &tokens, "<think>\n");
 
     return tokens.toOwnedSlice(allocator);
 }

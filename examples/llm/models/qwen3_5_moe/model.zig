@@ -1,6 +1,8 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const CompilationContext = zml.module.CompilationContext;
+
 const stdx = zml.stdx;
 
 const common = @import("../common.zig");
@@ -78,7 +80,7 @@ pub const LoadedModel = struct {
     }
 
     pub fn loadBuffers(
-        self: *const LoadedModel,
+        self: *LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
@@ -99,7 +101,7 @@ pub const LoadedModel = struct {
         }
 
         const all_shardings = shardings.all();
-        return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
+        var buffers = try zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
@@ -107,6 +109,159 @@ pub const LoadedModel = struct {
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
+        errdefer TextModel.unloadBuffers(&buffers.text_model, allocator);
+
+        try self.packExpertWeights(allocator, io, platform, &buffers, all_shardings);
+        return buffers;
+    }
+
+    fn packExpertWeights(
+        self: *LoadedModel,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        buffers: *Buffers,
+        shardings: [2]zml.sharding.Sharding,
+    ) !void {
+        var pack_gate_up_exe: ?zml.Exe = null;
+        defer if (pack_gate_up_exe) |*exe| exe.deinit();
+        var pack_gate_up_scale_exe: ?zml.Exe = null;
+        defer if (pack_gate_up_scale_exe) |*exe| exe.deinit();
+        var pack_down_exe: ?zml.Exe = null;
+        defer if (pack_down_exe) |*exe| exe.deinit();
+        var pack_down_scale_exe: ?zml.Exe = null;
+        defer if (pack_down_scale_exe) |*exe| exe.deinit();
+
+        for (self.inner.text_model.layers, buffers.text_model.layers) |*layer_model, *layer_buffers| {
+            // If model is already packed -> skip
+            if (layer_model.moe.layout != .per_expert) continue;
+
+            // Compile the repacker exec
+            if (pack_gate_up_exe == null) {
+                pack_gate_up_exe = try platform.compileFn(
+                    allocator,
+                    io,
+                    MoeRepacker.packGateUp,
+                    .{ layer_model.moe.slice_gate_proj, layer_model.moe.slice_up_proj },
+                    .{ .shardings = &shardings },
+                );
+                pack_gate_up_scale_exe = try platform.compileFn(
+                    allocator,
+                    io,
+                    MoeRepacker.packGateUp,
+                    .{ layer_model.moe.slice_gate_proj_scale, layer_model.moe.slice_up_proj_scale },
+                    .{ .shardings = &shardings },
+                );
+                pack_down_exe = try platform.compileFn(
+                    allocator,
+                    io,
+                    MoeRepacker.packExperts,
+                    .{layer_model.moe.slice_down_proj},
+                    .{ .shardings = &shardings },
+                );
+                pack_down_scale_exe = try platform.compileFn(
+                    allocator,
+                    io,
+                    MoeRepacker.packExperts,
+                    .{layer_model.moe.slice_down_proj_scale},
+                    .{ .shardings = &shardings },
+                );
+            }
+
+            // Repack gate_up weights and scales, and down_proj weights and scales
+            var gate_up_args = try pack_gate_up_exe.?.args(allocator);
+            defer gate_up_args.deinit(allocator);
+            for (layer_buffers.moe.slice_gate_proj, 0..) |buffer, i| {
+                gate_up_args.setPartial(buffer, i);
+            }
+            for (layer_buffers.moe.slice_up_proj, 0..) |buffer, i| {
+                gate_up_args.setPartial(buffer, layer_buffers.moe.slice_gate_proj.len + i);
+            }
+
+            var gate_up_results = try pack_gate_up_exe.?.results(allocator);
+            defer gate_up_results.deinit(allocator);
+            pack_gate_up_exe.?.call(gate_up_args, &gate_up_results);
+            const gate_up_buffer = gate_up_results.get(zml.Buffer);
+
+            var gate_up_scale_args = try pack_gate_up_scale_exe.?.args(allocator);
+            defer gate_up_scale_args.deinit(allocator);
+            for (layer_buffers.moe.slice_gate_proj_scale, 0..) |buffer, i| {
+                gate_up_scale_args.setPartial(buffer, i);
+            }
+            for (layer_buffers.moe.slice_up_proj_scale, 0..) |buffer, i| {
+                gate_up_scale_args.setPartial(buffer, layer_buffers.moe.slice_gate_proj_scale.len + i);
+            }
+
+            var gate_up_scale_results = try pack_gate_up_scale_exe.?.results(allocator);
+            defer gate_up_scale_results.deinit(allocator);
+            pack_gate_up_scale_exe.?.call(gate_up_scale_args, &gate_up_scale_results);
+            const gate_up_scale_buffer = gate_up_scale_results.get(zml.Buffer);
+
+            var down_args = try pack_down_exe.?.args(allocator);
+            defer down_args.deinit(allocator);
+            for (layer_buffers.moe.slice_down_proj, 0..) |buffer, i| {
+                down_args.setPartial(buffer, i);
+            }
+
+            var down_results = try pack_down_exe.?.results(allocator);
+            defer down_results.deinit(allocator);
+            pack_down_exe.?.call(down_args, &down_results);
+            const down_buffer = down_results.get(zml.Buffer);
+
+            var down_scale_args = try pack_down_scale_exe.?.args(allocator);
+            defer down_scale_args.deinit(allocator);
+            for (layer_buffers.moe.slice_down_proj_scale, 0..) |buffer, i| {
+                down_scale_args.setPartial(buffer, i);
+            }
+
+            var down_scale_results = try pack_down_scale_exe.?.results(allocator);
+            defer down_scale_results.deinit(allocator);
+            pack_down_scale_exe.?.call(down_scale_args, &down_scale_results);
+            const down_scale_buffer = down_scale_results.get(zml.Buffer);
+
+            allocator.free(layer_model.moe.slice_gate_proj);
+            allocator.free(layer_model.moe.slice_gate_proj_scale);
+            allocator.free(layer_model.moe.slice_up_proj);
+            allocator.free(layer_model.moe.slice_up_proj_scale);
+            allocator.free(layer_model.moe.slice_down_proj);
+            allocator.free(layer_model.moe.slice_down_proj_scale);
+
+            for (layer_buffers.moe.slice_gate_proj) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_gate_proj);
+            for (layer_buffers.moe.slice_gate_proj_scale) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_gate_proj_scale);
+            for (layer_buffers.moe.slice_up_proj) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_up_proj);
+            for (layer_buffers.moe.slice_up_proj_scale) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_up_proj_scale);
+            for (layer_buffers.moe.slice_down_proj) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_down_proj);
+            for (layer_buffers.moe.slice_down_proj_scale) |*buffer| buffer.deinit();
+            allocator.free(layer_buffers.moe.slice_down_proj_scale);
+
+            layer_model.moe.layout = .packed_weights;
+            layer_model.moe.gate_up_proj = zml.Tensor.fromShape(gate_up_buffer.shape());
+            layer_model.moe.gate_up_proj_scale = zml.Tensor.fromShape(gate_up_scale_buffer.shape());
+            layer_model.moe.down_proj = zml.Tensor.fromShape(down_buffer.shape());
+            layer_model.moe.down_proj_scale = zml.Tensor.fromShape(down_scale_buffer.shape());
+            layer_model.moe.slice_gate_proj = &.{};
+            layer_model.moe.slice_gate_proj_scale = &.{};
+            layer_model.moe.slice_up_proj = &.{};
+            layer_model.moe.slice_up_proj_scale = &.{};
+            layer_model.moe.slice_down_proj = &.{};
+            layer_model.moe.slice_down_proj_scale = &.{};
+
+            layer_buffers.moe.gate_up_proj = gate_up_buffer;
+            layer_buffers.moe.gate_up_proj_scale = gate_up_scale_buffer;
+            layer_buffers.moe.down_proj = down_buffer;
+            layer_buffers.moe.down_proj_scale = down_scale_buffer;
+            layer_buffers.moe.slice_gate_proj = &.{};
+            layer_buffers.moe.slice_gate_proj_scale = &.{};
+            layer_buffers.moe.slice_up_proj = &.{};
+            layer_buffers.moe.slice_up_proj_scale = &.{};
+            layer_buffers.moe.slice_down_proj = &.{};
+            layer_buffers.moe.slice_down_proj_scale = &.{};
+        }
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
@@ -125,10 +280,26 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.dtype();
+        const moe_dtype = if (self.inner.text_model.layers[0].moe.gate_up_proj) |gate_up_proj|
+            gate_up_proj.dtype()
+        else
+            self.inner.text_model.layers[0].moe.shared_expert.gate_proj.weight.dtype();
+        log.info("Moe dtype : {}", .{moe_dtype});
         const moe_backend = try zml.moe.Backend.auto(platform, moe_dtype);
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
+    }
+};
+
+const MoeRepacker = struct {
+    fn packExperts(tensors: []const zml.Tensor) zml.Tensor {
+        return Moe.repackExperts(tensors, 0, .expert);
+    }
+
+    fn packGateUp(gate_tensors: []const zml.Tensor, up_tensors: []const zml.Tensor) zml.Tensor {
+        const gate_proj = Moe.repackExperts(gate_tensors, 0, .expert);
+        const up_proj = Moe.repackExperts(up_tensors, 0, .expert);
+        return zml.Tensor.concatenate(&.{ gate_proj, up_proj }, .dout);
     }
 };
 
@@ -211,6 +382,28 @@ pub const Model = struct {
 
 //========================Text model========================
 
+// Use this intermediate struct to compile sampleTokens without taking the whole TextModel as input
+pub const Sampler = struct {
+    norm: RmsNorm,
+    lm_head: zml.nn.Linear,
+    gen_options: Model.GenOptions,
+
+    pub fn sampleTokens(
+        self: Sampler,
+        out: zml.Tensor,
+        rng: zml.Tensor.Rng,
+        token_index: ?zml.Tensor,
+    ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
+        const x = self.norm.forward(out);
+        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
+        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
+        if (token_index) |token_idx| {
+            return .{ next_tokens.convert(.u32), new_rng, token_idx.addConstant(1) };
+        }
+        return .{ next_tokens.convert(.u32), new_rng, null };
+    }
+};
+
 pub const TextModel = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
@@ -230,7 +423,8 @@ pub const TextModel = struct {
         errdefer allocator.free(layers);
 
         for (layers, 0..) |*layer, i| {
-            layer.* = try .init(store.withPrefix("layers").withLayer(i), config, i);
+            errdefer for (layers[0..i]) |previous_layer| previous_layer.deinit(allocator);
+            layer.* = try .init(allocator, store.withPrefix("layers").withLayer(i), config, i);
         }
 
         return .{
@@ -243,17 +437,28 @@ pub const TextModel = struct {
     }
 
     pub fn deinit(self: TextModel, allocator: std.mem.Allocator) void {
+        for (self.layers) |layer| {
+            layer.deinit(allocator);
+        }
         allocator.free(self.layers);
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(TextModel), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
-            TransformerLayer.unloadBuffers(layer);
+            TransformerLayer.unloadBuffers(layer, allocator);
         }
         allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
         self.lm_head.weight.deinit();
+    }
+
+    pub fn sampler(self: TextModel) Sampler {
+        return .{
+            .norm = self.norm,
+            .lm_head = self.lm_head,
+            .gen_options = self.gen_options,
+        };
     }
 
     pub fn forward(
@@ -283,13 +488,7 @@ pub const TextModel = struct {
         rng: zml.Tensor.Rng,
         token_index: ?zml.Tensor,
     ) struct { zml.Tensor, zml.Tensor.Rng, ?zml.Tensor } {
-        const x = self.norm.forward(out);
-        const logits = self.lm_head.forward(x.withPartialTags(.{.d})).rename(.{ .dout = .voc });
-        const next_tokens, const new_rng = zml.nn.sampleTokens(logits, self.gen_options.sampling_strategy, rng);
-        if (token_index) |token_idx| {
-            return .{ next_tokens.convert(.u32), new_rng, token_idx.addConstant(1) };
-        }
-        return .{ next_tokens.convert(.u32), new_rng, null };
+        return self.sampler().sampleTokens(out, rng, token_index);
     }
 };
 
@@ -304,7 +503,7 @@ pub const TransformerLayer = struct {
     moe: Moe,
     post_attention_layernorm: RmsNorm,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config, layer_index: usize) !TransformerLayer {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, layer_index: usize) !TransformerLayer {
         const is_full_attention = config.text_config.layer_types[layer_index] == .full_attention;
         return .{
             .input_layernorm = RmsNorm.init(store.withPrefix("input_layernorm"), config.text_config.rms_norm_eps),
@@ -312,18 +511,22 @@ pub const TransformerLayer = struct {
                 .{ .self_attn = try .init(store.withPrefix("self_attn"), config) }
             else
                 .{ .linear_attn = .init(store.withPrefix("linear_attn"), config) },
-            .moe = try .init(store.withPrefix("mlp"), config),
+            .moe = try .init(allocator, store.withPrefix("mlp"), config),
             .post_attention_layernorm = RmsNorm.init(store.withPrefix("post_attention_layernorm"), config.text_config.rms_norm_eps),
         };
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer)) void {
+    pub fn deinit(self: TransformerLayer, allocator: std.mem.Allocator) void {
+        self.moe.deinit(allocator);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(TransformerLayer), allocator: std.mem.Allocator) void {
         RmsNorm.unloadBuffers(&self.input_layernorm);
         switch (self.attn) {
             .self_attn => |*self_attn| SelfAttn.unloadBuffers(self_attn),
             .linear_attn => |*linear_attn| GatedDeltaNet.unloadBuffers(linear_attn),
         }
-        Moe.unloadBuffers(&self.moe);
+        Moe.unloadBuffers(&self.moe, allocator);
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
     }
 
@@ -424,8 +627,11 @@ pub const TransformerLayer = struct {
 
 pub const SelfAttn = struct {
     q_proj: zml.nn.Linear,
+    q_proj_scale: ?zml.Tensor,
     k_proj: zml.nn.Linear,
+    k_proj_scale: ?zml.Tensor,
     v_proj: zml.nn.Linear,
+    v_proj_scale: ?zml.Tensor,
 
     q_norm: RmsNorm,
     k_norm: RmsNorm,
@@ -436,6 +642,8 @@ pub const SelfAttn = struct {
     rotary_dim: i64,
     rotary_embed: TextRotaryEmbedding,
     o_proj: zml.nn.Linear,
+
+    o_proj_scale: ?zml.Tensor,
 
     fn initProj(store: zml.io.TensorStore.View, partitions: anytype, bias_partitions: anytype) zml.nn.Linear {
         return .init(
@@ -450,9 +658,13 @@ pub const SelfAttn = struct {
             config.text_config.rope_parameters.partial_rotary_factor);
         return .{
             .q_proj = initProj(store.withPrefix("q_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .q_proj_scale = store.withPrefix("q_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .k_proj = initProj(store.withPrefix("k_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .k_proj_scale = store.withPrefix("k_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .v_proj = initProj(store.withPrefix("v_proj"), .{ .dout = .model, .d = .replicated }, .{ .dout = .model }),
+            .v_proj_scale = store.withPrefix("v_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .o_proj = initProj(store.withPrefix("o_proj"), .{ .dout = .replicated, .d = .model }, .{ .dout = .replicated }),
+            .o_proj_scale = store.withPrefix("o_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .replicated, .d = .model }),
             .q_norm = RmsNorm.init(store.withPrefix("q_norm"), config.text_config.rms_norm_eps),
             .k_norm = RmsNorm.init(store.withPrefix("k_norm"), config.text_config.rms_norm_eps),
             .num_heads = config.text_config.num_attention_heads,
@@ -466,18 +678,23 @@ pub const SelfAttn = struct {
     pub fn unloadBuffers(self: *zml.Bufferized(SelfAttn)) void {
         self.q_proj.weight.deinit();
         if (self.q_proj.bias) |*bias| bias.deinit();
+        if (self.q_proj_scale) |*scale| scale.deinit();
         self.k_proj.weight.deinit();
         if (self.k_proj.bias) |*bias| bias.deinit();
+        if (self.k_proj_scale) |*scale| scale.deinit();
         self.v_proj.weight.deinit();
         if (self.v_proj.bias) |*bias| bias.deinit();
+        if (self.v_proj_scale) |*scale| scale.deinit();
         self.o_proj.weight.deinit();
         if (self.o_proj.bias) |*bias| bias.deinit();
+        if (self.o_proj_scale) |*scale| scale.deinit();
         RmsNorm.unloadBuffers(&self.q_norm);
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const q_proj = self.q_proj.forward(x).splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
+        const q_proj = forwardLinearDequantizeFp8(x, self.q_proj, self.q_proj_scale)
+            .splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
         const q, var gate = q_proj.chunkExact(.hd, 2);
         gate = gate.merge(.{ .d_out_proj = .{ .h, .hd } });
         return .{ q, gate };
@@ -485,8 +702,10 @@ pub const SelfAttn = struct {
 
     fn projectKV(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
-        const k = self.k_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
-        const v = self.v_proj.forward(x).splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const k = forwardLinearDequantizeFp8(x, self.k_proj, self.k_proj_scale)
+            .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
+        const v = forwardLinearDequantizeFp8(x, self.v_proj, self.v_proj_scale)
+            .splitAxis(.dout, .{ .h = num_kv_heads, .hd = self.head_dim });
         return .{ k, v };
     }
 
@@ -536,7 +755,11 @@ pub const SelfAttn = struct {
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const projected_output = forwardLinearDequantizeFp8(
+            gated_output.rename(.{ .d_out_proj = .d }),
+            self.o_proj,
+            self.o_proj_scale,
+        ).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -544,8 +767,11 @@ pub const SelfAttn = struct {
 
 pub const Mlp = struct {
     up_proj: zml.nn.Linear,
+    up_proj_scale: ?zml.Tensor,
     gate_proj: zml.nn.Linear,
+    gate_proj_scale: ?zml.Tensor,
     down_proj: zml.nn.Linear,
+    down_proj_scale: ?zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) Mlp {
         return .{
@@ -554,34 +780,40 @@ pub const Mlp = struct {
                 store.withPrefix("up_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }),
                 .d,
             ),
+            .up_proj_scale = store.withPrefix("up_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .gate_proj = .init(
                 store.withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
                 store.withPrefix("gate_proj").maybeCreateTensor("bias", .{.dout}, .{ .dout = .model }),
                 .d,
             ),
+            .gate_proj_scale = store.withPrefix("gate_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .down_proj = .init(
-                store.withPrefix("down_proj").createTensor("weight", .{ .d, .dout }, .{ .d = .replicated, .dout = .model }),
+                store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .{ .dout = .replicated, .d = .model }),
                 store.withPrefix("down_proj").maybeCreateTensor("bias", .{.d}, .{ .d = .replicated }),
-                .dout,
+                .d,
             ),
+            .down_proj_scale = store.withPrefix("down_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .replicated, .d = .model }),
         };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
         self.up_proj.weight.deinit();
         if (self.up_proj.bias) |*bias| bias.deinit();
+        if (self.up_proj_scale) |*scale| scale.deinit();
         self.gate_proj.weight.deinit();
         if (self.gate_proj.bias) |*bias| bias.deinit();
+        if (self.gate_proj_scale) |*scale| scale.deinit();
         self.down_proj.weight.deinit();
         if (self.down_proj.bias) |*bias| bias.deinit();
+        if (self.down_proj_scale) |*scale| scale.deinit();
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
-        const up_projed = self.up_proj.forward(x);
-        const gate = self.gate_proj.forward(x);
-        const hidden = gate.silu().mul(up_projed);
+        const up_projed = forwardLinearDequantizeFp8(x, self.up_proj, self.up_proj_scale);
+        const gate = forwardLinearDequantizeFp8(x, self.gate_proj, self.gate_proj_scale);
+        const hidden = gate.silu().mul(up_projed).rename(.{ .dout = .d });
 
-        const output = self.down_proj.forward(hidden);
+        const output = forwardLinearDequantizeFp8(hidden, self.down_proj, self.down_proj_scale);
         return output;
     }
 };
@@ -607,39 +839,162 @@ const Router = struct {
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
         const topk_ids = routing.indices.convert(.i32);
         const router_scores = routing.values.softmax(.top_expert);
-        //router_scores = router_scores.div(router_scores.sum(.top_expert));
         return .{ router_scores, topk_ids };
     }
 };
 
 pub const Moe = struct {
+    const Layout = enum { packed_weights, per_expert };
+
+    pub const PackedWeights = struct {
+        gate_up_proj: zml.Tensor,
+        gate_up_proj_scale: zml.Tensor,
+        down_proj: zml.Tensor,
+        down_proj_scale: zml.Tensor,
+    };
+
+    layout: Layout,
     shared_expert: Mlp,
     shared_expert_gate: zml.nn.Linear,
-    gate_up_proj: zml.Tensor,
-    down_proj: zml.Tensor,
+    gate_up_proj: ?zml.Tensor,
+    gate_up_proj_scale: ?zml.Tensor,
+    slice_gate_proj: []zml.Tensor,
+    slice_gate_proj_scale: []zml.Tensor,
+    slice_up_proj: []zml.Tensor,
+    slice_up_proj_scale: []zml.Tensor,
+    down_proj: ?zml.Tensor,
+    down_proj_scale: ?zml.Tensor,
+    slice_down_proj: []zml.Tensor,
+    slice_down_proj_scale: []zml.Tensor,
     router: Router,
 
-    pub fn init(store: zml.io.TensorStore.View, config: Config) !Moe {
+    fn repackExperts(tensors: []const zml.Tensor, axis_: anytype, tag: anytype) zml.Tensor {
+        stdx.debug.assert(tensors.len > 0, "expected at least one tensor to stack", .{});
+
+        const shape0 = tensors[0].shape();
+        const stacked_shape = shape0.insertTag(axis_, 1, tag);
+
+        const allocator = CompilationContext.current().arena.allocator();
+        const reshaped = allocator.alloc(zml.Tensor, tensors.len) catch unreachable;
+
+        for (tensors, 0..) |tensor, i| {
+            reshaped[i] = tensor.reshape(stacked_shape);
+        }
+
+        return zml.Tensor.concatenate(reshaped, axis_);
+    }
+
+    fn initPerExpert(
+        allocator: std.mem.Allocator,
+        store: zml.io.TensorStore.View,
+        num_experts: usize,
+        projection_name: []const u8,
+        tensor_name: []const u8,
+        tags: anytype,
+    ) ![]zml.Tensor {
+        const tensors = try allocator.alloc(zml.Tensor, num_experts);
+        errdefer allocator.free(tensors);
+
+        for (tensors, 0..) |*tensor, i| {
+            tensor.* = store.withLayer(i).withPrefix(projection_name).createTensor(tensor_name, tags, null);
+        }
+        return tensors;
+    }
+
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
+        const experts_store = store.withPrefix("experts");
+        const gate_up_proj_tensor = experts_store.maybeCreateTensor("gate_up_proj", .{ .expert, .dout, .d }, null);
+        const down_proj_tensor = experts_store.maybeCreateTensor("down_proj", .{ .expert, .d, .dout }, null);
+
+        const num_experts_i64 = config.text_config.num_experts orelse return error.MissingNumExperts;
+        const num_experts: usize = @intCast(num_experts_i64);
+
+        var slice_gate_proj: []zml.Tensor = &.{};
+        var slice_gate_proj_scale: []zml.Tensor = &.{};
+        var slice_up_proj: []zml.Tensor = &.{};
+        var slice_up_proj_scale: []zml.Tensor = &.{};
+        var slice_down_proj: []zml.Tensor = &.{};
+        var slice_down_proj_scale: []zml.Tensor = &.{};
+
+        var layout: Layout = .packed_weights;
+
+        if (gate_up_proj_tensor == null) {
+            layout = .per_expert;
+            const new_slice_gate_proj = try initPerExpert(allocator, experts_store, num_experts, "gate_proj", "weight", .{ .dout, .d });
+            allocator.free(slice_gate_proj);
+            slice_gate_proj = new_slice_gate_proj;
+
+            const new_slice_gate_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "gate_proj", "weight_scale_inv", .{ .dout, .d });
+            allocator.free(slice_gate_proj_scale);
+            slice_gate_proj_scale = new_slice_gate_proj_scale;
+
+            const new_slice_up_proj = try initPerExpert(allocator, experts_store, num_experts, "up_proj", "weight", .{ .dout, .d });
+            allocator.free(slice_up_proj);
+            slice_up_proj = new_slice_up_proj;
+
+            const new_slice_up_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "up_proj", "weight_scale_inv", .{ .dout, .d });
+            allocator.free(slice_up_proj_scale);
+            slice_up_proj_scale = new_slice_up_proj_scale;
+
+            const new_slice_down_proj = try initPerExpert(allocator, experts_store, num_experts, "down_proj", "weight", .{ .d, .dout });
+            allocator.free(slice_down_proj);
+            slice_down_proj = new_slice_down_proj;
+
+            const new_slice_down_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "down_proj", "weight_scale_inv", .{ .d, .dout });
+            allocator.free(slice_down_proj_scale);
+            slice_down_proj_scale = new_slice_down_proj_scale;
+        } else if (down_proj_tensor == null) {
+            return error.MissingDownProj;
+        }
+
         return .{
+            .layout = layout,
             .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
-            .shared_expert_gate = .init(store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.out}, null), .d),
-            .gate_up_proj = store.withPrefix("experts").createTensor("gate_up_proj", .{ .expert, .dout, .d }, null),
-            .down_proj = store.withPrefix("experts").createTensor("down_proj", .{ .expert, .d, .dout }, null),
+            .shared_expert_gate = .init(store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .gate_up_proj = gate_up_proj_tensor,
+            .gate_up_proj_scale = null,
+            .slice_gate_proj = slice_gate_proj,
+            .slice_gate_proj_scale = slice_gate_proj_scale,
+            .slice_up_proj = slice_up_proj,
+            .slice_up_proj_scale = slice_up_proj_scale,
+            .down_proj = down_proj_tensor,
+            .down_proj_scale = null,
+            .slice_down_proj = slice_down_proj,
+            .slice_down_proj_scale = slice_down_proj_scale,
             .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok.?),
         };
     }
 
+    pub fn deinit(self: Moe, allocator: std.mem.Allocator) void {
+        allocator.free(self.slice_gate_proj);
+        allocator.free(self.slice_gate_proj_scale);
+        allocator.free(self.slice_up_proj);
+        allocator.free(self.slice_up_proj_scale);
+        allocator.free(self.slice_down_proj);
+        allocator.free(self.slice_down_proj_scale);
+    }
+
     pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
+        return switch (self.layout) {
+            .packed_weights => if (self.gate_up_proj_scale != null and self.down_proj_scale != null)
+                self.forwardQuantized(x, moe_metadata, moe_parameters)
+            else
+                self.forwardUnquantized(x, moe_metadata, moe_parameters),
+            .per_expert => self.forwardQuantized(x, moe_metadata, moe_parameters),
+        };
+    }
+
+    pub fn forwardUnquantized(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
 
-        const moe_output = zml.moe.moe(
+        const moe_output = zml.moe.forwardMoe(
             x,
             topk_ids,
             routing_scores,
-            self.gate_up_proj,
+            self.gate_up_proj.?,
             null,
             null,
-            self.down_proj,
+            self.down_proj.?,
             null,
             null,
             moe_metadata,
@@ -652,15 +1007,104 @@ pub const Moe = struct {
         return moe_output.add(shared);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(Moe)) void {
+    pub fn forwardQuantized(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
+        stdx.debug.assert(self.layout == .packed_weights, "quantized forward expects packed MoE weights", .{});
+
+        const routing_scores, const topk_ids = self.router.forward(x);
+
+        const moe_output = zml.moe.forwardMoe(
+            x,
+            topk_ids,
+            routing_scores,
+            self.gate_up_proj.?,
+            self.gate_up_proj_scale,
+            null,
+            self.down_proj.?,
+            self.down_proj_scale,
+            null,
+            moe_metadata,
+            moe_parameters,
+        ) catch |err| stdx.debug.panic("moe backend failed: {}", .{err});
+
+        const shared_gate = self.shared_expert_gate.forward(x).sigmoid().broad(x.shape());
+        const shared = self.shared_expert.forward(x).mul(shared_gate);
+
+        return moe_output.add(shared);
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Moe), allocator: std.mem.Allocator) void {
         Mlp.unloadBuffers(&self.shared_expert);
         self.shared_expert_gate.weight.deinit();
         if (self.shared_expert_gate.bias) |*bias| bias.deinit();
-        self.gate_up_proj.deinit();
-        self.down_proj.deinit();
+        if (self.gate_up_proj) |*gate_up_proj| gate_up_proj.deinit();
+        if (self.gate_up_proj_scale) |*gate_up_proj_scale| gate_up_proj_scale.deinit();
+        for (self.slice_gate_proj) |*tensor| tensor.deinit();
+        allocator.free(self.slice_gate_proj);
+        for (self.slice_gate_proj_scale) |*tensor| tensor.deinit();
+        allocator.free(self.slice_gate_proj_scale);
+        for (self.slice_up_proj) |*tensor| tensor.deinit();
+        allocator.free(self.slice_up_proj);
+        for (self.slice_up_proj_scale) |*tensor| tensor.deinit();
+        allocator.free(self.slice_up_proj_scale);
+        if (self.down_proj) |*down_proj| down_proj.deinit();
+        if (self.down_proj_scale) |*down_proj_scale| down_proj_scale.deinit();
+        for (self.slice_down_proj) |*tensor| tensor.deinit();
+        allocator.free(self.slice_down_proj);
+        for (self.slice_down_proj_scale) |*tensor| tensor.deinit();
+        allocator.free(self.slice_down_proj_scale);
         Router.unloadBuffers(&self.router);
     }
 };
+
+fn forwardLinearDequantizeFp8(x: zml.Tensor, linear: zml.nn.Linear, scale_inv: ?zml.Tensor) zml.Tensor {
+    if (scale_inv == null) {
+        return linear.forward(x);
+    }
+
+    const weight_scale_inv = scale_inv.?;
+    const num_tokens = x.dim(.b) * x.dim(.s);
+
+    stdx.debug.assert(x.rank() == 3, "expected a rank-3 activation tensor, got {f}", .{x.shape()});
+    stdx.debug.assert(linear.tag == zml.Shape.toTag(.d), "blocked FP8 linear only supports contraction on .d, got {any}", .{linear.tag});
+    stdx.debug.assert(linear.weight.rank() == 2, "expected a rank-2 weight tensor, got {f}", .{linear.weight.shape()});
+    stdx.debug.assert(linear.weight.dtype() == .f8e4m3fn, "expected FP8 weights for blocked FP8 path, got {}", .{linear.weight.dtype()});
+    stdx.debug.assert(@mod(linear.weight.dim(.dout), 128) == 0, "output dim must be divisible by 128, got {d}", .{linear.weight.dim(.dout)});
+    stdx.debug.assert(@mod(linear.weight.dim(.d), 128) == 0, "weight input dim must be divisible by 128, got {d}", .{linear.weight.dim(.d)});
+    stdx.debug.assert(linear.weight.dim(.d) == x.dim(-1), "activation and weight input dims must match, got {f} and {f}", .{ x.shape(), linear.weight.shape() });
+    stdx.debug.assert(weight_scale_inv.rank() == 2, "expected a rank-2 FP8 scale tensor, got {f}", .{weight_scale_inv.shape()});
+    stdx.debug.assert(weight_scale_inv.dim(.dout) * 128 == linear.weight.dim(.dout), "scale output blocks must match weight output dim, got {f} and {f}", .{ weight_scale_inv.shape(), linear.weight.shape() });
+    stdx.debug.assert(weight_scale_inv.dim(.d) * 128 == linear.weight.dim(.d), "scale input blocks must match weight input dim, got {f} and {f}", .{ weight_scale_inv.shape(), linear.weight.shape() });
+
+    const blocked_weight = linear.weight.reshape(.{
+        .dout_block = @divExact(linear.weight.dim(.dout), 128),
+        .dout_chunk = 128,
+        .d_block = @divExact(linear.weight.dim(.d), 128),
+        .d_chunk = 128,
+    });
+    const blocked_scale = weight_scale_inv.reshape(.{
+        .dout_block = weight_scale_inv.dim(.dout),
+        .dout_chunk = 1,
+        .d_block = weight_scale_inv.dim(.d),
+        .d_chunk = 1,
+    });
+
+    const dequantized_weight = blocked_weight
+        .convert(.bf16)
+        .mul(blocked_scale.convert(.bf16))
+        .merge(.{ .dout = .{ .dout_block, .dout_chunk }, .d = .{ .d_block, .d_chunk } });
+
+    const flat_x = x.reshape(.{ .token = num_tokens, .d = x.dim(-1) });
+    var y = flat_x.dotGeneral(
+        dequantized_weight,
+        &.{
+            .{ @intCast(flat_x.axis(.d)), @intCast(dequantized_weight.axis(.d)) },
+        },
+        &.{},
+    );
+
+    y = y.reshape(.{ .b = x.dim(.b), .s = x.dim(.s), .dout = linear.weight.dim(.dout) });
+    return if (linear.bias) |bias| y.add(bias.broad(y.shape())) else y;
+}
 
 pub const TextRotaryEmbedding = struct {
     rope_opts: zml.nn.RopeOpts,
@@ -737,10 +1181,13 @@ pub const TextRotaryEmbedding = struct {
 
 pub const GatedDeltaNet = struct {
     in_proj_qkv: zml.nn.Linear,
+    in_proj_qkv_scale: ?zml.Tensor,
     in_proj_z: zml.nn.Linear,
+    in_proj_z_scale: ?zml.Tensor,
     in_proj_b: zml.nn.Linear,
     in_proj_a: zml.nn.Linear,
     out_proj: zml.nn.Linear,
+    out_proj_scale: ?zml.Tensor,
     conv1d_weight: zml.Tensor,
     dt_bias: zml.Tensor,
     aLog: zml.Tensor,
@@ -762,10 +1209,13 @@ pub const GatedDeltaNet = struct {
             @divExact(config.text_config.linear_num_value_heads, config.text_config.linear_num_key_heads);
         return .{
             .in_proj_qkv = initProj(store.withPrefix("in_proj_qkv"), .{ .dout = .model, .d = .replicated }),
+            .in_proj_qkv_scale = store.withPrefix("in_proj_qkv").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .in_proj_z = initProj(store.withPrefix("in_proj_z"), .{ .dout = .model, .d = .replicated }),
+            .in_proj_z_scale = store.withPrefix("in_proj_z").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .model, .d = .replicated }),
             .in_proj_b = initProj(store.withPrefix("in_proj_b"), .{ .dout = .model, .d = .replicated }),
             .in_proj_a = initProj(store.withPrefix("in_proj_a"), .{ .dout = .model, .d = .replicated }),
             .out_proj = initProj(store.withPrefix("out_proj"), .{ .dout = .replicated, .d = .model }),
+            .out_proj_scale = store.withPrefix("out_proj").maybeCreateTensor("weight_scale_inv", .{ .dout, .d }, .{ .dout = .replicated, .d = .model }),
             .conv1d_weight = store.withPrefix("conv1d").createTensor("weight", .{ .out, .in, .kernel_size }, .{ .out = .model, .in = .replicated, .kernel_size = .replicated }),
             .dt_bias = store.createTensor("dt_bias", .{.vh}, .{ .vh = .model }),
             .aLog = store.createTensor("A_log", .{.vh}, .{ .vh = .model }),
@@ -781,10 +1231,13 @@ pub const GatedDeltaNet = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(GatedDeltaNet)) void {
         self.in_proj_qkv.weight.deinit();
+        if (self.in_proj_qkv_scale) |*scale| scale.deinit();
         self.in_proj_z.weight.deinit();
+        if (self.in_proj_z_scale) |*scale| scale.deinit();
         self.in_proj_b.weight.deinit();
         self.in_proj_a.weight.deinit();
         self.out_proj.weight.deinit();
+        if (self.out_proj_scale) |*scale| scale.deinit();
         self.conv1d_weight.deinit();
         self.dt_bias.deinit();
         self.aLog.deinit();
@@ -846,7 +1299,8 @@ pub const GatedDeltaNet = struct {
         const left_pad = self.conv_kernel_size - 1;
 
         const x_in = x.withPartitioning(.{ .d = .replicated });
-        const projected_qkv = self.in_proj_qkv.forward(x_in).rename(.{ .dout = .mix }).withPartitioning(.{ .s = .replicated, .mix = .model });
+        const projected_qkv = forwardLinearDequantizeFp8(x_in, self.in_proj_qkv, self.in_proj_qkv_scale)
+            .rename(.{ .dout = .mix }).withPartitioning(.{ .s = .replicated, .mix = .model });
         const use_cached_state = x.dim(.s) == 1 and left_pad > 0;
         const conv_input = if (use_cached_state)
             zml.Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
@@ -878,7 +1332,9 @@ pub const GatedDeltaNet = struct {
         }
         mixed_qkv = mixed_qkv.withPartitioning(.{ .s = .replicated, .mix = .model });
 
-        const z = self.in_proj_z.forward(x_in).splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim }).withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
+        const z = forwardLinearDequantizeFp8(x_in, self.in_proj_z, self.in_proj_z_scale)
+            .splitAxis(.dout, .{ .vh = self.num_v_heads, .vhd = self.head_v_dim })
+            .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
         const b = self.in_proj_b.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
         const a = self.in_proj_a.forward(x_in).rename(.{ .dout = .vh }).withPartitioning(.{ .s = .replicated, .vh = .model });
 
@@ -919,7 +1375,11 @@ pub const GatedDeltaNet = struct {
             .rename(.{ .d = .vhd })
             .withPartitioning(.{ .s = .replicated, .vh = .model, .vhd = .replicated });
 
-        const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const output = forwardLinearDequantizeFp8(
+            core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } }),
+            self.out_proj,
+            self.out_proj_scale,
+        ).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
         const updated_cache = cache.update(
             buildUpdatedConvState(conv_input, left_pad),
             last_recurrent_state,

@@ -18,6 +18,8 @@ class FakeOptions:
     instrumentation_mode: str = ""
     default_dot_input_precision: str = "tf32"
     allowed_dot_input_precisions: tuple = ("tf32", "tf32x3", "ieee", "bf16x3", "bf16x6")
+    supported_fp8_dtypes: tuple = ("fp8e4nv", "fp8e5", "fp8e5b16", "fp8e4b8")
+    deprecated_fp8_dot_operand_dtypes: tuple = ()
     max_num_imprecise_acc_default: int = 0
     backend_name: str = "cpu"
 
