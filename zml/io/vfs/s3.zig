@@ -396,7 +396,11 @@ pub const S3 = struct {
 
     fn dirStatFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.Dir.StatFileOptions) std.Io.Dir.StatFileError!std.Io.File.Stat {
         const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.Dir.StatFileError.Unexpected;
+        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
+            error.BadPathName => return std.Io.File.OpenError.BadPathName,
+            else => return std.Io.File.OpenError.Unexpected,
+        };
 
         return .{
             .inode = 0,
@@ -415,7 +419,11 @@ pub const S3 = struct {
 
     fn dirOpenFile(userdata: ?*anyopaque, dir: std.Io.Dir, sub_path: []const u8, _: std.Io.File.OpenFlags) std.Io.File.OpenError!std.Io.File {
         const self: *S3 = @fieldParentPtr("base", VFSBase.as(userdata));
-        const size = self.fetchSize(dir, sub_path) catch return std.Io.File.OpenError.Unexpected;
+        const size = self.fetchSize(dir, sub_path) catch |err| switch (err) {
+            error.FileNotFound => return std.Io.File.OpenError.FileNotFound,
+            error.BadPathName => return std.Io.File.OpenError.BadPathName,
+            else => return std.Io.File.OpenError.Unexpected,
+        };
 
         var path_buffer: [8 * 1024]u8 = undefined;
         const path = self.resolvePath(dir, sub_path, &path_buffer) catch return std.Io.File.OpenError.SystemResources;
@@ -744,13 +752,16 @@ pub const S3 = struct {
         var redirect_buffer: [8 * 1024]u8 = undefined;
         const res = try req.receiveHead(&redirect_buffer);
 
-        switch (res.head.status.class()) {
-            .success => return res.head.content_length.?,
-            else => {
-                log.err("Failed to fetch size for {s}: {s}", .{ url, res.head.bytes });
-                return error.ServerError;
+        return switch (res.head.status.class()) {
+            .success => res.head.content_length.?,
+            else => switch (res.head.status) {
+                .not_found => return error.FileNotFound,
+                else => blk: {
+                    log.err("Failed to fetch size for {s}: {s}", .{ url, res.head.bytes });
+                    break :blk error.ServerError;
+                },
             },
-        }
+        };
     }
 
     fn performRead(self: *S3, handle: *Handle, data: []const []u8, offset: u64) !usize {
