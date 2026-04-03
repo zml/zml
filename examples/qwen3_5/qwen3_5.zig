@@ -116,12 +116,11 @@ pub const Qwen35 = struct {
         self: Qwen35,
         tokens_: Tensor,
         token_index: Tensor,
-        seq_len: Tensor,
         kv_cache: KvCache,
         rng: Tensor.Rng,
     ) struct { Tensor, KvCache, Tensor.Rng } {
         const tokens = tokens_.withPartialTags(.{.s});
-        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, seq_len, kv_cache);
+        const text_model_output, const updated_kv_cache = self.text_model.forward(tokens, token_index, kv_cache);
         const new_tokens, const new_rng = self.sampleTokens(text_model_output, rng);
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
     }
@@ -180,14 +179,13 @@ pub const TextModel = struct {
         self: TextModel,
         tokens: Tensor,
         token_index: Tensor,
-        seq_len: Tensor,
         kv_cache: KvCache,
     ) struct { Tensor, KvCache } {
         var hidden_states = self.embed_tokens.weight.gather(.{ .voc = tokens }, .{});
 
         var updated_kv_cache = kv_cache;
         for (self.layers, 0..) |layer, i| {
-            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, seq_len, updated_kv_cache.atLayer(i));
+            hidden_states, updated_kv_cache = layer.forward(hidden_states, token_index, updated_kv_cache.atLayer(i));
         }
 
         hidden_states = self.norm.forward(hidden_states);
@@ -233,7 +231,6 @@ pub const TransformerLayer = struct {
         self: TransformerLayer,
         x0: Tensor,
         token_index: Tensor,
-        seq_len: Tensor,
         kv_cache: KvCache.LayerView,
     ) struct { Tensor, KvCache } {
         const residual0 = x0;
@@ -248,7 +245,7 @@ pub const TransformerLayer = struct {
                 updated_kv_cache.self_attn = result[1];
             },
             .linear_attn => |*linear_attn| {
-                const result = linear_attn.forward(normalized_x0, seq_len, kv_cache.cache.linear_attn);
+                const result = linear_attn.forward(normalized_x0, kv_cache.cache.linear_attn);
                 attention_output = result[0];
                 updated_kv_cache.gated_delta_net = result[1];
             },
@@ -529,7 +526,7 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
-    fn recurrent_gated_delta_rule(query: Tensor, key: Tensor, value: Tensor, g: Tensor, beta: Tensor, seq_len: Tensor, initial_state: ?Tensor) struct { Tensor, Tensor } {
+    fn recurrent_gated_delta_rule(query: Tensor, key: Tensor, value: Tensor, g: Tensor, beta: Tensor, initial_state: ?Tensor) struct { Tensor, Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
         const key_norm = zml.nn.normalizeL2(key.rename(.{ .kh = .vh }), 1e-6);
@@ -558,7 +555,6 @@ pub const GatedDeltaNet = struct {
             value_f32,
             alpha_f32,
             beta_f32,
-            seq_len,
             .{ .s = initial_recurrent_state },
         );
 
@@ -568,14 +564,17 @@ pub const GatedDeltaNet = struct {
         };
     }
 
-    fn buildUpdatedConvState(input: Tensor, valid_seq_len: Tensor, left_pad: i64) Tensor {
-        const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad, .mix = input.dim(.mix) }, input.dtype());
+    fn buildUpdatedConvState(input: Tensor, left_pad: i64) Tensor {
+        const copy_len = @min(input.dim(.s), left_pad);
+        const tail = input.slice1d(.s, .{ .start = input.dim(.s) - copy_len, .end = input.dim(.s) });
+        if (copy_len == left_pad) return tail;
+
+        const padding_shape = zml.Shape.init(.{ .b = input.dim(.b), .s = left_pad - copy_len, .mix = input.dim(.mix) }, input.dtype());
         const padding = Tensor.constant(input.dtype().zero()).broad(padding_shape);
-        const padded_input = Tensor.concatenate(&.{ padding, input }, .s);
-        return padded_input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = valid_seq_len.convert(.i32), .len = left_pad } });
+        return Tensor.concatenate(&.{ padding, tail }, .s);
     }
 
-    pub fn forward(self: GatedDeltaNet, x: Tensor, seq_len: Tensor, cache: KvCache.GatedDeltaNetCache) struct { Tensor, KvCache.GatedDeltaNetCache } {
+    pub fn forward(self: GatedDeltaNet, x: Tensor, cache: KvCache.GatedDeltaNetCache) struct { Tensor, KvCache.GatedDeltaNetCache } {
         const key_dim = self.num_k_heads * self.head_k_dim;
         const value_dim = self.num_v_heads * self.head_v_dim;
         const conv_dim = 2 * key_dim + value_dim;
@@ -587,10 +586,6 @@ pub const GatedDeltaNet = struct {
             Tensor.concatenate(&.{ cache.convState(), projected_qkv }, .s)
         else
             projected_qkv;
-        const valid_conv_seq_len = if (use_cached_state)
-            Tensor.scalar(conv_input.dim(.s), seq_len.dtype())
-        else
-            seq_len;
 
         const kernel = self.conv1d_weight;
         var mixed_qkv = Tensor.conv1d(
@@ -643,7 +638,6 @@ pub const GatedDeltaNet = struct {
             value,
             g,
             beta,
-            seq_len,
             if (use_cached_state) cache.recurrentState() else null,
         );
 
@@ -656,7 +650,7 @@ pub const GatedDeltaNet = struct {
 
         const output = self.out_proj.forward(core_attn_out_normed.merge(.{ .d = .{ .vh, .vhd } })).rename(.{ .dout = .d });
         const updated_cache = cache.update(
-            buildUpdatedConvState(conv_input, valid_conv_seq_len, left_pad),
+            buildUpdatedConvState(conv_input, left_pad),
             last_recurrent_state,
         );
         return .{ output, updated_cache };
