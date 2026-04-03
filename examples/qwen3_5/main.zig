@@ -740,7 +740,7 @@ fn checkMixedPrefillCaches(
 
     var padded_tokens = try zml.Slice.alloc(allocator, zml.Shape.init(.{ 1, prefill_len }, prompt_tokens.shape.dtype()));
     defer padded_tokens.free(allocator);
-    @memset(padded_tokens.data(), 0);
+    // @memset(padded_tokens.data(), 0);
     @memcpy(padded_tokens.data()[0..prompt_tokens.data().len], prompt_tokens.data());
 
     var padded_tokens_buffer = try zml.Buffer.fromSlice(io, platform, padded_tokens, replicated_sharding);
