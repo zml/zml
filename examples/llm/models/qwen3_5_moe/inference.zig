@@ -26,6 +26,7 @@ pub const CompilationParameters = struct {
     moe_parameters: zml.moe.Parameters,
     seqlen: u32,
     shardings: common.Shardings,
+    xla_dump_to: ?[]const u8,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, moe_backend: zml.moe.Backend, shardings: common.Shardings) CompilationParameters {
         const dtype = mdl.text_model.embed_tokens.weight.dtype();
@@ -37,6 +38,7 @@ pub const CompilationParameters = struct {
             .moe_parameters = .init(.fromBackend(moe_backend, config.text_config.num_experts_per_tok)),
             .seqlen = seqlen,
             .shardings = shardings,
+            .xla_dump_to = "/home/ubuntu/xla_dump",
         };
     }
 };
@@ -105,6 +107,7 @@ fn compileSelfAttnLayerExe(
     moe_metadata: zml.moe.Metadata,
     moe_parameters: zml.moe.Parameters,
     shardings: [2]zml.sharding.Sharding,
+    xla_dump_to: ?[]const u8,
     progress: *std.Progress.Node,
     label: []const u8,
 ) !zml.Exe {
@@ -117,7 +120,10 @@ fn compileSelfAttnLayerExe(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
 
-    return platform.compile(allocator, io, mdl, .forwardSelfAttn, .{ hidden, token_index, cache, config, moe_metadata, moe_parameters }, .{ .shardings = &shardings });
+    return platform.compile(allocator, io, mdl, .forwardSelfAttn, .{ hidden, token_index, cache, config, moe_metadata, moe_parameters }, .{
+        .shardings = &shardings,
+        .xla_dump_to = xla_dump_to,
+    });
 }
 
 fn compileLinearAttnLayerExe(
@@ -132,6 +138,7 @@ fn compileLinearAttnLayerExe(
     moe_metadata: zml.moe.Metadata,
     moe_parameters: zml.moe.Parameters,
     shardings: [2]zml.sharding.Sharding,
+    xla_dump_to: ?[]const u8,
     progress: *std.Progress.Node,
     label: []const u8,
 ) !zml.Exe {
@@ -144,7 +151,10 @@ fn compileLinearAttnLayerExe(
     const now: std.Io.Timestamp = .now(io, .awake);
     defer log.info("Compiled {s} [{f}]", .{ label, now.untilNow(io, .awake) });
 
-    return platform.compile(allocator, io, mdl, .forwardLinearAttn, .{ hidden, token_index, cache, config, moe_metadata, moe_parameters }, .{ .shardings = &shardings });
+    return platform.compile(allocator, io, mdl, .forwardLinearAttn, .{ hidden, token_index, cache, config, moe_metadata, moe_parameters }, .{
+        .shardings = &shardings,
+        .xla_dump_to = xla_dump_to,
+    });
 }
 
 fn findFirstLayerIndex(layer_types: []const model.LayerType, target: model.LayerType) ?usize {
@@ -249,11 +259,12 @@ fn compileModel(
             moe_metadata_: zml.moe.Metadata,
             moe_parameters_: zml.moe.Parameters,
             shardings_: [2]zml.sharding.Sharding,
+            xla_dump_to_: ?[]const u8,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "prefill full-attention layer...");
+            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill full-attention layer...");
         }
-    }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, full_layer_model, prefill_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, parameters.xla_dump_to, progress });
     errdefer if (prefill_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_full_layer_future = try io.concurrent(struct {
@@ -269,11 +280,12 @@ fn compileModel(
             moe_metadata_: zml.moe.Metadata,
             moe_parameters_: zml.moe.Parameters,
             shardings_: [2]zml.sharding.Sharding,
+            xla_dump_to_: ?[]const u8,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "decode full-attention layer...");
+            return compileSelfAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode full-attention layer...");
         }
-    }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, full_layer_model, decode_hidden, token_index, self_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, parameters.xla_dump_to, progress });
     errdefer if (decode_full_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var prefill_full_layer_exe: ?zml.Exe = null;
@@ -296,11 +308,12 @@ fn compileModel(
             moe_metadata_: zml.moe.Metadata,
             moe_parameters_: zml.moe.Parameters,
             shardings_: [2]zml.sharding.Sharding,
+            xla_dump_to_: ?[]const u8,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "prefill linear-attention layer...");
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "prefill linear-attention layer...");
         }
-    }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, linear_layer_model, prefill_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.prefill_moe_metadata, parameters.moe_parameters, all_shardings, parameters.xla_dump_to, progress });
     errdefer if (prefill_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_linear_layer_future = try io.concurrent(struct {
@@ -316,11 +329,12 @@ fn compileModel(
             moe_metadata_: zml.moe.Metadata,
             moe_parameters_: zml.moe.Parameters,
             shardings_: [2]zml.sharding.Sharding,
+            xla_dump_to_: ?[]const u8,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
-            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, progress_, "decode linear-attention layer...");
+            return compileLinearAttnLayerExe(allocator_, io_, platform_, layer_model_, hidden_, token_index_, cache_, config_, moe_metadata_, moe_parameters_, shardings_, xla_dump_to_, progress_, "decode linear-attention layer...");
         }
-    }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, linear_layer_model, decode_hidden, token_index, linear_attn_cache, qwen35_model.config, parameters.decode_moe_metadata, parameters.moe_parameters, all_shardings, parameters.xla_dump_to, progress });
     errdefer if (decode_linear_layer_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var prefill_linear_layer_exe: ?zml.Exe = null;
@@ -336,7 +350,7 @@ fn compileModel(
             allocator_: std.mem.Allocator,
             io_: std.Io,
             platform_: *const zml.Platform,
-            model_: model.TextModel,
+            sampler_: model.Sampler,
             prefill_hidden_: zml.Tensor,
             rng_: zml.Tensor.Rng,
             shardings_: [2]zml.sharding.Sharding,
@@ -347,9 +361,9 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled prefill sampling [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ prefill_hidden_, rng_, null }, .{ .shardings = &shardings_ });
+            return platform_.compile(allocator_, io_, sampler_, .sampleTokens, .{ prefill_hidden_, rng_, null }, .{ .shardings = &shardings_ });
         }
-    }.call, .{ allocator, io, platform, qwen35_model.text_model, prefill_hidden, parameters.rng, all_shardings, progress });
+    }.call, .{ allocator, io, platform, qwen35_model.text_model.sampler(), prefill_hidden, parameters.rng, all_shardings, progress });
     errdefer if (prefill_sampling_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -360,7 +374,7 @@ fn compileModel(
             allocator_: std.mem.Allocator,
             io_: std.Io,
             platform_: *const zml.Platform,
-            model_: model.TextModel,
+            sampler_: model.Sampler,
             decode_hidden_: zml.Tensor,
             rng_: zml.Tensor.Rng,
             token_index_: zml.Tensor,
@@ -372,9 +386,9 @@ fn compileModel(
             defer node_.end();
             const now_: std.Io.Timestamp = .now(io_, .awake);
             defer log.info("Compiled decode sampling [{f}]", .{now_.untilNow(io_, .awake)});
-            return platform_.compile(allocator_, io_, model_, .sampleTokens, .{ decode_hidden_, rng_, token_index_ }, .{ .shardings = &shardings_ });
+            return platform_.compile(allocator_, io_, sampler_, .sampleTokens, .{ decode_hidden_, rng_, token_index_ }, .{ .shardings = &shardings_ });
         }
-    }.call, .{ allocator, io, platform, qwen35_model.text_model, decode_hidden, parameters.rng, token_index, all_shardings, progress });
+    }.call, .{ allocator, io, platform, qwen35_model.text_model.sampler(), decode_hidden, parameters.rng, token_index, all_shardings, progress });
     errdefer if (decode_sampling_future.cancel(io)) |v| {
         v.deinit();
     } else |_| {};
@@ -404,24 +418,25 @@ fn initMoeMetadata(qwen_model: model.Model, token_len: usize, batch_size: u32, b
     var second_out_shape: ?zml.Shape = null;
 
     const num_experts_per_tok = qwen_model.config.text_config.num_experts_per_tok.?;
+    const num_experts = qwen_model.config.text_config.num_experts.?;
 
     for (qwen_model.text_model.layers) |layer| {
         const gate_up_shape = zml.Shape.init(.{
-            .expert = layer.moe.gate_up_proj.dim(.expert),
-            .out = layer.moe.gate_up_proj.dim(.dout),
-        }, layer.moe.gate_up_proj.dtype());
+            .expert = num_experts,
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout),
+        }, .bf16);
         const down_shape = zml.Shape.init(.{
-            .expert = layer.moe.down_proj.dim(.expert),
-            .out = layer.moe.down_proj.dim(.d),
-        }, layer.moe.down_proj.dtype());
+            .expert = num_experts,
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.d),
+        }, .bf16);
         const first_out = zml.Shape.init(.{
             .total_tokens = batch_size * token_len * num_experts_per_tok,
-            .out = layer.moe.gate_up_proj.dim(.dout),
+            .out = layer.moe.shared_expert.gate_proj.weight.dim(.dout) * 2,
         }, .bf16);
         const second_out = zml.Shape.init(.{
             .token = batch_size * token_len,
             .topk = num_experts_per_tok,
-            .out = layer.moe.down_proj.dim(.d),
+            .out = layer.moe.shared_expert.down_proj.weight.dim(.d),
         }, .bf16);
 
         if (w1_zero_bias_shape == null) {

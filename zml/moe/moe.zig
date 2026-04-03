@@ -13,7 +13,7 @@ pub const Backend = enum {
                 if (zml.platform.cuda.tryGetComputeCapabilities(platform, first_device)) |cc| {
                     if (std.mem.eql(u8, cc, "9.0")) {
                         break :b switch (weights_dtype) {
-                            .bf16, .f16 => .triton,
+                            .bf16, .f16, .f8e4m3fn => .triton,
                             else => error.UnsupportedDataType,
                         };
                     }
@@ -92,7 +92,7 @@ pub const Metadata = union(Backend) {
     }
 };
 
-pub fn moe(
+pub fn forwardMoe(
     input: zml.Tensor,
     topk_ids: zml.Tensor,
     topk_weights: zml.Tensor,
