@@ -9,6 +9,7 @@ pub const VFS = struct {
     pub const HTTP = vfs.HTTP;
     pub const HF = vfs.HF;
     pub const S3 = vfs.S3;
+    pub const GCS = vfs.GCS;
     const VFSBase = vfs.VFSBase;
 
     const Handles = std.ArrayList(Handle);

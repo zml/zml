@@ -40,6 +40,9 @@ pub fn main(init: std.process.Init) !void {
     var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
     defer s3_vfs.deinit();
 
+    var gcs_vfs: zml.io.VFS.GCS = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer gcs_vfs.deinit();
+
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
@@ -47,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("https", vfs_https.io());
     try vfs.register("hf", hf_vfs.io());
     try vfs.register("s3", s3_vfs.io());
+    try vfs.register("gs", gcs_vfs.io());
 
     const io = vfs.io();
 
