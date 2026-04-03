@@ -5,4 +5,4 @@ else
     echo BUILD_SCM_REVISION "dev"
 fi
 
-echo STABLE_ZML_SMI_VERSION "$(git describe --tags --dirty --match zml-smi-v*)"
+echo STABLE_ZML_SMI_VERSION "$(git describe --tags --dirty --match 'zml-smi-v*' 2>/dev/null || echo "dev")"
