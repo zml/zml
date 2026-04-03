@@ -179,7 +179,7 @@ fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, prog
     };
     defer allocator.free(bytes);
 
-    return try .fromBytes(allocator, io, bytes);
+    return try .fromBytes(allocator, bytes);
 }
 
 pub fn printZmlLogo(io: std.Io) !void {
