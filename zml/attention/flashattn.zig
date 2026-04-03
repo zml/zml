@@ -258,10 +258,10 @@ pub const fa2 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+    pub fn causal(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
         const ctx = CompilationContext.current();
 
-        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
+        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.causal support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_k = b: {
@@ -462,8 +462,8 @@ pub const fa3 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
-        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3.attention support for batch size != 1 is not supported yet.", .{});
+    pub fn causal(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3.causal support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_k = b: {

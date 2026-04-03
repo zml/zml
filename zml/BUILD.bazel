@@ -31,7 +31,6 @@ zig_library(
     tags = ["manual"],
     srcs = [
         "attention.zig",
-        "attention/attention.zig",
         "attention/flashattn.zig",
         "attention/paged_attention.zig",
         "buffer.zig",

@@ -12,7 +12,7 @@ pub const Session = struct {
     model_buffers: *model.Buffers,
     compiled_model: *const inference.CompiledModel,
     kv_cache_buffers: zml.Bufferized(model.KvCache),
-    attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata),
+    attention_metadata_buffers: zml.Bufferized(zml.attention.Metadata),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
     generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
@@ -32,7 +32,7 @@ pub const Session = struct {
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         var attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, shardings.model);
-        errdefer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
+        errdefer zml.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
         var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, shardings.replicated);
@@ -56,7 +56,7 @@ pub const Session = struct {
 
     pub fn deinit(self: *Session) void {
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
-        zml.attention.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
+        zml.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
         self.generated_token_slice.free(self.allocator);
     }

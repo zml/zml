@@ -80,7 +80,7 @@ pub const LoadedModel = union(ModelType) {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
+        backend: zml.attention.Backend,
         shardings: Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,

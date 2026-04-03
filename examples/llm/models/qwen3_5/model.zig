@@ -128,7 +128,7 @@ pub const LoadedModel = struct {
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
-        backend: zml.attention.attention.Backend,
+        backend: zml.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
         progress: *std.Progress.Node,
@@ -523,13 +523,13 @@ pub const SelfAttn = struct {
         k = partitionCachedKv(k, replicate_kv_heads);
         v = partitionCachedKv(v, replicate_kv_heads);
 
-        const attn_output = zml.attention.attention.attention(
+        const attn_output = zml.attention.causal(
             q,
             k,
             v,
             token_index,
-            zml.attention.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
-            zml.attention.attention.Parameters.init(.fromBackend(.vanilla)),
+            zml.attention.Metadata.init(.fromBackend(.vanilla, x.dim(.s), self.num_heads)),
+            zml.attention.Parameters.init(.fromBackend(.vanilla)),
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());

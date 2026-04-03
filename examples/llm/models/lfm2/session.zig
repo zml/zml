@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const attention = zml.attention.attention;
+const attention = zml.attention;
 
 const inference = @import("inference.zig");
 const model = @import("model.zig");
