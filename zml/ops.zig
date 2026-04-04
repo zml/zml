@@ -2,12 +2,17 @@ const std = @import("std");
 
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
+const Buffer = @import("buffer.zig").Buffer;
+const Bufferized = @import("mem.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
+const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -1561,6 +1566,337 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     }
 
     return outputs_;
+}
+
+pub fn CustomCall(
+    I: type,
+    O: type,
+    A: type,
+    // (TensorToCustomCallBuffer(i), ShapeToBuffer(O), A) -> !?*pjrt.ffi.Error
+    comptime func: anytype,
+    comptime params: struct {
+        name: [:0]const u8,
+        sharding_aware: bool,
+        has_side_effect: bool,
+        output_operand_aliases: ?[]const i64 = null,
+    },
+) type {
+    return struct {
+        pub const InputTensors = I;
+        pub const OutputShapes = O;
+        pub const Attributes = A;
+
+        pub fn register(platform: *const Platform) !void {
+            try platform.registerFfi(.{
+                .name = params.name,
+                .platform_name = null,
+                .handler = @This().handler,
+                .traits = .{
+                    // TODO: Not sure what this means exactly, should this be configurable?
+                    .command_buffer_compatible = true,
+                },
+            });
+        }
+
+        pub fn call(input_tensors: I, output_shapes: O, attributes: A) ShapeToTensor(O) {
+            const args: CustomCallArgs(I, O, A) = .{
+                .input_tensors = input_tensors,
+                .output_shapes = output_shapes,
+                .attributes = attributes,
+            };
+            const opts: CustomCallOptions = .{
+                .has_side_effect = params.has_side_effect,
+                .output_operand_aliases = params.output_operand_aliases,
+            };
+            if (params.sharding_aware) {
+                return shardingAwareTypedCustomCall(
+                    I,
+                    O,
+                    A,
+                    params.name,
+                    opts,
+                    args,
+                );
+            } else {
+                return typedCustomCall(
+                    I,
+                    O,
+                    A,
+                    params.name,
+                    opts,
+                    args,
+                );
+            }
+        }
+
+        fn handler(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
+            if (call_frame.registeringHook()) return null;
+
+            const input_buffers: TensorToCustomCallBuffer(I), const output_buffers: ShapeToCustomCallBuffer(O), const attributes: A = customCallArgsFromPjrtCallFrame(I, O, A, call_frame);
+            return func(call_frame, input_buffers, output_buffers, attributes) catch |err|
+                pjrt.ffi.Error.create(call_frame.api, .unknown, @errorName(err));
+        }
+    };
+}
+
+fn CustomCallArgs(I: type, O: type, A: type) type {
+    return struct {
+        input_tensors: I,
+        output_shapes: O,
+        attributes: A,
+    };
+}
+
+pub const CustomCallBuffer = struct {
+    shape: Shape,
+    ptr: *anyopaque,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{f}@{*}", .{ self.shape, self.ptr });
+    }
+};
+
+pub fn shardingAwareTypedCustomCall(
+    I: type,
+    O: type,
+    A: type,
+    comptime target_name: [:0]const u8,
+    comptime opts: CustomCallOptions,
+    args: CustomCallArgs(I, O, A),
+) ShapeToTensor(O) {
+    var input_tensors: [@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields.len]Tensor = undefined;
+    inline for (@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields, 0..) |field, i| {
+        input_tensors[i] = @field(args.input_tensors, field.name);
+    }
+
+    var output_shapes: [@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields.len]Shape = undefined;
+    inline for (@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |field, i| {
+        output_shapes[i] = @field(args.output_shapes, field.name);
+    }
+
+    const output_tensors = manualComputationInternal(&input_tensors, &output_shapes, args.attributes, (struct {
+        fn body(attributes: A, _: std.mem.Allocator, sharded_input_tensors: []const Tensor, sharded_output_shapes: []const Shape) []const Tensor {
+            return typedCustomCall(
+                []const Tensor,
+                []const Shape,
+                A,
+                target_name,
+                opts,
+                .{
+                    .input_tensors = sharded_input_tensors,
+                    .output_shapes = sharded_output_shapes,
+                    .attributes = attributes,
+                },
+            );
+        }
+    }).body);
+
+    var out: ShapeToTensor(O) = undefined;
+    inline for (@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |field, i| {
+        @field(out, field.name) = output_tensors[i];
+    }
+    return out;
+}
+
+pub fn typedCustomCall(
+    I: type,
+    O: type,
+    A: type,
+    comptime target_name: [:0]const u8,
+    comptime opts: CustomCallOptions,
+    args: CustomCallArgs(I, O, A),
+) ShapeToTensor(O) {
+    const ctx = CompilationContext.current();
+    const allocator = ctx.arena.allocator();
+
+    stdx.debug.assert(!opts.has_side_effect or ctx.manual_computation_depth > 0, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
+
+    const input_tensors: []const Tensor = switch (@typeInfo(@TypeOf(args.input_tensors))) {
+        .@"struct" => |struct_info| b: {
+            var input_tensors: [struct_info.fields.len]Tensor = undefined;
+            inline for (struct_info.fields, 0..) |field, i| {
+                input_tensors[i] = @field(args.input_tensors, field.name);
+            }
+            break :b input_tensors;
+        },
+        // Extra case to support []const Tensor from shardingAwareTypedCustomCall
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected input slice");
+            break :b args.input_tensors;
+        },
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+    };
+
+    const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(args.output_shapes))) {
+        .@"struct" => |struct_info| b: {
+            var output_shapes: [struct_info.fields.len]Shape = undefined;
+            inline for (struct_info.fields, 0..) |field, i| {
+                output_shapes[i] = @field(args.output_shapes, field.name);
+            }
+            break :b output_shapes;
+        },
+        // Extra case to support []const Shape from shardingAwareTypedCustomCall
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected input slice");
+            break :b args.output_shapes;
+        },
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+    };
+
+    const metadata_attributes =
+        switch (@typeInfo(@TypeOf(args.attributes))) {
+            .@"struct" => |struct_info| b: {
+                var mlir_attributes_array: [struct_info.fields.len]mlir.NamedAttribute = undefined;
+                inline for (struct_info.fields, 0..) |field, i| {
+                    const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
+                        .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(args.attributes, field.name))),
+                        .int => |int_field| switch (int_field.signedness) {
+                            .signed => switch (int_field.bits) {
+                                8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(args.attributes, field.name)),
+                                16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @field(args.attributes, field.name)),
+                                32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @field(args.attributes, field.name)),
+                                64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @field(args.attributes, field.name)),
+                                else => @panic("Unsupported DataType"),
+                            },
+                            .unsigned => switch (int_field.bits) {
+                                8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @field(args.attributes, field.name)),
+                                16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @field(args.attributes, field.name)),
+                                32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @field(args.attributes, field.name)),
+                                64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @field(args.attributes, field.name)),
+                                else => @panic("Unsupported DataType"),
+                            },
+                        },
+                        .float => |float_field| switch (float_field.bits) {
+                            16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(args.attributes, field.name))),
+                            32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(args.attributes, field.name))),
+                            64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(args.attributes, field.name))),
+                            else => @panic("Unsupported DataType"),
+                        },
+                        .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(args.attributes, field.name)),
+                        .pointer => |pointer_info| switch (pointer_info.size) {
+                            .slice => if (pointer_info.child == u8)
+                                mlir.stringAttribute(ctx.mlir_ctx, @field(args.attributes, field.name))
+                            else
+                                @panic("Unsupported pointer type in metadata"),
+                            else => @panic("Unsupported pointer type in metadata"),
+                        },
+                        else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
+                    };
+                    mlir_attributes_array[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
+                }
+
+                break :b mlir_attributes_array;
+            },
+            else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(args.attributes))),
+        };
+
+    const values = allocator.alloc(*const mlir.Value, input_tensors.len) catch unreachable;
+    const input_shapes = allocator.alloc(Shape, input_tensors.len) catch unreachable;
+    for (input_tensors, 0..) |input, i| {
+        values[i] = input.value();
+        input_shapes[i] = input.shape();
+    }
+
+    const result_types = allocator.alloc(*const mlir.Type, output_shapes.len) catch unreachable;
+    for (output_shapes, 0..) |shape, i| {
+        result_types[i] = mlir.rankedTensorType(shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, shape.dtype()));
+    }
+
+    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, &(metadata_attributes ++ [_]mlir.NamedAttribute{
+        .named(ctx.mlir_ctx, "pjrt_api", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
+        .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
+    }));
+
+    const operand_layouts = allocator.alloc([]const usize, input_shapes.len) catch unreachable;
+    for (input_shapes, 0..) |shape, i| {
+        operand_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(shape.rank())).constSlice()) catch unreachable;
+    }
+
+    const result_layouts = allocator.alloc([]const usize, output_shapes.len) catch unreachable;
+    for (output_shapes, 0..) |shape, i| {
+        result_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(shape.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        ctx.mlir_ctx,
+        values,
+        result_types,
+        .{
+            .call_target_name = target_name,
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = opts.has_side_effect,
+            .operand_layouts = operand_layouts,
+            .result_layouts = result_layouts,
+            .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+            .additional_attributes = &.{},
+        },
+        .unknown(ctx.mlir_ctx),
+    ).appendTo(ctx.currentScope().block);
+
+    if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {
+        op.setAttributeByName("mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, "{manual}"));
+    }
+
+    const outputs_ = allocator.alloc(Tensor, output_shapes.len) catch unreachable;
+    for (output_shapes, 0..) |output_shape, i| {
+        outputs_[i] = Tensor._result(output_shape, op.result(i));
+    }
+
+    return outputs_;
+}
+
+pub fn TensorToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToTensor(T: type) type {
+    return meta.MapRestrict(Shape, Tensor).map(T);
+}
+
+fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.ffi.CallFrame) struct {
+    TensorToCustomCallBuffer(I),
+    ShapeToCustomCallBuffer(O),
+    A,
+} {
+    var input: TensorToCustomCallBuffer(I) = undefined;
+    inline for (@typeInfo(I).@"struct".fields, 0..) |field, i| {
+        const buf = call_frame.args.buffers()[i];
+        @field(input, field.name) = pjrtToCustomCallBuffer(buf);
+    }
+
+    var output: ShapeToCustomCallBuffer(O) = undefined;
+    inline for (@typeInfo(O).@"struct".fields, 0..) |field, i| {
+        const shape_buf = call_frame.results.buffers()[i];
+        @field(output, field.name) = pjrtToCustomCallBuffer(shape_buf);
+    }
+
+    var attributes: A = undefined;
+    inline for (@typeInfo(A).@"struct".fields) |field| {
+        const attribute = call_frame.attrs.getByName(.scalar, field.name) orelse
+            @panic("Attribute not found: " ++ field.name);
+        @field(attributes, field.name) = attribute.get(field.type);
+    }
+
+    return .{ input, output, attributes };
+}
+
+fn pjrtToCustomCallBuffer(buffer: *const pjrt.ffi.Buffer) CustomCallBuffer {
+    const dt = switch (buffer.dtype) {
+        .invalid => @panic("Found an invalid pjrt buffer"),
+        .token => @panic("Found an token pjrt buffer"),
+        inline else => |tag| @field(DataType, @tagName(tag)),
+    };
+    return .{
+        .ptr = buffer.data,
+        .shape = .init(buffer.dims(), dt),
+    };
 }
 
 test customCall {

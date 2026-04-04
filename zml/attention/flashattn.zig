@@ -19,8 +19,8 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
 
 pub fn register(platform: *const zml.Platform) !void {
     if (comptime platforms.isEnabled(.cuda)) {
-        try fa2.register(platform);
         try fa3.register(platform);
+        try fa2.Fa2CustomCall.register(platform);
         try paged_fa2.Decode.register(platform);
         try paged_fa2.Prefill.register(platform);
         try paged_fa3.Decode.register(platform);
@@ -37,6 +37,15 @@ fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
         .i8 => .i8,
         else => unreachable,
     };
+}
+
+fn toFlashattnTensor(buffer: zml.ops.CustomCallBuffer) flashattn.Tensor {
+    return .init(
+        buffer.ptr,
+        buffer.shape.dims(),
+        buffer.shape.withDtype(.u8).computeByteStrides().constSlice(),
+        flashattnDataTypeFromZmlDataType(buffer.shape.dtype()),
+    );
 }
 
 const Buffer = struct {
@@ -145,69 +154,76 @@ pub fn Wrapper(comptime T: type, run_func: std.meta.DeclEnum(T)) type {
 }
 
 pub const fa2 = struct {
-    const custom_call_name = "fa2_mha_varlen_fwd";
-    const Wrapped = Wrapper(@This(), .runInner);
+    const Input = struct {
+        q: zml.Tensor,
+        k: zml.Tensor,
+        v: zml.Tensor,
+        cu_seqlens_q: zml.Tensor,
+        cu_seqlens_k: zml.Tensor,
+        softmax_lse: zml.Tensor,
+        softmax_lse_accum: zml.Tensor,
+        out_accum: zml.Tensor,
+    };
 
-    const register = Wrapped.register;
-    const run = Wrapped.run;
+    const Output = struct {
+        attn: zml.Shape,
+    };
 
-    pub fn runInner(call_frame: *ffi.CallFrame) !?*ffi.Error {
-        if (call_frame.registeringHook()) return null;
+    const Attributes = struct {
+        softmax_scale: f32,
+        is_causal: bool,
+        window_size_left: i32,
+        window_size_right: i32,
+        max_seqlen_q: i32,
+        max_seqlen_k: i32,
+        num_heads: i32,
+    };
 
-        const q = bufferFromFfiBuffer(call_frame.args.buffers()[0]);
-        const k = bufferFromFfiBuffer(call_frame.args.buffers()[1]);
-        const v = bufferFromFfiBuffer(call_frame.args.buffers()[2]);
-        const cu_seqlens_q = bufferFromFfiBuffer(call_frame.args.buffers()[3]);
-        const cu_seqlens_k = bufferFromFfiBuffer(call_frame.args.buffers()[4]);
-        const softmax_lse = bufferFromFfiBuffer(call_frame.args.buffers()[5]);
-        const softmax_lse_accum = bufferFromFfiBuffer(call_frame.args.buffers()[6]);
-        const out_accum = bufferFromFfiBuffer(call_frame.args.buffers()[7]);
-        const o = bufferFromFfiBuffer(call_frame.results.buffers()[0]);
-
-        const softmax_scale: f32 = getScalarAttributeAs(f32, call_frame, "softmax_scale") orelse b: {
-            const head_dim = q.shape.dim(2);
-            break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
-        };
-        const is_causal: bool = getScalarAttributeAs(bool, call_frame, "is_causal").?;
-        const window_size_left: i32 = getScalarAttributeAs(i32, call_frame, "window_size_left") orelse -1;
-        const window_size_right: i32 = getScalarAttributeAs(i32, call_frame, "window_size_right") orelse -1;
-        const max_seqlen_q: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_q").?;
-        const max_seqlen_k: i32 = getScalarAttributeAs(i32, call_frame, "max_seqlen_k").?;
-        const num_heads: i32 = getScalarAttributeAs(i32, call_frame, "num_heads").?;
-
-        const ctx: *ffi.ExecutionContext = @constCast(call_frame.ctx);
-        const stream = call_frame.api.stream(ctx);
-
+    fn ffiCall(
+        call_frame: *zml.pjrt.ffi.CallFrame,
+        input: zml.ops.TensorToCustomCallBuffer(Input),
+        output: zml.ops.ShapeToCustomCallBuffer(Output),
+        attributes: Attributes,
+    ) !?*zml.pjrt.ffi.Error {
         const params: flashattn.FA2MhaVarlenFwdParams = .{
-            .max_seqlen_q = max_seqlen_q,
-            .max_seqlen_k = max_seqlen_k,
-            .is_causal = is_causal,
-            .softmax_scale = softmax_scale,
-            .window_size_left = window_size_left,
-            .window_size_right = window_size_right,
+            .max_seqlen_q = attributes.max_seqlen_q,
+            .max_seqlen_k = attributes.max_seqlen_k,
+            .is_causal = attributes.is_causal,
+            .softmax_scale = attributes.softmax_scale,
+            .window_size_left = attributes.window_size_left,
+            .window_size_right = attributes.window_size_right,
             .num_splits = 0,
-            .num_heads = num_heads,
+            .num_heads = attributes.num_heads,
         };
+
+        const stream = call_frame.api.stream(call_frame.ctx);
 
         flashattn.fa2_mha_varlen_fwd(
-            &q.toFlashattnTensor(),
-            &k.toFlashattnTensor(),
-            &v.toFlashattnTensor(),
-            &o.toFlashattnTensor(),
-            &cu_seqlens_q.toFlashattnTensor(),
-            &cu_seqlens_k.toFlashattnTensor(),
+            &toFlashattnTensor(input.q),
+            &toFlashattnTensor(input.k),
+            &toFlashattnTensor(input.v),
+            &toFlashattnTensor(output.attn),
+            &toFlashattnTensor(input.cu_seqlens_q),
+            &toFlashattnTensor(input.cu_seqlens_k),
             null,
             null,
-            &softmax_lse.toFlashattnTensor(),
+            &toFlashattnTensor(input.softmax_lse),
             null,
-            &softmax_lse_accum.toFlashattnTensor(),
-            &out_accum.toFlashattnTensor(),
+            &toFlashattnTensor(input.softmax_lse_accum),
+            &toFlashattnTensor(input.out_accum),
             &params,
             stream,
         );
 
         return null;
     }
+
+    const Fa2CustomCall = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
+        .name = "fa2_mha_varlen_fwd",
+        .sharding_aware = true,
+        .has_side_effect = true,
+        .output_operand_aliases = &.{0},
+    });
 
     pub const Parameters = struct {
         pub const InitOptions = struct {};
@@ -294,40 +310,34 @@ pub const fa2 = struct {
         const q_sharded = q.withPartitioning(.{ .h = .model });
         const model_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
 
-        const output_shape = q_sharded.shape();
-        var o = zml.ops.manualComputation(
+        const output = Fa2CustomCall.call(
             .{
-                q_sharded,
-                k,
-                v,
-                cu_seqlens_q,
-                cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
-                metadata.softmax_lse.withPartitioning(.{ .h = .model }),
-                metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
-                metadata.out_accum.withPartitioning(.{ .h = .model }),
+                .q = q_sharded,
+                .k = k,
+                .v = v,
+                .cu_seqlens_q = cu_seqlens_q,
+                .cu_seqlens_k = cu_seqlens_k.withTags(.{.i}).withPartitioning(.{ .i = .replicated }),
+                .softmax_lse = metadata.softmax_lse.withPartitioning(.{ .h = .model }),
+                .softmax_lse_accum = metadata.softmax_lse_accum.withPartitioning(.{ .h = .model }),
+                .out_accum = metadata.out_accum.withPartitioning(.{ .h = .model }),
             },
-            output_shape,
             .{
-                .metadata = .{
-                    //.softmax_scale = @as(f32, 1.0),
-                    .is_causal = true,
-                    .window_size_left = @as(i32, -1),
-                    .window_size_right = @as(i32, -1),
-                    .max_seqlen_q = max_seqlen_q,
-                    .max_seqlen_k = max_seqlen_k,
-                    .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
-                },
-                .opts = zml.ops.CustomCallOptions{
-                    .output_operand_aliases = &.{0},
-                    .has_side_effect = false,
-                },
+                .attn = q_sharded.shape(),
             },
-            (struct {
-                fn body(ctx_: anytype, _: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
-                    return zml.ops.customCall(custom_call_name, sharded_inputs, output, ctx_.metadata, ctx_.opts);
-                }
-            }).body,
+            .{
+                .softmax_scale = b: {
+                    const head_dim = q.shape().dim(2);
+                    break :b 1.0 / std.math.sqrt(@as(f32, @floatFromInt(head_dim)));
+                },
+                .is_causal = true,
+                .window_size_left = @as(i32, -1),
+                .window_size_right = @as(i32, -1),
+                .max_seqlen_q = max_seqlen_q,
+                .max_seqlen_k = max_seqlen_k,
+                .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
+            },
         );
+        var o = output.attn;
 
         if (seqlenq_ngroups_swapped) {
             o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups }).transpose(.{ .tot, .h, .ngroups, .hd }).merge(.{ .h = .{ .h, .ngroups } });

@@ -5,6 +5,7 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 
 pub const DataType = @import("dtype.zig").DataType;
+const Shape = @import("shape.zig").Shape;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
