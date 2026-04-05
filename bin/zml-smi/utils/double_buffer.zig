@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn DoubleBuffer(comptime T: type) type {
     return struct {
         const Self = @This();
+        pub const Value = T;
 
         values: [2]T,
         current: std.atomic.Value(u8) = std.atomic.Value(u8).init(0),

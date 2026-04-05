@@ -1,0 +1,18 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "api",
+    import_name = "zml-smi/api",
+    main = "api.zig",
+    srcs = [
+        "client.zig",
+        "server.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/json",
+        "//bin/zml-smi/utils:double_buffer",
+    ],
+)

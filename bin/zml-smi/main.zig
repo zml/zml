@@ -17,6 +17,8 @@ const ProcessEnricher = linux.process.ProcessEnricher;
 const host = linux.metrics;
 const c = @import("c");
 const csv = @import("zml-smi/csv");
+const json = @import("zml-smi/json");
+const api = @import("zml-smi/api");
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
 const static_print = smi_tui.print;
@@ -25,14 +27,23 @@ const data = smi_tui.data;
 const CliArgs = struct {
     top: bool = false,
     csv: bool = false,
+    json: bool = false,
+    api: bool = false,
+    port: u16 = 9090,
+    remotes: ?[]const u8 = null,
     tui_refresh_rate: u16 = 100,
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--csv] [--tui-refresh-rate MS] [--poll-interval MS]
+        \\ zml-smi [--top] [--csv] [--json] [--api] [--port PORT]
+        \\         [--remotes HOST,...] [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
         \\ --csv               Output device metrics as CSV
+        \\ --json              Output device metrics as JSON
+        \\ --api               Expose device metrics as HTTP JSON endpoint
+        \\ --port              API server port (default: 9090)
+        \\ --remotes           Add devices from remote hosts (comma-separated URLs)
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
         \\ --poll-interval     Device polling interval in ms (default: 500)
         \\
@@ -56,7 +67,7 @@ pub fn main(init: std.process.Init) !void {
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
-        .poll_only = !args.top,
+        .poll_only = !args.top and !args.api,
     });
     defer collector.deinit();
 
@@ -65,6 +76,8 @@ pub fn main(init: std.process.Init) !void {
 
     var enricher: ProcessEnricher = try .init(gpa, io);
     defer enricher.deinit();
+
+    if (args.api) std.log.info("serving on port {d}", .{args.port});
 
     inline for (device_backends) |entry| {
         const target, const backend = entry;
@@ -75,8 +88,15 @@ pub fn main(init: std.process.Init) !void {
         }
     }
 
+    const num_local_devices = collector.device_infos.items.len;
+
+    if (args.remotes) |hosts| {
+        try api.addRemotes(&collector, hosts);
+    }
+
     var state = try data.SystemState.init(arena, .{
         .devices = collector.device_infos.items,
+        .num_local_devices = num_local_devices,
         .host = &host_info,
         .targets = targets,
         .tui_refresh_rate = args.tui_refresh_rate,
@@ -92,6 +112,17 @@ pub fn main(init: std.process.Init) !void {
 
         try csv.write(&csv_writer.interface, collector.device_infos.items);
         try csv_writer.flush();
+    } else if (args.json) {
+        var json_buf: [4096]u8 = undefined;
+        var json_writer = std.Io.File.stdout().writer(io, &json_buf);
+
+        try json.write(&json_writer.interface, collector.device_infos.items);
+        try json_writer.flush();
+    } else if (args.api) {
+        var server = try api.Server.init(io, args.port, collector.device_infos.items);
+        defer server.deinit();
+
+        try server.serve();
     } else if (args.top) {
         try tui.run(gpa, io, &state);
     } else {

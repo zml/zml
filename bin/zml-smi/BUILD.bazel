@@ -69,7 +69,8 @@ zig_binary(
     deps = [
         "//bin/zml-smi/collector",
         "//bin/zml-smi/csv",
-        "//bin/zml-smi/platforms/linux",
+        "//bin/zml-smi/json",
+        "//bin/zml-smi/api",
         "//bin/zml-smi/info",
         "//bin/zml-smi/tui",
         "//stdx",
