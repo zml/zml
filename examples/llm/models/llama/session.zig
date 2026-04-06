@@ -68,7 +68,7 @@ pub const Session = struct {
         const start_header = self.tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
         const end_header = self.tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
         const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
-        const newline = self.tokenizer.tokenId("\n") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
         try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header });
@@ -88,7 +88,7 @@ pub const Session = struct {
         const start_header = self.tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
         const end_header = self.tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
         const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
-        const newline = self.tokenizer.tokenId("\n") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
         try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
