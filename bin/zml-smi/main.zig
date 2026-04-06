@@ -12,9 +12,12 @@ pub const std_options: std.Options = .{
 const Collector = @import("zml-smi/collector").Collector;
 const smi_info = @import("zml-smi/info");
 const HostInfo = smi_info.host_info.HostInfo;
-const linux = @import("zml-smi/platforms/linux");
-const ProcessEnricher = linux.process.ProcessEnricher;
-const host = linux.metrics;
+const platform = if (builtin.os.tag == .macos)
+    @import("zml-smi/platforms/macos")
+else
+    @import("zml-smi/platforms/linux");
+const ProcessEnricher = platform.process.ProcessEnricher;
+const host = platform.metrics;
 const c = @import("c");
 const csv = @import("zml-smi/csv");
 const json = @import("zml-smi/json");

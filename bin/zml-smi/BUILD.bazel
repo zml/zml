@@ -77,8 +77,9 @@ zig_binary(
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
     ] + select({
-        "@platforms//os:macos": [],
+        "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
         "//conditions:default": [
+            "//bin/zml-smi/platforms/linux",
             "//bin/zml-smi/platforms/amdsmi",
             "//bin/zml-smi/platforms/neuron",
             "//bin/zml-smi/platforms/nvml",
