@@ -6,9 +6,9 @@ zig_library(
     main = "tokenizer.zig",
     visibility = ["//visibility:public"],
     deps = [
-        "@iree_core//runtime/src/iree/tokenizer",
-        "@iree_core//runtime/src/iree/tokenizer/format/huggingface:tokenizer_json",
-        "@iree_core//runtime/src/iree/tokenizer/vocab:vocab",
+        "@iree//runtime/src/iree/tokenizer",
+        "@iree//runtime/src/iree/tokenizer/format/huggingface:tokenizer_json",
+        "@iree//runtime/src/iree/tokenizer/vocab:vocab",
     ],
 )
 
