@@ -22,6 +22,7 @@ const c = @import("c");
 const csv = @import("zml-smi/csv");
 const json = @import("zml-smi/json");
 const api = @import("zml-smi/api");
+const prometheus = @import("zml-smi/prometheus");
 const smi_tui = @import("zml-smi/tui");
 const tui = smi_tui.top;
 const static_print = smi_tui.print;
@@ -32,20 +33,24 @@ const CliArgs = struct {
     csv: bool = false,
     json: bool = false,
     api: bool = false,
-    port: u16 = 9090,
+    api_port: u16 = 9090,
     remotes: ?[]const u8 = null,
+    prometheus: bool = false,
+    prometheus_port: u16 = 9835,
     tui_refresh_rate: u16 = 100,
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--csv] [--json] [--api] [--port PORT]
+        \\ zml-smi [--top] [--csv] [--json] [--api] [--port PORT] [--prometheus] [--prometheus-port PORT]
         \\         [--remotes HOST,...] [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
         \\ --csv               Output device metrics as CSV
         \\ --json              Output device metrics as JSON
         \\ --api               Expose device metrics as HTTP JSON endpoint
-        \\ --port              API server port (default: 9090)
+        \\ --api-port          API server port (default: 9090)
+        \\ --prometheus        Expose metrics as Prometheus endpoint
+        \\ --prometheus-port   Prometheus server port (default: 9835)
         \\ --remotes           Add devices from remote hosts (comma-separated URLs)
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
         \\ --poll-interval     Device polling interval in ms (default: 500)
@@ -70,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
-        .poll_only = !args.top and !args.api,
+        .poll_only = !args.top and !args.prometheus and !args.api,
     });
     defer collector.deinit();
 
@@ -80,7 +85,13 @@ pub fn main(init: std.process.Init) !void {
     var enricher: ProcessEnricher = try .init(gpa, io);
     defer enricher.deinit();
 
-    if (args.api) std.log.info("serving on port {d}", .{args.port});
+    if (args.api) {
+        std.log.info("serving api metricson port {d}", .{args.api_port});
+    }
+
+    if (args.prometheus) {
+        std.log.info("serving prometheus metrics on port {d}", .{args.prometheus_port});
+    }
 
     inline for (device_backends) |entry| {
         const target, const backend = entry;
@@ -90,6 +101,8 @@ pub fn main(init: std.process.Init) !void {
             };
         }
     }
+
+    var api_group: std.Io.Group = .init;
 
     const num_local_devices = collector.device_infos.items.len;
 
@@ -109,7 +122,13 @@ pub fn main(init: std.process.Init) !void {
     });
     defer state.deinit(arena);
 
-    if (args.csv) {
+    if (args.prometheus) {
+        var server = try prometheus.Server.init(io, args.prometheus_port, collector.device_infos.items, &host_info);
+        defer server.deinit();
+
+        try api_group.concurrent(io, prometheus.Server.serve, .{&server});
+        try api_group.await(io);
+    } else if (args.csv) {
         var csv_buf: [4096]u8 = undefined;
         var csv_writer = std.Io.File.stdout().writer(io, &csv_buf);
 
@@ -122,7 +141,7 @@ pub fn main(init: std.process.Init) !void {
         try json.write(&json_writer.interface, collector.device_infos.items);
         try json_writer.flush();
     } else if (args.api) {
-        var server = try api.Server.init(io, args.port, collector.device_infos.items);
+        var server = try api.Server.init(io, args.api_port, collector.device_infos.items);
         defer server.deinit();
 
         try server.serve();

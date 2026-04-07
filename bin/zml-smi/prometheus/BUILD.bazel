@@ -1,0 +1,16 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "prometheus",
+    import_name = "zml-smi/prometheus",
+    main = "prometheus.zig",
+    srcs = [
+        "server.zig",
+        "exposition.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
+    ],
+)
