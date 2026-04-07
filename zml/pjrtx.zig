@@ -5,6 +5,7 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 
 pub const DataType = @import("dtype.zig").DataType;
+const Shape = @import("shape.zig").Shape;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
@@ -39,6 +40,30 @@ pub const Client = opaque {
             .bytecode_format = .mlir,
             .compile_options_pb = compile_options_pb,
         }));
+    }
+};
+
+pub const CustomCallBuffer = struct {
+    shape: Shape,
+    ptr: *anyopaque,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{f}@{*}", .{ self.shape, self.ptr });
+    }
+
+    pub fn fromPjrt(buffer: *const pjrt.ffi.Buffer) @This() {
+        const dt = switch (buffer.dtype) {
+            .invalid => @panic("Found an invalid pjrt buffer"),
+            .token => @panic("Found an token pjrt buffer"),
+            inline else => |tag| @field(DataType, @tagName(tag)),
+        };
+        return .{
+            .ptr = buffer.data,
+            .shape = .init(buffer.dims(), dt),
+        };
     }
 };
 
