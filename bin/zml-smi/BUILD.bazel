@@ -4,6 +4,7 @@ load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@bazel_lib//tools/release:hashes.bzl", "hashes")
 load("@tar.bzl//tar:tar.bzl", "tar")
 
 # zig libraries
@@ -113,9 +114,21 @@ genrule(
 #     strip_prefix = "bin",
 # )
 
-tar(
-    name = "archive",
+# Release archives, one per platform, correctly named for distribution
+# Build one:  bazel build --config=release //bin/zml-smi:zml-smi-linux-x86_64
+# Build all:  bazel build --config=release //bin/zml-smi:release
+
+_RELEASE_PLATFORMS = [
+    ("linux_amd64", "linux", "x86_64"),
+    ("linux_arm64", "linux", "aarch64"),
+    ("macos_amd64", "macos", "x86_64"),
+    ("macos_arm64", "macos", "aarch64"),
+]
+
+[tar(
+    name = "archive_" + plat,
     srcs = [":zml-smi"],
+    out = "zml-smi-" + os + "-" + arch + ".tar.zst",
     args = [
         "--options",
         ",".join([
@@ -126,6 +139,26 @@ tar(
     compress = "zstd",
     mtree = ":mtree",
     tags = ["manual"],
+) for plat, os, arch in _RELEASE_PLATFORMS]
+
+[platform_transition_filegroup(
+    name = "zml-smi-" + os + "-" + arch,
+    srcs = [":archive_" + plat],
+    target_platform = "//platforms:" + plat,
+    tags = ["manual"],
+) for plat, os, arch in _RELEASE_PLATFORMS]
+
+[hashes(
+    name = "zml-smi-" + os + "-" + arch + ".sha256",
+    src = ":zml-smi-" + os + "-" + arch,
+    tags = ["manual"],
+) for _, os, arch in _RELEASE_PLATFORMS]
+
+filegroup(
+    name = "release",
+    srcs = [":zml-smi-" + os + "-" + arch for _, os, arch in _RELEASE_PLATFORMS] +
+           [":zml-smi-" + os + "-" + arch + ".sha256" for _, os, arch in _RELEASE_PLATFORMS],
+    tags = ["manual"],
 )
 
 oci_image(
@@ -133,7 +166,7 @@ oci_image(
     base = "@distroless_cc_debian12",
     entrypoint = ["/zml-smi/zml-smi"],
     tars = [
-        ":archive",
+        ":archive_linux_amd64",
     ],
     tags = ["manual"],
 )
