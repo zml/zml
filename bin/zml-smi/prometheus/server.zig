@@ -27,12 +27,21 @@ pub const Server = struct {
         };
     }
 
+    pub fn run(io: std.Io, port: u16, devices: []const *DeviceInfo, host_info: *const HostInfo) void {
+        var self = init(io, port, devices, host_info) catch |err| {
+            std.log.err("prometheus server failed to start: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.deinit();
+        self.serve();
+    }
+
     pub fn deinit(self: *Server) void {
         self.connection_group.await(self.io) catch {};
         self.tcp.deinit(self.io);
     }
 
-    pub fn serve(self: *Server) !void {
+    pub fn serve(self: *Server) void {
         while (true) {
             const stream = self.tcp.accept(self.io) catch break;
             self.connection_group.concurrent(self.io, Server.onConnection, .{ self, stream }) catch break;

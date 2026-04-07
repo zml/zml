@@ -116,7 +116,7 @@ pub fn draw(self: *DeviceCard, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vx
             .neuron => "gpu_neuron",
             .tpu => "gpu_tpu",
         }),
-        .title_right = if (self.state.isRemote(i)) "remote" else null,
+        .title_right = if (self.state.devices[i].isRemote()) "remote" else null,
         .cell_size = ctx.cell_size,
         .highlighted = self.highlighted,
     };

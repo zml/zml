@@ -41,21 +41,23 @@ const CliArgs = struct {
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--csv] [--json] [--api] [--port PORT] [--prometheus] [--prometheus-port PORT]
-        \\         [--remotes HOST,...] [--tui-refresh-rate MS] [--poll-interval MS]
+        \\ zml-smi [--top] [--csv] [--json] [--prometheus] [--prometheus-port PORT]
+        \\         [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
         \\ --csv               Output device metrics as CSV
         \\ --json              Output device metrics as JSON
-        \\ --api               Expose device metrics as HTTP JSON endpoint
-        \\ --api-port          API server port (default: 9090)
         \\ --prometheus        Expose metrics as Prometheus endpoint
         \\ --prometheus-port   Prometheus server port (default: 9835)
-        \\ --remotes           Add devices from remote hosts (comma-separated URLs)
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
         \\ --poll-interval     Device polling interval in ms (default: 500)
         \\
     ;
+
+    //  [--api] [--port PORT] [--remotes HOST,...]
+    //  \\ --api               Expose device metrics as HTTP JSON endpoint
+    //  \\ --api-port          API server port (default: 9090)
+    //  \\ --remotes           Add devices from remote hosts (comma-separated URLs)
 };
 
 const device_backends = if (builtin.os.tag != .macos) .{
@@ -86,7 +88,7 @@ pub fn main(init: std.process.Init) !void {
     defer enricher.deinit();
 
     if (args.api) {
-        std.log.info("serving api metricson port {d}", .{args.api_port});
+        std.log.info("serving api metrics on port {d}", .{args.api_port});
     }
 
     if (args.prometheus) {
@@ -104,15 +106,12 @@ pub fn main(init: std.process.Init) !void {
 
     var api_group: std.Io.Group = .init;
 
-    const num_local_devices = collector.device_infos.items.len;
-
     if (args.remotes) |hosts| {
         try api.addRemotes(&collector, hosts);
     }
 
     var state = try data.SystemState.init(arena, .{
         .devices = collector.device_infos.items,
-        .num_local_devices = num_local_devices,
         .host = &host_info,
         .targets = targets,
         .tui_refresh_rate = args.tui_refresh_rate,
@@ -123,10 +122,14 @@ pub fn main(init: std.process.Init) !void {
     defer state.deinit(arena);
 
     if (args.prometheus) {
-        var server = try prometheus.Server.init(io, args.prometheus_port, collector.device_infos.items, &host_info);
-        defer server.deinit();
+        try api_group.concurrent(io, prometheus.Server.run, .{ io, args.prometheus_port, collector.device_infos.items, &host_info });
+    }
 
-        try api_group.concurrent(io, prometheus.Server.serve, .{&server});
+    if (args.api) {
+        try api_group.concurrent(io, api.Server.run, .{ io, args.api_port, collector.device_infos.items, collector.process_lists.items, gpa, &enricher });
+    }
+
+    if (args.prometheus or args.api) {
         try api_group.await(io);
     } else if (args.csv) {
         var csv_buf: [4096]u8 = undefined;
@@ -135,16 +138,18 @@ pub fn main(init: std.process.Init) !void {
         try csv.write(&csv_writer.interface, collector.device_infos.items);
         try csv_writer.flush();
     } else if (args.json) {
+        var procs: std.ArrayList(smi_info.process_info.ProcessInfo) = .empty;
+        defer procs.deinit(gpa);
+        for (collector.process_lists.items) |pl| {
+            try procs.appendSlice(gpa, pl.front().items);
+        }
+        enricher.enrich(io, procs.items);
+
         var json_buf: [4096]u8 = undefined;
         var json_writer = std.Io.File.stdout().writer(io, &json_buf);
 
-        try json.write(&json_writer.interface, collector.device_infos.items);
+        try json.write(&json_writer.interface, collector.device_infos.items, procs.items);
         try json_writer.flush();
-    } else if (args.api) {
-        var server = try api.Server.init(io, args.api_port, collector.device_infos.items);
-        defer server.deinit();
-
-        try server.serve();
     } else if (args.top) {
         try tui.run(gpa, io, &state);
     } else {

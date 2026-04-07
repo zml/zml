@@ -14,5 +14,8 @@ zig_library(
         "//bin/zml-smi/info",
         "//bin/zml-smi/json",
         "//bin/zml-smi/utils:double_buffer",
-    ],
+    ] + select({
+        "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
+        "//conditions:default": ["//bin/zml-smi/platforms/linux"],
+    }),
 )

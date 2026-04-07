@@ -88,47 +88,47 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, host: *const 
 
     for (devices, 0..) |dev, i| {
         switch (dev.*) {
-            .cuda => |*db| try writeMetrics(writer, gpu_metrics, db.front().*, .{ i, "cuda" }),
-            .rocm => |*db| try writeMetrics(writer, gpu_metrics, db.front().*, .{ i, "rocm" }),
-            .neuron => |*db| try writeMetrics(writer, neuron_metrics, db.front().*, .{ i, "neuron" }),
-            .tpu => |*db| try writeMetrics(writer, tpu_metrics, db.front().*, .{ i, "tpu" }),
+            .cuda => |*db| try writeDeviceMetrics(writer, gpu_metrics, db.front().*, i, "cuda"),
+            .rocm => |*db| try writeDeviceMetrics(writer, gpu_metrics, db.front().*, i, "rocm"),
+            .neuron => |*db| try writeDeviceMetrics(writer, neuron_metrics, db.front().*, i, "neuron"),
+            .tpu => |*db| try writeDeviceMetrics(writer, tpu_metrics, db.front().*, i, "tpu"),
         }
     }
 
-    try writeMetrics(writer, host_metrics, host.front().*, null);
+    try writeHostMetrics(writer, host.front().*);
 }
 
-fn writeMetrics(
+fn writeDeviceMetrics(
     writer: *std.Io.Writer,
     comptime metrics: anytype,
     val: anytype,
-    device: ?struct { usize, []const u8 },
+    device_idx: usize,
+    device_type: []const u8,
 ) !void {
-    const name_label = if (@hasField(@TypeOf(val), "name")) val.name else null;
-
     inline for (metrics) |m| {
         if (@field(val, m.field)) |raw| {
-            try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s}", .{ m.metric, m.help, m.metric, m.metric });
-
-            if (device) |d| {
-                try writer.print("{{device=\"{d}\",type=\"{s}\"", .{ d[0], d[1] });
-
-                if (name_label) |name| {
-                    try writer.print(",name=\"{s}\"", .{name});
-                }
-
-                try writer.writeAll("}");
-            }
-
-            try writer.writeAll(" ");
-
-            if (@hasField(@TypeOf(m), "fmt")) {
-                try m.fmt(writer, raw);
-            } else {
-                try writeValue(writer, raw);
-            }
+            try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s}{{device=\"{d}\",type=\"{s}\",name=\"{?s}\"}} ", .{ m.metric, m.help, m.metric, m.metric, device_idx, device_type, val.name });
+            try fmtValue(m, writer, raw);
             try writer.writeAll("\n");
         }
+    }
+}
+
+fn writeHostMetrics(writer: *std.Io.Writer, val: anytype) !void {
+    inline for (host_metrics) |m| {
+        if (@field(val, m.field)) |raw| {
+            try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s} ", .{ m.metric, m.help, m.metric, m.metric });
+            try fmtValue(m, writer, raw);
+            try writer.writeAll("\n");
+        }
+    }
+}
+
+fn fmtValue(comptime m: anytype, writer: *std.Io.Writer, raw: anytype) !void {
+    if (@hasField(@TypeOf(m), "fmt")) {
+        try m.fmt(writer, raw);
+    } else {
+        try writeValue(writer, raw);
     }
 }
 

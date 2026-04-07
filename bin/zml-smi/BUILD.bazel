@@ -115,18 +115,18 @@ genrule(
 # )
 
 # Release archives, one per platform, correctly named for distribution
-# Build one:  bazel build --config=release //bin/zml-smi:zml-smi-linux-x86_64
+# Build one:  bazel build --config=release //bin/zml-smi:zml-smi-linux-amd64
 # Build all:  bazel build --config=release //bin/zml-smi:release
 
 _RELEASE_PLATFORMS = [
-    ("linux_amd64", "linux", "x86_64"),
-    ("linux_arm64", "linux", "aarch64"),
-    ("macos_amd64", "macos", "x86_64"),
-    ("macos_arm64", "macos", "aarch64"),
+    ("linux", "amd64"),
+    ("linux", "arm64"),
+    ("macos", "amd64"),
+    ("macos", "arm64"),
 ]
 
 [tar(
-    name = "archive_" + plat,
+    name = "archive_" + os + "_" + arch,
     srcs = [":zml-smi"],
     out = "zml-smi-" + os + "-" + arch + ".tar.zst",
     args = [
@@ -139,25 +139,25 @@ _RELEASE_PLATFORMS = [
     compress = "zstd",
     mtree = ":mtree",
     tags = ["manual"],
-) for plat, os, arch in _RELEASE_PLATFORMS]
+) for os, arch in _RELEASE_PLATFORMS]
 
 [platform_transition_filegroup(
     name = "zml-smi-" + os + "-" + arch,
-    srcs = [":archive_" + plat],
-    target_platform = "//platforms:" + plat,
+    srcs = [":archive_" + os + "_" + arch],
+    target_platform = "//platforms:" + os + "_" + arch,
     tags = ["manual"],
-) for plat, os, arch in _RELEASE_PLATFORMS]
+) for os, arch in _RELEASE_PLATFORMS]
 
 [hashes(
     name = "zml-smi-" + os + "-" + arch + ".sha256",
     src = ":zml-smi-" + os + "-" + arch,
     tags = ["manual"],
-) for _, os, arch in _RELEASE_PLATFORMS]
+) for os, arch in _RELEASE_PLATFORMS]
 
 filegroup(
     name = "release",
-    srcs = [":zml-smi-" + os + "-" + arch for _, os, arch in _RELEASE_PLATFORMS] +
-           [":zml-smi-" + os + "-" + arch + ".sha256" for _, os, arch in _RELEASE_PLATFORMS],
+    srcs = [":zml-smi-" + os + "-" + arch for os, arch in _RELEASE_PLATFORMS] +
+           [":zml-smi-" + os + "-" + arch + ".sha256" for os, arch in _RELEASE_PLATFORMS],
     tags = ["manual"],
 )
 

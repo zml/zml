@@ -8,4 +8,5 @@ pub const ProcessInfo = struct {
     comm: []const u8 = "",
     cpu_percent: u16 = 0, // *10, e.g. 125 = 12.5%
     rss_kib: u64 = 0,
+    remote: bool = false,
 };

@@ -91,7 +91,6 @@ pub const SystemState = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     tui_refresh_rate: u16,
-    num_local_devices: usize,
 
     pub const Config = struct {
         devices: []*DeviceInfo,
@@ -101,7 +100,6 @@ pub const SystemState = struct {
         process_lists: []*ProcessDoubleBuffer,
         enricher: *ProcessEnricher,
         io: std.Io,
-        num_local_devices: ?usize = null,
     };
 
     pub fn init(allocator: std.mem.Allocator, cfg: Config) !SystemState {
@@ -115,12 +113,7 @@ pub const SystemState = struct {
             .enricher = cfg.enricher,
             .allocator = allocator,
             .io = cfg.io,
-            .num_local_devices = cfg.num_local_devices orelse cfg.devices.len,
         };
-    }
-
-    pub fn isRemote(self: *const SystemState, device_id: usize) bool {
-        return device_id >= self.num_local_devices;
     }
 
     pub fn deinit(self: *SystemState, allocator: std.mem.Allocator) void {

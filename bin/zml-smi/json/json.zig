@@ -1,12 +1,15 @@
 const std = @import("std");
 const smi_info = @import("zml-smi/info");
 const DeviceInfo = smi_info.device_info.DeviceInfo;
+const ProcessInfo = smi_info.process_info.ProcessInfo;
 
-pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo) !void {
+pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, processes: []const ProcessInfo) !void {
     var jw: std.json.Stringify = .{ .writer = writer };
 
-    try jw.beginArray();
+    try jw.beginObject();
 
+    try jw.objectField("devices");
+    try jw.beginArray();
     for (devices, 0..) |dev, i| {
         inline for (@typeInfo(DeviceInfo).@"union".fields) |tp| {
             const tag = @field(smi_info.Target, tp.name);
@@ -19,8 +22,16 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo) !void {
             }
         }
     }
-
     try jw.endArray();
+
+    try jw.objectField("processes");
+    try jw.beginArray();
+    for (processes) |proc| {
+        try jw.write(proc);
+    }
+    try jw.endArray();
+
+    try jw.endObject();
     try writer.writeAll("\n");
 }
 

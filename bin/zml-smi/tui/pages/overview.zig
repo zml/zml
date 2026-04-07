@@ -14,7 +14,7 @@ const ProcessTable = @import("../widgets/process_table.zig");
 
 const Overview = @This();
 
-const two_col_breakpoint: u16 = 120;
+const two_col_breakpoint: u16 = 140;
 const narrow_breakpoint: u16 = 80;
 const max_info_width: u16 = 50;
 /// Total width of the wide banner: logo box (incl. left margin) + info lines + right margin.
