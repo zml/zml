@@ -1,18 +1,19 @@
-load("@rules_zig//zig:defs.bzl", "zig_library", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 zig_library(
     name = "vfs",
-    tags = ["manual"],
     srcs = [
         "base.zig",
         "file.zig",
+        "gcs.zig",
         "hf.zig",
         "http.zig",
         "s3.zig",
     ],
+    main = "index.zig",
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
     deps = [
         "//stdx",
     ],
-    main = "index.zig",
-    visibility = ["//visibility:public"],
 )
