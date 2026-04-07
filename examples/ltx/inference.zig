@@ -456,8 +456,8 @@ fn runStage1(
     var a_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_neg", sharding);
     defer a_context_neg_buf.deinit();
 
-    std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape()});
-    std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape()});
+    std.log.info("  video_latent (noised)", .{});
+    std.log.info("  audio_latent (noised)", .{});
 
     // ---- Compile executables ----
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
@@ -862,7 +862,6 @@ fn runStage1(
             if (i > 0) { cond_h_v.deinit(); cond_h_a.deinit(); }
             cond_h_v = out.vx_out;
             cond_h_a = out.ax_out;
-            if (i % 16 == 15 or i == 47) std.log.info("    block {d:>2} done", .{i});
         }
 
         var cond_v_vel = try runOutputProjection(allocator, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
@@ -906,7 +905,6 @@ fn runStage1(
             if (i > 0) { neg_h_v.deinit(); neg_h_a.deinit(); }
             neg_h_v = out.vx_out;
             neg_h_a = out.ax_out;
-            if (i % 16 == 15 or i == 47) std.log.info("    block {d:>2} done", .{i});
         }
 
         var neg_v_vel = try runOutputProjection(allocator, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
@@ -951,7 +949,6 @@ fn runStage1(
                 if (i > 0) { ptb_h_v.deinit(); ptb_h_a.deinit(); }
                 ptb_h_v = out.vx_out;
                 ptb_h_a = out.ax_out;
-                std.log.info("    block {d:>2} done (STG)", .{i});
             } else {
                 var blk_args = try block_normal_exe.args(allocator);
                 defer blk_args.deinit(allocator);
@@ -978,7 +975,6 @@ fn runStage1(
                 if (i > 0) { ptb_h_v.deinit(); ptb_h_a.deinit(); }
                 ptb_h_v = out.vx_out;
                 ptb_h_a = out.ax_out;
-                if (i % 16 == 15 or i == 47) std.log.info("    block {d:>2} done", .{i});
             }
         }
 
@@ -1025,7 +1021,6 @@ fn runStage1(
             if (i > 0) { iso_h_v.deinit(); iso_h_a.deinit(); }
             iso_h_v = out.vx_out;
             iso_h_a = out.ax_out;
-            if (i % 16 == 15 or i == 47) std.log.info("    block {d:>2} done", .{i});
         }
 
         var iso_v_vel = try runOutputProjection(allocator, &proj_v_exe, iso_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
@@ -1194,7 +1189,7 @@ fn runBridge(
     defer video_5d_buf.deinit();
     var s1_video_mut = s1_video;
     s1_video_mut.deinit();
-    std.log.info("  Unpatchified: {any}", .{video_5d_buf.shape()});
+    std.log.info("  Unpatchified: {any}", .{video_5d_buf.shape().dims()});
 
     // ========================================================================
     // Step 2: Upsample: [1, 128, F, H_s1, W_s1] → [1, 128, F, H_s2, W_s2]
@@ -1250,7 +1245,7 @@ fn runBridge(
     upsample_exe.call(up_args, &up_results);
     var upsampled_buf = up_results.get(zml.Buffer);
     defer upsampled_buf.deinit();
-    std.log.info("  Upsampled: {any}", .{upsampled_buf.shape()});
+    std.log.info("  Upsampled: {any}", .{upsampled_buf.shape().dims()});
 
     // ========================================================================
     // Step 3: Re-patchify video: [1, 128, F, H_s2, W_s2] → [1, T_v2, 128]
@@ -1272,7 +1267,7 @@ fn runBridge(
     patch_args.set(.{upsampled_buf});
     patchify_exe.call(patch_args, &patch_results);
     var video_clean_buf = patch_results.get(zml.Buffer);
-    std.log.info("  Re-patchified video: {any}", .{video_clean_buf.shape()});
+    std.log.info("  Re-patchified video: {any}", .{video_clean_buf.shape().dims()});
 
     // ========================================================================
     // Step 4: Audio passthrough (already patchified from Stage 1)
@@ -1315,8 +1310,8 @@ fn runBridge(
     defer v_noise_buf.deinit();
     var a_noise_buf = try loadBuf(allocator, io, platform, &noise_store, "audio_noise_s2", sharding);
     defer a_noise_buf.deinit();
-    std.log.info("  video_noise: {any}", .{v_noise_buf.shape()});
-    std.log.info("  audio_noise: {any}", .{a_noise_buf.shape()});
+    std.log.info("  video_noise: {any}", .{v_noise_buf.shape().dims()});
+    std.log.info("  audio_noise: {any}", .{a_noise_buf.shape().dims()});
 
     // Compile noise init
     std.log.info("Compiling noise init...", .{});
@@ -1359,7 +1354,7 @@ fn runBridge(
     defer ni_v_results.deinit(allocator);
     ni_v_args.set(.{ video_clean_buf, v_noise_buf, v_mask_buf, sigma0_buf });
     noise_init_v_exe.call(ni_v_args, &ni_v_results);
-    var v_latent_buf = ni_v_results.get(zml.Buffer);
+    const v_latent_buf = ni_v_results.get(zml.Buffer);
 
     // Audio noise init
     var ni_a_args = try noise_init_a_exe.args(allocator);
@@ -1368,10 +1363,10 @@ fn runBridge(
     defer ni_a_results.deinit(allocator);
     ni_a_args.set(.{ audio_clean_buf, a_noise_buf, a_mask_buf, sigma0_buf });
     noise_init_a_exe.call(ni_a_args, &ni_a_results);
-    var a_latent_buf = ni_a_results.get(zml.Buffer);
+    const a_latent_buf = ni_a_results.get(zml.Buffer);
 
-    std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape()});
-    std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape()});
+    std.log.info("  video_latent (noised)", .{});
+    std.log.info("  audio_latent (noised)", .{});
 
     std.log.info("Bridge complete.", .{});
 
@@ -1700,7 +1695,6 @@ fn runStage2(
             if (i > 0) { h_v.deinit(); h_a.deinit(); }
             h_v = out.vx_out;
             h_a = out.ax_out;
-            if (i % 16 == 15 or i == 47) std.log.info("    block {d:>2} done", .{i});
         }
 
         // ---- 3. Output projection ----
@@ -1892,7 +1886,7 @@ fn runVideoVaeDecode(
     unpatch_args.set(.{v_latent_patchified});
     unpatch_exe.call(unpatch_args, &unpatch_results);
     const v_latent_5d = unpatch_results.get(zml.Buffer);
-    std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape()});
+    std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape().dims()});
 
     // ========================================================================
     // Step 2: Load VAE decoder weights + per-channel stats
@@ -1951,7 +1945,7 @@ fn runVideoVaeDecode(
     vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
     vae_exe.call(vae_args, &vae_results);
     const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
-    std.log.info("  Decoded video: {any}", .{decoded_video.shape()});
+    std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
 
     // ========================================================================
     // Step 4: Post-process to uint8 and write frames.bin
@@ -2148,7 +2142,7 @@ fn runAudioVaeDecode(
     unpatch_args.set(.{a_latent_patchified});
     unpatch_exe.call(unpatch_args, &unpatch_results);
     const a_latent_4d = unpatch_results.get(zml.Buffer);
-    std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape()});
+    std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape().dims()});
 
     // ========================================================================
     // Step 2: Load audio VAE decoder weights + per-channel stats
@@ -2207,7 +2201,7 @@ fn runAudioVaeDecode(
     audio_vae_args.set(.{ a_latent_4d, audio_stats_bufs, audio_vae_bufs });
     audio_vae_exe.call(audio_vae_args, &audio_vae_results);
     const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
-    std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape()});
+    std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape().dims()});
 
     // Write mel spectrogram for debugging
     try writeBuffer(allocator, io, decoded_audio, output_dir, "audio_mel.bin");
@@ -2272,7 +2266,7 @@ fn runVocoderWithBWE(
     );
 
     // ---- Stage 1: Main vocoder — mel → 16kHz waveform ----
-    std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape()});
+    std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape().dims()});
     var main_voc_exe = try platform.compileFn(
         allocator, io,
         model.forwardMainVocoder,
@@ -2289,10 +2283,10 @@ fn runVocoderWithBWE(
     main_voc_args.set(.{ audio_mel, &main_voc_bufs });
     main_voc_exe.call(main_voc_args, &main_voc_results);
     const waveform_16k = main_voc_results.get(zml.Buffer);
-    std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape()});
+    std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape().dims()});
 
     // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
-    std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape()});
+    std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
     var bwe_exe = try platform.compileFn(
         allocator, io,
         model.forwardBWEPipeline,
@@ -2309,7 +2303,7 @@ fn runVocoderWithBWE(
     bwe_args.set(.{ waveform_16k, &bwe_bufs });
     bwe_exe.call(bwe_args, &bwe_results);
     const waveform = bwe_results.get(zml.Buffer);
-    std.log.info("  48kHz waveform: {any}", .{waveform.shape()});
+    std.log.info("  48kHz waveform: {any}", .{waveform.shape().dims()});
 
     return waveform;
 }
@@ -2356,7 +2350,7 @@ fn writeBuffer(
     try writer.interface.writeAll(slice.constData());
     try writer.interface.flush();
 
-    std.log.info("  Wrote {s} ({d} bytes, shape {any})", .{ path, slice.constData().len, buf.shape() });
+    std.log.info("  Wrote {s} ({d} bytes, dims {any})", .{ path, slice.constData().len, buf.shape().dims() });
 }
 
 // ============================================================================
