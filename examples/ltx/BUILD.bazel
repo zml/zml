@@ -12,7 +12,12 @@ zig_binary(
     name = "denoise_e2e",
     main = "denoise_e2e.zig",
     srcs = [
+        "audio_vae.zig",
+        "conv_ops.zig",
         "model.zig",
+        "upsampler.zig",
+        "video_vae.zig",
+        "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -24,19 +29,12 @@ zig_binary(
     name = "denoise_stage1",
     main = "denoise_stage1.zig",
     srcs = [
+        "audio_vae.zig",
+        "conv_ops.zig",
         "model.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
-zig_binary(
-    name = "upsample",
-    main = "upsample.zig",
-    srcs = [
-        "model.zig",
+        "upsampler.zig",
+        "video_vae.zig",
+        "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -48,7 +46,12 @@ zig_binary(
     name = "bridge",
     main = "bridge.zig",
     srcs = [
+        "audio_vae.zig",
+        "conv_ops.zig",
         "model.zig",
+        "upsampler.zig",
+        "video_vae.zig",
+        "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -60,7 +63,12 @@ zig_binary(
     name = "inference",
     main = "inference.zig",
     srcs = [
+        "audio_vae.zig",
+        "conv_ops.zig",
         "model.zig",
+        "upsampler.zig",
+        "video_vae.zig",
+        "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -74,7 +82,6 @@ build_test(
         ":ltx",
         ":denoise_e2e",
         ":denoise_stage1",
-        ":upsample",
         ":bridge",
         ":inference",
     ],

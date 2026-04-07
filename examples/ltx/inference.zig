@@ -21,6 +21,11 @@
 const std = @import("std");
 const zml = @import("zml");
 const model = @import("model.zig");
+const conv_ops = @import("conv_ops.zig");
+const upsampler = @import("upsampler.zig");
+const video_vae = @import("video_vae.zig");
+const audio_vae = @import("audio_vae.zig");
+const vocoder = @import("vocoder.zig");
 
 comptime {
     @setEvalBranchQuota(200000);
@@ -1179,7 +1184,7 @@ fn runBridge(
 
     var unpatch_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUnpatchifyVideo,
+        upsampler.forwardUnpatchifyVideo,
         .{
             zml.Tensor.fromShape(patchified_shape),
             video_5d_s1_shape,
@@ -1205,12 +1210,12 @@ fn runBridge(
     // Step 2: Upsample: [1, 128, F, H_s1, W_s1] → [1, 128, F, H_s2, W_s2]
     // ========================================================================
     std.log.info("Compiling upsampler...", .{});
-    const upsampler_shape = model.initUpsamplerParams(up_store.view());
-    const stats_shape = model.initPerChannelStats(main_store.view());
+    const upsampler_shape = upsampler.initUpsamplerParams(up_store.view());
+    const stats_shape = conv_ops.initPerChannelStats(main_store.view());
 
     var upsample_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUpsample,
+        upsampler.forwardUpsample,
         .{
             zml.Tensor.fromShape(video_5d_buf.shape()),
             upsampler_shape,
@@ -1222,7 +1227,7 @@ fn runBridge(
 
     std.log.info("Loading upsampler weights...", .{});
     const up_bufs = try zml.io.load(
-        model.UpsamplerParams, &upsampler_shape,
+        upsampler.UpsamplerParams, &upsampler_shape,
         allocator, io, platform,
         .{
             .store = &up_store,
@@ -1235,7 +1240,7 @@ fn runBridge(
 
     std.log.info("Loading per-channel statistics...", .{});
     const stats_bufs = try zml.io.load(
-        model.PerChannelStats, &stats_shape,
+        conv_ops.PerChannelStats, &stats_shape,
         allocator, io, platform,
         .{
             .store = &main_store,
@@ -1263,7 +1268,7 @@ fn runBridge(
     std.log.info("Compiling patchify...", .{});
     var patchify_exe = try platform.compileFn(
         allocator, io,
-        model.forwardPatchifyVideo,
+        upsampler.forwardPatchifyVideo,
         .{zml.Tensor.fromShape(upsampled_buf.shape())},
         .{ .shardings = &.{sharding} },
     );
@@ -1878,7 +1883,7 @@ fn runVideoVaeDecode(
 
     var unpatch_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUnpatchifyVideo,
+        upsampler.forwardUnpatchifyVideo,
         .{
             zml.Tensor.fromShape(patchified_shape),
             video_5d_shape,
@@ -1901,9 +1906,9 @@ fn runVideoVaeDecode(
     // Step 2: Load VAE decoder weights + per-channel stats
     // ========================================================================
     std.log.info("Loading VAE decoder weights...", .{});
-    var vae_params = model.initVideoVaeDecoderParams(ckpt_store.view());
+    var vae_params = video_vae.initVideoVaeDecoderParams(ckpt_store.view());
     const vae_bufs = try zml.io.load(
-        model.VideoVaeDecoderParams,
+        video_vae.VideoVaeDecoderParams,
         &vae_params,
         allocator, io, platform,
         .{
@@ -1916,9 +1921,9 @@ fn runVideoVaeDecode(
     );
 
     std.log.info("Loading per-channel statistics...", .{});
-    var stats_shape = model.initPerChannelStats(ckpt_store.view());
+    var stats_shape = conv_ops.initPerChannelStats(ckpt_store.view());
     const stats_bufs = try zml.io.load(
-        model.PerChannelStats,
+        conv_ops.PerChannelStats,
         &stats_shape,
         allocator, io, platform,
         .{
@@ -1936,7 +1941,7 @@ fn runVideoVaeDecode(
     std.log.info("Compiling VAE decoder...", .{});
     var vae_exe = try platform.compileFn(
         allocator, io,
-        model.forwardVideoVaeDecode,
+        video_vae.forwardVideoVaeDecode,
         .{
             zml.Tensor.fromShape(v_latent_5d.shape()),
             stats_shape,
@@ -2132,7 +2137,7 @@ fn runAudioVaeDecode(
 
     var unpatch_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUnpatchifyAudio,
+        audio_vae.forwardUnpatchifyAudio,
         .{
             zml.Tensor.fromShape(patchified_shape),
         },
@@ -2154,9 +2159,9 @@ fn runAudioVaeDecode(
     // Step 2: Load audio VAE decoder weights + per-channel stats
     // ========================================================================
     std.log.info("Loading audio VAE decoder weights...", .{});
-    var audio_vae_params = model.initAudioVaeDecoderParams(ckpt_store.view());
+    var audio_vae_params = audio_vae.initAudioVaeDecoderParams(ckpt_store.view());
     const audio_vae_bufs = try zml.io.load(
-        model.AudioVaeDecoderParams,
+        audio_vae.AudioVaeDecoderParams,
         &audio_vae_params,
         allocator, io, platform,
         .{
@@ -2169,9 +2174,9 @@ fn runAudioVaeDecode(
     );
 
     std.log.info("Loading audio per-channel statistics...", .{});
-    var audio_stats_shape = model.initAudioPerChannelStats(ckpt_store.view());
+    var audio_stats_shape = audio_vae.initAudioPerChannelStats(ckpt_store.view());
     const audio_stats_bufs = try zml.io.load(
-        model.AudioPerChannelStats,
+        audio_vae.AudioPerChannelStats,
         &audio_stats_shape,
         allocator, io, platform,
         .{
@@ -2189,7 +2194,7 @@ fn runAudioVaeDecode(
     std.log.info("Compiling audio VAE decoder...", .{});
     var audio_vae_exe = try platform.compileFn(
         allocator, io,
-        model.forwardAudioVaeDecode,
+        audio_vae.forwardAudioVaeDecode,
         .{
             zml.Tensor.fromShape(a_latent_4d.shape()),
             audio_stats_shape,
@@ -2236,10 +2241,10 @@ fn runVocoderWithBWE(
 
     // ---- Load vocoder weights (split: main 667, BWE pipeline 559) ----
     std.log.info("Loading main vocoder weights...", .{});
-    var main_voc_params: model.MainVocoderParams = undefined;
-    model.initMainVocoderParams(&main_voc_params, ckpt_store.view().withPrefix("vocoder").withPrefix("vocoder"));
+    var main_voc_params: vocoder.MainVocoderParams = undefined;
+    vocoder.initMainVocoderParams(&main_voc_params, ckpt_store.view().withPrefix("vocoder").withPrefix("vocoder"));
     const main_voc_bufs = try zml.io.load(
-        model.MainVocoderParams,
+        vocoder.MainVocoderParams,
         &main_voc_params,
         allocator, io, platform,
         .{
@@ -2252,10 +2257,10 @@ fn runVocoderWithBWE(
     );
 
     std.log.info("Loading BWE pipeline weights...", .{});
-    var bwe_params: model.BWEPipelineParams = undefined;
-    model.initBWEPipelineParams(&bwe_params, ckpt_store.view());
+    var bwe_params: vocoder.BWEPipelineParams = undefined;
+    vocoder.initBWEPipelineParams(&bwe_params, ckpt_store.view());
     const bwe_bufs = try zml.io.load(
-        model.BWEPipelineParams,
+        vocoder.BWEPipelineParams,
         &bwe_params,
         allocator, io, platform,
         .{
@@ -2271,7 +2276,7 @@ fn runVocoderWithBWE(
     std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape().dims()});
     var main_voc_exe = try platform.compileFn(
         allocator, io,
-        model.forwardMainVocoder,
+        vocoder.forwardMainVocoder,
         .{ zml.Tensor.fromShape(audio_mel.shape()), &main_voc_params },
         .{ .shardings = &.{sharding} },
     );
@@ -2291,7 +2296,7 @@ fn runVocoderWithBWE(
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
     var bwe_exe = try platform.compileFn(
         allocator, io,
-        model.forwardBWEPipeline,
+        vocoder.forwardBWEPipeline,
         .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
         .{ .shardings = &.{sharding} },
     );

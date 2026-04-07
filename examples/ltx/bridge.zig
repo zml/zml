@@ -19,6 +19,8 @@
 const std = @import("std");
 const zml = @import("zml");
 const model = @import("model.zig");
+const conv_ops = @import("conv_ops.zig");
+const upsampler = @import("upsampler.zig");
 
 comptime {
     @setEvalBranchQuota(200000);
@@ -228,7 +230,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Compiling unpatchify...", .{});
     var unpatch_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUnpatchifyVideo,
+        upsampler.forwardUnpatchifyVideo,
         .{
             zml.Tensor.fromShape(patchified_shape),
             video_5d_s1_shape,
@@ -250,12 +252,12 @@ pub fn main(init: std.process.Init) !void {
 
     // Upsample: [1, 128, F, H_s1, W_s1] → [1, 128, F, H_s2, W_s2]
     std.log.info("Compiling upsampler...", .{});
-    const upsampler_shape = model.initUpsamplerParams(up_store.view());
-    const stats_shape = model.initPerChannelStats(main_store.view());
+    const upsampler_shape = upsampler.initUpsamplerParams(up_store.view());
+    const stats_shape = conv_ops.initPerChannelStats(main_store.view());
 
     var upsample_exe = try platform.compileFn(
         allocator, io,
-        model.forwardUpsample,
+        upsampler.forwardUpsample,
         .{
             zml.Tensor.fromShape(video_5d_buf.shape()),
             upsampler_shape,
@@ -267,7 +269,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("Loading upsampler weights...", .{});
     const up_bufs = try zml.io.load(
-        model.UpsamplerParams, &upsampler_shape,
+        upsampler.UpsamplerParams, &upsampler_shape,
         allocator, io, platform,
         .{
             .store = &up_store,
@@ -280,7 +282,7 @@ pub fn main(init: std.process.Init) !void {
 
     std.log.info("Loading per-channel statistics...", .{});
     const stats_bufs = try zml.io.load(
-        model.PerChannelStats, &stats_shape,
+        conv_ops.PerChannelStats, &stats_shape,
         allocator, io, platform,
         .{
             .store = &main_store,
@@ -309,7 +311,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("Compiling patchify...", .{});
     var patchify_exe = try platform.compileFn(
         allocator, io,
-        model.forwardPatchifyVideo,
+        upsampler.forwardPatchifyVideo,
         .{zml.Tensor.fromShape(upsampled_buf.shape())},
         .{ .shardings = &.{sharding} },
     );
