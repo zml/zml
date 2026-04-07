@@ -329,7 +329,7 @@ pub const paged = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         const output = zml.ops.manualComputation(
             .{
                 q,
@@ -338,7 +338,6 @@ pub const paged = struct {
                 parameters.block_table,
                 parameters.seq_lens,
                 parameters.query_start_len,
-                layer_index,
             },
             q.shape(),
             .{
@@ -351,7 +350,6 @@ pub const paged = struct {
                     const q_ = sharded_inputs[0];
                     const k_cache_ = sharded_inputs[1];
                     const v_cache_ = sharded_inputs[2];
-                    const layer_index_ = sharded_inputs[6];
                     const parameters_: Parameters = .{ .block_table = sharded_inputs[3], .seq_lens = sharded_inputs[4], .query_start_len = sharded_inputs[5], .options_ = ctx_.options };
 
                     const cu_count = getCuCount();
@@ -396,9 +394,9 @@ pub const paged = struct {
                         paged_attention_opts.num_2d_prgms,
                     );
                     const output = if (use_2d_kernel)
-                        pagedAttention2d(parameters_, ctx_.context, q_, k_cache_, v_cache_, layer_index_, ctx_.opts, paged_attention_opts)
+                        pagedAttention2d(parameters_, ctx_.context, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts)
                     else
-                        pagedAttention3d(parameters_, ctx_.context, q_, k_cache_, v_cache_, layer_index_, ctx_.opts, paged_attention_opts);
+                        pagedAttention3d(parameters_, ctx_.context, q_, k_cache_, v_cache_, ctx_.opts, paged_attention_opts);
 
                     return output;
                 }
@@ -408,11 +406,9 @@ pub const paged = struct {
         return output;
     }
 
-    pub fn pagedAttention2d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
+    pub fn pagedAttention2d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         _ = context;
         _ = opts;
-        // TODO(Corentin): remove
-        _ = layer_index;
         const config = select2dConfig(paged_attention_opts);
         const generation_config: GenerationConfig = .{
             .kernel_unified_attention_2d_ptr = .{
@@ -508,11 +504,9 @@ pub const paged = struct {
         return output[0];
     }
 
-    pub fn pagedAttention3d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
+    pub fn pagedAttention3d(parameters: Parameters, context: Context, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions, paged_attention_opts: PagedAttentionOptions) zml.Tensor {
         _ = context;
         _ = opts;
-        // TODO(Corentin): remove
-        _ = layer_index;
 
         const config = select3dConfig(paged_attention_opts);
 
