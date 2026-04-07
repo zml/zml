@@ -194,6 +194,18 @@ const Stage2Result = struct {
     }
 };
 
+const VideoFrames = struct {
+    data: []u8,
+    width: usize,
+    height: usize,
+    num_frames: usize,
+    allocator: std.mem.Allocator,
+
+    fn deinit(self: *VideoFrames) void {
+        self.allocator.free(self.data);
+    }
+};
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -229,6 +241,9 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  bf16-attn-stage1:  {}", .{args.bf16_attn_stage1});
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
+
+    // ---- Ensure output directory exists ----
+    try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
 
     // ---- Load pipeline metadata ----
     const pipe_meta = try loadPipelineMeta(allocator, io, args.meta);
@@ -316,7 +331,8 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 4: Video VAE Decode ===", .{});
 
-    try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, args.output_dir);
+    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, args.output_dir);
+    defer video_frames.deinit();
 
     // ========================================================================
     // Phase 5: Audio VAE Decode
@@ -332,10 +348,40 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 6: Vocoder + BWE ===", .{});
 
-    try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel, args.output_dir);
+    var waveform_buf = try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel);
+    defer waveform_buf.deinit();
     audio_mel.deinit();
 
     s2.deinit();
+
+    // ========================================================================
+    // Final: Encode video + audio → output.mp4
+    // ========================================================================
+    std.log.info("", .{});
+    std.log.info("=== Encoding output.mp4 (video + audio) ===", .{});
+
+    const waveform_slice = try waveform_buf.toSliceAlloc(allocator, io);
+    defer waveform_slice.free(allocator);
+    const waveform_bytes = waveform_slice.constData();
+
+    // Waveform shape is [1, 2, N] f32 (planar: all left then all right).
+    // Interleave to [N, 2] f32 (L R L R...) for ffmpeg.
+    const num_channels: usize = @intCast(waveform_buf.shape().dim(1));
+    const num_samples: usize = @intCast(waveform_buf.shape().dim(2));
+    const planar_f32: [*]const f32 = @alignCast(@ptrCast(waveform_bytes.ptr));
+    const interleaved = try allocator.alloc(f32, num_channels * num_samples);
+    defer allocator.free(interleaved);
+    for (0..num_samples) |i| {
+        for (0..num_channels) |ch| {
+            interleaved[i * num_channels + ch] = planar_f32[ch * num_samples + i];
+        }
+    }
+    const interleaved_bytes = std.mem.sliceAsBytes(interleaved);
+
+    // Also write interleaved waveform.bin for debugging
+    try writeRawBytes(allocator, io, interleaved_bytes, args.output_dir, "waveform.bin");
+
+    try encodeOutputMp4(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
 
     std.log.info("Done.", .{});
 }
@@ -1802,7 +1848,7 @@ fn runVideoVaeDecode(
     v_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
     output_dir: []const u8,
-) !void {
+) !VideoFrames {
     const s2 = pipe_meta.stage2;
     const F = s2.f_lat;
     const H = s2.h_lat;
@@ -1923,7 +1969,6 @@ fn runVideoVaeDecode(
 
     const num_pixels = F_out * H_out * W_out * 3;
     const frames_u8 = try allocator.alloc(u8, num_pixels);
-    defer allocator.free(frames_u8);
 
     // Convert bf16 [1, 3, F, H, W] → u8 [F, H, W, 3] (NHWC)
     // (x + 1) / 2 * 255, clamped to [0, 255]
@@ -1952,40 +1997,71 @@ fn runVideoVaeDecode(
     try writeRawBytes(allocator, io, frames_u8, output_dir, "frames.bin");
     std.log.info("  Video frames: {d}x{d}, {d} frames", .{ W_out, H_out, F_out });
 
-    // Pipe frames to ffmpeg → output.mp4
-    try pipeToFfmpeg(allocator, io, frames_u8, W_out, H_out, pipe_meta.frame_rate, output_dir);
+    return .{
+        .data = frames_u8,
+        .width = W_out,
+        .height = H_out,
+        .num_frames = F_out,
+        .allocator = allocator,
+    };
 }
 
-fn pipeToFfmpeg(
+fn encodeOutputMp4(
     allocator: std.mem.Allocator,
     io: std.Io,
-    frames_u8: []const u8,
-    width: usize,
-    height: usize,
+    video: VideoFrames,
+    audio_interleaved: []const u8,
+    audio_channels: usize,
     fps: f64,
     output_dir: []const u8,
 ) !void {
     const output_path = try std.fs.path.join(allocator, &.{ output_dir, "output.mp4" });
     defer allocator.free(output_path);
 
+    // Write interleaved audio to a temp file (ffmpeg reads video from stdin,
+    // audio from file — can't pipe both to stdin).
+    const audio_path = try std.fs.path.join(allocator, &.{ output_dir, "_audio_tmp.raw" });
+    defer allocator.free(audio_path);
+    {
+        const audio_file = try std.Io.Dir.createFile(.cwd(), io, audio_path, .{});
+        defer audio_file.close(io);
+        var wr_buf: [64 * 1024]u8 = undefined;
+        var wr = audio_file.writer(io, &wr_buf);
+        try wr.interface.writeAll(audio_interleaved);
+        try wr.interface.flush();
+    }
+
     var size_buf: [32]u8 = undefined;
-    const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ width, height }) catch unreachable;
+    const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ video.width, video.height }) catch unreachable;
 
     var fps_buf: [16]u8 = undefined;
     const fps_str = std.fmt.bufPrint(&fps_buf, "{d:.0}", .{fps}) catch unreachable;
 
-    std.log.info("Encoding video with ffmpeg → {s}", .{output_path});
+    var ac_buf: [8]u8 = undefined;
+    const ac_str = std.fmt.bufPrint(&ac_buf, "{d}", .{audio_channels}) catch unreachable;
+
+    std.log.info("Encoding video+audio with ffmpeg → {s}", .{output_path});
 
     var child = try std.process.spawn(io, .{
         .argv = &.{
-            "ffmpeg", "-y",
+            "ffmpeg",   "-y",
+            // Video input: raw RGB24 from stdin
             "-f",       "rawvideo",
             "-pix_fmt", "rgb24",
             "-s",       size_str,
             "-r",       fps_str,
             "-i",       "pipe:0",
+            // Audio input: interleaved f32le from file
+            "-f",       "f32le",
+            "-ar",      "48000",
+            "-ac",      ac_str,
+            "-i",       audio_path,
+            // Output encoding
             "-c:v",     "libx264",
             "-pix_fmt", "yuv420p",
+            "-c:a",     "aac",
+            "-b:a",     "192k",
+            "-shortest",
             output_path,
         },
         .stdin = .pipe,
@@ -1997,7 +2073,7 @@ fn pipeToFfmpeg(
     const stdin_file = child.stdin.?;
     var write_buf: [64 * 1024]u8 = undefined;
     var writer = stdin_file.writer(io, &write_buf);
-    try writer.interface.writeAll(frames_u8);
+    try writer.interface.writeAll(video.data);
     try writer.interface.flush();
     stdin_file.close(io);
     child.stdin = null;
@@ -2018,6 +2094,9 @@ fn pipeToFfmpeg(
     }
 
     std.log.info("  Wrote {s}", .{output_path});
+
+    // Clean up temp audio file
+    try std.Io.Dir.deleteFile(.cwd(), io, audio_path);
 }
 
 // Phase 5: Audio VAE Decode
@@ -2148,8 +2227,7 @@ fn runVocoderWithBWE(
     sharding: zml.sharding.Sharding,
     ckpt_path: []const u8,
     audio_mel: zml.Buffer,
-    output_dir: []const u8,
-) !void {
+) !zml.Buffer {
     // ---- Open checkpoint store ----
     std.log.info("Opening checkpoint for vocoder...", .{});
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
@@ -2233,9 +2311,7 @@ fn runVocoderWithBWE(
     const waveform = bwe_results.get(zml.Buffer);
     std.log.info("  48kHz waveform: {any}", .{waveform.shape()});
 
-    // ---- Write output ----
-    try writeBuffer(allocator, io, waveform, output_dir, "waveform.bin");
-    std.log.info("  Waveform written to waveform.bin", .{});
+    return waveform;
 }
 
 fn writeRawBytes(
