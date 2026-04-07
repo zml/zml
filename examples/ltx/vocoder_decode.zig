@@ -186,6 +186,84 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape()});
 
     // ========================================================================
+    // BWE Debug: compute mel spectrogram from 16kHz waveform
+    // ========================================================================
+    std.log.info("BWE Debug: compiling forwardBWEComputeMel (input: {any})...", .{waveform_16k.shape()});
+    var bwe_mel_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardBWEComputeMel,
+        .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
+        .{ .shardings = &.{sharding} },
+    );
+    defer bwe_mel_exe.deinit();
+
+    std.log.info("BWE Debug: running forwardBWEComputeMel...", .{});
+    var bwe_mel_args = try bwe_mel_exe.args(allocator);
+    defer bwe_mel_args.deinit(allocator);
+    var bwe_mel_results = try bwe_mel_exe.results(allocator);
+    defer bwe_mel_results.deinit(allocator);
+    bwe_mel_args.set(.{ waveform_16k, &bwe_bufs });
+    bwe_mel_exe.call(bwe_mel_args, &bwe_mel_results);
+    const bwe_mel_buf = bwe_mel_results.get(zml.Buffer);
+    std.log.info("  bwe_mel: {any}", .{bwe_mel_buf.shape()});
+
+    const bwe_mel_slice = try bwe_mel_buf.toSliceAlloc(allocator, io);
+    defer bwe_mel_slice.free(allocator);
+    try writeRawBytes(allocator, io, bwe_mel_slice.constData(), output_dir, "debug_bwe_mel.bin");
+
+    // ========================================================================
+    // BWE Debug: sinc resample skip connection
+    // ========================================================================
+    std.log.info("BWE Debug: compiling forwardBWESincSkip (input: {any})...", .{waveform_16k.shape()});
+    var bwe_skip_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardBWESincSkip,
+        .{zml.Tensor.fromShape(waveform_16k.shape())},
+        .{ .shardings = &.{sharding} },
+    );
+    defer bwe_skip_exe.deinit();
+
+    std.log.info("BWE Debug: running forwardBWESincSkip...", .{});
+    var bwe_skip_args = try bwe_skip_exe.args(allocator);
+    defer bwe_skip_args.deinit(allocator);
+    var bwe_skip_results = try bwe_skip_exe.results(allocator);
+    defer bwe_skip_results.deinit(allocator);
+    bwe_skip_args.set(.{waveform_16k});
+    bwe_skip_exe.call(bwe_skip_args, &bwe_skip_results);
+    const bwe_skip_buf = bwe_skip_results.get(zml.Buffer);
+    std.log.info("  bwe_skip: {any}", .{bwe_skip_buf.shape()});
+
+    const bwe_skip_slice = try bwe_skip_buf.toSliceAlloc(allocator, io);
+    defer bwe_skip_slice.free(allocator);
+    try writeRawBytes(allocator, io, bwe_skip_slice.constData(), output_dir, "debug_bwe_skip.bin");
+
+    // ========================================================================
+    // BWE Debug: residual (mel → BWE generator)
+    // ========================================================================
+    std.log.info("BWE Debug: compiling forwardBWEResidual (input: {any})...", .{waveform_16k.shape()});
+    var bwe_res_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardBWEResidual,
+        .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
+        .{ .shardings = &.{sharding} },
+    );
+    defer bwe_res_exe.deinit();
+
+    std.log.info("BWE Debug: running forwardBWEResidual...", .{});
+    var bwe_res_args = try bwe_res_exe.args(allocator);
+    defer bwe_res_args.deinit(allocator);
+    var bwe_res_results = try bwe_res_exe.results(allocator);
+    defer bwe_res_results.deinit(allocator);
+    bwe_res_args.set(.{ waveform_16k, &bwe_bufs });
+    bwe_res_exe.call(bwe_res_args, &bwe_res_results);
+    const bwe_res_buf = bwe_res_results.get(zml.Buffer);
+    std.log.info("  bwe_residual: {any}", .{bwe_res_buf.shape()});
+
+    const bwe_res_slice = try bwe_res_buf.toSliceAlloc(allocator, io);
+    defer bwe_res_slice.free(allocator);
+    try writeRawBytes(allocator, io, bwe_res_slice.constData(), output_dir, "debug_bwe_residual.bin");
+
+    // ========================================================================
     // Stage 2: BWE pipeline — 16kHz → 48kHz waveform
     // ========================================================================
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape()});

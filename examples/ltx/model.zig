@@ -3920,28 +3920,28 @@ fn forwardComputeMel(audio: Tensor, mel_stft: MelSTFTParams) Tensor {
     return log_mel.reshape(.{ batch, n_channels, log_mel.dim(1), log_mel.dim(2) });
 }
 
-/// Hann-windowed sinc resampler for BWE skip connection.
+/// Kaiser-windowed sinc resampler for BWE skip connection.
 /// Upsamples by ratio=3 (16kHz → 48kHz). Filter not in checkpoint — computed here.
 ///
-/// UpSample1d(ratio=3, window_type="hann"):
-///   kernel_size=43, pad=7, pad_left=42, pad_right=40
+/// UpSample1d(ratio=3, window_type="kaiser"):  (kaiser is the default)
+///   kernel_size=18, pad=5, pad_left=22, pad_right=23
 fn forwardSincResample3x(x: Tensor) Tensor {
     const ratio: i64 = 3;
-    const kernel_size: i64 = 43;
-    const pad: i64 = 7;
-    const pad_left_trim: i64 = 42;
-    const pad_right_trim: i64 = 40;
+    const kernel_size: i64 = 18;
+    const pad: i64 = 5;
+    const pad_left_trim: i64 = 22;
+    const pad_right_trim: i64 = 23;
 
-    // Precomputed Hann-windowed sinc filter (43 taps, ratio=3)
-    // Only 11 center taps are significant; outer taps are <1e-17 (zero in practice).
-    // Generated from: UpSample1d(ratio=3, window_type="hann")
-    //   rolloff=0.99, lowpass_filter_width=6, width=7
-    const filter_data = [43]f32{
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-        2.2237423e-04,  -8.3113974e-04, 1.6642004e-03,  -2.4983494e-03, 3.1095231e-03,
-        3.3000001e-01,
-        3.1095231e-03,  -2.4983494e-03, 1.6642004e-03,  -8.3113974e-04, 2.2237423e-04,
-        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    // Precomputed Kaiser-windowed sinc filter (18 taps, ratio=3)
+    // Generated from: UpSample1d(ratio=3, window_type="kaiser")
+    //   cutoff=0.5/ratio, half_width=0.6/ratio, kernel_size=18
+    //   filter.sum() ≈ 1.0, filter.sum()*ratio ≈ 3.0
+    const filter_data = [18]f32{
+        7.0040696301e-04, 4.6405289322e-03, 5.3038536571e-03, -1.0276262648e-02,
+        -3.6353457719e-02, -3.0759338289e-02, 5.2384063601e-02, 1.9813767076e-01,
+        3.1622257829e-01, 3.1622257829e-01, 1.9813767076e-01, 5.2384063601e-02,
+        -3.0759338289e-02, -3.6353457719e-02, -1.0276262648e-02, 5.3038536571e-03,
+        4.6405289322e-03, 7.0040696301e-04,
     };
 
     // 1. Replicate-pad
@@ -3949,10 +3949,10 @@ fn forwardSincResample3x(x: Tensor) Tensor {
 
     // 2. Depthwise conv_transpose1d with sinc filter
     const n_channels = y.dim(1);
-    // Create constant filter tensor [1, 1, 43] then broadcast to [C, 1, 43]
+    // Create constant filter tensor [1, 1, 18] then broadcast to [C, 1, 18]
     const filter_shape = zml.Shape.init(.{ 1, 1, kernel_size }, .f32);
     const filt_1 = Tensor.constantTensor(filter_shape, std.mem.sliceAsBytes(&filter_data));
-    const filt = filt_1.reverse(.{2}).broad(filter_shape.set(0, n_channels)); // [C, 1, 43] flipped
+    const filt = filt_1.reverse(.{2}).broad(filter_shape.set(0, n_channels)); // [C, 1, 18] flipped (symmetric)
 
     // MLIR padding for depthwise transposed conv: kernel_size - 1 = 42
     const mlir_pad = kernel_size - 1;
@@ -4094,5 +4094,52 @@ pub fn forwardBWEPipeline(waveform_16k: Tensor, params: *const BWEPipelineParams
     output = output.slice1d(2, .{ .end = output_length });
 
     return output;
+}
+
+// ====================================================================
+// Debug forward functions for BWE pipeline bisection
+// ====================================================================
+
+/// Helper: pad waveform to multiple of hop_length (shared by BWE debug fns).
+fn bwePadInput(waveform_16k: Tensor) Tensor {
+    const hop_length: i64 = 80;
+    var x = waveform_16k;
+    const length_low_rate = x.dim(2);
+    const remainder = @mod(length_low_rate, hop_length);
+    const pad_amount = if (remainder != 0) hop_length - remainder else 0;
+    if (pad_amount > 0) {
+        const right_zeros = Tensor.zeroes(x.shape().set(2, pad_amount));
+        x = Tensor.concatenate(&.{ x, right_zeros }, 2);
+    }
+    return x;
+}
+
+/// Debug: BWE compute mel only — returns log-mel [B, 2, n_mels, T_frames] (before transpose).
+pub fn forwardBWEComputeMel(waveform_16k: Tensor, params: *const BWEPipelineParams) Tensor {
+    const x = bwePadInput(waveform_16k);
+    return forwardComputeMel(x, params.mel_stft);
+}
+
+/// Debug: BWE sinc resample skip only — returns [B, 2, T_skip].
+pub fn forwardBWESincSkip(waveform_16k: Tensor) Tensor {
+    const x = bwePadInput(waveform_16k);
+    return forwardSincResample3x(x);
+}
+
+/// Debug: BWE residual only (mel → BWE generator) — returns [B, 2, T_bwe].
+pub fn forwardBWEResidual(waveform_16k: Tensor, params: *const BWEPipelineParams) Tensor {
+    const x = bwePadInput(waveform_16k);
+    const mel = forwardComputeMel(x, params.mel_stft);
+    const mel_for_bwe = mel.transpose(.{ 0, 1, 3, 2 });
+    return forwardVocoderGeneric(
+        mel_for_bwe,
+        params.bwe_generator.conv_pre,
+        params.bwe_generator.ups,
+        params.bwe_generator.resblocks,
+        params.bwe_generator.act_post,
+        params.bwe_generator.conv_post,
+        5,
+        false,
+    );
 }
 

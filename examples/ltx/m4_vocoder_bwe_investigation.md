@@ -56,7 +56,7 @@ The `forwardBWEPipeline` in model.zig (line ~4030) does:
 - `zml/io.zig` — **UNCHANGED** (reverted to original)
 
 ### Debug Infrastructure on Remote
-- Remote server: `root@dev-oboulant` (vast.ai, SSH port 6378, IP 34.48.171.202)
+- Remote server: `root@dev-oboulant`
 - `/root/.local/bin/uv` for Python
 - Python env: `cd /root/repos/LTX-2 && /root/.local/bin/uv run ...`
 - Zig build: `cd /root/repos/zml && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:vocoder_decode -- <args>`
@@ -70,13 +70,61 @@ The `forwardBWEPipeline` in model.zig (line ~4030) does:
 - `examples/ltx/e2e/export_vocoder_stages.py` — exports after_rearrange, after_conv_pre, after_ups0, after_stage0_resblocks
 - `examples/ltx/e2e/compare_vocoder.py` — compares 16kHz and 48kHz with PSNR per channel
 - `examples/ltx/e2e/verify_conv_transpose.py` — verified that manual kernel flip matches PyTorch
+- `examples/ltx/e2e/export_bwe_stages.py` — exports BWE intermediates: stft_magnitude, mel, residual, skip, output
+- `examples/ltx/e2e/compare_bwe_stages.py` — compares BWE intermediates with PSNR at each stage
 
 ### Debug Forward Functions in model.zig
 - `forwardAfterUps0` — verified at 145 dB after fix
 - `forwardAfterStage0` — should now be high PSNR too
+- `forwardBWEComputeMel` — returns log-mel [B,2,n_mels,T_frames] (before transpose)
+- `forwardBWESincSkip` — returns sinc-resampled skip [B,2,T_skip]
+- `forwardBWEResidual` — returns BWE generator residual [B,2,T_bwe]
 
 ### Config Values (from checkpoint metadata)
 Main vocoder: rates=[5,2,2,2,2,2], kernels=[11,4,4,4,4,4], initial_ch=1536
 BWE: rates=[6,5,2,2,2], kernels=[12,11,4,4,4], initial_ch=512
 BWE STFT: n_fft=512, hop_length=80, win_size=512, num_mels=64
 BWE sampling: input_sr=16000, output_sr=48000
+
+---
+
+## Session: April 7, 2026 — BWE Bisection Setup
+
+### Plan
+Stage 2 BWE pipeline (19.30 dB) needs bisection of `forwardComputeMel` and downstream.
+
+### Steps to Run on Remote
+
+**1. Export Python BWE intermediates:**
+```bash
+cd /root/repos/LTX-2 && uv run python /root/repos/zml/examples/ltx/e2e/export_bwe_stages.py \
+    --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+    --activations /root/e2e_demo/vocoder_ref/vocoder_activations.safetensors \
+    --output /root/e2e_demo/vocoder_ref/bwe_stages.safetensors
+```
+
+**2. Copy updated Zig files to remote and rebuild:**
+```bash
+# From local:
+scp examples/ltx/model.zig examples/ltx/vocoder_decode.zig root@dev-oboulant:/root/repos/zml/examples/ltx/
+scp examples/ltx/e2e/export_bwe_stages.py examples/ltx/e2e/compare_bwe_stages.py root@dev-oboulant:/root/repos/zml/examples/ltx/e2e/
+
+# On remote:
+cd /root/repos/zml && bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:vocoder_decode -- \
+    /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+    /root/e2e_demo/vocoder_ref/vocoder_activations.safetensors \
+    /root/e2e_demo/vocoder_zig_out/
+```
+
+**3. Compare BWE intermediates:**
+```bash
+cd /root/repos/LTX-2 && uv run python /root/repos/zml/examples/ltx/e2e/compare_bwe_stages.py \
+    /root/e2e_demo/vocoder_ref/bwe_stages.safetensors \
+    /root/e2e_demo/vocoder_zig_out/
+```
+
+### Expected Outcomes
+- `bwe_mel_pre_transpose`: If PSNR is low → bug is in forwardSTFT or forwardMelProjection
+- `bwe_skip`: If PSNR is low → bug is in forwardSincResample3x padding/trim arithmetic
+- `bwe_residual`: If mel is good but this is low → BWE generator has a bug (unlikely, same code as Stage 1)
+- `bwe_output`: Should match the overall 19.30 dB (or improve if we fix something)
