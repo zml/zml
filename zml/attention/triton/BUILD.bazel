@@ -87,8 +87,7 @@ copy_to_directory(
     allow_overwrites = True,
     exclude_srcs_patterns = [
         "**/include/**",
-        #"**/tests/**",
-        #"**/_solib_*/**",
+        "**/_solib_*/**",
     ],
     hardlink = "auto",
     include_external_repositories = ["**"],
