@@ -44,8 +44,8 @@ pub const Session = struct {
             .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
             .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, compiled_model.params.shardings.replicated),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),
-            .think_start = tokenizer.tokenToId("<think>") orelse unreachable,
-            .think_end = tokenizer.tokenToId("</think>") orelse unreachable,
+            .think_start = tokenizer.tokenId("<think>") orelse unreachable,
+            .think_end = tokenizer.tokenId("</think>") orelse unreachable,
         };
     }
 
@@ -60,17 +60,16 @@ pub const Session = struct {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
-        const im_start = self.tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = self.tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
+        const im_start = self.tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = self.tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, im_start, user, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
-        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
+        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, im_start });
+        try encoder.encodeAppend(allocator, &tokens, "user\n");
+        try encoder.encodeAppend(allocator, &tokens, prompt);
+        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
+        try encoder.encodeAppend(allocator, &tokens, "assistant\n");
         return tokens.toOwnedSlice(allocator);
     }
 
@@ -78,17 +77,16 @@ pub const Session = struct {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
-        const im_start = self.tokenizer.tokenToId("<|im_start|>") orelse return error.NoSuchToken;
-        const im_end = self.tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
+        const im_start = self.tokenizer.tokenId("<|im_start|>") orelse return error.NoSuchToken;
+        const im_end = self.tokenizer.tokenId("<|im_end|>") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start, user, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ im_end, newline });
-        try tokens.appendSlice(allocator, &.{ im_start, assistant, newline });
+        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
+        try encoder.encodeAppend(allocator, &tokens, "user\n");
+        try encoder.encodeAppend(allocator, &tokens, prompt);
+        try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
+        try encoder.encodeAppend(allocator, &tokens, "assistant\n");
         return tokens.toOwnedSlice(allocator);
     }
 
@@ -147,16 +145,15 @@ pub const Session = struct {
 
             if (token_id == self.config.eos_token_id) break :generation;
 
-            if (try decoder.next(token_id)) |token| {
-                if (self.think_start) |think_start| if (token_id == think_start) {
-                    try stdout.writeAll("\x1b[2m");
-                };
-                try stdout.writeAll(token);
-                if (self.think_end) |think_end| if (token_id == think_end) {
-                    try stdout.writeAll("\x1b[0m");
-                };
-                try stdout.flush();
-            }
+            const token = try decoder.feed_one(token_id);
+            if (self.think_start) |think_start| if (token_id == think_start) {
+                try stdout.writeAll("\x1b[2m");
+            };
+            try stdout.writeAll(token);
+            if (self.think_end) |think_end| if (token_id == think_end) {
+                try stdout.writeAll("\x1b[0m");
+            };
+            try stdout.flush();
 
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
@@ -180,5 +177,8 @@ pub const Session = struct {
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
+
+        try stdout.writeAll(try decoder.finalize());
+        try stdout.flush();
     }
 };

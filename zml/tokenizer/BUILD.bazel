@@ -12,6 +12,7 @@ zig_library(
         "//ffi:zig",
         "//stdx",
         "//zml/tokenizer/hftokenizers",
+        "//zml/tokenizer/iree",
         "//zml/tokenizer/sentencepiece",
     ],
 )
@@ -28,11 +29,8 @@ zig_binary(
 
 zig_test(
     name = "test",
-    main = "homemade.zig",
-    visibility = ["//visibility:public"],
     deps = [
-        "//ffi:zig",
-        "//stdx",
+        ":tokenizer"
     ],
 )
 

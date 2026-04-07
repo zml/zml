@@ -65,17 +65,19 @@ pub const Session = struct {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
-        const start_header = self.tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
-        const end_header = self.tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
-        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const eot = self.tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
+        const start_header = self.tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = self.tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header, user, end_header, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header });
+        try encoder.encodeAppend(allocator, &tokens, "user");
+        try tokens.appendSlice(allocator, &.{ end_header, newline });
+        try encoder.encodeAppend(allocator, &tokens, prompt);
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
+        try encoder.encodeAppend(allocator, &tokens, "assistant");
+        try tokens.appendSlice(allocator, &.{ end_header, newline });
         return tokens.toOwnedSlice(allocator);
     }
 
@@ -83,17 +85,19 @@ pub const Session = struct {
         var encoder = try self.tokenizer.encoder();
         defer encoder.deinit();
 
-        const start_header = self.tokenizer.tokenToId("<|start_header_id|>") orelse return error.NoSuchToken;
-        const end_header = self.tokenizer.tokenToId("<|end_header_id|>") orelse return error.NoSuchToken;
-        const user = self.tokenizer.tokenToId("user") orelse return error.NoSuchToken;
-        const assistant = self.tokenizer.tokenToId("assistant") orelse return error.NoSuchToken;
-        const eot = self.tokenizer.tokenToId("<|eot_id|>") orelse return error.NoSuchToken;
-        const newline = (try encoder.encode("\n"))[0];
+        const start_header = self.tokenizer.tokenId("<|start_header_id|>") orelse return error.NoSuchToken;
+        const end_header = self.tokenizer.tokenId("<|end_header_id|>") orelse return error.NoSuchToken;
+        const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
+        const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, user, end_header, newline });
-        try tokens.appendSlice(allocator, try encoder.encode(prompt));
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header, assistant, end_header, newline });
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
+        try encoder.encodeAppend(allocator, &tokens, "user");
+        try tokens.appendSlice(allocator, &.{ end_header, newline });
+        try encoder.encodeAppend(allocator, &tokens, prompt);
+        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
+        try encoder.encodeAppend(allocator, &tokens, "assistant");
+        try tokens.appendSlice(allocator, &.{ end_header, newline });
         return tokens.toOwnedSlice(allocator);
     }
 
@@ -152,10 +156,9 @@ pub const Session = struct {
 
             if (isEosToken(self.config, token_id)) break :generation;
 
-            if (try decoder.next(token_id)) |token| {
-                try stdout.writeAll(token);
-                try stdout.flush();
-            }
+            const token = try decoder.feed_one(token_id);
+            try stdout.writeAll(token);
+            try stdout.flush();
 
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
@@ -177,6 +180,9 @@ pub const Session = struct {
             decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
+
+        try stdout.writeAll(try decoder.finalize());
+        try stdout.flush();
     }
 };
 

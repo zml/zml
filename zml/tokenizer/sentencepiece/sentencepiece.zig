@@ -192,7 +192,7 @@ pub const SentencePieceProcessor = opaque {
         return try Decoder.init(self);
     }
 
-    pub fn tokenToId(self: *SentencePieceProcessor, token: []const u8) u32 {
+    pub fn tokenId(self: *SentencePieceProcessor, token: []const u8) u32 {
         return @intCast(c.SentencePieceProcessor_PieceToId(@ptrCast(self), ffi.ZigSlice.from(token)));
     }
 };
