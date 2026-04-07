@@ -43,6 +43,30 @@ pub const Client = opaque {
     }
 };
 
+pub const CustomCallBuffer = struct {
+    shape: Shape,
+    ptr: *anyopaque,
+
+    pub fn format(
+        self: @This(),
+        writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!void {
+        try writer.print("{f}@{*}", .{ self.shape, self.ptr });
+    }
+
+    pub fn fromPjrt(buffer: *const pjrt.ffi.Buffer) @This() {
+        const dt = switch (buffer.dtype) {
+            .invalid => @panic("Found an invalid pjrt buffer"),
+            .token => @panic("Found an token pjrt buffer"),
+            inline else => |tag| @field(DataType, @tagName(tag)),
+        };
+        return .{
+            .ptr = buffer.data,
+            .shape = .init(buffer.dims(), dt),
+        };
+    }
+};
+
 pub fn bufferTypeFromDtype(dt: DataType) pjrt.BufferType {
     return switch (dt) {
         inline else => |tag| @field(pjrt.BufferType, @tagName(tag)),

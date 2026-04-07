@@ -20,7 +20,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
 pub fn register(platform: *const zml.Platform) !void {
     if (comptime platforms.isEnabled(.cuda)) {
         try fa3.register(platform);
-        try fa2.Fa2CustomCall.register(platform);
+        try fa2.fa2_mha_varlen_fwd.register(platform);
         try paged_fa2.Decode.register(platform);
         try paged_fa2.Prefill.register(platform);
         try paged_fa3.Decode.register(platform);
@@ -39,7 +39,7 @@ fn flashattnDataTypeFromZmlDataType(dtype: zml.DataType) flashattn.DataType {
     };
 }
 
-fn toFlashattnTensor(buffer: zml.ops.CustomCallBuffer) flashattn.Tensor {
+fn toFlashattnTensor(buffer: zml.pjrtx.CustomCallBuffer) flashattn.Tensor {
     return .init(
         buffer.ptr,
         buffer.shape.dims(),
@@ -166,7 +166,7 @@ pub const fa2 = struct {
     };
 
     const Output = struct {
-        attn: zml.Shape,
+        o: zml.Shape,
     };
 
     const Attributes = struct {
@@ -202,7 +202,7 @@ pub const fa2 = struct {
             &toFlashattnTensor(input.q),
             &toFlashattnTensor(input.k),
             &toFlashattnTensor(input.v),
-            &toFlashattnTensor(output.attn),
+            &toFlashattnTensor(output.o),
             &toFlashattnTensor(input.cu_seqlens_q),
             &toFlashattnTensor(input.cu_seqlens_k),
             null,
@@ -218,11 +218,11 @@ pub const fa2 = struct {
         return null;
     }
 
-    const Fa2CustomCall = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
+    const fa2_mha_varlen_fwd = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
         .name = "fa2_mha_varlen_fwd",
-        .sharding_aware = true,
-        .has_side_effect = true,
-        .output_operand_aliases = &.{0},
+        .sharding_aware = false,
+        .has_side_effect = false,
+        .output_operand_aliases = .{ .o = .q },
     });
 
     pub const Parameters = struct {
@@ -310,7 +310,7 @@ pub const fa2 = struct {
         const q_sharded = q.withPartitioning(.{ .h = .model });
         const model_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
 
-        const output = Fa2CustomCall.call(
+        const output = fa2_mha_varlen_fwd.call(
             .{
                 .q = q_sharded,
                 .k = k,
@@ -322,7 +322,7 @@ pub const fa2 = struct {
                 .out_accum = metadata.out_accum.withPartitioning(.{ .h = .model }),
             },
             .{
-                .attn = q_sharded.shape(),
+                .o = q_sharded.shape(),
             },
             .{
                 .softmax_scale = b: {
@@ -337,7 +337,7 @@ pub const fa2 = struct {
                 .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
             },
         );
-        var o = output.attn;
+        var o = output.o;
 
         if (seqlenq_ngroups_swapped) {
             o = o.splitAxis(.tot, .{ .tot = original_tot, .ngroups = ngroups }).transpose(.{ .tot, .h, .ngroups, .hd }).merge(.{ .h = .{ .h, .ngroups } });
@@ -511,7 +511,7 @@ pub const fa3 = struct {
                 .max_seqlen_k = max_seqlen_k,
             },
             .{
-                .output_operand_aliases = &.{0},
+                .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
                 .has_side_effect = false,
             },
         );

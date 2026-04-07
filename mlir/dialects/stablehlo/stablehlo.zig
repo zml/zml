@@ -733,13 +733,18 @@ pub const CustomCallOpts = struct {
         typed_ffi: *const mlir.Attribute,
     };
 
+    pub const OutputOperandAlias = struct {
+        output_index: i64,
+        operand_index: i64,
+    };
+
     call_target_name: []const u8,
     has_side_effect: ?bool = null,
     api_version: ?ApiVersion = null,
     backend_config: ?BackendConfig = null,
     operand_layouts: ?[]const []const usize = null,
     result_layouts: ?[]const []const usize = null,
-    output_operand_aliases: ?[]const i64 = null,
+    output_operand_aliases: ?[]const OutputOperandAlias = null,
     additional_attributes: []const mlir.NamedAttribute = &.{},
 };
 
@@ -783,10 +788,10 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
 
     if (opts.output_operand_aliases) |output_operand_aliases| {
         var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
-        for (output_operand_aliases, 0..) |alias, output_index| {
-            const output_tuple_indices = if (result_types.len > 1) &[1]i64{@intCast(output_index)} else &.{};
+        for (output_operand_aliases) |alias| {
+            const output_tuple_indices = if (result_types.len > 1) &[1]i64{alias.output_index} else &.{};
             buffer.appendAssumeCapacity(
-                outputOperandAliasAttribute(ctx, .{ .operand_index = alias, .output_tuple_indices = output_tuple_indices }),
+                outputOperandAliasAttribute(ctx, .{ .operand_index = alias.operand_index, .output_tuple_indices = output_tuple_indices }),
             );
         }
         attrs.appendAssumeCapacity(

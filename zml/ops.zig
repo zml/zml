@@ -9,6 +9,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("mem.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
+const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
 const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -450,7 +451,7 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
-    output_operand_aliases: []const i64 = &.{},
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
@@ -1051,8 +1052,39 @@ fn CustomCallResultTypeFromOutputSpec(comptime OutputSpecT: type) type {
 
 pub const CustomCallOptions = struct {
     has_side_effect: bool,
-    output_operand_aliases: ?[]const i64 = null,
+    output_operand_aliases: ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = null,
 };
+
+fn customCallOutputOperandAliases(
+    comptime I: type,
+    comptime O: type,
+    comptime aliases: ?CustomCallOutputOperandAliases(I, O),
+) ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias {
+    const aliases_ = aliases orelse return null;
+
+    const output_fields = @typeInfo(O).@"struct".fields;
+    comptime var num_aliases = 0;
+    inline for (output_fields) |field| {
+        if (@field(aliases_, field.name) != null) num_aliases += 1;
+    }
+
+    const output_operand_aliases = comptime blk: {
+        var aliases_buffer: [num_aliases]dialects.stablehlo.CustomCallOpts.OutputOperandAlias = undefined;
+        var i = 0;
+        for (output_fields, 0..) |field, output_index| {
+            if (@field(aliases_, field.name)) |operand| {
+                aliases_buffer[i] = .{
+                    .output_index = @intCast(output_index),
+                    .operand_index = @intCast(@intFromEnum(operand)),
+                };
+                i += 1;
+            }
+        }
+        break :blk aliases_buffer;
+    };
+
+    return &output_operand_aliases;
+}
 
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
@@ -1569,16 +1601,27 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
 }
 
 pub fn CustomCall(
+    // A, I and O are assumed to be simple struct without any nesting like: { a: zml.Tensor }
     I: type,
     O: type,
     A: type,
-    // (TensorToCustomCallBuffer(i), ShapeToBuffer(O), A) -> !?*pjrt.ffi.Error
+    // Receives the custom call buffers for the input and outputs a struct with the same fields as I and O
+    // and the provided attributes. So if I is `{a: zml.Tensor}`, the first argument is `{a: CustomCallBuffer}`
+    // (TensorToCustomCallBuffer(i), ShapeToCustomCallBuffer(O), A) -> !?*pjrt.ffi.Error
     comptime func: anytype,
     comptime params: struct {
+        /// Name of the custom call, must be unique.
         name: [:0]const u8,
+        /// Custom call will see the data of a single device. So for a sharded buffer, it will only see a single partition. This applies
+        /// for both the input and output buffers. By default, the partitioning algorithm will assume nothing on the custom call input/output,
+        /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
+        /// sharding, this setting will avoid the shuffling of the buffer's data.
         sharding_aware: bool,
+        /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
         has_side_effect: bool,
-        output_operand_aliases: ?[]const i64 = null,
+        /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
+        /// Use the input/output field names to express the mapping: `{ .<out field> = .<in field> }`
+        output_operand_aliases: ?CustomCallOutputOperandAliases(I, O) = null,
     },
 ) type {
     return struct {
@@ -1586,13 +1629,13 @@ pub fn CustomCall(
         pub const OutputShapes = O;
         pub const Attributes = A;
 
+        /// Register the custom call so you can use it.
         pub fn register(platform: *const Platform) !void {
             try platform.registerFfi(.{
                 .name = params.name,
                 .platform_name = null,
                 .handler = @This().handler,
                 .traits = .{
-                    // TODO: Not sure what this means exactly, should this be configurable?
                     .command_buffer_compatible = true,
                 },
             });
@@ -1606,7 +1649,7 @@ pub fn CustomCall(
             };
             const opts: CustomCallOptions = .{
                 .has_side_effect = params.has_side_effect,
-                .output_operand_aliases = params.output_operand_aliases,
+                .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
             };
             if (params.sharding_aware) {
                 return shardingAwareTypedCustomCall(
@@ -1647,17 +1690,21 @@ fn CustomCallArgs(I: type, O: type, A: type) type {
     };
 }
 
-pub const CustomCallBuffer = struct {
-    shape: Shape,
-    ptr: *anyopaque,
+pub fn TensorToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
+}
 
-    pub fn format(
-        self: @This(),
-        writer: *std.Io.Writer,
-    ) std.Io.Writer.Error!void {
-        try writer.print("{f}@{*}", .{ self.shape, self.ptr });
-    }
-};
+pub fn ShapeToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToTensor(T: type) type {
+    return meta.MapRestrict(Shape, Tensor).map(T);
+}
+
+pub fn CustomCallOutputOperandAliases(I: type, O: type) type {
+    return meta.MapRestrict(Shape, ?std.meta.FieldEnum(I)).map(O);
+}
 
 pub fn shardingAwareTypedCustomCall(
     I: type,
@@ -1667,6 +1714,7 @@ pub fn shardingAwareTypedCustomCall(
     comptime opts: CustomCallOptions,
     args: CustomCallArgs(I, O, A),
 ) ShapeToTensor(O) {
+    // Convert to slices so that manualComputationInternal can inspect the input/output.
     var input_tensors: [@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields.len]Tensor = undefined;
     inline for (@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields, 0..) |field, i| {
         input_tensors[i] = @field(args.input_tensors, field.name);
@@ -1720,7 +1768,7 @@ pub fn typedCustomCall(
             inline for (struct_info.fields, 0..) |field, i| {
                 input_tensors[i] = @field(args.input_tensors, field.name);
             }
-            break :b input_tensors;
+            break :b &input_tensors;
         },
         // Extra case to support []const Tensor from shardingAwareTypedCustomCall
         .pointer => |pointer_info| b: {
@@ -1736,7 +1784,7 @@ pub fn typedCustomCall(
             inline for (struct_info.fields, 0..) |field, i| {
                 output_shapes[i] = @field(args.output_shapes, field.name);
             }
-            break :b output_shapes;
+            break :b &output_shapes;
         },
         // Extra case to support []const Shape from shardingAwareTypedCustomCall
         .pointer => |pointer_info| b: {
@@ -1840,24 +1888,11 @@ pub fn typedCustomCall(
         op.setAttributeByName("mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, "{manual}"));
     }
 
-    const outputs_ = allocator.alloc(Tensor, output_shapes.len) catch unreachable;
-    for (output_shapes, 0..) |output_shape, i| {
-        outputs_[i] = Tensor._result(output_shape, op.result(i));
+    var out: ShapeToTensor(O) = undefined;
+    inline for (output_shapes, @typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |output_shape, field, i| {
+        @field(out, field.name) = Tensor._result(output_shape, op.result(i));
     }
-
-    return outputs_;
-}
-
-pub fn TensorToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
-}
-
-pub fn ShapeToCustomCallBuffer(T: type) type {
-    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
-}
-
-pub fn ShapeToTensor(T: type) type {
-    return meta.MapRestrict(Shape, Tensor).map(T);
+    return out;
 }
 
 fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.ffi.CallFrame) struct {
@@ -1868,13 +1903,13 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
     var input: TensorToCustomCallBuffer(I) = undefined;
     inline for (@typeInfo(I).@"struct".fields, 0..) |field, i| {
         const buf = call_frame.args.buffers()[i];
-        @field(input, field.name) = pjrtToCustomCallBuffer(buf);
+        @field(input, field.name) = .fromPjrt(buf);
     }
 
     var output: ShapeToCustomCallBuffer(O) = undefined;
     inline for (@typeInfo(O).@"struct".fields, 0..) |field, i| {
         const shape_buf = call_frame.results.buffers()[i];
-        @field(output, field.name) = pjrtToCustomCallBuffer(shape_buf);
+        @field(output, field.name) = .fromPjrt(shape_buf);
     }
 
     var attributes: A = undefined;
@@ -1885,18 +1920,6 @@ fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.
     }
 
     return .{ input, output, attributes };
-}
-
-fn pjrtToCustomCallBuffer(buffer: *const pjrt.ffi.Buffer) CustomCallBuffer {
-    const dt = switch (buffer.dtype) {
-        .invalid => @panic("Found an invalid pjrt buffer"),
-        .token => @panic("Found an token pjrt buffer"),
-        inline else => |tag| @field(DataType, @tagName(tag)),
-    };
-    return .{
-        .ptr = buffer.data,
-        .shape = .init(buffer.dims(), dt),
-    };
 }
 
 test customCall {
@@ -1916,10 +1939,37 @@ test customCall {
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
         .has_side_effect = false,
-        .output_operand_aliases = &.{0},
+        .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
     });
 
     try zml.testing.expectEqualShapes(input.shape(), output.shape());
+}
+
+test "CustomCallOutputOperandAliases maps named fields to indices" {
+    const Input = struct {
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+    };
+    const Output = struct {
+        attn: Shape,
+        scratch: Shape,
+    };
+
+    const aliases = comptime customCallOutputOperandAliases(Input, Output, .{
+        .attn = .q,
+        .scratch = .v,
+    }).?;
+
+    try std.testing.expectEqual(@as(usize, 2), aliases.len);
+    try std.testing.expectEqualDeep(
+        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 0, .operand_index = 0 },
+        aliases[0],
+    );
+    try std.testing.expectEqualDeep(
+        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 1, .operand_index = 2 },
+        aliases[1],
+    );
 }
 
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
