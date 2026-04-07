@@ -318,12 +318,14 @@ pub fn main(init: std.process.Init) !void {
     bridge.a_clean.deinit();
 
     // ========================================================================
-    // Write denoised latents (for downstream tools / debugging)
+    // Write denoised latents (optional, for debugging)
     // ========================================================================
-    std.log.info("", .{});
-    std.log.info("Writing denoised latents...", .{});
-    try writeBuffer(allocator, io, s2.v_latent, args.output_dir, "video_latent.bin");
-    try writeBuffer(allocator, io, s2.a_latent, args.output_dir, "audio_latent.bin");
+    if (args.dump_intermediates) {
+        std.log.info("", .{});
+        std.log.info("Writing denoised latents...", .{});
+        try writeBuffer(allocator, io, s2.v_latent, args.output_dir, "video_latent.bin");
+        try writeBuffer(allocator, io, s2.a_latent, args.output_dir, "audio_latent.bin");
+    }
 
     // ========================================================================
     // Phase 4: Video VAE Decode
@@ -331,8 +333,12 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 4: Video VAE Decode ===", .{});
 
-    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, args.output_dir);
+    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta);
     defer video_frames.deinit();
+
+    if (args.dump_intermediates) {
+        try writeRawBytes(allocator, io, video_frames.data, args.output_dir, "frames.bin");
+    }
 
     // ========================================================================
     // Phase 5: Audio VAE Decode
@@ -340,7 +346,11 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 5: Audio VAE Decode ===", .{});
 
-    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta, args.output_dir);
+    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta);
+
+    if (args.dump_intermediates) {
+        try writeBuffer(allocator, io, audio_mel, args.output_dir, "audio_mel.bin");
+    }
 
     // ========================================================================
     // Phase 6: Vocoder + BWE (mel → 48kHz waveform)
@@ -1841,7 +1851,6 @@ fn runVideoVaeDecode(
     ckpt_path: []const u8,
     v_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
-    output_dir: []const u8,
 ) !VideoFrames {
     const s2 = pipe_meta.stage2;
     const F = s2.f_lat;
@@ -1987,8 +1996,6 @@ fn runVideoVaeDecode(
         }
     }
 
-    // Write frames.bin (kept for debugging)
-    try writeRawBytes(allocator, io, frames_u8, output_dir, "frames.bin");
     std.log.info("  Video frames: {d}x{d}, {d} frames", .{ W_out, H_out, F_out });
 
     return .{
@@ -2104,7 +2111,6 @@ fn runAudioVaeDecode(
     ckpt_path: []const u8,
     a_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
-    output_dir: []const u8,
 ) !zml.Buffer {
     const T_aud = pipe_meta.stage2.t_audio;
 
@@ -2202,10 +2208,6 @@ fn runAudioVaeDecode(
     audio_vae_exe.call(audio_vae_args, &audio_vae_results);
     const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
     std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape().dims()});
-
-    // Write mel spectrogram for debugging
-    try writeBuffer(allocator, io, decoded_audio, output_dir, "audio_mel.bin");
-    std.log.info("  Audio mel spectrogram written.", .{});
 
     return decoded_audio;
 }
@@ -2329,7 +2331,7 @@ fn writeRawBytes(
     std.log.info("  Wrote {s} ({d} bytes)", .{ path, data.len });
 }
 
-fn writeBuffer(
+fn writeBuffer (
     allocator: std.mem.Allocator,
     io: std.Io,
     buf: zml.Buffer,
