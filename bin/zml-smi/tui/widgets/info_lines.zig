@@ -7,6 +7,7 @@ const data = @import("../data.zig");
 const compose = @import("../lib/compose.zig");
 const ui = @import("../lib/ui.zig");
 const theme = @import("../theme.zig");
+const stamp = @import("bazel/stamp");
 
 const InfoLines = @This();
 
@@ -35,7 +36,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const w = ctx.max.width orelse 80;
     const host = self.state.host.front().*;
 
-    const hostname_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.hostname orelse "Unkown"});
+    const hostname_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.hostname orelse "Unknown"});
     const kernel_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.kernel orelse "Unknown"});
     const cpu_str = try std.fmt.allocPrint(ctx.arena, "{s}", .{host.cpu_name orelse "Unknown"});
     const uptime_str = try formatUptime(ctx.arena, host.uptime_seconds orelse 0);
@@ -50,7 +51,7 @@ pub fn draw(self: *const InfoLines, ctx: vxfw.DrawContext) std.mem.Allocator.Err
     const mem_str = try std.fmt.allocPrint(ctx.arena, "{d} / {d} GB", .{ used_gb, total_gb });
     const devices_str = try std.fmt.allocPrint(ctx.arena, "{d}", .{self.state.deviceCount()});
     const values = [entry_count][]const u8{
-        "v0.2",
+        stamp.stamp("STABLE_ZML_SMI_VERSION"),
         hostname_str,
         kernel_str,
         cpu_str,

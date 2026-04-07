@@ -1,24 +1,12 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
 load("@tar.bzl//tar:tar.bzl", "tar")
 
-# tpu grpc
-
-cc_library(
-    name = "tpuinfo",
-    srcs = ["bindings/tpu/libtpu/tpuinfo.cc"],
-    hdrs = ["bindings/tpu/libtpu/tpuinfo.h"],
-    strip_include_prefix = "bindings/tpu/libtpu",
-    deps = [
-        "@cloud_accelerator_diagnostics//:tpu_metric_service_cc_grpc",
-        "@grpc//:grpc++_unsecure",
-    ],
-)
+# zig libraries
 
 # smi
 
@@ -75,50 +63,26 @@ copy_to_directory(
 
 zig_binary(
     name = "zml-smi",
-    srcs = glob([
-        "tui/**/*.zig",
-    ]) + [
-        "bindings/amdsmi/amdsmi.zig",
-        "bindings/amdsmi/metrics.zig",
-        "bindings/amdsmi/process.zig",
-        "bindings/dynlib.zig",
-        "bindings/linux/metrics.zig",
-        "bindings/linux/process.zig",
-        "bindings/neuron/metrics.zig",
-        "bindings/neuron/nrt.zig",
-        "bindings/neuron/process.zig",
-        "bindings/nvml/metrics.zig",
-        "bindings/nvml/nvml.zig",
-        "bindings/nvml/process.zig",
-        "bindings/tpu/metrics.zig",
-        "bindings/tpu/process.zig",
-        "bindings/tpu/tpuinfo.zig",
-        "collector.zig",
-        "info/device_info.zig",
-        "info/host_info.zig",
-        "info/process_info.zig",
-        "platform.zig",
-        "utils/double_buffer.zig",
-        "utils/sandbox.zig",
-        "utils/sysfs.zig",
-        "worker.zig",
-    ],
+    visibility = ["//visibility:public"],
     data = [":sandbox"],
-    extra_srcs = glob([
-        "tui/assets/*",
-    ]),
     main = "main.zig",
     deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/csv",
+        "//bin/zml-smi/platforms/linux",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/tui",
         "//stdx",
         "@libvaxis//:vaxis",
         "@rules_zig//zig/runfiles",
     ] + select({
         "@platforms//os:macos": [],
         "//conditions:default": [
-            ":tpuinfo",
+            "//bin/zml-smi/platforms/amdsmi",
+            "//bin/zml-smi/platforms/neuron",
+            "//bin/zml-smi/platforms/nvml",
+            "//bin/zml-smi/platforms/tpu",
             "//platforms/neuron:libnrt_headers",
-            "@amd-smi-lib//:amdsmi",
-            "@cuda_nvml_dev//:nvml",
         ],
     }),
 )

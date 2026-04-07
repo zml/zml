@@ -7,7 +7,7 @@ const ui = @import("../lib/ui.zig");
 const compose = @import("../lib/compose.zig");
 const TitledBorder = @import("titled_border.zig");
 const ColumnLayout = @import("column_layout.zig");
-const pi = @import("../../info/process_info.zig");
+const pi = @import("zml-smi/info").process_info;
 const ProcessInfo = pi.ProcessInfo;
 
 const RichText = vxfw.RichText;

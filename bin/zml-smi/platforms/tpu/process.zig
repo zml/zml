@@ -1,28 +1,17 @@
 const std = @import("std");
-const pi = @import("../../info/process_info.zig");
-const ProcessDoubleBuffer = @import("../../utils/double_buffer.zig").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-const DeviceInfo = @import("../../info/device_info.zig").DeviceInfo;
-const Worker = @import("../../worker.zig").Worker;
+const smi_info = @import("zml-smi/info");
+const pi = smi_info.process_info;
+const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
+const DeviceInfo = smi_info.device_info.DeviceInfo;
+const Collector = @import("zml-smi/collector").Collector;
 
-pub fn init(w: *Worker, io: std.Io, allocator: std.mem.Allocator, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
-    try w.spawn(io, scanLoop, .{ io, w, allocator, list, devices_per_chip, device_infos, dev_offset });
+pub fn init(collector: *Collector, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
+    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, devices_per_chip, device_infos, dev_offset });
 }
 
-fn scanLoop(io: std.Io, w: *const Worker, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
-    const interval: std.Io.Duration = .fromMilliseconds(w.poll_interval_ms);
-
-    while (w.isRunning()) {
-        const start: std.Io.Timestamp = .now(io, .awake);
-
-        scan(io, allocator, list.back(), devices_per_chip, device_infos, dev_offset);
-
-        list.swap();
-
-        const elapsed = start.untilNow(io, .awake);
-        if (elapsed.nanoseconds < interval.nanoseconds) {
-            io.sleep(.fromNanoseconds(interval.nanoseconds - elapsed.nanoseconds), .awake) catch {};
-        }
-    }
+fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
+    scan(io, allocator, list.back(), devices_per_chip, device_infos, dev_offset);
+    list.swap();
 }
 
 fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, infos: []*DeviceInfo, dev_offset: u8) void {

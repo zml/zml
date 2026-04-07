@@ -19,7 +19,11 @@ pub fn draw(
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {
     // ── Header ──────────────────────────────────────────────
-    const header = try common.headerText(ctx.arena, id, nc.name orelse "Unknown");
+    const name_suffix: []const u8 = if (nc.driver_version) |v|
+        try std.fmt.allocPrint(ctx.arena, " ({s})", .{v})
+    else
+        "";
+    const header = try common.headerText(ctx.arena, id, try std.fmt.allocPrint(ctx.arena, "{s}{s}", .{ nc.name orelse "Unknown", name_suffix }));
 
     // ── Utilization + Memory charts ─────────────────────────
     const util_chart = try common.historyChart(ctx, state, id, state.history.util, .{
