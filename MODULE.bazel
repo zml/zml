@@ -81,7 +81,6 @@ uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-#python.toolchain(python_version = "3.14")
 use_repo(python, "python_versions", "python_3_12")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
