@@ -2,13 +2,6 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "ltx",
-    main = "main.zig",
-    visibility = ["//visibility:public"],
-    deps = ["//zml"],
-)
-
-zig_binary(
     name = "denoise_e2e",
     main = "denoise_e2e.zig",
     srcs = [
@@ -79,7 +72,6 @@ zig_binary(
 build_test(
     name = "test",
     targets = [
-        ":ltx",
         ":denoise_e2e",
         ":denoise_stage1",
         ":bridge",

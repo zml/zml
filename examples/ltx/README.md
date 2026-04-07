@@ -7,20 +7,21 @@ generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
 The pipeline produces video+audio from a text prompt:
 
-1. **Python** — Text encoding (prompt → context embeddings) + noise generation
-2. **Zig** — All GPU compute: Stage 1 denoising → bridge (upsample) → Stage 2 denoising
-3. **Python** — VAE decode (latents → MP4)
+1. **Python** — Text encoding (Gemma prompt → context embeddings) + noise init + sigma schedule
+2. **Zig** — Everything else on GPU: Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
 
-The `inference` binary runs the entire denoising pipeline (Stage 1 + bridge +
-Stage 2) in a single process, passing GPU buffers between phases without
-intermediate files.
+The `inference` binary runs the full pipeline end-to-end in a single process,
+passing GPU buffers between phases without intermediate files.
 
 ```
-Python (export)                Zig (inference)                     Python (decode)
-───────────────                ──────────────────────              ───────────────
-text encoding ──┐              Stage 1 (30 steps × 4 passes)      VAE decode
-noise init      ├─→ inputs ──→ Bridge (upsample 2×)           ──→ video + audio
-sigma schedule  ┘              Stage 2 (3 steps × 1 pass)         → output.mp4
+Python (export)                Zig (inference)
+───────────────                ──────────────────────────────────────────────────
+text encoding ──┐              Stage 1 (30 steps × 4 passes)
+noise init      ├─→ inputs ──→ Bridge (upsample 2×)
+sigma schedule  ┘              Stage 2 (3 steps × 1 pass)
+                               Video VAE decode → RGB frames
+                               Audio VAE decode → vocoder + BWE → waveform
+                               ffmpeg mux → output.mp4
 ```
 
 ## File Map
@@ -28,35 +29,30 @@ sigma schedule  ┘              Stage 2 (3 steps × 1 pass)         → output.
 ### Zig (compiled to GPU via ZML)
 | File | Purpose |
 |------|---------|
-| `model.zig` | Core model: transformer blocks, preprocessing, output projection, denoising step, guidance combine, noise init (~2500 lines) |
-| `inference.zig` | **Unified pipeline**: Stage 1 → bridge → Stage 2 in one binary |
+| `model.zig` | Core transformer: blocks, attention, preprocessing, output projection, denoising step, guidance, noise init |
+| `conv_ops.zig` | Shared convolution types and operations (Conv3d, Conv2d, GroupNorm, PerChannelStats) |
+| `upsampler.zig` | Latent spatial upscaler (2×) + video patchify/unpatchify |
+| `video_vae.zig` | Video VAE decoder (3D causal convolutions, DepthToSpace) |
+| `audio_vae.zig` | Audio VAE decoder (2D causal convolutions, PixelNorm2d) |
+| `vocoder.zig` | Vocoder + BWE (BigVGAN, sinc resampler, STFT, mel projection) |
+| `inference.zig` | **Unified pipeline**: Stage 1 → bridge → Stage 2 → VAE decode → vocoder in one binary |
 | `denoise_stage1.zig` | Standalone Stage 1 driver (for debugging/development) |
 | `bridge.zig` | Standalone bridge driver (for debugging/development) |
 | `denoise_e2e.zig` | Standalone Stage 2 driver (for debugging/development) |
-| `main.zig` | Utility: safetensors inspector |
 
 ### Python
 | File | Purpose |
 |------|---------|
 | `export_mixed_pipeline.py` | Export prompt embeddings, noise, sigmas, and pipeline metadata |
-| `e2e/decode_latents.py` | VAE decode Zig-produced latents → MP4 |
-| `bridge_s1_to_s2.py` | Legacy: Python bridge (replaced by bridge phase in `inference.zig`) |
-| `validate_mixed_pipeline.py` | Boundary validation: cos_sim checks between Python reference and Zig outputs |
 
-### Documentation
-| File | Purpose |
-|------|---------|
-| `04_unified_pipeline.md` | Design doc for the unified pipeline |
-| `full_e2e_mixed.md` | Command reference for the legacy multi-binary pipeline |
-| `STAGE1_DIVERGENCE_ANALYSIS.md` | Analysis of Stage 1 numerical divergence patterns |
-
+## Running the Unified Pipeline
 ## Running the Unified Pipeline
 
 ### Prerequisites
 
 - CUDA GPU with enough VRAM for the 22B model
 - Model weights at a known path (e.g. `/root/models/ltx-2.3/`)
-- Python env with `ltx_core`, `ltx_pipelines` for export and decode steps
+- Python env with `ltx_core`, `ltx_pipelines` for the export step
 
 ### Step 1: Export inputs (Python)
 
@@ -98,29 +94,17 @@ bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference 
   --bf16-attn-stage2
 ```
 
-This runs all three phases in sequence on GPU and writes:
-- `$OUT/unified/video_latent.bin` — final video latent (`[1, T_v2, 128]` bf16)
-- `$OUT/unified/audio_latent.bin` — final audio latent (`[1, T_a, 128]` bf16)
+This runs the full pipeline on GPU and writes `$OUT/unified/output.mp4` directly.
 
 **Flags:**
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--bf16-attn-stage1` | off | Use bf16 attention in Stage 1 (saves VRAM) |
 | `--bf16-attn-stage2` | off | Use bf16 attention in Stage 2 (recommended — avoids OOM after spatial upsample) |
-| `--dump-intermediates` | off | Also write `stage1_video_latent.bin` / `stage1_audio_latent.bin` for debugging |
+| `--dump-intermediates` | off | Also write intermediate latents for debugging |
 
-### Step 3: Decode to MP4 (Python)
-
-```bash
-python examples/ltx/e2e/decode_latents.py \
-  --inputs $OUT/stage1_inputs.safetensors \
-  --video-latent $OUT/unified/video_latent.bin \
-  --audio-latent $OUT/unified/audio_latent.bin \
-  --output $OUT/unified/output.mp4
-```
-
-## Legacy: Multi-Binary Pipeline
+## Standalone Drivers
 
 The standalone drivers (`denoise_stage1`, `bridge`, `denoise_e2e`) are kept for
-debugging and development. They write intermediate files between phases. See
-[full_e2e_mixed.md](full_e2e_mixed.md) for the multi-binary command reference.
+debugging and development. They read/write safetensors files between phases,
+making it easy to test a single stage in isolation.
