@@ -84,7 +84,7 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
 
     try zml.attention.attnd.register(allocator, io, platform, .{
-        .desctination = try .parseLiteral("127.0.0.1:8000"),
+        .desctination = try .parseLiteral("100.71.150.100:9898"),
     });
 
     log.info("\n{f}", .{platform.fmtVerbose()});
