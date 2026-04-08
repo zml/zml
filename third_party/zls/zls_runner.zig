@@ -26,6 +26,9 @@ const Config = struct {
 
     /// Path to a directory that will be used as zig's cache. Will default to `${KnownFolders.Cache}/zls`.
     global_cache_path: ?[]const u8 = null,
+
+    /// Custom Bazel runner is one-shot, so disable watch-based build-on-save.
+    enable_build_on_save: ?bool = false,
 };
 
 pub fn main(init: std.process.Init) !void {
@@ -63,6 +66,7 @@ pub fn main(init: std.process.Init) !void {
         .zig_lib_path = zig_lib_computed_path,
         .build_runner_path = zls_build_runner_path,
         .global_cache_path = global_cache_path,
+        .enable_build_on_save = false,
     };
 
     var buf: [std.Io.Dir.max_name_bytes]u8 = undefined;
