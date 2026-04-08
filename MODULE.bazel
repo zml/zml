@@ -44,64 +44,6 @@ bazel_dep(name = "gperftools", version = "2.18")
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
-tracy_http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-_TRACY_PUBLIC_COMMIT = "00a069d6088ff8d93304eaac4d925cece0e9081c"
-
-tracy_http_archive(
-    name = "tracy_public_upstream",
-    build_file_content = """
-load("@rules_cc//cc:cc_library.bzl", "cc_library")
-
-cc_library(
-    name = "client",
-    srcs = ["public/TracyClient.cpp"],
-    hdrs = glob(["public/**/*.h", "public/**/*.hpp"]),
-    textual_hdrs = glob(
-        ["public/**/*.cpp"],
-        exclude = ["public/TracyClient.cpp"],
-    ),
-    copts = [
-        "-std=c++20",
-        "-DTRACY_ENABLE",
-    ],
-    includes = ["public"],
-    visibility = ["//visibility:public"],
-)
-
-filegroup(
-    name = "source_tree",
-    srcs = glob(["**"]),
-    visibility = ["//visibility:public"],
-)
-
-exports_files(["LICENSE"])
-""",
-    sha256 = "fff8de03b18c9ea739c05dc471c3cd38a4f51c15910bc5cb4002d5d1b4d69325",
-    strip_prefix = "tracy-" + _TRACY_PUBLIC_COMMIT,
-    urls = ["https://github.com/wolfpld/tracy/archive/" + _TRACY_PUBLIC_COMMIT + ".tar.gz"],
-)
-
-pprof_http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
-
-_PPROF_COMMIT = "545e8a4df9364095d66e521b8f515f7af961e653"
-
-pprof_http_archive(
-    name = "pprof_upstream",
-    build_file_content = """
-filegroup(
-    name = "source_tree",
-    srcs = glob(["**"]),
-    visibility = ["//visibility:public"],
-)
-
-exports_files(["LICENSE", "go.mod", "go.sum"])
-""",
-    sha256 = "cbbaa59897eb698ff8d0c96568f87f8df89663cac60fdd4d691dcd5395724152",
-    strip_prefix = "pprof-" + _PPROF_COMMIT,
-    urls = ["https://github.com/google/pprof/archive/" + _PPROF_COMMIT + ".tar.gz"],
-)
-
 # BSDTar toolchains
 tar_toolchains = use_extension("@tar.bzl//tar:extensions.bzl", "toolchains")
 use_repo(
@@ -239,7 +181,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg", "pprof", "tracy",)
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(

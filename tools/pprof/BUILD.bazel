@@ -3,12 +3,12 @@ sh_binary(
     srcs = ["pprof.sh"],
     args = [
         "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
-        "--source-license-rlocation=$(rlocationpath @pprof_upstream//:LICENSE)",
+        "--source-license-rlocation=$(rlocationpath @pprof//:LICENSE)",
     ],
     data = [
         "@bazel_tools//tools/bash/runfiles:runfiles",
-        "@pprof_upstream//:LICENSE",
-        "@pprof_upstream//:source_tree",
+        "@pprof//:LICENSE",
+        "@pprof//:source_tree",
         "//tools/profile:bootstrap.sh",
     ],
     tags = ["manual"],

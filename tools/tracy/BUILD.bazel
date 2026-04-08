@@ -4,12 +4,12 @@ sh_binary(
     args = [
         "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
         "--tool=tracy-profiler",
-        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+        "--source-license-rlocation=$(rlocationpath @tracy//:LICENSE)",
     ],
     data = [
         "@bazel_tools//tools/bash/runfiles:runfiles",
-        "@tracy_public_upstream//:LICENSE",
-        "@tracy_public_upstream//:source_tree",
+        "@tracy//:LICENSE",
+        "@tracy//:source_tree",
         "//tools/profile:bootstrap.sh",
     ],
     tags = ["manual"],
@@ -22,12 +22,12 @@ sh_binary(
     args = [
         "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
         "--tool=tracy-capture",
-        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+        "--source-license-rlocation=$(rlocationpath @tracy//:LICENSE)",
     ],
     data = [
         "@bazel_tools//tools/bash/runfiles:runfiles",
-        "@tracy_public_upstream//:LICENSE",
-        "@tracy_public_upstream//:source_tree",
+        "@tracy//:LICENSE",
+        "@tracy//:source_tree",
         "//tools/profile:bootstrap.sh",
     ],
     tags = ["manual"],
@@ -40,12 +40,12 @@ sh_binary(
     args = [
         "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
         "--tool=tracy-capture-daemon",
-        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+        "--source-license-rlocation=$(rlocationpath @tracy//:LICENSE)",
     ],
     data = [
         "@bazel_tools//tools/bash/runfiles:runfiles",
-        "@tracy_public_upstream//:LICENSE",
-        "@tracy_public_upstream//:source_tree",
+        "@tracy//:LICENSE",
+        "@tracy//:source_tree",
         "//tools/profile:bootstrap.sh",
     ],
     tags = ["manual"],

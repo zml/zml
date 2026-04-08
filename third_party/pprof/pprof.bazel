@@ -1,0 +1,7 @@
+filegroup(
+    name = "source_tree",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["LICENSE", "go.mod", "go.sum"])
