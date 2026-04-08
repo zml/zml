@@ -212,8 +212,8 @@ for the initial validation milestone.
 | `forwardLogVarExtract` (slice ch 0..127) | ~5 | `video_vae_encoder.zig` |
 | `VideoVaeEncoderParams` + init | ~50 | `video_vae_encoder.zig` |
 | `forwardVideoVaeEncode` (top-level) | ~30 | `video_vae_encoder.zig` |
-| Conditioning logic in `inference.zig` | ~30 | `inference.zig` |
-| **Total** | **~175** | |
+| Conditioning logic in `inference.zig` | ~50 | `inference.zig` (Stage 1 + Stage 2) |
+| **Total** | **~195** | |
 
 ## Implementation plan
 
@@ -298,31 +298,93 @@ later if/when full self-contained Zig is desired.
 
 ### M3: Conditioning logic in inference.zig
 
-**Goal**: Wire encoder + conditioning into the unified pipeline.
+**Goal**: Wire encoder + conditioning into the unified pipeline for both stages.
 
-Steps:
+#### How token-space conditioning maps to "first frame"
+
+At denoising time, the video latent is in **patchified** (token) form:
+`[B, T_video, 128]` where `T_video = F × H_lat × W_lat`. Tokens are ordered
+frame-by-frame: the first `H_lat × W_lat` tokens correspond to frame 0, the
+next `H_lat × W_lat` to frame 1, etc.
+
+The encoded single-frame image has shape `[1, 128, 1, H_lat, W_lat]`.
+After patchifying: `[1, 1 × H_lat × W_lat, 128]` = `[1, n_img, 128]`.
+
+These `n_img` tokens align exactly with the first frame's positions in the
+full video token sequence. So replacing `latent[:, 0:n_img]` = "replace the
+first frame's tokens with the image encoding".
+
+The denoise_mask at those positions is set to `0.0` (for `strength=1.0`),
+meaning "these tokens are already clean — do not add noise or denoise them".
+The model then generates the remaining frames flowing naturally from this
+anchored first frame.
+
+#### Stage 1 conditioning (half-resolution)
+
+```
+Image [H, W] → resize to [H/2, W/2] → VAE encode → [1, 128, 1, H/64, W/64]
+  → patchify → [1, n_img_s1, 128]  where n_img_s1 = (H/64) × (W/64)
+
+Modify Stage 1 initial state:
+  video_latent[:, 0:n_img_s1]       = encoded_tokens_s1
+  video_clean_latent[:, 0:n_img_s1] = encoded_tokens_s1
+  video_denoise_mask[:, 0:n_img_s1] = 0.0
+```
+
+Example for 1024×1536: encode at 512×768 → latent `[1, 128, 1, 16, 24]` →
+384 tokens replace indices 0:384 in the ~6144-token Stage 1 sequence.
+
+#### Stage 2 conditioning (full-resolution)
+
+The reference Python pipeline applies image conditioning to **both** stages.
+After the bridge upsamples and before Stage 2 denoising, a second VAE encode
+at full resolution conditions the Stage 2 initial state:
+
+```
+Image [H, W] → resize to [H, W] → VAE encode → [1, 128, 1, H/32, W/32]
+  → patchify → [1, n_img_s2, 128]  where n_img_s2 = (H/32) × (W/32)
+
+Modify Stage 2 initial state (after bridge noise init):
+  video_latent[:, 0:n_img_s2]       = encoded_tokens_s2
+  video_clean_latent[:, 0:n_img_s2] = encoded_tokens_s2
+  video_denoise_mask[:, 0:n_img_s2] = 0.0
+```
+
+Example for 1024×1536: encode at 1024×1536 → latent `[1, 128, 1, 32, 48]` →
+1536 tokens replace indices 0:1536 in the ~24576-token Stage 2 sequence.
+
+The VAE encoder runs **twice** (different input resolutions) producing
+different-sized conditioning latents for each stage.
+
+#### Implementation steps
+
 1. Add `--image <path>` CLI flag to `inference.zig`
-2. If provided:
-   - Load image tensor (pre-exported safetensors for now)
-   - Compile + run `forwardVideoVaeEncode`
-   - Patchify encoded latent: `[1, 128, 1, H', W']` → `[1, n_tokens, 128]`
-   - Modify the loaded Stage 1 inputs:
-     - `video_latent[:, 0:n_tokens] = encoded_tokens`
-     - `video_clean_latent[:, 0:n_tokens] = encoded_tokens`
-     - `video_denoise_mask[:, 0:n_tokens] = 0.0`
-3. Rest of pipeline runs unchanged
+2. Before Stage 1:
+   - Load image tensor (pre-exported safetensors initially)
+   - Compile + run `forwardVideoVaeEncode` at Stage 1 resolution (H/2 × W/2)
+   - Patchify → apply conditioning to Stage 1 initial state
+3. After bridge, before Stage 2:
+   - Compile + run `forwardVideoVaeEncode` at Stage 2 resolution (H × W)
+   - Patchify → apply conditioning to Stage 2 initial state
+4. Rest of pipeline runs unchanged
 
 ### M4: End-to-end validation
 
-**Goal**: Full image-conditioned pipeline produces identical output to Python reference.
+**Goal**: Full image-conditioned pipeline (both stages) produces identical output
+to Python reference.
 
 Steps:
-1. Run `export_image_conditioning.py` with `--decode-video` to get Python-reference MP4
+1. Run `export_image_conditioning.py` with `--decode-video` to get:
+   - Python-reference MP4 (full image-conditioned pipeline)
+   - Reference encoder outputs at both resolutions
+   - Reference conditioned initial states for both stages
 2. Run Zig `inference` with `--image <same_image>` and same prompt/seed
 3. Compare:
-   - Encoder output: cos_sim vs `encoded_normalized` (> 0.999)
-   - Stage 1 output: cos_sim vs Python Stage 1 reference
-   - Final MP4: visual comparison
+   - Stage 1 encoder output: cos_sim vs reference (> 0.999)
+   - Stage 2 encoder output: cos_sim vs reference (> 0.999)
+   - Stage 1 denoised latent: cos_sim vs Python Stage 1 reference
+   - Stage 2 denoised latent: cos_sim vs Python Stage 2 reference
+   - Final MP4: visual comparison (first frame should match input image)
 
 ### M5: Full image loading (optional)
 
@@ -336,10 +398,11 @@ eliminating the Python preprocessing step for images.
    space-to-depth with temporal stride 2 brings it back to F=1. Need to verify
    this works correctly with the Zig reshape ops.
 
-2. **Stage 2 conditioning**: In the full Python pipeline, image conditioning is
-   applied to both Stage 1 and Stage 2 (with upscaled resolution for Stage 2).
-   The bridge phase would need to carry the conditioning through, or Stage 2
-   would need its own encode at 2× resolution. **Start with Stage 1 only**.
+2. **Stage 2 conditioning**: The VAE encoder runs twice — once at half-res for
+   Stage 1, once at full-res for Stage 2. Both use the same weights but
+   different input/output dimensions. The conditioning application logic is
+   identical (replace first-frame tokens + set mask to 0.0), just with
+   different token counts. Included in M3 scope.
 
 3. **Image resolution mismatch**: The input image is resized to Stage 1's
    half-resolution (H/2 × W/2). If the image aspect ratio doesn't match,
