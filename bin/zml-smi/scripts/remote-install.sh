@@ -6,21 +6,21 @@ BINARY_NAME="zml-smi"
 
 resolve_dirs() {
   if [ -n "${ZML_SMI_INSTALL_DIR:-}" ] || [ -n "${ZML_SMI_BIN_DIR:-}" ]; then
-    INSTALL_DIR="${ZML_SMI_INSTALL_DIR:-/usr/lib/zml-smi}"
-    BIN_DIR="${ZML_SMI_BIN_DIR:-/usr/bin}"
+    INSTALL_DIR="${ZML_SMI_INSTALL_DIR:-/opt/zml-smi}"
+    BIN_DIR="${ZML_SMI_BIN_DIR:-/usr/local/bin}"
     return
   fi
 
-  INSTALL_DIR="/usr/lib/zml-smi"
-  BIN_DIR="/usr/bin"
+  INSTALL_DIR="/opt/zml-smi"
+  BIN_DIR="/usr/local/bin"
 
   if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ] &&
      mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
     return
   fi
 
-  warn "Cannot write to /usr/lib or /usr/bin — falling back to ~/.local"
-  INSTALL_DIR="${HOME}/.local/lib/zml-smi"
+  warn "Cannot write to /opt or /usr/local/bin — falling back to ~/.local"
+  INSTALL_DIR="${HOME}/.local/zml-smi"
   BIN_DIR="${HOME}/.local/bin"
 }
 
