@@ -167,8 +167,15 @@ upload() {
     success "${name}"
   done
 
-  rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/install.sh"
-  success "install.sh"
+  rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/install.sh"
+  success "zml-smi/${VERSION}/install.sh"
+
+  if confirm "Set ${CYAN}${VERSION}${RESET}${WHITE} as the default install version?"; then
+    rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/install.sh"
+    success "zml-smi/install.sh"
+  else
+    warn "Skipped default install script"
+  fi
 }
 
 verify() {
@@ -194,7 +201,7 @@ verify() {
 
   local local_sha remote_sha
   local_sha="$(shasum -a 256 "$INSTALL_SCRIPT" | awk '{print $1}')"
-  remote_sha="$(curl -fsSL "${BASE_URL}/zml-smi/install.sh" | shasum -a 256 | awk '{print $1}')"
+  remote_sha="$(curl -fsSL "${install_url}/install.sh" | shasum -a 256 | awk '{print $1}')"
   if [ "$local_sha" = "$remote_sha" ]; then
     success "install.sh"
   else
@@ -234,6 +241,8 @@ release_notes() {
   done
 
   cat <<EOF
+## Changelog
+
 ${log}
 
 ## Install
