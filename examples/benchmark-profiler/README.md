@@ -1,6 +1,6 @@
 # Benchmark Profiler
 
-`//examples/benchmark-profiler` benchmarks and profiles two execution patterns with xprof:
+`//examples/benchmark-profiler` benchmarks and profiles two execution patterns with xprof, pprof, and Tracy:
 
 - `saxpy`: very small compute (`y = a * x + y`) called **5 times** sequentially to expose host dispatch overhead between `exe.call` invocations.
 - `matmul`: large matrix multiplication where device compute dominates, with each output reinjected as one input on the next `exe.call`.
@@ -32,6 +32,7 @@ total_calls = n * m
 ## Build
 
 ```bash
+bazel run //tools/tracy:*
 bazel build //examples/benchmark-profiler:benchmark_profiler
 ```
 
@@ -39,7 +40,39 @@ bazel build //examples/benchmark-profiler:benchmark_profiler
 
 ### SAXPY dispatch profile
 
+- bazel build //tools/pprof:pprof //examples/benchmark-profiler:benchmark_profiler
+- bazel run //tools/pprof:pprof -- -top /tmp/pprof/benchmark-profiler-saxpy.prof
+- bazel run //tools/pprof:pprof -- -http=: /tmp/pprof/benchmark-profiler-saxpy.prof
+
+Pprof does not need a separate local install anymore. The Bazel pprof target downloads a pinned official Go toolchain, builds pinned upstream `google/pprof`, and reuses the cached binary under `${XDG_CACHE_HOME:-$HOME/.cache}/zml/pprof`. Override the cache location with `ZML_PPROF_CACHE_DIR` if needed.
+
+- bazel build //tools/tracy:tracy-profiler //tools/tracy:tracy-capture //tools/tracy:tracy-capture-daemon
+
+- bazel run //tools/tracy:tracy-profiler -- --help
+- bazel run //tools/tracy:tracy-capture -- --help
+- bazel run //tools/tracy:tracy-capture-daemon -- --help
+
+Tracy does not need a separate local install anymore. The Bazel Tracy targets build from the same pinned upstream Tracy source archive that Bazel already fetched, then reuse the cached build under `${XDG_CACHE_HOME:-$HOME/.cache}/zml/tracy`. Override the cache location with `ZML_TRACY_CACHE_DIR` if needed.
+
 ```bash
+bazel run //tools/tracy:tracy-profiler --
+```
+
+```bash
+bazel run //examples/benchmark-profiler:benchmark_profiler -- \
+  --mode=saxpy \
+  --dtype=f32 \
+  --saxpySize=4096
+
+bazel run //examples/benchmark-profiler:benchmark_profiler -- \
+    --mode=saxpy \
+    --dtype=f32 \
+    --saxpySize=4096
+
+bazel run //tools/pprof:pprof -- -http=: \
+    bazel-bin/examples/benchmark-profiler/benchmark_profiler \
+    /tmp/pprof/benchmark-profiler-saxpy.prof
+
 bazel run //examples/benchmark-profiler:benchmark_profiler \
   --@zml//platforms:tpu=true \
   --@zml//platforms:cpu=false -- \
@@ -51,6 +84,19 @@ bazel run //examples/benchmark-profiler:benchmark_profiler \
 ```
 
 ### MATMUL compute profile
+
+```bash
+bazel run //examples/benchmark-profiler:benchmark_profiler \
+  -- \
+  --mode=matmul \
+  --dtype=f16 \
+  --matmulM=8192 \
+  --matmulK=8192 \
+  --matmulN=8192 \
+  --matmulCalls=5 \
+  --matmulPipelines=4 \
+  --sessionId=dispatch
+```
 
 ```bash
 export TPU_VISIBLE_DEVICES=0
@@ -135,7 +181,11 @@ Other available switches follow repo conventions:
 - `--matmulN=<n>`: MATMUL right cols (default: `4096`)
 - `--matmulCalls=<n>`: chained MATMUL `exe.call` count per pipeline (default: `1`)
 - `--matmulPipelines=<m>`: profiled MATMUL pipeline repeat count (default: `1`)
+- `--tracy=<on|off>`: enable or disable Tracy zones and frame marks at runtime (default: `on`)
 - `--xprofDir=<path>`: xprof repository directory (default: `/tmp/xprof`)
+- `--pprofDir=<path>`: pprof output directory, empty disables pprof capture (default: `/tmp/pprof`)
+- `--pprofFrequency=<hz>`: pprof sample frequency, capped by gperftools at `4000` (default: `4000`)
+- `--pprofDurationMs=<ms>`: repeated sampling window used to collect pprof CPU samples (default: `250`)
 - `--sessionId=<name>`: session id prefix (default: `benchmark-profiler`)
 
 ## Notes
