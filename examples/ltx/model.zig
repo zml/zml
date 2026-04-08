@@ -275,7 +275,7 @@ pub const OutputProjection = struct {
         }
     };
 
-    /// x: [.b, .t, .d], embedded_timestep: [.b, .d_emb] — from adaln_single.forward
+    /// x: [.b, .t, .d], embedded_timestep: [.b, .t, .d_emb] (broadcasts across T)
     /// Returns: [.b, .t, .d_out=128]
     pub fn forward(x_in: Tensor, embedded_timestep: Tensor, params: Params) Tensor {
         const x = x_in.withPartialTags(.{ .b, .t, .d });
@@ -690,6 +690,42 @@ fn adaValueAt(sst: Tensor, timestep: Tensor, idx: i64) Tensor {
     return sst_row.broad(ts.shape()).add(ts);
 }
 
+/// Per-token masked variant of adaValueAt.
+///
+/// Blends two broadcast timestep sources [B, 1, d_ada] using a per-token
+/// mask [B, T, 1] to produce per-token modulation [B, T, D]:
+///   result = mask * (sst[idx] + ts_sigma[idx]) + (1-mask) * (sst[idx] + ts_zero[idx])
+///
+/// This avoids materializing the full [B, T, d_ada] tensor (~905MB for T=6144)
+/// by blending AFTER slicing to D (~96MB per value). XLA can reuse these
+/// small temporaries sequentially across the 9 ada values per modality.
+fn adaValueAtMasked(sst: Tensor, ts_sigma: Tensor, ts_zero: Tensor, mask: Tensor, idx: i64) Tensor {
+    const d = sst.dim(.d);
+    const slice_ts = struct {
+        fn f(ts: Tensor, i: i64, dim: i64) Tensor {
+            return ts
+                .withPartialTags(.{ .b, .t, .tsflat })
+                .slice1d(.tsflat, .{ .start = i * dim, .end = (i + 1) * dim })
+                .rename(.{ .tsflat = .d });
+        }
+    }.f;
+    const ts_s = slice_ts(ts_sigma, idx, d); // [B, 1, D]
+    const ts_z = slice_ts(ts_zero, idx, d); // [B, 1, D]
+    const sst_row = sst
+        .slice1d(.n_ada, .{ .start = idx, .end = idx + 1 })
+        .squeeze(.n_ada)
+        .convert(ts_s.dtype()); // [D]
+    const val_s = sst_row.broad(ts_s.shape()).add(ts_s); // [B, 1, D]
+    const val_z = sst_row.broad(ts_z.shape()).add(ts_z); // [B, 1, D]
+    // mask: [B, T, mask=1] → rename .mask → .d for broadcast with [B, 1, D]
+    const m = mask.withPartialTags(.{ .b, .t, .mask }).rename(.{ .mask = .d }).convert(.f32); // [B, T, d=1]
+    const one_minus = Tensor.scalar(1.0, .f32).sub(m); // [B, T, d=1]
+    // Broadcast both sides to [B, T, D] — XLA fuses this into the elementwise op
+    const target = zml.Shape.init(.{ .b = m.dim(.b), .t = m.dim(.t), .d = val_s.dim(.d) }, .f32);
+    return m.broad(target).mul(val_s.convert(.f32).broad(target))
+        .add(one_minus.broad(target).mul(val_z.convert(.f32).broad(target)));
+}
+
 // ============================================================================
 // Section 7: BasicAVTransformerBlock (single block forward)
 // Python ref: ltx_core/models/transformer_ltx_2.py — BasicAVTransformerBlock.forward()
@@ -792,9 +828,16 @@ pub const BasicAVTransformerBlock = struct {
     /// Per-block AdaLN modulation values (shift, scale, gate) are computed
     /// inline from `params.scale_shift_table` during `forwardNative`.
     pub const SharedInputs = struct {
-        /// AdaLN timestep embeddings; flattened to [B, 1, N_ada * D].
+        /// AdaLN timestep embeddings at sigma; broadcast [B, 1, N_ada * D].
         video_timesteps: Tensor, // [B, 1, 6 * D_video]
         audio_timesteps: Tensor, // [B, 1, 6 * D_audio]
+        /// AdaLN timestep embeddings at zero; broadcast [B, 1, N_ada * D].
+        /// Used with denoise_mask to produce per-token modulation inside blocks.
+        video_timesteps_zero: Tensor, // [B, 1, 6 * D_video]
+        audio_timesteps_zero: Tensor, // [B, 1, 6 * D_audio]
+        /// Denoise mask for per-token timestep blending inside blocks.
+        v_denoise_mask: Tensor, // [B, T_v, 1]
+        a_denoise_mask: Tensor, // [B, T_a, 1]
         v_prompt_timestep: Tensor, // [B, 1, 2 * D_video]
         a_prompt_timestep: Tensor, // [B, 1, 2 * D_audio]
         /// Self-attention positional embeddings.
@@ -842,9 +885,9 @@ pub const BasicAVTransformerBlock = struct {
         const ad = ax.dtype();
 
         // ── Video: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const vshift_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 0).convert(vd);
-        const vscale_msa = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 1).convert(vd);
-        const vgate_msa  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 2).convert(vd);
+        const vshift_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 0).convert(vd);
+        const vscale_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 1).convert(vd);
+        const vgate_msa  = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 2).convert(vd);
         const norm_vx = zml.nn.rmsNorm(vx, .d, 1e-6)
             .mul(vscale_msa.addConstant(1.0).broad(vx.shape()))
             .add(vshift_msa.broad(vx.shape()));
@@ -866,9 +909,9 @@ pub const BasicAVTransformerBlock = struct {
         } else vx.add(video_msa_delta);
 
         // M2: video text cross-attn residual (cross-attention AdaLN path).
-        const v_shift_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 6).convert(vd);
-        const v_scale_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 7).convert(vd);
-        const v_gate_q = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 8).convert(vd);
+        const v_shift_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 6).convert(vd);
+        const v_scale_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 7).convert(vd);
+        const v_gate_q = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 8).convert(vd);
         const v_text_x = zml.nn.rmsNorm(h_v, .d, 1e-6)
             .mul(v_scale_q.addConstant(1.0).broad(h_v.shape()))
             .add(v_shift_q.broad(h_v.shape()));
@@ -894,9 +937,9 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Audio: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
-        const ashift_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 0).convert(ad);
-        const ascale_msa = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 1).convert(ad);
-        const agate_msa  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 2).convert(ad);
+        const ashift_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 0).convert(ad);
+        const ascale_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 1).convert(ad);
+        const agate_msa  = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 2).convert(ad);
         const norm_ax = zml.nn.rmsNorm(ax, .d, 1e-6)
             .mul(ascale_msa.addConstant(1.0).broad(ax.shape()))
             .add(ashift_msa.broad(ax.shape()));
@@ -918,9 +961,9 @@ pub const BasicAVTransformerBlock = struct {
         } else ax.add(audio_msa_delta);
 
         // M4-B: audio text cross-attn residual (cross-attention AdaLN path).
-        const a_shift_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 6).convert(ad);
-        const a_scale_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 7).convert(ad);
-        const a_gate_q = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 8).convert(ad);
+        const a_shift_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 6).convert(ad);
+        const a_scale_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 7).convert(ad);
+        const a_gate_q = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 8).convert(ad);
         const a_text_x = zml.nn.rmsNorm(h_a, .d, 1e-6)
             .mul(a_scale_q.addConstant(1.0).broad(h_a.shape()))
             .add(a_shift_q.broad(h_a.shape()));
@@ -1034,9 +1077,9 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Video FF: AdaLN rows 3,4,5 (shift, scale, gate) ─────────────────────────
-        const vshift_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 3).convert(vd);
-        const vscale_mlp = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 4).convert(vd);
-        const vgate_mlp  = adaValueAt(params.scale_shift_table, inputs.video_timesteps, 5).convert(vd);
+        const vshift_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 3).convert(vd);
+        const vscale_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 4).convert(vd);
+        const vgate_mlp  = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 5).convert(vd);
         const vx_scaled_ff = zml.nn.rmsNorm(h_v, .d, 1e-6)
             .mul(vscale_mlp.addConstant(1.0).broad(h_v.shape()))
             .add(vshift_mlp.broad(h_v.shape()));
@@ -1053,9 +1096,9 @@ pub const BasicAVTransformerBlock = struct {
         }
 
         // ── Audio FF: AdaLN rows 3,4,5 ─────────────────────────────────────────────
-        const ashift_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 3).convert(ad);
-        const ascale_mlp = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 4).convert(ad);
-        const agate_mlp  = adaValueAt(params.audio_scale_shift_table, inputs.audio_timesteps, 5).convert(ad);
+        const ashift_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 3).convert(ad);
+        const ascale_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 4).convert(ad);
+        const agate_mlp  = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 5).convert(ad);
         const ax_scaled_ff = zml.nn.rmsNorm(h_a, .d, 1e-6)
             .mul(ascale_mlp.addConstant(1.0).broad(h_a.shape()))
             .add(ashift_mlp.broad(h_a.shape()));
@@ -1666,6 +1709,10 @@ pub fn forwardBlock0Native(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1692,6 +1739,10 @@ pub fn forwardBlock0Native(
     return block.forwardNative(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -1721,6 +1772,10 @@ pub fn forwardBlock0NativeBf16Attn(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1747,6 +1802,10 @@ pub fn forwardBlock0NativeBf16Attn(
     return block.forwardNativeBf16Attn(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -1779,6 +1838,10 @@ pub fn forwardBlock0NativeSTG(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1805,6 +1868,10 @@ pub fn forwardBlock0NativeSTG(
     return block.forwardNativeSTG(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -1835,6 +1902,10 @@ pub fn forwardBlock0NativeSTGBf16Attn(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1861,6 +1932,10 @@ pub fn forwardBlock0NativeSTGBf16Attn(
     return block.forwardNativeSTGBf16Attn(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -1888,6 +1963,10 @@ pub fn forwardBlock0NativeWithAVMasks(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1916,6 +1995,10 @@ pub fn forwardBlock0NativeWithAVMasks(
     return block.forwardNative(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -1947,6 +2030,10 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
     ax_in: Tensor,
     video_timesteps: Tensor,
     audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
     v_prompt_timestep: Tensor,
     a_prompt_timestep: Tensor,
     v_pe_cos: Tensor,
@@ -1975,6 +2062,10 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
     return block.forwardNativeBf16Attn(vx_in, ax_in, .{
         .video_timesteps = video_timesteps,
         .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
         .v_prompt_timestep = v_prompt_timestep,
         .a_prompt_timestep = a_prompt_timestep,
         .v_pe_cos = v_pe_cos,
@@ -2314,10 +2405,14 @@ pub fn initPreprocessParams(store: zml.io.TensorStore.View) PreprocessParams {
 pub const PreprocessOutput = struct {
     vx: Tensor, // [B, T_v, D_video] — patchified video
     ax: Tensor, // [B, T_a, D_audio] — patchified audio
-    video_timesteps: Tensor, // [B, 1, 9 * D_video]
-    audio_timesteps: Tensor, // [B, 1, 9 * D_audio]
-    v_embedded_timestep: Tensor, // [B, 1, D_video] — for output projection
-    a_embedded_timestep: Tensor, // [B, 1, D_audio] — for output projection
+    video_timesteps: Tensor, // [B, 1, 9 * D_video] broadcast (sigma-based)
+    audio_timesteps: Tensor, // [B, 1, 9 * D_audio] broadcast (sigma-based)
+    video_timesteps_zero: Tensor, // [B, 1, 9 * D_video] broadcast (zero-based)
+    audio_timesteps_zero: Tensor, // [B, 1, 9 * D_audio] broadcast (zero-based)
+    v_denoise_mask: Tensor, // [B, T_v, 1]
+    a_denoise_mask: Tensor, // [B, T_a, 1]
+    v_embedded_timestep: Tensor, // [B, T_v, D_video] per-token (blended)
+    a_embedded_timestep: Tensor, // [B, T_a, D_audio] per-token (blended)
     v_prompt_timestep: Tensor, // [B, 1, 2 * D_video]
     a_prompt_timestep: Tensor, // [B, 1, 2 * D_audio]
     v_pe_cos: Tensor,
@@ -2377,53 +2472,72 @@ pub fn forwardPreprocess(
     const v_ctx = v_context.withPartialTags(.{ .b, .t, .d });
     const a_ctx = a_context.withPartialTags(.{ .b, .t, .d });
 
+    const v_mask = v_denoise_mask.withPartialTags(.{ .b, .t, .mask });
+    const a_mask = a_denoise_mask.withPartialTags(.{ .b, .t, .mask });
+
     // --- 1. Patchify ---
     const vx = patchify.forward(v_lat, params.video_patchify);
     const ax = patchify.forward(a_lat, params.audio_patchify);
 
-    // --- 2. Timestep embeddings (per-token) ---
-    // timesteps = denoise_mask * sigma → [B, T, 1]
-    // Then scale by timestep_scale_multiplier=1000 and flatten for adaln input.
-    const v_mask = v_denoise_mask.withPartialTags(.{ .b, .t, .mask }).convert(.f32);
-    const a_mask = a_denoise_mask.withPartialTags(.{ .b, .t, .mask }).convert(.f32);
-    const v_ts = v_mask.mul(v_sigma.convert(.f32).appendAxes(.{ .t, .mask }).broad(v_mask.shape()));
-    const a_ts = a_mask.mul(a_sigma.convert(.f32).appendAxes(.{ .t, .mask }).broad(a_mask.shape()));
-
-    // AdaLN: scaled timesteps → modulation + embedded_timestep
-    // flatten [B, T, 1] → [B*T] for adaln, then reshape back
-    const v_ts_flat = v_ts.squeeze(.mask).scale(1000.0).flatten(); // [B*T]
-    const a_ts_flat = a_ts.squeeze(.mask).scale(1000.0).flatten(); // [B*T]
-
-    const v_adaln = AdaLayerNormSingle.forward(v_ts_flat, params.adaln_single);
-    const a_adaln = AdaLayerNormSingle.forward(a_ts_flat, params.audio_adaln_single);
-
-    // Reshape back to [B, T, N*D] / [B, T, D]
-    const b_v: i64 = v_lat.dim(.b);
-    const t_v: i64 = v_lat.dim(.t);
-    const b_a: i64 = a_lat.dim(.b);
-    const t_a: i64 = a_lat.dim(.t);
-
-    // video_timesteps: [B*T, d_ada] → [B, T, d_ada] → treat T=1 as broadcast dim
-    // In Python: timestep.view(B, -1, N_ada*D) with T tokens then uses [B, T, N_ada*D].
-    // But SharedInputs expects [B, 1, N_ada*D] — the per-token dimension is implicit
-    // in the position embeddings. Actually per the Python code, the adaln is computed
-    // per-token and used per-token. However the existing block code uses [B, 1, N*D].
+    // --- 2. Timestep embeddings ---
     //
-    // For LTX distilled stage-2: all tokens share the same sigma, so denoise_mask * sigma
-    // is constant across tokens (mask is all-ones for generation). We produce [B, 1, N*D].
-    const v_timesteps = v_adaln.modulation.reshape(
-        zml.Shape.init(.{ .b = b_v, .t = t_v, .d_ada = v_adaln.modulation.dim(.d_ada) }, v_adaln.modulation.dtype()),
-    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_ada]
-    const a_timesteps = a_adaln.modulation.reshape(
-        zml.Shape.init(.{ .b = b_a, .t = t_a, .d_ada = a_adaln.modulation.dim(.d_ada) }, a_adaln.modulation.dtype()),
-    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_ada]
+    // Compute AdaLN modulation at BOTH sigma and zero. Pass both broadcast
+    // [B, 1, d_ada] sets plus the mask to blocks, which blend per-token inside
+    // adaValueAtMasked at the [B, T, D] level (~96MB) instead of materializing
+    // the full [B, T, d_ada] (~905MB) here.
+    //
+    // For embedded_timestep (used by output projection, only [B, T, D_emb] = 48MB),
+    // we CAN afford to blend here since it's much smaller.
+    const v_sigma_scaled = v_sigma.convert(.f32).scale(1000.0); // [B]
+    const a_sigma_scaled = a_sigma.convert(.f32).scale(1000.0); // [B]
+    const v_adaln = AdaLayerNormSingle.forward(v_sigma_scaled, params.adaln_single);
+    const a_adaln = AdaLayerNormSingle.forward(a_sigma_scaled, params.audio_adaln_single);
 
-    const v_emb_ts = v_adaln.embedded_timestep.reshape(
-        zml.Shape.init(.{ .b = b_v, .t = t_v, .d_emb = v_adaln.embedded_timestep.dim(.d_emb) }, v_adaln.embedded_timestep.dtype()),
-    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_emb]
-    const a_emb_ts = a_adaln.embedded_timestep.reshape(
-        zml.Shape.init(.{ .b = b_a, .t = t_a, .d_emb = a_adaln.embedded_timestep.dim(.d_emb) }, a_adaln.embedded_timestep.dtype()),
-    ).slice1d(.t, .{ .start = 0, .end = 1 }); // [B, 1, d_emb]
+    // Zero timestep modulation (for conditioned tokens)
+    const v_zero = Tensor.zeroes(v_sigma_scaled.shape().withDtype(.f32));
+    const a_zero = Tensor.zeroes(a_sigma_scaled.shape().withDtype(.f32));
+    const v_adaln_zero = AdaLayerNormSingle.forward(v_zero, params.adaln_single);
+    const a_adaln_zero = AdaLayerNormSingle.forward(a_zero, params.audio_adaln_single);
+
+    // Reshape [B, d_ada] → [B, 1, d_ada] for broadcast across T in adaValueAtMasked
+    const v_timesteps = v_adaln.modulation.reshape(
+        v_adaln.modulation.shape().splitAxis(.b, .{ .b = v_adaln.modulation.dim(.b), .t = 1 }),
+    );
+    const a_timesteps = a_adaln.modulation.reshape(
+        a_adaln.modulation.shape().splitAxis(.b, .{ .b = a_adaln.modulation.dim(.b), .t = 1 }),
+    );
+    const v_timesteps_zero = v_adaln_zero.modulation.reshape(
+        v_adaln_zero.modulation.shape().splitAxis(.b, .{ .b = v_adaln_zero.modulation.dim(.b), .t = 1 }),
+    );
+    const a_timesteps_zero = a_adaln_zero.modulation.reshape(
+        a_adaln_zero.modulation.shape().splitAxis(.b, .{ .b = a_adaln_zero.modulation.dim(.b), .t = 1 }),
+    );
+
+    // Blend embedded_timestep per-token: [B, T, D_emb] — small enough to materialize
+    // sigma: [B, 1, D_emb], zero: [B, 1, D_emb], mask: [B, T, 1]
+    const v_emb_s = v_adaln.embedded_timestep.reshape(
+        v_adaln.embedded_timestep.shape().splitAxis(.b, .{ .b = v_adaln.embedded_timestep.dim(.b), .t = 1 }),
+    );
+    const v_emb_z = v_adaln_zero.embedded_timestep.reshape(
+        v_adaln_zero.embedded_timestep.shape().splitAxis(.b, .{ .b = v_adaln_zero.embedded_timestep.dim(.b), .t = 1 }),
+    );
+    const a_emb_s = a_adaln.embedded_timestep.reshape(
+        a_adaln.embedded_timestep.shape().splitAxis(.b, .{ .b = a_adaln.embedded_timestep.dim(.b), .t = 1 }),
+    );
+    const a_emb_z = a_adaln_zero.embedded_timestep.reshape(
+        a_adaln_zero.embedded_timestep.shape().splitAxis(.b, .{ .b = a_adaln_zero.embedded_timestep.dim(.b), .t = 1 }),
+    );
+    // mask [B, T, mask=1] → rename → [B, T, d_emb=1] for broadcast
+    const v_mask_emb = v_mask.convert(.f32).rename(.{ .mask = .d_emb });
+    const v_one_minus_emb = Tensor.scalar(1.0, .f32).sub(v_mask_emb);
+    const v_emb_target = zml.Shape.init(.{ .b = v_mask_emb.dim(.b), .t = v_mask_emb.dim(.t), .d_emb = v_emb_s.dim(.d_emb) }, .f32);
+    const v_emb_ts = v_mask_emb.broad(v_emb_target).mul(v_emb_s.convert(.f32).broad(v_emb_target))
+        .add(v_one_minus_emb.broad(v_emb_target).mul(v_emb_z.convert(.f32).broad(v_emb_target)));
+    const a_mask_emb = a_mask.convert(.f32).rename(.{ .mask = .d_emb });
+    const a_one_minus_emb = Tensor.scalar(1.0, .f32).sub(a_mask_emb);
+    const a_emb_target = zml.Shape.init(.{ .b = a_mask_emb.dim(.b), .t = a_mask_emb.dim(.t), .d_emb = a_emb_s.dim(.d_emb) }, .f32);
+    const a_emb_ts = a_mask_emb.broad(a_emb_target).mul(a_emb_s.convert(.f32).broad(a_emb_target))
+        .add(a_one_minus_emb.broad(a_emb_target).mul(a_emb_z.convert(.f32).broad(a_emb_target)));
 
     // --- 3. Prompt adaln (uses raw sigma, not per-token timesteps) ---
     const v_prompt = AdaLayerNormSingle.forward(
@@ -2517,6 +2631,10 @@ pub fn forwardPreprocess(
         .ax = ax,
         .video_timesteps = v_timesteps,
         .audio_timesteps = a_timesteps,
+        .video_timesteps_zero = v_timesteps_zero,
+        .audio_timesteps_zero = a_timesteps_zero,
+        .v_denoise_mask = v_mask,
+        .a_denoise_mask = a_mask,
         .v_embedded_timestep = v_emb_ts,
         .a_embedded_timestep = a_emb_ts,
         .v_prompt_timestep = v_prompt_ts,

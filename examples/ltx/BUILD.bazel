@@ -10,6 +10,7 @@ zig_binary(
         "model.zig",
         "upsampler.zig",
         "video_vae.zig",
+        "video_vae_encoder.zig",
         "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
@@ -27,6 +28,7 @@ zig_binary(
         "model.zig",
         "upsampler.zig",
         "video_vae.zig",
+        "video_vae_encoder.zig",
         "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
@@ -44,6 +46,7 @@ zig_binary(
         "model.zig",
         "upsampler.zig",
         "video_vae.zig",
+        "video_vae_encoder.zig",
         "vocoder.zig",
     ],
     visibility = ["//visibility:public"],
@@ -58,10 +61,27 @@ zig_binary(
     srcs = [
         "audio_vae.zig",
         "conv_ops.zig",
+        "image_loading.zig",
         "model.zig",
         "upsampler.zig",
         "video_vae.zig",
+        "video_vae_encoder.zig",
         "vocoder.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "@stb//:stb",
+    ],
+)
+
+zig_binary(
+    name = "validate_encoder",
+    main = "validate_encoder.zig",
+    srcs = [
+        "conv_ops.zig",
+        "video_vae.zig",
+        "video_vae_encoder.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
@@ -76,5 +96,6 @@ build_test(
         ":denoise_stage1",
         ":bridge",
         ":inference",
+        ":validate_encoder",
     ],
 )

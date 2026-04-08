@@ -22,8 +22,10 @@ const std = @import("std");
 const zml = @import("zml");
 const model = @import("model.zig");
 const conv_ops = @import("conv_ops.zig");
+const image_loading = @import("image_loading.zig");
 const upsampler = @import("upsampler.zig");
 const video_vae = @import("video_vae.zig");
+const video_vae_encoder = @import("video_vae_encoder.zig");
 const audio_vae = @import("audio_vae.zig");
 const vocoder = @import("vocoder.zig");
 
@@ -72,6 +74,7 @@ const CliArgs = struct {
     bf16_attn_stage1: bool,
     bf16_attn_stage2: bool,
     dump_intermediates: bool,
+    image: ?[]const u8,
 };
 
 fn parseArgs(it: anytype) !CliArgs {
@@ -86,6 +89,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .bf16_attn_stage1 = false,
         .bf16_attn_stage2 = false,
         .dump_intermediates = false,
+        .image = null,
     };
     var have = [_]bool{false} ** 7;
 
@@ -119,6 +123,8 @@ fn parseArgs(it: anytype) !CliArgs {
             args.bf16_attn_stage2 = true;
         } else if (std.mem.eql(u8, arg, "--dump-intermediates")) {
             args.dump_intermediates = true;
+        } else if (std.mem.eql(u8, arg, "--image")) {
+            args.image = it.next() orelse return error.InvalidArgs;
         }
     }
 
@@ -221,6 +227,179 @@ const STG_BLOCK_IDX: usize = 28;
 /// Number of Stage 1 denoising steps.
 const NUM_STAGE1_STEPS: usize = model.stage1_default_schedule.num_steps;
 
+// ============================================================================
+// Image conditioning: graph functions + runtime helper
+// ============================================================================
+
+/// Result of applying image conditioning to the initial state.
+const ConditioningResult = struct {
+    latent: zml.Tensor,
+    clean_latent: zml.Tensor,
+    denoise_mask: zml.Tensor,
+};
+
+/// Graph function: Apply image conditioning to initial denoising state.
+///
+/// Replaces the first `n_img_tokens` positions (= first frame) in the video
+/// latent, clean latent, and denoise mask with the encoded image tokens.
+///
+/// Python ref: VideoConditionByLatentIndex.apply_to() + GaussianNoiser.__call__()
+///
+/// latent:        [1, T_video, 128] bf16 (noised initial state)
+/// clean_latent:  [1, T_video, 128] bf16
+/// denoise_mask:  [1, T_video, 1]   f32  (1.0 = denoise, 0.0 = keep)
+/// img_tokens:    [1, n_img, 128]   bf16 (encoded image, patchified)
+///
+/// For conditioned positions (first n_img tokens):
+///   latent       = img_tokens  (clean — no noise)
+///   clean_latent = img_tokens
+///   denoise_mask = 0.0  (strength=1.0 → 1 - 1 = 0)
+fn forwardApplyConditioning(
+    latent: zml.Tensor,
+    clean_latent: zml.Tensor,
+    denoise_mask: zml.Tensor,
+    img_tokens: zml.Tensor,
+) ConditioningResult {
+    const n_img = img_tokens.dim(1);
+
+    // Build replacement tensors at full sequence length by concatenating
+
+    // latent: [img_tokens ; latent[n_img:]]
+    const latent_rest = latent.slice1d(1, .{ .start = n_img });
+    const new_latent = zml.Tensor.concatenate(&.{ img_tokens, latent_rest }, 1);
+
+    // clean_latent: [img_tokens ; clean_latent[n_img:]]
+    const clean_rest = clean_latent.slice1d(1, .{ .start = n_img });
+    const new_clean = zml.Tensor.concatenate(&.{ img_tokens, clean_rest }, 1);
+
+    // denoise_mask: [zeros(n_img, 1) ; mask[n_img:]]
+    const zero_mask = zml.Tensor.zeroes(
+        zml.Shape.init(.{ 1, n_img, 1 }, .f32),
+    );
+    const mask_rest = denoise_mask.slice1d(1, .{ .start = n_img });
+    const new_mask = zml.Tensor.concatenate(&.{ zero_mask, mask_rest }, 1);
+
+    return .{
+        .latent = new_latent,
+        .clean_latent = new_clean,
+        .denoise_mask = new_mask,
+    };
+}
+
+/// Encode image and patchify: pixel image → latent tokens.
+/// [B, 3, 1, H, W] bf16 → [B, 128, 1, H/32, W/32] → [B, n_img, 128]
+fn forwardEncodeAndPatchify(
+    pixel_input: zml.Tensor,
+    stats: conv_ops.PerChannelStats,
+    encoder_params: video_vae_encoder.VideoVaeEncoderParams,
+) zml.Tensor {
+    // VAE encode: [B, 3, 1, H, W] → [B, 128, 1, H/32, W/32]
+    const encoded = video_vae_encoder.forwardVideoVaeEncode(pixel_input, stats, encoder_params);
+    // Patchify to token space: [B, 128, 1, H', W'] → [B, H'*W', 128]
+    return upsampler.forwardPatchifyVideo(encoded);
+}
+
+/// Runtime helper: compile VAE encoder, run it on an image, return patchified
+/// tokens as a Buffer. Caller owns the returned buffer.
+fn encodeImageToTokens(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    ckpt_path: []const u8,
+    image_buf: zml.Buffer,
+) !zml.Buffer {
+    // Open checkpoint for encoder weights
+    var ckpt_reg = try zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path);
+    defer ckpt_reg.deinit();
+    var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
+    defer ckpt_store.deinit();
+
+    const encoder_shape = video_vae_encoder.initVideoVaeEncoderParams(ckpt_store.view());
+    const stats_shape = conv_ops.initPerChannelStats(ckpt_store.view());
+
+    std.log.info("  Compiling VAE encoder...", .{});
+    var exe = try platform.compileFn(
+        allocator, io,
+        forwardEncodeAndPatchify,
+        .{
+            zml.Tensor.fromShape(image_buf.shape()),
+            stats_shape,
+            encoder_shape,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer exe.deinit();
+
+    std.log.info("  Loading encoder weights...", .{});
+    const encoder_bufs = try zml.io.load(
+        video_vae_encoder.VideoVaeEncoderParams, &encoder_shape,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * zml.MiB,
+        },
+    );
+    const stats_bufs = try zml.io.load(
+        conv_ops.PerChannelStats, &stats_shape,
+        allocator, io, platform,
+        .{
+            .store = &ckpt_store,
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * zml.MiB,
+        },
+    );
+
+    std.log.info("  Running encoder...", .{});
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+    args.set(.{ image_buf, stats_bufs, encoder_bufs });
+    exe.call(args, &results);
+    return results.get(zml.Buffer);
+}
+
+/// Runtime helper: apply image conditioning to existing latent/clean/mask buffers.
+/// Returns new buffers; caller must deinit the old ones.
+fn applyConditioning(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    v_latent: zml.Buffer,
+    v_clean: zml.Buffer,
+    v_mask: zml.Buffer,
+    img_tokens: zml.Buffer,
+) !struct { latent: zml.Buffer, clean: zml.Buffer, mask: zml.Buffer } {
+    var exe = try platform.compileFn(
+        allocator, io,
+        forwardApplyConditioning,
+        .{
+            zml.Tensor.fromShape(v_latent.shape()),
+            zml.Tensor.fromShape(v_clean.shape()),
+            zml.Tensor.fromShape(v_mask.shape()),
+            zml.Tensor.fromShape(img_tokens.shape()),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer exe.deinit();
+
+    var args = try exe.args(allocator);
+    defer args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+    args.set(.{ v_latent, v_clean, v_mask, img_tokens });
+    exe.call(args, &results);
+    const out = results.get(zml.Bufferized(ConditioningResult));
+    return .{ .latent = out.latent, .clean = out.clean_latent, .mask = out.denoise_mask };
+}
+
 
 
 // ============================================================================
@@ -246,6 +425,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  bf16-attn-stage1:  {}", .{args.bf16_attn_stage1});
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
+    std.log.info("  image:             {s}", .{args.image orelse "(none)"});
 
     // ---- Ensure output directory exists ----
     try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
@@ -273,7 +453,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1);
+    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -299,6 +479,7 @@ pub fn main(init: std.process.Init) !void {
         args.stage2_ckpt,
         args.stage2_noise,
         pipe_meta,
+        args.image,
     );
     // Stage 1 latent/context buffers are consumed by bridge (ownership transferred)
 
@@ -413,6 +594,10 @@ fn runStage1(
     ckpt_path: []const u8,
     inputs_path: []const u8,
     use_bf16_attn: bool,
+    image_path: ?[]const u8,
+    pipe_meta: PipelineMeta,
+    dump_intermediates: bool,
+    output_dir: []const u8,
 ) !Stage1Result {
     // ---- Sigma schedule ----
     const sigmas = model.computeSigmaSchedule(
@@ -473,6 +658,50 @@ fn runStage1(
 
     std.log.info("  video_latent (noised)", .{});
     std.log.info("  audio_latent (noised)", .{});
+
+    // ---- Image conditioning (optional) ----
+    if (image_path) |img_path| {
+        std.log.info("Applying image conditioning to Stage 1...", .{});
+
+        // Load image from disk, resize to Stage 1 pixel resolution, normalize to bf16 [-1,1].
+        // Stage 1 uses half resolution: pixel dims = h_lat * 32, w_lat * 32.
+        const s1_pixel_h: u32 = @intCast(pipe_meta.stage1.h_lat * 32);
+        const s1_pixel_w: u32 = @intCast(pipe_meta.stage1.w_lat * 32);
+        var image_s1_buf = try image_loading.loadAndPreprocess(allocator, io, platform, sharding, img_path, s1_pixel_h, s1_pixel_w);
+        defer image_s1_buf.deinit();
+        std.log.info("  image_s1: {any}", .{image_s1_buf.shape().dims()});
+
+        // Dump preprocessed image for comparison
+        if (dump_intermediates) {
+            try writeBuffer(allocator, io, image_s1_buf, output_dir, "s1_image_preprocessed.bin");
+        }
+
+        // Encode image → patchified tokens
+        var img_tokens = try encodeImageToTokens(allocator, io, platform, sharding, ckpt_path, image_s1_buf);
+        defer img_tokens.deinit();
+        std.log.info("  image tokens: {any}", .{img_tokens.shape().dims()});
+
+        // Apply conditioning: replace first-frame tokens in latent/clean/mask
+        const cond = try applyConditioning(allocator, io, platform, sharding, v_latent_buf, v_clean_buf, v_mask_buf, img_tokens);
+
+        // Replace old buffers with conditioned ones
+        v_latent_buf.deinit();
+        v_latent_buf = cond.latent;
+        v_clean_buf.deinit();
+        v_clean_buf = cond.clean;
+        v_mask_buf.deinit();
+        v_mask_buf = cond.mask;
+
+        std.log.info("  Conditioning applied (n_img={d})", .{img_tokens.shape().dim(1)});
+
+        // Debug dumps: img_tokens and conditioned state
+        if (dump_intermediates) {
+            try writeBuffer(allocator, io, img_tokens, output_dir, "s1_img_tokens.bin");
+            try writeBuffer(allocator, io, v_latent_buf, output_dir, "s1_conditioned_latent.bin");
+            try writeBuffer(allocator, io, v_clean_buf, output_dir, "s1_conditioned_clean.bin");
+            try writeBuffer(allocator, io, v_mask_buf, output_dir, "s1_conditioned_mask.bin");
+        }
+    }
 
     // ---- Compile executables ----
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
@@ -545,6 +774,10 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
         zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_denoise_mask.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_denoise_mask.shape()),
         zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
@@ -590,6 +823,10 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
         zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_denoise_mask.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_denoise_mask.shape()),
         zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
@@ -622,15 +859,15 @@ fn runStage1(
 
     // ---- Compile output projection exes ----
     std.log.info("Compiling output projection exes...", .{});
-    const v_emb_2d_shape = init_pre_out.v_embedded_timestep.shape();
-    const a_emb_2d_shape = init_pre_out.a_embedded_timestep.shape();
+    const v_emb_shape = init_pre_out.v_embedded_timestep.shape();
+    const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
 
     var proj_v_exe = try platform.compileFn(
         allocator, io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
-            zml.Tensor.fromShape(v_emb_2d_shape).withPartialTags(.{ .b, .d_emb }),
+            zml.Tensor.fromShape(v_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.norm_proj_out,
         },
         .{ .shardings = &.{sharding} },
@@ -642,7 +879,7 @@ fn runStage1(
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
-            zml.Tensor.fromShape(a_emb_2d_shape).withPartialTags(.{ .b, .d_emb }),
+            zml.Tensor.fromShape(a_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.audio_norm_proj_out,
         },
         .{ .shardings = &.{sharding} },
@@ -860,6 +1097,8 @@ fn runStage1(
             blk_args.set(.{
                 cond_h_v, cond_h_a,
                 pre_out.video_timesteps, pre_out.audio_timesteps,
+                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                 pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                 pre_out.v_pe_cos, pre_out.v_pe_sin,
                 pre_out.a_pe_cos, pre_out.a_pe_sin,
@@ -903,6 +1142,8 @@ fn runStage1(
             blk_args.set(.{
                 neg_h_v, neg_h_a,
                 pre_out.video_timesteps, pre_out.audio_timesteps,
+                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                 pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                 pre_out.v_pe_cos, pre_out.v_pe_sin,
                 pre_out.a_pe_cos, pre_out.a_pe_sin,
@@ -947,6 +1188,8 @@ fn runStage1(
                 blk_args.set(.{
                     ptb_h_v, ptb_h_a,
                     pre_out.video_timesteps, pre_out.audio_timesteps,
+                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                    pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                     pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                     pre_out.v_pe_cos, pre_out.v_pe_sin,
                     pre_out.a_pe_cos, pre_out.a_pe_sin,
@@ -973,6 +1216,8 @@ fn runStage1(
                 blk_args.set(.{
                     ptb_h_v, ptb_h_a,
                     pre_out.video_timesteps, pre_out.audio_timesteps,
+                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                    pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                     pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                     pre_out.v_pe_cos, pre_out.v_pe_sin,
                     pre_out.a_pe_cos, pre_out.a_pe_sin,
@@ -1017,6 +1262,8 @@ fn runStage1(
             blk_args.set(.{
                 iso_h_v, iso_h_a,
                 pre_out.video_timesteps, pre_out.audio_timesteps,
+                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                 pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                 pre_out.v_pe_cos, pre_out.v_pe_sin,
                 pre_out.a_pe_cos, pre_out.a_pe_sin,
@@ -1133,6 +1380,7 @@ fn runBridge(
     main_ckpt_path: []const u8,
     noise_path: []const u8,
     pipe_meta: PipelineMeta,
+    image_path: ?[]const u8,
 ) !BridgeResult {
     const s1 = pipe_meta.stage1;
     const s2 = pipe_meta.stage2;
@@ -1369,7 +1617,7 @@ fn runBridge(
     defer ni_v_results.deinit(allocator);
     ni_v_args.set(.{ video_clean_buf, v_noise_buf, v_mask_buf, sigma0_buf });
     noise_init_v_exe.call(ni_v_args, &ni_v_results);
-    const v_latent_buf = ni_v_results.get(zml.Buffer);
+    var v_latent_buf = ni_v_results.get(zml.Buffer);
 
     // Audio noise init
     var ni_a_args = try noise_init_a_exe.args(allocator);
@@ -1382,6 +1630,37 @@ fn runBridge(
 
     std.log.info("  video_latent (noised)", .{});
     std.log.info("  audio_latent (noised)", .{});
+
+    // ---- Image conditioning for Stage 2 (optional) ----
+    if (image_path) |img_path| {
+        std.log.info("Applying image conditioning to Stage 2...", .{});
+
+        // Load image from disk, resize to Stage 2 pixel resolution, normalize to bf16 [-1,1].
+        // Stage 2 uses full resolution: pixel dims = h_lat * 32, w_lat * 32.
+        const s2_pixel_h: u32 = @intCast(pipe_meta.stage2.h_lat * 32);
+        const s2_pixel_w: u32 = @intCast(pipe_meta.stage2.w_lat * 32);
+        var image_s2_buf = try image_loading.loadAndPreprocess(allocator, io, platform, sharding, img_path, s2_pixel_h, s2_pixel_w);
+        defer image_s2_buf.deinit();
+        std.log.info("  image_s2: {any}", .{image_s2_buf.shape().dims()});
+
+        // Encode image → patchified tokens
+        var img_tokens = try encodeImageToTokens(allocator, io, platform, sharding, main_ckpt_path, image_s2_buf);
+        defer img_tokens.deinit();
+        std.log.info("  image tokens: {any}", .{img_tokens.shape().dims()});
+
+        // Apply conditioning: replace first-frame tokens in latent/clean/mask
+        const cond = try applyConditioning(allocator, io, platform, sharding, v_latent_buf, video_clean_buf, v_mask_buf, img_tokens);
+
+        // Replace old buffers with conditioned ones
+        v_latent_buf.deinit();
+        v_latent_buf = cond.latent;
+        video_clean_buf.deinit();
+        video_clean_buf = cond.clean;
+        v_mask_buf.deinit();
+        v_mask_buf = cond.mask;
+
+        std.log.info("  Conditioning applied (n_img={d})", .{img_tokens.shape().dim(1)});
+    }
 
     std.log.info("Bridge complete.", .{});
 
@@ -1498,6 +1777,10 @@ fn runStage2(
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
         zml.Tensor.fromShape(init_pre_out.audio_timesteps.shape()),
+        zml.Tensor.fromShape(init_pre_out.video_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.audio_timesteps_zero.shape()),
+        zml.Tensor.fromShape(init_pre_out.v_denoise_mask.shape()),
+        zml.Tensor.fromShape(init_pre_out.a_denoise_mask.shape()),
         zml.Tensor.fromShape(init_pre_out.v_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.a_prompt_timestep.shape()),
         zml.Tensor.fromShape(init_pre_out.v_pe_cos.shape()),
@@ -1530,15 +1813,15 @@ fn runStage2(
 
     // ---- Compile output projection exes ----
     std.log.info("Compiling Stage 2 output projection exes...", .{});
-    const v_emb_2d_shape = init_pre_out.v_embedded_timestep.shape();
-    const a_emb_2d_shape = init_pre_out.a_embedded_timestep.shape();
+    const v_emb_shape = init_pre_out.v_embedded_timestep.shape();
+    const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
 
     var proj_v_exe = try platform.compileFn(
         allocator, io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
-            zml.Tensor.fromShape(v_emb_2d_shape).withPartialTags(.{ .b, .d_emb }),
+            zml.Tensor.fromShape(v_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.norm_proj_out,
         },
         .{ .shardings = &.{sharding} },
@@ -1550,7 +1833,7 @@ fn runStage2(
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
-            zml.Tensor.fromShape(a_emb_2d_shape).withPartialTags(.{ .b, .d_emb }),
+            zml.Tensor.fromShape(a_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.audio_norm_proj_out,
         },
         .{ .shardings = &.{sharding} },
@@ -1692,6 +1975,8 @@ fn runStage2(
             blk_args.set(.{
                 h_v, h_a,
                 pre_out.video_timesteps, pre_out.audio_timesteps,
+                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
                 pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
                 pre_out.v_pe_cos, pre_out.v_pe_sin,
                 pre_out.a_pe_cos, pre_out.a_pe_sin,

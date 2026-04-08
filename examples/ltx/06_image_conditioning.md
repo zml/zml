@@ -3,6 +3,180 @@
 Enable image-to-video generation by implementing the VAE encoder in Zig and
 wiring the conditioning logic into the inference pipeline.
 
+## Implementation status
+
+| Milestone | Status | Notes |
+|-----------|--------|-------|
+| **M0** Python export script | **Done** | `export_image_conditioning.py` — also supports unconditioned (`--image` optional) |
+| **M1** VAE encoder in Zig | **Done** | `video_vae_encoder.zig` (367 lines), cosim 0.9997 E2E |
+| **M2** Image loading in Zig | **Done** | `image_loading.zig` (116 lines) — stb_image + bilinear resize + center crop |
+| **M3** Conditioning in pipeline | **Done** | Stage 1 only — both `inference.zig` and `model.zig` updated |
+| **M4** End-to-end validation | **Done** | Identity preserved, regression tested with/without `--image` |
+| **M5** Full image loading | **Done** | Merged into M2 — stb_image path, no Python preprocessing needed |
+
+### Files changed (vs `oboulant/ltx-cleanup` base)
+
+Modified:
+- `model.zig` (+244/−73) — per-token AdaLN masking (`adaValueAtMasked`), `SharedInputs` extended with 6 new fields
+- `inference.zig` (+305/−12) — `--image` flag, VAE encode + conditioning pipeline, block call sites updated
+- `BUILD.bazel` (+21) — new srcs (`image_loading.zig`, `video_vae_encoder.zig`), `@stb//:stb` dep
+- `06_image_conditioning.md` — validation results + this status section
+
+New:
+- `video_vae_encoder.zig` (367 lines) — full VAE encoder: causal conv3d, space-to-depth, patchify, normalize
+- `image_loading.zig` (116 lines) — JPEG/PNG load via stb_image, bilinear resize, center crop, bf16 normalize
+- `export_image_conditioning.py` (843 lines) — Python reference export (conditioned + unconditioned paths)
+- `validate_encoder.zig` (618 lines) — standalone encoder validation binary (used during M1)
+- `diagnose_conditioning.py` (213 lines) — debug script (used during debugging)
+- `diagnose_pipeline.py` (217 lines) — debug script (used during debugging)
+
+### Key deviation from plan: per-token AdaLN masking
+
+The original plan stated: *"conditioning only modifies the initial state tensors
+(latent, clean_latent, denoise_mask) before denoising starts. The transformer
+itself is unchanged."*
+
+This turned out to be **wrong** for preserving identity when using strength=1.0
+conditioning. The naive approach (broadcast the sigma-derived timestep to all
+tokens uniformly) caused the **conditioned tokens (mask=0.0)** to receive the
+same large AdaLN modulation as the unconditioned tokens. Since conditioned tokens
+are already clean (no noise), they should get zero-sigma modulation instead.
+
+#### The problem
+
+Each of the 48 transformer blocks computes 9 AdaLN modulation values per modality
+(shift, scale, gate for MSA, FF, and QK-norm). These are derived from the
+timestep embedding, which is a function of sigma. When mask=0 ("this token is
+clean"), the effective sigma for that token should be 0, but the original code
+broadcast a single sigma to ALL tokens.
+
+Result: conditioned first-frame tokens got "noisy" modulations → identity drifted
+over time → generated person looked different from the reference image.
+
+#### The solution: `adaValueAtMasked`
+
+A new function blends two sets of modulation values per-token:
+
+```
+result[t] = mask[t] * ada_value(sigma) + (1 - mask[t]) * ada_value(0)
+```
+
+- For unconditioned tokens (mask=1.0): uses sigma modulation (unchanged behavior)
+- For conditioned tokens (mask=0.0): uses zero-sigma modulation (correct for clean tokens)
+
+**Memory optimization**: The naive approach would materialize `[B, T, d_ada]`
+(~905MB for T=6144, d_ada=36864). Instead, `adaValueAtMasked` blends AFTER
+slicing each ada value to `[B, T, D]` (~96MB), which XLA can reuse sequentially.
+This keeps peak memory well within the 48GB GPU budget.
+
+#### Scope of changes in `model.zig`
+
+- `adaValueAtMasked()` function: ~30 lines
+- `SharedInputs` struct: 6 new fields (`video_timesteps_zero`, `audio_timesteps_zero`,
+  `v_denoise_mask`, `a_denoise_mask`, plus the zero versions for both modalities)
+- `PreprocessOutput`: 6 matching new fields
+- `forwardPreprocess`: computes both sigma and zero AdaLN embeddings, blends
+  `embedded_timestep` per-token (small enough at [B, T, D_emb])
+- All 6 block entry point variants: updated signatures with 4 new params
+- All 18 `adaValueAt` calls for main timesteps (9 per modality × 2 modalities)
+  converted to `adaValueAtMasked`
+- `OutputProjection.forward`: accepts [B, T, D_emb] embedded_timestep (broadcasts across T)
+
+#### Scope of changes in `inference.zig`
+
+- All block compile args (3 Stage 1 variants + 1 Stage 2) include 4 new shapes
+- All block call sites (5 Stage 1 + 1 Stage 2) pass 4 new buffers
+- Output projection compilation tags `[B, 1, D_emb]` as `.{.b, .t, .d_emb}`
+
+### Regression safety
+
+When no `--image` is provided, the mask is all 1.0 everywhere. In this case
+`adaValueAtMasked` reduces to:
+
+```
+1.0 * ada_value(sigma) + 0.0 * ada_value(0) = ada_value(sigma)
+```
+
+This is mathematically identical to the original `adaValueAt` — the
+unconditioned path produces the same result as before.
+
+### Stage 2 conditioning: current state
+
+In the current implementation, Stage 2 conditioning IS applied in Zig when
+`--image` is provided: the image is VAE-encoded at full resolution, tokens
+replace the first-frame positions, and denoise_mask is set to 0.0. However the
+Stage 2 bridge creates all-ones mask by default, so conditioning only takes
+effect when the `--image` flag is passed.
+
+## Usage
+
+### Python export (on GPU server)
+
+The export script runs the full two-stage pipeline in Python, capturing all
+intermediate states for Zig to consume.
+
+**With image conditioning:**
+
+```bash
+cd /root/repos/LTX-2
+uv run python /root/repos/zml/examples/ltx/export_image_conditioning.py \
+    --image /path/to/reference_image.jpg \
+    --prompt "A beautiful sunset over the ocean" \
+    --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+    --output-dir /root/imgcond_ref/ \
+    --decode-video
+```
+
+**Without image (text-to-video only):**
+
+```bash
+cd /root/repos/LTX-2
+uv run python /root/repos/zml/examples/ltx/export_image_conditioning.py \
+    --prompt "A cat sitting on a windowsill watching rain" \
+    --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+    --output-dir /root/newprompt_ref/ \
+    --decode-video
+```
+
+Key outputs consumed by Zig:
+- `unconditioned_stage1_inputs.safetensors` — Stage 1 initial state (no image baked in)
+- `stage2_noise.safetensors` — Stage 2 noise vectors
+- `pipeline_meta.json` — resolution, sigmas, guidance params
+
+### Zig inference (on GPU server)
+
+**With image conditioning (bf16 attention for Stage 2):**
+
+```bash
+bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference -- \
+    --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+    --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+    --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+    --stage1-inputs /root/imgcond_ref/unconditioned_stage1_inputs.safetensors \
+    --stage2-noise /root/imgcond_ref/stage2_noise.safetensors \
+    --meta /root/imgcond_ref/pipeline_meta.json \
+    --output-dir /root/imgcond_zig/ \
+    --bf16-attn-stage2 \
+    --image /root/models/reference_image.jpg
+```
+
+**Without image (same prompt, same seed):**
+
+```bash
+bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference -- \
+    --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+    --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+    --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+    --stage1-inputs /root/imgcond_ref/unconditioned_stage1_inputs.safetensors \
+    --stage2-noise /root/imgcond_ref/stage2_noise.safetensors \
+    --meta /root/imgcond_ref/pipeline_meta.json \
+    --output-dir /root/nocond_zig/ \
+    --bf16-attn-stage2
+```
+
+The `--image` flag is optional. When omitted, the pipeline runs in pure
+text-to-video mode (all masks = 1.0, no per-token AdaLN blending needed).
+
 ## Background
 
 Currently the pipeline is text-only: Python exports text embeddings + noise,
@@ -407,6 +581,52 @@ eliminating the Python preprocessing step for images.
 3. **Image resolution mismatch**: The input image is resized to Stage 1's
    half-resolution (H/2 × W/2). If the image aspect ratio doesn't match,
    center-crop is applied. Need to handle this in preprocessing.
+
+## M1 validation results — cross-framework numerical divergence
+
+Per-block isolated validation (each block fed exact Python reference input):
+
+| Block | Type | cosim | close | Notes |
+|-------|------|-------|-------|-------|
+| A0  patchify | reshape | — | EXACT | Pure data rearrangement |
+| A1  conv_in | 1 CausalConv3d | 0.999994 | 1.0000 | Single conv is near-exact |
+| A2  down_blocks.0 | 4 ResBlocks (8 conv, 8 PixelNorm) | 0.999875 | 0.4412 | |
+| A3  down_blocks.1 | S2D (1,2,2) | 0.999996 | 0.9906 | |
+| A4  down_blocks.2 | 6 ResBlocks (12 conv, 12 PixelNorm) | 0.999957 | 0.4684 | |
+| A5  down_blocks.3 | S2D (2,1,1) | 0.999995 | 0.9878 | |
+| A6  down_blocks.4 | 4 ResBlocks (8 conv, 8 PixelNorm) | 0.999971 | 0.4324 | |
+| A7  down_blocks.5 | S2D (2,2,2) | 0.999999 | 0.9840 | |
+| A8  down_blocks.6 | 2 ResBlocks (4 conv, 4 PixelNorm) | 0.999998 | 0.9150 | |
+| A9  down_blocks.7 | S2D (2,2,2) | 1.000000 | 0.9887 | |
+| A10 down_blocks.8 | 2 ResBlocks (4 conv, 4 PixelNorm) | 1.000000 | 0.9560 | |
+| A11 norm_silu | PixelNorm + SiLU | 0.999981 | 1.0000 | |
+| A12 conv_out+norm | CausalConv3d + slice + normalize | 1.000000 | 0.9999 | |
+| **E2E** | **full encoder** | **0.999683** | **0.3973** | Cumulative |
+
+**Root cause**: XLA/StableHLO (PJRT CUDA) and PyTorch/cuDNN use different
+conv3d accumulation orders, producing small per-element rounding differences in
+bf16. Each individual conv3d is near-exact (close=1.0), but errors compound
+through ResBlock chains. The pattern is consistent:
+
+- 1 conv → close=1.0
+- 2 ResBlocks (4 conv + 4 PixelNorm + 4 SiLU) → close ≈ 0.92–0.96
+- 4 ResBlocks (8 conv + 8 PixelNorm + 8 SiLU) → close ≈ 0.43–0.47
+- SpaceToDepth (1 conv + rearrange) → close ≈ 0.98–0.99
+
+The "close" metric (`|diff| ≤ 5e-3 or |diff| ≤ 1% of max(|a|,|b|)`) is too
+tight for cross-framework comparison through 40+ chained bf16 ops.
+**cosim ≥ 0.9997 at every block** confirms the implementation is correct.
+
+Confirmed non-issues investigated:
+- PixelNorm eps: 1e-8 (matches Python's `PixelNorm()` default, not the 1e-6
+  from `build_normalization_layer`)
+- Spatial padding: ZEROS for encoder (REFLECT is decoder-only)
+- f32 upcast in PixelNorm: tested removing it — no change (XLA promotes
+  internally regardless)
+- ResBlock shortcut: identity (no conv_shortcut/norm3) — correct for
+  same-channel blocks
+- SpaceToDepth group_size: 2,1,4,8 — matches Python's
+  `in_ch * prod(stride) // out_ch` formula
 
 4. **Strength parameter**: `strength=1.0` means fully conditioned (denoise_mask=0 at
    image positions). Lower strength allows more variation from the reference.
