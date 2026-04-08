@@ -5,9 +5,9 @@ zig_binary(
     name = "benchmark_profiler",
     main = "main.zig",
     deps = [
+        "//third_party/pprof:pprof",
         "//zml",
         "//third_party/tracy:tracy",
-        "@gperftools//:cpu_profiler",
     ],
     visibility = ["//visibility:public"],
 )
