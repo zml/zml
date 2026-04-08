@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const args = try init.minimal.args.toSlice(arena.allocator());
 
-    const build_workspace_directory = init.environ_map.get("BUILD_WORKSPACE_DIRECTORY").?;
+    const build_workspace_directory = init.environ_map.get("BUILD_WORKSPACE_DIRECTORY") orelse ".";
     const execution_root = if (init.environ_map.get("BAZEL_EXECUTION_ROOT")) |value|
         value
     else blk: {
