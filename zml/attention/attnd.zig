@@ -166,14 +166,14 @@ fn cpuCall(
         .model_id = parameters.model_id,
         .conversation_id = 0,
         .layer_id = 0,
-        .token_pos = @bitCast(asSlice(&input.token_pos)[0..@sizeOf(u32)]),
+        .token_pos = std.mem.bytesAsValue(u32, asConstSlice(input.token_pos)[0..@sizeOf(u32)]).*,
     };
 
-    const q = asSlice(input.q);
-    const k = asSlice(input.k);
-    const v = asSlice(input.v);
+    const q = asConstSlice(input.q);
+    const k = asConstSlice(input.k);
+    const v = asConstSlice(input.v);
     const head_bytes = parameters.head_bytes;
-    const num_queries = parameters.num_queries;
+    const num_queries = parameters.num_q_per_head;
     for (0..parameters.num_kv_heads) |kv_head_id| {
         const k_offset = kv_head_id * head_bytes;
         @memcpy(req.k, k[k_offset..][0..head_bytes]);
@@ -195,7 +195,7 @@ fn cpuCall(
             req.header.first_q_id = q_sent;
             q_sent += nq;
 
-            ctx.attnd_client.send(req);
+            try ctx.client.send(ctx.io, req);
         }
     }
 
@@ -209,20 +209,26 @@ fn cpuCall(
     while (recv_q < parameters.num_kv_heads * parameters.num_q_per_head) {
         const resp = try ctx.client.receive(ctx.io, buffer);
 
-        std.debug.assert(resp.num_queries <= parameters.num_q_per_head);
-        std.debug.assert(resp.payload == resp.num_queries * parameters.head_bytes);
-        std.debug.assert(resp.kv_head_id < parameters.num_kv_heads);
-        std.debug.assert(resp.first_q_id + resp.num_queries <= parameters.queries_per_head);
+        std.debug.assert(resp.header.num_queries <= parameters.num_q_per_head);
+        std.debug.assert(resp.payload.len == resp.header.num_queries * parameters.head_bytes);
+        std.debug.assert(resp.header.kv_head_id < parameters.num_kv_heads);
+        std.debug.assert(resp.header.first_q_id + resp.header.num_queries <= parameters.num_q_per_head);
 
-        @memcpy(attn[q * parameters.head_bytes .. (q + resp.num_queries) * parameters.head_bytes], resp.payload);
-        recv_q += resp.num_queries;
+        const q_offset = (@as(usize, resp.header.kv_head_id) * parameters.num_q_per_head + resp.header.first_q_id) * parameters.head_bytes;
+        @memcpy(attn[q_offset .. q_offset + resp.payload.len], resp.payload);
+        recv_q += resp.header.num_queries;
     }
 
     return null;
 }
 
-fn asSlice(buf: *zml.pjrtx.CustomCallBuffer) []u8 {
+fn asSlice(buf: zml.pjrtx.CustomCallBuffer) []u8 {
     const bytes: [*]u8 = @ptrCast(@alignCast(buf.ptr));
+    return bytes[0..buf.shape.byteSize()];
+}
+
+fn asConstSlice(buf: zml.pjrtx.CustomCallBuffer) []const u8 {
+    const bytes: [*]const u8 = @ptrCast(@alignCast(buf.ptr));
     return bytes[0..buf.shape.byteSize()];
 }
 
@@ -294,7 +300,7 @@ const Message = struct {
             .payload = bytes[n..],
         };
 
-        if (msg.header.magic[0] == 'Z' and msg.header.magic[1] == 'M' and msg.header.magic[2] == 'L' and msg.header.model_id < 4) {
+        if (!(msg.header.magic[0] == 'Z' and msg.header.magic[1] == 'M' and msg.header.magic[2] == 'L' and @intFromEnum(msg.header.model_id) < 4)) {
             return error.InvalidHeader;
         }
 

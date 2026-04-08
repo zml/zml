@@ -1645,7 +1645,9 @@ pub const Ffi = extern struct {
     }
 
     pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const c.PJRT_FFI_Type_Info) ApiError!ffi.TypeId {
-        var ret: meta.Struct(c.PJRT_FFI_Type_Register_Args) = .{
+        var ret: c.PJRT_FFI_Type_Register_Args = .{
+            .struct_size = meta.structSize(c.PJRT_FFI_Type_Register_Args),
+            .extension_start = null,
             .type_name = type_name.ptr,
             .type_name_size = type_name.len,
             .type_id = 0, // let the plugin assign a unique type ID
@@ -1661,7 +1663,9 @@ pub const Ffi = extern struct {
     }
 
     pub fn addUserData(self: *const Ffi, api: *const Api, context: *ExecuteContext, user_data: UserData) ApiError!void {
-        var ret: meta.Struct(c.PJRT_FFI_UserData_Add_Args) = .{
+        var ret: c.PJRT_FFI_UserData_Add_Args = .{
+            .struct_size = meta.structSize(c.PJRT_FFI_UserData_Add_Args),
+            .extension_start = null,
             .context = @ptrCast(context),
             .user_data = user_data.toCStruct(),
         };
