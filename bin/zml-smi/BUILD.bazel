@@ -116,12 +116,11 @@ genrule(
 
 # Release archives, one per platform, correctly named for distribution
 # Build one:  bazel build --config=release //bin/zml-smi:zml-smi-linux-amd64
-# Build all:  bazel build --config=release //bin/zml-smi:release
+# Build all:  bazel build --config=release //bin/zml-smi:archives
 
 _RELEASE_PLATFORMS = [
     ("linux", "amd64"),
     ("linux", "arm64"),
-    ("macos", "amd64"),
     ("macos", "arm64"),
 ]
 
@@ -154,8 +153,14 @@ _RELEASE_PLATFORMS = [
     tags = ["manual"],
 ) for os, arch in _RELEASE_PLATFORMS]
 
-filegroup(
+sh_binary(
     name = "release",
+    srcs = ["scripts/release.sh"],
+    tags = ["manual"],
+)
+
+filegroup(
+    name = "archives",
     srcs = [":zml-smi-" + os + "-" + arch for os, arch in _RELEASE_PLATFORMS] +
            [":zml-smi-" + os + "-" + arch + ".sha256" for os, arch in _RELEASE_PLATFORMS],
     tags = ["manual"],

@@ -68,11 +68,15 @@ detect_platform() {
   esac
 
   case "$ARCH" in
-    x86_64|amd64)   ARCH_LABEL="x86_64" ;;
-    aarch64|arm64)   ARCH_LABEL="aarch64" ;;
+    x86_64|amd64)   ARCH_LABEL="amd64" ;;
+    aarch64|arm64)   ARCH_LABEL="arm64" ;;
     *)
       fail "Unsupported architecture: ${ARCH}" ;;
   esac
+
+  if [ "$OS_LABEL" = "macos" ] && [ "$ARCH_LABEL" = "amd64" ]; then
+    fail "macOS x86_64 is not supported. Only Apple Silicon (arm64) is supported."
+  fi
 
   success "${OS_LABEL} ${ARCH_LABEL}"
 
