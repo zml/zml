@@ -1076,9 +1076,9 @@ pub const paged_fa2 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
-        if (q.dim(.hd) > 256) {
-            return pagedAttentionVanilla(parameters, context, q, k_cache, v_cache, layer_index_, opts);
-        }
+        //if (q.dim(.hd) > 256) {
+        //    return pagedAttentionVanilla(parameters, context, q, k_cache, v_cache, layer_index_, opts);
+        //}
         const ctx = CompilationContext.current();
 
         const num_head_groups = q.dim(.hg);
@@ -1701,9 +1701,9 @@ pub const paged_fa3 = struct {
         stdx.debug.assert(q.shape().hasTags(.{ .b, .hg, .hkv, .hd }), "Expected q to have tags .b, .h, .hd", .{});
         stdx.debug.assert(k_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_k to have tags .page, .k_chunk, .h, .hd, got {}", .{k_cache.shape()});
         stdx.debug.assert(v_cache.shape().hasTags(.{ .page, .k_chunk, .hkv, .hd }), "Expected paged_v to have tags .page, .k_chunk, .h, .hd. got {}", .{v_cache.shape()});
-        if (q.dim(.hd) > 256) {
-            return pagedAttentionVanilla(parameters, context, q, k_cache, v_cache, layer_index, opts);
-        }
+        //if (q.dim(.hd) > 256) {
+        //    return pagedAttentionVanilla(parameters, context, q, k_cache, v_cache, layer_index, opts);
+        //}
 
         const num_head_groups = q.dim(.hg);
         const num_kv_heads = q.dim(.hkv);
