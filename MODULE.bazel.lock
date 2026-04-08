@@ -129,6 +129,8 @@
     "https://bcr.bazel.build/modules/googletest/1.16.0/MODULE.bazel": "a175623c69e94fca4ca7acbc12031e637b0c489318cd4805606981d4d7adb34a",
     "https://bcr.bazel.build/modules/googletest/1.17.0/MODULE.bazel": "dbec758171594a705933a29fcf69293d2468c49ec1f2ebca65c36f504d72df46",
     "https://bcr.bazel.build/modules/googletest/1.17.0/source.json": "38e4454b25fc30f15439c0378e57909ab1fd0a443158aa35aec685da727cd713",
+    "https://bcr.bazel.build/modules/gperftools/2.18/MODULE.bazel": "a5e263c509473a436011c3e94d04fa068393d97130ba2e0763a833a4c12e3ca6",
+    "https://bcr.bazel.build/modules/gperftools/2.18/source.json": "ed22262fbe529414f23269f161a2277aebccd98cd32aa1f8411256f36792684b",
     "https://bcr.bazel.build/modules/grpc-java/1.74.0/MODULE.bazel": "6e6b8214d1b77244263e13cf62b71467db8284369ad60567cf6ffcc0650dc621",
     "https://bcr.bazel.build/modules/grpc-java/1.74.0/source.json": "340f0cec843668dcdb6b7d1460c8f93937dd915e866c26d20ef1f30ffb4c3125",
     "https://bcr.bazel.build/modules/grpc-proto/0.0.0-20240627-ec30f58/MODULE.bazel": "88de79051e668a04726e9ea94a481ec6f1692086735fd6f488ab908b3b909238",

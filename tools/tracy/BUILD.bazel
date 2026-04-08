@@ -1,0 +1,53 @@
+sh_binary(
+    name = "tracy-profiler",
+    srcs = ["tracy_wrapper.sh"],
+    args = [
+        "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
+        "--tool=tracy-profiler",
+        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+    ],
+    data = [
+        "@bazel_tools//tools/bash/runfiles:runfiles",
+        "@tracy_public_upstream//:LICENSE",
+        "@tracy_public_upstream//:source_tree",
+        "//tools/profile:bootstrap.sh",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "tracy-capture",
+    srcs = ["tracy_wrapper.sh"],
+    args = [
+        "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
+        "--tool=tracy-capture",
+        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+    ],
+    data = [
+        "@bazel_tools//tools/bash/runfiles:runfiles",
+        "@tracy_public_upstream//:LICENSE",
+        "@tracy_public_upstream//:source_tree",
+        "//tools/profile:bootstrap.sh",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
+
+sh_binary(
+    name = "tracy-capture-daemon",
+    srcs = ["tracy_wrapper.sh"],
+    args = [
+        "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
+        "--tool=tracy-capture-daemon",
+        "--source-license-rlocation=$(rlocationpath @tracy_public_upstream//:LICENSE)",
+    ],
+    data = [
+        "@bazel_tools//tools/bash/runfiles:runfiles",
+        "@tracy_public_upstream//:LICENSE",
+        "@tracy_public_upstream//:source_tree",
+        "//tools/profile:bootstrap.sh",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)

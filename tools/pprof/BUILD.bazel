@@ -1,0 +1,16 @@
+sh_binary(
+    name = "pprof",
+    srcs = ["pprof.sh"],
+    args = [
+        "--bootstrap-rlocation=$(rlocationpath //tools/profile:bootstrap.sh)",
+        "--source-license-rlocation=$(rlocationpath @pprof_upstream//:LICENSE)",
+    ],
+    data = [
+        "@bazel_tools//tools/bash/runfiles:runfiles",
+        "@pprof_upstream//:LICENSE",
+        "@pprof_upstream//:source_tree",
+        "//tools/profile:bootstrap.sh",
+    ],
+    tags = ["manual"],
+    visibility = ["//visibility:public"],
+)
