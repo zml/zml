@@ -1,0 +1,15 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+cc_library(
+    name = "gperftools_cpu_profiler",
+    deps = ["@gperftools//:cpu_profiler"],
+    visibility = ["//visibility:private"],
+)
+
+zig_library(
+    name = "pprof",
+    main = "pprof.zig",
+    visibility = ["//visibility:public"],
+    deps = [":gperftools_cpu_profiler"],
+)

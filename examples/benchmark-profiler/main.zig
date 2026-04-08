@@ -1,16 +1,11 @@
 const std = @import("std");
 
+const pprof = @import("pprof");
 const tracy = @import("tracy");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
 const log = std.log.scoped(.benchmark_profiler);
-const max_pprof_frequency_hz: u32 = 4000;
-
-extern fn ProfilerStart(name: [*:0]const u8) c_int;
-extern fn ProfilerFlush() void;
-extern fn ProfilerStop() void;
-extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -74,7 +69,7 @@ const CliArgs = struct {
     tracy: tracy.Mode = .on,
     xprofDir: []const u8 = "/tmp/xprof",
     pprofDir: []const u8 = "/tmp/pprof",
-    pprofFrequency: u32 = max_pprof_frequency_hz,
+    pprofFrequency: u32 = pprof.max_frequency_hz,
     pprofDurationMs: u32 = 250,
     sessionId: []const u8 = "benchmark-profiler",
 };
@@ -141,63 +136,6 @@ fn createProfiler(
     profiler_options.device_tracer_level = 3;
     return platform.profiler(allocator, io, profiler_options);
 }
-
-const PprofProfile = struct {
-    allocator: std.mem.Allocator,
-    file_path: ?[:0]u8 = null,
-    frequency_hz: u32 = max_pprof_frequency_hz,
-    started: bool = false,
-
-    fn init(
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        pprof_dir: []const u8,
-        session_id: []const u8,
-        frequency_hz: u32,
-    ) !PprofProfile {
-        var profile: PprofProfile = .{
-            .allocator = allocator,
-            .frequency_hz = frequency_hz,
-        };
-        if (pprof_dir.len == 0) return profile;
-
-        try std.Io.Dir.createDirPath(.cwd(), io, pprof_dir);
-
-        const basename = try std.fmt.allocPrint(allocator, "{s}.prof", .{session_id});
-        defer allocator.free(basename);
-
-        profile.file_path = try std.Io.Dir.path.joinZ(allocator, &.{ pprof_dir, basename });
-        return profile;
-    }
-
-    fn deinit(self: *PprofProfile) void {
-        self.stop();
-        if (self.file_path) |file_path| self.allocator.free(file_path);
-        self.file_path = null;
-    }
-
-    fn start(self: *PprofProfile) !void {
-        const file_path = self.file_path orelse return;
-        const frequency = try std.fmt.allocPrint(self.allocator, "{d}", .{@min(self.frequency_hz, max_pprof_frequency_hz)});
-        defer self.allocator.free(frequency);
-        const frequency_z = try self.allocator.dupeZ(u8, frequency);
-        defer self.allocator.free(frequency_z);
-        if (setenv("CPUPROFILE_FREQUENCY", frequency_z.ptr, 1) != 0) return error.PprofSetFrequencyFailed;
-        if (ProfilerStart(file_path.ptr) == 0) return error.PprofStartFailed;
-        self.started = true;
-    }
-
-    fn stop(self: *PprofProfile) void {
-        if (!self.started) return;
-        ProfilerFlush();
-        ProfilerStop();
-        self.started = false;
-    }
-
-    fn outputPath(self: *const PprofProfile) ?[:0]const u8 {
-        return self.file_path;
-    }
-};
 
 fn createFilledBuffer(
     allocator: std.mem.Allocator,
@@ -384,8 +322,8 @@ fn runSaxpyProfile(
 
     var profiler = try createProfiler(platform, allocator, io, args.xprofDir, session_id);
     defer profiler.deinit();
-    var pprof = try PprofProfile.init(allocator, io, args.pprofDir, session_id, args.pprofFrequency);
-    defer pprof.deinit();
+    var cpu_profile = try pprof.Profile.init(allocator, io, args.pprofDir, session_id, args.pprofFrequency);
+    defer cpu_profile.deinit();
     var xprof_stopped = false;
 
     try profiler.start();
@@ -417,13 +355,13 @@ fn runSaxpyProfile(
     }
     xprof_stopped = true;
 
-    if (pprof.outputPath() != null) {
+    if (cpu_profile.enabled()) {
         log.info(
             "Capturing SAXPY pprof CPU samples over repeated dispatch windows for ~{d}ms at up to {d} Hz",
-            .{ args.pprofDurationMs, @min(args.pprofFrequency, max_pprof_frequency_hz) },
+            .{ args.pprofDurationMs, @min(args.pprofFrequency, pprof.max_frequency_hz) },
         );
-        try pprof.start();
-        errdefer pprof.stop();
+        try cpu_profile.start();
+        errdefer cpu_profile.stop();
 
         const pprof_started_at: std.Io.Timestamp = .now(io, .awake);
         const target_ns = @as(u64, args.pprofDurationMs) * std.time.ns_per_ms;
@@ -431,8 +369,8 @@ fn runSaxpyProfile(
             try runCalls(io, &exe, exe_args, &exe_results, saxpy_dispatch_calls, "saxpy pprof dispatch batch", tracy_enabled);
             tracy.frameMarkIf(tracy_enabled);
         }
-        pprof.stop();
-        if (pprof.outputPath()) |file_path| {
+        cpu_profile.stop();
+        if (cpu_profile.outputPath()) |file_path| {
             log.info("SAXPY pprof CPU profile dumped: {s}", .{file_path});
         }
     }
@@ -509,8 +447,8 @@ fn runMatmulProfile(
 
     var profiler = try createProfiler(platform, allocator, io, args.xprofDir, session_id);
     defer profiler.deinit();
-    var pprof = try PprofProfile.init(allocator, io, args.pprofDir, session_id, args.pprofFrequency);
-    defer pprof.deinit();
+    var cpu_profile = try pprof.Profile.init(allocator, io, args.pprofDir, session_id, args.pprofFrequency);
+    defer cpu_profile.deinit();
     var xprof_stopped = false;
 
     try profiler.start();
@@ -570,13 +508,13 @@ fn runMatmulProfile(
     }
     xprof_stopped = true;
 
-    if (pprof.outputPath() != null) {
+    if (cpu_profile.enabled()) {
         log.info(
             "Capturing MATMUL pprof CPU samples over repeated pipelines for ~{d}ms at up to {d} Hz",
-            .{ args.pprofDurationMs, @min(args.pprofFrequency, max_pprof_frequency_hz) },
+            .{ args.pprofDurationMs, @min(args.pprofFrequency, pprof.max_frequency_hz) },
         );
-        try pprof.start();
-        errdefer pprof.stop();
+        try cpu_profile.start();
+        errdefer cpu_profile.stop();
 
         const pprof_started_at: std.Io.Timestamp = .now(io, .awake);
         const target_ns = @as(u64, args.pprofDurationMs) * std.time.ns_per_ms;
@@ -600,8 +538,8 @@ fn runMatmulProfile(
                 tracy.frameMarkIf(tracy_enabled);
             }
         }
-        pprof.stop();
-        if (pprof.outputPath()) |file_path| {
+        cpu_profile.stop();
+        if (cpu_profile.outputPath()) |file_path| {
             log.info("MATMUL pprof CPU profile dumped: {s}", .{file_path});
         }
     }
