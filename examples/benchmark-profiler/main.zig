@@ -238,6 +238,7 @@ fn runMatmulPipelineCalls(
     comptime tracy_zone_name: ?[:0]const u8,
     tracy_enabled: bool,
 ) !void {
+    _ = out_slice; // autofix
     const tracy_zone = tracy.scopeNamedOpt(@src(), tracy_zone_name, tracy_enabled);
     defer tracy_zone.end();
     tracy_zone.setValue(call_count);
@@ -255,12 +256,16 @@ fn runMatmulPipelineCalls(
             exe.call(exe_args.*, exe_results);
         }
         out = exe_results.get(zml.Buffer);
-        {
-            const copy_zone = tracy.scopeNamed(@src(), "buffer.toSlice", tracy_enabled);
-            defer copy_zone.end();
-            try out.toSlice(io, out_slice);
-        }
-        // _ = try out.await(io);
+        // {
+        //     const copy_zone = tracy.scopeNamed(@src(), "buffer.toSlice", tracy_enabled);
+        //     defer copy_zone.end();
+        //     try out.toSlice(io, out_slice);
+        // }
+    }
+    {
+        const await_zone = tracy.scopeNamed(@src(), "Buffer.await", tracy_enabled);
+        defer await_zone.end();
+        _ = try out.await(io);
     }
 }
 
@@ -416,6 +421,7 @@ fn runMatmulProfile(
     };
     defer exe.deinit();
 
+    const tracy_buffer_zone = tracy.scopeNamed(@src(), "matmul buffer creation", tracy_enabled);
     var lhs_buffer = try createFilledBuffer(allocator, io, platform, lhs_shape, sharding, 1.0);
     defer lhs_buffer.deinit();
     var rhs_buffer = try createFilledBuffer(allocator, io, platform, rhs_shape, sharding, 0.5);
@@ -424,23 +430,12 @@ fn runMatmulProfile(
     var zml_allocator = zml.mem.DmaAllocator.init(allocator, &platform.devices[0]);
     const out_slice = try zml.Slice.alloc(zml_allocator.allocator(), out_shape);
     defer out_slice.free(zml_allocator.allocator());
+    tracy_buffer_zone.end();
 
     var exe_args = try exe.args(allocator);
     defer exe_args.deinit(allocator);
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
-
-    // log.info("Running MATMUL warmup...", .{});
-    // try runMatmulPipelineCalls(
-    //     io,
-    //     &exe,
-    //     &exe_args,
-    //     &exe_results,
-    //     &lhs_buffer,
-    //     &rhs_buffer,
-    //     reinject_side,
-    //     1,
-    // );
 
     const session_id = try withSessionSuffix(allocator, args.sessionId, "matmul");
     defer allocator.free(session_id);
