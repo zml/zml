@@ -3,7 +3,7 @@ load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
     name = "tracy_client",
-    deps = ["@tracy_public_upstream//:client"],
+    deps = ["@tracy//:client"],
     visibility = ["//visibility:private"],
 )
 

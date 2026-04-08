@@ -1,0 +1,25 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+
+cc_library(
+    name = "client",
+    srcs = ["public/TracyClient.cpp"],
+    hdrs = glob(["public/**/*.h", "public/**/*.hpp"]),
+    textual_hdrs = glob(
+        ["public/**/*.cpp"],
+        exclude = ["public/TracyClient.cpp"],
+    ),
+    copts = [
+        "-std=c++20",
+        "-DTRACY_ENABLE",
+    ],
+    includes = ["public"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "source_tree",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+exports_files(["LICENSE"])
