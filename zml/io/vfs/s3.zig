@@ -175,7 +175,7 @@ pub const S3 = struct {
     client: *std.http.Client,
     config: Config,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
     base: VFSBase,
 
@@ -360,7 +360,7 @@ pub const S3 = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -539,7 +539,7 @@ pub const S3 = struct {
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.Reader.Error.Unexpected;
+            return error.Unexpected;
         };
     }
 
@@ -687,7 +687,7 @@ pub const S3 = struct {
     }
 
     fn parseListObjectsResponse(self: *S3, xml: []const u8, prefix: []const u8) ![][]const u8 {
-        var results = std.ArrayListUnmanaged([]const u8){};
+        var results: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (results.items) |item| self.allocator.free(item);
             results.deinit(self.allocator);

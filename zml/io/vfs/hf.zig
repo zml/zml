@@ -103,7 +103,7 @@ pub const HF = struct {
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
@@ -319,7 +319,7 @@ pub const HF = struct {
         );
         defer parsed.deinit();
 
-        var tree_root: std.ArrayList(TreeNode) = .{};
+        var tree_root: std.ArrayList(TreeNode) = .empty;
         for (parsed.value) |item| {
             try insertTreeNode(self.allocator, &tree_root, item);
         }
@@ -472,7 +472,7 @@ pub const HF = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -667,7 +667,7 @@ pub const HF = struct {
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.Reader.Error.Unexpected;
+            return error.Unexpected;
         };
     }
 

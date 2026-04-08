@@ -23,15 +23,15 @@ pub const VFS = struct {
     mutex: std.Io.Mutex = .init,
 
     backends: std.StringArrayHashMapUnmanaged(std.Io) = .empty,
-    handles: Handles = .{},
-    closed_handles: ClosedHandles = .{},
+    handles: Handles = .empty,
+    closed_handles: ClosedHandles = .empty,
 
     base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, base_io: std.Io) !VFS {
         const base = VFSBase.init(base_io);
 
-        var handles: Handles = .{};
+        var handles: Handles = .empty;
         try handles.append(allocator, .{ .handle = CWD_HANDLE, .backend_idx = null });
         try handles.append(allocator, .{ .handle = std.posix.STDIN_FILENO, .backend_idx = null });
         try handles.append(allocator, .{ .handle = std.posix.STDOUT_FILENO, .backend_idx = null });
@@ -176,7 +176,7 @@ pub const VFS = struct {
                     .data = o.data,
                 } });
             },
-            .device_io_control, .file_write_streaming => {
+            .device_io_control, .file_write_streaming, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -228,7 +228,7 @@ pub const VFS = struct {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         const backend_idx, const dir_, const backend = self.lookupDir(dir, sub_path) catch |err| {
             log.err("Failed to lookup backend for dir create file '{s}' : {any}", .{ sub_path, err });
-            return std.Io.Dir.AccessError.Unexpected;
+            return error.Unexpected;
         };
 
         const file = try backend.vtable.dirCreateFile(backend.userdata, dir_, stripScheme(sub_path), flags);
@@ -271,7 +271,7 @@ pub const VFS = struct {
         const self: *VFS = @fieldParentPtr("base", VFSBase.as(userdata));
         _, const dir_, const backend = self.lookupDir(reader.dir, null) catch |err| {
             log.err("Failed to lookup backend for dir real path : {any}", .{err});
-            return std.Io.Dir.RealPathError.Unexpected;
+            return error.Unexpected;
         };
 
         const original_dir = reader.dir;
