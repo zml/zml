@@ -1,33 +1,16 @@
 const std = @import("std");
 
+const tracy = @import("tracy");
 const zml = @import("zml");
 const stdx = zml.stdx;
 
 const log = std.log.scoped(.benchmark_profiler);
 const max_pprof_frequency_hz: u32 = 4000;
 
-const TracyZoneCtx = extern struct {
-    id: u32,
-    active: i32,
-};
-
 extern fn ProfilerStart(name: [*:0]const u8) c_int;
 extern fn ProfilerFlush() void;
 extern fn ProfilerStop() void;
 extern fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-extern fn zml_tracy_set_thread_name(name: [*:0]const u8) void;
-extern fn zml_tracy_zone_begin(
-    name: [*:0]const u8,
-    function: [*:0]const u8,
-    file: [*:0]const u8,
-    line: u32,
-    color: u32,
-) TracyZoneCtx;
-extern fn zml_tracy_zone_end(ctx: TracyZoneCtx) void;
-extern fn zml_tracy_zone_text(ctx: TracyZoneCtx, text: [*]const u8, size: usize) void;
-extern fn zml_tracy_zone_value(ctx: TracyZoneCtx, value: u64) void;
-extern fn zml_tracy_frame_mark() void;
-extern fn zml_tracy_frame_mark_named(name: [*:0]const u8) void;
 
 pub const std_options: std.Options = .{
     .log_level = .info,
@@ -41,42 +24,9 @@ const Mode = enum {
     both,
 };
 
-const TracyMode = enum {
-    on,
-    off,
-};
-
 const MatmulReinjectSide = enum {
     lhs,
     rhs,
-};
-
-const TracyScope = struct {
-    enabled: bool = false,
-    ctx: TracyZoneCtx = .{ .id = 0, .active = 0 },
-
-    inline fn end(self: TracyScope) void {
-        if (!self.enabled) return;
-        zml_tracy_zone_end(self.ctx);
-    }
-
-    inline fn text(self: TracyScope, text_: []const u8) void {
-        if (!self.enabled or text_.len == 0) return;
-        zml_tracy_zone_text(self.ctx, text_.ptr, text_.len);
-    }
-
-    inline fn textFmt(self: TracyScope, comptime fmt: []const u8, args: anytype) void {
-        if (!self.enabled) return;
-
-        var buf: [160]u8 = undefined;
-        const text_ = std.fmt.bufPrint(&buf, fmt, args) catch return;
-        self.text(text_);
-    }
-
-    inline fn value(self: TracyScope, value_: u64) void {
-        if (!self.enabled) return;
-        zml_tracy_zone_value(self.ctx, value_);
-    }
 };
 
 const CliArgs = struct {
@@ -121,7 +71,7 @@ const CliArgs = struct {
     matmulCalls: usize = 1,
     matmulPipelines: usize = 1,
 
-    tracy: TracyMode = .on,
+    tracy: tracy.Mode = .on,
     xprofDir: []const u8 = "/tmp/xprof",
     pprofDir: []const u8 = "/tmp/pprof",
     pprofFrequency: u32 = max_pprof_frequency_hz,
@@ -171,29 +121,6 @@ fn saxpy(a: zml.Tensor, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
 
 fn matmul(lhs: zml.Tensor, rhs: zml.Tensor) zml.Tensor {
     return lhs.dot(rhs, .k);
-}
-
-inline fn tracyEnabled(args: CliArgs) bool {
-    return args.tracy == .on;
-}
-
-inline fn tracyZoneNamed(comptime name: [:0]const u8, enabled: bool) TracyScope {
-    if (!enabled) return .{};
-    const src = @src();
-    return .{
-        .enabled = true,
-        .ctx = zml_tracy_zone_begin(name.ptr, src.fn_name.ptr, src.file.ptr, src.line, 0),
-    };
-}
-
-inline fn tracyFrameMark(enabled: bool) void {
-    if (!enabled) return;
-    zml_tracy_frame_mark();
-}
-
-inline fn tracyFrameMarkNamed(comptime name: [:0]const u8, enabled: bool) void {
-    if (!enabled) return;
-    zml_tracy_frame_mark_named(name.ptr);
 }
 
 fn withSessionSuffix(allocator: std.mem.Allocator, session_id: []const u8, suffix: []const u8) ![]u8 {
@@ -307,17 +234,17 @@ fn runCallAndAwait(
     exe_results: *zml.Exe.Results,
     tracy_enabled: bool,
 ) !void {
-    const tracy_zone = tracyZoneNamed("dispatch call", tracy_enabled);
+    const tracy_zone = tracy.scopeNamed(@src(), "dispatch call", tracy_enabled);
     defer tracy_zone.end();
     {
-        const call_zone = tracyZoneNamed("exe.call", tracy_enabled);
+        const call_zone = tracy.scopeNamed(@src(), "exe.call", tracy_enabled);
         defer call_zone.end();
         exe.call(exe_args, exe_results);
     }
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
     {
-        const await_zone = tracyZoneNamed("buffer.await", tracy_enabled);
+        const await_zone = tracy.scopeNamed(@src(), "buffer.await", tracy_enabled);
         defer await_zone.end();
         _ = try out.await(io);
     }
@@ -332,9 +259,9 @@ fn runCalls(
     comptime tracy_zone_name: ?[:0]const u8,
     tracy_enabled: bool,
 ) !void {
-    const tracy_zone: TracyScope = if (tracy_zone_name) |name| tracyZoneNamed(name, tracy_enabled) else .{};
+    const tracy_zone = tracy.scopeNamedOpt(@src(), tracy_zone_name, tracy_enabled);
     defer tracy_zone.end();
-    tracy_zone.value(call_count);
+    tracy_zone.setValue(call_count);
 
     for (0..call_count) |_| {
         try runCallAndAwait(io, exe, exe_args, exe_results, tracy_enabled);
@@ -373,25 +300,25 @@ fn runMatmulPipelineCalls(
     comptime tracy_zone_name: ?[:0]const u8,
     tracy_enabled: bool,
 ) !void {
-    const tracy_zone: TracyScope = if (tracy_zone_name) |name| tracyZoneNamed(name, tracy_enabled) else .{};
+    const tracy_zone = tracy.scopeNamedOpt(@src(), tracy_zone_name, tracy_enabled);
     defer tracy_zone.end();
-    tracy_zone.value(call_count);
+    tracy_zone.setValue(call_count);
 
     var out = lhs_buffer.*;
     for (0..call_count) |call_index| {
-        const call_zone = tracyZoneNamed("matmul pipeline call", tracy_enabled);
+        const call_zone = tracy.scopeNamed(@src(), "matmul pipeline call", tracy_enabled);
         defer call_zone.end();
-        call_zone.value(call_index + 1);
+        call_zone.setValue(call_index + 1);
 
         exe_args.set(.{ out, rhs_buffer.* });
         {
-            const queue_zone = tracyZoneNamed("exe.call", tracy_enabled);
+            const queue_zone = tracy.scopeNamed(@src(), "exe.call", tracy_enabled);
             defer queue_zone.end();
             exe.call(exe_args.*, exe_results);
         }
         out = exe_results.get(zml.Buffer);
         {
-            const copy_zone = tracyZoneNamed("buffer.toSlice", tracy_enabled);
+            const copy_zone = tracy.scopeNamed(@src(), "buffer.toSlice", tracy_enabled);
             defer copy_zone.end();
             try out.toSlice(io, out_slice);
         }
@@ -406,8 +333,8 @@ fn runSaxpyProfile(
     sharding: zml.sharding.Sharding,
     args: CliArgs,
 ) !void {
-    const tracy_enabled = tracyEnabled(args);
-    const tracy_zone = tracyZoneNamed("runSaxpyProfile", tracy_enabled);
+    const tracy_enabled = args.tracy.enabled();
+    const tracy_zone = tracy.scopeNamed(@src(), "runSaxpyProfile", tracy_enabled);
     defer tracy_zone.end();
     tracy_zone.textFmt("dtype={s} n={d}", .{ @tagName(args.dtype), args.saxpySize });
 
@@ -420,7 +347,7 @@ fn runSaxpyProfile(
 
     log.info("Compiling SAXPY executable...", .{});
     var exe = blk: {
-        const compile_zone = tracyZoneNamed("saxpy compile", tracy_enabled);
+        const compile_zone = tracy.scopeNamed(@src(), "saxpy compile", tracy_enabled);
         defer compile_zone.end();
         break :blk try platform.compileFn(
             allocator,
@@ -450,7 +377,7 @@ fn runSaxpyProfile(
 
     log.info("Running SAXPY warmup...", .{});
     try runCalls(io, &exe, exe_args, &exe_results, 1, "saxpy warmup dispatch batch", tracy_enabled);
-    tracyFrameMarkNamed("saxpy warmup", tracy_enabled);
+    tracy.frameMarkNamedIf("saxpy warmup", tracy_enabled);
 
     const session_id = try withSessionSuffix(allocator, args.sessionId, "saxpy");
     defer allocator.free(session_id);
@@ -475,13 +402,13 @@ fn runSaxpyProfile(
     log.info("Profiling SAXPY dispatch with {d} sequential exe.call invocations", .{saxpy_dispatch_calls});
     const started_at: std.Io.Timestamp = .now(io, .awake);
     {
-        const profile_zone = tracyZoneNamed("saxpy profile window", tracy_enabled);
+        const profile_zone = tracy.scopeNamed(@src(), "saxpy profile window", tracy_enabled);
         defer profile_zone.end();
         profile_zone.textFmt("dispatch_calls={d}", .{saxpy_dispatch_calls});
-        profile_zone.value(saxpy_dispatch_calls);
+        profile_zone.setValue(saxpy_dispatch_calls);
         try runCalls(io, &exe, exe_args, &exe_results, saxpy_dispatch_calls, "saxpy dispatch batch", tracy_enabled);
     }
-    tracyFrameMarkNamed("saxpy profile window", tracy_enabled);
+    tracy.frameMarkNamedIf("saxpy profile window", tracy_enabled);
     log.info("SAXPY profiled window elapsed: {f}", .{started_at.untilNow(io, .awake)});
     if ((try profiler.stop())) |profile| {
         log.info("SAXPY profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
@@ -502,7 +429,7 @@ fn runSaxpyProfile(
         const target_ns = @as(u64, args.pprofDurationMs) * std.time.ns_per_ms;
         while (pprof_started_at.untilNow(io, .awake).toNanoseconds() < target_ns) {
             try runCalls(io, &exe, exe_args, &exe_results, saxpy_dispatch_calls, "saxpy pprof dispatch batch", tracy_enabled);
-            tracyFrameMark(tracy_enabled);
+            tracy.frameMarkIf(tracy_enabled);
         }
         pprof.stop();
         if (pprof.outputPath()) |file_path| {
@@ -518,8 +445,8 @@ fn runMatmulProfile(
     sharding: zml.sharding.Sharding,
     args: CliArgs,
 ) !void {
-    const tracy_enabled = tracyEnabled(args);
-    const tracy_zone = tracyZoneNamed("runMatmulProfile", tracy_enabled);
+    const tracy_enabled = args.tracy.enabled();
+    const tracy_zone = tracy.scopeNamed(@src(), "runMatmulProfile", tracy_enabled);
     defer tracy_zone.end();
     tracy_zone.textFmt(
         "dtype={s} lhs={d}x{d} rhs={d}x{d}",
@@ -536,7 +463,7 @@ fn runMatmulProfile(
 
     log.info("Compiling MATMUL executable...", .{});
     var exe = blk: {
-        const compile_zone = tracyZoneNamed("matmul compile", tracy_enabled);
+        const compile_zone = tracy.scopeNamed(@src(), "matmul compile", tracy_enabled);
         defer compile_zone.end();
         break :blk try platform.compileFn(
             allocator,
@@ -611,14 +538,14 @@ fn runMatmulProfile(
     );
     const started_at: std.Io.Timestamp = .now(io, .awake);
     {
-        const profile_zone = tracyZoneNamed("matmul profile window", tracy_enabled);
+        const profile_zone = tracy.scopeNamed(@src(), "matmul profile window", tracy_enabled);
         defer profile_zone.end();
         profile_zone.textFmt("pipelines={d} calls_per_pipeline={d}", .{ args.matmulPipelines, args.matmulCalls });
-        profile_zone.value(total_calls);
+        profile_zone.setValue(total_calls);
         for (0..args.matmulPipelines) |pipeline_index| {
-            const pipeline_zone = tracyZoneNamed("matmul profile pipeline", tracy_enabled);
+            const pipeline_zone = tracy.scopeNamed(@src(), "matmul profile pipeline", tracy_enabled);
             defer pipeline_zone.end();
-            pipeline_zone.value(pipeline_index + 1);
+            pipeline_zone.setValue(pipeline_index + 1);
             try runMatmulPipelineCalls(
                 io,
                 &exe,
@@ -631,10 +558,10 @@ fn runMatmulProfile(
                 "matmul profile dispatch batch",
                 tracy_enabled,
             );
-            tracyFrameMark(tracy_enabled);
+            tracy.frameMarkIf(tracy_enabled);
         }
     }
-    tracyFrameMarkNamed("matmul profile window", tracy_enabled);
+    tracy.frameMarkNamedIf("matmul profile window", tracy_enabled);
     log.info("MATMUL profiled window elapsed: {f}", .{started_at.untilNow(io, .awake)});
     if ((try profiler.stop())) |profile| {
         log.info("MATMUL profile dumped: {s} and {s}", .{ profile.protobuf_path, profile.perfetto_path });
@@ -655,9 +582,9 @@ fn runMatmulProfile(
         const target_ns = @as(u64, args.pprofDurationMs) * std.time.ns_per_ms;
         while (pprof_started_at.untilNow(io, .awake).toNanoseconds() < target_ns) {
             for (0..args.matmulPipelines) |pipeline_index| {
-                const pipeline_zone = tracyZoneNamed("matmul pprof pipeline", tracy_enabled);
+                const pipeline_zone = tracy.scopeNamed(@src(), "matmul pprof pipeline", tracy_enabled);
                 defer pipeline_zone.end();
-                pipeline_zone.value(pipeline_index + 1);
+                pipeline_zone.setValue(pipeline_index + 1);
                 try runMatmulPipelineCalls(
                     io,
                     &exe,
@@ -670,7 +597,7 @@ fn runMatmulProfile(
                     "matmul pprof dispatch batch",
                     tracy_enabled,
                 );
-                tracyFrameMark(tracy_enabled);
+                tracy.frameMarkIf(tracy_enabled);
             }
         }
         pprof.stop();
@@ -686,9 +613,7 @@ pub fn main(init: std.process.Init) !void {
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
     try validateArgs(args);
-    if (tracyEnabled(args)) {
-        zml_tracy_set_thread_name("benchmark_profiler");
-    }
+    tracy.setThreadNameIf("benchmark_profiler", args.tracy.enabled());
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
@@ -729,7 +654,7 @@ pub fn main(init: std.process.Init) !void {
             },
         }
     }
-    if (tracyEnabled(args)) {
+    if (args.tracy.enabled()) {
         log.info("Monitor live traces with: bazel run //tools/tracy:tracy-profiler --", .{});
     }
 }
