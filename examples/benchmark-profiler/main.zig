@@ -542,11 +542,21 @@ fn runMatmulProfile(
 
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
-    const io = init.io;
+    const io: std.Io = init.io;
 
     const args = stdx.flags.parse(init.minimal.args, CliArgs);
     try validateArgs(args);
     tracy.setThreadNameIf("benchmark_profiler", args.tracy.enabled());
+
+    var current_dir = try std.Io.Dir.openDir(.cwd(), io, ".", .{});
+    defer current_dir.close(io);
+    var file_uri_buf: [1024]u8 = undefined;
+    const file_uri_len: usize = try current_dir.realPath(io, &file_uri_buf);
+    const file_uri = file_uri_buf[0..file_uri_len];
+
+    // current_dir.realPath(io: Io, out_buffer: []u8)
+    std.log.info("src file {s} --- {s}", .{ @src().file, file_uri });
+    std.process.exit(1);
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);

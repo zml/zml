@@ -14,6 +14,7 @@ zls_completion(
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
+        "//examples/benchmark-profiler:benchmark_profiler",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",

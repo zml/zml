@@ -5,8 +5,8 @@ zig_binary(
     name = "benchmark_profiler",
     main = "main.zig",
     deps = [
-        "//third_party/pprof:pprof",
         "//zml",
+        "//third_party/pprof:pprof",
         "//third_party/tracy:tracy",
     ],
     visibility = ["//visibility:public"],
