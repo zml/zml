@@ -1,28 +1,15 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
 
 cc_library(
-    name = "tracy_shim",
-    srcs = ["tracy_shim.cc"],
-    hdrs = ["tracy_shim.h"],
-    copts = [
-        "-std=c++20",
-        "-DTRACY_ENABLE",
-    ],
+    name = "tracy_client",
     deps = ["@tracy_public_upstream//:client"],
     visibility = ["//visibility:private"],
 )
 
-cc_library(
-    name = "tracy_internal",
-    deps = [
-        ":tracy_shim",
-        "@tracy_public_upstream//:client",
-    ],
-    visibility = ["//visibility:private"],
-)
-
-cc_library(
+zig_library(
     name = "tracy",
-    implementation_deps = [":tracy_internal"],
+    main = "tracy.zig",
     visibility = ["//visibility:public"],
+    deps = [":tracy_client"],
 )
