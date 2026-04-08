@@ -174,7 +174,7 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
 
     const im_start = tokenizer.tokenId("<|im_start|>") orelse special_tokens.im_start_token_id;
     const im_end = tokenizer.tokenId("<|im_end|>") orelse special_tokens.im_end_token_id;
-    const newline = tokenizer.tokenId("\n") orelse return error.NoSuchToken;
+    const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     if (!is_first_turn) {

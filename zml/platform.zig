@@ -405,6 +405,7 @@ pub const Platform = struct {
     }
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
+        self.execution_context.deinit(self.pjrt_api);
         self.pjrt_client.deinit(self.pjrt_api);
         self.arena_state.promote(allocator).deinit();
     }
@@ -486,9 +487,9 @@ pub const Platform = struct {
         }
     }
 
-    pub fn registerData(self: *const zml.Platform, name: []const u8, ptr: *anyopaque) !pjrt.ffi.TypeId {
+    pub fn registerData(self: *const zml.Platform, name: []const u8, ptr: *anyopaque, type_info: ?*const pjrt.Ffi.TypeInfo) !pjrt.ffi.TypeId {
         const ffi = self.pjrt_api.ffi() orelse return error.NoFfi;
-        const type_id = try ffi.registerTypeId(self.pjrt_api, name, null);
+        const type_id = try ffi.registerTypeId(self.pjrt_api, name, type_info);
         try ffi.addUserData(self.pjrt_api, self.execution_context, .{ .type_id = type_id.type_id, .user_data = ptr });
         return type_id;
     }

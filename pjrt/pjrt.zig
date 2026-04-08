@@ -1644,7 +1644,7 @@ pub const Ffi = extern struct {
         }
     }
 
-    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const c.PJRT_FFI_Type_Info) ApiError!ffi.TypeId {
+    pub fn registerTypeId(self: *const Ffi, api: *const Api, type_name: []const u8, type_info: ?*const TypeInfo) ApiError!ffi.TypeId {
         var ret: c.PJRT_FFI_Type_Register_Args = .{
             .struct_size = meta.structSize(c.PJRT_FFI_Type_Register_Args),
             .extension_start = null,
