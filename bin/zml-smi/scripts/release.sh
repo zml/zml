@@ -85,24 +85,28 @@ changelog() {
   prev_tag="$(git describe --tags --abbrev=0 --match 'zml-smi-v*' 2>/dev/null || true)"
   local range="${prev_tag:+${prev_tag}..HEAD}"
 
-  git log ${range:-HEAD} --pretty=format:"- %s" -- bin/zml-smi/ | grep -vi WIP
+  git log ${range:-HEAD} --pretty=format:"- %s" -- bin/zml-smi/ | grep -vi WIP || true
 }
 
 tag() {
   step "Tagging ${CYAN}${TAG}${WHITE}"
+
+  # Cache changelog before tagging, otherwise the new tag makes the range empty
+  CACHED_CHANGELOG="$(changelog)"
+
+  if [ -z "$CACHED_CHANGELOG" ]; then
+    warn "No changes since last release"
+  fi
 
   if git rev-parse "$TAG" &>/dev/null; then
     warn "Tag ${TAG} already exists, skipping"
     return
   fi
 
-  local log
-  log="$(changelog)"
-
   if [ "$DRY_RUN" = true ]; then
     warn "Dry run — skipping tag creation"
   elif confirm "Create tag ${CYAN}${TAG}${RESET}${WHITE}?"; then
-    git tag -a "$TAG" -m "$(printf '%s\n\n%s' "$TAG" "$log")"
+    git tag -a "$TAG" -m "$(printf '%s\n\n%s' "$TAG" "$CACHED_CHANGELOG")"
     success "Created tag ${CYAN}${TAG}"
   else
     warn "Skipped tagging"
@@ -111,7 +115,7 @@ tag() {
   printf "\n"
 
   printf "${DIM}"
-  echo "$log"
+  echo "$CACHED_CHANGELOG"
   printf "${RESET}"
 }
 
@@ -211,8 +215,7 @@ verify() {
 
 release_notes() {
   local install_url="${BASE_URL}/zml-smi/${VERSION}"
-  local log
-  log="$(changelog)"
+  local log="$CACHED_CHANGELOG"
 
   local downloads=""
   for f in "${FILES[@]}"; do
@@ -278,15 +281,11 @@ github_release() {
     return
   fi
 
-  local assets=()
-  for f in "${FILES[@]}"; do
-    [ -f "$f" ] && assets+=("$f")
-  done
-
+  printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
   gh release create "$TAG" \
     --title "$TAG" \
-    --notes "$notes" \
-    "${assets[@]}"
+    --notes "$notes"
+  printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
   success "Created release ${CYAN}${TAG}"
 }
 
@@ -303,7 +302,9 @@ push_tag() {
     return
   fi
 
+  printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
   git push origin "$TAG"
+  printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
   success "Pushed ${CYAN}${TAG}${RESET}${GREEN} to origin"
 }
 

@@ -43,4 +43,3 @@ fn writeValue(writer: *std.Io.Writer, field: anytype) !void {
         else => return writer.print("{any}", .{field}),
     }
 }
-
