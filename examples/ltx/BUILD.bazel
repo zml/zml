@@ -75,20 +75,6 @@ zig_binary(
     ],
 )
 
-zig_binary(
-    name = "validate_encoder",
-    main = "validate_encoder.zig",
-    srcs = [
-        "conv_ops.zig",
-        "video_vae.zig",
-        "video_vae_encoder.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
 build_test(
     name = "test",
     targets = [
@@ -96,6 +82,5 @@ build_test(
         ":denoise_stage1",
         ":bridge",
         ":inference",
-        ":validate_encoder",
     ],
 )
