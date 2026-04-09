@@ -5,10 +5,13 @@ generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
 ## Pipeline Overview
 
-The pipeline produces video+audio from a text prompt:
+The pipeline produces video+audio from a text prompt, with optional image conditioning:
 
 1. **Python** — Text encoding (Gemma prompt → context embeddings) + noise init + sigma schedule
-2. **Zig** — Everything else on GPU: Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
+2. **Zig** — Everything else on GPU: optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
+
+When `--image` is provided, the first frame is conditioned on a reference image
+via VAE encoding + per-token mask blending (see [06_image_conditioning.md](06_image_conditioning.md)).
 
 The `inference` binary runs the full pipeline end-to-end in a single process,
 passing GPU buffers between phases without intermediate files.
@@ -35,23 +38,22 @@ sigma schedule  ┘              Stage 2 (3 steps × 1 pass)
 | `video_vae.zig` | Video VAE decoder (3D causal convolutions, DepthToSpace) |
 | `audio_vae.zig` | Audio VAE decoder (2D causal convolutions, PixelNorm2d) |
 | `vocoder.zig` | Vocoder + BWE (BigVGAN, sinc resampler, STFT, mel projection) |
+| `video_vae_encoder.zig` | Video VAE encoder (for image conditioning) |
+| `image_loading.zig` | JPEG/PNG loading via stb_image, bilinear resize, center crop, bf16 normalize |
 | `inference.zig` | **Unified pipeline**: Stage 1 → bridge → Stage 2 → VAE decode → vocoder in one binary |
-| `denoise_stage1.zig` | Standalone Stage 1 driver (for debugging/development) |
-| `bridge.zig` | Standalone bridge driver (for debugging/development) |
-| `denoise_e2e.zig` | Standalone Stage 2 driver (for debugging/development) |
 
 ### Python
 | File | Purpose |
 |------|---------|
-| `export_mixed_pipeline.py` | Export prompt embeddings, noise, sigmas, and pipeline metadata |
+| `export_pipeline.py` | Export prompt embeddings, noise, sigmas, and pipeline metadata (supports optional `--image` for image conditioning) |
 
-## Running the Unified Pipeline
 ## Running the Unified Pipeline
 
 ### Prerequisites
 
 - CUDA GPU with enough VRAM for the 22B model
 - Model weights at a known path (e.g. `/root/models/ltx-2.3/`)
+- Gemma 3 model for text encoding (e.g. `/root/models/gemma-3-12b-it/`)
 - Python env with `ltx_core`, `ltx_pipelines` for the export step
 
 ### Step 1: Export inputs (Python)
@@ -61,7 +63,7 @@ Run the export script to encode the text prompt and generate noise:
 ```bash
 cd /root/repos/LTX-2  # or wherever ltx_core is installed
 
-python examples/ltx/export_mixed_pipeline.py \
+python examples/ltx/export_pipeline.py \
   --output-dir $OUT \
   --prompt "Someone walking by the beach at sunset" \
   --negative-prompt "blurry, out of focus" \
@@ -74,9 +76,11 @@ python examples/ltx/export_mixed_pipeline.py \
 ```
 
 This produces:
-- `$OUT/stage1_inputs.safetensors` — context embeddings, initial noise, masks, positions
+- `$OUT/unconditioned_stage1_inputs.safetensors` — context embeddings, initial noise, masks, positions
 - `$OUT/stage2_noise.safetensors` — pre-drawn noise for Stage 2
 - `$OUT/pipeline_meta.json` — latent dimensions, sigma schedules, guidance parameters
+
+To generate with image conditioning, add `--image /path/to/image.jpg`.
 
 ### Step 2: Run inference (Zig)
 
@@ -87,7 +91,7 @@ bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference 
   --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
   --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
   --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-  --stage1-inputs $OUT/stage1_inputs.safetensors \
+  --stage1-inputs $OUT/unconditioned_stage1_inputs.safetensors \\
   --stage2-noise $OUT/stage2_noise.safetensors \
   --meta $OUT/pipeline_meta.json \
   --output-dir $OUT/unified \
@@ -103,8 +107,8 @@ This runs the full pipeline on GPU and writes `$OUT/unified/output.mp4` directly
 | `--bf16-attn-stage2` | off | Use bf16 attention in Stage 2 (recommended — avoids OOM after spatial upsample) |
 | `--dump-intermediates` | off | Also write intermediate latents for debugging |
 
-## Standalone Drivers
+## Image Conditioning
 
-The standalone drivers (`denoise_stage1`, `bridge`, `denoise_e2e`) are kept for
-debugging and development. They read/write safetensors files between phases,
-making it easy to test a single stage in isolation.
+To generate video conditioned on a reference image, pass `--image` to both the
+export script and the Zig inference binary. See [06_image_conditioning.md](06_image_conditioning.md)
+for details on the implementation and per-token AdaLN masking.

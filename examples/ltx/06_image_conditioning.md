@@ -7,7 +7,7 @@ wiring the conditioning logic into the inference pipeline.
 
 | Milestone | Status | Notes |
 |-----------|--------|-------|
-| **M0** Python export script | **Done** | `export_image_conditioning.py` — also supports unconditioned (`--image` optional) |
+| **M0** Python export script | **Done** | `export_pipeline.py` (renamed from `export_image_conditioning.py`) — supports both conditioned (`--image`) and unconditioned modes |
 | **M1** VAE encoder in Zig | **Done** | `video_vae_encoder.zig` (367 lines), cosim 0.9997 E2E |
 | **M2** Image loading in Zig | **Done** | `image_loading.zig` (116 lines) — stb_image + bilinear resize + center crop |
 | **M3** Conditioning in pipeline | **Done** | Stage 1 only — both `inference.zig` and `model.zig` updated |
@@ -25,7 +25,7 @@ Modified:
 New:
 - `video_vae_encoder.zig` (367 lines) — full VAE encoder: causal conv3d, space-to-depth, patchify, normalize
 - `image_loading.zig` (116 lines) — JPEG/PNG load via stb_image, bilinear resize, center crop, bf16 normalize
-- `export_image_conditioning.py` (843 lines) — Python reference export (conditioned + unconditioned paths)
+- `export_pipeline.py` (renamed from `export_image_conditioning.py`, 843 lines) — Python reference export (conditioned + unconditioned paths)
 - `validate_encoder.zig` (618 lines) — standalone encoder validation binary (used during M1)
 - `diagnose_conditioning.py` (213 lines) — debug script (used during debugging)
 - `diagnose_pipeline.py` (217 lines) — debug script (used during debugging)
@@ -119,7 +119,7 @@ intermediate states for Zig to consume.
 
 ```bash
 cd /root/repos/LTX-2
-uv run python /root/repos/zml/examples/ltx/export_image_conditioning.py \
+uv run python /root/repos/zml/examples/ltx/export_pipeline.py \
     --image /path/to/reference_image.jpg \
     --prompt "A beautiful sunset over the ocean" \
     --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
@@ -131,7 +131,7 @@ uv run python /root/repos/zml/examples/ltx/export_image_conditioning.py \
 
 ```bash
 cd /root/repos/LTX-2
-uv run python /root/repos/zml/examples/ltx/export_image_conditioning.py \
+uv run python /root/repos/zml/examples/ltx/export_pipeline.py \
     --prompt "A cat sitting on a windowsill watching rain" \
     --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
     --output-dir /root/newprompt_ref/ \
@@ -396,11 +396,11 @@ for the initial validation milestone.
 **Goal**: Export reference activations for every encoder boundary, plus the
 final conditioned `stage1_inputs.safetensors` from an image-conditioned run.
 
-Create `export_image_conditioning.py`:
+Create `export_pipeline.py`:
 
 ```bash
 cd /root/repos/LTX-2
-python export_image_conditioning.py \
+python export_pipeline.py \
   --image /path/to/reference_image.jpg \
   --checkpoint /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
   --height 512 --width 768 \
@@ -548,7 +548,7 @@ different-sized conditioning latents for each stage.
 to Python reference.
 
 Steps:
-1. Run `export_image_conditioning.py` with `--decode-video` to get:
+1. Run `export_pipeline.py` with `--decode-video` to get:
    - Python-reference MP4 (full image-conditioned pipeline)
    - Reference encoder outputs at both resolutions
    - Reference conditioned initial states for both stages

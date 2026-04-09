@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
-"""Export reference activations for image conditioning (M0).
+"""Export pipeline: run the full two-stage LTX-2.3 pipeline in Python and
+capture all intermediate states for the Zig inference binary.
 
-Runs the VAE encoder on a reference image and captures activations at every
-boundary.  Then runs the full two-stage conditioned pipeline, exporting the
-conditioned initial states for each stage.
+Supports both text-to-video (default) and image-conditioned generation
+(pass --image).  When --image is provided, the VAE encoder is also run and
+activations are captured for validation.
 
-Outputs:
-  {out}/image_preprocessed.safetensors   — [1,3,1,H,W] bf16 (normalized input)
-  {out}/encoder_activations.safetensors  — intermediate activations (see below)
-  {out}/conditioned_stage1_inputs.safetensors — 14 tensors (conditioned Stage 1)
-  {out}/conditioned_stage2_inputs.safetensors — 14 tensors (conditioned Stage 2)
-  {out}/ref/stage1_outputs.safetensors   — Stage 1 denoised latents
-  {out}/ref/upsampled.safetensors        — Upscaled video latent
-  {out}/ref/stage2_outputs.safetensors   — Stage 2 denoised latents
+Outputs (always):
+  {out}/unconditioned_stage1_inputs.safetensors — Stage 1 inputs (no image)
+  {out}/stage2_noise.safetensors                — Pre-drawn Stage 2 noise
+  {out}/ref/stage1_outputs.safetensors           — Stage 1 denoised latents
+  {out}/ref/upsampled.safetensors                — Upscaled video latent
+  {out}/ref/stage2_outputs.safetensors           — Stage 2 denoised latents
   {out}/pipeline_meta.json               — Pipeline config metadata
   {out}/python_reference.mp4             — Full-Python video (with --decode-video)
 
 Usage (on GPU server):
   cd /root/repos/LTX-2
-  uv run examples/ltx/export_image_conditioning.py \
+  uv run examples/ltx/export_pipeline.py \
       --image /path/to/reference_image.jpg \
       --output-dir /root/imgcond_ref/ \
       --prompt "A beautiful sunset over the ocean" \
@@ -358,7 +357,7 @@ def main() -> None:
         dtype=torch.float32, device=device,
     )
 
-    # LTX-2.3 guidance params (matching export_mixed_pipeline.py)
+    # LTX-2.3 guidance params
     video_guider_params = MultiModalGuiderParams(
         cfg_scale=3.0, stg_scale=1.0, rescale_scale=0.7,
         modality_scale=3.0, skip_step=0, stg_blocks=[28],
