@@ -1464,6 +1464,10 @@ pub fn computeSigmaSchedule(
     return sigmas;
 }
 
+/// Stage 2 distilled sigma schedule (3 denoising steps).
+/// From ltx_pipelines.utils.constants.STAGE_2_DISTILLED_SIGMA_VALUES.
+pub const stage2_distilled_sigmas: [4]f32 = .{ 0.909375, 0.725, 0.421875, 0.0 };
+
 // Values taken from regular 30-step schedule 
 // https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-core/src/ltx_core/components/schedulers.py
 pub const stage1_default_schedule = struct {

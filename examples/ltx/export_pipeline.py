@@ -724,7 +724,6 @@ def main() -> None:
             "w_lat": w_lat_s1,
             "t_video": t_v1,
             "t_audio": t_a1,
-            "sigmas": sigmas.cpu().tolist(),
         },
         "stage2": {
             "f_lat": f_lat,
@@ -732,8 +731,6 @@ def main() -> None:
             "w_lat": w_lat,
             "t_video": t_v2,
             "t_audio": t_a2,
-            "sigma_0": sigma_0,
-            "sigmas": distilled_sigmas.cpu().tolist(),
         },
         "guidance": {
             "video": {

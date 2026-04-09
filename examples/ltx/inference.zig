@@ -44,19 +44,12 @@ const StageMeta = struct {
     w_lat: i64,
     f_lat: i64,
     t_audio: i64,
-    sigmas: []const f32 = &.{},
 };
 
 const PipelineMeta = struct {
-    allocator: std.mem.Allocator,
     frame_rate: f64,
     stage1: StageMeta,
     stage2: StageMeta,
-
-    fn deinit(self: PipelineMeta) void {
-        if (self.stage1.sigmas.len > 0) self.allocator.free(self.stage1.sigmas);
-        if (self.stage2.sigmas.len > 0) self.allocator.free(self.stage2.sigmas);
-    }
 };
 
 // ============================================================================
@@ -432,8 +425,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ---- Load pipeline metadata ----
     const pipe_meta = try loadPipelineMeta(allocator, io, args.meta);
-    defer pipe_meta.deinit();
-    const stage2_sigmas = pipe_meta.stage2.sigmas;
+    const stage2_sigmas: []const f32 = &model.stage2_distilled_sigmas;
     std.log.info("  Stage 1: F={d} H={d} W={d} T_a={d}", .{
         pipe_meta.stage1.f_lat, pipe_meta.stage1.h_lat, pipe_meta.stage1.w_lat, pipe_meta.stage1.t_audio,
     });
@@ -1385,7 +1377,7 @@ fn runBridge(
     const s1 = pipe_meta.stage1;
     const s2 = pipe_meta.stage2;
     const fps = pipe_meta.frame_rate;
-    const sigma_0: f32 = s2.sigmas[0];
+    const sigma_0: f32 = model.stage2_distilled_sigmas[0];
 
     const F = s1.f_lat;
     const H_s1 = s1.h_lat;
@@ -2663,7 +2655,6 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
         w_lat: i64,
         f_lat: i64,
         t_audio: i64,
-        sigmas: []f64 = &.{},
     };
 
     const JsonMeta = struct {
@@ -2676,38 +2667,21 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
     defer parsed.deinit();
     const v = parsed.value;
 
-    // Convert f64 sigma arrays to owned f32 slices.
-    const s1_sigmas = try convertSigmas(allocator, v.stage1.sigmas);
-    errdefer allocator.free(s1_sigmas);
-    const s2_sigmas = try convertSigmas(allocator, v.stage2.sigmas);
-
     return .{
-        .allocator = allocator,
         .frame_rate = v.frame_rate,
         .stage1 = .{
             .h_lat = v.stage1.h_lat,
             .w_lat = v.stage1.w_lat,
             .f_lat = v.stage1.f_lat,
             .t_audio = v.stage1.t_audio,
-            .sigmas = s1_sigmas,
         },
         .stage2 = .{
             .h_lat = v.stage2.h_lat,
             .w_lat = v.stage2.w_lat,
             .f_lat = v.stage2.f_lat,
             .t_audio = v.stage2.t_audio,
-            .sigmas = s2_sigmas,
         },
     };
-}
-
-fn convertSigmas(allocator: std.mem.Allocator, sigmas_f64: []const f64) ![]const f32 {
-    if (sigmas_f64.len == 0) return &.{};
-    const result = try allocator.alloc(f32, sigmas_f64.len);
-    for (sigmas_f64, 0..) |s, i| {
-        result[i] = @floatCast(s);
-    }
-    return result;
 }
 
 // ============================================================================
