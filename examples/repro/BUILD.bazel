@@ -1,8 +1,40 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "config_defined_empty",
+    import_name = "config",
+    main = "config_true.zig",
+)
+
+zig_library(
+    name = "config_not_defined_empty",
+    import_name = "config",
+    main = "config_false.zig",
+)
 
 zig_binary(
     name = "repro",
     main = "main.zig",
-    deps = ["//zml"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config_defined_empty",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "repro_not_defined_empty",
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":config_not_defined_empty",
+        "//zml",
+    ],
+)
+
+zig_binary(
+    name = "repro_simple",
+    main = "repro_simple.zig",
+    visibility = ["//visibility:public"],
 )
