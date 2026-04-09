@@ -1,10 +1,10 @@
 load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_lib//tools/release:hashes.bzl", "hashes")
 load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
-load("@bazel_lib//tools/release:hashes.bzl", "hashes")
 load("@tar.bzl//tar:tar.bzl", "tar")
 
 # zig libraries
@@ -62,6 +62,19 @@ copy_to_directory(
     },
 )
 
+run_binary(
+    name = "zml-smi.stripped",
+    srcs = [":zml-smi"],
+    outs = ["zml-smi.stripped.bin"],
+    args = [
+        "--strip-all",
+        "-o",
+        "$(location zml-smi.stripped.bin)",
+        "$(location :zml-smi)",
+    ],
+    tool = "@llvm//tools:llvm-strip",
+)
+
 zig_binary(
     name = "zml-smi",
     visibility = ["//visibility:public"],
@@ -95,7 +108,10 @@ zig_binary(
 
 mtree_spec(
     name = "mtree_spec",
-    srcs = [":zml-smi"],
+    srcs = [
+        ":zml-smi",
+        ":zml-smi.stripped",
+    ],
     tags = ["manual"],
 )
 
@@ -104,7 +120,7 @@ genrule(
     name = "mtree",
     srcs = [":mtree_spec"],
     outs = ["mtree.txt"],
-    cmd = """sed -e '/type=dir/d' -e 's#^bin/##g' $< > $@""",
+    cmd = """sed -e '/type=dir/d' -e '/zml-smi\\/zml-smi /d' -e 's#^bin/##g' -e 's#zml-smi\\.stripped\\.bin#zml-smi#' -e '/stamp.c/d' $< > $@""",
     tags = ["manual"],
 )
 
@@ -126,7 +142,10 @@ _RELEASE_PLATFORMS = [
 
 [tar(
     name = "archive_" + os + "_" + arch,
-    srcs = [":zml-smi"],
+    srcs = [
+        ":zml-smi",
+        ":zml-smi.stripped",
+    ],
     out = "zml-smi-" + os + "-" + arch + ".tar.zst",
     args = [
         "--options",
