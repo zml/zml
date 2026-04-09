@@ -11,7 +11,7 @@ The pipeline produces video+audio from a text prompt, with optional image condit
 2. **Zig** — Everything else on GPU: optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
 
 When `--image` is provided, the first frame is conditioned on a reference image
-via VAE encoding + per-token mask blending (see [06_image_conditioning.md](06_image_conditioning.md)).
+via VAE encoding + per-token mask blending (see [06_image_conditioning.md](_archive/06_image_conditioning.md)).
 
 The `inference` binary runs the full pipeline end-to-end in a single process,
 passing GPU buffers between phases without intermediate files.
@@ -110,5 +110,5 @@ This runs the full pipeline on GPU and writes `$OUT/unified/output.mp4` directly
 ## Image Conditioning
 
 To generate video conditioned on a reference image, pass `--image` to both the
-export script and the Zig inference binary. See [06_image_conditioning.md](06_image_conditioning.md)
+export script and the Zig inference binary. See [06_image_conditioning.md](_archive/06_image_conditioning.md)
 for details on the implementation and per-token AdaLN masking.
