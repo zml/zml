@@ -8,6 +8,7 @@ zls_completion(
         "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
+        "//examples/repro",
         "//stdx",
         "//zml",
         "//zml/tokenizer/iree",
