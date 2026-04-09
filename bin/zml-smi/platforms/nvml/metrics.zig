@@ -13,7 +13,7 @@ pub fn start(collector: *Collector) !void {
     nvml.* = try Nvml.init();
 
     const count = try nvml.deviceCount();
-    const dev_offset: u8 = @intCast(collector.device_infos.items.len);
+    const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
         const dev = Device.open(nvml, @intCast(i)) catch continue;

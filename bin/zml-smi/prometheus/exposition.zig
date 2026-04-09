@@ -3,8 +3,12 @@ const smi_info = @import("zml-smi/info");
 const DeviceInfo = smi_info.device_info.DeviceInfo;
 const HostInfo = smi_info.host_info.HostInfo;
 
-const gpu_metrics = .{
-    .{ .field = "util_percent", .metric = "zml_device_utilization_percent", .help = "GPU utilization percentage" },
+const device_metrics = .{
+    // Shared across all device types
+    .{ .field = "util_percent", .metric = "zml_device_utilization_percent", .help = "Device utilization percentage" },
+    .{ .field = "mem_used_bytes", .metric = "zml_device_memory_used_bytes", .help = "Device memory used in bytes" },
+    .{ .field = "mem_total_bytes", .metric = "zml_device_memory_total_bytes", .help = "Device memory total in bytes" },
+    // GPU (CUDA/ROCm)
     .{ .field = "encoder_util_percent", .metric = "zml_device_encoder_utilization_percent", .help = "Encoder utilization percentage" },
     .{ .field = "decoder_util_percent", .metric = "zml_device_decoder_utilization_percent", .help = "Decoder utilization percentage" },
     .{ .field = "power_mw", .metric = "zml_device_power_watts", .help = "Power draw in watts", .fmt = fmtMilliwattsAsWatts },
@@ -14,16 +18,9 @@ const gpu_metrics = .{
     .{ .field = "clock_graphics_mhz", .metric = "zml_device_clock_graphics_mhz", .help = "Graphics clock frequency in MHz" },
     .{ .field = "clock_sm_mhz", .metric = "zml_device_clock_sm_mhz", .help = "SM clock frequency in MHz" },
     .{ .field = "clock_mem_mhz", .metric = "zml_device_clock_memory_mhz", .help = "Memory clock frequency in MHz" },
-    .{ .field = "mem_used_bytes", .metric = "zml_device_memory_used_bytes", .help = "Device memory used in bytes" },
-    .{ .field = "mem_total_bytes", .metric = "zml_device_memory_total_bytes", .help = "Device memory total in bytes" },
     .{ .field = "pcie_tx_kbps", .metric = "zml_device_pcie_tx_bytes_per_second", .help = "PCIe TX throughput in bytes per second", .fmt = fmtKbpsAsBytesPerSec },
     .{ .field = "pcie_rx_kbps", .metric = "zml_device_pcie_rx_bytes_per_second", .help = "PCIe RX throughput in bytes per second", .fmt = fmtKbpsAsBytesPerSec },
-};
-
-const neuron_metrics = .{
-    .{ .field = "util_percent", .metric = "zml_device_utilization_percent", .help = "Device utilization percentage" },
-    .{ .field = "mem_used_bytes", .metric = "zml_device_memory_used_bytes", .help = "Device memory used in bytes" },
-    .{ .field = "mem_total_bytes", .metric = "zml_device_memory_total_bytes", .help = "Device memory total in bytes" },
+    // Neuron
     .{ .field = "nc_tensors", .metric = "zml_device_neuron_tensors_bytes", .help = "Neuron core tensor memory in bytes" },
     .{ .field = "nc_constants", .metric = "zml_device_neuron_constants_bytes", .help = "Neuron core constants memory in bytes" },
     .{ .field = "nc_model_code", .metric = "zml_device_neuron_model_code_bytes", .help = "Neuron core model code memory in bytes" },
@@ -35,12 +32,6 @@ const neuron_metrics = .{
     .{ .field = "nc_collectives", .metric = "zml_device_neuron_collectives_bytes", .help = "Neuron core collectives memory in bytes" },
     .{ .field = "nc_notifications", .metric = "zml_device_neuron_notifications_bytes", .help = "Neuron core notifications memory in bytes" },
     .{ .field = "nc_uncategorized", .metric = "zml_device_neuron_uncategorized_bytes", .help = "Neuron core uncategorized memory in bytes" },
-};
-
-const tpu_metrics = .{
-    .{ .field = "util_percent", .metric = "zml_device_utilization_percent", .help = "Device utilization percentage" },
-    .{ .field = "mem_used_bytes", .metric = "zml_device_memory_used_bytes", .help = "Device memory used in bytes" },
-    .{ .field = "mem_total_bytes", .metric = "zml_device_memory_total_bytes", .help = "Device memory total in bytes" },
 };
 
 const host_metrics = .{
@@ -73,7 +64,9 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, host: *const 
                     }) |label| {
                         if (@hasField(@TypeOf(val), label[0])) {
                             if (@field(val, label[0])) |v| {
-                                try writer.print(",{s}=\"{s}\"", .{ label[1], v });
+                                try writer.print(",{s}=\"", .{label[1]});
+                                try writeEscapedLabel(writer, v);
+                                try writer.writeAll("\"");
                             }
                         }
                     }
@@ -86,29 +79,42 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, host: *const 
     }
     try writer.writeAll("\n");
 
-    for (devices, 0..) |dev, i| {
-        switch (dev.*) {
-            .cuda => |*db| try writeDeviceMetrics(writer, gpu_metrics, db.front().*, i, "cuda"),
-            .rocm => |*db| try writeDeviceMetrics(writer, gpu_metrics, db.front().*, i, "rocm"),
-            .neuron => |*db| try writeDeviceMetrics(writer, neuron_metrics, db.front().*, i, "neuron"),
-            .tpu => |*db| try writeDeviceMetrics(writer, tpu_metrics, db.front().*, i, "tpu"),
-        }
-    }
-
+    try writeAllDeviceMetrics(writer, device_metrics, devices);
     try writeHostMetrics(writer, host.front().*);
 }
 
-fn writeDeviceMetrics(
+fn writeAllDeviceMetrics(
     writer: *std.Io.Writer,
     comptime metrics: anytype,
-    val: anytype,
-    device_idx: usize,
-    device_type: []const u8,
+    devices: []const *DeviceInfo,
 ) !void {
     inline for (metrics) |m| {
-        if (@field(val, m.field)) |raw| {
-            try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s}{{device=\"{d}\",type=\"{s}\",name=\"{?s}\"}} ", .{ m.metric, m.help, m.metric, m.metric, device_idx, device_type, val.name });
-            try fmtValue(m, writer, raw);
+        var header_written = false;
+
+        for (devices, 0..) |dev, i| {
+            switch (dev.*) {
+                inline else => |*db| {
+                    const val = db.front().*;
+                    if (@hasField(@TypeOf(val), m.field)) {
+                        if (@field(val, m.field)) |raw| {
+                            if (!header_written) {
+                                try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n", .{ m.metric, m.help, m.metric });
+                                header_written = true;
+                            }
+
+                            const device_type = @tagName(std.meta.activeTag(dev.*));
+                            try writer.print("{s}{{device=\"{d}\",type=\"{s}\",name=\"", .{ m.metric, i, device_type });
+                            try writeEscapedLabel(writer, val.name orelse "");
+                            try writer.writeAll("\"} ");
+                            try fmtValue(m, writer, raw);
+                            try writer.writeAll("\n");
+                        }
+                    }
+                },
+            }
+        }
+
+        if (header_written) {
             try writer.writeAll("\n");
         }
     }
@@ -119,7 +125,7 @@ fn writeHostMetrics(writer: *std.Io.Writer, val: anytype) !void {
         if (@field(val, m.field)) |raw| {
             try writer.print("# HELP {s} {s}\n# TYPE {s} gauge\n{s} ", .{ m.metric, m.help, m.metric, m.metric });
             try fmtValue(m, writer, raw);
-            try writer.writeAll("\n");
+            try writer.writeAll("\n\n");
         }
     }
 }
@@ -150,4 +156,15 @@ fn fmtKibAsBytes(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!void {
 
 fn fmtKbpsAsBytesPerSec(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!void {
     try writer.print("{d}", .{val * 128});
+}
+
+fn writeEscapedLabel(writer: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
+    for (value) |ch| {
+        switch (ch) {
+            '\\' => try writer.writeAll("\\\\"),
+            '"' => try writer.writeAll("\\\""),
+            '\n' => try writer.writeAll("\\n"),
+            else => try writer.writeAll(&.{ch}),
+        }
+    }
 }

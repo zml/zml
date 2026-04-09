@@ -12,7 +12,7 @@ const DeltaState = struct {
     prev_timestamp: ?std.Io.Timestamp = null,
 };
 
-pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, util_buf: []UtilAtomic, dev_offset: u8, warmup: bool) !void {
+pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, util_buf: []UtilAtomic, dev_offset: u16, warmup: bool) !void {
     if (nrt.handles.len == 0) return;
     const delta_states = try collector.arena.alloc(DeltaState, util_buf.len);
     @memset(delta_states, .{});
@@ -27,7 +27,7 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, nrt: *const Nrt, 
     try collector.spawnPoll(pollOnce, args);
 }
 
-fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, util_buf: []UtilAtomic, dev_offset: u8, delta_states: []DeltaState) void {
+fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, nrt: *const Nrt, nc_per_device: u32, util_buf: []UtilAtomic, dev_offset: u16, delta_states: []DeltaState) void {
     const back = list.back();
 
     back.clearRetainingCapacity();

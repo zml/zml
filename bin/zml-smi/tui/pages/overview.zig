@@ -23,10 +23,10 @@ pub const host_line_width: u16 = (Logo.logo_width + 6) + max_info_width + 2;
 state: *const data.SystemState,
 device_cards: []DeviceCard = &.{},
 process_table: ?*ProcessTable = null, // maybe null if we decide not to print the process table in print mode
-viewing_device: *?u8 = undefined,
+viewing_device: *?u16 = undefined,
 use_braille: bool = false,
 
-pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u8) !Overview {
+pub fn init(allocator: std.mem.Allocator, state: *const data.SystemState, process_table: ?*ProcessTable, viewing_device: *?u16) !Overview {
     const count = state.deviceCount();
     const cards = try allocator.alloc(DeviceCard, count);
     for (cards, 0..) |*card, i| {

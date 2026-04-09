@@ -1,6 +1,6 @@
 pub const ProcessInfo = struct {
     pid: u32 = 0,
-    device_idx: u8 = 0,
+    device_idx: u16 = 0,
     dev_util_percent: ?u16 = null,
     dev_mem_kib: ?u64 = null,
     uid: u32 = 0,

@@ -44,7 +44,7 @@ fn addHost(collector: *Collector, host: []const u8) !void {
     const root = parsed.value.object;
     const json_devices = if (root.get("devices")) |v| v.array.items else &.{};
 
-    const dev_offset: u8 = @intCast(collector.device_infos.items.len);
+    const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     var devices: std.ArrayList(*DeviceInfo) = .empty;
     for (json_devices) |item| {
@@ -65,7 +65,7 @@ fn addHost(collector: *Collector, host: []const u8) !void {
     const back = processes.back();
     for (json_processes) |item| {
         var proc = std.json.parseFromValueLeaky(pi.ProcessInfo, str_arenas[back_idx].allocator(), item, .{ .ignore_unknown_fields = true }) catch continue;
-        proc.device_idx +|= dev_offset;
+        proc.device_idx += dev_offset;
         proc.remote = true;
         back.append(collector.gpa, proc) catch continue;
     }
@@ -76,7 +76,7 @@ fn addHost(collector: *Collector, host: []const u8) !void {
     try collector.spawnPoll(pollOnce, .{ poll_arena, collector.gpa, collector.io, url, devices.items, processes, dev_offset, str_arenas });
 }
 
-fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, host: []const u8, devices: []const *DeviceInfo, processes: *ProcessDoubleBuffer, dev_offset: u8, str_arenas: [2]*std.heap.ArenaAllocator) void {
+fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: std.Io, host: []const u8, devices: []const *DeviceInfo, processes: *ProcessDoubleBuffer, dev_offset: u16, str_arenas: [2]*std.heap.ArenaAllocator) void {
     _ = poll_arena.reset(.retain_capacity);
 
     const body = httpGet(gpa, io, host) catch return;
@@ -91,6 +91,7 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
     for (json_devices, 0..) |item, i| {
         const jdi = std.json.parseFromValueLeaky(JsonDeviceInfo, poll_arena.allocator(), item, .{}) catch continue;
         if (i >= devices.len) {
+            std.log.warn("{s}: remote has more devices than expected ({d} > {d})", .{ host, json_devices.len, devices.len });
             break;
         }
 
@@ -111,7 +112,7 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
     back.clearRetainingCapacity();
     for (json_processes) |item| {
         var proc = std.json.parseFromValueLeaky(pi.ProcessInfo, alloc, item, .{ .ignore_unknown_fields = true }) catch continue;
-        proc.device_idx +|= dev_offset;
+        proc.device_idx += dev_offset;
         proc.remote = true;
         back.append(gpa, proc) catch continue;
     }
@@ -119,6 +120,11 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
 }
 
 fn httpGet(allocator: std.mem.Allocator, io: std.Io, host: []const u8) ![]const u8 {
+    if (!std.mem.startsWith(u8, host, "http://") and !std.mem.startsWith(u8, host, "https://")) {
+        std.log.err("remote host must start with http:// or https://: {s}", .{host});
+        return error.InvalidUrl;
+    }
+
     const url = try std.fmt.allocPrint(allocator, "{s}/metrics", .{host});
     defer allocator.free(url);
 

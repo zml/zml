@@ -40,8 +40,8 @@ const ScrollState = struct {
 const Model = struct {
     allocator: std.mem.Allocator,
     state: *data.SystemState,
-    viewing_device: ?u8 = null,
-    prev_viewing_device: ?u8 = null,
+    viewing_device: ?u16 = null,
+    prev_viewing_device: ?u16 = null,
     scroll: ScrollState = .{},
     vx: *vaxis.Vaxis,
     tty: *vaxis.Tty,

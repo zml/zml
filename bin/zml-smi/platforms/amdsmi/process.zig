@@ -7,7 +7,7 @@ const Collector = @import("zml-smi/collector").Collector;
 
 const bdf_len = "0000:00:00.0".len;
 
-pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8) !void {
+pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16) !void {
     const device_count = amdsmi.deviceCount();
     const pci_slots = try collector.arena.alloc(?[bdf_len]u8, device_count);
 
@@ -26,7 +26,7 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const Am
     try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, amdsmi, dev_offset, device_count, pci_slots });
 }
 
-fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u8, device_count: u32, pci_slots: []?[bdf_len]u8) void {
+fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16, device_count: u32, pci_slots: []?[bdf_len]u8) void {
     const back = list.back();
 
     back.clearRetainingCapacity();

@@ -9,7 +9,7 @@ const compose = @import("../../lib/compose.zig");
 const Chart = @import("../../widgets/chart.zig");
 const ColumnLayout = @import("../../widgets/column_layout.zig");
 
-pub fn headerText(arena: std.mem.Allocator, id: u8, name: []const u8) std.mem.Allocator.Error!vxfw.Text {
+pub fn headerText(arena: std.mem.Allocator, id: u16, name: []const u8) std.mem.Allocator.Error!vxfw.Text {
     return .{
         .text = try std.fmt.allocPrint(arena, "Device {d}: {s}", .{ id, name }),
         .style = theme.header_style,
@@ -22,7 +22,7 @@ pub fn headerText(arena: std.mem.Allocator, id: u8, name: []const u8) std.mem.Al
 pub fn historyChart(
     ctx: vxfw.DrawContext,
     state: *const data.SystemState,
-    id: u8,
+    id: u16,
     history: anytype,
     opts: struct {
         title: []const u8,

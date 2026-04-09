@@ -10,12 +10,12 @@ const MetricCard = @import("metric_card.zig");
 
 const DeviceCard = @This();
 
-device_id: u8 = 0,
+device_id: u16 = 0,
 highlighted: bool = false,
 
 state: *const data.SystemState = undefined,
 use_braille: bool = false,
-viewing_device: *?u8 = undefined,
+viewing_device: *?u16 = undefined,
 
 pub fn handleEvent(self: *DeviceCard, ctx: *vxfw.EventContext, event: vxfw.Event) anyerror!void {
     switch (event) {
