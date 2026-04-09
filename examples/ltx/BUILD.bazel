@@ -2,60 +2,6 @@ load("@bazel_skylib//rules:build_test.bzl", "build_test")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
-    name = "denoise_e2e",
-    main = "denoise_e2e.zig",
-    srcs = [
-        "audio_vae.zig",
-        "conv_ops.zig",
-        "model.zig",
-        "upsampler.zig",
-        "video_vae.zig",
-        "video_vae_encoder.zig",
-        "vocoder.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
-zig_binary(
-    name = "denoise_stage1",
-    main = "denoise_stage1.zig",
-    srcs = [
-        "audio_vae.zig",
-        "conv_ops.zig",
-        "model.zig",
-        "upsampler.zig",
-        "video_vae.zig",
-        "video_vae_encoder.zig",
-        "vocoder.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
-zig_binary(
-    name = "bridge",
-    main = "bridge.zig",
-    srcs = [
-        "audio_vae.zig",
-        "conv_ops.zig",
-        "model.zig",
-        "upsampler.zig",
-        "video_vae.zig",
-        "video_vae_encoder.zig",
-        "vocoder.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
-zig_binary(
     name = "inference",
     main = "inference.zig",
     srcs = [
@@ -78,9 +24,6 @@ zig_binary(
 build_test(
     name = "test",
     targets = [
-        ":denoise_e2e",
-        ":denoise_stage1",
-        ":bridge",
         ":inference",
     ],
 )
