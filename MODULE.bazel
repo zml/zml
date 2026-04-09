@@ -245,7 +245,7 @@ use_repo(
 
 git_override(
     module_name = "rules_zig",
-    commit = "7b205b78fb21e11efe5adcc9ec1c37fa5852dc77",
+    commit = "56911842f4527df036e8d52e78dd0f54a22d4215",
     remote = "https://github.com/zml/rules_zig.git",
 )
 

@@ -16,6 +16,7 @@ common          --enable_platform_specific_config
 
 # Ensure host tools are built optimized
 common          --host_compilation_mode=opt
+common          --@rules_zig//zig/settings:mode=release_safe
 
 # Suppress all warnings, LLVM and friends are too noisy
 common          --copt='-w'
