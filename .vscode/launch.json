@@ -1,0 +1,23 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Benchmark Profiler saxpy (Bazel + LLDB)",
+            "type": "lldb-dap",
+            "request": "launch",
+            "program": "${workspaceFolder}/bazel-bin/examples/benchmark-profiler/benchmark_profiler",
+            "args": [
+                "--mode=saxpy",
+                "--dtype=f32",
+                "--saxpySize=4096"
+            ],
+            "cwd": "${workspaceFolder}",
+            "console": "integratedTerminal",
+            "preLaunchTask": "prepare benchmark_profiler debug",
+            "debuggerRoot": "${workspaceFolder}",
+            "initCommands": [
+                "command source ${workspaceFolder}/.vscode/lldb-bazel-source-map.lldb"
+            ]
+        }
+    ]
+}

@@ -59,7 +59,8 @@ bazel run //tools/tracy:tracy-profiler --
 ```
 
 ```bash
-bazel run //examples/benchmark-profiler:benchmark_profiler -- \
+# --batch -o run -k bt -k exit 
+bazel run //examples/benchmark-profiler:benchmark_profiler --run_under="lldb --" -- \
   --mode=saxpy \
   --dtype=f32 \
   --saxpySize=4096

@@ -1,0 +1,37 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "bazel build //examples/benchmark-profiler:benchmark_profiler",
+            "type": "shell",
+            "command": "bazel",
+            "args": [
+                "build",
+                "//examples/benchmark-profiler:benchmark_profiler"
+            ],
+            "group": "build",
+            "problemMatcher": []
+        },
+        {
+            "label": "generate lldb source map for benchmark_profiler",
+            "type": "shell",
+            "command": "python3",
+            "args": [
+                "${workspaceFolder}/.vscode/gen_lldb_bazel_source_map.py",
+                "${workspaceFolder}/bazel-bin/examples/benchmark-profiler/benchmark_profiler",
+                "${workspaceFolder}",
+                "${workspaceFolder}/.vscode/lldb-bazel-source-map.lldb"
+            ],
+            "problemMatcher": []
+        },
+        {
+            "label": "prepare benchmark_profiler debug",
+            "dependsOrder": "sequence",
+            "dependsOn": [
+                "bazel build //examples/benchmark-profiler:benchmark_profiler",
+                "generate lldb source map for benchmark_profiler"
+            ],
+            "problemMatcher": []
+        }
+    ]
+}

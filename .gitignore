@@ -31,6 +31,7 @@ venv
 # Editor specific
 ## Neovim
 .nvim.local.lua
+/.vscode/lldb-bazel-source-map.lldb
 
 # Devenv
 .devenv*

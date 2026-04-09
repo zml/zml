@@ -33,5 +33,6 @@
     },
     "rust-analyzer.linkedProjects": [
         "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
-    ]
+    ],
+    "lldb-dap.executable-path": "/Applications/Xcode.app/Contents/Developer/usr/bin/lldb-dap"
 }
