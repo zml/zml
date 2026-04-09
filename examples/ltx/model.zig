@@ -1364,6 +1364,26 @@ pub fn forwardOutputProjection(x: Tensor, embedded_timestep: Tensor, params: Out
 // Denoising-loop arithmetic (Step 3)
 // =====================================================================
 
+/// Generate Gaussian noise via Box-Muller transform.
+///
+/// Takes an Rng state and produces N(0,1) noise of the given shape.
+/// Uses two uniform samples: Z = sqrt(-2*ln(U1)) * cos(2π*U2).
+/// Returns the updated Rng state and noise tensor in bf16.
+pub fn forwardGenerateNoise(rng: Tensor.Rng, target_shape: Tensor) struct { Tensor.Rng, Tensor } {
+    const shape = target_shape._shape;
+    const eps = std.math.floatEps(f32);
+
+    const rng1, const uni1 = rng.uniform(shape.withDtype(.f32), .{ .min = eps, .max = 1.0 });
+    const rng2, const uni2 = rng1.uniform(shape.withDtype(.f32), .{ .min = 0.0, .max = 1.0 });
+
+    // Box-Muller: Z = sqrt(-2 * ln(U1)) * cos(2π * U2)
+    const r = uni1.log().scale(-2.0).sqrt();
+    const theta = uni2.scale(2.0 * std.math.pi);
+    const noise = r.mul(theta.cos());
+
+    return .{ rng2, noise.convert(shape.dtype()) };
+}
+
 /// Apply noise initialization (GaussianNoiser).
 ///
 /// Produces the initial noised latent from clean latent, noise, and mask:

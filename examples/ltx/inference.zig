@@ -13,7 +13,7 @@
 ///       --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
 ///       --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
 ///       --stage1-inputs /root/e2e_demo/stage1_inputs.safetensors \
-///       --stage2-noise /root/e2e_demo/stage2_noise.safetensors \
+///       --seed 42 \
 ///       --meta /root/e2e_demo/pipeline_meta.json \
 ///       --output-dir /root/e2e_demo/unified_out/ \
 ///       --bf16-attn-stage2
@@ -61,9 +61,9 @@ const CliArgs = struct {
     stage2_ckpt: []const u8,
     upsampler_ckpt: []const u8,
     stage1_inputs: []const u8,
-    stage2_noise: []const u8,
     meta: []const u8,
     output_dir: []const u8,
+    seed: u64,
     bf16_attn_stage1: bool,
     bf16_attn_stage2: bool,
     dump_intermediates: bool,
@@ -76,15 +76,15 @@ fn parseArgs(it: anytype) !CliArgs {
         .stage2_ckpt = undefined,
         .upsampler_ckpt = undefined,
         .stage1_inputs = undefined,
-        .stage2_noise = undefined,
         .meta = undefined,
         .output_dir = undefined,
+        .seed = 42,
         .bf16_attn_stage1 = false,
         .bf16_attn_stage2 = false,
         .dump_intermediates = false,
         .image = null,
     };
-    var have = [_]bool{false} ** 7;
+    var have = [_]bool{false} ** 6;
 
     _ = it.next(); // exe name
 
@@ -101,15 +101,15 @@ fn parseArgs(it: anytype) !CliArgs {
         } else if (std.mem.eql(u8, arg, "--stage1-inputs")) {
             args.stage1_inputs = it.next() orelse return error.InvalidArgs;
             have[3] = true;
-        } else if (std.mem.eql(u8, arg, "--stage2-noise")) {
-            args.stage2_noise = it.next() orelse return error.InvalidArgs;
-            have[4] = true;
         } else if (std.mem.eql(u8, arg, "--meta")) {
             args.meta = it.next() orelse return error.InvalidArgs;
-            have[5] = true;
+            have[4] = true;
         } else if (std.mem.eql(u8, arg, "--output-dir")) {
             args.output_dir = it.next() orelse return error.InvalidArgs;
-            have[6] = true;
+            have[5] = true;
+        } else if (std.mem.eql(u8, arg, "--seed")) {
+            const seed_str = it.next() orelse return error.InvalidArgs;
+            args.seed = std.fmt.parseInt(u64, seed_str, 10) catch return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--bf16-attn-stage1")) {
             args.bf16_attn_stage1 = true;
         } else if (std.mem.eql(u8, arg, "--bf16-attn-stage2")) {
@@ -125,8 +125,9 @@ fn parseArgs(it: anytype) !CliArgs {
         if (!h) {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
-                    "--upsampler-ckpt <path> --stage1-inputs <path> --stage2-noise <path> " ++
-                    "--meta <path> --output-dir <path> [--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
+                    "--upsampler-ckpt <path> --stage1-inputs <path> " ++
+                    "--meta <path> --output-dir <path> [--seed <int>] " ++
+                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
             return error.InvalidArgs;
@@ -145,12 +146,14 @@ const Stage1Result = struct {
     a_latent: zml.Buffer, // [1, T_a,  128] bf16
     v_context_pos: zml.Buffer, // [1, S, 4096] bf16 — kept for Stage 2
     a_context_pos: zml.Buffer, // [1, S, 2048] bf16 — kept for Stage 2
+    rng_state: zml.Buffer, // [2] u64 — RNG state after Stage 1 noise draws
 
     fn deinit(self: *Stage1Result) void {
         self.v_latent.deinit();
         self.a_latent.deinit();
         self.v_context_pos.deinit();
         self.a_context_pos.deinit();
+        self.rng_state.deinit();
     }
 };
 
@@ -412,7 +415,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  stage2-ckpt:     {s}", .{args.stage2_ckpt});
     std.log.info("  upsampler-ckpt:  {s}", .{args.upsampler_ckpt});
     std.log.info("  stage1-inputs:   {s}", .{args.stage1_inputs});
-    std.log.info("  stage2-noise:    {s}", .{args.stage2_noise});
+    std.log.info("  seed:            {d}", .{args.seed});
     std.log.info("  meta:            {s}", .{args.meta});
     std.log.info("  output-dir:      {s}", .{args.output_dir});
     std.log.info("  bf16-attn-stage1:  {}", .{args.bf16_attn_stage1});
@@ -445,7 +448,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir);
+    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -469,9 +472,11 @@ pub fn main(init: std.process.Init) !void {
         s1.a_context_pos,
         args.upsampler_ckpt,
         args.stage2_ckpt,
-        args.stage2_noise,
         pipe_meta,
         args.image,
+        s1.rng_state,
+        args.dump_intermediates,
+        args.output_dir,
     );
     // Stage 1 latent/context buffers are consumed by bridge (ownership transferred)
 
@@ -590,6 +595,7 @@ fn runStage1(
     pipe_meta: PipelineMeta,
     dump_intermediates: bool,
     output_dir: []const u8,
+    seed: u64,
 ) !Stage1Result {
     // ---- Sigma schedule ----
     const sigmas = model.computeSigmaSchedule(
@@ -624,8 +630,6 @@ fn runStage1(
     // ---- Load inputs ----
     std.log.info("Loading Stage 1 inputs...", .{});
 
-    var v_latent_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_latent", sharding);
-    var a_latent_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_latent", sharding);
     var v_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_denoise_mask", sharding);
     defer v_mask_buf.deinit();
     var a_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_denoise_mask", sharding);
@@ -648,8 +652,118 @@ fn runStage1(
     var a_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_neg", sharding);
     defer a_context_neg_buf.deinit();
 
-    std.log.info("  video_latent (noised)", .{});
-    std.log.info("  audio_latent (noised)", .{});
+    // ---- Generate noise and run noise init ----
+    std.log.info("Generating Stage 1 noise (seed={d})...", .{seed});
+
+    var noise_gen_v_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardGenerateNoise,
+        .{
+            zml.Tensor.Rng.init(),
+            zml.Tensor.fromShape(v_clean_buf.shape()),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_gen_v_exe.deinit();
+
+    var noise_gen_a_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardGenerateNoise,
+        .{
+            zml.Tensor.Rng.init(),
+            zml.Tensor.fromShape(a_clean_buf.shape()),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_gen_a_exe.deinit();
+
+    var rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, sharding);
+
+    // Generate video noise (draw #1)
+    var gen_v_args = try noise_gen_v_exe.args(allocator);
+    defer gen_v_args.deinit(allocator);
+    var gen_v_results = try noise_gen_v_exe.results(allocator);
+    defer gen_v_results.deinit(allocator);
+    gen_v_args.set(.{ rng_buf, v_clean_buf });
+    noise_gen_v_exe.call(gen_v_args, &gen_v_results);
+    rng_buf._state.deinit();
+    rng_buf, var v_noise_buf = gen_v_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+    defer v_noise_buf.deinit();
+
+    // Generate audio noise (draw #2)
+    var gen_a_args = try noise_gen_a_exe.args(allocator);
+    defer gen_a_args.deinit(allocator);
+    var gen_a_results = try noise_gen_a_exe.results(allocator);
+    defer gen_a_results.deinit(allocator);
+    gen_a_args.set(.{ rng_buf, a_clean_buf });
+    noise_gen_a_exe.call(gen_a_args, &gen_a_results);
+    rng_buf._state.deinit();
+    rng_buf, var a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+    defer a_noise_buf.deinit();
+
+    std.log.info("  video_noise: {any}", .{v_noise_buf.shape().dims()});
+    std.log.info("  audio_noise: {any}", .{a_noise_buf.shape().dims()});
+
+    if (dump_intermediates) {
+        try writeBuffer(allocator, io, v_noise_buf, output_dir, "s1_video_noise.bin");
+        try writeBuffer(allocator, io, a_noise_buf, output_dir, "s1_audio_noise.bin");
+    }
+
+    // Compile noise init
+    const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
+
+    var noise_init_v_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardNoiseInit,
+        .{
+            zml.Tensor.fromShape(v_clean_buf.shape()),
+            zml.Tensor.fromShape(v_noise_buf.shape()),
+            zml.Tensor.fromShape(v_mask_buf.shape()),
+            zml.Tensor.fromShape(sigma_scalar_shape),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_init_v_exe.deinit();
+
+    var noise_init_a_exe = try platform.compileFn(
+        allocator, io,
+        model.forwardNoiseInit,
+        .{
+            zml.Tensor.fromShape(a_clean_buf.shape()),
+            zml.Tensor.fromShape(a_noise_buf.shape()),
+            zml.Tensor.fromShape(a_mask_buf.shape()),
+            zml.Tensor.fromShape(sigma_scalar_shape),
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer noise_init_a_exe.deinit();
+
+    // Stage 1 noise_scale = 1.0 (pure noise for unconditioned, mask-weighted for image-conditioned)
+    const noise_scale: f32 = 1.0;
+    std.log.info("Running Stage 1 noise init (noise_scale={d:.6})...", .{noise_scale});
+    var noise_scale_buf = try zml.Buffer.scalar(io, platform, noise_scale, .f32, sharding);
+    defer noise_scale_buf.deinit();
+
+    // Video noise init
+    var ni_v_args = try noise_init_v_exe.args(allocator);
+    defer ni_v_args.deinit(allocator);
+    var ni_v_results = try noise_init_v_exe.results(allocator);
+    defer ni_v_results.deinit(allocator);
+    ni_v_args.set(.{ v_clean_buf, v_noise_buf, v_mask_buf, noise_scale_buf });
+    noise_init_v_exe.call(ni_v_args, &ni_v_results);
+    var v_latent_buf = ni_v_results.get(zml.Buffer);
+
+    // Audio noise init
+    var ni_a_args = try noise_init_a_exe.args(allocator);
+    defer ni_a_args.deinit(allocator);
+    var ni_a_results = try noise_init_a_exe.results(allocator);
+    defer ni_a_results.deinit(allocator);
+    ni_a_args.set(.{ a_clean_buf, a_noise_buf, a_mask_buf, noise_scale_buf });
+    noise_init_a_exe.call(ni_a_args, &ni_a_results);
+    var a_latent_buf = ni_a_results.get(zml.Buffer);
+
+    std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape().dims()});
+    std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape().dims()});
 
     // ---- Image conditioning (optional) ----
     if (image_path) |img_path| {
@@ -696,7 +810,6 @@ fn runStage1(
     }
 
     // ---- Compile executables ----
-    const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
 
     std.log.info("Compiling preprocessing exe...", .{});
     const preprocess_shape = model.initPreprocessParams(ckpt_store.view());
@@ -1352,6 +1465,7 @@ fn runStage1(
         .a_latent = a_latent_buf,
         .v_context_pos = v_context_pos_buf,
         .a_context_pos = a_context_pos_buf,
+        .rng_state = rng_buf._state,
     };
 }
 
@@ -1370,9 +1484,11 @@ fn runBridge(
     a_context: zml.Buffer,
     upsampler_ckpt_path: []const u8,
     main_ckpt_path: []const u8,
-    noise_path: []const u8,
     pipe_meta: PipelineMeta,
     image_path: ?[]const u8,
+    rng_state: zml.Buffer,
+    dump_intermediates: bool,
+    output_dir: []const u8,
 ) !BridgeResult {
     const s1 = pipe_meta.stage1;
     const s2 = pipe_meta.stage2;
@@ -1406,14 +1522,6 @@ fn runBridge(
     defer main_reg.deinit();
     var main_store: zml.io.TensorStore = .fromRegistry(allocator, &main_reg);
     defer main_store.deinit();
-
-    var noise_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, noise_path) catch |err| {
-        std.log.err("Failed to open stage2 noise: {s}", .{noise_path});
-        return err;
-    };
-    defer noise_reg.deinit();
-    var noise_store: zml.io.TensorStore = .fromRegistry(allocator, &noise_reg);
-    defer noise_store.deinit();
 
     // ========================================================================
     // Step 1: Unpatchify video: [1, T_v1, 128] → [1, 128, F, H_s1, W_s1]
@@ -1558,15 +1666,68 @@ fn runBridge(
     var a_mask_buf = try zml.Buffer.fromBytes(io, platform, a_mask_shape, sharding, a_mask_host);
 
     // ========================================================================
-    // Step 6: Load noise and run noise init
+    // Step 6: Generate or load noise, then run noise init
     // ========================================================================
-    std.log.info("Loading noise tensors...", .{});
-    var v_noise_buf = try loadBuf(allocator, io, platform, &noise_store, "video_noise_s2", sharding);
+    var v_noise_buf: zml.Buffer = undefined;
+    var a_noise_buf: zml.Buffer = undefined;
+
+    {
+        // Generate noise from RNG state
+        std.log.info("Generating Stage 2 noise from RNG...", .{});
+        var rng_buf: zml.Bufferized(zml.Tensor.Rng) = .{ ._state = rng_state };
+
+        var noise_gen_v_exe = try platform.compileFn(
+            allocator, io,
+            model.forwardGenerateNoise,
+            .{
+                zml.Tensor.Rng.init(),
+                zml.Tensor.fromShape(video_clean_buf.shape()),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer noise_gen_v_exe.deinit();
+
+        var noise_gen_a_exe = try platform.compileFn(
+            allocator, io,
+            model.forwardGenerateNoise,
+            .{
+                zml.Tensor.Rng.init(),
+                zml.Tensor.fromShape(audio_clean_buf.shape()),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer noise_gen_a_exe.deinit();
+
+        // Generate video noise (draw #3)
+        var gen_v_args = try noise_gen_v_exe.args(allocator);
+        defer gen_v_args.deinit(allocator);
+        var gen_v_results = try noise_gen_v_exe.results(allocator);
+        defer gen_v_results.deinit(allocator);
+        gen_v_args.set(.{ rng_buf, video_clean_buf });
+        noise_gen_v_exe.call(gen_v_args, &gen_v_results);
+        rng_buf._state.deinit();
+        rng_buf, v_noise_buf = gen_v_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+
+        // Generate audio noise (draw #4)
+        var gen_a_args = try noise_gen_a_exe.args(allocator);
+        defer gen_a_args.deinit(allocator);
+        var gen_a_results = try noise_gen_a_exe.results(allocator);
+        defer gen_a_results.deinit(allocator);
+        gen_a_args.set(.{ rng_buf, audio_clean_buf });
+        noise_gen_a_exe.call(gen_a_args, &gen_a_results);
+        rng_buf._state.deinit();
+        _, a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+    }
     defer v_noise_buf.deinit();
-    var a_noise_buf = try loadBuf(allocator, io, platform, &noise_store, "audio_noise_s2", sharding);
     defer a_noise_buf.deinit();
+
     std.log.info("  video_noise: {any}", .{v_noise_buf.shape().dims()});
     std.log.info("  audio_noise: {any}", .{a_noise_buf.shape().dims()});
+
+    if (dump_intermediates) {
+        try writeBuffer(allocator, io, v_noise_buf, output_dir, "s2_video_noise.bin");
+        try writeBuffer(allocator, io, a_noise_buf, output_dir, "s2_audio_noise.bin");
+    }
 
     // Compile noise init
     std.log.info("Compiling noise init...", .{});
