@@ -16,7 +16,7 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, processes: []
 
             switch (dev.*) {
                 tag => |*db| {
-                    try jw.write(Envelope(tp.name, tp.type.Value){ .index = i, .type = tp.name, .inner = db.front().* });
+                    try jw.write(Envelope(tp.type.Value){ .index = i, .type = tp.name, .inner = db.front().* });
                 },
                 else => {},
             }
@@ -35,7 +35,7 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, processes: []
     try writer.writeAll("\n");
 }
 
-fn Envelope(comptime _: []const u8, comptime Inner: type) type {
+fn Envelope(comptime Inner: type) type {
     return struct {
         index: usize,
         type: []const u8,
