@@ -11,11 +11,8 @@ pub const Server = struct {
     tcp: std.Io.net.Server,
     connection_group: std.Io.Group = .init,
 
-    pub fn init(io: std.Io, port: u16, devices: []const *DeviceInfo, host: *const HostInfo) !Server {
-        const address: std.Io.net.IpAddress = .{ .ip4 = .{
-            .bytes = .{ 0, 0, 0, 0 },
-            .port = port,
-        } };
+    pub fn init(io: std.Io, listen: []const u8, devices: []const *DeviceInfo, host: *const HostInfo) !Server {
+        const address = parseListenAddress(listen) orelse return error.InvalidAddress;
         var tcp = try address.listen(io, .{ .reuse_address = true });
         errdefer tcp.deinit(io);
 
@@ -27,8 +24,8 @@ pub const Server = struct {
         };
     }
 
-    pub fn run(io: std.Io, port: u16, devices: []const *DeviceInfo, host_info: *const HostInfo) void {
-        var self = init(io, port, devices, host_info) catch |err| {
+    pub fn run(io: std.Io, listen: []const u8, devices: []const *DeviceInfo, host_info: *const HostInfo) void {
+        var self = init(io, listen, devices, host_info) catch |err| {
             std.log.err("prometheus server failed to start: {s}", .{@errorName(err)});
             return;
         };
@@ -92,5 +89,20 @@ pub const Server = struct {
                 try request.respond("Not Found\n", .{ .status = .not_found });
             }
         }
+    }
+
+    fn parseListenAddress(listen: []const u8) ?std.Io.net.IpAddress {
+        var ttk = std.mem.tokenizeScalar(u8, listen, ':');
+
+        const host_str = ttk.next() orelse return null;
+        const port_str = ttk.next() orelse return null;
+        const port = std.fmt.parseInt(u16, port_str, 10) catch return null;
+
+        const ip_bytes: [4]u8 = if (std.mem.eql(u8, host_str, "localhost"))
+            .{ 127, 0, 0, 1 }
+        else
+            (std.Io.net.IpAddress.parseIp4(host_str, 0) catch return null).ip4.bytes;
+
+        return .{ .ip4 = .{ .bytes = ip_bytes, .port = port } };
     }
 };

@@ -35,20 +35,18 @@ const CliArgs = struct {
     api: bool = false,
     api_port: u16 = 9090,
     remotes: ?[]const u8 = null,
-    prometheus: bool = false,
-    prometheus_port: u16 = 9835,
+    prometheus_listen: ?[]const u8 = null,
     tui_refresh_rate: u16 = 100,
     poll_interval: u16 = 500,
 
     pub const help =
-        \\ zml-smi [--top] [--csv] [--json] [--prometheus] [--prometheus-port PORT]
+        \\ zml-smi [--top] [--csv] [--json] [--prometheus-listen HOST:PORT]
         \\         [--tui-refresh-rate MS] [--poll-interval MS]
         \\
         \\ --top               Interactive TUI mode
         \\ --csv               Output device metrics as CSV
         \\ --json              Output device metrics as JSON
-        \\ --prometheus        Expose metrics as Prometheus endpoint
-        \\ --prometheus-port   Prometheus server port (default: 9835)
+        \\ --prometheus-listen Expose metrics as Prometheus endpoint on HOST:PORT
         \\ --tui-refresh-rate  TUI refresh rate in ms (default: 100)
         \\ --poll-interval     Device polling interval in ms (default: 500)
         \\
@@ -77,7 +75,7 @@ pub fn main(init: std.process.Init) !void {
 
     var collector: Collector = .init(arena, gpa, io, .{
         .poll_interval_ms = args.poll_interval,
-        .poll_only = !args.top and !args.prometheus and !args.api,
+        .poll_only = !args.top and args.prometheus_listen == null and !args.api,
     });
     defer collector.deinit();
 
@@ -91,8 +89,8 @@ pub fn main(init: std.process.Init) !void {
         std.log.info("serving api metrics on port {d}", .{args.api_port});
     }
 
-    if (args.prometheus) {
-        std.log.info("serving prometheus metrics on port {d}", .{args.prometheus_port});
+    if (args.prometheus_listen) |listen| {
+        std.log.info("serving prometheus metrics on {s}", .{listen});
     }
 
     inline for (device_backends) |entry| {
@@ -121,15 +119,15 @@ pub fn main(init: std.process.Init) !void {
     });
     defer state.deinit(arena);
 
-    if (args.prometheus) {
-        try api_group.concurrent(io, prometheus.Server.run, .{ io, args.prometheus_port, collector.device_infos.items, &host_info });
+    if (args.prometheus_listen) |listen| {
+        try api_group.concurrent(io, prometheus.Server.run, .{ io, listen, collector.device_infos.items, &host_info });
     }
 
     if (args.api) {
         try api_group.concurrent(io, api.Server.run, .{ io, args.api_port, collector.device_infos.items, collector.process_lists.items, gpa, &enricher });
     }
 
-    if (args.prometheus or args.api) {
+    if (args.prometheus_listen != null or args.api) {
         try api_group.await(io);
     } else if (args.csv) {
         var csv_buf: [4096]u8 = undefined;
