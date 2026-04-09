@@ -455,12 +455,12 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
     const Child = ptr_info.child;
     const can_error = stdx.meta.FnReturnErrorSet(cb) != null;
 
-    const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
-        .pointer => |info| .{ info.child, !info.is_const },
+    const K = switch (@typeInfo(FnParam(cb, 1))) {
+        .pointer => |info| info.child,
         else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
     };
     // Abort if v doesnt' contain any K.
-    if (comptime !Contains(Ptr, K)) return;
+    //if (comptime !Contains(Ptr, K)) return;
 
     // Handle simple cases.
     switch (Ptr) {
@@ -474,20 +474,28 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
     }
 
     // Handle stdx.BoundedArray that contains uninitalized data.
-    if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
-        return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
-    }
+    //if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
+    //    return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
+    //}
 
     // Recursively visit fields of v.
     switch (ptr_info.size) {
         .one => switch (@typeInfo(Child)) {
             .@"struct" => |s| inline for (s.fields) |field| {
-                if (field.is_comptime or comptime !Contains(field.type, K)) continue;
+                //if (field.is_comptime or comptime !Contains(field.type, K)) continue;
                 const field_type_info = @typeInfo(field.type);
                 // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
                 switch (field_type_info) {
                     .pointer => if (can_error) try visit(cb, ctx, @field(v, field.name)) else visit(cb, ctx, @field(v, field.name)),
-                    .array, .optional, .@"union", .@"struct" => if (can_error) try visit(cb, ctx, &@field(v, field.name)) else visit(cb, ctx, &@field(v, field.name)),
+                    .@"struct" => {
+                        std.log.info("{*}", .{&@field(v, field.name)});
+                        if (can_error) {
+                            //try visit(cb, ctx, &@field(v, field.name));
+                        } else {
+                            visit(cb, ctx, &@field(v, field.name));
+                        }
+                    },
+                    .array, .optional, .@"union" => if (can_error) try visit(cb, ctx, &@field(v, field.name)) else visit(cb, ctx, &@field(v, field.name)),
                     else => {},
                 }
             },

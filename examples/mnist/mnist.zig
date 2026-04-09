@@ -116,6 +116,10 @@ pub fn main(init: std.process.Init) !void {
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 
+    if (true) {
+        unreachable;
+    }
+
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
 

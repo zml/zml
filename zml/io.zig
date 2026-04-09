@@ -1135,59 +1135,72 @@ pub fn load(
         total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
     };
 
-    meta.forEachVisit(&bufferized, *Buffer, struct {
-        fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
-            ctx.buffers[i] = buffer;
+    const LocalContext = struct {
+        walk_ctx: *Ctx,
+        index: usize = 0,
+    };
+    var ctx: LocalContext = .{ .walk_ctx = &walk_ctx };
+
+    meta.visit(struct {
+        fn call(ctx_: *LocalContext, buffer: *Buffer) void {
+            ctx_.walk_ctx.buffers[ctx_.index] = buffer;
+            ctx_.index += 1;
         }
-    }.call, .{&walk_ctx});
+    }.call, &ctx, &bufferized);
 
-    meta.forEachVisit(model, *const Tensor, struct {
-        fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
-            ctx.group.concurrent(ctx.io, struct {
-                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
-                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
-                    defer reader.deinit();
+    //meta.forEachVisit(&bufferized, *Buffer, struct {
+    //    fn call(i: usize, buffer: *Buffer, ctx: *Ctx) void {
+    //        ctx.buffers[i] = buffer;
+    //    }
+    //}.call, .{&walk_ctx});
 
-                    const shape = reader.tensor.shape;
-                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
-                    const sharding = if (select_sharding) |s| s else blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
-                        break :blk ctx_.replicated_sharding;
-                    };
+    //meta.forEachVisit(model, *const Tensor, struct {
+    //    fn call(i: usize, tensor: *const Tensor, ctx: *Ctx) void {
+    //        ctx.group.concurrent(ctx.io, struct {
+    //            fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+    //                var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
+    //                defer reader.deinit();
 
-                    var writer = MemoryWriter.init(
-                        ctx_.allocator,
-                        ctx_.io,
-                        ctx_.platform,
-                        ctx_.pinned_buffer_pools,
-                        ctx_.dma_allocators,
-                        shape,
-                        sharding,
-                        ctx_.buffers[i_],
-                    ) catch unreachable;
-                    defer writer.deinit(ctx_.allocator);
+    //                const shape = reader.tensor.shape;
+    //                const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
+    //                const sharding = if (select_sharding) |s| s else blk: {
+    //                    log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
+    //                    break :blk ctx_.replicated_sharding;
+    //                };
 
-                    const scale = 1024;
+    //                var writer = MemoryWriter.init(
+    //                    ctx_.allocator,
+    //                    ctx_.io,
+    //                    ctx_.platform,
+    //                    ctx_.pinned_buffer_pools,
+    //                    ctx_.dma_allocators,
+    //                    shape,
+    //                    sharding,
+    //                    ctx_.buffers[i_],
+    //                ) catch unreachable;
+    //                defer writer.deinit(ctx_.allocator);
 
-                    if (ctx_.progress) |progress| {
-                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
-                        defer node.end();
-                        writer.setProgress(&node);
-                        defer writer.setProgress(null);
-                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
-                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
-                        progress_writer.interface.flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    } else {
-                        const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
-                        writer.interface().flush() catch unreachable;
-                        _ = ctx_.total.fetchAdd(total, .monotonic);
-                    }
-                }
-            }.call, .{ i, tensor, ctx }) catch unreachable;
-        }
-    }.call, .{&walk_ctx});
-    walk_ctx.group.await(io) catch unreachable;
+    //                const scale = 1024;
+
+    //                if (ctx_.progress) |progress| {
+    //                    var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+    //                    defer node.end();
+    //                    writer.setProgress(&node);
+    //                    defer writer.setProgress(null);
+    //                    var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+    //                    const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+    //                    progress_writer.interface.flush() catch unreachable;
+    //                    _ = ctx_.total.fetchAdd(total, .monotonic);
+    //                } else {
+    //                    const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
+    //                    writer.interface().flush() catch unreachable;
+    //                    _ = ctx_.total.fetchAdd(total, .monotonic);
+    //                }
+    //            }
+    //        }.call, .{ i, tensor, ctx }) catch unreachable;
+    //    }
+    //}.call, .{&walk_ctx});
+    //walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
 }
