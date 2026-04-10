@@ -470,7 +470,6 @@ const Visitor = struct {
 };
 
 pub fn visit(comptime call_back: anytype, ctx: FnParam(call_back, 0), v: anytype) VisitReturn(call_back) {
-
     const action = comptime Visitor.determineAction(call_back, @TypeOf(v));
 
     const PtrTypeOfV = @TypeOf(v);
@@ -517,7 +516,7 @@ pub fn visit(comptime call_back: anytype, ctx: FnParam(call_back, 0), v: anytype
                         if (can_error) try visit(call_back, ctx, v_elem) else visit(call_back, ctx, v_elem);
                     }
                 },
-                .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers got {}", .{@TypeOf(call_back), PtrTypeOfV}),
+                .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers got {}", .{ @TypeOf(call_back), PtrTypeOfV }),
             }
         },
     }
