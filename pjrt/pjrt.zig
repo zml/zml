@@ -3,6 +3,12 @@ const builtin = @import("builtin");
 
 const c = @import("c");
 
+comptime {
+    // PJRT FFI metadata reflection can walk long generated type names.
+    // Raise branch quota to avoid comptime exhaustion in std.mem.indexOf.
+    @setEvalBranchQuota(20000);
+}
+
 pub const ffi = @import("ffi.zig");
 
 const log = std.log.scoped(.pjrt);
@@ -21,6 +27,7 @@ pub const meta = struct {
     //
     // 1. https://github.com/openxla/xla/issues/10032
     pub fn structSize(comptime T: type) usize {
+        @setEvalBranchQuota(20000);
         // unsafe on purpose, we want this to fail if that ever changes
         const typedef_name = comptime blk: {
             const needle = ".struct_";

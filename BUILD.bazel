@@ -4,6 +4,8 @@ zls_completion(
     name = "completion",
     visibility = ["//visibility:public"],
     deps = [
+        "//examples/benchmark",
+        "//examples/ltx:inference",
         "//bin/zml-smi",
         "//examples/llm",
         "//examples/mnist",
@@ -30,3 +32,4 @@ platform(
     },
     visibility = ["//visibility:public"],
 )
+
