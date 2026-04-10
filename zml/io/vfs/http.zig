@@ -156,7 +156,7 @@ pub const HTTP = struct {
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -284,7 +284,7 @@ pub const HTTP = struct {
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.Reader.Error.Unexpected;
+            return error.Unexpected;
         };
     }
 
