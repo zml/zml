@@ -1,6 +1,6 @@
 const std = @import("std");
-const zml = @import("../zml.zig");
-const triton = @import("triton.zig");
+const zml = @import("zml.zig");
+const triton = @import("moe/triton.zig");
 
 pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
