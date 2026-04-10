@@ -42,7 +42,7 @@ pub const HTTP = struct {
     client: *std.http.Client,
     protocol: Protocol,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
