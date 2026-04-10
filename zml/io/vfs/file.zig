@@ -85,7 +85,7 @@ pub const File = struct {
     allocator: std.mem.Allocator,
     mutex: std.Io.Mutex = .init,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     config: Config,
     base: VFSBase,
 
@@ -201,7 +201,7 @@ pub const File = struct {
                     },
                 });
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }

@@ -49,7 +49,7 @@ zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     translate_c = "@translate-c",
-    zig_version = "0.16.0-dev.2722+f16eb18ce",
+    zig_version = "0.16.0-dev.3133+5ec8e45f3",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",

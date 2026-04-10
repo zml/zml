@@ -103,7 +103,7 @@ pub const HF = struct {
     client: *std.http.Client,
     authorization: std.http.Client.Request.Headers.Value,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
     trees: std.StringHashMapUnmanaged(std.ArrayList(TreeNode)) = .{},
     dir_read_states: std.AutoHashMapUnmanaged(*std.Io.Dir.Reader, ReadState) = .{},
@@ -319,7 +319,7 @@ pub const HF = struct {
         );
         defer parsed.deinit();
 
-        var tree_root: std.ArrayList(TreeNode) = .{};
+        var tree_root: std.ArrayList(TreeNode) = .empty;
         for (parsed.value) |item| {
             try insertTreeNode(self.allocator, &tree_root, item);
         }
@@ -407,7 +407,7 @@ pub const HF = struct {
         var parts = std.mem.tokenizeScalar(u8, item.path, '/');
         var current_list = root;
 
-        var parents: std.ArrayList(*TreeNode) = .{};
+        var parents: std.ArrayList(*TreeNode) = .empty;
         defer parents.deinit(allocator);
 
         while (true) {
@@ -426,7 +426,7 @@ pub const HF = struct {
                 if (!is_last) {
                     try parents.append(allocator, f);
                     if (f.children == null) {
-                        f.children = .{};
+                        f.children = .empty;
                     }
                     current_list = &f.children.?;
                 } else if (std.mem.eql(u8, item.type, "file")) {
@@ -438,7 +438,7 @@ pub const HF = struct {
                     .name = try allocator.dupe(u8, part),
                     .kind = if (is_file) .file else .directory,
                     .size = if (is_last) item.size else 0,
-                    .children = if (is_file) null else .{},
+                    .children = if (is_file) null else .empty,
                 };
                 try current_list.append(allocator, new_node);
 
@@ -462,17 +462,17 @@ pub const HF = struct {
                 const handle = self.getFileHandle(o.file);
                 const total = self.performRead(handle, o.data, handle.pos) catch |err| {
                     log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 };
 
                 if (total == 0) {
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 }
 
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -667,7 +667,7 @@ pub const HF = struct {
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.Reader.Error.Unexpected;
+            return error.Unexpected;
         };
     }
 
