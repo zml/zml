@@ -184,8 +184,10 @@ upload() {
   if confirm "Set ${CYAN}${VERSION}${RESET}${WHITE} as the default install version?"; then
     rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/install.sh"
     success "zml-smi/install.sh"
+    DEFAULT_INSTALL=true
   else
     warn "Skipped default install script"
+    DEFAULT_INSTALL=false
   fi
 }
 
@@ -361,7 +363,7 @@ main() {
   if [ "$VERIFY" = true ] && [ "$DRY_RUN" = false ]; then
     verify
   fi
-  if [ "$PUBLISH" = true ]; then
+  if [ "$PUBLISH" = true ] && [ "${DEFAULT_INSTALL:-true}" = true ]; then
     push_tag
     github_release
   fi
@@ -375,7 +377,11 @@ main() {
   else
     printf "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
     printf "  ${GREEN}  Release complete!${RESET}\n"
-    printf "  ${DIM}  curl -fsSL ${BASE_URL}/zml-smi/install.sh | sudo bash${RESET}\n"
+    if [ "${DEFAULT_INSTALL:-true}" = true ]; then
+      printf "  ${DIM}  curl -fsSL ${BASE_URL}/zml-smi/install.sh | sudo bash${RESET}\n"
+    else
+      printf "  ${DIM}  curl -fsSL ${BASE_URL}/zml-smi/${VERSION}/install.sh | sudo bash${RESET}\n"
+    fi
     printf "  ${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}\n"
   fi
   printf "\n"
