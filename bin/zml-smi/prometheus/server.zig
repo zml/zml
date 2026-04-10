@@ -70,24 +70,18 @@ pub const Server = struct {
                 continue;
             }
 
-            if (std.mem.eql(u8, request.head.target, "/metrics")) {
-                var body_buf: [4096]u8 = undefined;
-                var body_writer = try request.respondStreaming(&body_buf, .{
-                    .respond_options = .{
-                        .status = .ok,
-                        .extra_headers = &.{
-                            .{ .name = "content-type", .value = "text/plain" },
-                        },
+            var body_buf: [4096]u8 = undefined;
+            var body_writer = try request.respondStreaming(&body_buf, .{
+                .respond_options = .{
+                    .status = .ok,
+                    .extra_headers = &.{
+                        .{ .name = "content-type", .value = "text/plain" },
                     },
-                });
+                },
+            });
 
-                try exposition.write(&body_writer.writer, self.devices, self.host);
-                try body_writer.end();
-            } else if (std.mem.eql(u8, request.head.target, "/")) {
-                try request.respond("OK\n", .{ .status = .ok });
-            } else {
-                try request.respond("Not Found\n", .{ .status = .not_found });
-            }
+            try exposition.write(&body_writer.writer, self.devices, self.host);
+            try body_writer.end();
         }
     }
 };
