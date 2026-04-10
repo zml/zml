@@ -11,7 +11,7 @@ const tpu_detail = @import("detail/tpu_detail.zig");
 const Detail = @This();
 
 state: *const data.SystemState,
-device_id: u8,
+device_id: u16,
 process_table: *ProcessTable = undefined,
 
 pub fn draw(self: *const Detail, ctx: vxfw.DrawContext) std.mem.Allocator.Error!vxfw.Surface {

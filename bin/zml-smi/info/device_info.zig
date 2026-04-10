@@ -13,9 +13,16 @@ pub const DeviceInfo = union(Target) {
     rocm: DoubleBuffer(GpuInfo),
     neuron: DoubleBuffer(NeuronInfo),
     tpu: DoubleBuffer(TpuInfo),
+
+    pub fn isRemote(self: *const DeviceInfo) bool {
+        switch (self.*) {
+            inline else => |*db| return db.front().remote,
+        }
+    }
 };
 
 pub const GpuInfo = struct {
+    remote: bool = false,
     name: ?[]const u8 = null,
     driver_version: ?[]const u8 = null,
     cuda_driver_version: ?[]const u8 = null,
@@ -54,6 +61,7 @@ pub const GpuInfo = struct {
 };
 
 pub const NeuronInfo = struct {
+    remote: bool = false,
     name: ?[]const u8 = null,
     driver_version: ?[]const u8 = null,
 
@@ -76,6 +84,7 @@ pub const NeuronInfo = struct {
 };
 
 pub const TpuInfo = struct {
+    remote: bool = false,
     name: ?[]const u8 = null,
 
     util_percent: ?u64 = null,

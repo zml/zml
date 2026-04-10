@@ -12,6 +12,7 @@ const MetricCard = @This();
 
 title: []const u8,
 title_image: ?vaxis.Image = null,
+title_right: ?[]const u8 = null,
 cell_size: vxfw.Size = .{},
 /// Lines of "label: value" pairs to display.
 lines: []const LineEntry = &.{},
@@ -51,6 +52,7 @@ pub fn draw(self: *const MetricCard, ctx: vxfw.DrawContext) std.mem.Allocator.Er
         .child = ui.drawWidget(self, drawContent),
         .title = self.title,
         .title_image = self.title_image,
+        .value_label = self.title_right,
         .cell_size = self.cell_size,
         .border_style = bstyle,
     };

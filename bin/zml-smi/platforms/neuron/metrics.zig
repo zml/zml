@@ -30,7 +30,7 @@ pub fn start(collector: *Collector) !void {
 
     const GiB: u64 = 1024 * 1024 * 1024;
     var neuron_infos: std.ArrayList(*DeviceInfo) = .{};
-    const dev_offset: u8 = @intCast(collector.device_infos.items.len);
+    const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     var ver_buf: [Nrt.version_buf_len]u8 = undefined;
     const nrt_ver: ?[]const u8 = if (nrt.version(&ver_buf)) |v|

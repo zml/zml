@@ -43,6 +43,7 @@ pub const ProcessEnricher = struct {
         curr_ticks.ensureTotalCapacity(self.gpa, @intCast(procs.len)) catch return;
 
         for (procs) |*info| {
+            if (info.remote) continue;
             // Read Uid, VmRSS from /proc/{pid}/status
             const status_path = std.fmt.allocPrint(alloc, "/proc/{d}/status", .{info.pid}) catch continue;
             const uid: u32 = @intCast(sysfs.readFieldInt(alloc, io, status_path, "Uid") catch 0);

@@ -13,7 +13,7 @@ pub fn start(collector: *Collector) !void {
     const chip = scanPciChips(collector.arena, collector.io) orelse return error.TpuUnavailable;
     const device_count = chip.chip_count * chip.devices_per_chip;
     var tpu_infos: std.ArrayList(*DeviceInfo) = .{};
-    const dev_offset: u8 = @intCast(collector.device_infos.items.len);
+    const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     for (0..device_count) |_| {
         const chip_name = try collector.arena.dupe(u8, chip.name);

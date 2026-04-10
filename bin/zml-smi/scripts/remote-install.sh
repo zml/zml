@@ -2,25 +2,26 @@
 set -euo pipefail
 
 BASE_URL=""
+VERSION=""
 BINARY_NAME="zml-smi"
 
 resolve_dirs() {
   if [ -n "${ZML_SMI_INSTALL_DIR:-}" ] || [ -n "${ZML_SMI_BIN_DIR:-}" ]; then
-    INSTALL_DIR="${ZML_SMI_INSTALL_DIR:-/usr/lib/zml-smi}"
-    BIN_DIR="${ZML_SMI_BIN_DIR:-/usr/bin}"
+    INSTALL_DIR="${ZML_SMI_INSTALL_DIR:-/opt/zml-smi}"
+    BIN_DIR="${ZML_SMI_BIN_DIR:-/usr/local/bin}"
     return
   fi
 
-  INSTALL_DIR="/usr/lib/zml-smi"
-  BIN_DIR="/usr/bin"
+  INSTALL_DIR="/opt/zml-smi"
+  BIN_DIR="/usr/local/bin"
 
   if mkdir -p "$INSTALL_DIR" 2>/dev/null && [ -w "$INSTALL_DIR" ] &&
      mkdir -p "$BIN_DIR" 2>/dev/null && [ -w "$BIN_DIR" ]; then
     return
   fi
 
-  warn "Cannot write to /usr/lib or /usr/bin — falling back to ~/.local"
-  INSTALL_DIR="${HOME}/.local/lib/zml-smi"
+  warn "Cannot write to /opt or /usr/local/bin — falling back to ~/.local"
+  INSTALL_DIR="${HOME}/.local/zml-smi"
   BIN_DIR="${HOME}/.local/bin"
 }
 
@@ -68,15 +69,19 @@ detect_platform() {
   esac
 
   case "$ARCH" in
-    x86_64|amd64)   ARCH_LABEL="x86_64" ;;
-    aarch64|arm64)   ARCH_LABEL="aarch64" ;;
+    x86_64|amd64)   ARCH_LABEL="amd64" ;;
+    aarch64|arm64)   ARCH_LABEL="arm64" ;;
     *)
       fail "Unsupported architecture: ${ARCH}" ;;
   esac
 
+  if [ "$OS_LABEL" = "macos" ] && [ "$ARCH_LABEL" = "amd64" ]; then
+    fail "macOS x86_64 is not supported. Only Apple Silicon (arm64) is supported."
+  fi
+
   success "${OS_LABEL} ${ARCH_LABEL}"
 
-  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
+  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-v${VERSION}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
 }
 
 check_deps() {
