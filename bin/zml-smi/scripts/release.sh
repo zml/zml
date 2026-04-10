@@ -41,7 +41,7 @@ usage() {
     bazel run //bin/zml-smi:release -- [flags] <version>
 
   ${WHITE}Arguments${RESET}
-    ${CYAN}version${RESET}         Semantic version, e.g. ${DIM}1.0.0${RESET} (tagged as ${DIM}zml-smi-v1.0.0${RESET})
+    ${CYAN}version${RESET}         Version string, e.g. ${DIM}v1.0.0${RESET} (tagged as ${DIM}zml-smi-v1.0.0${RESET})
 
   ${WHITE}Flags${RESET}
     ${CYAN}--dry-run${RESET}       Build only — skip tagging, uploading, and publishing
@@ -51,7 +51,6 @@ usage() {
     ${CYAN}-h, --help${RESET}      Show this help
 
   ${WHITE}Environment${RESET}
-    ${CYAN}BUCKET${RESET}          S3-compatible bucket name
     ${CYAN}BASE_URL${RESET}        Public base URL serving the bucket
     ${CYAN}RCLONE_REMOTE${RESET}   Rclone remote name ${DIM}(default: r2)${RESET}
 
@@ -76,12 +75,11 @@ usage() {
 # --- Checks ---
 
 check_env() {
-  [ -z "${BUILD_WORKSPACE_DIRECTORY:-}" ] && fail "Must be run via 'bazel run //bin/zml-smi:release -- <version>'"
-  local missing=()
-  [ -z "${BUCKET:-}" ] && missing+=("BUCKET")
-  [ -z "${BASE_URL:-}" ] && missing+=("BASE_URL")
-  if [ ${#missing[@]} -gt 0 ]; then
-    fail "Missing required environment variables: ${CYAN}${missing[*]}"
+  if [ -z "${BUILD_WORKSPACE_DIRECTORY:-}" ]; then
+    fail "Must be run via 'bazel run //bin/zml-smi:release -- <version>'"
+  fi
+  if [ -z "${BASE_URL:-}" ]; then
+    fail "Missing required environment variable: ${CYAN}BASE_URL"
   fi
 }
 
@@ -89,7 +87,7 @@ check_env() {
 
 changelog() {
   local prev_tag
-  prev_tag="$(git describe --tags --abbrev=0 --match 'zml-smi-v*' 2>/dev/null || true)"
+  prev_tag="$(git describe --tags --abbrev=0 --match 'zml-smi-*' 2>/dev/null || true)"
   local range="${prev_tag:+${prev_tag}..HEAD}"
 
   git log ${range:-HEAD} --pretty=format:"- %s" -- bin/zml-smi/ | grep -vi WIP || true
@@ -159,12 +157,12 @@ upload() {
   success "BASE_URL=${CYAN}${install_url}"
 
   if [ "$DRY_RUN" = true ]; then
-    step "Uploading to ${CYAN}${rclone_remote}:${BUCKET}"
+    step "Uploading to ${CYAN}${rclone_remote}"
     warn "Dry run — skipping upload"
     return
   fi
 
-  step "Uploading to ${CYAN}${rclone_remote}:${BUCKET}"
+  step "Uploading to ${CYAN}${rclone_remote}"
 
   if ! confirm "Upload artifacts?"; then
     warn "Skipped upload"
@@ -178,16 +176,16 @@ upload() {
     fi
     local name remote_name
     name="$(basename "$f")"
-    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
-    rclone copyto "$f" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/${remote_name}"
+    remote_name="${name/zml-smi-/zml-smi-${VERSION}-}"
+    rclone copyto "$f" "${rclone_remote}:zml-smi/${VERSION}/${remote_name}"
     success "${remote_name}"
   done
 
-  rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/install.sh"
+  rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:zml-smi/${VERSION}/install.sh"
   success "zml-smi/${VERSION}/install.sh"
 
   if confirm "Set ${CYAN}${VERSION}${RESET}${WHITE} as the default install version?"; then
-    rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/install.sh"
+    rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:zml-smi/install.sh"
     success "zml-smi/install.sh"
     DEFAULT_INSTALL=true
   else
@@ -207,7 +205,7 @@ verify() {
     fi
     local name remote_name
     name="$(basename "$f")"
-    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
+    remote_name="${name/zml-smi-/zml-smi-${VERSION}-}"
     local local_sha remote_sha
     local_sha="$(shasum -a 256 "$f" | awk '{print $1}')"
     remote_sha="$(curl -fsSL "${install_url}/${remote_name}" | shasum -a 256 | awk '{print $1}')"
@@ -255,7 +253,7 @@ release_notes() {
     if [ "$sha" != "$actual" ]; then
       fail "${name} sha256 mismatch — sidecar: ${sha}, actual: ${actual}"
     fi
-    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
+    remote_name="${name/zml-smi-/zml-smi-${VERSION}-}"
     downloads="${downloads}| [${remote_name}](${install_url}/${remote_name}) | \`${sha}\` |"$'\n'
   done
 
@@ -349,7 +347,7 @@ main() {
 
   check_env
 
-  TAG="zml-smi-v${VERSION}"
+  TAG="zml-smi-${VERSION}"
 
   local title="zml-smi release ${TAG}"
   if [ "$DRY_RUN" = true ]; then
