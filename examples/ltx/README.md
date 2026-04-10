@@ -200,5 +200,5 @@ In image-conditioned mode, the denoise mask and clean latent encode the conditio
 
 ## Migration History
 
-See [07_noise_generation_migration.md](07_noise_generation_migration.md) for the
+See [07_noise_generation_migration.md](_archive/07_noise_generation_migration.md) for the
 noise generation and sigma schedule migration from Python to Zig.
