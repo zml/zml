@@ -1126,13 +1126,14 @@ pub const BasicAVTransformerBlock = struct {
         return self.forwardNativeImpl(false, false, false, false, false, false, vx_in, ax_in, inputs, params);
     }
 
-    /// Checker-only experimental path: attention runs in bf16 matching Python's dtype chain.
+    /// bf16-native attention path: attention runs in bf16 matching Python's dtype chain.
+    /// Activated via --bf16-attn-stage1 / --bf16-attn-stage2 CLI flags.
     pub fn forwardNativeBf16Attn(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         return self.forwardNativeImpl(false, false, false, true, false, false, vx_in, ax_in, inputs, params);
     }
 
     /// STG block variant: both video and audio self-attention bypass Q·K·V and compute to_out(to_v(x)) instead.
-    /// Used for block 29 during the STG perturbation pass (Pass 3) in Stage 1 denoising.
+    /// Used for block 28 (0-indexed) during the STG perturbation pass (Pass 3) in Stage 1 denoising.
     pub fn forwardNativeSTG(self: BasicAVTransformerBlock, vx_in: Tensor, ax_in: Tensor, inputs: SharedInputs, params: Params) FullOutputs {
         return self.forwardNativeImpl(false, false, false, false, true, true, vx_in, ax_in, inputs, params);
     }
@@ -1353,8 +1354,8 @@ pub fn forwardAdalnSingle(sigma: Tensor, params: AdaLayerNormSingle.Params) AdaL
     return AdaLayerNormSingle.forward(sigma, params);
 }
 
-/// Free-function entrypoint for parity tooling: output projection after all transformer blocks.
-/// x: [.b, .t, .d], embedded_timestep: [.b, .d_emb]
+/// Output projection after all transformer blocks: hidden → velocity.
+/// x: [.b, .t, .d], embedded_timestep: [.b, .t, .d_emb]
 /// Returns: [.b, .t, .d_out=128]
 pub fn forwardOutputProjection(x: Tensor, embedded_timestep: Tensor, params: OutputProjection.Params) Tensor {
     return OutputProjection.forward(x, embedded_timestep, params);
@@ -1631,18 +1632,13 @@ pub fn forwardDenoisingStep(
 
 /// Convert raw velocity → x0 prediction (denoised sample).
 ///
-/// Matches Python's X0Model.forward output:
-///   timesteps = denoise_mask * sigma
-///   x0 = (sample - velocity * timesteps).to(bf16)
-///
-/// The guider combine should operate on x0 predictions (not velocities)
-/// so that the rescale factor is computed in the same space as Python.
 /// Velocity → x0 conversion matching Python's X0Model + to_denoised() dtype chain.
+/// The guider combine operates on x0 predictions (not velocities) so that the
+/// rescale factor is computed in the same space as Python.
 ///
-/// Python (traced empirically with f32 denoise_mask):
+/// Python dtype chain (traced empirically with f32 denoise_mask):
 ///   timesteps = denoise_mask(f32) * sigma(f32) → f32
-///   to_denoised: sigma = sigma.to(f32)  →  f32 (no-op since timesteps already f32)
-///               (sample.f32 - velocity.f32 * sigma_f32).to(bf16)
+///   x0 = (sample.f32 - velocity.f32 * timesteps_f32).to(bf16)
 pub fn forwardToDenoised(
     sample: Tensor,
     velocity: Tensor,
@@ -1855,8 +1851,8 @@ pub fn forwardBlock0NativeBf16Attn(
 
 
 /// STG block variant: identical interface to forwardBlock0Native, but both video and audio
-/// self-attention use V-passthrough (to_out(to_v(x))). Used for block 29 during Pass 3
-/// (STG perturbation) in Stage 1 denoising.
+/// self-attention use V-passthrough (to_out(to_v(x))). Used for block 28 (0-indexed) during
+/// Pass 3 (STG perturbation) in Stage 1 denoising.
 pub fn forwardBlock0NativeSTG(
     vx_in: Tensor,
     ax_in: Tensor,
@@ -2490,7 +2486,7 @@ pub fn forwardPreprocess(
 ) PreprocessOutput {
     const patchify = Patchify{};
 
-    // Tag all inputs — fixture tensors arrive untagged from safetensors.
+    // Tag all inputs — tensors arrive untagged from safetensors.
     const v_lat = v_latent.withPartialTags(.{ .b, .t, .patch });
     const a_lat = a_latent.withPartialTags(.{ .b, .t, .patch });
     const v_ctx = v_context.withPartialTags(.{ .b, .t, .d });
@@ -2647,9 +2643,8 @@ pub fn forwardPreprocess(
     ); // [B, 1, D_a]
 
     // Convert f32 adaln outputs to bf16 at the preprocessing boundary.
-    // This matches step 1's behavior (fixture provided bf16 timesteps).
-    // The f32 adaln computes precisely, then bf16 rounding gives the same
-    // values Python saved to the fixture.
+    // The f32 adaln computes precisely, then bf16 rounding matches
+    // Python's dtype chain.
     return .{
         .vx = vx,
         .ax = ax,
