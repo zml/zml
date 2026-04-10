@@ -41,10 +41,12 @@ zig_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
-        "//bin/zml-smi/platforms/linux",
         "//bazel/stamp:zig",
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
         "@libvaxis//:vaxis",
-    ],
+    ] + select({
+        "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
+        "//conditions:default": ["//bin/zml-smi/platforms/linux"],
+    }),
 )

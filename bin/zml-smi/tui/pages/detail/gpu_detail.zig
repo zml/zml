@@ -15,7 +15,7 @@ pub fn draw(
     process_table: *ProcessTable,
     ctx: vxfw.DrawContext,
     w: u16,
-    id: u8,
+    id: u16,
     gpu: data.GpuInfo,
     parent_widget: vxfw.Widget,
 ) std.mem.Allocator.Error!vxfw.Surface {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const smi_info = @import("zml-smi/info");
 const di = smi_info.device_info;
 pub const DeviceInfo = di.DeviceInfo;
@@ -12,7 +13,10 @@ pub const HostInfo = hi.HostInfo;
 pub const HostData = hi.HostData;
 pub const pi = smi_info.process_info;
 pub const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
-pub const ProcessEnricher = @import("zml-smi/platforms/linux").process.ProcessEnricher;
+pub const ProcessEnricher = if (builtin.os.tag == .macos)
+    @import("zml-smi/platforms/macos").process.ProcessEnricher
+else
+    @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
 pub const history_len: usize = 500;
 
@@ -84,7 +88,8 @@ pub const SystemState = struct {
     targets: Targets,
     process_lists: []*ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     io: std.Io,
     tui_refresh_rate: u16,
 
@@ -95,19 +100,22 @@ pub const SystemState = struct {
         tui_refresh_rate: u16,
         process_lists: []*ProcessDoubleBuffer,
         enricher: *ProcessEnricher,
+        gpa: std.mem.Allocator,
+        arena: std.mem.Allocator,
         io: std.Io,
     };
 
-    pub fn init(allocator: std.mem.Allocator, cfg: Config) !SystemState {
+    pub fn init(cfg: Config) !SystemState {
         return .{
             .devices = cfg.devices,
             .host = cfg.host,
-            .history = try HistoryBuffers.init(allocator, cfg.devices.len),
+            .history = try HistoryBuffers.init(cfg.arena, cfg.devices.len),
             .targets = cfg.targets,
             .tui_refresh_rate = cfg.tui_refresh_rate,
             .process_lists = cfg.process_lists,
             .enricher = cfg.enricher,
-            .allocator = allocator,
+            .gpa = cfg.gpa,
+            .arena = cfg.arena,
             .io = cfg.io,
         };
     }

@@ -56,7 +56,7 @@ pub fn run(allocator: std.mem.Allocator, io: std.Io, state: *data.SystemState) !
 
     const content_w: u16 = @min(@as(u16, @intCast(vx.screen.width)), Overview.host_line_width + 2);
 
-    var viewing_device: ?u8 = null;
+    var viewing_device: ?u16 = null;
     var overview = try Overview.init(allocator, state, null, &viewing_device);
     defer overview.deinit(allocator);
 

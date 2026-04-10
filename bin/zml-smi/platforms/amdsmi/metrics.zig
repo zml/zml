@@ -13,7 +13,7 @@ pub fn start(collector: *Collector) !void {
     amdsmi.* = try AmdSmi.init(collector.arena);
 
     const count = amdsmi.deviceCount();
-    const dev_offset: u8 = @intCast(collector.device_infos.items.len);
+    const dev_offset: u16 = @intCast(collector.device_infos.items.len);
 
     for (0..count) |i| {
         const dev = Device.open(amdsmi, @intCast(i)) catch continue;

@@ -26,7 +26,7 @@ scroll_bars: vxfw.ScrollBars = .{
 },
 merged: std.ArrayList(ProcessInfo) = .{},
 
-pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) void {
+pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;
     self.merged.clearRetainingCapacity();
 
@@ -37,10 +37,10 @@ pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u8) vo
                 if (entry.device_idx != did) {
                     continue;
                 }
-                self.merged.append(state.allocator, entry) catch break;
+                self.merged.append(state.gpa, entry) catch break;
             }
         } else {
-            self.merged.appendSlice(state.allocator, pl_items) catch break;
+            self.merged.appendSlice(state.gpa, pl_items) catch break;
         }
     }
 

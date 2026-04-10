@@ -5,7 +5,6 @@ const DeviceInfo = smi_info.device_info.DeviceInfo;
 pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo) !void {
     inline for (@typeInfo(DeviceInfo).@"union".fields) |tp| {
         const tag = @field(smi_info.Target, tp.name);
-        const Inner = resolveType(tp.type);
         var header_printed = false;
 
         for (devices, 0..) |dev, i| {
@@ -13,7 +12,7 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo) !void {
                 tag => |*db| {
                     if (!header_printed) {
                         try writer.writeAll("index,type");
-                        inline for (@typeInfo(Inner).@"struct".fields) |f| {
+                        inline for (@typeInfo(tp.type.Value).@"struct".fields) |f| {
                             try writer.writeAll("," ++ f.name);
                         }
                         try writer.writeAll("\n");
@@ -24,7 +23,7 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo) !void {
                     const val = db.front().*;
 
                     try writer.print("{d},{s}", .{ i, tp.name });
-                    inline for (@typeInfo(Inner).@"struct".fields) |f| {
+                    inline for (@typeInfo(tp.type.Value).@"struct".fields) |f| {
                         try writer.writeAll(",");
                         try writeValue(writer, @field(val, f.name));
                     }
@@ -43,11 +42,4 @@ fn writeValue(writer: *std.Io.Writer, field: anytype) !void {
         .pointer => return writer.writeAll(field),
         else => return writer.print("{any}", .{field}),
     }
-}
-
-fn resolveType(comptime DB: type) type {
-    for (@typeInfo(DB).@"struct".fields) |df| {
-        if (std.mem.eql(u8, df.name, "values")) return @typeInfo(df.type).array.child;
-    }
-    unreachable;
 }

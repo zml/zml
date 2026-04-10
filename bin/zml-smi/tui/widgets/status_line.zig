@@ -6,7 +6,7 @@ const ui = @import("../lib/ui.zig");
 
 const StatusLine = @This();
 
-viewing_device: ?u8,
+viewing_device: ?u16,
 use_braille: bool,
 
 const Binding = struct {

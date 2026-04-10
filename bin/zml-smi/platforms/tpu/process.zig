@@ -5,16 +5,16 @@ const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.Ar
 const DeviceInfo = smi_info.device_info.DeviceInfo;
 const Collector = @import("zml-smi/collector").Collector;
 
-pub fn init(collector: *Collector, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u8) !void {
-    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, devices_per_chip, device_infos, dev_offset });
+pub fn init(collector: *Collector, devices_per_chip: u32, device_infos: []*DeviceInfo, list: *ProcessDoubleBuffer, dev_offset: u16) !void {
+    try collector.spawnPoll(pollOnce, .{ collector.gpa, collector.io, list, devices_per_chip, device_infos, dev_offset });
 }
 
-fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u8) void {
-    scan(io, allocator, list.back(), devices_per_chip, device_infos, dev_offset);
+fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, devices_per_chip: u32, device_infos: []*DeviceInfo, dev_offset: u16) void {
+    scan(allocator, io, list.back(), devices_per_chip, device_infos, dev_offset);
     list.swap();
 }
 
-fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, infos: []*DeviceInfo, dev_offset: u8) void {
+fn scan(allocator: std.mem.Allocator, io: std.Io, back: *std.ArrayList(pi.ProcessInfo), devices_per_chip: u32, infos: []*DeviceInfo, dev_offset: u16) void {
     back.clearRetainingCapacity();
 
     var proc_dir = std.Io.Dir.openDirAbsolute(io, "/proc", .{ .iterate = true }) catch return;
@@ -36,9 +36,9 @@ fn scan(io: std.Io, allocator: std.mem.Allocator, back: *std.ArrayList(pi.Proces
             const target = link_buf[0..len];
 
             if (parseChipIndex(target)) |chip_idx| {
-                const base: u8 = @intCast(chip_idx * devices_per_chip);
+                const base: u16 = @intCast(chip_idx * devices_per_chip);
                 for (0..devices_per_chip) |d| {
-                    const local_idx: u8 = @intCast(base + d);
+                    const local_idx: u16 = @intCast(base + d);
                     var info: pi.ProcessInfo = .{ .pid = pid, .device_idx = local_idx + dev_offset };
 
                     if (local_idx < infos.len) {
