@@ -19,9 +19,9 @@ Phase 6  vocoder + BWE   mel → 16kHz waveform → 48kHz stereo → MP4 mux
 A quick introduction to [mel spectrograms](https://huggingface.co/learn/audio-course/en/chapter1/audio_data#mel-spectrogram). 
 
 **Entry point:** `main()` in
-[inference.zig](inference.zig#L405).
+[inference.zig](inference.zig#L410).
 It parses CLI args, loads `pipeline_meta.json`, initialises the ZML platform,
-then calls each phase function in sequence (lines 405–585).
+then calls each phase function in sequence.
 
 GPU buffers flow directly between phases — no files touch disk unless
 `--dump-intermediates` is set.
@@ -74,7 +74,7 @@ different real `zml.Buffer` inputs.
 > - `Buffer` = runtime device allocation (actual GPU memory)
 
 You can see the first concrete example at
-[inference.zig L658](inference.zig#L658)
+[inference.zig L666](inference.zig#L666)
 where `forwardGenerateNoise` is compiled and then called twice (once for video
 noise, once for audio noise).
 
@@ -97,15 +97,15 @@ Stage 1 consumes pre-computed inputs from a safetensors file:
 | `v_context_pos/neg` | `[1, S, 4096]` bf16 | Text-conditioned embeddings |
 | `a_context_pos/neg` | `[1, S, 2048]` bf16 | Text-conditioned embeddings |
 
-These are loaded at [inference.zig L630](inference.zig#L630).
+These are loaded at [inference.zig L638](inference.zig#L638).
 
 ### 4.2  Result Structs (Buffer hand-off)
 
 Each phase returns a result struct whose fields are live GPU buffers:
 
-- **`Stage1Result`** ([inference.zig L144](inference.zig#L144)):
+- **`Stage1Result`** ([inference.zig L143](inference.zig#L143)):
   denoised v/a latents + positive text contexts + RNG state.
-- **`BridgeResult`** ([inference.zig L164](inference.zig#L164)):
+- **`BridgeResult`** ([inference.zig L163](inference.zig#L163)):
   upsampled & re-noised latents + Stage 2 positions/masks/contexts/clean.
 - **`Stage2Result`** ([inference.zig L193](inference.zig#L193)):
   final denoised v/a latents.
@@ -116,21 +116,21 @@ Ownership transfers between phases — the caller frees what it no longer needs.
 
 ## 5. Phase 1 — Stage 1: 30-Step Guided Denoising
 
-**Function:** [`runStage1()`](inference.zig#L586) (~900 lines)
+**Function:** [`runStage1()`](inference.zig#L591) (~900 lines)
 
 ### 5.1  Noise Generation & Initialisation
 
 1. **Sigma schedule** — computed on the host (CPU):
-   [`computeSigmaSchedule()`](model.zig#L1434) generates 31 values via a
+   [`computeSigmaSchedule()`](model.zig#L1431) generates 31 values via a
    logistic shift+stretch formula. Read the code comments there for the math.
 
 2. **Box-Muller noise** — compiled graph function
-   [`forwardGenerateNoise()`](model.zig#L1373): takes RNG state + target shape,
+   [`forwardGenerateNoise()`](model.zig#L1370): takes RNG state + target shape,
    returns updated RNG + Gaussian noise. Called twice (video draw #1, audio
-   draw #2) at [inference.zig L682](inference.zig#L682).
+   draw #2) at [inference.zig L689](inference.zig#L689).
 
 3. **Noise init** —
-   [`forwardNoiseInit()`](model.zig#L1395):
+   [`forwardNoiseInit()`](model.zig#L1392):
    `noised = noise × mask × σ₀ + clean × (1 − mask × σ₀)`.
    This blends noise with the clean latent proportionally to the denoise mask
    and initial sigma.
@@ -150,7 +150,7 @@ Stage 1 compiles **8 distinct executables** before entering the loop:
 | `denoise_v/a_exe` | `forwardDenoisingStepFromX0` | Euler step (x₀ + mask blending) |
 | `guider_combine_exe` | `forwardGuiderCombine` | CFG + STG + modality merge |
 
-Compilation happens at [inference.zig L872](inference.zig#L872).
+Compilation happens at [inference.zig L821](inference.zig#L821).
 
 ### 5.3  The 4-Pass Guidance Loop
 
@@ -163,7 +163,7 @@ Pass 3  STG           positive context, V-passthrough at block 28  → velocity_
 Pass 4  Isolated      positive context, zeroed AV cross-masks   → velocity_iso
 ```
 
-The loop body is at [inference.zig L1157](inference.zig#L1157).
+The loop body is at [inference.zig L1179](inference.zig#L1179).
 
 For each pass:
 1. Feed `(vx, ax)` from `forwardPreprocess` through 48 sequential block calls.
@@ -175,7 +175,7 @@ After all 4 passes, `forwardGuiderCombine` merges them:
 combined = cond + (cfg−1)·(cond−neg) + stg·(cond−ptb) + (mod−1)·(cond−iso)
 rescale  × ( rescale · std(cond)/std(combined) + (1−rescale) )
 ```
-See [`forwardGuiderCombine()`](model.zig#L1510).
+See [`forwardGuiderCombine()`](model.zig#L1507).
 
 Finally, `forwardDenoisingStepFromX0` takes one Euler step, replacing the
 latent buffers for the next iteration.
@@ -183,7 +183,7 @@ latent buffers for the next iteration.
 ### 5.4  Weight Loading Strategy
 
 The 48 transformer blocks' weights are loaded one at a time into GPU memory
-([inference.zig L1085](inference.zig#L1085)).
+([inference.zig L1098](inference.zig#L1098)).
 Each block shares the same compiled executable — only the weight buffer argument
 changes per block call.
 
@@ -191,7 +191,7 @@ changes per block call.
 
 ## 6. Phase 2 — Bridge
 
-**Function:** [`runBridge()`](inference.zig#L1476)
+**Function:** [`runBridge()`](inference.zig#L1515)
 
 The bridge converts Stage 1's low-res latent to Stage 2's high-res latent:
 
@@ -211,7 +211,7 @@ optionally re-applies image conditioning.
 
 ## 7. Phase 3 — Stage 2: 3-Step Distilled Denoising
 
-**Function:** [`runStage2()`](inference.zig#L1838)
+**Function:** [`runStage2()`](inference.zig#L1890)
 
 Much simpler than Stage 1:
 - **3 steps** (σ = `[0.909375, 0.725, 0.421875] → 0.0`)
@@ -219,13 +219,13 @@ Much simpler than Stage 1:
 - Uses `forwardDenoisingStep` (velocity-based Euler, not x₀-based)
 - Same 48-block architecture with different checkpoint weights
 
-See the distilled sigmas at [`stage2_distilled_sigmas`](model.zig#L1490).
+See the distilled sigmas at [`stage2_distilled_sigmas`](model.zig#L1487).
 
 ---
 
 ## 8. The Transformer Block (×48)
 
-**Struct:** [`BasicAVTransformerBlock`](model.zig#L740)
+**Struct:** [`BasicAVTransformerBlock`](model.zig#L737)
 
 Each of the 48 blocks processes **two parallel streams** (video + audio) with
 cross-attention bridges between them:
@@ -253,13 +253,13 @@ cross-attention bridges between them:
 
 ### 8.1  Attention Variants
 
-[`Attention`](model.zig#L377) handles 6 kinds, enumerated in `AttentionKind`:
+[`Attention`](model.zig#L376) handles 6 kinds, enumerated in `AttentionKind`:
 - `attn1` (video self), `attn2` (video↔text cross)
 - `audio_attn1` (audio self), `audio_attn2` (audio↔text cross)
 - `audio_to_video_attn`, `video_to_audio_attn`
 
 All use 32 heads. RoPE is applied via split-half cos/sin rotation — see
-[`applyLtxRotaryEmbSplit()`](model.zig#L631).
+[`applyLtxRotaryEmbSplit()`](model.zig#L629).
 
 ### 8.2  AdaLN Modulation
 
@@ -267,11 +267,11 @@ Each block is modulated by **Adaptive Layer Norm** driven by the timestep σ:
 
 1. σ → sinusoidal embedding → MLP →
    9 modulation vectors per modality (shift, scale, gate × 3 sub-layers).
-2. These are computed once in [`forwardPreprocess`](model.zig#L2474) and
+2. These are computed once in [`forwardPreprocess`](model.zig#L2470) and
    threaded through all 48 blocks as `SharedInputs`.
 
 The per-token blending logic (for tokens that have mask=0, i.e. conditioned)
-uses σ=0 modulation. See [`adaValueAtMasked()`](model.zig#L702) for the
+uses σ=0 modulation. See [`adaValueAtMasked()`](model.zig#L699) for the
 memory-efficient implementation.
 
 ### 8.3  STG (Spatiotemporal Guidance)
@@ -281,7 +281,7 @@ At block index 28 during Pass 3, self-attention is replaced with a
 `to_out(to_v(x))` — effectively removing the attention mixing. This creates a
 "perturbed" trajectory that the guider uses to improve coherence.
 
-See [`forwardNativeSTG()`](model.zig#L1137).
+See [`forwardNativeSTG()`](model.zig#L1134).
 
 ---
 
@@ -289,12 +289,12 @@ See [`forwardNativeSTG()`](model.zig#L1137).
 
 ### 9.1  Sigma Schedule (Host-side)
 
-[`computeSigmaSchedule()`](model.zig#L1434) — logistic
+[`computeSigmaSchedule()`](model.zig#L1431) — logistic
 shift + terminal stretch. The 30+1 sigmas go from ≈1.0 → 0.0.
 
 ### 9.2  Velocity → x₀
 
-[`forwardToDenoised()`](model.zig#L1642):
+[`forwardToDenoised()`](model.zig#L1639):
 ```
 x₀ = latent − σ × velocity × mask
 ```
@@ -302,7 +302,7 @@ Only tokens with `mask=1` (denoising regions) get the velocity update.
 
 ### 9.3  Euler Step (Stage 1 — from x₀)
 
-[`forwardDenoisingStepFromX0()`](model.zig#L1671):
+[`forwardDenoisingStepFromX0()`](model.zig#L1668):
 ```
 velocity = (latent − x₀) / σ_current                        (inferred from x₀)
 next     = latent + (σ_next − σ_current) × velocity × mask   (Euler update)
@@ -311,7 +311,7 @@ next     = next × mask + clean × (1 − mask)                  (mask blending)
 
 ### 9.4  Euler Step (Stage 2 — from velocity)
 
-[`forwardDenoisingStep()`](model.zig#L1588):
+[`forwardDenoisingStep()`](model.zig#L1585):
 ```
 next = latent + (σ_next − σ_current) × velocity × mask
 next = next × mask + clean × (1 − mask)
@@ -324,7 +324,7 @@ Simpler since the distilled model outputs are used directly.
 
 ### 10.1  Video VAE Decode (Phase 4)
 
-**Function:** [`runVideoVaeDecode()`](inference.zig#L2289)
+**Function:** [`runVideoVaeDecode()`](inference.zig#L2357)
 **Model:** [video_vae.zig](video_vae.zig) — 3D causal convolution decoder
 
 Architecture: `conv_in → 9 up_blocks (ResBlock groups + DepthToSpace) → PixelNorm → SiLU → conv_out`
@@ -334,14 +334,14 @@ Frames are then extracted as uint8 RGB.
 
 ### 10.2  Audio VAE Decode (Phase 5)
 
-**Function:** [`runAudioVaeDecode()`](inference.zig#L2549)
+**Function:** [`runAudioVaeDecode()`](inference.zig#L2622)
 **Model:** [audio_vae.zig](audio_vae.zig) — 2D causal convolution decoder
 
 Converts `[1, 128, 1, T_audio]` latent → mel spectrogram.
 
 ### 10.3  Vocoder + BWE (Phase 6)
 
-**Function:** [`runVocoderWithBWE()`](inference.zig#L2662)
+**Function:** [`runVocoderWithBWE()`](inference.zig#L2741)
 **Model:** [vocoder.zig](vocoder.zig)
 
 Two-stage audio synthesis:
@@ -368,7 +368,7 @@ seed → initBuffer → [Stage 1: draw#1 video, draw#2 audio]
 ```
 
 See the `Tensor.Rng` type (from `zml`) and the draw sequence at
-[inference.zig L682](inference.zig#L682).
+[inference.zig L689](inference.zig#L689).
 
 ---
 
@@ -376,9 +376,9 @@ See the `Tensor.Rng` type (from `zml`) and the draw sequence at
 
 When `--image` is provided:
 
-1. [`encodeImageToTokens()`](inference.zig#L300) — load image → VAE encode →
+1. [`encodeImageToTokens()`](inference.zig#L299) — load image → VAE encode →
    patchify → `[1, n_img, 128]` token buffer.
-2. [`forwardApplyConditioning()`](inference.zig#L253) — splice image tokens
+2. [`forwardApplyConditioning()`](inference.zig#L252) — splice image tokens
    into the first frame positions of latent/clean/mask.
 
 The conditioning zeroes out the denoise mask for first-frame tokens (= keep
@@ -391,7 +391,7 @@ them fixed), so the denoising loop never modifies the image-conditioned region.
 | Component | Compute dtype | Rationale |
 |-----------|--------------|-----------|
 | Transformer (video stream) | bf16 | Standard for large-scale diffusion |
-| Transformer (audio FF) | f32 matmuls | Reduces accumulated audio drift — see [`forwardAudioFFPrecise()`](model.zig#L84) |
+| Transformer (audio FF) | f32 matmuls | Reduces accumulated audio drift — see [`forwardAudioFFPrecise()`](model.zig#L83) |
 | GELU activation | f32 | Precision-critical non-linearity, cast back after — see [`FeedForward.forward()`](model.zig#L61) |
 | AdaLN modulation math | f32 | Avoids bf16 rounding in shift/scale blending |
 | Noise init / Euler steps | f32 | All denoising arithmetic runs f32, casts to bf16 at end |
@@ -412,7 +412,7 @@ different weight buffers. This means:
 - The architecture only **requires** one block's weights on GPU at a time,
   which would enable weight streaming (load block N → call → free → load N+1).
   However, the current implementation loads all 48 blocks upfront
-  ([inference.zig L1085](inference.zig#L1085)), so they all reside in GPU
+  ([inference.zig L1098](inference.zig#L1098)), so they all reside in GPU
   memory simultaneously. This trades higher peak memory for speed — streaming
   would add 5,760 host→device transfers per stage (48 blocks × 4 passes × 30
   steps).

@@ -11,7 +11,7 @@ The pipeline produces video+audio from a text prompt, with optional image condit
 2. **Zig** — Everything else on GPU: noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
 
 When `--image` is provided, the first frame is conditioned on a reference image
-via VAE encoding + per-token mask blending (see [06_image_conditioning.md](_archive/06_image_conditioning.md)).
+via VAE encoding + per-token mask blending.
 
 The `inference` binary runs the full pipeline end-to-end in a single process,
 passing GPU buffers between phases without intermediate files.
@@ -189,7 +189,7 @@ Passing `--image` to `export_pipeline.py` is only useful for generating
 **reference tensors** (`conditioned_stage1_inputs.safetensors`,
 `encoder_activations.safetensors`) for validation against the Zig output.
 
-See [06_image_conditioning.md](_archive/06_image_conditioning.md) for details
+See the image conditioning section below for details
 on the implementation and per-token AdaLN masking.
 
 In image-conditioned mode, the denoise mask and clean latent encode the conditioning:
@@ -200,5 +200,5 @@ In image-conditioned mode, the denoise mask and clean latent encode the conditio
 
 ## Migration History
 
-See [07_noise_generation_migration.md](_archive/07_noise_generation_migration.md) for the
-noise generation and sigma schedule migration from Python to Zig.
+Noise generation and sigma schedule computation were migrated from Python to Zig
+(Box-Muller via `Tensor.Rng`, logistic sigma schedule in `computeSigmaSchedule()`).
