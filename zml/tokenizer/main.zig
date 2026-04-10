@@ -13,7 +13,7 @@ const Flags = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+    var gpa: std.debug.GeneralPurposeAllocator(.{}) = .{};
     const allocator = gpa.allocator();
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
