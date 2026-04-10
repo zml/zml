@@ -12,7 +12,7 @@ pub const Server = struct {
     connection_group: std.Io.Group = .init,
 
     pub fn init(io: std.Io, listen: []const u8, devices: []const *DeviceInfo, host: *const HostInfo) !Server {
-        const address = parseListenAddress(listen) orelse return error.InvalidAddress;
+        const address = try std.Io.net.IpAddress.parseLiteral(listen);
         var tcp = try address.listen(io, .{ .reuse_address = true });
         errdefer tcp.deinit(io);
 
@@ -89,20 +89,5 @@ pub const Server = struct {
                 try request.respond("Not Found\n", .{ .status = .not_found });
             }
         }
-    }
-
-    fn parseListenAddress(listen: []const u8) ?std.Io.net.IpAddress {
-        var ttk = std.mem.tokenizeScalar(u8, listen, ':');
-
-        const host_str = ttk.next() orelse return null;
-        const port_str = ttk.next() orelse return null;
-        const port = std.fmt.parseInt(u16, port_str, 10) catch return null;
-
-        const ip_bytes: [4]u8 = if (std.mem.eql(u8, host_str, "localhost"))
-            .{ 127, 0, 0, 1 }
-        else
-            (std.Io.net.IpAddress.parseIp4(host_str, 0) catch return null).ip4.bytes;
-
-        return .{ .ip4 = .{ .bytes = ip_bytes, .port = port } };
     }
 };
