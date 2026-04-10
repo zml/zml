@@ -473,11 +473,11 @@ pub const GCS = struct {
                 const handle = self.getFileHandle(o.file);
                 const total = self.performRead(handle, o.data, handle.pos) catch |err| {
                     log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 };
 
                 if (total == 0) {
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 }
 
                 handle.pos += @intCast(total);
