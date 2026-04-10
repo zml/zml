@@ -121,17 +121,7 @@ pub fn fusedExpertsImpl(
     const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
-    if (hidden.dtype() != .bf16) return error.UnsupportedType;
-    if (gate_up.dtype() != .bf16 and gate_up.dtype() != .f8e4m3fn) return error.UnsupportedType;
-    if (down.dtype() != .bf16 and down.dtype() != .f8e4m3fn) return error.UnsupportedType;
-    if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
-    if (ids.dtype() != .i32) return error.UnsupportedType;
-    if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
-    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
-    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
-    if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
-    if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
-    if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+    try validateInputs(hidden, gate_up, down, weights, ids);
 
     const block_size_m = options.block_size_m;
     const num_experts = gate_up.dim(.expert);
@@ -206,12 +196,10 @@ pub fn fusedExpertsImpl(
         first_generation_config,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = hidden_quant.dim(.token) * ids.dim(.topk), .out = gate_up.dim(.out) }, .bf16),
+        Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
     );
 
-    const first_flat = first_out.reshape(.{ .g = num_assignments, .out = gate_up.dim(.out) });
-
-    const gate, const up = zml.nn.splitRealImg(first_flat, .sequential);
+    const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
     const activated = gate.silu().mul(up);
 
     var activated_quant = activated;
@@ -285,7 +273,9 @@ fn callFusedKernel(
         @min(max_num_tokens_padded, num_valid_tokens * block_size_m)
     else
         max_num_tokens_padded;
-    const grid_x = ceilDiv(em_effective, block_size_m) * ceilDiv(b.dim(1), block_size_n);
+    const grid_x =
+        (std.math.divCeil(i64, em_effective, block_size_m) catch unreachable) *
+        (std.math.divCeil(i64, b.dim(1), block_size_n) catch unreachable);
 
     const stride_asm: i64 = if (config.group_k > 0 and a_scale.rank() == 2) a_scale.dim(1) else 0;
     const stride_ask: i64 = if (config.group_k > 0 and a_scale.rank() == 2) 1 else 0;
@@ -306,21 +296,21 @@ fn callFusedKernel(
         sorted_token_ids,
         expert_ids,
         num_tokens_post_padded,
-        i64s(b.dim(1)),
-        i64s(b.dim(2)),
-        i64s(em_effective),
-        i64s(num_valid_tokens),
-        i64s(a.dim(1)),
-        i64s(b.dim(1) * b.dim(2)),
-        i64s(b.dim(2)),
-        i64s(b.dim(.out)),
-        i64s(stride_asm),
-        i64s(stride_ask),
-        i64s(stride_bse),
-        i64s(stride_bsk),
-        i64s(stride_bsn),
-        i64s(0),
-        i64s(0),
+        Tensor.constant(.{ .i64 = b.dim(1) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = num_valid_tokens }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = a.dim(1) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = b.dim(1) * b.dim(2) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = b.dim(.out) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
     };
     const outputs = ops.triton(inputs, .{output_shape}, .{
         .name = "fused_moe_kernel",
@@ -655,14 +645,6 @@ fn getLaunchConfigJsonPath(allocator: std.mem.Allocator) ![]const u8 {
     return try allocator.dupe(u8, config_json);
 }
 
-fn jsonValueAsI64(v: std.json.Value) !i64 {
-    return switch (v) {
-        .integer => |x| x,
-        .float => |x| @intFromFloat(x),
-        else => error.InvalidLaunchConfigValue,
-    };
-}
-
 fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
@@ -710,22 +692,21 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     if (best_config == null) return error.NoMatchingLaunchConfig;
 
     const cfg = best_config.?.object;
-    out.block_size_m = try jsonValueAsI64(cfg.get("BLOCK_SIZE_M") orelse return error.MissingLaunchConfigField);
-    out.block_size_n = try jsonValueAsI64(cfg.get("BLOCK_SIZE_N") orelse return error.MissingLaunchConfigField);
-    out.block_size_k = try jsonValueAsI64(cfg.get("BLOCK_SIZE_K") orelse return error.MissingLaunchConfigField);
-    out.group_size_m = try jsonValueAsI64(cfg.get("GROUP_SIZE_M") orelse return error.MissingLaunchConfigField);
-    out.num_warps = try jsonValueAsI64(cfg.get("num_warps") orelse return error.MissingLaunchConfigField);
-    out.num_stages = try jsonValueAsI64(cfg.get("num_stages") orelse return error.MissingLaunchConfigField);
+    const block_size_m = cfg.get("BLOCK_SIZE_M") orelse return error.MissingLaunchConfigField;
+    const block_size_n = cfg.get("BLOCK_SIZE_N") orelse return error.MissingLaunchConfigField;
+    const block_size_k = cfg.get("BLOCK_SIZE_K") orelse return error.MissingLaunchConfigField;
+    const group_size_m = cfg.get("GROUP_SIZE_M") orelse return error.MissingLaunchConfigField;
+    const num_warps = cfg.get("num_warps") orelse return error.MissingLaunchConfigField;
+    const num_stages = cfg.get("num_stages") orelse return error.MissingLaunchConfigField;
+
+    out.block_size_m = block_size_m.integer;
+    out.block_size_n = block_size_n.integer;
+    out.block_size_k = block_size_k.integer;
+    out.group_size_m = group_size_m.integer;
+    out.num_warps = num_warps.integer;
+    out.num_stages = num_stages.integer;
 
     return out;
-}
-
-fn i64s(v: i64) Tensor {
-    return Tensor.constant(.{ .i64 = v }).reshape(.{1});
-}
-
-fn ceilDiv(a: i64, b: i64) i64 {
-    return @divFloor(a + b - 1, b);
 }
 
 fn fp8ActivationGroupSize(x: Tensor) i64 {
@@ -767,9 +748,9 @@ fn quantizePerTokenGroupFp8(
     const inputs = .{
         x,
 
-        i64s(group_size),
-        i64s(x.dim(1)),
-        i64s(x.dim(1)),
+        Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
+        Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
         Tensor.scalar(1e-6, .f32),
     };
 
@@ -798,6 +779,20 @@ fn validateOptions(opts: Options) !void {
     if (opts.w1_bias != null or opts.w2_bias != null) return error.UnsupportedOption;
 }
 
+fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {
+    if (hidden.dtype() != .bf16) return error.UnsupportedType;
+    if (gate_up.dtype() != .bf16 and gate_up.dtype() != .f8e4m3fn) return error.UnsupportedType;
+    if (down.dtype() != .bf16 and down.dtype() != .f8e4m3fn) return error.UnsupportedType;
+    if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
+    if (ids.dtype() != .i32) return error.UnsupportedType;
+    if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
+    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
+    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+    if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
+    if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
+    if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+}
+
 // Here the padding is made so that each token is aligned "in front of" its assigned experts and an expert process a contiguous block of tokens (based on block size m)
 fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, num_experts: i64, block_size_m: i64) !struct { Tensor, Tensor, Tensor } {
     log.info("Using triton kernels to sort and align tokens to experts with block size {d}", .{block_size_m});
@@ -809,13 +804,13 @@ fn alignBlockSize(allocator: std.mem.Allocator, io: std.Io, topk_ids: Tensor, nu
         num_assignments * block_size_m
     else
         num_assignments + num_experts * (block_size_m - 1);
-    const max_num_m_blocks = ceilDiv(max_num_tokens_padded, block_size_m);
+    const max_num_m_blocks = std.math.divCeil(i64, max_num_tokens_padded, block_size_m) catch unreachable;
     const warp_size: i64 = 32;
-    const padded_num_experts = ceilDiv(num_experts, warp_size) * warp_size;
+    const padded_num_experts = (std.math.divCeil(i64, num_experts, warp_size) catch unreachable) * warp_size;
     const experts_per_warp: i64 = warp_size;
     const hist_block: i64 = 256;
     const sort_block_size: i64 = 256;
-    const sort_grid_x: i64 = @min(ceilDiv(num_assignments, sort_block_size), 65535);
+    const sort_grid_x: i64 = @min(std.math.divCeil(i64, num_assignments, sort_block_size) catch unreachable, 65535);
 
     const ttir_align = try generateAlignBlockSizeTtir(
         allocator,
