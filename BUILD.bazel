@@ -5,9 +5,7 @@ zls_completion(
     visibility = ["//visibility:public"],
     deps = [
         "//examples/benchmark",
-        "//examples/lfm",
         "//examples/ltx:inference",
-        "//examples/llama",
         "//bin/zml-smi",
         "//examples/llm",
         "//examples/mnist",
