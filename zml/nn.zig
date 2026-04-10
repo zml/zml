@@ -31,6 +31,14 @@ pub const Linear = struct {
 
         return if (self.bias) |bias| y.add(bias.broad(y.shape())) else y;
     }
+    
+    pub fn convert(self: Linear, dt: DataType) Linear {
+        return .{
+            .weight = self.weight.convert(dt),
+            .bias = if (self.bias) |bias| bias.convert(dt) else null,
+            .tag = self.tag,
+        };
+    }
 };
 
 pub const TokenEmbedding = struct {
@@ -40,6 +48,10 @@ pub const TokenEmbedding = struct {
         stdx.debug.assert(idx.dtype().isInteger(), "TokenEmbedding expects an integer input, received: {f}", .{idx});
         stdx.debug.assert(self.weight.rank() == 2, "TokenEmbedding expects it's weight Tensor to be a 2D matrix, got {f}", .{self.weight});
         return self.weight.withTags(.{ .voc, .d }).gather(.{ .voc = idx }, .{});
+    }
+    
+    pub fn convert(self: TokenEmbedding, dt: DataType) TokenEmbedding {
+        return .{ .weight = self.weight.convert(dt) };
     }
 };
 

@@ -10,7 +10,7 @@ zig_binary(
         "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//",
         "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//model.safetensors",
         "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json",
-        "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//model.safetensors",
+        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//activations.safetensors",
     ],
     main = "main.zig",
     visibility = ["//visibility:public"],
@@ -19,5 +19,13 @@ zig_binary(
         "//zml",
         "//mlir",
         "//mlir/dialects",
+    ],
+)
+
+zig_binary(
+    name = "torch2zml",
+    main = "torch2zml.zig",
+    deps = [
+        "@zml//zml",
     ],
 )
