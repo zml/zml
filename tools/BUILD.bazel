@@ -1,7 +1,30 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_cc//cc:cc_test.bzl", "cc_test")
 load("@rules_python//python:py_library.bzl", "py_library")
 
 py_library(
     name = "zml_utils",
     srcs = ["zml_utils.py"],
     visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "xspace_to_perfetto_lib",
+    tags = ["manual"],
+    srcs = ["xspace_to_perfetto_lib.cc"],
+    hdrs = ["xspace_to_perfetto.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//ffi:cc",
+        "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/convert:trace_events_to_json",
+        "@xla//xla/tsl/profiler/convert:xplane_to_trace_events",
+    ],
+)
+
+cc_binary(
+    name = "xspace_to_perfetto",
+    srcs = ["xspace_to_perfetto.cc"],
+    visibility = ["//visibility:public"],
+    deps = [":xspace_to_perfetto_lib"],
 )

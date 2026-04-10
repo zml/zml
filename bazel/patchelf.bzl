@@ -23,10 +23,10 @@ def _patchelf_impl(ctx):
             commands.append(""" "$1" --replace-needed '{}' '{}' "$3" """.format(k, v))
 
     if ctx.attr.set_rpath:
-        commands.append(""" "$1" --set-rpath '{}' "$3" """.format(ctx.attr.set_rpath))
+        commands.append(""" "$1" --set-rpath '{}' --force-rpath "$3" """.format(ctx.attr.set_rpath))
     if ctx.attr.add_rpath:
         for path in ctx.attr.add_rpath:
-            commands.append(""" "$1" --add-rpath '{}' "$3" """.format(path))
+            commands.append(""" "$1" --add-rpath '{}' --force-rpath "$3" """.format(path))
     if ctx.attr.remove_rpath:
         for path in ctx.attr.remove_rpath:
             commands.append(""" "$1" --remove-rpath '{}' "$3" """.format(path))

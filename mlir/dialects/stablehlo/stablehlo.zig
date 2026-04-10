@@ -620,6 +620,28 @@ pub fn dynamic_update_slice(ctx: *mlir.Context, operand: *const mlir.Value, upda
     });
 }
 
+pub fn while_(
+    ctx: *mlir.Context,
+    operands: []const *const mlir.Value,
+    result_types: []const *const mlir.Type,
+    cond_block: *mlir.Block,
+    body_block: *mlir.Block,
+    location: *const mlir.Location,
+) *mlir.Operation {
+    _ = ctx;
+    var state = mlir.OperationState.init("stablehlo.while", location);
+    state.addOperands(operands);
+    state.addResults(result_types);
+
+    const cond_region = mlir.Region.init();
+    cond_region.appendOwnedBlock(cond_block);
+    const body_region = mlir.Region.init();
+    body_region.appendOwnedBlock(body_block);
+    state.addOwnedRegions(&.{ cond_region, body_region });
+
+    return mlir.Operation.init(&state) catch @panic("Failed to create stablehlo.while operation");
+}
+
 pub fn get_tuple_element(ctx: *mlir.Context, tuple_value: *const mlir.Value, index: i64, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "stablehlo.get_tuple_element", .{
         .operands = .{ .flat = &.{tuple_value} },
@@ -711,13 +733,18 @@ pub const CustomCallOpts = struct {
         typed_ffi: *const mlir.Attribute,
     };
 
+    pub const OutputOperandAlias = struct {
+        output_index: i64,
+        operand_index: i64,
+    };
+
     call_target_name: []const u8,
     has_side_effect: ?bool = null,
     api_version: ?ApiVersion = null,
     backend_config: ?BackendConfig = null,
     operand_layouts: ?[]const []const usize = null,
     result_layouts: ?[]const []const usize = null,
-    output_operand_aliases: ?[]const i64 = null,
+    output_operand_aliases: ?[]const OutputOperandAlias = null,
     additional_attributes: []const mlir.NamedAttribute = &.{},
 };
 
@@ -761,10 +788,10 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
 
     if (opts.output_operand_aliases) |output_operand_aliases| {
         var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
-        for (output_operand_aliases, 0..) |alias, output_index| {
-            const output_tuple_indices = if (result_types.len > 1) &[1]i64{@intCast(output_index)} else &.{};
+        for (output_operand_aliases) |alias| {
+            const output_tuple_indices = if (result_types.len > 1) &[1]i64{alias.output_index} else &.{};
             buffer.appendAssumeCapacity(
-                outputOperandAliasAttribute(ctx, .{ .operand_index = alias, .output_tuple_indices = output_tuple_indices }),
+                outputOperandAliasAttribute(ctx, .{ .operand_index = alias.operand_index, .output_tuple_indices = output_tuple_indices }),
             );
         }
         attrs.appendAssumeCapacity(
@@ -1365,7 +1392,9 @@ pub fn serializePortableArtifact2(module: *mlir.Module, target_version: []const 
     if (sctx.err) |err| {
         return err;
     }
-    if (c.mlirLogicalResultIsFailure(result)) {
+    // TODO(Corentin): Find out why this crashes on macOS
+    //if (c.mlirLogicalResultIsFailure(result)) {
+    if (@as(c_int, result.value) == 0) {
         return error.InvalidMlirBytecodeVersion;
     }
 }

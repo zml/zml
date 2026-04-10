@@ -16,6 +16,7 @@ common          --enable_platform_specific_config
 
 # Ensure host tools are built optimized
 common          --host_compilation_mode=opt
+common          --@rules_zig//zig/settings:mode=release_safe
 
 # Suppress all warnings, LLVM and friends are too noisy
 common          --copt='-w'
@@ -28,6 +29,8 @@ common          --enable_runfiles
 
 # Ensure the local env doesn't leak into the build
 common          --incompatible_strict_action_env
+# Ensure rules_python doesn't rely on the system's Python for stage-1 bootstrap
+common          --@rules_python//python/config_settings:bootstrap_impl=script
 
 # We don't to check the built files in the sandbox or repositories
 common          --experimental_check_output_files=false
@@ -79,12 +82,19 @@ common          --@llvm//config:experimental_stub_libgcc_s=true
 
 common          --macos_minimum_os=13.0
 
+# Enable stamping
+common          --stamp=true
+common          --workspace_status_command=./tools/workspace_status.sh
+
 common          --@rules_cc//cc/toolchains/args/archiver_flags:use_libtool_on_macos=false
 common          --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 common          --repo_env=BAZEL_NO_APPLE_CPP_TOOLCHAIN=1
 
 # Required for protobuf upb on Linux
 common:linux    --copt=-fPIC
+
+# Prefer prebuilt protoc (finally!)
+common          --@com_google_protobuf//bazel/toolchains:prefer_prebuilt_protoc=true
 
 # Print test errors in the console
 test            --test_output=errors
@@ -108,6 +118,7 @@ common:alldebug --strategy=local
 
 common:release  --compilation_mode=opt
 common:release  --copt=-Ofast
+common:release  --linkopt=-Wl,--strip-all
 common:release  --@rules_zig//zig/settings:mode=release_safe
 
 # --config=native builds everything optimized for the local CPU
@@ -116,3 +127,20 @@ common:native   --@rules_zig//zig/settings:zigopt=-mcpu=native
 common:native   --@@rules_rs++rules_rust+rules_rust//rust/settings:extra_rustc_flag=-Ctarget-cpu=native
 
 common:linux    --host_platform=//platforms:host_glibc
+
+# Remote execution and caching with BuildBuddy
+common:remote   --bes_results_url=https://app.buildbuddy.io/invocation/
+common:remote   --bes_backend=grpcs://remote.buildbuddy.io
+common:remote   --remote_cache=grpcs://remote.buildbuddy.io
+common:remote   --experimental_remote_downloader=grpcs://remote.buildbuddy.io
+common:remote   --remote_executor=grpcs://remote.buildbuddy.io
+common:remote   --remote_download_toplevel
+common:remote   --nobuild_runfile_links
+common:remote   --remote_timeout=3600
+common:remote   --noexperimental_throttle_remote_action_building
+common:remote   --experimental_remote_execution_keepalive
+common:remote   --remote_cache_compression
+common:remote   --grpc_keepalive_time=30s
+common:remote   --jobs=2000
+common:remote   --extra_execution_platforms=@zml//:rbe_platform
+common:remote   --experimental_repo_remote_exec=true

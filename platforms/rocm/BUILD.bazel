@@ -1,15 +1,24 @@
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library")
 
+exports_files(
+    ["merge_amdgpu_ids.zig"],
+    visibility = ["@libpjrt_rocm//:__subpackages__"],
+)
+
 zig_shared_library(
     name = "zmlxrocm",
     main = "zmlxrocm.zig",
     shared_lib_name = "libzmlxrocm.so.0",
-    visibility = ["@libpjrt_rocm//:__subpackages__"],
+    visibility = [
+        "//bin/zml-smi:__pkg__",
+        "@libpjrt_rocm//:__subpackages__",
+    ],
     # Use Clang's compiler-rt, but disable stack checking
     # to avoid requiring on the _zig_probe_stack symbol.
     zigopts = ["-fno-stack-check"],
     deps = ["//stdx"],
+    target_compatible_with = ["@platforms//os:linux"],
 )
 
 alias(
@@ -19,17 +28,20 @@ alias(
 
 cc_library(
     name = "empty",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_ROCM_DISABLED"],
 )
 
 cc_library(
     name = "libpjrt_rocm",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_ROCM"],
     deps = ["@libpjrt_rocm"],
 )
 
 zig_library(
     name = "rocm",
+    tags = ["manual"],
     import_name = "platforms/rocm",
     main = "rocm.zig",
     visibility = ["//visibility:public"],

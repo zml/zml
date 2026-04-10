@@ -14,8 +14,8 @@ const init_array_section = switch (builtin.object_format) {
 
 export const _ linksection(init_array_section) = &struct {
     fn call(argc: c_int, argv: [*c][*:0]u8, envp: [*:null]?[*:0]u8) callconv(.c) void {
-        _ = argc; // autofix
-        _ = envp; // autofix
+        _ = argc;
+        _ = envp;
         var threaded: std.Io.Threaded = .init_single_threaded;
         runfiles_global = bazel_runfiles.Runfiles.create(.{
             .allocator = std.heap.c_allocator,
@@ -30,21 +30,6 @@ export const _ linksection(init_array_section) = &struct {
         };
     }
 }.call;
-
-pub fn init(allocator: std.mem.Allocator, io: std.Io, argv: std.process.Args, environ_map: *std.process.Environ.Map) !void {
-    runfiles_global = try bazel_runfiles.Runfiles.create(.{
-        .allocator = allocator,
-        .io = io,
-        .argv = argv,
-        .environ_map = environ_map,
-    }) orelse {
-        std.debug.panic("Unable to find runfiles", .{});
-    };
-}
-
-pub fn initSimple(init_: std.process.Init) !void {
-    try init(init_.arena.allocator(), init_.io, init_.minimal.args, init_.environ_map);
-}
 
 pub fn runfiles(source_repository: []const u8) !bazel_runfiles.Runfiles.WithSourceRepo {
     return runfiles_global.withSourceRepo(source_repository);

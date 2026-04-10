@@ -1,8 +1,8 @@
 """Implementation of the zls_completion macro."""
 
-load("@aspect_bazel_lib//lib:utils.bzl", "utils")
+load("@bazel_lib//lib:utils.bzl", "utils")
 load("@bazel_skylib//rules:expand_template.bzl", "expand_template")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 load(":zls_write_build_config.bzl", "zls_write_build_config")
 load(":zls_write_runner_zig_src.bzl", "zls_write_runner_zig_src")
 
@@ -18,9 +18,10 @@ def zls_completion(name, deps, testonly = False, **kwargs):
     # Generate the ZLS BuildConfig file.
     # It contains the list of Zig packages alongside their main Zig file paths.
     build_config = name + ".build_config"
+    build_config_file = name + ".build_config.json"
     zls_write_build_config(
         name = build_config,
-        out = name + ".build_config.json",
+        out = build_config_file,
         deps = deps,
         testonly = testonly,
     )
@@ -32,14 +33,37 @@ def zls_completion(name, deps, testonly = False, **kwargs):
         main = Label("//third_party/zls:workspace_printer.zig"),
         data = [
             ":{}".format(build_config),
+            ":{}".format(build_config_file),
         ],
         args = [
-            "$(rlocationpath :{})".format(build_config),
+            "$(rlocationpath :{})".format(build_config_file),
         ],
         deps = [
             "@rules_zig//zig/runfiles",
         ],
         visibility = ["//visibility:private"],
+        testonly = testonly,
+    )
+
+    # Used to verify that the build config printer works as expected.
+    # Prevent regressions.
+    zig_test(
+        name = "{}_test".format(build_config_printer),
+        main = Label("//third_party/zls:workspace_printer_test.zig"),
+        srcs = [Label("//third_party/zls:workspace_printer.zig")],
+        data = deps + [
+            ":{}".format(build_config),
+            ":{}".format(build_config_file),
+            ":{}".format(build_config_printer),
+        ],
+        env = {
+            "COMPLETION_BUILD_CONFIG_RLOCATION": "$(rlocationpath :{})".format(build_config_file),
+            "COMPLETION_PACKAGE": native.package_name(),
+            "COMPLETION_PRINTER_RLOCATION": "$(rlocationpath :{})".format(build_config_printer),
+        },
+        deps = [
+            "@rules_zig//zig/runfiles",
+        ],
         testonly = testonly,
     )
 

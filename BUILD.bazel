@@ -8,10 +8,13 @@ zls_completion(
         "//examples/lfm",
         "//examples/ltx:inference",
         "//examples/llama",
+        "//bin/zml-smi",
+        "//examples/llm",
         "//examples/mnist",
         "//examples/sharding",
         "//stdx",
         "//zml",
+        "//zml/tokenizer/iree",
     ],
 )
 
@@ -22,7 +25,7 @@ platform(
         "@platforms//os:linux",
         # ubuntu:22.04 has GNU C Library (Ubuntu GLIBC 2.35-0ubuntu3.10)
         # But apparently not in this docker://ubuntu:22.04 image?
-        "@llvm//constraints/libc:gnu.2.31",
+        "@llvm//constraints/libc:gnu.2.28",
         "@bazel_tools//tools/cpp:clang",
     ],
     exec_properties = {

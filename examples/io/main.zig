@@ -40,6 +40,9 @@ pub fn main(init: std.process.Init) !void {
     var s3_vfs: zml.io.VFS.S3 = try .auto(allocator, init.io, &http_client, init.environ_map);
     defer s3_vfs.deinit();
 
+    var gcs_vfs: zml.io.VFS.GCS = try .auto(allocator, init.io, &http_client, init.environ_map);
+    defer gcs_vfs.deinit();
+
     var vfs: zml.io.VFS = try .init(allocator, init.io);
     defer vfs.deinit();
 
@@ -47,6 +50,7 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("https", vfs_https.io());
     try vfs.register("hf", hf_vfs.io());
     try vfs.register("s3", s3_vfs.io());
+    try vfs.register("gs", gcs_vfs.io());
 
     const io = vfs.io();
 
@@ -203,11 +207,10 @@ pub fn main(init: std.process.Init) !void {
             defer {
                 const took = now.untilNow(io, .awake);
                 const bytes_per_sec: u64 = @intFromFloat(@as(f64, @floatFromInt(total_bytes)) / (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s));
-                log.info("Loaded weights [{Bi:.2}, {D}, {Bi:.2}/s]", .{ total_bytes, stdx.fmt.fmtDuration(took), bytes_per_sec });
+                log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
             }
 
-            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, .{
-                .store = &store,
+            _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
                 .shardings = &.{ replicated_sharding, sharded_sharding },
                 .parallelism = 16,
                 .dma_chunks = 16,

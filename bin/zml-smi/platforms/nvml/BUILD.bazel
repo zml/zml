@@ -1,0 +1,19 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "nvml",
+    import_name = "zml-smi/platforms/nvml",
+    main = "metrics.zig",
+    srcs = [
+        "nvml.zig",
+        "process.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:double_buffer",
+        "//bin/zml-smi/utils:dynlib",
+        "@cuda_nvml_dev//:nvml",
+    ],
+)

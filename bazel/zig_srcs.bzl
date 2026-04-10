@@ -1,4 +1,5 @@
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
 load("@rules_zig//zig:defs.bzl", "zig_static_library")
 
 def zig_srcs(name, zig_bin = "", zig_lib = ""):

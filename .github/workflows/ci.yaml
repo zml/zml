@@ -12,73 +12,90 @@ concurrency:
   cancel-in-progress: ${{ !contains(github.ref, 'master')}}
 
 jobs:
-  platforms:
+  ci:
+    name: ci-${{ matrix.target }}
     strategy:
+      fail-fast: false
       matrix:
-        runtimes:
+        include:
+          - target: cpu
+            bazel_opts: ""
+            self_hosted: false
+            run_tests: true
+            runner_labels:
+              - runs-on
+              - runner=16cpu-linux-x64
+              - family=c8+c7
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
+          - target: neuron
+            bazel_opts: "--@zml//platforms:neuron=true --@zml//platforms:cpu=false"
+            self_hosted: false
+            run_tests: false
+            runner_labels:
+              - runs-on
+              - runner=16cpu-linux-x64
+              - family=c8+c7
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
+          - target: tpu
+            bazel_opts: "--@zml//platforms:tpu=true --@zml//platforms:cpu=false"
+            self_hosted: false
+            run_tests: false
+            runner_labels:
+              - runs-on
+              - runner=16cpu-linux-x64
+              - family=c8+c7
+              - image=ubuntu24-amd64
+              - run-id=${{ github.run_id }}
+              - extras=s3-cache
           - target: cuda
             bazel_opts: "--@zml//platforms:cuda=true --@zml//platforms:cpu=false"
-            enable_cache: false
-            user: actions
-            runs-on: ["self-hosted", "platform=cuda"]
+            self_hosted: true
+            run_tests: true
+            runner_labels: ["self-hosted", "platform=cuda"]
           - target: rocm
             bazel_opts: "--@zml//platforms:rocm=true --@zml//platforms:cpu=false"
-            enable_cache: false
-            user: actions
-            runs-on: ["self-hosted", "platform=rocm"]
-          - target: cpu
-            bazel_opts: "--@zml//platforms:cpu=true"
-            enable_cache: true
-            user: runner
-            runs-on:
-              [
-                "runs-on",
-                "runner=4cpu-linux-x64",
-                "image=ubuntu24-amd64",
-                "run-id=${{ github.run_id }}",
-                "extras=s3-cache",
-              ]
-    runs-on: ${{ matrix.runtimes.runs-on }}
+            self_hosted: true
+            run_tests: true
+            runner_labels: ["self-hosted", "platform=rocm"]
+    runs-on: ${{ matrix.runner_labels }}
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
         uses: actions/checkout@v4
 
-      - uses: runs-on/snapshot@v1
-        if: ${{ matrix.runtimes.enable_cache }}
-        with:
-          path: /home/${{ matrix.runtimes.user }}/.cache/bazel-disk
-          volume_size: 350
-
-      - name: TMP fix for the mount user
-        if: ${{ matrix.runtimes.enable_cache }}
-        run: sudo chown -R ${{ matrix.runtimes.user }}:${{ matrix.runtimes.user }} /home/${{ matrix.runtimes.user }}/.cache/
-
       - name: Ensure self hosted cache permissions
-        if: ${{ !matrix.runtimes.enable_cache }}
+        if: ${{ matrix.self_hosted }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
-      - uses: bazel-contrib/setup-bazel@0.15.0
+      - name: Setup Bazel
+        uses: bazel-contrib/setup-bazel@0.19.0
         with:
-          bazelisk-version: 1.26.0
-          bazelisk-cache: false
-          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
+          bazelisk-version: 1.28.1
+          bazelisk-cache: ${{ !matrix.self_hosted }}
+          repository-cache: ${{ !matrix.self_hosted }}
+          external-cache: ${{ !matrix.self_hosted }}
           bazelrc: |
-            common -c opt
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            common --disk_cache=/home/${{ matrix.runtimes.user }}/.cache/bazel-disk
-            common --strip=always
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
+            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
+            ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
 
-      - name: ZML / bazel build //...
-        run: bazel build ${{ matrix.runtimes.bazel_opts }} //...
+      - run: bazel mod graph
+      - run: bazel query ${{ matrix.bazel_opts }} //...
+      - run: bazel build ${{ matrix.bazel_opts }} //...
+      - if: ${{ matrix.run_tests }}
+        run: bazel test ${{ matrix.bazel_opts }} //...
 
-      - name: ZML / bazel test //...
-        run: bazel test ${{ matrix.runtimes.bazel_opts }} //...
-  ci:
+  lint:
     runs-on:
       [
         "runs-on",
@@ -90,15 +107,7 @@ jobs:
     steps:
       - uses: runs-on/action@v1
       - name: Checkout
-        uses: actions/checkout@v4
-
-      - uses: runs-on/snapshot@v1
-        with:
-          path: /home/runner/.cache/bazel-disk
-          volume_size: 350
-
-      - name: TMP fix for the mount user
-        run: sudo chown -R runner:runner /home/runner/.cache/
+        uses: actions/checkout@v6
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -111,27 +120,3 @@ jobs:
 
       - name: No autofix in Zig code
         run: bash -c "! git grep -l '// autofix' -- '*.zig'"
-
-      - uses: bazel-contrib/setup-bazel@0.15.0
-        with:
-          bazelisk-version: 1.26.0
-          bazelisk-cache: false
-          # todo: use `--config=debug` instead of `-c opt` when static archive bug is fixed
-          bazelrc: |
-            common -c opt
-            common --verbose_failures
-            common --keep_going
-            common --test_output=streamed
-            common --color=yes
-            common --show_timestamps
-            common --disk_cache=/home/runner/.cache/bazel-disk
-            common --strip=always
-
-      - name: ZML / bazel mod explain
-        run: bazel mod explain
-
-      - name: ZML / bazel mod graph
-        run: bazel mod graph
-
-      - name: ZML / bazel query //...
-        run: bazel query //...

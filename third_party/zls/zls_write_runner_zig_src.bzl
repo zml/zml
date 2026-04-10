@@ -1,6 +1,6 @@
 """Generates the ZLS runner source file."""
 
-load("@aspect_bazel_lib//lib:paths.bzl", "to_rlocation_path")
+load("@bazel_lib//lib:paths.bzl", "to_rlocation_path")
 
 def _zls_write_runner_zig_src_impl(ctx):
     zigtoolchaininfo = ctx.toolchains["@rules_zig//zig:toolchain_type"].zigtoolchaininfo

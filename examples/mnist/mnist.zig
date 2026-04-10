@@ -44,8 +44,7 @@ const Mnist = struct {
         store: *const zml.io.TensorStore,
         shardings: []const zml.sharding.Sharding,
     ) !zml.Bufferized(Mnist) {
-        return zml.io.load(Mnist, self, allocator, io, platform, .{
-            .store = store,
+        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
             .shardings = shardings,
             .parallelism = 1,
             .dma_chunks = 1,
@@ -101,7 +100,7 @@ pub fn main(init: std.process.Init) !void {
     var exe = blk: {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
-        defer log.info("✅ Compiled model [{D}]", .{stdx.fmt.fmtDuration(start.untilNow(io, .awake))});
+        defer log.info("✅ Compiled model [{f}]", .{start.untilNow(io, .awake)});
         break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{ .shardings = &.{replicated_sharding} });
     };
     defer exe.deinit();
@@ -110,8 +109,8 @@ pub fn main(init: std.process.Init) !void {
     var mnist_buffers = blk: {
         log.info("Transfering weights....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
-        defer log.info("✅ Transferred weights [{D}]", .{
-            stdx.fmt.fmtDuration(start.untilNow(io, .awake)),
+        defer log.info("✅ Transferred weights [{f}]", .{
+            start.untilNow(io, .awake),
         });
         break :blk try mnist_model.load(init.arena.allocator(), io, platform, &store, &.{replicated_sharding});
     };

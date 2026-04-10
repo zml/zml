@@ -4,49 +4,6 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "amdgpu-core_1-7.2.70200-2278374.22.04_amd64",
-					"name": "amdgpu-core",
-					"version": "1:7.2.70200-2278374.22.04"
-				}
-			],
-			"key": "libdrm-amdgpu-common_1.0.0.70200-2278374.22.04_amd64",
-			"name": "libdrm-amdgpu-common",
-			"sha256": "baa11bc7e3f8e6931a69dea7f1485c2f982da184811ac7545342953ffb64abc4",
-			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/libd/libdrm-amdgpu-common/libdrm-amdgpu-common_1.0.0.70200-2278374.22.04_all.deb"
-			],
-			"version": "1.0.0.70200-2278374.22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "amdgpu-core_1-7.2.70200-2278374.22.04_amd64",
-			"name": "amdgpu-core",
-			"sha256": "916fdee8e388c36a67abda89e0868e5789f4b77a3c351f945db4218fbcbe226c",
-			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/a/amdgpu-core/amdgpu-core_7.2.70200-2278374.22.04_all.deb"
-			],
-			"version": "1:7.2.70200-2278374.22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
-				},
-				{
-					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "libstdc++6",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
-					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "libgcc-s1",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
 					"name": "libc6",
 					"version": "2.35-0ubuntu3.10"
@@ -57,507 +14,23 @@
 					"version": "1:4.4.27-1"
 				},
 				{
-					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "gcc-12-base",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
-					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
-				},
-				{
-					"key": "python3_3.10.6-1_22.04.1_amd64",
-					"name": "python3",
-					"version": "3.10.6-1~22.04.1"
-				},
-				{
-					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
-					"name": "libpython3-stdlib",
-					"version": "3.10.6-1~22.04.1"
-				},
-				{
-					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
-					"name": "libpython3.10-stdlib",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
-					"name": "libuuid1",
-					"version": "2.37.2-4ubuntu3.4"
-				},
-				{
-					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
-					"name": "libtirpc3",
-					"version": "1.3.2-2ubuntu0.1"
-				},
-				{
-					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
-					"name": "libtirpc-common",
-					"version": "1.3.2-2ubuntu0.1"
-				},
-				{
-					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
-					"name": "libgssapi-krb5-2",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
-					"name": "libkrb5support0",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
-					"name": "libkrb5-3",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
-					"name": "libssl3",
-					"version": "3.0.2-0ubuntu1.19"
-				},
-				{
-					"key": "debconf_1.5.79ubuntu1_amd64",
-					"name": "debconf",
-					"version": "1.5.79ubuntu1"
-				},
-				{
-					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
-					"name": "perl-base",
-					"version": "5.34.0-3ubuntu1.4"
-				},
-				{
-					"key": "dpkg_1.21.1ubuntu2.3_amd64",
-					"name": "dpkg",
-					"version": "1.21.1ubuntu2.3"
-				},
-				{
-					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
-					"name": "tar",
-					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
-				},
-				{
-					"key": "libselinux1_3.3-1build2_amd64",
-					"name": "libselinux1",
-					"version": "3.3-1build2"
-				},
-				{
-					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
-					"name": "libpcre2-8-0",
-					"version": "10.39-3ubuntu0.1"
-				},
-				{
-					"key": "libacl1_2.3.1-1_amd64",
-					"name": "libacl1",
-					"version": "2.3.1-1"
-				},
-				{
-					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
-					"name": "zlib1g",
-					"version": "1:1.2.11.dfsg-2ubuntu9.2"
-				},
-				{
-					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
-					"name": "libzstd1",
-					"version": "1.4.8+dfsg-3build1"
-				},
-				{
-					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
-					"name": "liblzma5",
-					"version": "5.2.5-2ubuntu1"
-				},
-				{
-					"key": "libbz2-1.0_1.0.8-5build1_amd64",
-					"name": "libbz2-1.0",
-					"version": "1.0.8-5build1"
-				},
-				{
-					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
-					"name": "libkeyutils1",
-					"version": "1.6.1-2ubuntu3"
-				},
-				{
-					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
-					"name": "libk5crypto3",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
-					"name": "libcom-err2",
-					"version": "1.46.5-2ubuntu1.2"
-				},
-				{
-					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo6",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
-					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
-					"name": "libsqlite3-0",
-					"version": "3.37.2-2ubuntu0.4"
-				},
-				{
-					"key": "libreadline8_8.1.2-1_amd64",
-					"name": "libreadline8",
-					"version": "8.1.2-1"
-				},
-				{
-					"key": "readline-common_8.1.2-1_amd64",
-					"name": "readline-common",
-					"version": "8.1.2-1"
-				},
-				{
-					"key": "libnsl2_1.3.0-2build2_amd64",
-					"name": "libnsl2",
-					"version": "1.3.0-2build2"
-				},
-				{
-					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
-					"name": "libncursesw6",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
-					"key": "libmpdec3_2.5.1-2build2_amd64",
-					"name": "libmpdec3",
-					"version": "2.5.1-2build2"
-				},
-				{
-					"key": "libffi8_3.4.2-4_amd64",
-					"name": "libffi8",
-					"version": "3.4.2-4"
-				},
-				{
-					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
-					"name": "libdb5.3",
-					"version": "5.3.28+dfsg1-0.8ubuntu3"
-				},
-				{
-					"key": "media-types_7.0.0_amd64",
-					"name": "media-types",
-					"version": "7.0.0"
-				},
-				{
-					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
-					"name": "libpython3.10-minimal",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "python3.10_3.10.12-1_22.04.10_amd64",
-					"name": "python3.10",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
-					"name": "python3.10-minimal",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
-					"name": "libexpat1",
-					"version": "2.4.7-1ubuntu0.6"
-				},
-				{
-					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
-					"name": "python3-minimal",
-					"version": "3.10.6-1~22.04.1"
-				},
-				{
-					"key": "libelf1_0.186-1ubuntu0.1_amd64",
-					"name": "libelf1",
-					"version": "0.186-1ubuntu0.1"
-				},
-				{
-					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
-					"name": "libnuma1",
-					"version": "2.0.14-3ubuntu2"
-				},
-				{
-					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-amdgpu1",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm-amdgpu-common_1.0.0.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-common",
-					"version": "1.0.0.70200-2278374.22.04"
-				},
-				{
-					"key": "amdgpu-core_1-7.2.70200-2278374.22.04_amd64",
-					"name": "amdgpu-core",
-					"version": "1:7.2.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm2-amdgpu_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm2-amdgpu",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				}
-			],
-			"key": "hsa-rocr_1.18.0.70200-43_22.04_amd64",
-			"name": "hsa-rocr",
-			"sha256": "c2ee2205b61a0c6b00478e70fa0cde4441fc9658cddcedb8bff07ab07569719c",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hsa-rocr/hsa-rocr_1.18.0.70200-43~22.04_amd64.deb"
-			],
-			"version": "1.18.0.70200-43~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [
-				{
-					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
-					"name": "libstdc++6",
-					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
 					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
 					"name": "libgcc-s1",
 					"version": "12.3.0-1ubuntu1~22.04"
 				},
 				{
-					"key": "libc6_2.35-0ubuntu3.10_amd64",
-					"name": "libc6",
-					"version": "2.35-0ubuntu3.10"
-				},
-				{
-					"key": "libcrypt1_1-4.4.27-1_amd64",
-					"name": "libcrypt1",
-					"version": "1:4.4.27-1"
-				},
-				{
 					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
 					"name": "gcc-12-base",
 					"version": "12.3.0-1ubuntu1~22.04"
-				},
-				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
-					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
-				},
-				{
-					"key": "python3_3.10.6-1_22.04.1_amd64",
-					"name": "python3",
-					"version": "3.10.6-1~22.04.1"
-				},
-				{
-					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
-					"name": "libpython3-stdlib",
-					"version": "3.10.6-1~22.04.1"
-				},
-				{
-					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
-					"name": "libpython3.10-stdlib",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
-					"name": "libuuid1",
-					"version": "2.37.2-4ubuntu3.4"
-				},
-				{
-					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
-					"name": "libtirpc3",
-					"version": "1.3.2-2ubuntu0.1"
-				},
-				{
-					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
-					"name": "libtirpc-common",
-					"version": "1.3.2-2ubuntu0.1"
-				},
-				{
-					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
-					"name": "libgssapi-krb5-2",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
-					"name": "libkrb5support0",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
-					"name": "libkrb5-3",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
-					"name": "libssl3",
-					"version": "3.0.2-0ubuntu1.19"
-				},
-				{
-					"key": "debconf_1.5.79ubuntu1_amd64",
-					"name": "debconf",
-					"version": "1.5.79ubuntu1"
-				},
-				{
-					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
-					"name": "perl-base",
-					"version": "5.34.0-3ubuntu1.4"
-				},
-				{
-					"key": "dpkg_1.21.1ubuntu2.3_amd64",
-					"name": "dpkg",
-					"version": "1.21.1ubuntu2.3"
-				},
-				{
-					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
-					"name": "tar",
-					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
-				},
-				{
-					"key": "libselinux1_3.3-1build2_amd64",
-					"name": "libselinux1",
-					"version": "3.3-1build2"
-				},
-				{
-					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
-					"name": "libpcre2-8-0",
-					"version": "10.39-3ubuntu0.1"
-				},
-				{
-					"key": "libacl1_2.3.1-1_amd64",
-					"name": "libacl1",
-					"version": "2.3.1-1"
-				},
-				{
-					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
-					"name": "zlib1g",
-					"version": "1:1.2.11.dfsg-2ubuntu9.2"
-				},
-				{
-					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
-					"name": "libzstd1",
-					"version": "1.4.8+dfsg-3build1"
-				},
-				{
-					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
-					"name": "liblzma5",
-					"version": "5.2.5-2ubuntu1"
-				},
-				{
-					"key": "libbz2-1.0_1.0.8-5build1_amd64",
-					"name": "libbz2-1.0",
-					"version": "1.0.8-5build1"
-				},
-				{
-					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
-					"name": "libkeyutils1",
-					"version": "1.6.1-2ubuntu3"
-				},
-				{
-					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
-					"name": "libk5crypto3",
-					"version": "1.19.2-2ubuntu0.7"
-				},
-				{
-					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
-					"name": "libcom-err2",
-					"version": "1.46.5-2ubuntu1.2"
-				},
-				{
-					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
-					"name": "libtinfo6",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
-					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
-					"name": "libsqlite3-0",
-					"version": "3.37.2-2ubuntu0.4"
-				},
-				{
-					"key": "libreadline8_8.1.2-1_amd64",
-					"name": "libreadline8",
-					"version": "8.1.2-1"
-				},
-				{
-					"key": "readline-common_8.1.2-1_amd64",
-					"name": "readline-common",
-					"version": "8.1.2-1"
-				},
-				{
-					"key": "libnsl2_1.3.0-2build2_amd64",
-					"name": "libnsl2",
-					"version": "1.3.0-2build2"
-				},
-				{
-					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
-					"name": "libncursesw6",
-					"version": "6.3-2ubuntu0.1"
-				},
-				{
-					"key": "libmpdec3_2.5.1-2build2_amd64",
-					"name": "libmpdec3",
-					"version": "2.5.1-2build2"
-				},
-				{
-					"key": "libffi8_3.4.2-4_amd64",
-					"name": "libffi8",
-					"version": "3.4.2-4"
-				},
-				{
-					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
-					"name": "libdb5.3",
-					"version": "5.3.28+dfsg1-0.8ubuntu3"
-				},
-				{
-					"key": "media-types_7.0.0_amd64",
-					"name": "media-types",
-					"version": "7.0.0"
-				},
-				{
-					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
-					"name": "libpython3.10-minimal",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "python3.10_3.10.12-1_22.04.10_amd64",
-					"name": "python3.10",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
-					"name": "python3.10-minimal",
-					"version": "3.10.12-1~22.04.10"
-				},
-				{
-					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
-					"name": "libexpat1",
-					"version": "2.4.7-1ubuntu0.6"
-				},
-				{
-					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
-					"name": "python3-minimal",
-					"version": "3.10.6-1~22.04.1"
 				}
 			],
-			"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
-			"name": "rocprofiler-register",
-			"sha256": "144d516c55f368e82c231df469c1d3097ee4f44302ef3b71fe3eeded4199f5d3",
+			"key": "libbz2-1.0_1.0.8-5build1_amd64",
+			"name": "libbz2-1.0",
+			"sha256": "3bfeaf4259eadbb7faa09feee86cd6cad172cd95907d7465afd0eb5aebb5433f",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocprofiler-register/rocprofiler-register_0.6.0.70200-43~22.04_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-5build1_amd64.deb"
 			],
-			"version": "0.6.0.70200-43~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
-			"name": "libstdc++6",
-			"sha256": "83873058e692936a09649ede2f8e70b87dde1f3f5488db53da8081b81c79a5d9",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04_amd64.deb"
-			],
-			"version": "12.3.0-1ubuntu1~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
-			"name": "libgcc-s1",
-			"sha256": "8ca7b573446d22ef46a97b4ec537c38acc8653f76391127253040acc7b74af5f",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04_amd64.deb"
-			],
-			"version": "12.3.0-1ubuntu1~22.04"
+			"version": "1.0.8-5build1"
 		},
 		{
 			"arch": "amd64",
@@ -584,6 +57,17 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+			"name": "libgcc-s1",
+			"sha256": "8ca7b573446d22ef46a97b4ec537c38acc8653f76391127253040acc7b74af5f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libgcc-s1_12.3.0-1ubuntu1~22.04_amd64.deb"
+			],
+			"version": "12.3.0-1ubuntu1~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
 			"name": "gcc-12-base",
 			"sha256": "80a1f5df097af3978f7df2808006ca77197865e5eb7a923712aee6876e7a14cb",
@@ -594,14 +78,417 @@
 		},
 		{
 			"arch": "amd64",
-			"dependencies": [],
-			"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
-			"name": "rocm-core",
-			"sha256": "9e8c61b3b260547f88b795f521d82249dfae50f9f82522c6ba9a4fad8fe10f0a",
-			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocm-core/rocm-core_7.2.0.70200-43~22.04_amd64.deb"
+			"dependencies": [
+				{
+					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.11.dfsg-2ubuntu9.2"
+				},
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.2.5-2ubuntu1"
+				},
+				{
+					"key": "libelf1_0.186-1ubuntu0.1_amd64",
+					"name": "libelf1",
+					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5build1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5build1"
+				}
 			],
-			"version": "7.2.0.70200-43~22.04"
+			"key": "libdw1_0.186-1ubuntu0.1_amd64",
+			"name": "libdw1",
+			"sha256": "487120e8e4468844a1bd024c3684e97dbe831fbaa04b975a337e8482370c4e17",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/e/elfutils/libdw1_0.186-1ubuntu0.1_amd64.deb"
+			],
+			"version": "0.186-1ubuntu0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+			"name": "zlib1g",
+			"sha256": "9dc17e51a1be2d9ed63b7b84ef0e4e29c5abe6f1bc62cb03e7181483cce8a2f2",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb"
+			],
+			"version": "1:1.2.11.dfsg-2ubuntu9.2"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				}
+			],
+			"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+			"name": "liblzma5",
+			"sha256": "8f1c46e7d3f5102a5e4fdca7c949728a343ba71c2a7c124118df2c13d4c444f7",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1_amd64.deb"
+			],
+			"version": "5.2.5-2ubuntu1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libelf1_0.186-1ubuntu0.1_amd64",
+			"name": "libelf1",
+			"sha256": "2cc781614b045b450a1e073ee3b0902f393ee58ede1d2ea4526ad805fcccf538",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/e/elfutils/libelf1_0.186-1ubuntu0.1_amd64.deb"
+			],
+			"version": "0.186-1ubuntu0.1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
+					"name": "rocm-core",
+					"version": "7.2.1.70201-81~22.04"
+				},
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "python3_3.10.6-1_22.04.1_amd64",
+					"name": "python3",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-stdlib",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
+					"name": "libuuid1",
+					"version": "2.37.2-4ubuntu3.4"
+				},
+				{
+					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc3",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc-common",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
+					"name": "libgssapi-krb5-2",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5support0",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5-3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
+					"name": "libssl3",
+					"version": "3.0.2-0ubuntu1.19"
+				},
+				{
+					"key": "debconf_1.5.79ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.79ubuntu1"
+				},
+				{
+					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
+					"name": "perl-base",
+					"version": "5.34.0-3ubuntu1.4"
+				},
+				{
+					"key": "dpkg_1.21.1ubuntu2.3_amd64",
+					"name": "dpkg",
+					"version": "1.21.1ubuntu2.3"
+				},
+				{
+					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
+					"name": "tar",
+					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
+				},
+				{
+					"key": "libselinux1_3.3-1build2_amd64",
+					"name": "libselinux1",
+					"version": "3.3-1build2"
+				},
+				{
+					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.39-3ubuntu0.1"
+				},
+				{
+					"key": "libacl1_2.3.1-1_amd64",
+					"name": "libacl1",
+					"version": "2.3.1-1"
+				},
+				{
+					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.11.dfsg-2ubuntu9.2"
+				},
+				{
+					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
+					"name": "libzstd1",
+					"version": "1.4.8+dfsg-3build1"
+				},
+				{
+					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.2.5-2ubuntu1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5build1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5build1"
+				},
+				{
+					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
+					"name": "libkeyutils1",
+					"version": "1.6.1-2ubuntu3"
+				},
+				{
+					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libk5crypto3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
+					"name": "libcom-err2",
+					"version": "1.46.5-2ubuntu1.2"
+				},
+				{
+					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
+					"name": "libtinfo6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.37.2-2ubuntu0.4"
+				},
+				{
+					"key": "libreadline8_8.1.2-1_amd64",
+					"name": "libreadline8",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "readline-common_8.1.2-1_amd64",
+					"name": "readline-common",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "libnsl2_1.3.0-2build2_amd64",
+					"name": "libnsl2",
+					"version": "1.3.0-2build2"
+				},
+				{
+					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
+					"name": "libncursesw6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libmpdec3_2.5.1-2build2_amd64",
+					"name": "libmpdec3",
+					"version": "2.5.1-2build2"
+				},
+				{
+					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libstdc++6",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libffi8_3.4.2-4_amd64",
+					"name": "libffi8",
+					"version": "3.4.2-4"
+				},
+				{
+					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
+					"name": "libdb5.3",
+					"version": "5.3.28+dfsg1-0.8ubuntu3"
+				},
+				{
+					"key": "media-types_7.0.0_amd64",
+					"name": "media-types",
+					"version": "7.0.0"
+				},
+				{
+					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
+					"name": "libexpat1",
+					"version": "2.4.7-1ubuntu0.6"
+				},
+				{
+					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
+					"name": "python3-minimal",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "python3-setuptools_59.6.0-1.2ubuntu0.22.04.3_amd64",
+					"name": "python3-setuptools",
+					"version": "59.6.0-1.2ubuntu0.22.04.3"
+				},
+				{
+					"key": "python3-distutils_3.10.8-1_22.04_amd64",
+					"name": "python3-distutils",
+					"version": "3.10.8-1~22.04"
+				},
+				{
+					"key": "python3-lib2to3_3.10.8-1_22.04_amd64",
+					"name": "python3-lib2to3",
+					"version": "3.10.8-1~22.04"
+				},
+				{
+					"key": "python3-pkg-resources_59.6.0-1.2ubuntu0.22.04.3_amd64",
+					"name": "python3-pkg-resources",
+					"version": "59.6.0-1.2ubuntu0.22.04.3"
+				},
+				{
+					"key": "sudo_1.9.9-1ubuntu2.5_amd64",
+					"name": "sudo",
+					"version": "1.9.9-1ubuntu2.5"
+				},
+				{
+					"key": "lsb-base_11.1.0ubuntu4_amd64",
+					"name": "lsb-base",
+					"version": "11.1.0ubuntu4"
+				},
+				{
+					"key": "libpam-modules_1.4.0-11ubuntu2.6_amd64",
+					"name": "libpam-modules",
+					"version": "1.4.0-11ubuntu2.6"
+				},
+				{
+					"key": "libpam-modules-bin_1.4.0-11ubuntu2.6_amd64",
+					"name": "libpam-modules-bin",
+					"version": "1.4.0-11ubuntu2.6"
+				},
+				{
+					"key": "libpam0g_1.4.0-11ubuntu2.6_amd64",
+					"name": "libpam0g",
+					"version": "1.4.0-11ubuntu2.6"
+				},
+				{
+					"key": "libaudit1_1-3.0.7-1build1_amd64",
+					"name": "libaudit1",
+					"version": "1:3.0.7-1build1"
+				},
+				{
+					"key": "libcap-ng0_0.7.9-2.2build3_amd64",
+					"name": "libcap-ng0",
+					"version": "0.7.9-2.2build3"
+				},
+				{
+					"key": "libaudit-common_1-3.0.7-1build1_amd64",
+					"name": "libaudit-common",
+					"version": "1:3.0.7-1build1"
+				}
+			],
+			"key": "amd-smi-lib_26.2.2.70201-81_22.04_amd64",
+			"name": "amd-smi-lib",
+			"sha256": "43566b517bdbd90fe7b5bc400c30f14dd062de6a304642808079cef394f606f6",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/a/amd-smi-lib/amd-smi-lib_26.2.2.70201-81~22.04_amd64.deb"
+			],
+			"version": "26.2.2.70201-81~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
+			"name": "rocm-core",
+			"sha256": "b83fe314e67f6bd3cef2b5695fb6de7153110a14727add1992d0056d81a7e9a9",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocm-core/rocm-core_7.2.1.70201-81~22.04_amd64.deb"
+			],
+			"version": "7.2.1.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -793,17 +680,6 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
-			"name": "zlib1g",
-			"sha256": "9dc17e51a1be2d9ed63b7b84ef0e4e29c5abe6f1bc62cb03e7181483cce8a2f2",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.11.dfsg-2ubuntu9.2_amd64.deb"
-			],
-			"version": "1:1.2.11.dfsg-2ubuntu9.2"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
 			"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
 			"name": "libzstd1",
 			"sha256": "ae7db00ce8b093e50c994518b90203544e063b4bc574836a048bb142b950b2c9",
@@ -811,28 +687,6 @@
 				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libz/libzstd/libzstd1_1.4.8+dfsg-3build1_amd64.deb"
 			],
 			"version": "1.4.8+dfsg-3build1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "liblzma5_5.2.5-2ubuntu1_amd64",
-			"name": "liblzma5",
-			"sha256": "8f1c46e7d3f5102a5e4fdca7c949728a343ba71c2a7c124118df2c13d4c444f7",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/x/xz-utils/liblzma5_5.2.5-2ubuntu1_amd64.deb"
-			],
-			"version": "5.2.5-2ubuntu1"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "libbz2-1.0_1.0.8-5build1_amd64",
-			"name": "libbz2-1.0",
-			"sha256": "3bfeaf4259eadbb7faa09feee86cd6cad172cd95907d7465afd0eb5aebb5433f",
-			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/b/bzip2/libbz2-1.0_1.0.8-5build1_amd64.deb"
-			],
-			"version": "1.0.8-5build1"
 		},
 		{
 			"arch": "amd64",
@@ -947,6 +801,17 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
+			"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
+			"name": "libstdc++6",
+			"sha256": "83873058e692936a09649ede2f8e70b87dde1f3f5488db53da8081b81c79a5d9",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/g/gcc-12/libstdc++6_12.3.0-1ubuntu1~22.04_amd64.deb"
+			],
+			"version": "12.3.0-1ubuntu1~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
 			"key": "libffi8_3.4.2-4_amd64",
 			"name": "libffi8",
 			"sha256": "b4f88c91fa6f4c942097be6abfc365fb133c5e147640168cbb7704fd855eac10",
@@ -1035,13 +900,671 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libelf1_0.186-1ubuntu0.1_amd64",
-			"name": "libelf1",
-			"sha256": "2cc781614b045b450a1e073ee3b0902f393ee58ede1d2ea4526ad805fcccf538",
+			"key": "python3-setuptools_59.6.0-1.2ubuntu0.22.04.3_amd64",
+			"name": "python3-setuptools",
+			"sha256": "553fd6b076e22c35123f29b4b5ff08e762164b39c72569f05af7265571a85c13",
 			"urls": [
-				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/e/elfutils/libelf1_0.186-1ubuntu0.1_amd64.deb"
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/s/setuptools/python3-setuptools_59.6.0-1.2ubuntu0.22.04.3_all.deb"
 			],
-			"version": "0.186-1ubuntu0.1"
+			"version": "59.6.0-1.2ubuntu0.22.04.3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3-distutils_3.10.8-1_22.04_amd64",
+			"name": "python3-distutils",
+			"sha256": "b2bada10bef81fa7dc4bde61a1a462f37ca5027805e7c96e58685e9034c6094f",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3-stdlib-extensions/python3-distutils_3.10.8-1~22.04_all.deb"
+			],
+			"version": "3.10.8-1~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3-lib2to3_3.10.8-1_22.04_amd64",
+			"name": "python3-lib2to3",
+			"sha256": "7bd212e61e8bb7fabf4768629e5dc97e6f8a7f98cc9335b5a3ce8c11cb633248",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/python3-stdlib-extensions/python3-lib2to3_3.10.8-1~22.04_all.deb"
+			],
+			"version": "3.10.8-1~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "python3-pkg-resources_59.6.0-1.2ubuntu0.22.04.3_amd64",
+			"name": "python3-pkg-resources",
+			"sha256": "e838b1d16912f11c8c955d99ba5b7f378025ebb29b3ea72096cc7e9ec4d5e8f8",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/s/setuptools/python3-pkg-resources_59.6.0-1.2ubuntu0.22.04.3_all.deb"
+			],
+			"version": "59.6.0-1.2ubuntu0.22.04.3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "sudo_1.9.9-1ubuntu2.5_amd64",
+			"name": "sudo",
+			"sha256": "479c1e3247887315cc69dcec0b2a58504c77be3f45448de3a0b0e44b0f4ca775",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/s/sudo/sudo_1.9.9-1ubuntu2.5_amd64.deb"
+			],
+			"version": "1.9.9-1ubuntu2.5"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "lsb-base_11.1.0ubuntu4_amd64",
+			"name": "lsb-base",
+			"sha256": "23ac3e99b0c2cd0179a7f40fa5a24248345e16c515f222164dad2a638b4f04cf",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/l/lsb/lsb-base_11.1.0ubuntu4_all.deb"
+			],
+			"version": "11.1.0ubuntu4"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpam-modules_1.4.0-11ubuntu2.6_amd64",
+			"name": "libpam-modules",
+			"sha256": "6f03b50258a365d69a037fdd9c29a6b976fa3953c84bafacfc19385cd8fe4b68",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pam/libpam-modules_1.4.0-11ubuntu2.6_amd64.deb"
+			],
+			"version": "1.4.0-11ubuntu2.6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpam-modules-bin_1.4.0-11ubuntu2.6_amd64",
+			"name": "libpam-modules-bin",
+			"sha256": "3b85776823736451ec59708181ebdcdde0429ef9bdea76ffeba8f2428146331c",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pam/libpam-modules-bin_1.4.0-11ubuntu2.6_amd64.deb"
+			],
+			"version": "1.4.0-11ubuntu2.6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libpam0g_1.4.0-11ubuntu2.6_amd64",
+			"name": "libpam0g",
+			"sha256": "9c0e509cdf68364212910805ed673f481b7762109eb6499b68d7f9bf599b0c4a",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/p/pam/libpam0g_1.4.0-11ubuntu2.6_amd64.deb"
+			],
+			"version": "1.4.0-11ubuntu2.6"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libaudit1_1-3.0.7-1build1_amd64",
+			"name": "libaudit1",
+			"sha256": "36710fbc49150a13f14f1f9c2c8288ee840cf9425f8a609c22fefa6b64eb51c1",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/a/audit/libaudit1_3.0.7-1build1_amd64.deb"
+			],
+			"version": "1:3.0.7-1build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libcap-ng0_0.7.9-2.2build3_amd64",
+			"name": "libcap-ng0",
+			"sha256": "124d0c8748a841f279e996298ef8aac69a249e294792f4b5e16dc00496f1d3ac",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/libc/libcap-ng/libcap-ng0_0.7.9-2.2build3_amd64.deb"
+			],
+			"version": "0.7.9-2.2build3"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "libaudit-common_1-3.0.7-1build1_amd64",
+			"name": "libaudit-common",
+			"sha256": "86697036d05c956b5b42339bf61ecf3743f7c6fd4d59a67ab16add9a2cd7802a",
+			"urls": [
+				"https://snapshot.ubuntu.com/ubuntu/20250711T030400Z/pool/main/a/audit/libaudit-common_3.0.7-1build1_all.deb"
+			],
+			"version": "1:3.0.7-1build1"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				}
+			],
+			"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+			"name": "libdrm-amdgpu-common",
+			"sha256": "288719d661cc1fbba776ec08d10053d745d53a35afe8cbfcf232828aa5a27091",
+			"urls": [
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/libd/libdrm-amdgpu-common/libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_all.deb"
+			],
+			"version": "1.0.0.70201-2303469.22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [],
+			"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+			"name": "amdgpu-core",
+			"sha256": "54af80759a376028bb442344cdcf39565063438d3708a40f125f02ccb2d8813e",
+			"urls": [
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/a/amdgpu-core/amdgpu-core_7.2.70201-2303469.22.04_all.deb"
+			],
+			"version": "1:7.2.70201-2303469.22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.6.0.70201-81~22.04"
+				},
+				{
+					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libstdc++6",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
+					"name": "rocm-core",
+					"version": "7.2.1.70201-81~22.04"
+				},
+				{
+					"key": "python3_3.10.6-1_22.04.1_amd64",
+					"name": "python3",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-stdlib",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
+					"name": "libuuid1",
+					"version": "2.37.2-4ubuntu3.4"
+				},
+				{
+					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc3",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc-common",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
+					"name": "libgssapi-krb5-2",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5support0",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5-3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
+					"name": "libssl3",
+					"version": "3.0.2-0ubuntu1.19"
+				},
+				{
+					"key": "debconf_1.5.79ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.79ubuntu1"
+				},
+				{
+					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
+					"name": "perl-base",
+					"version": "5.34.0-3ubuntu1.4"
+				},
+				{
+					"key": "dpkg_1.21.1ubuntu2.3_amd64",
+					"name": "dpkg",
+					"version": "1.21.1ubuntu2.3"
+				},
+				{
+					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
+					"name": "tar",
+					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
+				},
+				{
+					"key": "libselinux1_3.3-1build2_amd64",
+					"name": "libselinux1",
+					"version": "3.3-1build2"
+				},
+				{
+					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.39-3ubuntu0.1"
+				},
+				{
+					"key": "libacl1_2.3.1-1_amd64",
+					"name": "libacl1",
+					"version": "2.3.1-1"
+				},
+				{
+					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.11.dfsg-2ubuntu9.2"
+				},
+				{
+					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
+					"name": "libzstd1",
+					"version": "1.4.8+dfsg-3build1"
+				},
+				{
+					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.2.5-2ubuntu1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5build1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5build1"
+				},
+				{
+					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
+					"name": "libkeyutils1",
+					"version": "1.6.1-2ubuntu3"
+				},
+				{
+					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libk5crypto3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
+					"name": "libcom-err2",
+					"version": "1.46.5-2ubuntu1.2"
+				},
+				{
+					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
+					"name": "libtinfo6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.37.2-2ubuntu0.4"
+				},
+				{
+					"key": "libreadline8_8.1.2-1_amd64",
+					"name": "libreadline8",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "readline-common_8.1.2-1_amd64",
+					"name": "readline-common",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "libnsl2_1.3.0-2build2_amd64",
+					"name": "libnsl2",
+					"version": "1.3.0-2build2"
+				},
+				{
+					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
+					"name": "libncursesw6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libmpdec3_2.5.1-2build2_amd64",
+					"name": "libmpdec3",
+					"version": "2.5.1-2build2"
+				},
+				{
+					"key": "libffi8_3.4.2-4_amd64",
+					"name": "libffi8",
+					"version": "3.4.2-4"
+				},
+				{
+					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
+					"name": "libdb5.3",
+					"version": "5.3.28+dfsg1-0.8ubuntu3"
+				},
+				{
+					"key": "media-types_7.0.0_amd64",
+					"name": "media-types",
+					"version": "7.0.0"
+				},
+				{
+					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
+					"name": "libexpat1",
+					"version": "2.4.7-1ubuntu0.6"
+				},
+				{
+					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
+					"name": "python3-minimal",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libelf1_0.186-1ubuntu0.1_amd64",
+					"name": "libelf1",
+					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+					"name": "libnuma1",
+					"version": "2.0.14-3ubuntu2"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				}
+			],
+			"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+			"name": "hsa-rocr",
+			"sha256": "0cea908f2d05be0b6cb98556b429def4f114199ceb7903eca521ec310182ac41",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hsa-rocr/hsa-rocr_1.18.0.70201-81~22.04_amd64.deb"
+			],
+			"version": "1.18.0.70201-81~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libstdc++6",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
+					"name": "rocm-core",
+					"version": "7.2.1.70201-81~22.04"
+				},
+				{
+					"key": "python3_3.10.6-1_22.04.1_amd64",
+					"name": "python3",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-stdlib",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
+					"name": "libuuid1",
+					"version": "2.37.2-4ubuntu3.4"
+				},
+				{
+					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc3",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc-common",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
+					"name": "libgssapi-krb5-2",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5support0",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5-3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
+					"name": "libssl3",
+					"version": "3.0.2-0ubuntu1.19"
+				},
+				{
+					"key": "debconf_1.5.79ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.79ubuntu1"
+				},
+				{
+					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
+					"name": "perl-base",
+					"version": "5.34.0-3ubuntu1.4"
+				},
+				{
+					"key": "dpkg_1.21.1ubuntu2.3_amd64",
+					"name": "dpkg",
+					"version": "1.21.1ubuntu2.3"
+				},
+				{
+					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
+					"name": "tar",
+					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
+				},
+				{
+					"key": "libselinux1_3.3-1build2_amd64",
+					"name": "libselinux1",
+					"version": "3.3-1build2"
+				},
+				{
+					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.39-3ubuntu0.1"
+				},
+				{
+					"key": "libacl1_2.3.1-1_amd64",
+					"name": "libacl1",
+					"version": "2.3.1-1"
+				},
+				{
+					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.11.dfsg-2ubuntu9.2"
+				},
+				{
+					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
+					"name": "libzstd1",
+					"version": "1.4.8+dfsg-3build1"
+				},
+				{
+					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.2.5-2ubuntu1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5build1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5build1"
+				},
+				{
+					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
+					"name": "libkeyutils1",
+					"version": "1.6.1-2ubuntu3"
+				},
+				{
+					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libk5crypto3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
+					"name": "libcom-err2",
+					"version": "1.46.5-2ubuntu1.2"
+				},
+				{
+					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
+					"name": "libtinfo6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.37.2-2ubuntu0.4"
+				},
+				{
+					"key": "libreadline8_8.1.2-1_amd64",
+					"name": "libreadline8",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "readline-common_8.1.2-1_amd64",
+					"name": "readline-common",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "libnsl2_1.3.0-2build2_amd64",
+					"name": "libnsl2",
+					"version": "1.3.0-2build2"
+				},
+				{
+					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
+					"name": "libncursesw6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libmpdec3_2.5.1-2build2_amd64",
+					"name": "libmpdec3",
+					"version": "2.5.1-2build2"
+				},
+				{
+					"key": "libffi8_3.4.2-4_amd64",
+					"name": "libffi8",
+					"version": "3.4.2-4"
+				},
+				{
+					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
+					"name": "libdb5.3",
+					"version": "5.3.28+dfsg1-0.8ubuntu3"
+				},
+				{
+					"key": "media-types_7.0.0_amd64",
+					"name": "media-types",
+					"version": "7.0.0"
+				},
+				{
+					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
+					"name": "libexpat1",
+					"version": "2.4.7-1ubuntu0.6"
+				},
+				{
+					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
+					"name": "python3-minimal",
+					"version": "3.10.6-1~22.04.1"
+				}
+			],
+			"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
+			"name": "rocprofiler-register",
+			"sha256": "55bca0525ca02921240e5caf74ce3de0fc5791264e495bf026a49a4fedc0e1f3",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocprofiler-register/rocprofiler-register_0.6.0.70201-81~22.04_amd64.deb"
+			],
+			"version": "0.6.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -1057,32 +1580,32 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70200-2278374.22.04_amd64",
+			"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
 			"name": "libdrm-amdgpu-amdgpu1",
-			"sha256": "460f6dd499dbff0d4bc368d40b0c3f943dbf981df77f362ac05cce7befcf7779",
+			"sha256": "f8b455610e6603c2966ffed5e7530b2b2c1a6742fba99aab08f0930b4f638f58",
 			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-amdgpu1_2.4.125.70200-2278374.22.04_amd64.deb"
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-amdgpu1_2.4.125.70201-2303469.22.04_amd64.deb"
 			],
-			"version": "1:2.4.125.70200-2278374.22.04"
+			"version": "1:2.4.125.70201-2303469.22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm2-amdgpu_1-2.4.125.70200-2278374.22.04_amd64",
+			"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
 			"name": "libdrm2-amdgpu",
-			"sha256": "a5a620541bcd852d6feb8299dda804c41cb979a3870cf82a783112b58ad9d7e4",
+			"sha256": "320439f513cada1bc308482a94eb07b7af04cd90a8163ad627983279c0be5ef3",
 			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm2-amdgpu_2.4.125.70200-2278374.22.04_amd64.deb"
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm2-amdgpu_2.4.125.70201-2303469.22.04_amd64.deb"
 			],
-			"version": "1:2.4.125.70200-2278374.22.04"
+			"version": "1:2.4.125.70201-2303469.22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -1305,34 +1828,53 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
+				},
+				{
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+					"name": "libnuma1",
+					"version": "2.0.14-3ubuntu2"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				}
 			],
-			"key": "hsa-amd-aqlprofile_1.0.0.70200-43_22.04_amd64",
+			"key": "hsa-amd-aqlprofile_1.0.0.70201-81_22.04_amd64",
 			"name": "hsa-amd-aqlprofile",
-			"sha256": "c4eabbbac5adb81d30442fe4172660591b4b11f70596035c0cd6b5dc80bd27be",
+			"sha256": "9a205f71abf149f59d8d8bac934f24a826a7eb0a7993d1159446aedc9e7aa364",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hsa-amd-aqlprofile/hsa-amd-aqlprofile_1.0.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hsa-amd-aqlprofile/hsa-amd-aqlprofile_1.0.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.0.0.70200-43~22.04"
-		},
-		{
-			"arch": "amd64",
-			"dependencies": [],
-			"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-			"name": "hsa-runtime-rocr4wsl-amdgpu",
-			"sha256": "a62cc2bbf9cfc46b263b17ff90bea66ae01267c03014b55a9764eab6895db4a7",
-			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/h/hsa-runtime-rocr4wsl-amdgpu/hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64.deb"
-			],
-			"version": "25.30.13-2281980.22.04"
+			"version": "1.0.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -1373,9 +1915,9 @@
 					"version": "1.4.8+dfsg-3build1"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "python3_3.10.6-1_22.04.1_amd64",
@@ -1618,13 +2160,13 @@
 					"version": "6.3-2ubuntu0.1"
 				}
 			],
-			"key": "comgr_3.0.0.70200-43_22.04_amd64",
+			"key": "comgr_3.0.0.70201-81_22.04_amd64",
 			"name": "comgr",
-			"sha256": "8f58b1958811430ba19426489608b3cbf685e5a78c1d6d9414c7f23cc8311a13",
+			"sha256": "096a51d616f01f431d8fd7716257ca602d811c393075300a4b947244333cdc50",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/c/comgr/comgr_3.0.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/c/comgr/comgr_3.0.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "3.0.0.70200-43~22.04"
+			"version": "3.0.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -1751,14 +2293,14 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocprofiler-sdk-rocpd_1.1.0-43_22.04_amd64",
+					"key": "rocprofiler-sdk-rocpd_1.1.0-81_22.04_amd64",
 					"name": "rocprofiler-sdk-rocpd",
-					"version": "1.1.0-43~22.04"
+					"version": "1.1.0-81~22.04"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -1981,53 +2523,53 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocprofiler-sdk-roctx_1.1.0-43_22.04_amd64",
+					"key": "rocprofiler-sdk-roctx_1.1.0-81_22.04_amd64",
 					"name": "rocprofiler-sdk-roctx",
-					"version": "1.1.0-43~22.04"
+					"version": "1.1.0-81~22.04"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				}
 			],
-			"key": "rocprofiler-sdk_1.1.0-43_22.04_amd64",
+			"key": "rocprofiler-sdk_1.1.0-81_22.04_amd64",
 			"name": "rocprofiler-sdk",
-			"sha256": "adaebb45a2b713fb7677cca10d50afbce33b025f6bbf5a84cf37707fc413127d",
+			"sha256": "03b11e5e48e2125b32676515e0191158109aa581fe4785c5edb4a3c0c30f3282",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocprofiler-sdk/rocprofiler-sdk_1.1.0-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocprofiler-sdk/rocprofiler-sdk_1.1.0-81~22.04_amd64.deb"
 			],
-			"version": "1.1.0-43~22.04"
+			"version": "1.1.0-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocprofiler-sdk-rocpd_1.1.0-43_22.04_amd64",
+			"key": "rocprofiler-sdk-rocpd_1.1.0-81_22.04_amd64",
 			"name": "rocprofiler-sdk-rocpd",
-			"sha256": "2dbfad4c5c1e55bb65771bb3aa34460c52e6c7952767f26756d8aa7d98c47414",
+			"sha256": "1dfbc1887f4f7de7b78e3fd2959b53f54fa9f613763b8f4cf3c4c6f97b34b7c7",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocprofiler-sdk-rocpd/rocprofiler-sdk-rocpd_1.1.0-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocprofiler-sdk-rocpd/rocprofiler-sdk-rocpd_1.1.0-81~22.04_amd64.deb"
 			],
-			"version": "1.1.0-43~22.04"
+			"version": "1.1.0-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocprofiler-sdk-roctx_1.1.0-43_22.04_amd64",
+			"key": "rocprofiler-sdk-roctx_1.1.0-81_22.04_amd64",
 			"name": "rocprofiler-sdk-roctx",
-			"sha256": "4c74438154cd91d81768c5ecbbed24859f787db638dcacce6b70445abf8577c7",
+			"sha256": "49ac3668842c82767a91128c0107af77a44b1c6c7e7c4c16248eac613f17ddcf",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocprofiler-sdk-roctx/rocprofiler-sdk-roctx_1.1.0-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocprofiler-sdk-roctx/rocprofiler-sdk-roctx_1.1.0-81~22.04_amd64.deb"
 			],
-			"version": "1.1.0-43~22.04"
+			"version": "1.1.0-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -2250,29 +2792,29 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocrand_4.2.0.70200-43_22.04_amd64",
+					"key": "rocrand_4.2.0.70201-81_22.04_amd64",
 					"name": "rocrand",
-					"version": "4.2.0.70200-43~22.04"
+					"version": "4.2.0.70201-81~22.04"
 				},
 				{
-					"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
 					"name": "hipblaslt",
-					"version": "1.2.1.70200-43~22.04"
+					"version": "1.2.2.70201-81~22.04"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				},
 				{
-					"key": "rocblas_5.2.0.70200-43_22.04_amd64",
+					"key": "rocblas_5.2.0.70201-81_22.04_amd64",
 					"name": "rocblas",
-					"version": "5.2.0.70200-43~22.04"
+					"version": "5.2.0.70201-81~22.04"
 				},
 				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
+					"version": "7.2.53211.70201-81~22.04"
 				},
 				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
@@ -2280,14 +2822,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -2345,9 +2887,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -2375,42 +2917,62 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				}
 			],
-			"key": "miopen-hip_3.5.1.70200-43_22.04_amd64",
+			"key": "miopen-hip_3.5.1.70201-81_22.04_amd64",
 			"name": "miopen-hip",
-			"sha256": "c9b6ea5b4f07aa6ee21f95f69ac3dd88ef87449e52c41d751b01b071ab121656",
+			"sha256": "6602376a310d0f8702acea8d0fa78138800060373f462bfd80994218ff87a674",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/m/miopen-hip/miopen-hip_3.5.1.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/m/miopen-hip/miopen-hip_3.5.1.70201-81~22.04_amd64.deb"
 			],
-			"version": "3.5.1.70200-43~22.04"
+			"version": "3.5.1.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocrand_4.2.0.70200-43_22.04_amd64",
+			"key": "rocrand_4.2.0.70201-81_22.04_amd64",
 			"name": "rocrand",
-			"sha256": "2b22a1cc2861eff622c6756b7cba160fb0b9211cbd9452b89b7d3ab3ce19e6c8",
+			"sha256": "6a772e0be70c346a62aa6be3420c7ae7e4e70ca7f472abdd9b4fd6b42eaf9297",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocrand/rocrand_4.2.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocrand/rocrand_4.2.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "4.2.0.70200-43~22.04"
+			"version": "4.2.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -2633,26 +3195,26 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				}
 			],
-			"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
+			"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
 			"name": "hipblaslt",
-			"sha256": "a7baff52908f4a25b134d7e2613c1eb2b51b369509465d2a502b457f3ce3c1b2",
+			"sha256": "d44468114be65720eb0a82aa6009426de0022e345785a039caacc0cd63a0dc18",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipblaslt/hipblaslt_1.2.1.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipblaslt/hipblaslt_1.2.2.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.2.1.70200-43~22.04"
+			"version": "1.2.2.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -2875,21 +3437,21 @@
 					"version": "3.10.6-1~22.04.1"
 				}
 			],
-			"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+			"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 			"name": "roctracer",
-			"sha256": "4b40ae9c1981979f3fb69e9713c5b9fc1a17f868a83732f38f8fb5e53be3a612",
+			"sha256": "51c372d9a3e238e83b9725743f4fbc58a7dd93cb67b5b5adb72bf19148a12e26",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/roctracer/roctracer_4.1.70200.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/roctracer/roctracer_4.1.70201.70201-81~22.04_amd64.deb"
 			],
-			"version": "4.1.70200.70200-43~22.04"
+			"version": "4.1.70201.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -3112,9 +3674,9 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
+					"version": "7.2.53211.70201-81~22.04"
 				},
 				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
@@ -3122,14 +3684,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -3187,9 +3749,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -3217,9 +3779,9 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
@@ -3227,23 +3789,43 @@
 					"version": "0.186-1ubuntu0.1"
 				},
 				{
-					"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
-					"name": "hipblaslt",
-					"version": "1.2.1.70200-43~22.04"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "1.2.2.70201-81~22.04"
+				},
+				{
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				}
 			],
-			"key": "rocblas_5.2.0.70200-43_22.04_amd64",
+			"key": "rocblas_5.2.0.70201-81_22.04_amd64",
 			"name": "rocblas",
-			"sha256": "0581ada80350b0d959e1863af4ff4be3ef31fe9838e941d09b8f0693dda7d23d",
+			"sha256": "835c40b7943ec98298fe889958a9e40ea70ed196a84cfb23c88e98967d30e057",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocblas/rocblas_5.2.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocblas/rocblas_5.2.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "5.2.0.70200-43~22.04"
+			"version": "5.2.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -3279,14 +3861,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "python3_3.10.6-1_22.04.1_amd64",
@@ -3484,9 +4066,9 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -3544,9 +4126,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -3574,34 +4156,54 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				}
 			],
-			"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+			"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 			"name": "hip-runtime-amd",
-			"sha256": "97f477244025fb3bd8762d8d730d18545cafe080cb938f3f6520aeaff6e05c42",
+			"sha256": "2d265ee445042558e06318e445fe7aa0fbfd00e7795bd4d72ada4997b9a748c1",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hip-runtime-amd/hip-runtime-amd_7.2.26015.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hip-runtime-amd/hip-runtime-amd_7.2.53211.70201-81~22.04_amd64.deb"
 			],
-			"version": "7.2.26015.70200-43~22.04"
+			"version": "7.2.53211.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+			"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 			"name": "rocminfo",
-			"sha256": "6b8bcd3f5d0589a3b6447353c140b4ef676c0fbe319050a0f584fde4aa83f16f",
+			"sha256": "774cb4be2da5a7674e2056494fd3456e7c6ea74de50a81554ca38963c8dad317",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocminfo/rocminfo_1.0.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocminfo/rocminfo_1.0.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.0.0.70200-43~22.04"
+			"version": "1.0.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -3687,9 +4289,9 @@
 					"version": "12.3.0-1ubuntu1~22.04"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "python3_3.10.6-1_22.04.1_amd64",
@@ -3887,14 +4489,14 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocm-smi-lib_7.8.0.70200-43_22.04_amd64",
+					"key": "rocm-smi-lib_7.8.0.70201-81_22.04_amd64",
 					"name": "rocm-smi-lib",
-					"version": "7.8.0.70200-43~22.04"
+					"version": "7.8.0.70201-81~22.04"
 				},
 				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
+					"version": "7.2.53211.70201-81~22.04"
 				},
 				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
@@ -3902,14 +4504,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -3967,9 +4569,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -3997,42 +4599,62 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
 					"name": "libelf1",
 					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				}
 			],
-			"key": "rccl_2.27.7.70200-43_22.04_amd64",
+			"key": "rccl_2.27.7.70201-81_22.04_amd64",
 			"name": "rccl",
-			"sha256": "bb450a46ee36578a2b171b9af891f5e94ef04e9f743f75ec16e99246ddaff878",
+			"sha256": "cd84ed31a1bcce67d82ed4599d375b6e1e29b487313dba65297b856ce38ef8cf",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rccl/rccl_2.27.7.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rccl/rccl_2.27.7.70201-81~22.04_amd64.deb"
 			],
-			"version": "2.27.7.70200-43~22.04"
+			"version": "2.27.7.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocm-smi-lib_7.8.0.70200-43_22.04_amd64",
+			"key": "rocm-smi-lib_7.8.0.70201-81_22.04_amd64",
 			"name": "rocm-smi-lib",
-			"sha256": "bfd4ef1c3382eab7685c92c218ef14593ea1bd06836bb8cc903e4100e9125d79",
+			"sha256": "fc470d30b9e33ffc026ae829d7584e7fea04562a488e44c00a27b670d495829d",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.8.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocm-smi-lib/rocm-smi-lib_7.8.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "7.8.0.70200-43~22.04"
+			"version": "7.8.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -4255,31 +4877,31 @@
 					"version": "3.10.6-1~22.04.1"
 				}
 			],
-			"key": "rocm-device-libs_1.0.0.70200-43_22.04_amd64",
+			"key": "rocm-device-libs_1.0.0.70201-81_22.04_amd64",
 			"name": "rocm-device-libs",
-			"sha256": "f1fe8f8fea614c3f734d002f6ae688929156bcfde0f27457412a7c3074d18d51",
+			"sha256": "86ecdcb81a4face9077f51b66b06f9cfc1ea15aa33043a6c0a3e771f8dec5916",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocm-device-libs/rocm-device-libs_1.0.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocm-device-libs/rocm-device-libs_1.0.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.0.0.70200-43~22.04"
+			"version": "1.0.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "hipcc_1.1.1.70200-43_22.04_amd64",
+					"key": "hipcc_1.1.1.70201-81_22.04_amd64",
 					"name": "hipcc",
-					"version": "1.1.1.70200-43~22.04"
+					"version": "1.1.1.70201-81~22.04"
 				},
 				{
-					"key": "rocm-llvm_22.0.0.26014.70200-43_22.04_amd64",
+					"key": "rocm-llvm_22.0.0.26084.70201-81_22.04_amd64",
 					"name": "rocm-llvm",
-					"version": "22.0.0.26014.70200-43~22.04"
+					"version": "22.0.0.26084.70201-81~22.04"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -4592,14 +5214,19 @@
 					"version": "2.35-0ubuntu3.10"
 				},
 				{
-					"key": "hsa-rocr-dev_1.18.0.70200-43_22.04_amd64",
+					"key": "hsa-rocr-dev_1.18.0.70201-81_22.04_amd64",
 					"name": "hsa-rocr-dev",
-					"version": "1.18.0.70200-43~22.04"
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
+				},
+				{
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
@@ -4607,54 +5234,49 @@
 					"version": "0.186-1ubuntu0.1"
 				},
 				{
-					"key": "libdrm-amdgpu-dev_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-dev",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm-amdgpu-radeon1_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-radeon1",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm2-amdgpu_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm2-amdgpu",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				},
-				{
-					"key": "amdgpu-core_1-7.2.70200-2278374.22.04_amd64",
-					"name": "amdgpu-core",
-					"version": "1:7.2.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-amdgpu1",
-					"version": "1:2.4.125.70200-2278374.22.04"
-				},
-				{
-					"key": "libdrm-amdgpu-common_1.0.0.70200-2278374.22.04_amd64",
-					"name": "libdrm-amdgpu-common",
-					"version": "1.0.0.70200-2278374.22.04"
-				},
-				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
-					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
-				},
-				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
 					"name": "libnuma1",
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
-					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-dev_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-dev",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-radeon1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-radeon1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
+					"name": "hip-runtime-amd",
+					"version": "7.2.53211.70201-81~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -4677,9 +5299,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -4722,35 +5344,35 @@
 					"version": "1:5.41-3ubuntu0.1"
 				}
 			],
-			"key": "hip-dev_7.2.26015.70200-43_22.04_amd64",
+			"key": "hip-dev_7.2.53211.70201-81_22.04_amd64",
 			"name": "hip-dev",
-			"sha256": "19d62d6f520b4e521fe90246d9ae872b30528e490f80c6e265f83a583302f0ad",
+			"sha256": "5cc26232d8b7fd3ced173c07183be1d8c262beadce74fc44360e986d9f10dfc0",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hip-dev/hip-dev_7.2.26015.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hip-dev/hip-dev_7.2.53211.70201-81~22.04_amd64.deb"
 			],
-			"version": "7.2.26015.70200-43~22.04"
+			"version": "7.2.53211.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "hipcc_1.1.1.70200-43_22.04_amd64",
+			"key": "hipcc_1.1.1.70201-81_22.04_amd64",
 			"name": "hipcc",
-			"sha256": "3c037af2114bd9058fb1420c00586c5d1c01a63d1d34500d8e61b39802ac570b",
+			"sha256": "fb047beabb6e93401d9179aadf26dbbb30df476f24525535c543d26e6c6f0327",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipcc/hipcc_1.1.1.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipcc/hipcc_1.1.1.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.1.1.70200-43~22.04"
+			"version": "1.1.1.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocm-llvm_22.0.0.26014.70200-43_22.04_amd64",
+			"key": "rocm-llvm_22.0.0.26084.70201-81_22.04_amd64",
 			"name": "rocm-llvm",
-			"sha256": "88d604fe0ab4a2502f0c7e0f8d3b7b49e829ae3057971de681a68b2fdb2505d2",
+			"sha256": "81dfdbac523318101e06e551c6a98aae55c595886d84de43e893dcf2ca41a3ba",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocm-llvm/rocm-llvm_22.0.0.26014.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocm-llvm/rocm-llvm_22.0.0.26084.70201-81~22.04_amd64.deb"
 			],
-			"version": "22.0.0.26014.70200-43~22.04"
+			"version": "22.0.0.26084.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
@@ -4876,35 +5498,35 @@
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "hsa-rocr-dev_1.18.0.70200-43_22.04_amd64",
+			"key": "hsa-rocr-dev_1.18.0.70201-81_22.04_amd64",
 			"name": "hsa-rocr-dev",
-			"sha256": "71233ffaac8f28550c35bcf3e287a377a3c5c938a1e815e65d4155139cf4bdff",
+			"sha256": "95043500f730e6cb0e796274228f3f94deb0e36e7f80793584a2932e6ec707e5",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hsa-rocr-dev/hsa-rocr-dev_1.18.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hsa-rocr-dev/hsa-rocr-dev_1.18.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.18.0.70200-43~22.04"
+			"version": "1.18.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-amdgpu-dev_1-2.4.125.70200-2278374.22.04_amd64",
+			"key": "libdrm-amdgpu-dev_1-2.4.125.70201-2303469.22.04_amd64",
 			"name": "libdrm-amdgpu-dev",
-			"sha256": "fec583602169ae32d3c9313dcb24c00732911234712495cbb6bb10f2194d2aee",
+			"sha256": "23b402f6a8915f401e26a3986429b2a64207477e5eec99293021e608ed812ea3",
 			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-dev_2.4.125.70200-2278374.22.04_amd64.deb"
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-dev_2.4.125.70201-2303469.22.04_amd64.deb"
 			],
-			"version": "1:2.4.125.70200-2278374.22.04"
+			"version": "1:2.4.125.70201-2303469.22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "libdrm-amdgpu-radeon1_1-2.4.125.70200-2278374.22.04_amd64",
+			"key": "libdrm-amdgpu-radeon1_1-2.4.125.70201-2303469.22.04_amd64",
 			"name": "libdrm-amdgpu-radeon1",
-			"sha256": "70049c919cff1b728107a03cd893b69106de8c00ac344e2d4019922d6bdbcd8b",
+			"sha256": "4b735739687e0796c3d967397ffead2d81499acab208f7e1709342b237657ef3",
 			"urls": [
-				"https://repo.radeon.com/graphics/7.2/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-radeon1_2.4.125.70200-2278374.22.04_amd64.deb"
+				"https://repo.radeon.com/graphics/7.2.1/ubuntu/pool/main/libd/libdrm-amdgpu/libdrm-amdgpu-radeon1_2.4.125.70201-2303469.22.04_amd64.deb"
 			],
-			"version": "1:2.4.125.70200-2278374.22.04"
+			"version": "1:2.4.125.70201-2303469.22.04"
 		},
 		{
 			"arch": "amd64",
@@ -4943,9 +5565,9 @@
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -5168,14 +5790,14 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocblas_5.2.0.70200-43_22.04_amd64",
+					"key": "rocblas_5.2.0.70201-81_22.04_amd64",
 					"name": "rocblas",
-					"version": "5.2.0.70200-43~22.04"
+					"version": "5.2.0.70201-81~22.04"
 				},
 				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
+					"version": "7.2.53211.70201-81~22.04"
 				},
 				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
@@ -5183,14 +5805,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -5248,9 +5870,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -5278,9 +5900,9 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
@@ -5288,31 +5910,51 @@
 					"version": "0.186-1ubuntu0.1"
 				},
 				{
-					"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
-					"name": "hipblaslt",
-					"version": "1.2.1.70200-43~22.04"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "1.2.2.70201-81~22.04"
+				},
+				{
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				}
 			],
-			"key": "rocsolver_3.32.0.70200-43_22.04_amd64",
+			"key": "rocsolver_3.32.0.70201-81_22.04_amd64",
 			"name": "rocsolver",
-			"sha256": "f18b57d3ebeba075b2b91f9e71d92da3efba73f34c5cff697cea1259b829547a",
+			"sha256": "6208660df71b8a5c55e2147c64bcaf65778288c1a9b24b25e1df9c1e9a071d24",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocsolver/rocsolver_3.32.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocsolver/rocsolver_3.32.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "3.32.0.70200-43~22.04"
+			"version": "3.32.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -5535,19 +6177,19 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocsolver_3.32.0.70200-43_22.04_amd64",
+					"key": "rocsolver_3.32.0.70201-81_22.04_amd64",
 					"name": "rocsolver",
-					"version": "3.32.0.70200-43~22.04"
+					"version": "3.32.0.70201-81~22.04"
 				},
 				{
-					"key": "rocblas_5.2.0.70200-43_22.04_amd64",
+					"key": "rocblas_5.2.0.70201-81_22.04_amd64",
 					"name": "rocblas",
-					"version": "5.2.0.70200-43~22.04"
+					"version": "5.2.0.70201-81~22.04"
 				},
 				{
-					"key": "hip-runtime-amd_7.2.26015.70200-43_22.04_amd64",
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
 					"name": "hip-runtime-amd",
-					"version": "7.2.26015.70200-43~22.04"
+					"version": "7.2.53211.70201-81~22.04"
 				},
 				{
 					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
@@ -5555,14 +6197,14 @@
 					"version": "2.0.14-3ubuntu2"
 				},
 				{
-					"key": "rocprofiler-register_0.6.0.70200-43_22.04_amd64",
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
 					"name": "rocprofiler-register",
-					"version": "0.6.0.70200-43~22.04"
+					"version": "0.6.0.70201-81~22.04"
 				},
 				{
-					"key": "comgr_3.0.0.70200-43_22.04_amd64",
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
 					"name": "comgr",
-					"version": "3.0.0.70200-43~22.04"
+					"version": "3.0.0.70201-81~22.04"
 				},
 				{
 					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
@@ -5620,9 +6262,9 @@
 					"version": "6.3-2ubuntu0.1"
 				},
 				{
-					"key": "rocminfo_1.0.0.70200-43_22.04_amd64",
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
 					"name": "rocminfo",
-					"version": "1.0.0.70200-43~22.04"
+					"version": "1.0.0.70201-81~22.04"
 				},
 				{
 					"key": "pciutils_1-3.7.0-6_amd64",
@@ -5650,9 +6292,9 @@
 					"version": "29-1ubuntu1"
 				},
 				{
-					"key": "hsa-runtime-rocr4wsl-amdgpu_25.30.13-2281980.22.04_amd64",
-					"name": "hsa-runtime-rocr4wsl-amdgpu",
-					"version": "25.30.13-2281980.22.04"
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
 				},
 				{
 					"key": "libelf1_0.186-1ubuntu0.1_amd64",
@@ -5660,31 +6302,51 @@
 					"version": "0.186-1ubuntu0.1"
 				},
 				{
-					"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
-					"name": "hipblaslt",
-					"version": "1.2.1.70200-43~22.04"
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "1.2.2.70201-81~22.04"
+				},
+				{
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				}
 			],
-			"key": "hipsolver_3.2.0.70200-43_22.04_amd64",
+			"key": "hipsolver_3.2.0.70201-81_22.04_amd64",
 			"name": "hipsolver",
-			"sha256": "0fbff8007eada3d952db641c0653df26854854ee9e7058b4bd63202db66f2af8",
+			"sha256": "dc4f18451d0e2bd370e30e3ab75137429563a253deba56f44e955e5a903f0230",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipsolver/hipsolver_3.2.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipsolver/hipsolver_3.2.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "3.2.0.70200-43~22.04"
+			"version": "3.2.0.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -5907,42 +6569,42 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "rocfft_1.0.36.70200-43_22.04_amd64",
+					"key": "rocfft_1.0.36.70201-81_22.04_amd64",
 					"name": "rocfft",
-					"version": "1.0.36.70200-43~22.04"
+					"version": "1.0.36.70201-81~22.04"
 				}
 			],
-			"key": "hipfft_1.0.22.70200-43_22.04_amd64",
+			"key": "hipfft_1.0.22.70201-81_22.04_amd64",
 			"name": "hipfft",
-			"sha256": "55a791b56dbeadcc3a1f1d0d770afc71a7fbb06aed4cd190b75ee27c19c18c61",
+			"sha256": "19cee2bfd969648b46bb4ee152be823631810ce1e099d008292067f7468aec32",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipfft/hipfft_1.0.22.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipfft/hipfft_1.0.22.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.0.22.70200-43~22.04"
+			"version": "1.0.22.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "rocfft_1.0.36.70200-43_22.04_amd64",
+			"key": "rocfft_1.0.36.70201-81_22.04_amd64",
 			"name": "rocfft",
-			"sha256": "8dbfef90c0055ef0d572451cb4a7a3380c3394485ed33cab4c116283d2fea7fe",
+			"sha256": "4866b772d074f7f01e6fb882bef28667baa5d634ef902e95341087864d5e53e4",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/r/rocfft/rocfft_1.0.36.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocfft/rocfft_1.0.36.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.0.36.70200-43~22.04"
+			"version": "1.0.36.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [
 				{
-					"key": "hipblaslt_1.2.1.70200-43_22.04_amd64",
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
 					"name": "hipblaslt",
-					"version": "1.2.1.70200-43~22.04"
+					"version": "1.2.2.70201-81~22.04"
 				},
 				{
-					"key": "rocm-core_7.2.0.70200-43_22.04_amd64",
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
 					"name": "rocm-core",
-					"version": "7.2.0.70200-43~22.04"
+					"version": "7.2.1.70201-81~22.04"
 				},
 				{
 					"key": "libc6_2.35-0ubuntu3.10_amd64",
@@ -6165,34 +6827,421 @@
 					"version": "3.10.6-1~22.04.1"
 				},
 				{
-					"key": "roctracer_4.1.70200.70200-43_22.04_amd64",
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
 					"name": "roctracer",
-					"version": "4.1.70200.70200-43~22.04"
+					"version": "4.1.70201.70201-81~22.04"
 				},
 				{
-					"key": "hipblas-common-dev_1.4.0.70200-43_22.04_amd64",
+					"key": "hipblas-common-dev_1.4.0.70201-81_22.04_amd64",
 					"name": "hipblas-common-dev",
-					"version": "1.4.0.70200-43~22.04"
+					"version": "1.4.0.70201-81~22.04"
 				}
 			],
-			"key": "hipblaslt-dev_1.2.1.70200-43_22.04_amd64",
+			"key": "hipblaslt-dev_1.2.2.70201-81_22.04_amd64",
 			"name": "hipblaslt-dev",
-			"sha256": "7bb01f62e51be15495ea4a124db7b6c4e600d27d401ce636fb9b3daaf6b4b958",
+			"sha256": "b6b90b4b9576ad8cf615528ab468537351eadb53576abf0e06a7319d0cbab2d0",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipblaslt-dev/hipblaslt-dev_1.2.1.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipblaslt-dev/hipblaslt-dev_1.2.2.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.2.1.70200-43~22.04"
+			"version": "1.2.2.70201-81~22.04"
 		},
 		{
 			"arch": "amd64",
 			"dependencies": [],
-			"key": "hipblas-common-dev_1.4.0.70200-43_22.04_amd64",
+			"key": "hipblas-common-dev_1.4.0.70201-81_22.04_amd64",
 			"name": "hipblas-common-dev",
-			"sha256": "1eed050f8367b58d697db452c3928780ae408ee055694f1676326d54f4caa739",
+			"sha256": "400298c925c13791860486014e2c9215681be640e525945fc2da7e9eafa6fbfa",
 			"urls": [
-				"https://repo.radeon.com/rocm/apt/7.2/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.4.0.70200-43~22.04_amd64.deb"
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/h/hipblas-common-dev/hipblas-common-dev_1.4.0.70201-81~22.04_amd64.deb"
 			],
-			"version": "1.4.0.70200-43~22.04"
+			"version": "1.4.0.70201-81~22.04"
+		},
+		{
+			"arch": "amd64",
+			"dependencies": [
+				{
+					"key": "rocm-core_7.2.1.70201-81_22.04_amd64",
+					"name": "rocm-core",
+					"version": "7.2.1.70201-81~22.04"
+				},
+				{
+					"key": "libc6_2.35-0ubuntu3.10_amd64",
+					"name": "libc6",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libcrypt1_1-4.4.27-1_amd64",
+					"name": "libcrypt1",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "libgcc-s1_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libgcc-s1",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "gcc-12-base_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "gcc-12-base",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "python3_3.10.6-1_22.04.1_amd64",
+					"name": "python3",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3-stdlib_3.10.6-1_22.04.1_amd64",
+					"name": "libpython3-stdlib",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "libpython3.10-stdlib_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-stdlib",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libuuid1_2.37.2-4ubuntu3.4_amd64",
+					"name": "libuuid1",
+					"version": "2.37.2-4ubuntu3.4"
+				},
+				{
+					"key": "libtirpc3_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc3",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libtirpc-common_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc-common",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "libgssapi-krb5-2_1.19.2-2ubuntu0.7_amd64",
+					"name": "libgssapi-krb5-2",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5support0_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5support0",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libkrb5-3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libkrb5-3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libssl3_3.0.2-0ubuntu1.19_amd64",
+					"name": "libssl3",
+					"version": "3.0.2-0ubuntu1.19"
+				},
+				{
+					"key": "debconf_1.5.79ubuntu1_amd64",
+					"name": "debconf",
+					"version": "1.5.79ubuntu1"
+				},
+				{
+					"key": "perl-base_5.34.0-3ubuntu1.4_amd64",
+					"name": "perl-base",
+					"version": "5.34.0-3ubuntu1.4"
+				},
+				{
+					"key": "dpkg_1.21.1ubuntu2.3_amd64",
+					"name": "dpkg",
+					"version": "1.21.1ubuntu2.3"
+				},
+				{
+					"key": "tar_1.34-p-dfsg-1ubuntu0.1.22.04.2_amd64",
+					"name": "tar",
+					"version": "1.34+dfsg-1ubuntu0.1.22.04.2"
+				},
+				{
+					"key": "libselinux1_3.3-1build2_amd64",
+					"name": "libselinux1",
+					"version": "3.3-1build2"
+				},
+				{
+					"key": "libpcre2-8-0_10.39-3ubuntu0.1_amd64",
+					"name": "libpcre2-8-0",
+					"version": "10.39-3ubuntu0.1"
+				},
+				{
+					"key": "libacl1_2.3.1-1_amd64",
+					"name": "libacl1",
+					"version": "2.3.1-1"
+				},
+				{
+					"key": "zlib1g_1-1.2.11.dfsg-2ubuntu9.2_amd64",
+					"name": "zlib1g",
+					"version": "1:1.2.11.dfsg-2ubuntu9.2"
+				},
+				{
+					"key": "libzstd1_1.4.8-p-dfsg-3build1_amd64",
+					"name": "libzstd1",
+					"version": "1.4.8+dfsg-3build1"
+				},
+				{
+					"key": "liblzma5_5.2.5-2ubuntu1_amd64",
+					"name": "liblzma5",
+					"version": "5.2.5-2ubuntu1"
+				},
+				{
+					"key": "libbz2-1.0_1.0.8-5build1_amd64",
+					"name": "libbz2-1.0",
+					"version": "1.0.8-5build1"
+				},
+				{
+					"key": "libkeyutils1_1.6.1-2ubuntu3_amd64",
+					"name": "libkeyutils1",
+					"version": "1.6.1-2ubuntu3"
+				},
+				{
+					"key": "libk5crypto3_1.19.2-2ubuntu0.7_amd64",
+					"name": "libk5crypto3",
+					"version": "1.19.2-2ubuntu0.7"
+				},
+				{
+					"key": "libcom-err2_1.46.5-2ubuntu1.2_amd64",
+					"name": "libcom-err2",
+					"version": "1.46.5-2ubuntu1.2"
+				},
+				{
+					"key": "libtinfo6_6.3-2ubuntu0.1_amd64",
+					"name": "libtinfo6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libsqlite3-0_3.37.2-2ubuntu0.4_amd64",
+					"name": "libsqlite3-0",
+					"version": "3.37.2-2ubuntu0.4"
+				},
+				{
+					"key": "libreadline8_8.1.2-1_amd64",
+					"name": "libreadline8",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "readline-common_8.1.2-1_amd64",
+					"name": "readline-common",
+					"version": "8.1.2-1"
+				},
+				{
+					"key": "libnsl2_1.3.0-2build2_amd64",
+					"name": "libnsl2",
+					"version": "1.3.0-2build2"
+				},
+				{
+					"key": "libncursesw6_6.3-2ubuntu0.1_amd64",
+					"name": "libncursesw6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libmpdec3_2.5.1-2build2_amd64",
+					"name": "libmpdec3",
+					"version": "2.5.1-2build2"
+				},
+				{
+					"key": "libstdc-p--p-6_12.3.0-1ubuntu1_22.04_amd64",
+					"name": "libstdc++6",
+					"version": "12.3.0-1ubuntu1~22.04"
+				},
+				{
+					"key": "libffi8_3.4.2-4_amd64",
+					"name": "libffi8",
+					"version": "3.4.2-4"
+				},
+				{
+					"key": "libdb5.3_5.3.28-p-dfsg1-0.8ubuntu3_amd64",
+					"name": "libdb5.3",
+					"version": "5.3.28+dfsg1-0.8ubuntu3"
+				},
+				{
+					"key": "media-types_7.0.0_amd64",
+					"name": "media-types",
+					"version": "7.0.0"
+				},
+				{
+					"key": "libpython3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "libpython3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "python3.10-minimal_3.10.12-1_22.04.10_amd64",
+					"name": "python3.10-minimal",
+					"version": "3.10.12-1~22.04.10"
+				},
+				{
+					"key": "libexpat1_2.4.7-1ubuntu0.6_amd64",
+					"name": "libexpat1",
+					"version": "2.4.7-1ubuntu0.6"
+				},
+				{
+					"key": "python3-minimal_3.10.6-1_22.04.1_amd64",
+					"name": "python3-minimal",
+					"version": "3.10.6-1~22.04.1"
+				},
+				{
+					"key": "rocblas_5.2.0.70201-81_22.04_amd64",
+					"name": "rocblas",
+					"version": "5.2.0.70201-81~22.04"
+				},
+				{
+					"key": "hip-runtime-amd_7.2.53211.70201-81_22.04_amd64",
+					"name": "hip-runtime-amd",
+					"version": "7.2.53211.70201-81~22.04"
+				},
+				{
+					"key": "libnuma1_2.0.14-3ubuntu2_amd64",
+					"name": "libnuma1",
+					"version": "2.0.14-3ubuntu2"
+				},
+				{
+					"key": "rocprofiler-register_0.6.0.70201-81_22.04_amd64",
+					"name": "rocprofiler-register",
+					"version": "0.6.0.70201-81~22.04"
+				},
+				{
+					"key": "comgr_3.0.0.70201-81_22.04_amd64",
+					"name": "comgr",
+					"version": "3.0.0.70201-81~22.04"
+				},
+				{
+					"key": "libtinfo-dev_6.3-2ubuntu0.1_amd64",
+					"name": "libtinfo-dev",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libncurses-dev_6.3-2ubuntu0.1_amd64",
+					"name": "libncurses-dev",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "ncurses-bin_6.3-2ubuntu0.1_amd64",
+					"name": "ncurses-bin",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "libc6-dev_2.35-0ubuntu3.10_amd64",
+					"name": "libc6-dev",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libnsl-dev_1.3.0-2build2_amd64",
+					"name": "libnsl-dev",
+					"version": "1.3.0-2build2"
+				},
+				{
+					"key": "libtirpc-dev_1.3.2-2ubuntu0.1_amd64",
+					"name": "libtirpc-dev",
+					"version": "1.3.2-2ubuntu0.1"
+				},
+				{
+					"key": "rpcsvc-proto_1.4.2-0ubuntu6_amd64",
+					"name": "rpcsvc-proto",
+					"version": "1.4.2-0ubuntu6"
+				},
+				{
+					"key": "libcrypt-dev_1-4.4.27-1_amd64",
+					"name": "libcrypt-dev",
+					"version": "1:4.4.27-1"
+				},
+				{
+					"key": "linux-libc-dev_5.15.0-143.153_amd64",
+					"name": "linux-libc-dev",
+					"version": "5.15.0-143.153"
+				},
+				{
+					"key": "libc-dev-bin_2.35-0ubuntu3.10_amd64",
+					"name": "libc-dev-bin",
+					"version": "2.35-0ubuntu3.10"
+				},
+				{
+					"key": "libncurses6_6.3-2ubuntu0.1_amd64",
+					"name": "libncurses6",
+					"version": "6.3-2ubuntu0.1"
+				},
+				{
+					"key": "rocminfo_1.0.0.70201-81_22.04_amd64",
+					"name": "rocminfo",
+					"version": "1.0.0.70201-81~22.04"
+				},
+				{
+					"key": "pciutils_1-3.7.0-6_amd64",
+					"name": "pciutils",
+					"version": "1:3.7.0-6"
+				},
+				{
+					"key": "libpci3_1-3.7.0-6_amd64",
+					"name": "libpci3",
+					"version": "1:3.7.0-6"
+				},
+				{
+					"key": "pci.ids_0.0_2022.01.22-1ubuntu0.1_amd64",
+					"name": "pci.ids",
+					"version": "0.0~2022.01.22-1ubuntu0.1"
+				},
+				{
+					"key": "libudev1_249.11-0ubuntu3.16_amd64",
+					"name": "libudev1",
+					"version": "249.11-0ubuntu3.16"
+				},
+				{
+					"key": "libkmod2_29-1ubuntu1_amd64",
+					"name": "libkmod2",
+					"version": "29-1ubuntu1"
+				},
+				{
+					"key": "hsa-rocr_1.18.0.70201-81_22.04_amd64",
+					"name": "hsa-rocr",
+					"version": "1.18.0.70201-81~22.04"
+				},
+				{
+					"key": "libelf1_0.186-1ubuntu0.1_amd64",
+					"name": "libelf1",
+					"version": "0.186-1ubuntu0.1"
+				},
+				{
+					"key": "libdrm-amdgpu-amdgpu1_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-amdgpu1",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm-amdgpu-common_1.0.0.70201-2303469.22.04_amd64",
+					"name": "libdrm-amdgpu-common",
+					"version": "1.0.0.70201-2303469.22.04"
+				},
+				{
+					"key": "amdgpu-core_1-7.2.70201-2303469.22.04_amd64",
+					"name": "amdgpu-core",
+					"version": "1:7.2.70201-2303469.22.04"
+				},
+				{
+					"key": "libdrm2-amdgpu_1-2.4.125.70201-2303469.22.04_amd64",
+					"name": "libdrm2-amdgpu",
+					"version": "1:2.4.125.70201-2303469.22.04"
+				},
+				{
+					"key": "hipblaslt_1.2.2.70201-81_22.04_amd64",
+					"name": "hipblaslt",
+					"version": "1.2.2.70201-81~22.04"
+				},
+				{
+					"key": "roctracer_4.1.70201.70201-81_22.04_amd64",
+					"name": "roctracer",
+					"version": "4.1.70201.70201-81~22.04"
+				}
+			],
+			"key": "rocsparse_4.2.0.70201-81_22.04_amd64",
+			"name": "rocsparse",
+			"sha256": "f29106f3e1a6374cca59c0ee2ba78b1901934316f46951b2ecc136363b5a7bb9",
+			"urls": [
+				"https://repo.radeon.com/rocm/apt/7.2.1/pool/main/r/rocsparse/rocsparse_4.2.0.70201-81~22.04_amd64.deb"
+			],
+			"version": "4.2.0.70201-81~22.04"
 		}
 	],
 	"version": 1

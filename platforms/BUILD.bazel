@@ -28,6 +28,7 @@ PLATFORMS = {
 
 zig_library(
     name = "platforms",
+    tags = ["manual"],
     main = "platforms.zig",
     visibility = ["//visibility:public"],
     deps = [

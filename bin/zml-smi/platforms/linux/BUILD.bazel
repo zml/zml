@@ -1,0 +1,17 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "linux",
+    import_name = "zml-smi/platforms/linux",
+    main = "linux.zig",
+    srcs = [
+        "metrics.zig",
+        "process.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/utils:sysfs",
+    ],
+)

@@ -2,197 +2,132 @@
   <img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/zml-banner.png" style="width:100%; height:120px;">
   <a href="https://zml.ai">Website</a>
   | <a href="#getting-started">Getting Started</a>
-  | <a href="https://docs.zml.ai">Documentation</a>
+  | <a href="./docs/README.md">Documentation</a>
   | <a href="https://discord.gg/6y72SN2E7H">Discord</a>
   | <a href="./CONTRIBUTING.md">Contributing</a>
 </div>
 
 [ZML]: https://zml.ai/
 [Getting Started]: #getting-started
-[Documentation]: https://docs.zml.ai
+[Documentation]: ./docs/README.md
 [Contributing]: ./CONTRIBUTING.md
 [Discord]: https://discord.gg/6y72SN2E7H
 
-# Bonjour 👋
+# About
 
-At ZML, we are creating exciting AI products on top of our high-performance
-AI inference stack. Our stack is built for production, using the amazing
-[Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and the
-power of [Bazel](https://bazel.build).
+ZML is a production inference stack, purpose-built to decouple AI workloads from proprietary hardware.
 
-<div align="center">
-  <div>Take me straight to <a href="#getting-started">getting started</a> or <a href="#a-taste-of-zml">give me a taste</a> 🥐!</div>
-</div>
+Any model, many hardwares, one codebase, peak performance.
 
----
+Compiled directly to NVIDIA, AMD, TPU, Trainium for peak hardware performance on any accelerator. No rewriting.
 
-&nbsp;
+It is built using the
+[Zig](https://ziglang.org) language, [MLIR](https://mlir.llvm.org), and [Bazel](https://bazel.build).
 
-# We're happy to share!
-We're very happy to share our inference stack with the World and hope it allows
-you, too, to build cool and exciting AI projects.
-
-To give you a glimpse of what you can do with ZML, here is an early demo:
-
-<div align="center"><img src="https://raw.githubusercontent.com/zml/zml.github.io/refs/heads/main/docs-assets/ZML.gif" style="width:75%"></div>
-
-It shows a prototype running a LLama3 model sharded on 1 NVIDIA RTX 4090, 1 AMD
-6800XT, and 1 Google Cloud TPU v2.  All accelerators were hosted in different
-locations, with activations being passed over a VPN.
-
-All processes used the same model code, cross-compiled on a Mac, and copied onto
-the servers.
-
-For more inspiration, see also the examples below or check out the
-[examples](./examples) folder.
-
-
-
-# Getting started
-
-
+# Getting Started
 
 ## Prerequisites
 
 We use `bazel` to build ZML and its dependencies. The only prerequisite is
-`bazel`, which we recommend to download through `bazelisk`, a version manager
-for `bazel`.
-
-**Please note: If you do not wish to install `bazel`** system-wide, we provide
-[bazel.sh](bazel.sh) which downloads it to your home folder
-and runs it.
-
-**Install Bazel** (recommended):
-
-<details><summary>
+`bazel`, which we recommend installing through `bazelisk`.
 
 ### macOS
-</summary>
 
-```
+```bash
 brew install bazelisk
 ```
-</details>
-
-<details><summary>
 
 ### Linux
-</summary>
 
-```
-curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64'
+```bash
+curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.0/bazelisk-linux-amd64'
 chmod +x /usr/local/bin/bazel
 ```
-</details>
 
+## 30-Second Smoke Test
 
-## Run a pre-packaged model
+Run the MNIST example:
 
-We have implemented a variety of example models in ZML. See our reference
-implementations in the
-[examples](https://github.com/zml/zml/tree/master/examples/) folder.
-
-### MNIST
-
-The [classic](https://en.wikipedia.org/wiki/MNIST_database) handwritten digits
-recognition task. The model is tasked to recognize a handwritten digit, which
-has been converted to a 28x28 pixel monochrome image. `Bazel` will download a
-pre-trained model, and the test dataset. The program will load the model,
-compile it, and classify a randomly picked example from the test dataset.
-
-On the command line:
-
-```
-bazel run --config=release //examples/mnist
-
-# or
-./bazel.sh run --config=release //examples/mnist
+```bash
+bazel run //examples/mnist
 ```
 
+This downloads a small pretrained MNIST model, compiles it, loads the weights, and
+classifies a random handwritten digit.
 
+## LLM Quickstart
 
-### Meta Llama 3.1 8B
+The main LLM example is [`//examples/llm`](./examples/llm). It currently supports:
 
-This model has restrictions, see
-[here](https://huggingface.co/meta-llama/Llama-3.1-8B-Instruct). It **requires
-approval from Meta on Huggingface**, which can take a few hours to get granted.
+- Llama 3.1 / 3.2
+- Qwen 3.5
+- LFM 2.5
 
-Once you've been granted access, you're ready to download a gated model like
-`Llama-3.1-8B-Instruct`!
+Authenticate with Hugging Face if you want to load gated repos such as Meta
+Llama:
 
-First, you need to download the model using the [huggingface-cli](https://huggingface.co/docs/huggingface_hub/en/guides/cli).
-Note you don't need to install it yourself,
-you can just use the packaged version `bazel run //tools/hf --`.
-
-```
-bazel run //tools/hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
-```
-
-Then, you can run the model.
-
-```
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+```bash
+bazel run //tools/hf -- auth login
 ```
 
-You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
+Alternatively, set the `HF_TOKEN` environment variable.
 
-### Meta Llama 3.2 1B
+Then run a prompt directly:
 
-Like the 8B model above, this model also requires approval. See
-[here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
-
-```
-bazel run //tools/hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct -- --prompt="What is the capital of France?"
+```bash
+bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
-For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
+Open the interactive chat loop by omitting `--prompt`:
+
+```bash
+bazel run //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct
+```
+
+You can also load from:
+
+- a local directory: `--model=/var/models/meta-llama/Llama-3.2-1B-Instruct`
+- S3: `--model=s3://bucket/path/to/model`
 
 ## Running Models on GPU / TPU
 
-You can compile models for accelerator runtimes by appending one or more of the
-following arguments to the command line when compiling / running a model:
+Append one or more platform flags when compiling or running:
 
 - NVIDIA CUDA: `--@zml//platforms:cuda=true`
 - AMD RoCM: `--@zml//platforms:rocm=true`
 - Google TPU: `--@zml//platforms:tpu=true`
-- AWS Trainium/Inferentia 2: `--@zml//platforms:neuron=true`
-- **AVOID CPU:** `--@zml//platforms:cpu=false`
+- AWS Trainium / Inferentia 2: `--@zml//platforms:neuron=true`
+- Disable CPU compilation: `--@zml//platforms:cpu=false`
 
-The latter, avoiding compilation for CPU, cuts down compilation time.
+Example on CUDA:
 
-So, to run the Llama 3.1 8B model from above on your host sporting an NVIDIA GPU,
-run the following:
-
-```
-bazel run --config=release //examples/llama                       \
-          --@zml//platforms:cuda=true                     \
-          -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct \
-          --prompt="What is the capital of France?"
+```bash
+bazel run //examples/llm --@zml//platforms:cuda=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
 ```
 
+Example on ROCm:
+
+```bash
+bazel run //examples/llm --@zml//platforms:rocm=true -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="Write a haiku about Zig"
+```
 
 ## Run Tests
 
-```
+```bash
 bazel test //zml:test
 ```
 
+# Examples
 
-# A taste of ZML
+- [`examples/llm`](./examples/llm): unified LLM CLI for Llama, Qwen, and LFM
+- [`examples/mnist`](./examples/mnist): smallest end-to-end model run
+- [`examples/sharding`](./examples/sharding): logical mesh, partitioners, shard-local execution, profiler output
+- [`examples/io`](./examples/io): inspect and load local, `hf://`, `https://`, and `s3://` repositories through the VFS layer
+- [`examples/benchmark`](./examples/benchmark): measure loading and execution performance
 
-
-
-## MNIST
-
+# A Taste Of ZML
 
 ```zig
-const std = @import("std");
-const zml = @import("zml");
-
-/// Model definition
 const Mnist = struct {
     fc1: Layer,
     fc2: Layer,
@@ -201,65 +136,84 @@ const Mnist = struct {
         weight: zml.Tensor,
         bias: zml.Tensor,
 
+        pub fn init(store: zml.io.TensorStore.View) Layer {
+            return .{
+                .weight = store.createTensor("weight", .{ .d_out, .d }, null),
+                .bias = store.createTensor("bias", .{.d_out}, null),
+            };
+        }
+
         pub fn forward(self: Layer, input: zml.Tensor) zml.Tensor {
-            return self.weight.matmul(input).add(self.bias).relu();
+            return self.weight.dot(input, .d).add(self.bias).relu().withTags(.{.d});
         }
     };
 
+    pub fn init(store: zml.io.TensorStore.View) Mnist {
+        return .{
+            .fc1 = .init(store.withPrefix("fc1")),
+            .fc2 = .init(store.withPrefix("fc2")),
+        };
+    }
+
+    pub fn load(
+        self: *const Mnist,
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *const zml.io.TensorStore,
+        shardings: []const zml.sharding.Sharding,
+    ) !zml.Bufferized(Mnist) {
+        return zml.io.load(Mnist, self, allocator, io, platform, store, .{
+            .shardings = shardings,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 16 * 1024 * 1024,
+        });
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mnist)) void {
+        self.fc1.weight.deinit();
+        self.fc1.bias.deinit();
+        self.fc2.weight.deinit();
+        self.fc2.bias.deinit();
+    }
+
     /// just two linear layers + relu activation
     pub fn forward(self: Mnist, input: zml.Tensor) zml.Tensor {
-        std.log.info("Compiling for target: {s}", .{@tagName(input.getContext().target())});
-        var x = input.flattenAll().convert(.f32);
+        var x = input.flatten().convert(.f32).withTags(.{.d});
         const layers: []const Layer = &.{ self.fc1, self.fc2 };
         for (layers) |layer| {
-            x = zml.call(layer, .forward, .{x});
+            x = layer.forward(x);
         }
-        return x.argMax(0, .u8).indices;
+        return x.argMax(0).indices.convert(.u8);
     }
 };
 ```
 
+For a full walkthrough, see:
 
+- [Getting Started](./docs/tutorials/getting_started.md)
+- [Writing your first model](./docs/tutorials/write_first_model.md)
+- [ZML Concepts](./docs/learn/concepts.md)
+- [Deploying on a server](./docs/howtos/deploy_on_server.md)
 
-## Tagged Tensors
+# Where To Go Next
 
-```zig
-const Sdpa = struct {
-    pub fn forward(_: Sdpa, ctx: *zml.Context, q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor) zml.Tensor {
-        const q = q_.withTags(.{ .b, .h, .q, .hd });
-        const k = k_.withTags(.{ .b, .h, .k, .hd });
-        const v = v_.withTags(.{ .b, .h, .k, .hd });
-        const attn_mask = zml.nn.causalAttnMask(ctx, .{ .q = q.dim(.q), .k = k.dim(.k) }, q.dtype(), null);
-        return zml.nn.sdpa(ctx, q, k, v, .{ .attn_mask = attn_mask });
-    }
-};
-```
-
-
-
-
-# Where to go next:
-
-You might want to check out more [examples](./examples), read through the
-[documentation directly on GitHub](./docs/README.md), or, for the full rendering
-experience, browse the
-[online documentation with included API reference](https://docs.zml.ai).
-
-
+- Run more examples in [`./examples`](./examples)
+- Read the example-specific notes in [`examples/llm/README.md`](./examples/llm/README.md)
+- Learn tagged dimensions in [`working_with_tensors.md`](./docs/tutorials/working_with_tensors.md)
+- Start building a model with [`write_first_model.md`](./docs/tutorials/write_first_model.md)
+- Explore deployment in [`deploy_on_server.md`](./docs/howtos/deploy_on_server.md)
 
 # Contributing
 
 See [here][Contributing].
 
-
-
 # License
 
 ZML is licensed under the [Apache 2.0 license](./LICENSE).
 
-
-
-# Thanks to our contributors
+# Thanks To Our Contributors
 
 <a href="https://github.com/zml/zml/graphs/contributors">
   <img src="https://contrib.rocks/image?repo=zml/zml" />

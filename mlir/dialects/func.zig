@@ -67,7 +67,6 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     });
 }
 
-
 pub fn call(ctx: *mlir.Context, name: []const u8, values: []const *const mlir.Value, results: []const *const mlir.Type, location: *const mlir.Location) *mlir.Operation {
     return mlir.Operation.make(ctx, "func.call", .{
         .operands = .{ .variadic = &.{values} },

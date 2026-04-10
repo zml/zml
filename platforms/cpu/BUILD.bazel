@@ -1,4 +1,4 @@
-load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_cc//cc:cc_library.bzl", "cc_library")
 load("@rules_zig//zig:defs.bzl", "zig_library")
 
@@ -20,6 +20,7 @@ config_setting(
 
 cc_library(
     name = "empty",
+    tags = ["manual"],
     defines = ["ZML_RUNTIME_CPU_DISABLED"],
 )
 
@@ -36,12 +37,14 @@ copy_to_directory(
 
 cc_library(
     name = "libpjrt_cpu",
+    tags = ["manual"],
     data = [":sandbox"],
     defines = ["ZML_RUNTIME_CPU"],
 )
 
 zig_library(
     name = "cpu",
+    tags = ["manual"],
     import_name = "platforms/cpu",
     main = "cpu.zig",
     visibility = ["//visibility:public"],

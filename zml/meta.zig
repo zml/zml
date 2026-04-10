@@ -148,7 +148,7 @@ pub fn mapAlloc(comptime cb: anytype, allocator: std.mem.Allocator, ctx: FnParam
     // TODO: handle tuple to slice conversion
     // TODO: handle error bubbling up
     const From = FnParam(cb, 1);
-    const To = stdx.meta.FnResult(cb);
+    const To = stdx.meta.FnReturn(cb);
     const FromStruct = @TypeOf(from);
     const type_info_to_ptr = @typeInfo(@TypeOf(to));
     if (type_info_to_ptr != .pointer) {
@@ -438,7 +438,7 @@ test MapRestrict {
 /// Recursively visit the given struct and calls the callback for each K found.
 /// The `v` parameter must me a pointer, and tensor data need to be mutable if callbacks needs it.
 pub fn VisitReturn(comptime cb: anytype) type {
-    return if (stdx.meta.FnSignature(cb, null).ReturnErrorSet) |error_set|
+    return if (stdx.meta.FnReturnErrorSet(cb)) |error_set|
         error_set!void
     else
         void;
@@ -453,7 +453,7 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
     }
     const ptr_info = type_info_v.pointer;
     const Child = ptr_info.child;
-    const can_error = stdx.meta.FnSignature(cb, null).ReturnErrorSet != null;
+    const can_error = stdx.meta.FnReturnErrorSet(cb) != null;
 
     const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
         .pointer => |info| .{ info.child, !info.is_const },
@@ -702,13 +702,13 @@ pub fn collectAlloc(
     func_ctx: _CollectCtx(func),
     allocator: std.mem.Allocator,
     obj: anytype,
-) std.mem.Allocator.Error![]stdx.meta.FnSignature(func, null).ReturnT {
+) std.mem.Allocator.Error![]stdx.meta.FnReturn(func) {
     stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collect expects a func with two arguments, got: {}", .{@TypeOf(func)});
 
     const CollectAllocCtx = struct {
         func_ctx: _CollectCtx(func),
         allocator: std.mem.Allocator,
-        out: std.ArrayList(stdx.meta.FnSignature(func, null).ReturnT) = .empty,
+        out: std.ArrayList(stdx.meta.FnReturn(func)) = .empty,
         oom: bool = false,
 
         fn cb(ctx: *@This(), val: *const _CollectArg(func)) void {
@@ -729,7 +729,7 @@ pub fn collectAlloc(
 /// Given a func(X) -> Y or a func(Ctx, X) -> Y,
 /// finds all X in the given object, and write the result of func(X) into a given slice.
 /// Asserts that the number of X found is equal to the slice len.
-pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnResult(func)) void {
+pub fn collectBuf(func: anytype, func_ctx: _CollectCtx(func), obj: anytype, out: []stdx.meta.FnReturn(func)) void {
     stdx.debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".params.len <= 2, "zml.meta.collectBuf expects a func with one or two arguments, got: {}", .{@TypeOf(func)});
     const LocalContext = struct {
         func_ctx: _CollectCtx(func),
@@ -773,8 +773,9 @@ pub fn Contains(Haystack: type, T: type) bool {
     return switch (@typeInfo(Haystack)) {
         .@"struct" => |info| {
             inline for (info.fields) |field| {
-                if (!field.is_comptime and Contains(field.type, T))
+                if (!field.is_comptime and Contains(field.type, T)) {
                     return true;
+                }
             }
             return false;
         },

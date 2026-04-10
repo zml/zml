@@ -254,7 +254,7 @@ fn BufferizedWithArgs(comptime T: type) type {
 /// Automatically calls the executable with the given arguments, taking care of arguments and results allocation.
 /// This helper can be used in tests to make the code a bit less verbose.
 /// It doesn't handle pointers in inputs/outputs structs.
-pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(stdx.meta.FnArgs(func))) !zml.Bufferized(stdx.meta.FnResult(func)) {
+pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Exe, func: anytype, inputs: zml.Bufferized(std.meta.ArgsTuple(@TypeOf(func)))) !zml.Bufferized(stdx.meta.FnReturn(func)) {
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
 
@@ -264,7 +264,7 @@ pub fn autoCall(allocator: std.mem.Allocator, io: std.Io, exe: *const zml.exe.Ex
     args.set(inputs);
     exe.callOpts(io, args, &results, .{ .wait = true });
 
-    var output: zml.Bufferized(stdx.meta.FnResult(func)) = undefined;
+    var output: zml.Bufferized(stdx.meta.FnReturn(func)) = undefined;
     results.fill(.{&output});
 
     return output;
@@ -302,7 +302,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const zml.Sharding,
+    shardings: []const zml.sharding.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -332,12 +332,14 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey);
+            tensor.* = ctx_.activation_store.createTensor(subkey, null, null);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
-    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = shardings });
+    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{replicated_sharding} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});
@@ -354,13 +356,7 @@ pub fn testLayer(
     var exe_results = try exe.results(allocator);
     defer exe_results.deinit(allocator);
 
-    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, .{
-        .dma_chunks = 1,
-        .dma_chunk_size = 4096,
-        .store = activation_store.store,
-        .parallelism = 1,
-        .shardings = shardings,
-    });
+    var args_buffers = try zml.io.load(ArgsT, &args, allocator, io, platform, activation_store.store, .auto);
     defer zml.meta.visit(struct {
         fn cb(_: void, b: *zml.Buffer) void {
             b.deinit();

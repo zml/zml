@@ -29,10 +29,8 @@ def _zls_construct_zig_module_info_impl(target, ctx):
         elif CcInfo in dep:
             cdeps.append(dep[CcInfo])
 
-    root_module_is_only_dep = len(ctx.rule.attr.deps) == 1 and ZigModuleInfo in ctx.rule.attr.deps[0]
-    if root_module_is_only_dep:
-        root_module = ctx.rule.attr.deps[0][ZigModuleInfo]
-    else:
+    root_module = None
+    if ctx.rule.attr.main:
         root_module = zig_module_info(
             name = ctx.rule.attr.name,
             canonical_name = target.label.name,
@@ -43,6 +41,8 @@ def _zls_construct_zig_module_info_impl(target, ctx):
             cdeps = cdeps,
             zigopts = [],
         )
+    else:
+        root_module = zdeps[0]
 
     return [
         root_module,
@@ -155,17 +155,6 @@ zls_write_build_config = rule(
         "_zls_completion_tpl": attr.label(
             default = ":zls.completion.tpl",
             allow_single_file = True,
-        ),
-        "_translate_c": attr.label(
-            default = Label("@rules_zig//zig/private/common:translate-c"),
-            cfg = "exec",
-            executable = True,
-        ),
-        "_c_helpers": attr.label(
-            default = Label("@rules_zig//zig/private/common:helpers"),
-        ),
-        "_c_builtins": attr.label(
-            default = Label("@rules_zig//zig/private/common:c_builtins"),
         ),
     },
     toolchains = [

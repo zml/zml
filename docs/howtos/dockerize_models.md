@@ -38,16 +38,16 @@ We need to add a few "imports" at the beginning of our `BUILD.bazel` so we can
 use their rules to define our 5 additional targets:
 
 ```python
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
 
 zig_binary(
     name = "simple_layer",
     main = "main.zig",
     deps = [
-        "@zml//async",
         "@zml//zml",
     ],
 )
@@ -135,11 +135,11 @@ And that's almost it! You can already build the image:
 ```
 bazel build --config=release //examples/simple_layer:image
 
-INFO: Analyzed target //simple_layer:image (1 packages loaded, 8 targets configured).
+INFO: Analyzed target //examples/simple_layer:image (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
-Target //simple_layer:image up-to-date:
-  bazel-out/k8-dbg-ST-f832ad0148ae/bin/simple_layer/image_
-INFO: Elapsed time: 0.279s, Critical Path: 0.00s
+Target //examples/simple_layer:image up-to-date:
+  bazel-out/linux_amd64-opt/bin/examples/simple_layer/image_
+INFO: Elapsed time: 0.285s, Critical Path: 0.00s
 INFO: 1 process: 1 internal.
 INFO: Build completed successfully, 1 total action
 ```
@@ -168,7 +168,7 @@ oci_load(
 ... then we can load the image and run it with the following commands:
 
 ```
-bazel run --config=release //simple_layer:load
+bazel run --config=release //examples/simple_layer:load
 docker run --rm distroless/simple_layer:latest
 ```
 
@@ -193,7 +193,7 @@ This will push the `simple_layer` image with the tag `latest` (you can add more)
 to the docker registry:
 
 ```
-bazel run --config=release //simple_layer:push
+bazel run --config=release //examples/simple_layer:push
 ```
 
 When dealing with maybe a public and a private container registry - or if you
@@ -201,7 +201,7 @@ just want to try it out **right now**, you can always override the repository on
 the command line:
 
 ```
-bazel run --config=release //simple_layer:push -- --repository my.server.com/org/image
+bazel run --config=release //examples/simple_layer:push -- --repository my.server.com/org/image
 ```
 
 
@@ -215,8 +215,8 @@ We'll use the [MNIST
 example](https://github.com/zml/zml/tree/master/examples/mnist) to illustrate
 how to build Docker images that also contain data files.
 
-You can `bazel run --config=release //mnist:push -- --repository
-index.docker.io/my_org/zml_mnist` in the `./examples` folder if you want to try
+You can `bazel run --config=release //examples/mnist:push -- --repository
+index.docker.io/my_org/zml_mnist` if you want to try
 it out.
 
 **Note: Please add one more of the following parameters to specify all the
@@ -231,7 +231,7 @@ platforms your containerized model should support.**
 **Example:**
 
 ```
-bazel run //mnist:push --config=release --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //examples/mnist:push --config=release --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```
 
 
@@ -244,26 +244,27 @@ same.
 Let's start with creating the manifest and archive:
 
 ```python
-load("@aspect_bazel_lib//lib:expand_template.bzl", "expand_template")
-load("@aspect_bazel_lib//lib:tar.bzl", "mtree_spec", "tar")
-load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
 load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load", "oci_push")
 load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
 
 # The executable
 zig_binary(
     name = "mnist",
     args = [
-        "$(location @com_github_ggerganov_ggml_mnist//file)",
-        "$(location @com_github_ggerganov_ggml_mnist_data//file)",
+        "$(location @mnist//:mnist.safetensors)",
+        "$(location @mnist//:t10k-images.idx3-ubyte)",
     ],
     data = [
-        "@com_github_ggerganov_ggml_mnist//file",
-        "@com_github_ggerganov_ggml_mnist_data//file",
+        "@mnist//:mnist.safetensors",
+        "@mnist//:t10k-images.idx3-ubyte",
     ],
     main = "mnist.zig",
+    visibility = ["//visibility:public"],
     deps = [
-        "@zml//async",
+        "@zml//bazel",
         "@zml//zml",
     ],
 )
@@ -296,22 +297,24 @@ simple string interpolation will not be enough.
 For this reason, we use the `expand_template` rule, like this:
 
 ```python
+load("@bazel_lib//lib:expand_template.bzl", "expand_template")
+
 # A convenience template for creating the "command line" for the entrypoint
 expand_template(
     name = "entrypoint",
     data = [
         ":mnist",
-        "@com_github_ggerganov_ggml_mnist//file",
-        "@com_github_ggerganov_ggml_mnist_data//file",
+        "@mnist//:mnist.safetensors",
+        "@mnist//:t10k-images.idx3-ubyte",
     ],
     substitutions = {
-        ":model": "$(rlocationpath @com_github_ggerganov_ggml_mnist//file)",
-        ":data": "$(rlocationpath @com_github_ggerganov_ggml_mnist_data//file)",
+        ":model": "$(rlocationpath @mnist//:mnist.safetensors)",
+        ":data": "$(rlocationpath @mnist//:t10k-images.idx3-ubyte)",
     },
     template = [
         "./{}/mnist".format(package_name()),
-        "./{}/mnist.runfiles/:model".format(package_name()),
-        "./{}/mnist.runfiles/:data".format(package_name()),
+        "/{}/mnist.runfiles/:model".format(package_name()),
+        "/{}/mnist.runfiles/:data".format(package_name()),
     ],
 )
 ```
@@ -372,5 +375,5 @@ And that's it! With one simple bazel command, you can push a neatly packaged
 MNIST model, including weights and dataset, to the docker registry:
 
 ```
-bazel run //mnist:push --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
+bazel run //examples/mnist:push --@zml//platforms:cuda=true -- --repository index.docker.io/my_org/zml_mnist
 ```

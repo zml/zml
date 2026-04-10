@@ -2,12 +2,18 @@ const std = @import("std");
 
 const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
+const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
+const Buffer = @import("buffer.zig").Buffer;
+const Bufferized = @import("mem.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
+const CustomCallBuffer = @import("pjrtx.zig").CustomCallBuffer;
+const DataType = @import("dtype.zig").DataType;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
+const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -16,7 +22,7 @@ pub const ReduceArgs = struct {
     right: Tensor,
 };
 
-pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -119,7 +125,7 @@ pub const ReduceWindowOpts = struct {
     padding: []const [2]i64,
 };
 
-pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnResult(func) {
+pub fn reduceWindow(inputs: anytype, inits: anytype, opts: ReduceWindowOpts, comptime func: anytype, context: anytype) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -260,6 +266,184 @@ pub fn sort(inputs: anytype, axis_: i64, comptime func: anytype, context: anytyp
     return result;
 }
 
+pub fn @"while"(operands: anytype, comptime cond: anytype, comptime body: anytype, context: anytype) stdx.meta.FnReturn(body) {
+    stdx.debug.assertComptime(stdx.meta.isTupleOf(@TypeOf(operands), Tensor), "zml.ops.while expects a tuple of Tensor operands, got {}", .{@TypeOf(operands)});
+    stdx.debug.assertComptime(stdx.meta.isTuple(@TypeOf(context)), "zml.ops.while expects tuple context like .{{ ... }}, got {}", .{@TypeOf(context)});
+
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    const location = mlir.Location.unknown(mlir_ctx);
+
+    var captured_context: @TypeOf(context) = undefined;
+    meta.mapAlloc(struct {
+        fn capture(_: void, tensor: Tensor) Tensor {
+            return Tensor._result(tensor.shape(), tensor.value());
+        }
+    }.capture, arena.allocator(), {}, context, &captured_context) catch unreachable;
+
+    var block_types: [operands.len]*const mlir.Type = undefined;
+    var block_locs: [operands.len]*const mlir.Location = @splat(location);
+    var operand_values: [operands.len]*const mlir.Value = undefined;
+    var operand_shapes: [operands.len]Shape = undefined;
+
+    inline for (0..operands.len) |i| {
+        operand_shapes[i] = operands[i].shape();
+        block_types[i] = mlir.rankedTensorType(operand_shapes[i].dims(), mlirx.Type.fromDType(mlir_ctx, operand_shapes[i].dtype()));
+        operand_values[i] = operands[i].value();
+    }
+
+    const cond_block = b: {
+        var cond_args: @TypeOf(operands) = undefined;
+        inline for (0..operands.len) |i| {
+            cond_args[i] = .fromShape(operand_shapes[i]);
+        }
+
+        const block = mlir.Block.init(&block_types, &block_locs);
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        const scope = CompilationContext.current().currentScope();
+        inline for (0..operands.len) |i| {
+            scope.id_to_argument.put(scope.arena.allocator(), cond_args[i].id, i) catch unreachable;
+        }
+
+        const cond_result = @call(.auto, cond, cond_args ++ captured_context);
+        stdx.debug.assert(meta.count(Tensor, &cond_result) == 1, "zml.ops.while expects cond to return exactly one Tensor, got {}", .{@TypeOf(cond_result)});
+
+        const cond_tensor = meta.first(Tensor, cond_result);
+        stdx.debug.assert(cond_tensor.rank() == 0 and cond_tensor.dtype() == .bool, "zml.ops.while expects cond to return a scalar bool Tensor, got {f}", .{cond_tensor});
+
+        _ = dialects.stablehlo.return_(mlir_ctx, cond_tensor.value(), location).appendTo(block);
+        break :b block;
+    };
+
+    const body_block, var result = b: {
+        var body_args: @TypeOf(operands) = undefined;
+        inline for (0..operands.len) |i| {
+            body_args[i] = .fromShape(operand_shapes[i]);
+        }
+
+        const block = mlir.Block.init(&block_types, &block_locs);
+        errdefer block.deinit();
+
+        CompilationContext.current().pushBlock(block);
+        defer CompilationContext.current().popBlock();
+
+        const scope = CompilationContext.current().currentScope();
+        inline for (0..operands.len) |i| {
+            scope.id_to_argument.put(scope.arena.allocator(), body_args[i].id, i) catch unreachable;
+        }
+
+        const result = @call(.auto, body, body_args ++ captured_context);
+        stdx.debug.assert(meta.count(Tensor, &result) == operands.len, "zml.ops.while expects body to return {d} Tensor values, got {}", .{ operands.len, @TypeOf(result) });
+
+        var result_tensors: [operands.len]Tensor = undefined;
+        meta.collectBuf(struct {
+            fn cb(tensor: Tensor) Tensor {
+                return tensor;
+            }
+        }.cb, {}, &result, &result_tensors);
+
+        var result_values: [operands.len]*const mlir.Value = undefined;
+        inline for (0..operands.len) |i| {
+            stdx.debug.assert(result_tensors[i].shape().eql(operand_shapes[i]), "zml.ops.while expects body to preserve loop state shape, got {f} for operand {d} but expected {f}", .{ result_tensors[i], i, operands[i] });
+            result_values[i] = result_tensors[i].value();
+        }
+
+        _ = dialects.stablehlo.returns(mlir_ctx, &result_values, location).appendTo(block);
+        break :b .{ block, result };
+    };
+
+    const op = dialects.stablehlo.while_(
+        mlir_ctx,
+        &operand_values,
+        &block_types,
+        cond_block,
+        body_block,
+        location,
+    ).appendTo(CompilationContext.current().currentScope().block);
+
+    const n_operands = operands.len;
+    const AssignResultCtx = struct {
+        op_: *mlir.Operation,
+        shapes: [n_operands]Shape,
+        idx: usize = 0,
+    };
+    var assign_result_ctx: AssignResultCtx = .{
+        .op_ = op,
+        .shapes = operand_shapes,
+    };
+    meta.visit(struct {
+        fn cb(ctx: *AssignResultCtx, tensor: *Tensor) void {
+            tensor.* = Tensor._result(ctx.shapes[ctx.idx], ctx.op_.result(ctx.idx));
+            ctx.idx += 1;
+        }
+    }.cb, &assign_result_ctx, &result);
+
+    return result;
+}
+
+pub const while_ = @"while";
+
+test @"while" {
+    const zml = @import("zml.zig");
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
+
+    const initial_i: zml.Tensor = .init(.{}, .i64);
+    const initial_sum: zml.Tensor = .init(.{}, .i64);
+
+    const Local = struct {
+        fn cond(i: Tensor, sum: Tensor) Tensor {
+            _ = sum;
+            return i.cmp(.LT, Tensor.scalar(10, .i64));
+        }
+
+        fn body(i: Tensor, sum: Tensor) [2]Tensor {
+            const one = Tensor.scalar(1, .i64);
+            return .{
+                i.add(one),
+                sum.add(one),
+            };
+        }
+
+        fn forward(i: Tensor, sum: Tensor) [2]Tensor {
+            return zml.ops.@"while"(.{ i, sum }, cond, body, .{});
+        }
+    };
+
+    var exe = try zml.module.compile(
+        std.testing.allocator,
+        std.testing.io,
+        Local.forward,
+        .{ initial_i, initial_sum },
+        platform,
+        .{ .shardings = &.{replicated_sharding} },
+    );
+    defer exe.deinit();
+
+    var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), replicated_sharding, std.mem.sliceAsBytes(&[1]i64{1}));
+    defer i_buffer.deinit();
+    var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), replicated_sharding, std.mem.sliceAsBytes(&[1]i64{0}));
+    defer sum_buffer.deinit();
+
+    var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.forward, .{ i_buffer, sum_buffer });
+    defer results[0].deinit();
+    defer results[1].deinit();
+
+    var cpu_i = try results[0].toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer cpu_i.free(std.testing.allocator);
+    var cpu_sum = try results[1].toSliceAlloc(std.testing.allocator, std.testing.io);
+    defer cpu_sum.free(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(i64, 10), cpu_i.items(i64)[0]);
+    try std.testing.expectEqual(@as(i64, 9), cpu_sum.items(i64)[0]);
+}
+
 pub const TritonOps = struct {
     debug: bool = false,
     name: [:0]const u8,
@@ -267,7 +451,7 @@ pub const TritonOps = struct {
     grid: [3]i32,
     num_stages: i32,
     num_warps: i32,
-    output_operand_aliases: []const i64 = &.{},
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
 /// Generate an MLIR call to the given member function with the given tensors.
@@ -411,7 +595,7 @@ pub fn scatter(
     comptime func: anytype,
     context: anytype,
     opts: Tensor.ScatterOpts,
-) stdx.meta.FnResult(func) {
+) stdx.meta.FnReturn(func) {
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
 
@@ -868,8 +1052,39 @@ fn CustomCallResultTypeFromOutputSpec(comptime OutputSpecT: type) type {
 
 pub const CustomCallOptions = struct {
     has_side_effect: bool,
-    output_operand_aliases: ?[]const i64 = null,
+    output_operand_aliases: ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = null,
 };
+
+fn customCallOutputOperandAliases(
+    comptime I: type,
+    comptime O: type,
+    comptime aliases: ?CustomCallOutputOperandAliases(I, O),
+) ?[]const dialects.stablehlo.CustomCallOpts.OutputOperandAlias {
+    const aliases_ = aliases orelse return null;
+
+    const output_fields = @typeInfo(O).@"struct".fields;
+    comptime var num_aliases = 0;
+    inline for (output_fields) |field| {
+        if (@field(aliases_, field.name) != null) num_aliases += 1;
+    }
+
+    const output_operand_aliases = comptime blk: {
+        var aliases_buffer: [num_aliases]dialects.stablehlo.CustomCallOpts.OutputOperandAlias = undefined;
+        var i = 0;
+        for (output_fields, 0..) |field, output_index| {
+            if (@field(aliases_, field.name)) |operand| {
+                aliases_buffer[i] = .{
+                    .output_index = @intCast(output_index),
+                    .operand_index = @intCast(@intFromEnum(operand)),
+                };
+                i += 1;
+            }
+        }
+        break :blk aliases_buffer;
+    };
+
+    return &output_operand_aliases;
+}
 
 pub fn customCall(target_name: [:0]const u8, inputs: anytype, outputs: anytype, metadata: anytype, opts: CustomCallOptions) CustomCallResultTypeFromOutputSpec(@TypeOf(outputs)) {
     // Transform generic inputs to flat slice.
@@ -1199,7 +1414,7 @@ fn manualComputationInternal(
 }
 
 fn manualComputationReturnType(comptime body_fn: anytype) type {
-    const ReturnT = stdx.meta.FnResult(body_fn);
+    const ReturnT = stdx.meta.FnReturn(body_fn);
     if (ReturnT == void or ReturnT == Tensor) return ReturnT;
 
     return switch (@typeInfo(ReturnT)) {
@@ -1385,6 +1600,328 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     return outputs_;
 }
 
+pub fn CustomCall(
+    // A, I and O are assumed to be simple struct without any nesting like: { a: zml.Tensor }
+    I: type,
+    O: type,
+    A: type,
+    // Receives the custom call buffers for the input and outputs a struct with the same fields as I and O
+    // and the provided attributes. So if I is `{a: zml.Tensor}`, the first argument is `{a: CustomCallBuffer}`
+    // (TensorToCustomCallBuffer(i), ShapeToCustomCallBuffer(O), A) -> !?*pjrt.ffi.Error
+    comptime func: anytype,
+    comptime params: struct {
+        /// Name of the custom call, must be unique.
+        name: [:0]const u8,
+        /// Custom call will see the data of a single device. So for a sharded buffer, it will only see a single partition. This applies
+        /// for both the input and output buffers. By default, the partitioning algorithm will assume nothing on the custom call input/output,
+        /// so everything will be forced as replicated. If do you know / ensure that the custom call is consistent with the provided input/output
+        /// sharding, this setting will avoid the shuffling of the buffer's data.
+        sharding_aware: bool,
+        /// Whether the function has any side-effect, meaning that XLA cannot re-order it/optimize it out. A typical example is print.
+        has_side_effect: bool,
+        /// Similar to reuseBuffer on tensors, tells XLA that the custom call re-uses an input buffer for its output.
+        /// Use the input/output field names to express the mapping: `{ .<out field> = .<in field> }`
+        output_operand_aliases: ?CustomCallOutputOperandAliases(I, O) = null,
+    },
+) type {
+    return struct {
+        pub const InputTensors = I;
+        pub const OutputShapes = O;
+        pub const Attributes = A;
+
+        /// Register the custom call so you can use it.
+        pub fn register(platform: *const Platform) !void {
+            try platform.registerFfi(.{
+                .name = params.name,
+                .platform_name = null,
+                .handler = @This().handler,
+                .traits = .{
+                    .command_buffer_compatible = true,
+                },
+            });
+        }
+
+        pub fn call(input_tensors: I, output_shapes: O, attributes: A) ShapeToTensor(O) {
+            const args: CustomCallArgs(I, O, A) = .{
+                .input_tensors = input_tensors,
+                .output_shapes = output_shapes,
+                .attributes = attributes,
+            };
+            const opts: CustomCallOptions = .{
+                .has_side_effect = params.has_side_effect,
+                .output_operand_aliases = comptime customCallOutputOperandAliases(I, O, params.output_operand_aliases),
+            };
+            if (params.sharding_aware) {
+                return shardingAwareTypedCustomCall(
+                    I,
+                    O,
+                    A,
+                    params.name,
+                    opts,
+                    args,
+                );
+            } else {
+                return typedCustomCall(
+                    I,
+                    O,
+                    A,
+                    params.name,
+                    opts,
+                    args,
+                );
+            }
+        }
+
+        fn handler(call_frame: *pjrt.ffi.CallFrame) callconv(.c) ?*pjrt.ffi.Error {
+            if (call_frame.registeringHook()) return null;
+
+            const input_buffers: TensorToCustomCallBuffer(I), const output_buffers: ShapeToCustomCallBuffer(O), const attributes: A = customCallArgsFromPjrtCallFrame(I, O, A, call_frame);
+            return func(call_frame, input_buffers, output_buffers, attributes) catch |err|
+                pjrt.ffi.Error.create(call_frame.api, .unknown, @errorName(err));
+        }
+    };
+}
+
+fn CustomCallArgs(I: type, O: type, A: type) type {
+    return struct {
+        input_tensors: I,
+        output_shapes: O,
+        attributes: A,
+    };
+}
+
+pub fn TensorToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToTensor(T: type) type {
+    return meta.MapRestrict(Shape, Tensor).map(T);
+}
+
+pub fn CustomCallOutputOperandAliases(I: type, O: type) type {
+    return meta.MapRestrict(Shape, ?std.meta.FieldEnum(I)).map(O);
+}
+
+pub fn shardingAwareTypedCustomCall(
+    I: type,
+    O: type,
+    A: type,
+    comptime target_name: [:0]const u8,
+    comptime opts: CustomCallOptions,
+    args: CustomCallArgs(I, O, A),
+) ShapeToTensor(O) {
+    // Convert to slices so that manualComputationInternal can inspect the input/output.
+    var input_tensors: [@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields.len]Tensor = undefined;
+    inline for (@typeInfo(@TypeOf(args.input_tensors)).@"struct".fields, 0..) |field, i| {
+        input_tensors[i] = @field(args.input_tensors, field.name);
+    }
+
+    var output_shapes: [@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields.len]Shape = undefined;
+    inline for (@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |field, i| {
+        output_shapes[i] = @field(args.output_shapes, field.name);
+    }
+
+    const output_tensors = manualComputationInternal(&input_tensors, &output_shapes, args.attributes, (struct {
+        fn body(attributes: A, _: std.mem.Allocator, sharded_input_tensors: []const Tensor, sharded_output_shapes: []const Shape) []const Tensor {
+            return typedCustomCall(
+                []const Tensor,
+                []const Shape,
+                A,
+                target_name,
+                opts,
+                .{
+                    .input_tensors = sharded_input_tensors,
+                    .output_shapes = sharded_output_shapes,
+                    .attributes = attributes,
+                },
+            );
+        }
+    }).body);
+
+    var out: ShapeToTensor(O) = undefined;
+    inline for (@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |field, i| {
+        @field(out, field.name) = output_tensors[i];
+    }
+    return out;
+}
+
+pub fn typedCustomCall(
+    I: type,
+    O: type,
+    A: type,
+    comptime target_name: [:0]const u8,
+    comptime opts: CustomCallOptions,
+    args: CustomCallArgs(I, O, A),
+) ShapeToTensor(O) {
+    const ctx = CompilationContext.current();
+    const allocator = ctx.arena.allocator();
+
+    stdx.debug.assert(!opts.has_side_effect or ctx.manual_computation_depth > 0, "side-effect customCall '{s}' must be emitted inside manualComputation", .{target_name});
+
+    const input_tensors: []const Tensor = switch (@typeInfo(@TypeOf(args.input_tensors))) {
+        .@"struct" => |struct_info| b: {
+            var input_tensors: [struct_info.fields.len]Tensor = undefined;
+            inline for (struct_info.fields, 0..) |field, i| {
+                input_tensors[i] = @field(args.input_tensors, field.name);
+            }
+            break :b &input_tensors;
+        },
+        // Extra case to support []const Tensor from shardingAwareTypedCustomCall
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected input slice");
+            break :b args.input_tensors;
+        },
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+    };
+
+    const output_shapes: []const Shape = switch (@typeInfo(@TypeOf(args.output_shapes))) {
+        .@"struct" => |struct_info| b: {
+            var output_shapes: [struct_info.fields.len]Shape = undefined;
+            inline for (struct_info.fields, 0..) |field, i| {
+                output_shapes[i] = @field(args.output_shapes, field.name);
+            }
+            break :b &output_shapes;
+        },
+        // Extra case to support []const Shape from shardingAwareTypedCustomCall
+        .pointer => |pointer_info| b: {
+            if (pointer_info.size != .slice) @compileError("Expected input slice");
+            break :b args.output_shapes;
+        },
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
+    };
+
+    const metadata_attributes =
+        switch (@typeInfo(@TypeOf(args.attributes))) {
+            .@"struct" => |struct_info| b: {
+                var mlir_attributes_array: [struct_info.fields.len]mlir.NamedAttribute = undefined;
+                inline for (struct_info.fields, 0..) |field, i| {
+                    const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
+                        .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(args.attributes, field.name))),
+                        .int => |int_field| switch (int_field.signedness) {
+                            .signed => switch (int_field.bits) {
+                                8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(args.attributes, field.name)),
+                                16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @field(args.attributes, field.name)),
+                                32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @field(args.attributes, field.name)),
+                                64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @field(args.attributes, field.name)),
+                                else => @panic("Unsupported DataType"),
+                            },
+                            .unsigned => switch (int_field.bits) {
+                                8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @field(args.attributes, field.name)),
+                                16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @field(args.attributes, field.name)),
+                                32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @field(args.attributes, field.name)),
+                                64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @field(args.attributes, field.name)),
+                                else => @panic("Unsupported DataType"),
+                            },
+                        },
+                        .float => |float_field| switch (float_field.bits) {
+                            16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(args.attributes, field.name))),
+                            32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(args.attributes, field.name))),
+                            64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(args.attributes, field.name))),
+                            else => @panic("Unsupported DataType"),
+                        },
+                        .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(args.attributes, field.name)),
+                        .pointer => |pointer_info| switch (pointer_info.size) {
+                            .slice => if (pointer_info.child == u8)
+                                mlir.stringAttribute(ctx.mlir_ctx, @field(args.attributes, field.name))
+                            else
+                                @panic("Unsupported pointer type in metadata"),
+                            else => @panic("Unsupported pointer type in metadata"),
+                        },
+                        else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
+                    };
+                    mlir_attributes_array[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
+                }
+
+                break :b mlir_attributes_array;
+            },
+            else => @compileError("Unsupported type: " ++ @typeName(@TypeOf(args.attributes))),
+        };
+
+    const values = allocator.alloc(*const mlir.Value, input_tensors.len) catch unreachable;
+    const input_shapes = allocator.alloc(Shape, input_tensors.len) catch unreachable;
+    for (input_tensors, 0..) |input, i| {
+        values[i] = input.value();
+        input_shapes[i] = input.shape();
+    }
+
+    const result_types = allocator.alloc(*const mlir.Type, output_shapes.len) catch unreachable;
+    for (output_shapes, 0..) |shape, i| {
+        result_types[i] = mlir.rankedTensorType(shape.dims(), mlirx.Type.fromDType(ctx.mlir_ctx, shape.dtype()));
+    }
+
+    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, &(metadata_attributes ++ [_]mlir.NamedAttribute{
+        .named(ctx.mlir_ctx, "pjrt_api", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
+        .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
+    }));
+
+    const operand_layouts = allocator.alloc([]const usize, input_shapes.len) catch unreachable;
+    for (input_shapes, 0..) |shape, i| {
+        operand_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(shape.rank())).constSlice()) catch unreachable;
+    }
+
+    const result_layouts = allocator.alloc([]const usize, output_shapes.len) catch unreachable;
+    for (output_shapes, 0..) |shape, i| {
+        result_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(shape.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        ctx.mlir_ctx,
+        values,
+        result_types,
+        .{
+            .call_target_name = target_name,
+            .backend_config = .{ .typed_ffi = backend_config },
+            .has_side_effect = opts.has_side_effect,
+            .operand_layouts = operand_layouts,
+            .result_layouts = result_layouts,
+            .output_operand_aliases = opts.output_operand_aliases orelse &.{},
+            .additional_attributes = &.{},
+        },
+        .unknown(ctx.mlir_ctx),
+    ).appendTo(ctx.currentScope().block);
+
+    if (ctx.manual_computation_depth > 0 and ctx.partitioning.partitioner == .gspmd) {
+        op.setAttributeByName("mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, "{manual}"));
+    }
+
+    var out: ShapeToTensor(O) = undefined;
+    inline for (output_shapes, @typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |output_shape, field, i| {
+        @field(out, field.name) = Tensor._result(output_shape, op.result(i));
+    }
+    return out;
+}
+
+fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.ffi.CallFrame) struct {
+    TensorToCustomCallBuffer(I),
+    ShapeToCustomCallBuffer(O),
+    A,
+} {
+    var input: TensorToCustomCallBuffer(I) = undefined;
+    inline for (@typeInfo(I).@"struct".fields, 0..) |field, i| {
+        const buf = call_frame.args.buffers()[i];
+        @field(input, field.name) = .fromPjrt(buf);
+    }
+
+    var output: ShapeToCustomCallBuffer(O) = undefined;
+    inline for (@typeInfo(O).@"struct".fields, 0..) |field, i| {
+        const shape_buf = call_frame.results.buffers()[i];
+        @field(output, field.name) = .fromPjrt(shape_buf);
+    }
+
+    var attributes: A = undefined;
+    inline for (@typeInfo(A).@"struct".fields) |field| {
+        const attribute = call_frame.attrs.getByName(.scalar, field.name) orelse
+            @panic("Attribute not found: " ++ field.name);
+        @field(attributes, field.name) = attribute.get(field.type);
+    }
+
+    return .{ input, output, attributes };
+}
+
 test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
@@ -1402,10 +1939,37 @@ test customCall {
     const input = Tensor.constant(zml.DataType.bf16.constant(0)).broad(shape);
     const output = customCall("my_custom_call", .{input}, .{zml.Shape.init(.{128}, .bf16)}, .{}, .{
         .has_side_effect = false,
-        .output_operand_aliases = &.{0},
+        .output_operand_aliases = &.{.{ .output_index = 0, .operand_index = 0 }},
     });
 
     try zml.testing.expectEqualShapes(input.shape(), output.shape());
+}
+
+test "CustomCallOutputOperandAliases maps named fields to indices" {
+    const Input = struct {
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+    };
+    const Output = struct {
+        attn: Shape,
+        scratch: Shape,
+    };
+
+    const aliases = comptime customCallOutputOperandAliases(Input, Output, .{
+        .attn = .q,
+        .scratch = .v,
+    }).?;
+
+    try std.testing.expectEqual(@as(usize, 2), aliases.len);
+    try std.testing.expectEqualDeep(
+        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 0, .operand_index = 0 },
+        aliases[0],
+    );
+    try std.testing.expectEqualDeep(
+        dialects.stablehlo.CustomCallOpts.OutputOperandAlias{ .output_index = 1, .operand_index = 2 },
+        aliases[1],
+    );
 }
 
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {

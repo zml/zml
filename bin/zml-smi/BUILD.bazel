@@ -1,0 +1,150 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+load("@tar.bzl//tar:mtree.bzl", "mtree_spec")
+load("@tar.bzl//tar:tar.bzl", "tar")
+
+# zig libraries
+
+# smi
+
+run_binary(
+    name = "libnrt.stripped",
+    srcs = ["@aws-neuronx-runtime-lib//:libnrt.patchelf"],
+    outs = ["libnrt.so.1"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libnrt.so.1)",
+        "$(location @aws-neuronx-runtime-lib//:libnrt.patchelf)",
+    ],
+    tool = "@llvm//tools:llvm-strip",
+)
+
+run_binary(
+    name = "libncfw.stripped",
+    srcs = ["@aws-neuronx-runtime-lib//:libncfw.patchelf"],
+    outs = ["libncfw.so.2"],
+    args = [
+        "--strip-debug",
+        "-o",
+        "$(location libncfw.so.2)",
+        "$(location @aws-neuronx-runtime-lib//:libncfw.patchelf)",
+    ],
+    tool = "@llvm//tools:llvm-strip",
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = select({
+        "@platforms//os:macos": [],
+        "//conditions:default": [
+            ":libncfw.stripped",
+            ":libnrt.stripped",
+            "//platforms/rocm:zmlxrocm",
+            "@amd-smi-lib//:libamd_smi",
+            "@libdrm-amdgpu-amdgpu1",
+            "@libdrm2-amdgpu//:libdrm2-amdgpu",
+            "@libpjrt_rocm//:amdgpu_ids",
+        ],
+    }),
+    include_external_repositories = ["**"],
+    replace_prefixes = {
+        "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
+        "amdgpu.ids": "share/libdrm/amdgpu.ids",
+        "libdrm-amdgpu-amdgpu1": "lib",
+        "platforms/rocm": "lib",
+        "libnrt.so.1": "lib/libnrt.so.1",
+        "libncfw.so.2": "lib/libncfw.so.2",
+    },
+)
+
+zig_binary(
+    name = "zml-smi",
+    visibility = ["//visibility:public"],
+    data = [":sandbox"],
+    main = "main.zig",
+    deps = [
+        "//bin/zml-smi/collector",
+        "//bin/zml-smi/csv",
+        "//bin/zml-smi/platforms/linux",
+        "//bin/zml-smi/info",
+        "//bin/zml-smi/tui",
+        "//stdx",
+        "@libvaxis//:vaxis",
+        "@rules_zig//zig/runfiles",
+    ] + select({
+        "@platforms//os:macos": [],
+        "//conditions:default": [
+            "//bin/zml-smi/platforms/amdsmi",
+            "//bin/zml-smi/platforms/neuron",
+            "//bin/zml-smi/platforms/nvml",
+            "//bin/zml-smi/platforms/tpu",
+            "//platforms/neuron:libnrt_headers",
+        ],
+    }),
+)
+
+# docker image
+
+mtree_spec(
+    name = "mtree_spec",
+    srcs = [":zml-smi"],
+    tags = ["manual"],
+)
+
+# Use this genrule until mtree_mutate is fixed
+genrule(
+    name = "mtree",
+    srcs = [":mtree_spec"],
+    outs = ["mtree.txt"],
+    cmd = """sed -e '/type=dir/d' -e 's#^bin/##g' $< > $@""",
+    tags = ["manual"],
+)
+
+# mtree_mutate(
+#     name = "mtree",
+#     mtree = ":mtree_spec",
+#     strip_prefix = "bin",
+# )
+
+tar(
+    name = "archive",
+    srcs = [":zml-smi"],
+    args = [
+        "--options",
+        ",".join([
+            "zstd:compression-level=22",
+            "zstd:threads=16",
+        ]),
+    ],
+    compress = "zstd",
+    mtree = ":mtree",
+    tags = ["manual"],
+)
+
+oci_image(
+    name = "image_",
+    base = "@distroless_cc_debian12",
+    entrypoint = ["/zml-smi/zml-smi"],
+    tars = [
+        ":archive",
+    ],
+    tags = ["manual"],
+)
+
+platform_transition_filegroup(
+    name = "image",
+    srcs = [":image_"],
+    tags = ["manual"],
+    target_platform = "//platforms:linux_amd64",
+)
+
+oci_load(
+    name = "load",
+    image = ":image",
+    repo_tags = ["zmlai/zml-smi:latest"],
+    tags = ["manual"],
+)

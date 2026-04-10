@@ -80,7 +80,7 @@ pub const Partitioning = struct {
     pub fn localShapeForShape(self: Partitioning, shape: Shape) !Shape {
         const sharding = try self.selectSharding(shape);
         const placement = try Placement.init(sharding, shape);
-        return placement.shards.get(0).shape;
+        return placement.shards.get(0).shape.withDefaultPartitioning();
     }
 
     pub fn numPartitionsForLogicalAxis(self: Partitioning, shape: Shape, logical_axis: anytype) !i64 {

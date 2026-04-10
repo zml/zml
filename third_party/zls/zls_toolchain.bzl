@@ -2,7 +2,7 @@
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-_VERSION = "0.16.0-dev.215+0e289f5c"
+_VERSION = "0.16.0-dev.254+695a1d5c"
 
 _ZLS_PLATFORMS = {
     "x86_64-linux": struct(
@@ -26,9 +26,9 @@ _ZLS_PLATFORMS = {
 }
 
 _ZLS_VERSIONS = {
-    "x86_64-linux": "026a0ce9ea06b276319210509fa2a2edd7acf4e68da83b1a704c06ae26671548",
-    "x86_64-macos": "061845ec346620b914063763e8e39f9a374d2817c4ae976ea3eeb577a6e1cf32",
-    "aarch64-macos": "fb711e068e2ec77b3979458ff72f18311fa7df74644a8cf43985c0f88cae5c66",
+    "x86_64-linux": "b02f9623a0cec2475c26268f12f49f48b81e9c41f2a8a6628806452685cd1013",
+    "x86_64-macos": "4cab46f56a9685822a5ad3665af3a9b11d2556313defa634b5e8b85cac8151cb",
+    "aarch64-macos": "8e4ef0603042a2081ae02672ad72f271d8c840746bbfa0ed9934c6b72ea10d7b",
 }
 
 ZlsToolchainInfo = provider(

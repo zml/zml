@@ -104,7 +104,7 @@ fn parse_commands(args: *std.process.Args.Iterator, comptime Commands: type) Com
     // NB: help must be declared as *pub* const to be visible here.
     if (@hasDecl(Commands, "help")) {
         if (std.mem.eql(u8, first_arg, "-h") or std.mem.eql(u8, first_arg, "--help")) {
-            std.io.getStdOut().writeAll(Commands.help) catch std.process.exit(1);
+            std.debug.print(Commands.help, .{});
             std.process.exit(0);
         }
     }
@@ -212,6 +212,14 @@ fn parse_flags(args: *std.process.Args.Iterator, comptime Flags: type) Flags {
 
     var parsed_positional = false;
     next_arg: while (args.next()) |arg| {
+        // NB: help must be declared as *pub* const to be visible here.
+        if (@hasDecl(Flags, "help")) {
+            if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) {
+                std.debug.print(Flags.help, .{});
+                std.process.exit(0);
+            }
+        }
+
         comptime var field_len_prev = std.math.maxInt(usize);
         inline for (fields[0..field_count]) |field| {
             const flag = comptime flag_name(field);

@@ -7,12 +7,12 @@ const upb = @import("upb");
 const log = std.log.scoped(.@"zml/platforms/neuron/libneuronxla");
 
 pub fn makeTempDir(io: std.Io, buf: []u8, prefix: []const u8) ![]const u8 {
-    const tmp_dir = std.posix.getenv("TMPDIR") orelse "/tmp";
+    const tmp_dir = std.c.getenv("TMPDIR") orelse "/tmp";
     const ret = try std.fmt.bufPrint(buf, "{s}{s}{s}{d}", .{
         tmp_dir,
         std.Io.Dir.path.sep_str_posix,
         prefix,
-        (try std.Io.Clock.now(.real, io)).toNanoseconds(),
+        std.Io.Clock.now(.real, io).toNanoseconds(),
     });
     try std.Io.Dir.createDir(.cwd(), io, ret, .fromMode(0o700));
     return ret;
@@ -192,36 +192,36 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
     var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var child: std.process.Child = .init(&.{
-        try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
-            stdx.process.selfSharedObjectDirPath(),
-            "..",
-            "bin",
-            "neuronx-cc",
-        }),
-        "compile",
-        "--framework=XLA",
-        "--target",
-        target,
-        "--verbose=user",
-        "--enable-internal-neff-wrapper",
-        "--output",
-        neff_file,
-        "--optlevel=1",
-        // generic is the default, but it fails on transformers, force it
-        "--model-type=transformer",
-        // disable it, we do our own
-        "--auto-cast=none",
-        "--enable-fast-loading-neuron-binaries",
-        code_file,
-    }, arena.allocator());
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
-    child.cwd = tmp_dir;
-    _ = try child.spawnAndWait(io);
-
-    std.debug.print(">>>> {s}\n", .{tmp_dir});
+    var child = try std.process.spawn(io, .{
+        .argv = &.{
+            try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
+                stdx.process.selfSharedObjectDirPath(),
+                "..",
+                "bin",
+                "neuronx-cc",
+            }),
+            "compile",
+            "--framework=XLA",
+            "--target",
+            target,
+            "--verbose=35",
+            "--enable-internal-neff-wrapper",
+            "--output",
+            neff_file,
+            "--optlevel=1",
+            // generic is the default, but it fails on transformers, force it
+            "--model-type=transformer",
+            // disable it, we do our own
+            "--auto-cast=none",
+            "--enable-fast-loading-neuron-binaries",
+            code_file,
+        },
+        .stdin = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
+        .cwd = .{ .path = tmp_dir },
+    });
+    _ = try child.wait(io);
 
     const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});

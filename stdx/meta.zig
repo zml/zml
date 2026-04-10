@@ -2,8 +2,6 @@ const std = @import("std");
 
 const debug = @import("debug.zig");
 const compileError = debug.compileError;
-pub const FnSignature = @import("signature.zig").FnSignature;
-pub const Signature = @import("signature.zig").Signature;
 
 pub fn isStruct(comptime T: type) bool {
     return switch (@typeInfo(T)) {
@@ -139,24 +137,34 @@ pub fn TupleRange(comptime T: type, comptime start: ?usize, comptime end: ?usize
 }
 
 pub fn FnParam(comptime func: anytype, comptime n: comptime_int) type {
-    return @typeInfo(@TypeOf(func)).@"fn".params[n].type orelse @compileError("anytype is not supported");
+    const params = @typeInfo(@TypeOf(func)).@"fn".params;
+    if (n >= params.len) {
+        @compileError("param doesn't exist in func");
+    }
+    return params[n].type orelse @compileError("anytype is not supported");
 }
 
-pub fn FnArgs(comptime func: anytype) type {
-    debug.assertComptime(!@typeInfo(@TypeOf(func)).@"fn".is_generic, "FnArgs expects non generic function, got: {}", .{@TypeOf(func)});
-    return FnSignature(func, null).ArgsT;
-}
-
-pub fn FnArgsWithHint(comptime func: anytype, ArgsT: type) type {
-    debug.assertComptime(@typeInfo(@TypeOf(func)).@"fn".is_generic, "FnArgsWithHint expects a generic function, got: {}", .{@TypeOf(func)});
-    return FnSignature(func, ArgsT).ArgsT;
-}
-
-pub fn FnResult(comptime func: anytype) type {
+pub fn FnReturn(comptime func: anytype) type {
     return @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
 }
 
-pub fn Head(Tuple: type) type {
+pub fn FnReturnPayload(comptime func: anytype) type {
+    const rt = @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
+    return switch (@typeInfo(rt)) {
+        .error_union => |u| u.payload,
+        else => rt,
+    };
+}
+
+pub fn FnReturnErrorSet(comptime func: anytype) ?type {
+    const rt = @typeInfo(@TypeOf(func)).@"fn".return_type orelse @compileError("anytype is not supported");
+    return switch (@typeInfo(rt)) {
+        .error_union => |u| u.error_set,
+        else => null,
+    };
+}
+
+pub fn Head(comptime Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {
             if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");
@@ -166,7 +174,7 @@ pub fn Head(Tuple: type) type {
     };
 }
 
-pub fn Tail(Tuple: type) type {
+pub fn Tail(comptime Tuple: type) type {
     return switch (@typeInfo(Tuple)) {
         .@"struct" => |struct_info| {
             if (struct_info.fields.len == 0) @compileError("Can't tail empty tuple");

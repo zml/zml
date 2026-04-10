@@ -142,7 +142,6 @@ test normalizeL2 {
 
 pub const RopeOpts = struct {
     layout: Layout = .sequential,
-    freq_base: f32 = 10_000,
     scaling: Scaling = .{ .default = .{} },
 
     /// There are two layouts corresponding to how to split `x` in real/imag parts.
@@ -179,7 +178,7 @@ pub const RopeOpts = struct {
             mscale_all_dim: ?f32 = null,
             truncate: bool = true,
             original_max_position_embeddings: u32,
-            rope_theta: f32,
+            rope_theta: f32 = 10000,
             llama_4_scaling_beta: ?f32 = null,
             attention_factor: ?f32 = null,
         };
@@ -199,8 +198,8 @@ pub const RopeOpts = struct {
         }
 
         pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, options: std.json.ParseOptions) std.json.ParseFromValueError!Scaling {
-            _ = allocator; // autofix
-            _ = options; // autofix
+            _ = allocator;
+            _ = options;
             if (source == .null) return .{ .default = .{} };
 
             if (source != .object) return error.InvalidEnumTag;
@@ -321,7 +320,7 @@ pub fn mergeRealImg(x_real: Tensor, x_imag: Tensor, layout: RopeOpts.Layout) Ten
 }
 
 /// {exp( - n * ln(10_000) / N ) | n in [0..N] }
-fn invFreq(N: i64, opts: RopeOpts) Tensor {
+pub fn invFreq(N: i64, opts: RopeOpts) Tensor {
     const allocator = zml.module.CompilationContext.current().allocator;
     const N_half: usize = @intCast(@divExact(N, 2));
     const inv_freq = allocator.alloc(f32, N_half) catch @panic("OOM");
@@ -335,7 +334,7 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
     const N = inv_freq.len;
     // Default frequencies
     for (0.., inv_freq) |n, *f| {
-        f.* = @exp(-@log(opts.freq_base) * stdx.math.divFloat(f32, n, N));
+        f.* = @exp(-@log(opts.scaling.getRopeTheta()) * stdx.math.divFloat(f32, n, N));
     }
 
     switch (opts.scaling) {
@@ -374,8 +373,8 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
             const downscaling = 1.0 / s.factor.?;
 
             // This isn't a typo: low n have a high frequency, high n have a low frequency.
-            var n_low: f64 = -@log(f_high) / @log(opts.freq_base) * N_f;
-            var n_high: f64 = -@log(f_low) / @log(opts.freq_base) * N_f;
+            var n_low: f64 = -@log(f_high) / @log(opts.scaling.getRopeTheta()) * N_f;
+            var n_high: f64 = -@log(f_low) / @log(opts.scaling.getRopeTheta()) * N_f;
             if (s.truncate) {
                 n_high = std.math.ceil(n_high);
                 n_low = std.math.floor(n_low);
@@ -400,12 +399,12 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
 test "invFreq Llama3" {
     // Llama 3.2-1B config
     const llama_conf: RopeOpts = .{
-        .freq_base = 500_000,
         .scaling = .{ .llama3 = .{
             .factor = 32,
             .high_freq_factor = 4,
             .low_freq_factor = 1,
             .original_max_position_embeddings = 8192,
+            .rope_theta = 500_000,
         } },
     };
     const llama_freq = [_]f32{ 1.000000000000e+00, 6.636012792587e-01, 4.403666257858e-01, 2.922278344631e-01, 1.939227581024e-01, 1.286873817444e-01, 8.539710193872e-02, 5.666961893439e-02, 3.760603070259e-02, 2.495540864766e-02, 1.656044088304e-02, 1.098952908069e-02, 7.292665075511e-03, 4.839421249926e-03, 3.211446106434e-03, 1.290548010729e-03, 4.295567050576e-04, 9.708286233945e-05, 1.946163865796e-05, 1.291476746701e-05, 8.570255886298e-06, 5.687232260243e-06, 3.774054448513e-06, 2.504467147446e-06, 1.661967417022e-06, 1.102883629756e-06, 7.318749339902e-07, 4.856731266045e-07, 3.222932889457e-07, 2.138742303259e-07, 1.419272024350e-07, 9.418306490261e-08 };
@@ -420,14 +419,13 @@ test "invFreq Llama3" {
 
 test "invFreq Yarn" {
     const yarn_conf: RopeOpts = .{
-        .freq_base = 150_000,
         .scaling = .{ .yarn = .{
             .factor = 32.0,
             .beta_fast = 32.0,
             .beta_slow = 1.0,
             .original_max_position_embeddings = 4096,
             .truncate = true,
-            .rope_theta = 10000,
+            .rope_theta = 150_000,
         } },
     };
     const yarn_freq = [_]f32{ 1.000000000000e+00, 6.890442967415e-01, 4.747820496559e-01, 3.271458745003e-01, 2.254180014133e-01, 1.553229838610e-01, 1.070244237781e-01, 7.374456524849e-02, 5.081327259541e-02, 3.162075206637e-02, 1.945096626878e-02, 1.179219130427e-02, 7.015713956207e-03, 4.069554619491e-03, 2.277272054926e-03, 1.206130953506e-03, 5.809474969283e-04, 2.279478358105e-04, 3.830881178146e-05, 2.639646845637e-05, 1.818833698053e-05, 1.253256959899e-05, 8.635495760245e-06, 5.950239483354e-06, 4.099978468730e-06, 2.825066758305e-06, 1.946596285052e-06, 1.341290953860e-06, 9.242089618056e-07, 6.368209142238e-07, 4.387978549403e-07, 3.023511396805e-07 };
@@ -1115,6 +1113,301 @@ pub fn sdpa(q_: Tensor, k_: Tensor, v_: Tensor, opts: SdpaOpts) Tensor {
 
     var attn = attn_weights.dot(v, .k);
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
+}
+
+pub const GatedDeltaNet = struct {
+    pub const State = struct {
+        /// Per-head recurrent state with shape .{ .h, .v, .k }.
+        s: Tensor,
+    };
+
+    pub const StepInputs = struct {
+        /// Query tensor with shape .{ .h, .k }.
+        q: Tensor,
+        /// Key tensor with shape .{ .h, .k }.
+        k: Tensor,
+        /// Value tensor with shape .{ .h, .v }.
+        v: Tensor,
+        /// Forget gate with shape .{ .h }.
+        alpha: Tensor,
+        /// Delta gate with shape .{ .h }.
+        beta: Tensor,
+    };
+
+    pub const StepOutput = struct {
+        state: State,
+        output: Tensor,
+    };
+
+    pub const Output = struct {
+        /// Sequence of outputs with shape .{ .s, .h, .v }.
+        outputs: Tensor,
+        state: State,
+    };
+
+    fn sliceStep(input: Tensor, step_: Tensor) Tensor {
+        return input.dynamicSlice(.{ .s = Tensor.DynSlice{ .start = step_, .len = 1 } }).squeeze(.s);
+    }
+
+    fn validateStep(state: State, inputs: StepInputs) void {
+        const err_template = "GatedDeltaNet.step(state: {f}, q: {f}, k: {f}, v: {f}, alpha: {f}, beta: {f}) is invalid ! ";
+        const err_args = .{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta };
+
+        stdx.debug.assert(state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "state.s is missing tags {{.h, .v, .k}}", err_args);
+        stdx.debug.assert(inputs.q.shape().hasTags(.{ .h, .k }), err_template ++ "q is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(inputs.k.shape().hasTags(.{ .h, .k }), err_template ++ "k is missing tags {{.h, .k}}", err_args);
+        stdx.debug.assert(inputs.v.shape().hasTags(.{ .h, .v }), err_template ++ "v is missing tags {{.h, .v}}", err_args);
+        stdx.debug.assert(inputs.alpha.shape().hasTags(.{.h}), err_template ++ "alpha is missing tag {{.h}}", err_args);
+        stdx.debug.assert(inputs.beta.shape().hasTags(.{.h}), err_template ++ "beta is missing tag {{.h}}", err_args);
+
+        _ = collectDims(.{.h}, &.{ state.s, inputs.q, inputs.k, inputs.v, inputs.alpha, inputs.beta }, .strict) catch {
+            stdx.debug.panic(err_template ++ "head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ state.s, inputs.q, inputs.k }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ state.s, inputs.v }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
+        };
+    }
+
+    /// Single-step recurrent update for Gated Delta Net.
+    ///
+    /// Shapes:
+    /// - `state.s`: .{ .h, .v, .k }
+    /// - `inputs.q`, `inputs.k`: .{ .h, .k }
+    /// - `inputs.v`: .{ .h, .v }
+    /// - `inputs.alpha`, `inputs.beta`: .{ .h }
+    pub fn step(state: State, inputs: StepInputs) StepOutput {
+        validateStep(state, inputs);
+
+        const v_hat = state.s.dot(inputs.k, .k).mul(inputs.alpha.insertAxes(.last, .{.v}));
+        const delta = inputs.v.sub(v_hat).mul(inputs.beta.insertAxes(.last, .{.v}));
+        const delta_k = delta.insertAxes(.last, .{.k}).broad(state.s.shape()).mul(inputs.k.insertAxes(.k, .{.v}).broad(state.s.shape()));
+        const s_new = state.s.mul(inputs.alpha.insertAxes(.last, .{ .v, .k })).add(delta_k);
+        const y = s_new.dot(inputs.q, .k);
+
+        return .{
+            .state = .{ .s = s_new },
+            .output = y,
+        };
+    }
+
+    /// Processes a sequence with Gated Delta Net recurrence using `stablehlo.while`.
+    ///
+    /// Shapes:
+    /// - `queries`, `keys`: .{ .s, .h, .k }
+    /// - `values`, `outputs`: .{ .s, .h, .v }
+    /// - `alphas`, `betas`: .{ .s, .h }
+    /// - `initial_state.s`: .{ .h, .v, .k }
+    pub fn forward(
+        queries: Tensor,
+        keys: Tensor,
+        values: Tensor,
+        alphas: Tensor,
+        betas: Tensor,
+        initial_state: State,
+    ) Output {
+        const err_template = "GatedDeltaNet.forward(queries: {f}, keys: {f}, values: {f}, alphas: {f}, betas: {f}, state: {f}) is invalid ! ";
+        const err_args = .{ queries, keys, values, alphas, betas, initial_state.s };
+
+        stdx.debug.assert(queries.shape().hasTags(.{ .s, .h, .k }), err_template ++ "queries is missing tags {{.s, .h, .k}}", err_args);
+        stdx.debug.assert(keys.shape().hasTags(.{ .s, .h, .k }), err_template ++ "keys is missing tags {{.s, .h, .k}}", err_args);
+        stdx.debug.assert(values.shape().hasTags(.{ .s, .h, .v }), err_template ++ "values is missing tags {{.s, .h, .v}}", err_args);
+        stdx.debug.assert(alphas.shape().hasTags(.{ .s, .h }), err_template ++ "alphas is missing tags {{.s, .h}}", err_args);
+        stdx.debug.assert(betas.shape().hasTags(.{ .s, .h }), err_template ++ "betas is missing tags {{.s, .h}}", err_args);
+        stdx.debug.assert(initial_state.s.shape().hasTags(.{ .h, .v, .k }), err_template ++ "initial_state.s is missing tags {{.h, .v, .k}}", err_args);
+
+        _ = collectDims(.{ .s, .h }, &.{ queries, keys, values, alphas, betas }, .strict) catch {
+            stdx.debug.panic(err_template ++ "sequence/head dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.k}, &.{ queries, keys, initial_state.s }, .strict) catch {
+            stdx.debug.panic(err_template ++ "key dimensions are inconsistent.", err_args);
+        };
+        _ = collectDims(.{.v}, &.{ values, initial_state.s }, .strict) catch {
+            stdx.debug.panic(err_template ++ "value dimensions are inconsistent.", err_args);
+        };
+
+        const WhileContext = struct {
+            queries: Tensor,
+            keys: Tensor,
+            values: Tensor,
+            alphas: Tensor,
+            betas: Tensor,
+            seq_len: Tensor,
+        };
+        const while_context: WhileContext = .{
+            .queries = queries,
+            .keys = keys,
+            .values = values,
+            .alphas = alphas,
+            .betas = betas,
+            .seq_len = Tensor.scalar(queries.dim(.s), .i32),
+        };
+
+        const Local = struct {
+            fn cond(step_: Tensor, _: Tensor, _: Tensor, ctx: WhileContext) Tensor {
+                return step_.cmp(.LT, ctx.seq_len);
+            }
+
+            fn body(step_: Tensor, s_prev: Tensor, outputs_prev: Tensor, ctx: WhileContext) [3]Tensor {
+                const step_out = step(
+                    .{ .s = s_prev },
+                    .{
+                        .q = sliceStep(ctx.queries, step_),
+                        .k = sliceStep(ctx.keys, step_),
+                        .v = sliceStep(ctx.values, step_),
+                        .alpha = sliceStep(ctx.alphas, step_),
+                        .beta = sliceStep(ctx.betas, step_),
+                    },
+                );
+                const outputs_new = outputs_prev.dynamicUpdateSlice(.{ .s = step_ }, step_out.output);
+
+                return .{
+                    step_.add(Tensor.scalar(1, .i32)),
+                    step_out.state.s,
+                    outputs_new,
+                };
+            }
+        };
+
+        const step0 = Tensor.scalar(0, .i32);
+        const outputs0 = Tensor.zeroes(values.shape());
+        const loop_state = ops.@"while"(
+            .{ step0, initial_state.s, outputs0 },
+            Local.cond,
+            Local.body,
+            .{while_context},
+        );
+
+        return .{
+            .outputs = loop_state[2],
+            .state = .{ .s = loop_state[1] },
+        };
+    }
+};
+
+test "gated delta net" {
+    const platform = zml.testing.env();
+    const replicated_sharding = zml.testing.replicatedSharding();
+
+    const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
+    const values: zml.Tensor = .init(.{ .s = 2, .h = 2, .v = 2 }, .f32);
+    const alphas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const betas: zml.Tensor = .init(.{ .s = 2, .h = 2 }, .f32);
+    const initial_s: zml.Tensor = .init(.{ .h = 2, .v = 2, .k = 2 }, .f32);
+
+    var exe = try zml.module.compile(
+        std.testing.allocator,
+        std.testing.io,
+        GatedDeltaNet.forward,
+        .{ queries, keys, values, alphas, betas, GatedDeltaNet.State{ .s = initial_s } },
+        platform,
+        .{ .shardings = &.{replicated_sharding} },
+    );
+    defer exe.deinit();
+
+    var queries_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        queries.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
+        }),
+    );
+    defer queries_buffer.deinit();
+    var keys_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        keys.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer keys_buffer.deinit();
+    var values_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        values.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
+            .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
+        }),
+    );
+    defer values_buffer.deinit();
+    var alphas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        alphas.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 0.5, 0.25 },
+            .{ 0.8, 0.6 },
+        }),
+    );
+    defer alphas_buffer.deinit();
+    var betas_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        betas.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2]f32{
+            .{ 1.0, 0.5 },
+            .{ 0.75, 1.0 },
+        }),
+    );
+    defer betas_buffer.deinit();
+    var initial_s_buffer: zml.Buffer = try .fromBytes(
+        std.testing.io,
+        platform,
+        initial_s.shape(),
+        replicated_sharding,
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
+            .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
+        }),
+    );
+    defer initial_s_buffer.deinit();
+
+    var result = try zml.testing.autoCall(
+        std.testing.allocator,
+        std.testing.io,
+        &exe,
+        GatedDeltaNet.forward,
+        .{ queries_buffer, keys_buffer, values_buffer, alphas_buffer, betas_buffer, .{ .s = initial_s_buffer } },
+    );
+    defer result.outputs.deinit();
+    defer result.state.s.deinit();
+
+    const expected_outputs: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ 3.0, 0.0 }, .{ 1.125, 2.0 } },
+            .{ .{ -11.15, 10.75 }, .{ 2.325, -1.2 } },
+        }),
+    );
+    const expected_final_s: zml.Slice = .init(
+        zml.Shape.init(.{ 2, 2, 2 }, .f32),
+        std.mem.sliceAsBytes(&[2][2][2]f32{
+            .{ .{ -9.3, -1.85 }, .{ 6.9, 3.85 } },
+            .{ .{ 3.0, 0.675 }, .{ 0.0, 1.2 } },
+        }),
+    );
+
+    try zml.testing.expectClose(std.testing.io, expected_outputs, result.outputs, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
+    try zml.testing.expectClose(std.testing.io, expected_final_s, result.state.s, .{
+        .absolute_tolerance = 1e-4,
+        .relative_tolerance = 1e-4,
+    });
 }
 
 /// Options controlling generation. The default values correspond to greedy decoding.

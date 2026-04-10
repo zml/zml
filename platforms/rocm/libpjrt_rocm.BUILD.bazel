@@ -1,11 +1,12 @@
-load("@aspect_bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
-load("@aspect_bazel_lib//lib:tar.bzl", "tar")
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@bazel_skylib//rules:common_settings.bzl", "bool_flag", "string_list_flag")
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
 load("@zml//bazel:patchelf.bzl", "patchelf")
 
 bool_flag(
     name = "hipblaslt",
-    build_setting_default = False,
+    build_setting_default = True,
     visibility = ["//visibility:public"],
 )
 
@@ -26,6 +27,27 @@ patchelf(
     set_rpath = "$ORIGIN",
 )
 
+zig_binary(
+    name = "merge_amdgpu_ids",
+    main = "@zml//platforms/rocm:merge_amdgpu_ids.zig",
+)
+
+run_binary(
+    name = "amdgpu_ids",
+    srcs = [
+        "@libdrm-amdgpu-common//:amdgpu_ids",
+        "@libdrm_mesa_amdgpu_ids//file:amdgpu.ids",
+    ],
+    outs = ["amdgpu.ids"],
+    args = [
+        "$(location @libdrm-amdgpu-common//:amdgpu_ids)",
+        "$(location @libdrm_mesa_amdgpu_ids//file:amdgpu.ids)",
+        "$(location amdgpu.ids)",
+    ],
+    tool = ":merge_amdgpu_ids",
+    visibility = ["@zml//bin/zml-smi:__pkg__"],
+)
+
 copy_to_directory(
     name = "sandbox",
     srcs = [
@@ -40,9 +62,11 @@ copy_to_directory(
         "@hsa-amd-aqlprofile//:hsa-amd-aqlprofile",
         "@hsa-rocr//:hsa-runtime",
         "@libdrm-amdgpu-amdgpu1",
-        "@libdrm-amdgpu-common//:amdgpu_ids",
+        ":amdgpu_ids",
         "@libdrm2-amdgpu",
+        "@libbz2-1.0",
         "@libelf1",
+        "@liblzma5",
         "@libnuma1",
         "@libtinfo6",
         "@libzstd1",
@@ -58,17 +82,25 @@ copy_to_directory(
         "@rocprofiler-sdk//:rocprofiler-sdk",
         "@rocprofiler-sdk-rocpd//:rocprofiler-sdk-rocpd",
         "@rocprofiler-sdk-roctx//:rocprofiler-sdk-roctx",
+        "@rocsparse",
         "@rocsolver",
         "@roctracer",
         "@roctracer//:roctx",
         "@zlib1g",
+        "@libdw1",
         "@zml//platforms/rocm:zmlxrocm",
     ] + select({
         ":_hipblaslt": ["@hipblaslt//:runfiles"],
         "//conditions:default": [],
     }),
     replace_prefixes = {
+        "MIOpen": "lib",
         "amdhip": "lib",
+        "amd_comgr": "lib",
+        "hiprtc_so": "lib",
+        "hipsolver": "lib",
+        "hsa-amd-aqlprofile": "lib",
+        "hsa-runtime": "lib",
         "hipblaslt": "lib",
         "lib/x86_64-linux-gnu": "lib",
         "libdrm-amdgpu-amdgpu1": "lib",
@@ -76,19 +108,22 @@ copy_to_directory(
         "libpjrt_rocm_so": "lib",
         "opt/amdgpu/lib/x86_64-linux-gnu": "lib",
         "opt/amdgpu/share": "share",
+        "amdgpu.ids": "share/libdrm/amdgpu.ids",
+        "rccl": "lib",
         "rocblas": "lib",
+        "rocm-core": "lib",
+        "rocprofiler-register": "lib",
+        "rocprofiler-sdk_so": "lib",
+        "rocm_smi": "lib",
+        "rocsolver": "lib",
         "rocroller": "lib",
+        "roctracer": "lib",
+        "roctx": "lib",
         "platforms/rocm": "lib",
         "usr/lib/x86_64-linux-gnu": "lib",
     },
     add_directory_to_runfiles = True,
     include_external_repositories = ["**"],
-)
-
-tar(
-    name = "amdgpu_ids_layer",
-    srcs = ["@libdrm-amdgpu-common//:amdgpu_ids"],
-    visibility = ["//visibility:public"],
 )
 
 cc_library(

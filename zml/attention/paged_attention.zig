@@ -46,7 +46,7 @@ pub const Options = union(Backend) {
     };
 
     pub fn fromBackend(args: Args) Options {
-        const max_num_pages = @divFloor(args.seq_len + args.page_chunk_size - 1, args.page_chunk_size); // @divCeil
+        const max_num_pages = std.math.divCeil(u32, args.seq_len, args.page_chunk_size) catch unreachable;
         return switch (args.backend) {
             .cuda_fa2 => if (args.is_prefill) .{
                 .cuda_fa2 = .{
@@ -83,6 +83,7 @@ pub const Options = union(Backend) {
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
+                        .num_kv_heads = args.num_kv_heads,
                         .head_dim = args.head_dim,
                     },
                 },
@@ -94,6 +95,7 @@ pub const Options = union(Backend) {
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
+                        .num_kv_heads = args.num_kv_heads,
                         .head_dim = args.head_dim,
                     },
                 },
@@ -158,8 +160,8 @@ pub const AttentionOptions = struct {
 };
 
 pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, layer_index: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-    _ = k; // autofix
-    _ = v; // autofix
+    _ = k;
+    _ = v;
     return switch (parameters) {
         .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, layer_index, opts),
         .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, layer_index, opts),

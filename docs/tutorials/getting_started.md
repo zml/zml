@@ -21,14 +21,14 @@ through `bazelisk`, a version manager for `bazel`.
 **macOs:**
 
 ```
-    brew install bazelisk
+brew install bazelisk
 ```
 
 **Linux:**
 
 ```
-    curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.25.0/bazelisk-linux-amd64'
-    chmod +x /usr/local/bin/bazel
+curl -L -o /usr/local/bin/bazel 'https://github.com/bazelbuild/bazelisk/releases/download/v1.28.1/bazelisk-linux-amd64'
+chmod +x /usr/local/bin/bazel
 ```
 
 
@@ -49,7 +49,7 @@ compile it, and classify a randomly picked example from the test dataset.
 On the command line:
 
 ```
-bazel run --config=release //mnist
+bazel run --config=release //examples/mnist
 ```
 
 ### Llama
@@ -71,11 +71,10 @@ Once you've been granted access, you're ready to download a gated model like
 `Meta-Llama-3.1-8B-Instruct`!
 
 ```
-# requires token in $HOME/.cache/huggingface/token, as created by the
-# `huggingface-cli login` command, or the `HUGGINGFACE_TOKEN` environment variable.
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.1-8B-Instruct --local-dir $HOME/Llama-3.1-8B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
+# Authenticate on Huggingface.
+bazel run //tools/hf -- auth login
+# Run the model, loading directly from HF.
+bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.1-8B-Instruct --prompt="What is the capital of France?"
 ```
 
 You can also try `Llama-3.1-70B-Instruct` if you have enough memory.
@@ -86,9 +85,8 @@ Like the 8B model above, this model also requires approval. See
 [here](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) for access requirements.
 
 ```
-bazel run @zml//tools:hf -- download meta-llama/Llama-3.2-1B-Instruct --local-dir $HOME/Llama-3.2-1B-Instruct --exclude='*.pth'
-bazel run --config=release //examples/llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct
-bazel run --config=release //llama -- --hf-model-path=$HOME/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
+bazel run //tools/hf -- auth login
+bazel run --config=release //examples/llm -- --model=hf://meta-llama/Llama-3.2-1B-Instruct --prompt="What is the capital of France?"
 ```
 
 For a larger 3.2 model, you can also try `Llama-3.2-3B-Instruct`.
@@ -114,13 +112,15 @@ following arguments to the command line when compiling or running a model:
 The latter, avoiding compilation for CPU, cuts down compilation time.
 
 
-So, to run the OpenLLama model from above on your host sporting an NVIDIA GPU,
+So, to run the Llama model from above on your host sporting an NVIDIA GPU,
 run the following:
 
 ```
-bazel run --config=release //examples/llama:Llama-3.2-1B-Instruct \
-          --@zml//platforms:cuda=true                              \
-          -- --prompt="What is the capital of France?"
+bazel run --config=release //examples/llm               \
+          --@zml//platforms:cuda=true                   \
+          --                                            \
+          --model=hf://meta-llama/Llama-3.1-8B-Instruct \
+          --prompt="What is the capital of France?"
 ```
 
 
