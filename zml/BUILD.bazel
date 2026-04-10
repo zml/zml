@@ -38,6 +38,7 @@ zig_library(
         "attention/triton.zig",
         "moe/moe.zig",
         "moe/triton.zig",
+        "moe.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
