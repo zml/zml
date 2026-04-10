@@ -139,7 +139,10 @@ build() {
   bazel build --config=release //bin/zml-smi:archives
 
   printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
-  mapfile -t FILES < <(bazel cquery --config=release --output=files //bin/zml-smi:archives 2>/dev/null)
+  FILES=()
+  while IFS= read -r line; do
+    FILES+=("$line")
+  done < <(bazel cquery --config=release --output=files //bin/zml-smi:archives 2>/dev/null)
   success "Built ${CYAN}${#FILES[@]}${RESET}${GREEN} artifacts"
 }
 
