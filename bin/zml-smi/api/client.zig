@@ -5,25 +5,14 @@ const pi = smi_info.process_info;
 const ProcessDoubleBuffer = @import("zml-smi/double_buffer").DoubleBuffer(std.ArrayList(pi.ProcessInfo));
 const Collector = @import("zml-smi/collector").Collector;
 
-const JsonDeviceInfo = struct {
-    device: DeviceInfo,
-
-    pub fn jsonParseFromValue(allocator: std.mem.Allocator, source: std.json.Value, _: std.json.ParseOptions) !JsonDeviceInfo {
-        const type_str = source.object.get("type").?.string;
-
-        inline for (@typeInfo(DeviceInfo).@"union".fields) |field| {
-            if (std.mem.eql(u8, type_str, field.name)) {
-                var val = try std.json.innerParseFromValue(field.type.Value, allocator, source, .{
-                    .ignore_unknown_fields = true,
-                });
-                val.remote = true;
-
-                return .{ .device = @unionInit(DeviceInfo, field.name, .{ .values = .{ val, val } }) };
-            }
+fn setRemote(device: *DeviceInfo) void {
+    inline for (@typeInfo(DeviceInfo).@"union".fields) |field| {
+        if (device.* == @field(smi_info.device_info.Target, field.name)) {
+            @field(device, field.name).values[0].remote = true;
+            @field(device, field.name).values[1].remote = true;
         }
-        return error.UnexpectedToken;
     }
-};
+}
 
 pub fn addRemotes(collector: *Collector, hosts: []const u8) !void {
     var it = std.mem.splitScalar(u8, hosts, ',');
@@ -48,8 +37,9 @@ fn addHost(collector: *Collector, host: []const u8) !void {
 
     var devices: std.ArrayList(*DeviceInfo) = .empty;
     for (json_devices) |item| {
-        const jdi = std.json.parseFromValueLeaky(JsonDeviceInfo, collector.arena, item, .{}) catch continue;
-        const info = try collector.addDevice(jdi.device);
+        var device = std.json.parseFromValueLeaky(DeviceInfo, collector.arena, item, .{ .ignore_unknown_fields = true }) catch continue;
+        setRemote(&device);
+        const info = try collector.addDevice(device);
         try devices.append(collector.arena, info);
     }
 
@@ -89,16 +79,16 @@ fn pollOnce(poll_arena: *std.heap.ArenaAllocator, gpa: std.mem.Allocator, io: st
     const json_devices = if (root.get("devices")) |v| v.array.items else &.{};
 
     for (json_devices, 0..) |item, i| {
-        const jdi = std.json.parseFromValueLeaky(JsonDeviceInfo, poll_arena.allocator(), item, .{}) catch continue;
         if (i >= devices.len) {
             std.log.warn("{s}: remote has more devices than expected ({d} > {d})", .{ host, json_devices.len, devices.len });
             break;
         }
+        var device = std.json.parseFromValueLeaky(DeviceInfo, poll_arena.allocator(), item, .{ .ignore_unknown_fields = true }) catch continue;
+        setRemote(&device);
 
         inline for (@typeInfo(DeviceInfo).@"union".fields) |field| {
             if (devices[i].* == @field(smi_info.device_info.Target, field.name)) {
-                @field(devices[i], field.name).back().* = @field(jdi.device, field.name).front().*;
-                @field(devices[i], field.name).back().remote = true;
+                @field(devices[i], field.name).back().* = @field(device, field.name).front().*;
                 @field(devices[i], field.name).swap();
             }
         }
