@@ -4,6 +4,6 @@ def repo():
     new_git_repository(
         name = "translate-c",
         remote = "https://codeberg.org/ziglang/translate-c",
-        commit = "5ac39f77661a216b75b195fe74ce7d0a04b33b7d",
+        commit = "46b5609b5ac4c0a896217d1d984f3ae50e4810b5",
         build_file = "//third_party/translate-c:translate-c.bazel",
     )

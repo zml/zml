@@ -473,6 +473,10 @@ pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(
         else => {},
     }
 
+    if (ptr_info.size == .one and ptr_info.child == K) {
+        return if (can_error) try cb(ctx, v) else cb(ctx, v);
+    }
+
     // Handle stdx.BoundedArray that contains uninitalized data.
     //if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
     //    return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
