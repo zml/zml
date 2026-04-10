@@ -451,7 +451,6 @@ const Visitor = struct {
     };
 
     pub fn determineAction(comptime call_back: anytype, comptime PtrTypeOfV: type) VisitorType {
-
         const PtrInfo = switch (@typeInfo(PtrTypeOfV)) {
             .pointer => |info| info,
             else => stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ @TypeOf(call_back), PtrTypeOfV }),
