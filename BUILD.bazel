@@ -8,6 +8,8 @@ zls_completion(
         "//examples/ltx:inference",
         "//bin/zml-smi",
         "//examples/llm",
+        "//examples/benchmark",
+        "//examples/ltx:inference",
         "//examples/mnist",
         "//examples/sharding",
         "//stdx",
