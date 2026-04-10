@@ -68,12 +68,12 @@ const output = results.get(zml.Buffer);
 on actual data. The compiled executable (`exe`) is then called many times with
 different real `zml.Buffer` inputs.
 
-> **Key type distinction:**
+> **Type distinction:**
 > - `Shape` = metadata only (dims, dtype, tags)
 > - `Tensor` = compile-time graph node (no data)
 > - `Buffer` = runtime device allocation (actual GPU memory)
 
-You can see the first concrete example at
+A concrete example is at
 [inference.zig L666](inference.zig#L666)
 where `forwardGenerateNoise` is compiled and then called twice (once for video
 noise, once for audio noise).
@@ -94,8 +94,8 @@ Stage 1 consumes pre-computed inputs from a safetensors file:
 | `audio_denoise_mask` | `[1, T_a, 1]` f32 | Likewise |
 | `video_positions` | `[1, 3, T_v, 2]` bf16 | RoPE coordinates (F, H, W) |
 | `audio_positions` | `[1, 1, T_a, 2]` f32 | RoPE coordinates (T) |
-| `v_context_pos/neg` | `[1, S, 4096]` bf16 | Text-conditioned embeddings |
-| `a_context_pos/neg` | `[1, S, 2048]` bf16 | Text-conditioned embeddings |
+| `v_context_pos/neg` | `[1, S, 4096]` bf16 | Text-conditioned embeddings (from Gemma) |
+| `a_context_pos/neg` | `[1, S, 2048]` bf16 | Text-conditioned embeddings (from Gemma)|
 
 These are loaded at [inference.zig L638](inference.zig#L638).
 
