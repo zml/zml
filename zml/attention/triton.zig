@@ -437,14 +437,10 @@ pub const paged = struct {
 
         log.debug("pagedAttention2d config: {any}", .{generation_config});
 
-        var threaded_io: std.Io.Threaded = .init_single_threaded;
-        threaded_io.allocator = std.heap.c_allocator;
-        defer threaded_io.deinit();
-
-        const io = threaded_io.io();
-
-        const ttir = generateTtir(std.heap.c_allocator, io, generation_config) catch unreachable;
-        defer std.heap.c_allocator.free(ttir);
+        const io = zml.module.CompilationContext.current().io;
+        const allocator = zml.module.CompilationContext.current().allocator;
+        const ttir = generateTtir(allocator, io, generation_config) catch unreachable;
+        defer allocator.free(ttir);
 
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
         const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
@@ -536,13 +532,10 @@ pub const paged = struct {
 
         log.debug("pagedAttention3d attention config: {any}", .{attn_generation_config});
 
-        var threaded_io: std.Io.Threaded = .init_single_threaded;
-        threaded_io.allocator = std.heap.c_allocator;
-        defer threaded_io.deinit();
-
-        const io = threaded_io.io();
-        const attn_ttir = generateTtir(std.heap.c_allocator, io, attn_generation_config) catch unreachable;
-        defer std.heap.c_allocator.free(attn_ttir);
+        const io = zml.module.CompilationContext.current().io;
+        const allocator = zml.module.CompilationContext.current().allocator;
+        const attn_ttir = generateTtir(allocator, io, attn_generation_config) catch unreachable;
+        defer allocator.free(attn_ttir);
 
         const reduce_generation_config: GenerationConfig = .{
             .reduce_segments_ptr = .{
