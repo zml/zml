@@ -28,18 +28,6 @@ clean latents   ┘              Stage 2 (3 steps × 1 pass, distilled sigmas)
                                ffmpeg mux → output.mp4
 ```
 
-### What Python still provides vs. what Zig handles natively
-
-| Concern | Owner | Notes |
-|---------|-------|-------|
-| Text encoding | **Python** | Gemma 3 (video context, 4096-d) + T5 (audio context, 2048-d) |
-| Positions | **Python** | RoPE position ids for video/audio tokens — deterministic from geometry |
-| Denoise masks | **Python** | All-ones in unconditioned mode; per-token mask in image-conditioned mode |
-| Clean latents | **Python** | All-zeros unconditioned; VAE-encoded image at first-frame tokens when conditioned |
-| Sigma schedules | **Zig** | Stage 1: `computeSigmaSchedule()` (30 steps). Stage 2: hardcoded `[0.909375, 0.725, 0.421875, 0.0]` |
-| Noise generation | **Zig** | Box-Muller via `Tensor.Rng` (StableHLO `rng_bit_generator`), seeded, deterministic |
-| Image VAE encoding | **Zig** | When `--image` is passed to inference binary |
-
 ## File Map
 
 ### Zig (compiled to GPU via ZML)
@@ -85,14 +73,14 @@ the denoising loop.
 
 | File | Contents |
 |------|----------|
-| `unconditioned_stage1_inputs.safetensors` | 12 tensors (see below) — always produced |
-| `conditioned_stage1_inputs.safetensors` | Same 12 tensors but with image conditioning applied (only with `--image`) |
-| `conditioned_stage2_inputs.safetensors` | Stage 2 captured state + recovered noise (only with `--image`) |
-| `stage2_noise.safetensors` | Recovered Stage 2 noise (kept for reference; **not used by Zig** — Zig generates its own) |
-| `pipeline_meta.json` | Latent geometry, guidance params, generation config |
-| `ref/stage1_outputs.safetensors` | Stage 1 denoised latents (Python reference) |
-| `ref/upsampled.safetensors` | Upscaled video latent (Python reference) |
-| `ref/stage2_outputs.safetensors` | Stage 2 final latents (Python reference) |
+| `unconditioned_stage1_inputs.safetensors` | 12 tensors (see below) — always produced. Used for input by Zig |
+| `conditioned_stage1_inputs.safetensors` | Same 12 tensors but with image conditioning applied (only with `--image`). Only for debug purpose |
+| `conditioned_stage2_inputs.safetensors` | Stage 2 captured state + recovered noise (only with `--image`). Only for debug purpose |
+| `stage2_noise.safetensors` | Recovered Stage 2 noise (kept for reference; **not used by Zig** — Zig generates its own. Only for debug purpose) |
+| `pipeline_meta.json` | Latent geometry, guidance params, generation config. Used for metadata by Zig |
+| `ref/stage1_outputs.safetensors` | Stage 1 denoised latents (Python reference). Only for debug purpose |
+| `ref/upsampled.safetensors` | Upscaled video latent (Python reference). Only for debug purpose |
+| `ref/stage2_outputs.safetensors` | Stage 2 final latents (Python reference). Only for debug purpose |
 
 ### Tensors in `unconditioned_stage1_inputs.safetensors`
 
@@ -146,7 +134,7 @@ python examples/ltx/export_pipeline.py \
 ```
 
 This produces:
-- `$OUT/unconditioned_stage1_inputs.safetensors` — text embeddings, positions, denoise masks, clean latents (12 tensors)
+- `$OUT/unconditioned_stage1_inputs.safetensors` — text embeddings, positions, denoise masks, clean latents (12 tensors described above)
 - `$OUT/pipeline_meta.json` — latent geometry and guidance parameters
 
 To generate with image conditioning, add `--image /path/to/image.jpg`.
@@ -188,9 +176,6 @@ before denoising begins.
 Passing `--image` to `export_pipeline.py` is only useful for generating
 **reference tensors** (`conditioned_stage1_inputs.safetensors`,
 `encoder_activations.safetensors`) for validation against the Zig output.
-
-See the image conditioning section below for details
-on the implementation and per-token AdaLN masking.
 
 In image-conditioned mode, the denoise mask and clean latent encode the conditioning:
 - **Denoise mask**: 0.0 for first-frame tokens (keep clean), 1.0 for the rest (fully denoise)
