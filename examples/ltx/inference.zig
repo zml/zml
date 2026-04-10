@@ -17,7 +17,6 @@
 ///       --meta /root/e2e_demo/pipeline_meta.json \
 ///       --output-dir /root/e2e_demo/unified_out/ \
 ///       --bf16-attn-stage2
-
 const std = @import("std");
 const zml = @import("zml");
 const model = @import("model.zig");
@@ -316,7 +315,8 @@ fn encodeImageToTokens(
 
     std.log.info("  Compiling VAE encoder...", .{});
     var exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         forwardEncodeAndPatchify,
         .{
             zml.Tensor.fromShape(image_buf.shape()),
@@ -329,8 +329,12 @@ fn encodeImageToTokens(
 
     std.log.info("  Loading encoder weights...", .{});
     const encoder_bufs = try zml.io.load(
-        video_vae_encoder.VideoVaeEncoderParams, &encoder_shape,
-        allocator, io, platform, &ckpt_store,
+        video_vae_encoder.VideoVaeEncoderParams,
+        &encoder_shape,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -339,8 +343,12 @@ fn encodeImageToTokens(
         },
     );
     const stats_bufs = try zml.io.load(
-        conv_ops.PerChannelStats, &stats_shape,
-        allocator, io, platform, &ckpt_store,
+        conv_ops.PerChannelStats,
+        &stats_shape,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -372,7 +380,8 @@ fn applyConditioning(
     img_tokens: zml.Buffer,
 ) !struct { latent: zml.Buffer, clean: zml.Buffer, mask: zml.Buffer } {
     var exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         forwardApplyConditioning,
         .{
             zml.Tensor.fromShape(v_latent.shape()),
@@ -393,8 +402,6 @@ fn applyConditioning(
     const out = results.get(zml.Bufferized(ConditioningResult));
     return .{ .latent = out.latent, .clean = out.clean_latent, .mask = out.denoise_mask };
 }
-
-
 
 // ============================================================================
 // Main
@@ -559,7 +566,7 @@ pub fn main(init: std.process.Init) !void {
     // Interleave to [N, 2] f32 (L R L R...) for ffmpeg.
     const num_channels: usize = @intCast(waveform_buf.shape().dim(1));
     const num_samples: usize = @intCast(waveform_buf.shape().dim(2));
-    const planar_f32: [*]const f32 = @alignCast(@ptrCast(waveform_bytes.ptr));
+    const planar_f32: [*]const f32 = @ptrCast(@alignCast(waveform_bytes.ptr));
     const interleaved = try allocator.alloc(f32, num_channels * num_samples);
     defer allocator.free(interleaved);
     for (0..num_samples) |i| {
@@ -654,7 +661,8 @@ fn runStage1(
     std.log.info("Generating Stage 1 noise (seed={d})...", .{seed});
 
     var noise_gen_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardGenerateNoise,
         .{
             zml.Tensor.Rng.init(),
@@ -665,7 +673,8 @@ fn runStage1(
     defer noise_gen_v_exe.deinit();
 
     var noise_gen_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardGenerateNoise,
         .{
             zml.Tensor.Rng.init(),
@@ -711,7 +720,8 @@ fn runStage1(
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
 
     var noise_init_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardNoiseInit,
         .{
             zml.Tensor.fromShape(v_clean_buf.shape()),
@@ -724,7 +734,8 @@ fn runStage1(
     defer noise_init_v_exe.deinit();
 
     var noise_init_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardNoiseInit,
         .{
             zml.Tensor.fromShape(a_clean_buf.shape()),
@@ -812,7 +823,8 @@ fn runStage1(
     std.log.info("Compiling preprocessing exe...", .{});
     const preprocess_shape = model.initPreprocessParams(ckpt_store.view());
     var preprocess_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardPreprocess,
         .{
             zml.Tensor.fromShape(v_latent_buf.shape()),
@@ -837,7 +849,10 @@ fn runStage1(
     var preprocess_bufs = try zml.io.load(
         model.PreprocessParams,
         &preprocess_shape,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -856,10 +871,10 @@ fn runStage1(
     var pre_results_init = try preprocess_exe.results(allocator);
     defer pre_results_init.deinit(allocator);
     pre_args_init.set(.{
-        v_latent_buf, a_latent_buf,
-        v_mask_buf, a_mask_buf,
-        sigma_1d_init, sigma_1d_init,
-        v_positions_buf, a_positions_buf,
+        v_latent_buf,      a_latent_buf,
+        v_mask_buf,        a_mask_buf,
+        sigma_1d_init,     sigma_1d_init,
+        v_positions_buf,   a_positions_buf,
         v_context_pos_buf, a_context_pos_buf,
         preprocess_bufs,
     });
@@ -965,7 +980,8 @@ fn runStage1(
     const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
 
     var proj_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
@@ -977,7 +993,8 @@ fn runStage1(
     defer proj_v_exe.deinit();
 
     var proj_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
@@ -991,7 +1008,8 @@ fn runStage1(
     // ---- Compile vel→x0 exes ----
     std.log.info("Compiling vel→x0 (toDenoised) exes...", .{});
     var to_denoised_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardToDenoised,
         .{
             zml.Tensor.fromShape(v_latent_buf.shape()),
@@ -1004,7 +1022,8 @@ fn runStage1(
     defer to_denoised_v_exe.deinit();
 
     var to_denoised_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardToDenoised,
         .{
             zml.Tensor.fromShape(a_latent_buf.shape()),
@@ -1019,7 +1038,8 @@ fn runStage1(
     // ---- Compile denoising step exes (from x0) ----
     std.log.info("Compiling denoising step (from x0) exes...", .{});
     var denoise_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardDenoisingStepFromX0,
         .{
             zml.Tensor.fromShape(v_latent_buf.shape()),
@@ -1034,7 +1054,8 @@ fn runStage1(
     defer denoise_v_exe.deinit();
 
     var denoise_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardDenoisingStepFromX0,
         .{
             zml.Tensor.fromShape(a_latent_buf.shape()),
@@ -1053,7 +1074,8 @@ fn runStage1(
     const vel_v_shape = v_latent_buf.shape();
     const vel_a_shape = a_latent_buf.shape();
     var guider_combine_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardGuiderCombine,
         .{
             zml.Tensor.fromShape(vel_v_shape),
@@ -1086,7 +1108,10 @@ fn runStage1(
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
-            allocator, io, platform, &ckpt_store,
+            allocator,
+            io,
+            platform,
+            &ckpt_store,
             .{
                 .shardings = &.{sharding},
                 .parallelism = 4,
@@ -1101,7 +1126,10 @@ fn runStage1(
     var proj_v_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.norm_proj_out,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -1114,7 +1142,10 @@ fn runStage1(
     var proj_a_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.audio_norm_proj_out,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -1172,10 +1203,10 @@ fn runStage1(
         defer pre_results.deinit(allocator);
 
         pre_args.set(.{
-            v_latent_buf, a_latent_buf,
-            v_mask_buf, a_mask_buf,
-            sigma_1d, sigma_1d,
-            v_positions_buf, a_positions_buf,
+            v_latent_buf,      a_latent_buf,
+            v_mask_buf,        a_mask_buf,
+            sigma_1d,          sigma_1d,
+            v_positions_buf,   a_positions_buf,
             v_context_pos_buf, a_context_pos_buf,
             preprocess_bufs,
         });
@@ -1194,25 +1225,28 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             blk_args.set(.{
-                cond_h_v, cond_h_a,
-                pre_out.video_timesteps, pre_out.audio_timesteps,
+                cond_h_v,                     cond_h_a,
+                pre_out.video_timesteps,      pre_out.audio_timesteps,
                 pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos, pre_out.v_pe_sin,
-                pre_out.a_pe_cos, pre_out.a_pe_sin,
-                pre_out.v_text_ctx, pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
+                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
             block_normal_exe.call(blk_args, &blk_results);
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) { cond_h_v.deinit(); cond_h_a.deinit(); }
+            if (i > 0) {
+                cond_h_v.deinit();
+                cond_h_a.deinit();
+            }
             cond_h_v = out.vx_out;
             cond_h_a = out.ax_out;
         }
@@ -1239,25 +1273,28 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             blk_args.set(.{
-                neg_h_v, neg_h_a,
-                pre_out.video_timesteps, pre_out.audio_timesteps,
+                neg_h_v,                      neg_h_a,
+                pre_out.video_timesteps,      pre_out.audio_timesteps,
                 pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos, pre_out.v_pe_sin,
-                pre_out.a_pe_cos, pre_out.a_pe_sin,
-                v_context_neg_buf, a_context_neg_buf,
-                pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
+                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                v_context_neg_buf,            a_context_neg_buf,
+                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
             block_normal_exe.call(blk_args, &blk_results);
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) { neg_h_v.deinit(); neg_h_a.deinit(); }
+            if (i > 0) {
+                neg_h_v.deinit();
+                neg_h_a.deinit();
+            }
             neg_h_v = out.vx_out;
             neg_h_a = out.ax_out;
         }
@@ -1285,25 +1322,28 @@ fn runStage1(
                 defer blk_results.deinit(allocator);
 
                 blk_args.set(.{
-                    ptb_h_v, ptb_h_a,
-                    pre_out.video_timesteps, pre_out.audio_timesteps,
+                    ptb_h_v,                      ptb_h_a,
+                    pre_out.video_timesteps,      pre_out.audio_timesteps,
                     pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos, pre_out.v_pe_sin,
-                    pre_out.a_pe_cos, pre_out.a_pe_sin,
-                    pre_out.v_text_ctx, pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
+                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
                 block_stg_exe.call(blk_args, &blk_results);
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-                if (i > 0) { ptb_h_v.deinit(); ptb_h_a.deinit(); }
+                if (i > 0) {
+                    ptb_h_v.deinit();
+                    ptb_h_a.deinit();
+                }
                 ptb_h_v = out.vx_out;
                 ptb_h_a = out.ax_out;
             } else {
@@ -1313,25 +1353,28 @@ fn runStage1(
                 defer blk_results.deinit(allocator);
 
                 blk_args.set(.{
-                    ptb_h_v, ptb_h_a,
-                    pre_out.video_timesteps, pre_out.audio_timesteps,
+                    ptb_h_v,                      ptb_h_a,
+                    pre_out.video_timesteps,      pre_out.audio_timesteps,
                     pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos, pre_out.v_pe_sin,
-                    pre_out.a_pe_cos, pre_out.a_pe_sin,
-                    pre_out.v_text_ctx, pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
+                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
                 block_normal_exe.call(blk_args, &blk_results);
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-                if (i > 0) { ptb_h_v.deinit(); ptb_h_a.deinit(); }
+                if (i > 0) {
+                    ptb_h_v.deinit();
+                    ptb_h_a.deinit();
+                }
                 ptb_h_v = out.vx_out;
                 ptb_h_a = out.ax_out;
             }
@@ -1359,27 +1402,29 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             blk_args.set(.{
-                iso_h_v, iso_h_a,
-                pre_out.video_timesteps, pre_out.audio_timesteps,
+                iso_h_v,                      iso_h_a,
+                pre_out.video_timesteps,      pre_out.audio_timesteps,
                 pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos, pre_out.v_pe_sin,
-                pre_out.a_pe_cos, pre_out.a_pe_sin,
-                pre_out.v_text_ctx, pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                zero_mask_buf,
-                pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
-                zero_mask_buf,
+                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                zero_mask_buf,                pre_out.v2a_pe_cos,
+                pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
+                pre_out.v2a_k_pe_sin,         zero_mask_buf,
                 block_params_bufs[i],
             });
             block_iso_exe.call(blk_args, &blk_results);
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) { iso_h_v.deinit(); iso_h_a.deinit(); }
+            if (i > 0) {
+                iso_h_v.deinit();
+                iso_h_a.deinit();
+            }
             iso_h_v = out.vx_out;
             iso_h_a = out.ax_out;
         }
@@ -1402,8 +1447,8 @@ fn runStage1(
         defer gc_results.deinit(allocator);
 
         gc_args.set(.{
-            cond_v_x0, neg_v_x0, ptb_v_x0, iso_v_x0,
-            cond_a_x0, neg_a_x0, ptb_a_x0, iso_a_x0,
+            cond_v_x0, neg_v_x0,  ptb_v_x0,  iso_v_x0,
+            cond_a_x0, neg_a_x0,  ptb_a_x0,  iso_a_x0,
             cfg_v_buf, stg_v_buf, mod_v_buf, rescale_v_buf,
             cfg_a_buf, stg_a_buf, mod_a_buf, rescale_a_buf,
         });
@@ -1525,7 +1570,8 @@ fn runBridge(
     const video_5d_s1_shape = zml.Shape.init(.{ 1, C, F, H_s1, W_s1 }, .bf16);
 
     var unpatch_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         upsampler.forwardUnpatchifyVideo,
         .{
             zml.Tensor.fromShape(patchified_shape),
@@ -1556,7 +1602,8 @@ fn runBridge(
     const stats_shape = conv_ops.initPerChannelStats(main_store.view());
 
     var upsample_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         upsampler.forwardUpsample,
         .{
             zml.Tensor.fromShape(video_5d_buf.shape()),
@@ -1569,8 +1616,12 @@ fn runBridge(
 
     std.log.info("Loading upsampler weights...", .{});
     const up_bufs = try zml.io.load(
-        upsampler.UpsamplerParams, &upsampler_shape,
-        allocator, io, platform, &up_store,
+        upsampler.UpsamplerParams,
+        &upsampler_shape,
+        allocator,
+        io,
+        platform,
+        &up_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -1581,8 +1632,12 @@ fn runBridge(
 
     std.log.info("Loading per-channel statistics...", .{});
     const stats_bufs = try zml.io.load(
-        conv_ops.PerChannelStats, &stats_shape,
-        allocator, io, platform, &main_store,
+        conv_ops.PerChannelStats,
+        &stats_shape,
+        allocator,
+        io,
+        platform,
+        &main_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -1607,7 +1662,8 @@ fn runBridge(
     // ========================================================================
     std.log.info("Compiling patchify...", .{});
     var patchify_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         upsampler.forwardPatchifyVideo,
         .{zml.Tensor.fromShape(upsampled_buf.shape())},
         .{ .shardings = &.{sharding} },
@@ -1669,7 +1725,8 @@ fn runBridge(
         var rng_buf: zml.Bufferized(zml.Tensor.Rng) = .{ ._state = rng_state };
 
         var noise_gen_v_exe = try platform.compileFn(
-            allocator, io,
+            allocator,
+            io,
             model.forwardGenerateNoise,
             .{
                 zml.Tensor.Rng.init(),
@@ -1680,7 +1737,8 @@ fn runBridge(
         defer noise_gen_v_exe.deinit();
 
         var noise_gen_a_exe = try platform.compileFn(
-            allocator, io,
+            allocator,
+            io,
             model.forwardGenerateNoise,
             .{
                 zml.Tensor.Rng.init(),
@@ -1726,7 +1784,8 @@ fn runBridge(
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
 
     var noise_init_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardNoiseInit,
         .{
             zml.Tensor.fromShape(video_clean_buf.shape()),
@@ -1739,7 +1798,8 @@ fn runBridge(
     defer noise_init_v_exe.deinit();
 
     var noise_init_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardNoiseInit,
         .{
             zml.Tensor.fromShape(audio_clean_buf.shape()),
@@ -1856,7 +1916,8 @@ fn runStage2(
     std.log.info("Compiling Stage 2 preprocessing exe...", .{});
     const preprocess_shape = model.initPreprocessParams(ckpt_store.view());
     var preprocess_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardPreprocess,
         .{
             zml.Tensor.fromShape(v_latent_buf.shape()),
@@ -1881,7 +1942,10 @@ fn runStage2(
     var preprocess_bufs = try zml.io.load(
         model.PreprocessParams,
         &preprocess_shape,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -1900,11 +1964,11 @@ fn runStage2(
     var pre_results_init = try preprocess_exe.results(allocator);
     defer pre_results_init.deinit(allocator);
     pre_args_init.set(.{
-        v_latent_buf, a_latent_buf,
-        bridge.v_mask, bridge.a_mask,
-        sigma_1d_init, sigma_1d_init,
+        v_latent_buf,       a_latent_buf,
+        bridge.v_mask,      bridge.a_mask,
+        sigma_1d_init,      sigma_1d_init,
         bridge.v_positions, bridge.a_positions,
-        bridge.v_context, bridge.a_context,
+        bridge.v_context,   bridge.a_context,
         preprocess_bufs,
     });
     preprocess_exe.call(pre_args_init, &pre_results_init);
@@ -1961,7 +2025,8 @@ fn runStage2(
     const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
 
     var proj_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
@@ -1973,7 +2038,8 @@ fn runStage2(
     defer proj_v_exe.deinit();
 
     var proj_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardOutputProjection,
         .{
             zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
@@ -1989,7 +2055,8 @@ fn runStage2(
     std.log.info("Compiling Stage 2 denoising step exes...", .{});
 
     var denoise_v_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardDenoisingStep,
         .{
             zml.Tensor.fromShape(v_latent_buf.shape()),
@@ -2004,7 +2071,8 @@ fn runStage2(
     defer denoise_v_exe.deinit();
 
     var denoise_a_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         model.forwardDenoisingStep,
         .{
             zml.Tensor.fromShape(a_latent_buf.shape()),
@@ -2027,7 +2095,10 @@ fn runStage2(
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
-            allocator, io, platform, &ckpt_store,
+            allocator,
+            io,
+            platform,
+            &ckpt_store,
             .{
                 .shardings = &.{sharding},
                 .parallelism = 4,
@@ -2042,7 +2113,10 @@ fn runStage2(
     var proj_v_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.norm_proj_out,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2055,7 +2129,10 @@ fn runStage2(
     var proj_a_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.audio_norm_proj_out,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2092,11 +2169,11 @@ fn runStage2(
         defer pre_results.deinit(allocator);
 
         pre_args.set(.{
-            v_latent_buf, a_latent_buf,
-            bridge.v_mask, bridge.a_mask,
-            sigma_1d, sigma_1d,
+            v_latent_buf,       a_latent_buf,
+            bridge.v_mask,      bridge.a_mask,
+            sigma_1d,           sigma_1d,
             bridge.v_positions, bridge.a_positions,
-            bridge.v_context, bridge.a_context,
+            bridge.v_context,   bridge.a_context,
             preprocess_bufs,
         });
         preprocess_exe.call(pre_args, &pre_results);
@@ -2114,26 +2191,29 @@ fn runStage2(
             defer blk_results.deinit(allocator);
 
             blk_args.set(.{
-                h_v, h_a,
-                pre_out.video_timesteps, pre_out.audio_timesteps,
+                h_v,                          h_a,
+                pre_out.video_timesteps,      pre_out.audio_timesteps,
                 pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask, pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep, pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos, pre_out.v_pe_sin,
-                pre_out.a_pe_cos, pre_out.a_pe_sin,
-                pre_out.v_text_ctx, pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts, pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts, pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos, pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos, pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos, pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos, pre_out.v2a_k_pe_sin,
+                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
             block_exe.call(blk_args, &blk_results);
 
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) { h_v.deinit(); h_a.deinit(); }
+            if (i > 0) {
+                h_v.deinit();
+                h_a.deinit();
+            }
             h_v = out.vx_out;
             h_a = out.ax_out;
         }
@@ -2308,7 +2388,8 @@ fn runVideoVaeDecode(
     const video_5d_shape = zml.Shape.init(.{ 1, C, F, H, W }, .bf16);
 
     var unpatch_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         upsampler.forwardUnpatchifyVideo,
         .{
             zml.Tensor.fromShape(patchified_shape),
@@ -2336,7 +2417,10 @@ fn runVideoVaeDecode(
     const vae_bufs = try zml.io.load(
         video_vae.VideoVaeDecoderParams,
         &vae_params,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2350,7 +2434,10 @@ fn runVideoVaeDecode(
     const stats_bufs = try zml.io.load(
         conv_ops.PerChannelStats,
         &stats_shape,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2364,7 +2451,8 @@ fn runVideoVaeDecode(
     // ========================================================================
     std.log.info("Compiling VAE decoder...", .{});
     var vae_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         video_vae.forwardVideoVaeDecode,
         .{
             zml.Tensor.fromShape(v_latent_5d.shape()),
@@ -2474,25 +2562,24 @@ fn encodeOutputMp4(
 
     var child = try std.process.spawn(io, .{
         .argv = &.{
-            "ffmpeg",   "-y",
+            "ffmpeg",    "-y",
             // Video input: raw RGB24 from stdin
-            "-f",       "rawvideo",
-            "-pix_fmt", "rgb24",
-            "-s",       size_str,
-            "-r",       fps_str,
-            "-i",       "pipe:0",
+            "-f",        "rawvideo",
+            "-pix_fmt",  "rgb24",
+            "-s",        size_str,
+            "-r",        fps_str,
+            "-i",        "pipe:0",
             // Audio input: interleaved f32le from file
-            "-f",       "f32le",
-            "-ar",      "48000",
-            "-ac",      ac_str,
-            "-i",       audio_path,
+            "-f",        "f32le",
+            "-ar",       "48000",
+            "-ac",       ac_str,
+            "-i",        audio_path,
             // Output encoding
-            "-c:v",     "libx264",
-            "-pix_fmt", "yuv420p",
-            "-c:a",     "aac",
-            "-b:a",     "192k",
-            "-shortest",
-            output_path,
+            "-c:v",      "libx264",
+            "-pix_fmt",  "yuv420p",
+            "-c:a",      "aac",
+            "-b:a",      "192k",
+            "-shortest", output_path,
         },
         .stdin = .pipe,
         .stdout = .inherit,
@@ -2560,7 +2647,8 @@ fn runAudioVaeDecode(
     const patchified_shape = zml.Shape.init(.{ 1, T_aud, 128 }, .bf16);
 
     var unpatch_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         audio_vae.forwardUnpatchifyAudio,
         .{
             zml.Tensor.fromShape(patchified_shape),
@@ -2587,7 +2675,10 @@ fn runAudioVaeDecode(
     const audio_vae_bufs = try zml.io.load(
         audio_vae.AudioVaeDecoderParams,
         &audio_vae_params,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2601,7 +2692,10 @@ fn runAudioVaeDecode(
     const audio_stats_bufs = try zml.io.load(
         audio_vae.AudioPerChannelStats,
         &audio_stats_shape,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2615,7 +2709,8 @@ fn runAudioVaeDecode(
     // ========================================================================
     std.log.info("Compiling audio VAE decoder...", .{});
     var audio_vae_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         audio_vae.forwardAudioVaeDecode,
         .{
             zml.Tensor.fromShape(a_latent_4d.shape()),
@@ -2668,7 +2763,10 @@ fn runVocoderWithBWE(
     const main_voc_bufs = try zml.io.load(
         vocoder.MainVocoderParams,
         &main_voc_params,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2683,7 +2781,10 @@ fn runVocoderWithBWE(
     const bwe_bufs = try zml.io.load(
         vocoder.BWEPipelineParams,
         &bwe_params,
-        allocator, io, platform, &ckpt_store,
+        allocator,
+        io,
+        platform,
+        &ckpt_store,
         .{
             .shardings = &.{sharding},
             .parallelism = 4,
@@ -2695,7 +2796,8 @@ fn runVocoderWithBWE(
     // ---- Stage 1: Main vocoder — mel → 16kHz waveform ----
     std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape().dims()});
     var main_voc_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         vocoder.forwardMainVocoder,
         .{ zml.Tensor.fromShape(audio_mel.shape()), &main_voc_params },
         .{ .shardings = &.{sharding} },
@@ -2715,7 +2817,8 @@ fn runVocoderWithBWE(
     // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
     var bwe_exe = try platform.compileFn(
-        allocator, io,
+        allocator,
+        io,
         vocoder.forwardBWEPipeline,
         .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
         .{ .shardings = &.{sharding} },
@@ -2756,7 +2859,7 @@ fn writeRawBytes(
     std.log.info("  Wrote {s} ({d} bytes)", .{ path, data.len });
 }
 
-fn writeBuffer (
+fn writeBuffer(
     allocator: std.mem.Allocator,
     io: std.Io,
     buf: zml.Buffer,

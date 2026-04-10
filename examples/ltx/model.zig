@@ -67,7 +67,6 @@ pub const FeedForward = struct {
         const h2 = h1.convert(.f32).gelu().convert(dt);
         return params.out.forward(h2);
     }
-
 };
 
 fn linearForwardF32(x: Tensor, linear: zml.nn.Linear) Tensor {
@@ -130,7 +129,7 @@ pub const Patchify = struct {
 /// Sinusoidal timestep embedding.
 /// Matches Python: get_timestep_embedding(sigma, dim=256, flip_sin_to_cos=True, downscale_freq_shift=0)
 /// https://github.com/Lightricks/LTX-2/blob/ae855f8538843825f9015a419cf4ba5edaf5eec2/packages/ltx-core/src/ltx_core/model/transformer/timestep_embedding.py#L6
-/// 
+///
 /// Input:  sigma [.b] f32
 /// Output: [.b, .d_sin=256] f32
 fn sinusoidalTimestepEmbedding(sigma: Tensor) Tensor {
@@ -459,7 +458,6 @@ pub const Attention = struct {
         return self.forwardImpl(true, x, params, num_heads, opts);
     }
 
-
     /// STG V-passthrough: replaces full Q·K·V attention with to_out(to_v(x)).
     /// Q/K projections, RMSNorm, RoPE, and SDPA are all skipped.
     /// Per-head gating is still applied exactly as in the normal path.
@@ -526,7 +524,7 @@ pub const Attention = struct {
         }
 
         // LTX 2.3 attention includes RMSNorms on q and k with learned weights, applied before splitting into heads.
-        // In PyTorch, multiplying by the learned weight is done within the `RMSNorm` module after the normalization step. 
+        // In PyTorch, multiplying by the learned weight is done within the `RMSNorm` module after the normalization step.
         // On the other hand, zml.nn.rmsNorm() returns a normalized tensor without applying the learned weight, so we multiply manually.
         q = zml.nn.rmsNorm(q, .d_q, 1e-6).mul(params.q_norm_weight.convert(compute_dtype).broad(q.shape()));
         k = zml.nn.rmsNorm(k, .d_k, 1e-6).mul(params.k_norm_weight.convert(compute_dtype).broad(k.shape()));
@@ -640,7 +638,6 @@ pub const Attention = struct {
         const out_second = x_second.mul(cos_b).add(x_first.mul(sin_b));
         return Tensor.concatenate(&.{ out_first, out_second }, .hd);
     }
-
 };
 
 fn kindStorePath(kind: AttentionKind) []const u8 {
@@ -757,12 +754,12 @@ pub const BasicAVTransformerBlock = struct {
         audio_to_video_attn: Attention.Params,
         video_to_audio_attn: Attention.Params,
         // AdaLN scale-shift tables — required for the native threading path (forwardNative).
-        scale_shift_table: Tensor,               // [.n_ada=6, .d=D_video]  video self-attn + FF
-        audio_scale_shift_table: Tensor,         // [.n_ada=6, .d=D_audio]  audio self-attn + FF
-        scale_shift_table_a2v_ca_video: Tensor,  // [.n_ada=5, .d=D_video]  AV CA video side
-        scale_shift_table_a2v_ca_audio: Tensor,  // [.n_ada=5, .d=D_audio]  AV CA audio side
-        prompt_scale_shift_table: Tensor,        // [.n_prompt=2, .d=D_video] text CA prompt modulation
-        audio_prompt_scale_shift_table: Tensor,  // [.n_prompt=2, .d=D_audio] text CA prompt modulation
+        scale_shift_table: Tensor, // [.n_ada=6, .d=D_video]  video self-attn + FF
+        audio_scale_shift_table: Tensor, // [.n_ada=6, .d=D_audio]  audio self-attn + FF
+        scale_shift_table_a2v_ca_video: Tensor, // [.n_ada=5, .d=D_video]  AV CA video side
+        scale_shift_table_a2v_ca_audio: Tensor, // [.n_ada=5, .d=D_audio]  AV CA audio side
+        prompt_scale_shift_table: Tensor, // [.n_prompt=2, .d=D_video] text CA prompt modulation
+        audio_prompt_scale_shift_table: Tensor, // [.n_prompt=2, .d=D_audio] text CA prompt modulation
 
         pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
             FeedForward.Params.unloadBuffers(&params.ff);
@@ -851,9 +848,9 @@ pub const BasicAVTransformerBlock = struct {
         v_text_ctx_mask: ?Tensor = null,
         a_text_ctx_mask: ?Tensor = null,
         /// AV cross-attention scale-shift timestep embeddings.
-        v_cross_ss_ts: Tensor,   // video.cross_scale_shift_timestep  [B, 1, 4 * D_video]
+        v_cross_ss_ts: Tensor, // video.cross_scale_shift_timestep  [B, 1, 4 * D_video]
         v_cross_gate_ts: Tensor, // video.cross_gate_timestep          [B, 1, D_video]
-        a_cross_ss_ts: Tensor,   // audio.cross_scale_shift_timestep  [B, 1, 4 * D_audio]
+        a_cross_ss_ts: Tensor, // audio.cross_scale_shift_timestep  [B, 1, 4 * D_audio]
         a_cross_gate_ts: Tensor, // audio.cross_gate_timestep         [B, 1, D_audio]
         /// AV cross-attention positional embeddings, captured per module call.
         a2v_pe_cos: Tensor,
@@ -887,7 +884,7 @@ pub const BasicAVTransformerBlock = struct {
         // ── Video: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
         const vshift_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 0).convert(vd);
         const vscale_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 1).convert(vd);
-        const vgate_msa  = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 2).convert(vd);
+        const vgate_msa = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 2).convert(vd);
         const norm_vx = zml.nn.rmsNorm(vx, .d, 1e-6)
             .mul(vscale_msa.addConstant(1.0).broad(vx.shape()))
             .add(vshift_msa.broad(vx.shape()));
@@ -939,7 +936,7 @@ pub const BasicAVTransformerBlock = struct {
         // ── Audio: AdaLN self-attn (rows 0,1,2 → shift, scale, gate) ─────────────────
         const ashift_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 0).convert(ad);
         const ascale_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 1).convert(ad);
-        const agate_msa  = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 2).convert(ad);
+        const agate_msa = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 2).convert(ad);
         const norm_ax = zml.nn.rmsNorm(ax, .d, 1e-6)
             .mul(ascale_msa.addConstant(1.0).broad(ax.shape()))
             .add(ashift_msa.broad(ax.shape()));
@@ -994,17 +991,17 @@ pub const BasicAVTransformerBlock = struct {
 
         // ── A→V branch ─────────────────────────────────────────────────────────────
         // Video query: sst_a2v_ca_video rows 0,1 (scale/shift); gate from row 4.
-        const sst_v_ss   = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 0, .end = 4 });
+        const sst_v_ss = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 0, .end = 4 });
         const sst_v_gate = params.scale_shift_table_a2v_ca_video.slice1d(.n_ada, .{ .start = 4, .end = 5 });
-        const scale_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   0).convert(vd);
-        const shift_v_a2v = adaValueAt(sst_v_ss,   inputs.v_cross_ss_ts,   1).convert(vd);
-        const gate_a2v    = adaValueAt(sst_v_gate,  inputs.v_cross_gate_ts, 0).convert(vd);
+        const scale_v_a2v = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 0).convert(vd);
+        const shift_v_a2v = adaValueAt(sst_v_ss, inputs.v_cross_ss_ts, 1).convert(vd);
+        const gate_a2v = adaValueAt(sst_v_gate, inputs.v_cross_gate_ts, 0).convert(vd);
         const vx_scaled_a2v = vx_norm3
             .mul(scale_v_a2v.addConstant(1.0).broad(vx_norm3.shape()))
             .add(shift_v_a2v.broad(vx_norm3.shape()));
 
         // Audio context: sst_a2v_ca_audio rows 0,1 (scale/shift).
-        const sst_a_ss   = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 0, .end = 4 });
+        const sst_a_ss = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 0, .end = 4 });
         const sst_a_gate = params.scale_shift_table_a2v_ca_audio.slice1d(.n_ada, .{ .start = 4, .end = 5 });
         const scale_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 0).convert(ad);
         const shift_a_a2v = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 1).convert(ad);
@@ -1013,15 +1010,15 @@ pub const BasicAVTransformerBlock = struct {
             .add(shift_a_a2v.broad(ax_norm3.shape()));
 
         const a2v_out = if (bf16_attn) self.audio_to_video_attn.forwardBf16(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
-            .context  = ax_scaled_a2v,
-            .pe_cos   = inputs.a2v_pe_cos,
-            .pe_sin   = inputs.a2v_pe_sin,
+            .context = ax_scaled_a2v,
+            .pe_cos = inputs.a2v_pe_cos,
+            .pe_sin = inputs.a2v_pe_sin,
             .k_pe_cos = inputs.a2v_k_pe_cos,
             .k_pe_sin = inputs.a2v_k_pe_sin,
         }) else self.audio_to_video_attn.forward(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
-            .context  = ax_scaled_a2v,
-            .pe_cos   = inputs.a2v_pe_cos,
-            .pe_sin   = inputs.a2v_pe_sin,
+            .context = ax_scaled_a2v,
+            .pe_cos = inputs.a2v_pe_cos,
+            .pe_sin = inputs.a2v_pe_sin,
             .k_pe_cos = inputs.a2v_k_pe_cos,
             .k_pe_sin = inputs.a2v_k_pe_sin,
         });
@@ -1038,9 +1035,9 @@ pub const BasicAVTransformerBlock = struct {
 
         // ── V→A branch ─────────────────────────────────────────────────────────────
         // Audio query: sst_a2v_ca_audio rows 2,3 (scale/shift); gate from row 4.
-        const scale_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   2).convert(ad);
-        const shift_a_v2a = adaValueAt(sst_a_ss,   inputs.a_cross_ss_ts,   3).convert(ad);
-        const gate_v2a    = adaValueAt(sst_a_gate,  inputs.a_cross_gate_ts, 0).convert(ad);
+        const scale_a_v2a = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 2).convert(ad);
+        const shift_a_v2a = adaValueAt(sst_a_ss, inputs.a_cross_ss_ts, 3).convert(ad);
+        const gate_v2a = adaValueAt(sst_a_gate, inputs.a_cross_gate_ts, 0).convert(ad);
         const ax_scaled_v2a = ax_norm3
             .mul(scale_a_v2a.addConstant(1.0).broad(ax_norm3.shape()))
             .add(shift_a_v2a.broad(ax_norm3.shape()));
@@ -1053,15 +1050,15 @@ pub const BasicAVTransformerBlock = struct {
             .add(shift_v_v2a.broad(vx_norm3.shape()));
 
         const v2a_out = if (bf16_attn) self.video_to_audio_attn.forwardBf16(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
-            .context  = vx_scaled_v2a,
-            .pe_cos   = inputs.v2a_pe_cos,
-            .pe_sin   = inputs.v2a_pe_sin,
+            .context = vx_scaled_v2a,
+            .pe_cos = inputs.v2a_pe_cos,
+            .pe_sin = inputs.v2a_pe_sin,
             .k_pe_cos = inputs.v2a_k_pe_cos,
             .k_pe_sin = inputs.v2a_k_pe_sin,
         }) else self.video_to_audio_attn.forward(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
-            .context  = vx_scaled_v2a,
-            .pe_cos   = inputs.v2a_pe_cos,
-            .pe_sin   = inputs.v2a_pe_sin,
+            .context = vx_scaled_v2a,
+            .pe_cos = inputs.v2a_pe_cos,
+            .pe_sin = inputs.v2a_pe_sin,
             .k_pe_cos = inputs.v2a_k_pe_cos,
             .k_pe_sin = inputs.v2a_k_pe_sin,
         });
@@ -1079,7 +1076,7 @@ pub const BasicAVTransformerBlock = struct {
         // ── Video FF: AdaLN rows 3,4,5 (shift, scale, gate) ─────────────────────────
         const vshift_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 3).convert(vd);
         const vscale_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 4).convert(vd);
-        const vgate_mlp  = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 5).convert(vd);
+        const vgate_mlp = adaValueAtMasked(params.scale_shift_table, inputs.video_timesteps, inputs.video_timesteps_zero, inputs.v_denoise_mask, 5).convert(vd);
         const vx_scaled_ff = zml.nn.rmsNorm(h_v, .d, 1e-6)
             .mul(vscale_mlp.addConstant(1.0).broad(h_v.shape()))
             .add(vshift_mlp.broad(h_v.shape()));
@@ -1098,7 +1095,7 @@ pub const BasicAVTransformerBlock = struct {
         // ── Audio FF: AdaLN rows 3,4,5 ─────────────────────────────────────────────
         const ashift_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 3).convert(ad);
         const ascale_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 4).convert(ad);
-        const agate_mlp  = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 5).convert(ad);
+        const agate_mlp = adaValueAtMasked(params.audio_scale_shift_table, inputs.audio_timesteps, inputs.audio_timesteps_zero, inputs.a_denoise_mask, 5).convert(ad);
         const ax_scaled_ff = zml.nn.rmsNorm(h_a, .d, 1e-6)
             .mul(ascale_mlp.addConstant(1.0).broad(h_a.shape()))
             .add(ashift_mlp.broad(h_a.shape()));
@@ -1489,7 +1486,7 @@ pub fn computeSigmaSchedule(
 /// From ltx_pipelines.utils.constants.STAGE_2_DISTILLED_SIGMA_VALUES.
 pub const stage2_distilled_sigmas: [4]f32 = .{ 0.909375, 0.725, 0.421875, 0.0 };
 
-// Values taken from regular 30-step schedule 
+// Values taken from regular 30-step schedule
 // https://github.com/Lightricks/LTX-2/blob/main/packages/ltx-core/src/ltx_core/components/schedulers.py
 pub const stage1_default_schedule = struct {
     pub const num_steps: usize = 30;
@@ -1848,7 +1845,6 @@ pub fn forwardBlock0NativeBf16Attn(
         .v2a_k_pe_sin = v2a_k_pe_sin,
     }, params);
 }
-
 
 /// STG block variant: identical interface to forwardBlock0Native, but both video and audio
 /// self-attention use V-passthrough (to_out(to_v(x))). Used for block 28 (0-indexed) during
