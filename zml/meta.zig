@@ -451,17 +451,18 @@ const Visitor = struct {
     };
 
     pub fn determineAction(comptime call_back: anytype, comptime PtrTypeOfV: type) VisitorType {
-        const type_info_v = @typeInfo(PtrTypeOfV);
 
-        if (type_info_v != .pointer) {
-            const CallBackType = @TypeOf(call_back);
-            stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ CallBackType, PtrTypeOfV });
-        }
+        const PtrInfo = switch (@typeInfo(PtrTypeOfV)) {
+            .pointer => |info| info,
+            else => stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ @TypeOf(call_back), PtrTypeOfV }),
+        };
 
-        const ptr_info = type_info_v.pointer;
-        const TargetType = @typeInfo(FnParam(call_back, 1)).pointer.child;
+        const TargetType = switch (@typeInfo(FnParam(call_back, 1))) {
+            .pointer => |info| info.child,
+            else => stdx.debug.compileError("zml.meta.visit({}) is expecting a callback with a pointer as second argument but found {}", .{ @TypeOf(call_back), FnParam(call_back, 1) }),
+        };
 
-        if ((ptr_info.size == .one and ptr_info.child == TargetType) or PtrTypeOfV == *TargetType or PtrTypeOfV == *const TargetType) {
+        if ((PtrInfo.size == .one and PtrInfo.child == TargetType) or PtrTypeOfV == *TargetType or PtrTypeOfV == *const TargetType) {
             return .CallBack;
         }
 
@@ -485,7 +486,7 @@ pub fn visit(comptime call_back: anytype, ctx: FnParam(call_back, 0), v: anytype
         .Recurse => {
             const TargetType, const mutating_cb = switch (@typeInfo(FnParam(call_back, 1))) {
                 .pointer => |info| .{ info.child, !info.is_const },
-                else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(call_back, 1)}),
+                else => stdx.debug.compileError("zml.meta.visit({}) is expecting a callback with a pointer as second argument but found {}", .{ @TypeOf(call_back), FnParam(call_back, 1) }),
             };
 
             if (comptime !Contains(PtrTypeOfV, TargetType)) return;
@@ -509,14 +510,14 @@ pub fn visit(comptime call_back: anytype, ctx: FnParam(call_back, 0), v: anytype
                     .@"union" => switch (v.*) {
                         inline else => |*v_field| if (can_error) try visit(call_back, ctx, v_field) else visit(call_back, ctx, v_field),
                     },
-                    else => stdx.debug.compileError("Unsupported struct field type: {}", .{ChildTypeV}),
+                    else => stdx.debug.compileError("zml.meta.visit({}) doesn't support visiting pointer type {}", .{ @TypeOf(call_back), ChildTypeV }),
                 },
                 .slice => {
                     for (v) |*v_elem| {
                         if (can_error) try visit(call_back, ctx, v_elem) else visit(call_back, ctx, v_elem);
                     }
                 },
-                .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers got {}", .{ @TypeOf(call_back), PtrTypeOfV }),
+                .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers got {}", .{ @TypeOf(call_back), ChildTypeV }),
             }
         },
     }
