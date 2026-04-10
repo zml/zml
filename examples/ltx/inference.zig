@@ -330,9 +330,8 @@ fn encodeImageToTokens(
     std.log.info("  Loading encoder weights...", .{});
     const encoder_bufs = try zml.io.load(
         video_vae_encoder.VideoVaeEncoderParams, &encoder_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -341,9 +340,8 @@ fn encodeImageToTokens(
     );
     const stats_bufs = try zml.io.load(
         conv_ops.PerChannelStats, &stats_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -839,9 +837,8 @@ fn runStage1(
     var preprocess_bufs = try zml.io.load(
         model.PreprocessParams,
         &preprocess_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -1089,9 +1086,8 @@ fn runStage1(
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
-            allocator, io, platform,
+            allocator, io, platform, &ckpt_store,
             .{
-                .store = &ckpt_store,
                 .shardings = &.{sharding},
                 .parallelism = 4,
                 .dma_chunks = 4,
@@ -1105,9 +1101,8 @@ fn runStage1(
     var proj_v_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.norm_proj_out,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -1119,9 +1114,8 @@ fn runStage1(
     var proj_a_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.audio_norm_proj_out,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -1576,9 +1570,8 @@ fn runBridge(
     std.log.info("Loading upsampler weights...", .{});
     const up_bufs = try zml.io.load(
         upsampler.UpsamplerParams, &upsampler_shape,
-        allocator, io, platform,
+        allocator, io, platform, &up_store,
         .{
-            .store = &up_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -1589,9 +1582,8 @@ fn runBridge(
     std.log.info("Loading per-channel statistics...", .{});
     const stats_bufs = try zml.io.load(
         conv_ops.PerChannelStats, &stats_shape,
-        allocator, io, platform,
+        allocator, io, platform, &main_store,
         .{
-            .store = &main_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -1889,9 +1881,8 @@ fn runStage2(
     var preprocess_bufs = try zml.io.load(
         model.PreprocessParams,
         &preprocess_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2036,9 +2027,8 @@ fn runStage2(
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
-            allocator, io, platform,
+            allocator, io, platform, &ckpt_store,
             .{
-                .store = &ckpt_store,
                 .shardings = &.{sharding},
                 .parallelism = 4,
                 .dma_chunks = 4,
@@ -2052,9 +2042,8 @@ fn runStage2(
     var proj_v_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.norm_proj_out,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2066,9 +2055,8 @@ fn runStage2(
     var proj_a_bufs = try zml.io.load(
         model.OutputProjection.Params,
         &block_params_shape.audio_norm_proj_out,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2348,9 +2336,8 @@ fn runVideoVaeDecode(
     const vae_bufs = try zml.io.load(
         video_vae.VideoVaeDecoderParams,
         &vae_params,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2363,9 +2350,8 @@ fn runVideoVaeDecode(
     const stats_bufs = try zml.io.load(
         conv_ops.PerChannelStats,
         &stats_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2601,9 +2587,8 @@ fn runAudioVaeDecode(
     const audio_vae_bufs = try zml.io.load(
         audio_vae.AudioVaeDecoderParams,
         &audio_vae_params,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2616,9 +2601,8 @@ fn runAudioVaeDecode(
     const audio_stats_bufs = try zml.io.load(
         audio_vae.AudioPerChannelStats,
         &audio_stats_shape,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2684,9 +2668,8 @@ fn runVocoderWithBWE(
     const main_voc_bufs = try zml.io.load(
         vocoder.MainVocoderParams,
         &main_voc_params,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
@@ -2700,9 +2683,8 @@ fn runVocoderWithBWE(
     const bwe_bufs = try zml.io.load(
         vocoder.BWEPipelineParams,
         &bwe_params,
-        allocator, io, platform,
+        allocator, io, platform, &ckpt_store,
         .{
-            .store = &ckpt_store,
             .shardings = &.{sharding},
             .parallelism = 4,
             .dma_chunks = 4,
