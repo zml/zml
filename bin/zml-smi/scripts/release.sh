@@ -150,7 +150,8 @@ upload() {
   step "Patching install script"
 
   INSTALL_SCRIPT="$(mktemp)"
-  sed "s|^BASE_URL=.*|BASE_URL=\"${install_url}\"|" \
+  sed -e "s|^BASE_URL=.*|BASE_URL=\"${install_url}\"|" \
+      -e "s|^VERSION=.*|VERSION=\"${VERSION}\"|" \
     "${BUILD_WORKSPACE_DIRECTORY}/bin/zml-smi/scripts/remote-install.sh" > "$INSTALL_SCRIPT"
   success "BASE_URL=${CYAN}${install_url}"
 
@@ -172,10 +173,11 @@ upload() {
       warn "SKIP $(basename "$f") ${DIM}(not built for this host)${RESET}"
       continue
     fi
-    local name
+    local name remote_name
     name="$(basename "$f")"
-    rclone copyto "$f" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/${name}"
-    success "${name}"
+    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
+    rclone copyto "$f" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/${remote_name}"
+    success "${remote_name}"
   done
 
   rclone copyto "$INSTALL_SCRIPT" "${rclone_remote}:${BUCKET}/zml-smi/${VERSION}/install.sh"
@@ -200,15 +202,16 @@ verify() {
     if [ ! -f "$f" ]; then
       continue
     fi
-    local name
+    local name remote_name
     name="$(basename "$f")"
+    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
     local local_sha remote_sha
     local_sha="$(shasum -a 256 "$f" | awk '{print $1}')"
-    remote_sha="$(curl -fsSL "${install_url}/${name}" | shasum -a 256 | awk '{print $1}')"
+    remote_sha="$(curl -fsSL "${install_url}/${remote_name}" | shasum -a 256 | awk '{print $1}')"
     if [ "$local_sha" = "$remote_sha" ]; then
-      success "${name}"
+      success "${remote_name}"
     else
-      fail "${name} — sha256 mismatch (local: ${local_sha}, remote: ${remote_sha})"
+      fail "${remote_name} — sha256 mismatch (local: ${local_sha}, remote: ${remote_sha})"
     fi
   done
 
@@ -229,7 +232,7 @@ release_notes() {
   local downloads=""
   for f in "${FILES[@]}"; do
     [ -f "$f" ] || continue
-    local name
+    local name remote_name
     name="$(basename "$f")"
     [[ "$name" == *.sha256 ]] && continue
     local sha_file=""
@@ -249,7 +252,8 @@ release_notes() {
     if [ "$sha" != "$actual" ]; then
       fail "${name} sha256 mismatch — sidecar: ${sha}, actual: ${actual}"
     fi
-    downloads="${downloads}| [${name}](${install_url}/${name}) | \`${sha}\` |"$'\n'
+    remote_name="${name/zml-smi-/zml-smi-v${VERSION}-}"
+    downloads="${downloads}| [${remote_name}](${install_url}/${remote_name}) | \`${sha}\` |"$'\n'
   done
 
   cat <<EOF

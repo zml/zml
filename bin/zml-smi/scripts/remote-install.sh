@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_URL=""
+VERSION=""
 BINARY_NAME="zml-smi"
 
 resolve_dirs() {
@@ -80,7 +81,7 @@ detect_platform() {
 
   success "${OS_LABEL} ${ARCH_LABEL}"
 
-  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
+  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-v${VERSION}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
 }
 
 check_deps() {
