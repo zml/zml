@@ -55,6 +55,13 @@ usage() {
     ${CYAN}BASE_URL${RESET}        Public base URL serving the bucket
     ${CYAN}RCLONE_REMOTE${RESET}   Rclone remote name ${DIM}(default: r2)${RESET}
 
+    ${DIM}If rclone is not configured, you can set the remote via env vars:${RESET}
+    ${DIM}  RCLONE_CONFIG_R2_TYPE=s3${RESET}
+    ${DIM}  RCLONE_CONFIG_R2_PROVIDER=Cloudflare${RESET}
+    ${DIM}  RCLONE_CONFIG_R2_ACCESS_KEY_ID=your_access_key${RESET}
+    ${DIM}  RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=your_secret_key${RESET}
+    ${DIM}  RCLONE_CONFIG_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com${RESET}
+
   ${WHITE}Examples${RESET}
     ${DIM}# Interactive, local only${RESET}
     bazel run //bin/zml-smi:release -- 0.4.0
