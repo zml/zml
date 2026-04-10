@@ -11,15 +11,15 @@ else
     @import("zml-smi/platforms/linux").process.ProcessEnricher;
 
 pub const Server = struct {
+    allocator: std.mem.Allocator,
     io: std.Io,
-    gpa: std.mem.Allocator,
     devices: []const *DeviceInfo,
     process_lists: []const *const ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
     tcp: std.Io.net.Server,
     connection_group: std.Io.Group = .init,
 
-    pub fn init(io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, gpa: std.mem.Allocator, enricher: *ProcessEnricher) !Server {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher) !Server {
         const address: std.Io.net.IpAddress = .{ .ip4 = .{
             .bytes = .{ 0, 0, 0, 0 },
             .port = port,
@@ -28,8 +28,8 @@ pub const Server = struct {
         errdefer tcp.deinit(io);
 
         return .{
+            .allocator = allocator,
             .io = io,
-            .gpa = gpa,
             .devices = devices,
             .process_lists = process_lists,
             .enricher = enricher,
@@ -37,8 +37,8 @@ pub const Server = struct {
         };
     }
 
-    pub fn run(io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, gpa: std.mem.Allocator, enricher: *ProcessEnricher) void {
-        var self = init(io, port, devices, process_lists, gpa, enricher) catch |err| {
+    pub fn run(allocator: std.mem.Allocator, io: std.Io, port: u16, devices: []const *DeviceInfo, process_lists: []const *const ProcessDoubleBuffer, enricher: *ProcessEnricher) void {
+        var self = init(allocator, io, port, devices, process_lists, enricher) catch |err| {
             std.log.err("api server failed to start: {s}", .{@errorName(err)});
             return;
         };
@@ -73,7 +73,7 @@ pub const Server = struct {
         var http_server: std.http.Server = .init(&reader.interface, &writer.interface);
 
         var procs: std.ArrayList(ProcessInfo) = .empty;
-        defer procs.deinit(self.gpa);
+        defer procs.deinit(self.allocator);
 
         while (true) {
             var request = http_server.receiveHead() catch |err| switch (err) {
@@ -83,7 +83,7 @@ pub const Server = struct {
 
             procs.clearRetainingCapacity();
             for (self.process_lists) |pl| {
-                procs.appendSlice(self.gpa, pl.front().items) catch {};
+                procs.appendSlice(self.allocator, pl.front().items) catch {};
             }
             self.enricher.enrich(self.io, procs.items);
 

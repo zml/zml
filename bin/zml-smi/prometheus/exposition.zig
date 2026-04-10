@@ -18,8 +18,8 @@ const device_metrics = .{
     .{ .field = "clock_graphics_mhz", .metric = "zml_device_clock_graphics_mhz", .help = "Graphics clock frequency in MHz" },
     .{ .field = "clock_sm_mhz", .metric = "zml_device_clock_sm_mhz", .help = "SM clock frequency in MHz" },
     .{ .field = "clock_mem_mhz", .metric = "zml_device_clock_memory_mhz", .help = "Memory clock frequency in MHz" },
-    .{ .field = "pcie_tx_kbps", .metric = "zml_device_pcie_tx_bytes_per_second", .help = "PCIe TX throughput in bytes per second", .fmt = fmtKbpsAsBytesPerSec },
-    .{ .field = "pcie_rx_kbps", .metric = "zml_device_pcie_rx_bytes_per_second", .help = "PCIe RX throughput in bytes per second", .fmt = fmtKbpsAsBytesPerSec },
+    .{ .field = "pcie_tx_kbps", .metric = "zml_device_pcie_tx_bytes_per_second", .help = "PCIe TX throughput in bytes per second", .fmt = fmtScaled(128) },
+    .{ .field = "pcie_rx_kbps", .metric = "zml_device_pcie_rx_bytes_per_second", .help = "PCIe RX throughput in bytes per second", .fmt = fmtScaled(128) },
     // Neuron
     .{ .field = "nc_tensors", .metric = "zml_device_neuron_tensors_bytes", .help = "Neuron core tensor memory in bytes" },
     .{ .field = "nc_constants", .metric = "zml_device_neuron_constants_bytes", .help = "Neuron core constants memory in bytes" },
@@ -36,8 +36,8 @@ const device_metrics = .{
 
 const host_metrics = .{
     .{ .field = "cpu_cores", .metric = "zml_host_cpu_cores", .help = "Number of CPU cores" },
-    .{ .field = "mem_total_kib", .metric = "zml_host_memory_total_bytes", .help = "Total host memory in bytes", .fmt = fmtKibAsBytes },
-    .{ .field = "mem_available_kib", .metric = "zml_host_memory_available_bytes", .help = "Available host memory in bytes", .fmt = fmtKibAsBytes },
+    .{ .field = "mem_total_kib", .metric = "zml_host_memory_total_bytes", .help = "Total host memory in bytes", .fmt = fmtScaled(1024) },
+    .{ .field = "mem_available_kib", .metric = "zml_host_memory_available_bytes", .help = "Available host memory in bytes", .fmt = fmtScaled(1024) },
     .{ .field = "load_1", .metric = "zml_host_load_1", .help = "1-minute load average" },
     .{ .field = "load_5", .metric = "zml_host_load_5", .help = "5-minute load average" },
     .{ .field = "load_15", .metric = "zml_host_load_15", .help = "15-minute load average" },
@@ -65,7 +65,7 @@ pub fn write(writer: *std.Io.Writer, devices: []const *DeviceInfo, host: *const 
                         if (@hasField(@TypeOf(val), label[0])) {
                             if (@field(val, label[0])) |v| {
                                 try writer.print(",{s}=\"", .{label[1]});
-                                try writeEscapedLabel(writer, v);
+                                try std.zig.stringEscape(v, writer);
                                 try writer.writeAll("\"");
                             }
                         }
@@ -104,7 +104,7 @@ fn writeAllDeviceMetrics(
 
                             const device_type = @tagName(std.meta.activeTag(dev.*));
                             try writer.print("{s}{{device=\"{d}\",type=\"{s}\",name=\"", .{ m.metric, i, device_type });
-                            try writeEscapedLabel(writer, val.name orelse "");
+                            try std.zig.stringEscape(val.name orelse "", writer);
                             try writer.writeAll("\"} ");
                             try fmtValue(m, writer, raw);
                             try writer.writeAll("\n");
@@ -150,21 +150,10 @@ fn fmtMilliwattsAsWatts(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!vo
     try writer.print("{d}.{d:0>3}", .{ val / 1000, val % 1000 });
 }
 
-fn fmtKibAsBytes(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!void {
-    try writer.print("{d}", .{val * 1024});
-}
-
-fn fmtKbpsAsBytesPerSec(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!void {
-    try writer.print("{d}", .{val * 128});
-}
-
-fn writeEscapedLabel(writer: *std.Io.Writer, value: []const u8) std.Io.Writer.Error!void {
-    for (value) |ch| {
-        switch (ch) {
-            '\\' => try writer.writeAll("\\\\"),
-            '"' => try writer.writeAll("\\\""),
-            '\n' => try writer.writeAll("\\n"),
-            else => try writer.writeAll(&.{ch}),
+fn fmtScaled(comptime scale: u64) fn (*std.Io.Writer, u64) std.Io.Writer.Error!void {
+    return struct {
+        fn f(writer: *std.Io.Writer, val: u64) std.Io.Writer.Error!void {
+            try writer.print("{d}", .{val * scale});
         }
-    }
+    }.f;
 }

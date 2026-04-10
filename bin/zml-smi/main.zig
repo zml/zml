@@ -108,13 +108,15 @@ pub fn main(init: std.process.Init) !void {
         try api.addRemotes(&collector, hosts);
     }
 
-    var state = try data.SystemState.init(arena, .{
+    var state = try data.SystemState.init(.{
         .devices = collector.device_infos.items,
         .host = &host_info,
         .targets = targets,
         .tui_refresh_rate = args.tui_refresh_rate,
         .process_lists = collector.process_lists.items,
         .enricher = &enricher,
+        .gpa = gpa,
+        .arena = arena,
         .io = io,
     });
     defer state.deinit(arena);
@@ -124,7 +126,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     if (args.api) {
-        try api_group.concurrent(io, api.Server.run, .{ io, args.api_port, collector.device_infos.items, collector.process_lists.items, gpa, &enricher });
+        try api_group.concurrent(io, api.Server.run, .{ gpa, io, args.api_port, collector.device_infos.items, collector.process_lists.items, &enricher });
     }
 
     if (args.prometheus_listen != null or args.api) {

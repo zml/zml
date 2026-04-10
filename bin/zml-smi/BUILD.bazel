@@ -65,11 +65,11 @@ copy_to_directory(
 run_binary(
     name = "zml-smi.stripped",
     srcs = [":zml-smi"],
-    outs = ["zml-smi.stripped.bin"],
+    outs = ["zml-smi.stripped"],
     args = [
         "--strip-all",
         "-o",
-        "$(location zml-smi.stripped.bin)",
+        "$(location zml-smi.stripped)",
         "$(location :zml-smi)",
     ],
     tool = "@llvm//tools:llvm-strip",
@@ -120,7 +120,7 @@ genrule(
     name = "mtree",
     srcs = [":mtree_spec"],
     outs = ["mtree.txt"],
-    cmd = """sed -e '/type=dir/d' -e '/zml-smi\\/zml-smi /d' -e 's#^bin/##g' -e 's#zml-smi\\.stripped\\.bin#zml-smi#' -e '/stamp.c/d' $< > $@""",
+    cmd = """sed -e '/type=dir/d' -e '/zml-smi\\/zml-smi /d' -e 's#^bin/##g' -e 's#zml-smi\\.stripped#zml-smi#' -e '/stamp.c/d' $< > $@""",
     tags = ["manual"],
 )
 

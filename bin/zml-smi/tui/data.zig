@@ -88,7 +88,8 @@ pub const SystemState = struct {
     targets: Targets,
     process_lists: []*ProcessDoubleBuffer,
     enricher: *ProcessEnricher,
-    allocator: std.mem.Allocator,
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
     io: std.Io,
     tui_refresh_rate: u16,
 
@@ -99,19 +100,22 @@ pub const SystemState = struct {
         tui_refresh_rate: u16,
         process_lists: []*ProcessDoubleBuffer,
         enricher: *ProcessEnricher,
+        gpa: std.mem.Allocator,
+        arena: std.mem.Allocator,
         io: std.Io,
     };
 
-    pub fn init(allocator: std.mem.Allocator, cfg: Config) !SystemState {
+    pub fn init(cfg: Config) !SystemState {
         return .{
             .devices = cfg.devices,
             .host = cfg.host,
-            .history = try HistoryBuffers.init(allocator, cfg.devices.len),
+            .history = try HistoryBuffers.init(cfg.arena, cfg.devices.len),
             .targets = cfg.targets,
             .tui_refresh_rate = cfg.tui_refresh_rate,
             .process_lists = cfg.process_lists,
             .enricher = cfg.enricher,
-            .allocator = allocator,
+            .gpa = cfg.gpa,
+            .arena = cfg.arena,
             .io = cfg.io,
         };
     }

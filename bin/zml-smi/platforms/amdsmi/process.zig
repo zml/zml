@@ -23,10 +23,10 @@ pub fn init(collector: *Collector, list: *ProcessDoubleBuffer, amdsmi: *const Am
         });
     }
 
-    try collector.spawnPoll(pollOnce, .{ collector.io, collector.gpa, list, amdsmi, dev_offset, device_count, pci_slots });
+    try collector.spawnPoll(pollOnce, .{ collector.gpa, collector.io, list, amdsmi, dev_offset, device_count, pci_slots });
 }
 
-fn pollOnce(io: std.Io, allocator: std.mem.Allocator, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16, device_count: u32, pci_slots: []?[bdf_len]u8) void {
+fn pollOnce(allocator: std.mem.Allocator, io: std.Io, list: *ProcessDoubleBuffer, amdsmi: *const AmdSmi, dev_offset: u16, device_count: u32, pci_slots: []?[bdf_len]u8) void {
     const back = list.back();
 
     back.clearRetainingCapacity();
