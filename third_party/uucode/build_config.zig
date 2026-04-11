@@ -1,18 +1,16 @@
 const config = @import("config.zig");
-const config_x = @import("config.x.zig");
 
-pub const tables = [_]config.Table{
+pub const fields = config.fields;
+pub const build_components = config.build_components;
+pub const get_components = config.get_components;
+
+pub const tables: []const config.Table = &.{
     .{
-        .extensions = &.{},
-        .fields = &config._resolveFields(
-            config_x,
-            &.{
-                "east_asian_width",
-                "grapheme_break",
-                "general_category",
-                "is_emoji_presentation",
-            },
-            &.{},
-        ),
+        .fields = &.{
+            "east_asian_width",
+            "grapheme_break",
+            "general_category",
+            "is_emoji_presentation",
+        },
     },
 };

@@ -444,83 +444,81 @@ pub fn VisitReturn(comptime cb: anytype) type {
         void;
 }
 
-pub fn visit(comptime cb: anytype, ctx: FnParam(cb, 0), v: anytype) VisitReturn(cb) {
-    const Callback = @TypeOf(cb);
-    const Ptr = @TypeOf(v);
-    const type_info_v = @typeInfo(Ptr);
-    if (type_info_v != .pointer) {
-        stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ Callback, Ptr });
-    }
-    const ptr_info = type_info_v.pointer;
-    const Child = ptr_info.child;
-    const can_error = stdx.meta.FnReturnErrorSet(cb) != null;
-
-    const K, const mutating_cb = switch (@typeInfo(FnParam(cb, 1))) {
-        .pointer => |info| .{ info.child, !info.is_const },
-        else => stdx.debug.compileError("zml.meta.visit is expecting a callback with a pointer as second argument but found {}", .{FnParam(cb, 1)}),
+const Visitor = struct {
+    pub const VisitorType = enum(u2) {
+        CallBack,
+        Recurse,
     };
-    // Abort if v doesnt' contain any K.
-    if (comptime !Contains(Ptr, K)) return;
 
-    // Handle simple cases.
-    switch (Ptr) {
-        *const K, *K => return cb(ctx, v),
-        *const ?K, *?K => return if (v.*) |*val| cb(ctx, val) else {},
-        []const K, []K => {
-            for (v) |*v_elem| if (can_error) try cb(ctx, v_elem) else cb(ctx, v_elem);
-            return;
-        },
-        else => {},
+    pub fn determineAction(comptime call_back: anytype, comptime PtrTypeOfV: type) VisitorType {
+        const PtrInfo = switch (@typeInfo(PtrTypeOfV)) {
+            .pointer => |info| info,
+            else => stdx.debug.compileError("zml.meta.visit({}) is expecting a pointer/slice input, but received: {}", .{ @TypeOf(call_back), PtrTypeOfV }),
+        };
+
+        const TargetType = switch (@typeInfo(FnParam(call_back, 1))) {
+            .pointer => |info| info.child,
+            else => stdx.debug.compileError("zml.meta.visit({}) is expecting a callback with a pointer as second argument but found {}", .{ @TypeOf(call_back), FnParam(call_back, 1) }),
+        };
+
+        if ((PtrInfo.size == .one and PtrInfo.child == TargetType) or PtrTypeOfV == *TargetType or PtrTypeOfV == *const TargetType) {
+            return .CallBack;
+        }
+
+        return .Recurse;
     }
+};
 
-    // Handle stdx.BoundedArray that contains uninitalized data.
-    if (@typeInfo(Child) == .@"struct" and @hasDecl(Child, "constSlice") and @hasDecl(Child, "slice")) {
-        return visit(cb, ctx, if (mutating_cb) v.slice() else v.constSlice());
-    }
+pub fn visit(comptime call_back: anytype, ctx: FnParam(call_back, 0), v: anytype) VisitReturn(call_back) {
+    const action = comptime Visitor.determineAction(call_back, @TypeOf(v));
 
-    // Recursively visit fields of v.
-    switch (ptr_info.size) {
-        .one => switch (@typeInfo(Child)) {
-            .@"struct" => |s| inline for (s.fields) |field| {
-                if (field.is_comptime or comptime !Contains(field.type, K)) continue;
-                const field_type_info = @typeInfo(field.type);
-                // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
-                switch (field_type_info) {
-                    .pointer => if (can_error) try visit(cb, ctx, @field(v, field.name)) else visit(cb, ctx, @field(v, field.name)),
-                    .array, .optional, .@"union", .@"struct" => if (can_error) try visit(cb, ctx, &@field(v, field.name)) else visit(cb, ctx, &@field(v, field.name)),
-                    else => {},
-                }
-            },
-            .array => for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
-            .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
-            .@"union" => switch (v.*) {
-                inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),
-            },
-            else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
+    const PtrTypeOfV = @TypeOf(v);
+    const ptr_info_v = @typeInfo(PtrTypeOfV).pointer;
+    const ChildTypeV = ptr_info_v.child;
+
+    const can_error = stdx.meta.FnReturnErrorSet(call_back) != null;
+
+    switch (action) {
+        .CallBack => {
+            return if (can_error) try call_back(ctx, v) else call_back(ctx, v);
         },
-        .slice => {
-            for (v) |*v_elem| {
-                switch (@typeInfo(Child)) {
+        .Recurse => {
+            const TargetType, const mutating_cb = switch (@typeInfo(FnParam(call_back, 1))) {
+                .pointer => |info| .{ info.child, !info.is_const },
+                else => stdx.debug.compileError("zml.meta.visit({}) is expecting a callback with a pointer as second argument but found {}", .{ @TypeOf(call_back), FnParam(call_back, 1) }),
+            };
+
+            if (comptime !Contains(PtrTypeOfV, TargetType)) return;
+
+            if (@typeInfo(ChildTypeV) == .@"struct" and @hasDecl(ChildTypeV, "constSlice") and @hasDecl(ChildTypeV, "slice")) {
+                return visit(call_back, ctx, if (mutating_cb) v.slice() else v.constSlice());
+            }
+
+            switch (ptr_info_v.size) {
+                .one => switch (@typeInfo(ChildTypeV)) {
                     .@"struct" => |s| inline for (s.fields) |field| {
-                        if (field.is_comptime or comptime !Contains(field.type, K)) continue;
-                        const field_type_info = @typeInfo(field.type);
-                        // If the field is already a pointer, we recurse with it directly, otherwise, we recurse with a pointer to the field.
-                        if (field_type_info == .pointer) {
-                            if (can_error) try visit(cb, ctx, @field(v_elem, field.name)) else visit(cb, ctx, @field(v_elem, field.name));
+                        if (field.is_comptime or comptime !Contains(field.type, TargetType)) continue;
+                        if (@typeInfo(field.type) == .pointer) {
+                            if (can_error) try visit(call_back, ctx, @field(v, field.name)) else visit(call_back, ctx, @field(v, field.name));
                         } else {
-                            if (can_error) try visit(cb, ctx, &@field(v_elem, field.name)) else visit(cb, ctx, &@field(v_elem, field.name));
+                            if (can_error) try visit(call_back, ctx, &@field(v, field.name)) else visit(call_back, ctx, &@field(v, field.name));
                         }
                     },
-                    .array => for (v) |*elem| if (can_error) try visit(cb, ctx, elem) else visit(cb, ctx, elem),
-                    .optional => if (v.* != null) if (can_error) try visit(cb, ctx, &v.*.?) else visit(cb, ctx, &v.*.?),
-                    .@"union" => switch (v_elem.*) {
-                        inline else => |*v_field| if (can_error) try visit(cb, ctx, v_field) else visit(cb, ctx, v_field),
+                    .array => inline for (v) |*elem| if (can_error) try visit(call_back, ctx, elem) else visit(call_back, ctx, elem),
+                    .optional => if (v.* != null) if (can_error) try visit(call_back, ctx, &v.*.?) else visit(call_back, ctx, &v.*.?),
+                    .@"union" => switch (v.*) {
+                        inline else => |*v_field| if (can_error) try visit(call_back, ctx, v_field) else visit(call_back, ctx, v_field),
                     },
-                    else => stdx.debug.compileError("zml.meta.visit({}) doesn't support fields of type: {}", .{ Callback, Child }),
-                }
+                    else => stdx.debug.compileError("zml.meta.visit({}) doesn't support visiting pointer type {}", .{ @TypeOf(call_back), ChildTypeV }),
+                },
+                .slice => {
+                    for (v) |*v_elem| {
+                        if (can_error) try visit(call_back, ctx, v_elem) else visit(call_back, ctx, v_elem);
+                    }
+                },
+                .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers got {}", .{ @TypeOf(call_back), ChildTypeV }),
             }
         },
-        .many, .c => stdx.debug.compileError("zml.meta.visit({}) doesn't support [*] style pointers, got: {}", .{ Callback, Ptr }),
     }
 }
 

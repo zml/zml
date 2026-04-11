@@ -42,7 +42,7 @@ pub const HTTP = struct {
     client: *std.http.Client,
     protocol: Protocol,
     handles: stdx.SegmentedList(Handle, 0) = .{},
-    closed_handles: std.ArrayList(u32) = .{},
+    closed_handles: std.ArrayList(u32) = .empty,
     base: VFSBase,
 
     pub fn init(allocator: std.mem.Allocator, inner: std.Io, http_client: *std.http.Client, protocol: Protocol) !HTTP {
@@ -146,17 +146,17 @@ pub const HTTP = struct {
                 const handle = self.getFileHandle(o.file);
                 const total = self.performRead(handle, o.data, handle.pos) catch |err| {
                     log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, handle.pos, err });
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 };
 
                 if (total == 0) {
-                    return .{ .file_read_streaming = std.Io.File.ReadStreamingError.EndOfStream };
+                    return .{ .file_read_streaming = error.EndOfStream };
                 }
 
                 handle.pos += @intCast(total);
                 return .{ .file_read_streaming = total };
             },
-            .file_write_streaming, .device_io_control => {
+            .file_write_streaming, .device_io_control, .net_receive => {
                 return self.base.inner.vtable.operate(self.base.inner.userdata, operation);
             },
         }
@@ -284,7 +284,7 @@ pub const HTTP = struct {
         const handle = self.getFileHandle(file);
         return self.performRead(handle, data, offset) catch |err| {
             log.err("Failed to perform read for file {s} at pos {d}: {any}", .{ handle.uri, offset, err });
-            return std.Io.File.Reader.Error.Unexpected;
+            return error.Unexpected;
         };
     }
 
