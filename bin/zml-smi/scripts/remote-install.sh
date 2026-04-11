@@ -81,7 +81,7 @@ detect_platform() {
 
   success "${OS_LABEL} ${ARCH_LABEL}"
 
-  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-v${VERSION}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
+  DOWNLOAD_URL="${BASE_URL}/${BINARY_NAME}-${VERSION}-${OS_LABEL}-${ARCH_LABEL}.tar.zst"
 }
 
 check_deps() {
