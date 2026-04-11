@@ -1742,6 +1742,7 @@ pub fn shardingAwareTypedCustomCall(
         }
     }).body);
 
+    // Convert the slice back to a struct
     var out: ShapeToTensor(O) = undefined;
     inline for (@typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |field, i| {
         @field(out, field.name) = output_tensors[i];
@@ -1888,11 +1889,25 @@ pub fn typedCustomCall(
         op.setAttributeByName("mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, "{manual}"));
     }
 
-    var out: ShapeToTensor(O) = undefined;
-    inline for (output_shapes, @typeInfo(@TypeOf(args.output_shapes)).@"struct".fields, 0..) |output_shape, field, i| {
-        @field(out, field.name) = Tensor._result(output_shape, op.result(i));
+    switch (@typeInfo(@TypeOf(args.output_shapes))) {
+        .@"struct" => |struct_info| {
+            var out: ShapeToTensor(O) = undefined;
+            inline for (output_shapes, struct_info.fields, 0..) |output_shape, field, i| {
+                @field(out, field.name) = Tensor._result(output_shape, op.result(i));
+            }
+            return out;
+        },
+        // Extra case to support []const Shape from shardingAwareTypedCustomCall
+        .pointer => |pointer_info| {
+            if (pointer_info.size != .slice) @compileError("Expected input slice");
+            var out: []Tensor = allocator.alloc(Tensor, args.output_shapes.len) catch unreachable;
+            for (output_shapes, 0..) |output_shape, i| {
+                out[i] = Tensor._result(output_shape, op.result(i));
+            }
+            return out;
+        },
+        else => @compileError("Unsupported input type: " ++ @typeName(@TypeOf(args.input_tensor))),
     }
-    return out;
 }
 
 fn customCallArgsFromPjrtCallFrame(I: type, O: type, A: type, call_frame: *pjrt.ffi.CallFrame) struct {

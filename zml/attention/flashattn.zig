@@ -220,7 +220,7 @@ pub const fa2 = struct {
 
     const fa2_mha_varlen_fwd = zml.ops.CustomCall(Input, Output, Attributes, ffiCall, .{
         .name = "fa2_mha_varlen_fwd",
-        .sharding_aware = false,
+        .sharding_aware = true,
         .has_side_effect = false,
         .output_operand_aliases = .{ .o = .q },
     });
