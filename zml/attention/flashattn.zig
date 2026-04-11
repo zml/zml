@@ -275,8 +275,6 @@ pub const fa2 = struct {
     };
 
     pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
-        const ctx = CompilationContext.current();
-
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa2.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -308,7 +306,6 @@ pub const fa2 = struct {
         }
 
         const q_sharded = q.withPartitioning(.{ .h = .model });
-        const model_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q_sharded.shape(), .model) catch unreachable;
 
         const output = fa2_mha_varlen_fwd.call(
             .{
@@ -334,7 +331,7 @@ pub const fa2 = struct {
                 .window_size_right = @as(i32, -1),
                 .max_seqlen_q = max_seqlen_q,
                 .max_seqlen_k = max_seqlen_k,
-                .num_heads = @as(i32, @intCast(@divExact(num_heads, model_partitions))),
+                .num_heads = @as(i32, @intCast(num_heads)),
             },
         );
         var o = output.o;
