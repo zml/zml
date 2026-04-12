@@ -81,6 +81,7 @@ pub const CompilationContext = struct {
     };
 
     allocator: std.mem.Allocator,
+    io: std.Io,
     arena: std.heap.ArenaAllocator,
 
     mlir_registry: *mlir.DialectRegistry,
@@ -120,6 +121,7 @@ pub const CompilationContext = struct {
 
         return .{
             .allocator = allocator,
+            .io = io,
             .arena = std.heap.ArenaAllocator.init(allocator),
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
@@ -176,7 +178,18 @@ pub fn compile(
     platform: *const Platform,
     opts: CompilationOptions,
 ) !Exe {
-    var compilation_context: CompilationContext = .init(allocator, io, platform, opts);
+    // TODO: Here we have somewhat of a requirement
+    // Emitting MLIR requires to have the compilation context available at all times using `CompilationContext.current()`.
+    // If in the future, we inject an Io that is not thread-based, we might have some surprises.
+    //
+    // I think the correct implementation would be to dispatch `emitMlir` to a thread pool, then wait for the result
+    // asynchronously using the provided Io. For now, we'll simply make that blocking as it's not a big deal but keep
+    // in mind we might want to revisit that later.
+    _ = io;
+    var st_io: std.Io.Threaded = .init_single_threaded;
+    defer st_io.deinit();
+
+    var compilation_context: CompilationContext = .init(allocator, st_io.io(), platform, opts);
     defer compilation_context.deinit();
 
     const result = emitMlir(&compilation_context, func, args) catch unreachable;
@@ -210,7 +223,7 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), io, platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
+    const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
     log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
 
     const exe = try Exe.init(

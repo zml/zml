@@ -11,6 +11,8 @@ const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiler.zig");
 const zml = @import("zml.zig");
 
+const attention = @import("attention.zig");
+
 const log = std.log.scoped(.zml);
 
 fn StaticPlatformMap(comptime E: type, comptime T: type) type {
@@ -200,6 +202,19 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
+
+    triton_runtime: ?attention.triton.Runtime = null,
+
+    pub fn initBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: attention.paged_attention.Backend) !void {
+        switch (backend) {
+            .triton => {
+                if (self.triton_runtime == null) {
+                    self.triton_runtime = try zml.attention.triton.Runtime.init(allocator, io);
+                }
+            },
+            else => {},
+        }
+    }
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -401,8 +416,9 @@ pub const Platform = struct {
         return .{ .data = self };
     }
 
-    pub fn deinit(self: *Platform, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         self.pjrt_client.deinit(self.pjrt_api);
+        if (self.triton_runtime) |*rt| rt.deinit(io);
         self.arena_state.promote(allocator).deinit();
     }
 
