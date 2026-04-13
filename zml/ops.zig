@@ -1518,7 +1518,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     }
 
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
-    var metadata_attribute_list: std.ArrayList(mlir.NamedAttribute) = .initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
+    var metadata_attribute_list = std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
     inline for (metadata_type_info.@"struct".fields) |field| {
         const maybe_attribute: ?*const mlir.Attribute = switch (@typeInfo(field.type)) {
             .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
@@ -1552,11 +1552,11 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
                     @panic("Unsupported pointer type in metadata"),
                 else => @panic("Unsupported pointer type in metadata"),
             },
-            .optional => |optional_info| if (@field(metadata, field.name) != null) switch (@typeInfo(optional_info.child)) {
+            .optional => |optional_info| if (@field(metadata, field.name)) |value| switch (@typeInfo(optional_info.child)) {
                 .float => |float_field| switch (float_field.bits) {
-                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
-                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
-                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
+                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, value)),
+                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, value)),
+                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, value)),
                     else => @panic("Unsupported DataType"),
                 },
 
