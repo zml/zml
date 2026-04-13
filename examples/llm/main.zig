@@ -13,6 +13,20 @@ pub const std_options: std.Options = .{
 
 const log = std.log.scoped(.llm);
 
+const Metrics = struct {
+    model: []const u8,
+    backend: zml.attention.attention.Backend,
+    seqlen: u32,
+    tokenizer_load_ms: u64 = 0,
+    weights_load_ms: u64 = 0,
+    compile_ms: u64 = 0,
+    generation_ms: u64 = 0,
+};
+
+fn durationMs(d: std.Io.Duration) u64 {
+    return @intCast(@divFloor(d.toNanoseconds(), std.time.ns_per_ms));
+}
+
 const Args = struct {
     model: []const u8,
     prompt: ?[]const u8 = null,
@@ -20,6 +34,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
     single: bool = false,
+    metrics_json: ?[]const u8 = null,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -27,13 +42,14 @@ const Args = struct {
         \\ Run text generation with a model selected from `model_type` in the `config.json`.
         \\
         \\ Options:
-        \\   --model=<path>      Path to the model repository (required)
-        \\   --prompt=<string>   Prompt to use for generation (default: none)
-        \\   --seqlen=<number>   Sequence length (default: 2048)
-        \\   --topk=<number>     Top-k sampling cutoff (default: 4)
-        \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
-        \\                       (only used by LFM2 which uses multiple kernels by default)
+        \\   --model=<path>         Path to the model repository (required)
+        \\   --prompt=<string>      Prompt to use for generation (default: none)
+        \\   --seqlen=<number>      Sequence length (default: 2048)
+        \\   --topk=<number>        Top-k sampling cutoff (default: 4)
+        \\   --backend=<text>       Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
+        \\   --single               Create a single kernel encompassing all the layers when supported
+        \\                          (only used by LFM2 which uses multiple kernels by default)
+        \\   --metrics-json=<path>  Write run metrics as JSON (recommended with --prompt)
         \\
     ;
 };
@@ -89,6 +105,12 @@ pub fn main(init: std.process.Init) !void {
         break :b selected;
     };
 
+    var metrics = Metrics{
+        .model = args.model,
+        .backend = backend,
+        .seqlen = args.seqlen,
+    };
+
     //
     // Model initialization
     //
@@ -120,13 +142,19 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     errdefer progress.end();
 
+    const tok_t0: std.Io.Timestamp = .now(io, .awake);
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
+    metrics.tokenizer_load_ms = durationMs(tok_t0.untilNow(io, .awake));
     defer tokenizer.deinit();
 
+    const w_t0: std.Io.Timestamp = .now(io, .awake);
     var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    metrics.weights_load_ms = durationMs(w_t0.untilNow(io, .awake));
     defer model.unloadBuffers(&model_buffers, allocator);
 
+    const c_t0: std.Io.Timestamp = .now(io, .awake);
     var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+    metrics.compile_ms = durationMs(c_t0.untilNow(io, .awake));
     defer compiled_model.deinit();
 
     progress.end();
@@ -159,10 +187,29 @@ pub fn main(init: std.process.Init) !void {
     defer llm_chat.deinit();
 
     if (interactive) {
+        if (args.metrics_json != null) {
+            log.warn("--metrics-json is most meaningful with --prompt (non-interactive mode).", .{});
+        }
         try llm_chat.runInteractive(prompt);
     } else {
+        const g_t0: std.Io.Timestamp = .now(io, .awake);
         try llm_chat.runOnce(prompt);
+        metrics.generation_ms = durationMs(g_t0.untilNow(io, .awake));
     }
+
+    if (args.metrics_json) |path| {
+        try writeMetricsJson(io, path, metrics);
+    }
+}
+
+fn writeMetricsJson(io: std.Io, path: []const u8, metrics: Metrics) !void {
+    const file = try std.Io.Dir.cwd().createFile(io, path, .{ .truncate = true });
+    defer file.close(io);
+
+    var writer = file.writer(io, &.{});
+    try std.json.stringify(metrics, .{}, &writer.interface);
+    try writer.interface.writeAll("\n");
+    try writer.interface.flush();
 }
 
 fn loadTokenizer(allocator: std.mem.Allocator, io: std.Io, dir: std.Io.Dir, progress: *std.Progress.Node) !zml.tokenizer.Tokenizer {
