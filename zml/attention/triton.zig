@@ -266,7 +266,7 @@ pub const paged = struct {
 
         pub fn init(options_: Options) Parameters {
             return .{
-                .block_table = .init(.{ .b = options_.batch_size, .num_pages_per_seq = options_.max_num_pages }, .i32),
+                .block_table = .init(.{ .b = options_.batch_size, .p = options_.max_num_pages }, .i32),
                 .seq_lens = .init(.{ .b = options_.batch_size }, .i32),
                 .query_start_len = .init(.{ .b = options_.batch_size + 1 }, .i32),
                 .options_ = options_,
@@ -374,7 +374,7 @@ pub const paged = struct {
                         .batch_size = @intCast(parameters_.block_table.dim(.b)),
                         .block_size = @intCast(k_cache_.dim(.k_chunk)),
                         .num_blocks = @intCast(k_cache_.dim(.page)),
-                        .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.num_pages_per_seq)),
+                        .max_num_block_per_seq = @intCast(parameters_.block_table.dim(.p)),
                         .sliding_window = if (ctx_.opts.sliding_window < 0) 0 else @intCast(ctx_.opts.sliding_window),
                         .block_m = block_m,
                         .block_q = block_q,
