@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const BFloat16 = zml.floats.BFloat16;
 const stdx = zml.stdx;
 const block_config: i32 = 16;
 
@@ -26,14 +27,15 @@ const Args = struct {
     ;
 };
 
-pub fn scale_dot_product(lhs_block: zml.Tensor, lhs_scale: zml.Tensor, rhs_block: zml.Tensor, rhs_scale: zml.Tensor) zml.Tensor {
-    const output_shape = zml.Shape.init(.{ .token = lhs_block.dim(.token), .dout = rhs_block.dim(.dout) }, .bf16);
+pub fn scale_dot_product(lhs_block: zml.Tensor, lhs_scale: zml.Tensor, rhs_block: zml.Tensor, rhs_scale: zml.Tensor, global_scale: zml.Tensor) zml.Tensor {
+    const output_shape = zml.Shape.init(.{ .b = lhs_block.dim(.b), .dout = rhs_block.dim(.dout) }, .bf16);
+    // const dequant_type: []const u8 = "BF16";
     return zml.ops.customCall(
         "__op$block_scaled_dot",
-        .{ lhs_block, rhs_block, lhs_scale, rhs_scale },
+        .{ lhs_block, rhs_block, lhs_scale, rhs_scale, global_scale },
         output_shape,
         .{
-            .dequantize_type = "BF16",
+            // .dequantize_type = dequant_type,
         },
         .{ .has_side_effect = false },
     );
@@ -50,6 +52,35 @@ pub fn dequantize(block: zml.Tensor, scale: zml.Tensor, _type: zml.DataType) zml
 
     const result = block_converted.mul(scale_reshaped);
     return result;
+}
+
+const QuantizeNVFP4Result = struct {
+    block: zml.Tensor,
+    scale: zml.Tensor,
+};
+
+/// Quantize activations into NVFP4 blocks and per-block scales.
+///
+/// This helper is intentionally not wired in the model forward path yet.
+pub fn quantizeActivationNVFP4(x: zml.Tensor) QuantizeNVFP4Result {
+    const block_size: i64 = block_config;
+    const d_group = @divExact(x.dim(.d), block_size);
+
+    const quant_shape = zml.Shape.init(.{ .b = x.dim(.b), .d = x.dim(.d) }, .f4e2m1);
+    const scale_shape = zml.Shape.init(.{ .b = x.dim(.b), .d_group = d_group }, .f8e4m3fn);
+
+    const outputs: [2]zml.Tensor = zml.ops.customCall(
+        "__op$quantize",
+        .{x},
+        .{ quant_shape, scale_shape },
+        .{},
+        .{ .has_side_effect = false },
+    );
+
+    return .{
+        .block = outputs[0],
+        .scale = outputs[1],
+    };
 }
 
 const GemmaLayer0Mlp = struct {
@@ -147,30 +178,35 @@ const GemmaLayer0Mlp = struct {
     }
 
     pub fn forward(self: GemmaLayer0Mlp, x: zml.Tensor) zml.Tensor {
-        const x_f32 = x.convert(.f32);
+        const up_proj_scale_bf16 = self.quantization_tensors.up_proj_scale_2.convert(.bf16);
+        const gate_proj_scale_bf16 = self.quantization_tensors.gate_proj_scale_2.convert(.bf16);
+        const down_proj_scale_bf16 = self.quantization_tensors.down_proj_scale_2.convert(.bf16);
+        const out_quantized = quantizeActivationNVFP4(x);
         const proj = forwardLinearDequantizeNVFP4(
             self.up_proj,
-            x_f32,
-            self.quantization_tensors.up_proj_input_scale,
+            out_quantized.block,
+            out_quantized.scale,
             self.quantization_tensors.up_proj_scale,
-            self.quantization_tensors.up_proj_scale_2,
+            up_proj_scale_bf16,
         );
 
         var output = forwardLinearDequantizeNVFP4(
             self.gate_proj,
-            x_f32,
-            self.quantization_tensors.gate_proj_input_scale,
+            out_quantized.block,
+            out_quantized.scale,
             self.quantization_tensors.gate_proj_scale,
-            self.quantization_tensors.gate_proj_scale_2,
+            gate_proj_scale_bf16,
         );
         output = output.gelu().mul(proj).rename(.{ .dout = .d });
 
+        const activated_quant = quantizeActivationNVFP4(output);
+
         return forwardLinearDequantizeNVFP4(
             self.down_proj,
-            output,
-            self.quantization_tensors.down_proj_input_scale,
+            activated_quant.block,
+            activated_quant.scale,
             self.quantization_tensors.down_proj_scale,
-            self.quantization_tensors.down_proj_scale_2,
+            down_proj_scale_bf16,
         );
     }
 };
@@ -188,15 +224,14 @@ pub fn forwardLinearDequantizeNVFP4(
     var weight_f4 = linear.weight.bitCast(.f4e2m1);
     weight_f4 = weight_f4.merge(.{ .d = .{ .d_packed, .bitcast } });
 
-    const flat_x = x.reshape(.{ .token = num_tokens, .d = x.dim(.d) });
-    const fused_weight_scale = weight_scale.convert(.f32).mul(weight_scale_2.convert(.f32));
+    const flat_x = x.reshape(.{ .b = num_tokens, .d = x.dim(.d) });
+
+    log.info("lhs block shape: {f}, rhs block shape: {f}, input scale shape: {f}, weight scale shape: {f}, weight scale 2 shape: {f}", .{ flat_x.shape(), weight_f4.shape(), input_scale.shape(), weight_scale.shape(), weight_scale_2.shape() });
 
     // Fused NVFP4 path: runtime custom call handles block-scale dequantization + matmul.
-    var y = scale_dot_product(flat_x, input_scale.convert(.f32), weight_f4, fused_weight_scale)
-        .convert(.f32)
+    var y = scale_dot_product(flat_x, input_scale, weight_f4, weight_scale, weight_scale_2)
         .rename(.{ .dout = .dout_w });
 
-    // Old reference path kept for debugging/comparison.
     // const group_size = @divExact(weight_f4.dim(.d), weight_scale.dim(.d_group));
     // const block_scale = weight_scale.convert(.f32)
     //     .reshape(.{ .dout = weight_scale.dim(.dout), .d_group = weight_scale.dim(.d_group), .d_block = 1 })
@@ -253,7 +288,7 @@ pub fn main(init: std.process.Init) !void {
 
     const input_dim = mlp.up_proj.weight.dim(.d_packed) * 2;
     const batch_dim: i64 = @intCast(args.batch);
-    const input: zml.Tensor = .init(.{ .b = batch_dim, .d = input_dim }, .f32);
+    const input: zml.Tensor = .init(.{ .b = batch_dim, .d = input_dim }, .bf16);
 
     log.info("Compiling layer-0 NVFP4 MLP", .{});
     var exe = try platform.compile(allocator, io, mlp, .forward, .{input}, .{ .shardings = &.{replicated} });
@@ -264,13 +299,14 @@ pub fn main(init: std.process.Init) !void {
     defer GemmaLayer0Mlp.unloadBuffers(&mlp_buffers);
 
     const input_len = batch_dim * input_dim;
-    const input_data = try allocator.alloc(f32, @intCast(input_len));
+    const input_data = try allocator.alloc(BFloat16, @intCast(input_len));
     defer allocator.free(input_data);
 
     var prng = std.Random.DefaultPrng.init(args.seed);
     const rng = prng.random();
     for (input_data) |*v| {
-        v.* = (rng.float(f32) * 2.0) - 1.0;
+        const sample = (rng.float(f32) * 2.0) - 1.0;
+        v.* = BFloat16.fromF32(sample);
     }
 
     var input_buffer = try zml.Buffer.fromBytes(io, platform, input.shape(), replicated, std.mem.sliceAsBytes(input_data));
@@ -290,11 +326,15 @@ pub fn main(init: std.process.Init) !void {
     var out_slice = try output.toSliceAlloc(allocator, io);
     defer out_slice.free(allocator);
 
-    const output_f32 = out_slice.constItems(f32);
-    const preview_len = @min(output_f32.len, 8);
+    const output_bf16 = out_slice.constItems(BFloat16);
+    const preview_len = @min(output_bf16.len, 8);
+    var output_preview_f32: [8]f32 = undefined;
+    for (0..preview_len) |i| {
+        output_preview_f32[i] = output_bf16[i].toF32();
+    }
 
     log.info("NVFP4 MLP run complete", .{});
     log.info("Input shape: {f}", .{input.shape()});
     log.info("Output shape: {f}", .{output.shape()});
-    log.info("Output preview (first {d} values): {any}", .{ preview_len, output_f32[0..preview_len] });
+    log.info("Output preview (first {d} values, as f32): {any}", .{ preview_len, output_preview_f32[0..preview_len] });
 }
