@@ -1,0 +1,9 @@
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+	name = "matmul_nvfp4",
+	srcs = ["main.zig"],
+	main = "main.zig",
+	visibility = ["//visibility:public"],
+	deps = ["//zml"],
+)
