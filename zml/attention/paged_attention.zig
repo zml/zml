@@ -175,6 +175,7 @@ pub const Context = union(Backend) {
 pub const AttentionOptions = struct {
     is_causal: bool = true,
     sliding_window: i32 = -1,
+    scale: ?f32 = null,
 };
 
 pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {

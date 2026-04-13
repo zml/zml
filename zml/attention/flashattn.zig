@@ -950,6 +950,7 @@ pub const paged_fa2 = struct {
                             .max_seqlen_k = context.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
                             .window_size_left = opts.sliding_window,
+                            .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
@@ -1026,6 +1027,7 @@ pub const paged_fa2 = struct {
                             .max_seqlen_k = context.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
                             .window_size_left = opts.sliding_window,
+                            .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
@@ -1089,6 +1091,7 @@ pub const paged_fa2 = struct {
                             .max_seqlen_k = context.max_seqlen_k,
                             .num_heads = num_heads_per_shard,
                             .window_size_left = opts.sliding_window,
+                            .softmax_scale = opts.scale,
                         },
                         .opts = zml.ops.CustomCallOptions{
                             .has_side_effect = false,
