@@ -19,7 +19,7 @@ _uucode_repo = repository_rule(
 def repo():
     _uucode_repo(
         name = "uucode",
-        commit = "faab8894d753207878283d523add01817e23b805",
+        commit = "f1c687f09174f9f11eda14d3e3ce497d68ab09a6",
         build_config = "//third_party/uucode:build_config.zig",
         build_file = "//third_party/uucode:uucode.bazel",
     )

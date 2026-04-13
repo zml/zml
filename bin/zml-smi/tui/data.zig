@@ -58,7 +58,7 @@ pub const HistoryBuffers = struct {
     power: []RingBuffer(u64, history_len) = &.{},
 
     pub fn init(allocator: std.mem.Allocator, count: usize) !HistoryBuffers {
-        var h: HistoryBuffers = .{
+        const h: HistoryBuffers = .{
             .util = try allocator.alloc(RingBuffer(u64, history_len), count),
             .mem_util = try allocator.alloc(RingBuffer(u64, history_len), count),
             .temp = try allocator.alloc(RingBuffer(u64, history_len), count),

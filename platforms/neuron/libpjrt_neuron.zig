@@ -8,8 +8,9 @@ const stdx = @import("stdx");
 const log = std.log.scoped(.@"zml/platforms/neuron");
 
 fn findFreeTcpPort(io: std.Io) !u16 {
+    const addr: std.Io.net.IpAddress = .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } };
     var server = try std.Io.net.IpAddress.listen(
-        .{ .ip4 = .{ .bytes = .{ 127, 0, 0, 1 }, .port = 0 } },
+        &addr,
         io,
         .{},
     );

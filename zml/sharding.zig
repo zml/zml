@@ -1109,7 +1109,7 @@ pub const Sharding = struct {
         }
 
         var folds: Folds = try .init(0);
-        var folds_consumed = std.EnumSet(PhysicalAxisTag).initEmpty();
+        var folds_consumed: std.EnumSet(PhysicalAxisTag) = .empty;
         for (strategy.folding.constSlice()) |entry| {
             for (entry.sources.constSlice()) |src| {
                 if (!physical.hasAxis(src)) return error.InvalidPhysicalAxis;
@@ -1188,7 +1188,7 @@ pub const Sharding = struct {
         const logical_tag = Shape.toTag(logical_axis);
         const bound_axes = self.binding(logical_tag) orelse return 1;
 
-        var physical_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
+        var physical_axes: std.EnumSet(PhysicalAxisTag) = .empty;
         for (bound_axes) |bound_axis| {
             if (self.foldSources(bound_axis)) |sources| {
                 for (sources) |source| physical_axes.insert(source);
@@ -1242,7 +1242,7 @@ pub const Sharding = struct {
         const view = self.physicalView();
         var axes_per_dim = stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK).init(0) catch unreachable;
         var used_mask = [_]bool{false} ** Shape.MAX_RANK;
-        var globally_used = std.EnumSet(PhysicalAxisTag).initEmpty();
+        var globally_used: std.EnumSet(PhysicalAxisTag) = .empty;
 
         for (0..shape.rank()) |ax| {
             var dim_axes = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
@@ -1715,7 +1715,7 @@ pub const Placement = struct {
         };
 
         for (self.shards.slice()) |*s| {
-            var used_axes = std.EnumSet(PhysicalAxisTag).initEmpty();
+            var used_axes: std.EnumSet(PhysicalAxisTag) = .empty;
 
             for (0..shape.rank()) |ax| {
                 const axis_index: u8 = @intCast(ax);

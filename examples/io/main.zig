@@ -139,7 +139,7 @@ pub fn main(init: std.process.Init) !void {
                 var current = root;
                 var parts = std.mem.tokenizeScalar(u8, name, '.');
                 while (parts.next()) |part| {
-                    const gop = try current.children.getOrPut(part);
+                    const gop = try current.children.getOrPut(current.allocator, part);
                     if (!gop.found_existing) {
                         gop.value_ptr.* = try TensorNode.init(init.arena.allocator(), part);
                     }
@@ -274,15 +274,15 @@ fn printTree(io: std.Io, writer: *std.Io.Writer, dir: std.Io.Dir, prefix: []cons
 
 const TensorNode = struct {
     name: []const u8,
-    children: std.StringArrayHashMap(*TensorNode),
+    children: std.StringArrayHashMapUnmanaged(*TensorNode) = .empty,
+    allocator: std.mem.Allocator,
     tensor: ?zml.safetensors.Tensor = null,
 
     fn init(allocator: std.mem.Allocator, name: []const u8) !*TensorNode {
         const node = try allocator.create(TensorNode);
         node.* = .{
             .name = name,
-            .children = std.StringArrayHashMap(*TensorNode).init(allocator),
-            .tensor = null,
+            .allocator = allocator,
         };
         return node;
     }
@@ -314,7 +314,7 @@ fn printTensorTree(
     is_last: bool,
     is_root: bool,
 ) !void {
-    const allocator = node.children.allocator;
+    const allocator = node.allocator;
 
     if (is_root) {
         const children_nodes = try getSortedChildren(allocator, node);
