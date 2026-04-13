@@ -209,7 +209,7 @@ pub const Tensor = struct {
             .unknown(ctx.mlir_ctx),
         ).appendTo(currentBlock());
 
-        var res = _result(self._shape, op.result(0));
+        const res = _result(self._shape, op.result(0));
         ctx.currentScope().id_to_output_memory_kind.put(ctx.currentScope().arena.allocator(), res.id, kind) catch unreachable;
         return res;
     }

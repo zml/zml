@@ -591,9 +591,9 @@ pub const DirectMemoryWriter = struct {
         allocator: std.mem.Allocator,
         shape: Shape,
         placement: Placement,
-        raw_segments: std.ArrayListUnmanaged(RawSegment) = .{},
-        segments: std.ArrayListUnmanaged(StreamSegment) = .{},
-        mirrors: std.ArrayListUnmanaged(usize) = .{},
+        raw_segments: std.ArrayListUnmanaged(RawSegment) = .empty,
+        segments: std.ArrayListUnmanaged(StreamSegment) = .empty,
+        mirrors: std.ArrayListUnmanaged(usize) = .empty,
 
         fn init(allocator: std.mem.Allocator, shape: Shape, placement: Placement) StreamPlanner {
             return .{
@@ -617,6 +617,7 @@ pub const DirectMemoryWriter = struct {
             const owned_segments = try self.segments.toOwnedSlice(self.allocator);
             errdefer self.allocator.free(owned_segments);
             const owned_mirrors = try self.mirrors.toOwnedSlice(self.allocator);
+            errdefer self.allocator.free(owned_mirrors);
 
             return .{
                 .segments = owned_segments,

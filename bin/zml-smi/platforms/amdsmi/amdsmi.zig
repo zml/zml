@@ -56,7 +56,7 @@ pub fn init(allocator: std.mem.Allocator) !AmdSmi {
     defer allocator.free(sockets);
     try check(fns.amdsmi_get_socket_handles(&socket_count, @ptrCast(sockets.ptr)));
 
-    var handle_list: std.ArrayList(c.amdsmi_processor_handle) = .{};
+    var handle_list: std.ArrayList(c.amdsmi_processor_handle) = .empty;
     defer handle_list.deinit(allocator);
 
     for (sockets[0..socket_count]) |socket| {

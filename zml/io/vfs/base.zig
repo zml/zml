@@ -91,6 +91,7 @@ pub const VFSBase = struct {
             .unlockStderr = unlockStderr,
             .processCurrentPath = processCurrentPath,
             .processSetCurrentDir = processSetCurrentDir,
+            .processSetCurrentPath = processSetCurrentPath,
             .processReplace = processReplace,
             .processReplacePath = processReplacePath,
             .processSpawn = processSpawn,
@@ -111,7 +112,6 @@ pub const VFSBase = struct {
             .netConnectUnix = netConnectUnix,
             .netSocketCreatePair = netSocketCreatePair,
             .netSend = netSend,
-            .netReceive = netReceive,
             .netRead = netRead,
             .netWrite = netWrite,
             .netWriteFile = netWriteFile,
@@ -531,6 +531,11 @@ pub const VFSBase = struct {
         return self.inner.vtable.processSetCurrentDir(self.inner.userdata, dir);
     }
 
+    pub fn processSetCurrentPath(userdata: ?*anyopaque, path: []const u8) std.process.SetCurrentPathError!void {
+        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
+        return self.inner.vtable.processSetCurrentPath(self.inner.userdata, path);
+    }
+
     pub fn processReplace(userdata: ?*anyopaque, options: std.process.ReplaceOptions) std.process.ReplaceError {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.processReplace(self.inner.userdata, options);
@@ -591,14 +596,14 @@ pub const VFSBase = struct {
         return self.inner.vtable.randomSecure(self.inner.userdata, buffer);
     }
 
-    pub fn netListenIp(userdata: ?*anyopaque, address: std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Server {
+    pub fn netListenIp(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ListenOptions) std.Io.net.IpAddress.ListenError!std.Io.net.Socket {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netListenIp(self.inner.userdata, address, options);
     }
 
-    pub fn netAccept(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle) std.Io.net.Server.AcceptError!std.Io.net.Stream {
+    pub fn netAccept(userdata: ?*anyopaque, server: std.Io.net.Socket.Handle, options: std.Io.net.Server.AcceptOptions) std.Io.net.Server.AcceptError!std.Io.net.Socket {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netAccept(self.inner.userdata, server);
+        return self.inner.vtable.netAccept(self.inner.userdata, server, options);
     }
 
     pub fn netBindIp(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.BindOptions) std.Io.net.IpAddress.BindError!std.Io.net.Socket {
@@ -606,7 +611,7 @@ pub const VFSBase = struct {
         return self.inner.vtable.netBindIp(self.inner.userdata, address, options);
     }
 
-    pub fn netConnectIp(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Stream {
+    pub fn netConnectIp(userdata: ?*anyopaque, address: *const std.Io.net.IpAddress, options: std.Io.net.IpAddress.ConnectOptions) std.Io.net.IpAddress.ConnectError!std.Io.net.Socket {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netConnectIp(self.inner.userdata, address, options);
     }
@@ -629,11 +634,6 @@ pub const VFSBase = struct {
     pub fn netSend(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, msgs: []std.Io.net.OutgoingMessage, flags: std.Io.net.SendFlags) struct { ?std.Io.net.Socket.SendError, usize } {
         const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
         return self.inner.vtable.netSend(self.inner.userdata, handle, msgs, flags);
-    }
-
-    pub fn netReceive(userdata: ?*anyopaque, handle: std.Io.net.Socket.Handle, message_buffer: []std.Io.net.IncomingMessage, data_buffer: []u8, flags: std.Io.net.ReceiveFlags, timeout: std.Io.Timeout) struct { ?std.Io.net.Socket.ReceiveTimeoutError, usize } {
-        const self: *VFSBase = @ptrCast(@alignCast(userdata.?));
-        return self.inner.vtable.netReceive(self.inner.userdata, handle, message_buffer, data_buffer, flags, timeout);
     }
 
     pub fn netRead(userdata: ?*anyopaque, src: std.Io.net.Socket.Handle, data: [][]u8) std.Io.net.Stream.Reader.Error!usize {

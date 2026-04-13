@@ -62,7 +62,7 @@ pub fn draw(self: *const StatusLine, ctx: vxfw.DrawContext) std.mem.Allocator.Er
         .softwrap = false,
         .overflow = .clip,
     };
-    var surf = try rich.draw(ui.fixedSize(ctx, w, 1));
+    const surf = try rich.draw(ui.fixedSize(ctx, w, 1));
 
     // Fill background across full width
     if (surf.buffer.len > 0) {
