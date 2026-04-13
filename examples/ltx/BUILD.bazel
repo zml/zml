@@ -9,6 +9,7 @@ zig_binary(
         "conv_ops.zig",
         "image_loading.zig",
         "model.zig",
+        "text_embeddings.zig",
         "upsampler.zig",
         "video_vae.zig",
         "video_vae_encoder.zig",
@@ -21,9 +22,24 @@ zig_binary(
     ],
 )
 
+zig_binary(
+    name = "validate_text_embeddings",
+    main = "validate_text_embeddings.zig",
+    srcs = [
+        "text_embeddings.zig",
+        "model.zig",
+        "conv_ops.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+    ],
+)
+
 build_test(
     name = "test",
     targets = [
         ":inference",
+        ":validate_text_embeddings",
     ],
 )
