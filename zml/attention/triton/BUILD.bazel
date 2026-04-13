@@ -27,6 +27,7 @@ py_library(
         "fake_plugin/compiler.py",
         "fake_plugin/driver.py",
     ],
+    target_compatible_with = ["@platforms//os:linux"],
     deps = ["@triton_py_deps//triton"],
 )
 
@@ -36,6 +37,7 @@ py_library(
         "triton_kernels/__init__.py",
         "triton_kernels/unified_attention.py",
     ],
+    target_compatible_with = ["@platforms//os:linux"],
     deps = ["@triton_py_deps//triton"],
 )
 
@@ -44,6 +46,7 @@ py_binary(
     srcs = ["generate.py"],
     main = "generate.py",
     python_version = "3.12",
+    target_compatible_with = ["@platforms//os:linux"],
     deps = [
         ":fake_plugin",
         ":triton_kernels",
@@ -66,11 +69,13 @@ zig_binary(
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "generate.zig",
     tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
     deps = [":libpython"],
 )
 
 runfiles_to_default(
     name = "generate_files",
+    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
     deps = [
         ":generate",
@@ -83,6 +88,7 @@ copy_to_directory(
     srcs = [
         ":generate_files",
     ],
+    target_compatible_with = ["@platforms//os:linux"],
     add_directory_to_runfiles = False,
     allow_overwrites = True,
     exclude_srcs_patterns = [
