@@ -37,6 +37,15 @@ index d67cd61..6472129 100644
      error{ EndOfStream, InvalidData, UnfinishedBits };
  
  pub const ConvertError = Error ||
+@@ -101,7 +101,7 @@
+ };
+ 
+ pub const Animation = struct {
+-    frames: FrameList = .{},
++    frames: FrameList = .empty,
+     loop_count: i32 = AnimationLoopInfinite,
+ 
+     pub const FrameList = std.ArrayList(AnimationFrame);
 @@ -150,16 +150,16 @@ pub fn deinit(self: *Image, allocator: std.mem.Allocator) void {
  }
  
@@ -295,6 +304,14 @@ diff --git a/src/formats/pam.zig b/src/formats/pam.zig
 index f366d95..7ef9833 100644
 --- a/src/formats/pam.zig
 +++ b/src/formats/pam.zig
+@@ -70,7 +70,7 @@
+         var maybe_maxval: ?u16 = null;
+         var maybe_tuple_type: ?TupleType = null;
+-        var comments = std.ArrayListUnmanaged([]const u8){};
++        var comments: std.ArrayListUnmanaged([]const u8) = .empty;
+         defer {
+             for (comments.items) |comment| allocator.free(comment);
+             comments.deinit(allocator);
 @@ -77,7 +77,7 @@ const Header = struct {
          }
  
@@ -4336,3 +4353,139 @@ index 9f6b1a8..a53b23c 100644
 -    }) |source_file| std.testing.refAllDeclsRecursive(source_file);
 +    }) |source_file| std.testing.refAllDecls(source_file);
  }
+diff --git a/src/formats/gif.zig b/src/formats/gif.zig
+--- a/src/formats/gif.zig
++++ b/src/formats/gif.zig
+@@ -8,7 +8,7 @@
+ const std = @import("std");
+ const utils = @import("../utils.zig");
+ 
+-pub const HeaderFlags = packed struct {
++pub const HeaderFlags = packed struct(u8) {
+     global_color_table_size: u3 = 0,
+     sorted: bool = false,
+     color_resolution: u3 = 0,
+@@ -129,9 +129,9 @@
+ pub const GIF = struct {
+     header: Header = .{},
+     global_color_table: utils.FixedStorage(color.Rgb24, 256) = .{},
+-    frames: std.ArrayList(FrameData) = .{},
+-    comments: std.ArrayList(CommentExtension) = .{},
+-    application_infos: std.ArrayList(ApplicationExtension) = .{},
++    frames: std.ArrayList(FrameData) = .empty,
++    comments: std.ArrayList(CommentExtension) = .empty,
++    application_infos: std.ArrayList(ApplicationExtension) = .empty,
+     arena_allocator: std.heap.ArenaAllocator = undefined,
+ 
+     pub const SubImage = struct {
+@@ -147,6 +147,6 @@
+     pub const FrameData = struct {
+         graphics_control: ?GraphicControlExtension = null,
+-        sub_images: std.ArrayList(*SubImage) = .{},
++        sub_images: std.ArrayList(*SubImage) = .empty,
+ 
+         pub fn deinit(self: *FrameData, allocator: std.mem.Allocator) void {
+             for (self.sub_images.items) |sub_image| {
+@@ -683,7 +683,7 @@
+         const final_pixel_format = self.findBestPixelFormat();
+ 
+         const frame_list_allocator = self.arena_allocator.child_allocator;
+ 
+-        var frame_list = Image.Animation.FrameList{};
++        var frame_list: Image.Animation.FrameList = .empty;
+ 
+         if (self.frames.items.len == 0) {
+diff --git a/src/compressions/lzw.zig b/src/compressions/lzw.zig
+--- a/src/compressions/lzw.zig
++++ b/src/compressions/lzw.zig
+@@ -11,9 +11,10 @@
+         next_code: u13 = 0,
+         previous_code: ?u13 = null,
+-        dictionary: std.AutoArrayHashMap(u13, []const u8),
++        dictionary: std.AutoArrayHashMapUnmanaged(u13, []const u8) = .empty,
++        dict_allocator: std.mem.Allocator,
+ 
+         remaining_data: ?u13 = null,
+         remaining_bits: u4 = 0,
+@@ -27,7 +28,7 @@
+             var result = Self{
+                 .area_allocator = std.heap.ArenaAllocator.init(allocator),
+                 .code_size = initial_code_size,
+-                .dictionary = std.AutoArrayHashMap(u13, []const u8).init(allocator),
++                .dict_allocator = allocator,
+                 .initial_code_size = initial_code_size,
+                 .clear_code = @as(u13, 1) << @intCast(initial_code_size),
+                 .end_information_code = (@as(u13, 1) << @intCast(initial_code_size)) + 1,
+@@ -43,7 +44,7 @@
+ 
+         pub fn deinit(self: *Self) void {
+             self.area_allocator.deinit();
+-            self.dictionary.deinit();
++            self.dictionary.deinit(self.dict_allocator);
+         }
+ 
+         pub fn decode(self: *Self, reader: *std.Io.Reader, writer: *std.Io.Writer) !void {
+@@ -85,7 +86,7 @@
+                             var new_value = try allocator.alloc(u8, previous_value.len + 1);
+                             std.mem.copyForwards(u8, new_value, previous_value);
+                             new_value[previous_value.len] = value[0];
+-                            try self.dictionary.put(self.next_code, new_value);
++                            try self.dictionary.put(self.dict_allocator, self.next_code, new_value);
+ 
+                             self.next_code += 1;
+ 
+@@ -109,7 +110,7 @@
+                                 var new_value = try allocator.alloc(u8, previous_value.len + 1);
+                                 std.mem.copyForwards(u8, new_value, previous_value);
+                                 new_value[previous_value.len] = previous_value[0];
+-                                try self.dictionary.put(self.next_code, new_value);
++                                try self.dictionary.put(self.dict_allocator, self.next_code, new_value);
+ 
+                                 _ = try writer.write(new_value);
+ 
+@@ -154,7 +155,7 @@
+                 var data = try allocator.alloc(u8, 1);
+                 data[0] = @as(u8, @truncate(index));
+ 
+-                try self.dictionary.put(index, data);
++                try self.dictionary.put(self.dict_allocator, index, data);
+             }
+         }
+     };
+diff --git a/src/formats/jpeg/huffman.zig b/src/formats/jpeg/huffman.zig
+--- a/src/formats/jpeg/huffman.zig
++++ b/src/formats/jpeg/huffman.zig
+@@ -9,7 +9,7 @@
+ 
+ const HuffmanCode = struct { length_minus_one: u4, code: u16 };
+-const HuffmanCodeMap = std.AutoArrayHashMap(HuffmanCode, u8);
++const HuffmanCodeMap = std.AutoArrayHashMapUnmanaged(HuffmanCode, u8);
+ 
+ const JPEG_DEBUG = false;
+ const JPEG_VERY_DEBUG = false;
+@@ -40,8 +40,8 @@
+         for (code_counts) |count| total_huffman_codes += count;
+ 
+-        var huffman_code_map = HuffmanCodeMap.init(allocator);
+-        errdefer huffman_code_map.deinit();
++        var huffman_code_map: HuffmanCodeMap = .empty;
++        errdefer huffman_code_map.deinit(allocator);
+ 
+         var fast_table: [1 << fast_bits]u8 = @splat(255);
+         var fast_size: [1 << fast_bits]u5 = @splat(0);
+@@ -65,7 +65,7 @@
+ 
+                 const byte = try reader.takeByte();
+-                try huffman_code_map.put(.{ .length_minus_one = @as(u4, @intCast(i)), .code = code }, byte);
++                try huffman_code_map.put(allocator, .{ .length_minus_one = @as(u4, @intCast(i)), .code = code }, byte);
+ 
+                 // construct accelaration structure see stb_image
+                 if (i + 1 <= fast_bits) {
+@@ -96,5 +96,5 @@
+ 
+     pub fn deinit(self: *Table) void {
+-        self.code_map.deinit();
++        self.code_map.deinit(self.allocator);
+     }
+ };
+

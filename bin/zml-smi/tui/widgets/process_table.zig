@@ -24,7 +24,7 @@ scroll_bars: vxfw.ScrollBars = .{
     },
     .draw_horizontal_scrollbar = false,
 },
-merged: std.ArrayList(ProcessInfo) = .{},
+merged: std.ArrayList(ProcessInfo) = .empty,
 
 pub fn prepare(self: *ProcessTable, state: *data.SystemState, device_id: ?u16) void {
     self.scroll_bars.scroll_view.children.builder.userdata = self;

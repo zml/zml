@@ -191,6 +191,25 @@ index fc3962f..2661cf4 100644
  const vaxis = @import("../main.zig");
  const vxfw = @import("vxfw.zig");
  
+@@ -36,8 +37,8 @@ fn init(allocator: Allocator, io: std.Io) !App {
+             .kitty_keyboard_flags = .{
+                 .report_events = true,
+             },
+         }),
+-        .timers = std.ArrayList(vxfw.Tick){},
++        .timers = .empty,
+         .wants_focus = null,
+         .io = io,
+     };
+@@ -102,7 +103,7 @@
+     var ctx: vxfw.EventContext = .{
+         .alloc = self.allocator,
+         .phase = .capturing,
+-        .cmds = vxfw.CommandList{},
++        .cmds = .empty,
+         .io = io,
+         .consume_event = false,
+         .redraw = false,
 @@ -123,6 +124,13 @@ pub fn run(self: *App, widget: vxfw.Widget, opts: Options) anyerror!void {
  
          try self.checkTimers(&ctx);
@@ -205,6 +224,33 @@ index fc3962f..2661cf4 100644
          {
              loop.queue.lock();
              defer loop.queue.unlock();
+@@ -342,7 +350,7 @@
+         // For mouse events we store the last frame and use that for hit testing
+         const last_frame = surface;
+ 
+-        var hits = std.ArrayList(vxfw.HitResult){};
++        var hits: std.ArrayList(vxfw.HitResult) = .empty;
+         defer hits.deinit(app.allocator);
+         const sub: vxfw.SubSurface = .{
+             .origin = .{ .row = 0, .col = 0 },
+@@ -405,7 +413,7 @@
+         const last_frame = self.last_frame;
+         self.mouse = mouse;
+ 
+-        var hits = std.ArrayList(vxfw.HitResult){};
++        var hits: std.ArrayList(vxfw.HitResult) = .empty;
+         defer hits.deinit(app.allocator);
+         const sub: vxfw.SubSurface = .{
+             .origin = .{ .row = 0, .col = 0 },
+@@ -524,7 +532,7 @@
+         return .{
+             .root = root,
+             .focused_widget = root,
+-            .path_to_focused = std.ArrayList(Widget){},
++            .path_to_focused = .empty,
+         };
+     }
+ 
 diff --git a/src/vxfw/Padding.zig b/src/vxfw/Padding.zig
 index e60162f..6e5f40b 100644
 --- a/src/vxfw/Padding.zig

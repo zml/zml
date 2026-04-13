@@ -963,13 +963,14 @@ pub const Gpt2TextDecoder = struct {
     const Code = stdx.BoundedArray(u8, 2);
 
     // TODO: benchmark this is more efficient than doing the conversion at runtime.
-    code_to_byte: std.AutoArrayHashMap(Code, u8),
+    code_to_byte: std.AutoArrayHashMapUnmanaged(Code, u8) = .empty,
+    allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) !Gpt2TextDecoder {
         var self = Gpt2TextDecoder{
-            .code_to_byte = std.AutoArrayHashMap(Code, u8).init(allocator),
+            .allocator = allocator,
         };
-        try self.code_to_byte.ensureTotalCapacity(256);
+        try self.code_to_byte.ensureTotalCapacity(allocator, 256);
         errdefer unreachable;
 
         var n: usize = 0;
@@ -995,7 +996,7 @@ pub const Gpt2TextDecoder = struct {
     }
 
     pub fn deinit(self: *Gpt2TextDecoder) void {
-        self.code_to_byte.deinit();
+        self.code_to_byte.deinit(self.allocator);
     }
 
     /// Transform bytes representing text under the gpt2 encoding,

@@ -360,7 +360,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
         .pointer => |p| {
             switch (p.size) {
                 .slice => {
-                    bufferized_.* = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment), model.len);
+                    bufferized_.* = try allocator.alignedAlloc(p.child, .fromByteUnits(p.alignment orelse @alignOf(p.child)), model.len);
                     for (model, bufferized_.*) |src, *dst| {
                         try bufferizeInner(allocator, src, dst);
                     }

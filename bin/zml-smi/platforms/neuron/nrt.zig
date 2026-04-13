@@ -65,8 +65,8 @@ pub fn init(allocator: std.mem.Allocator, io: std.Io) !Nrt {
     var dev_index_buf: [c.MAX_NEURON_DEVICE_COUNT]c_int = undefined;
     const count: usize = @intCast(@max(0, private_fns.ndl_available_devices(&dev_index_buf, c.MAX_NEURON_DEVICE_COUNT)));
 
-    var handle_list: std.ArrayList(*c.ndl_device_t) = .{};
-    var index_list: std.ArrayList(c_int) = .{};
+    var handle_list: std.ArrayList(*c.ndl_device_t) = .empty;
+    var index_list: std.ArrayList(c_int) = .empty;
 
     for (dev_index_buf[0..count]) |device_idx| {
         var dev: ?*c.ndl_device_t = null;
