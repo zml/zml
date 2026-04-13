@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !void {
 
     // Auto-select platform
     const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
+    defer platform.deinit(allocator, io);
 
     const replicated_sharding = try zml.sharding.replicatedSharding(platform);
 
