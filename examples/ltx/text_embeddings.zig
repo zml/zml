@@ -484,6 +484,12 @@ fn replacePaddedWithRegisters(
     learnable_registers: Tensor,
 ) struct { hidden_states: Tensor, mask: Tensor } {
     const seq_len = hidden_states.dim(.t);
+    if (@rem(seq_len, NUM_REGISTERS) != 0) {
+        std.debug.panic(
+            "seq_len ({}) must be an exact multiple of NUM_REGISTERS ({}) for register tiling",
+            .{ seq_len, NUM_REGISTERS },
+        );
+    }
     const num_register_tiles: i64 = @divExact(seq_len, NUM_REGISTERS);
 
     // binary_mask: [B, T] — 1 for real tokens, 0 for padding
