@@ -49,7 +49,6 @@ clean latents   ┘              Bridge (upsample 2×, re-noise)
 | File | Purpose |
 |------|---------|
 | `export_pipeline.py` | Run full Python reference pipeline; export Gemma hidden states, positions, masks, and metadata for Zig inference |
-| `export_gemma_hidden_states.py` | Standalone Gemma export + reference embeddings for validation |
 
 ## What `export_pipeline.py` does
 

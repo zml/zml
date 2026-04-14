@@ -22,24 +22,9 @@ zig_binary(
     ],
 )
 
-zig_binary(
-    name = "validate_text_embeddings",
-    main = "validate_text_embeddings.zig",
-    srcs = [
-        "text_embeddings.zig",
-        "model.zig",
-        "conv_ops.zig",
-    ],
-    visibility = ["//visibility:public"],
-    deps = [
-        "//zml",
-    ],
-)
-
 build_test(
     name = "test",
     targets = [
         ":inference",
-        ":validate_text_embeddings",
     ],
 )
