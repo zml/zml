@@ -192,36 +192,43 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
     var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var child = try std.process.spawn(io, .{
-        .argv = &.{
-            try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
-                stdx.process.selfSharedObjectDirPath(),
-                "..",
-                "bin",
-                "neuronx-cc",
-            }),
-            "compile",
-            "--framework=XLA",
-            "--target",
-            target,
-            "--verbose=35",
-            "--enable-internal-neff-wrapper",
-            "--output",
-            neff_file,
-            "--optlevel=1",
-            // generic is the default, but it fails on transformers, force it
-            "--model-type=transformer",
-            // disable it, we do our own
-            "--auto-cast=none",
-            "--enable-fast-loading-neuron-binaries",
-            code_file,
-        },
-        .stdin = .ignore,
-        .stdout = .inherit,
-        .stderr = .inherit,
-        .cwd = .{ .path = tmp_dir },
+    const neuronx_cc_path = try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
+        stdx.process.selfSharedObjectDirPath(),
+        "..",
+        "bin",
+        "neuronx-cc",
     });
-    _ = try child.wait(io);
+
+    {
+        const gil_state = c.PyEval_SaveThread();
+        defer c.PyEval_RestoreThread(gil_state);
+
+        var child = try std.process.spawn(io, .{
+            .argv = &.{
+                neuronx_cc_path,
+                "compile",
+                "--framework=XLA",
+                "--target",
+                target,
+                "--verbose=35",
+                "--enable-internal-neff-wrapper",
+                "--output",
+                neff_file,
+                "--optlevel=1",
+                // generic is the default, but it fails on transformers, force it
+                "--model-type=transformer",
+                // disable it, we do our own
+                "--auto-cast=none",
+                "--enable-fast-loading-neuron-binaries",
+                code_file,
+            },
+            .stdin = .ignore,
+            .stdout = .ignore,
+            .stderr = .ignore,
+            .cwd = .{ .path = tmp_dir },
+        });
+        _ = try child.wait(io);
+    }
 
     // neuronx-cc exits 0 even on compilation failure
     std.Io.Dir.access(.cwd(), io, neff_file, .{}) catch |err| {
