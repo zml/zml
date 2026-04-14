@@ -15,10 +15,10 @@ fn selfSharedObjectPathImpl(addr: usize) []const u8 {
     return std.mem.span(info.dli_fname);
 }
 
-pub fn selfSharedObjectPath() []const u8 {
+pub noinline fn selfSharedObjectPath() []const u8 {
     return selfSharedObjectPathImpl(@returnAddress());
 }
 
-pub fn selfSharedObjectDirPath() []const u8 {
+pub noinline fn selfSharedObjectDirPath() []const u8 {
     return std.fs.path.dirname(selfSharedObjectPathImpl(@returnAddress())).?;
 }
