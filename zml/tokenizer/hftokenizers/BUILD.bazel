@@ -1,0 +1,35 @@
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_rs//rs:rust_static_library.bzl", "rust_static_library")
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+rust_static_library(
+    name = "hftokenizers_rs",
+    srcs = ["hftokenizers.rs"],
+    crate_name = "zml_tokenizer_hftokenizers",
+    edition = "2021",
+    proc_macro_deps = ["@crates//:tokenizers"],
+    deps = ["@crates//:tokenizers"],
+)
+
+cc_library(
+    name = "hftokenizers_cc",
+    tags = ["manual"],
+    hdrs = ["hftokenizers.h"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hftokenizers_rs",
+        "//ffi:cc",
+    ],
+)
+
+zig_library(
+    name = "hftokenizers",
+    tags = ["manual"],
+    main = "hftokenizers.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":hftokenizers_cc",
+        "//ffi:zig",
+        "//stdx",
+    ],
+)

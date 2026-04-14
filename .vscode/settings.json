@@ -6,7 +6,7 @@
         "**/.hg": true,
         "**/CVS": true,
         "**/.DS_Store": true,
-        "**/bazel-*": true,
+        "**/bazel-*": true
     },
     "files.watcherExclude": {
         "**/bazel-*": true,
@@ -29,6 +29,9 @@
         "editor.stickyScroll.defaultModel": "foldingProviderModel",
         "editor.codeActionsOnSave": {
             "source.fixAll": "explicit",
-        },
+        }
     },
+    "rust-analyzer.linkedProjects": [
+        "${workspaceFolder}/zml/tokenizer/hftokenizers/Cargo.toml"
+    ]
 }
