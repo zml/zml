@@ -459,7 +459,7 @@ pub fn main(init: std.process.Init) !void {
 
     // ---- Platform init ----
     const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
+    defer platform.deinit(allocator, io);
     const sharding = try zml.sharding.replicatedSharding(platform);
 
     // ========================================================================
@@ -468,7 +468,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
+    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
