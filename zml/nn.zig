@@ -156,6 +156,7 @@ pub const RopeOpts = struct {
         llama3: Llama3,
         yarn: Yarn,
         linear: Scaling.Linear,
+        proportional: Scaling.Proportional,
 
         pub const Default = struct {
             rope_theta: f32 = 10000,
@@ -188,6 +189,11 @@ pub const RopeOpts = struct {
             rope_theta: f32 = 10000,
         };
 
+        pub const Proportional = struct {
+            partial_rotary_factor: f32,
+            rope_theta: f32 = 10000,
+        };
+
         /// Read a Rope scaling config from HF config.json format.
         pub fn jsonParse(allocator: std.mem.Allocator, source: anytype, options: std.json.ParseOptions) !Scaling {
             return jsonParseFromValue(
@@ -210,10 +216,14 @@ pub const RopeOpts = struct {
             if (std.mem.eql(u8, impl.string, "llama3")) {
                 // Note: leaky is fine here cause Llama3 struct don't need to allocate memory.
                 return .{ .llama3 = try std.json.parseFromValueLeaky(Llama3, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "default")) {
+                return .{ .default = try std.json.parseFromValueLeaky(Default, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else if (std.mem.eql(u8, impl.string, "yarn")) {
                 return .{ .yarn = try std.json.parseFromValueLeaky(Yarn, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else if (std.mem.eql(u8, impl.string, "linear")) {
                 return .{ .linear = try std.json.parseFromValueLeaky(Scaling.Linear, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
+            } else if (std.mem.eql(u8, impl.string, "proportional")) {
+                return .{ .proportional = try std.json.parseFromValueLeaky(Scaling.Proportional, stdx.noalloc, source, .{ .ignore_unknown_fields = true }) };
             } else {
                 log.warn("Unsupported Rope implementation: {s}, will use the default one which will produce altered results", .{impl.string});
                 return .{ .default = .{} };
@@ -342,6 +352,13 @@ fn _invFreq(opts: RopeOpts, inv_freq: []f32) void {
         .linear => |l| {
             for (inv_freq) |*f| f.* /= l.factor;
         },
+        .proportional => |p| {
+            const rotary_fraction = std.math.clamp(p.partial_rotary_factor, 0.0, 1.0);
+            const rotary_frequencies: usize = @intFromFloat(@floor(@as(f32, @floatFromInt(N)) * rotary_fraction));
+            for (inv_freq[rotary_frequencies..]) |*f| {
+                f.* = 0;
+            }
+        },
         .llama3 => |s| {
             // https://arxiv.org/pdf/2309.16039
             // After Llama2 they observed that the rope frequencies where too sharp and hurting long distance attention.
@@ -437,6 +454,106 @@ test "invFreq Yarn" {
         try std.testing.expectApproxEqRel(expected, actual, 1e-5);
     }
     try std.testing.expectApproxEqRel(1.3465735902799727, yarn_conf.scaling.attentionScaling(), 1e-5);
+}
+
+test "RopeOpts.Scaling parses proportional" {
+    const json =
+        \\{
+        \\  "rope_type": "proportional",
+        \\  "partial_rotary_factor": 0.25,
+        \\  "rope_theta": 1000000
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .proportional => |p| {
+            try std.testing.expectApproxEqRel(0.25, p.partial_rotary_factor, 1e-6);
+            try std.testing.expectApproxEqRel(1_000_000, p.rope_theta, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "RopeOpts.Scaling parses default rope type" {
+    const json =
+        \\{
+        \\  "rope_type": "default",
+        \\  "rope_theta": 10000
+        \\}
+    ;
+    var value = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer value.deinit();
+
+    const scaling = try RopeOpts.Scaling.jsonParseFromValue(std.testing.allocator, value.value, .{});
+    switch (scaling) {
+        .default => |d| {
+            try std.testing.expectApproxEqRel(10_000, d.rope_theta, 1e-6);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+test "invFreq Proportional" {
+    const proportional_conf: RopeOpts = .{
+        .scaling = .{ .proportional = .{
+            .partial_rotary_factor = 0.25,
+            .rope_theta = 1_000_000,
+        } },
+    };
+    const default_conf: RopeOpts = .{
+        .scaling = .{ .default = .{
+            .rope_theta = 1_000_000,
+        } },
+    };
+
+    var inv_freq: [16]f32 = undefined;
+    var default_inv_freq: [16]f32 = undefined;
+    _invFreq(proportional_conf, &inv_freq);
+    _invFreq(default_conf, &default_inv_freq);
+
+    for (0..4) |i| {
+        try std.testing.expectApproxEqRel(default_inv_freq[i], inv_freq[i], 1e-6);
+    }
+    for (4..inv_freq.len) |i| {
+        try std.testing.expectEqual(@as(f32, 0.0), inv_freq[i]);
+    }
+}
+
+test "invFreq Proportional clamps partial rotary factor" {
+    const default_conf: RopeOpts = .{
+        .scaling = .{ .default = .{
+            .rope_theta = 10_000,
+        } },
+    };
+    const negative_conf: RopeOpts = .{
+        .scaling = .{ .proportional = .{
+            .partial_rotary_factor = -0.5,
+            .rope_theta = 10_000,
+        } },
+    };
+    const overfull_conf: RopeOpts = .{
+        .scaling = .{ .proportional = .{
+            .partial_rotary_factor = 1.5,
+            .rope_theta = 10_000,
+        } },
+    };
+
+    var default_inv_freq: [8]f32 = undefined;
+    var negative_inv_freq: [8]f32 = undefined;
+    var overfull_inv_freq: [8]f32 = undefined;
+    _invFreq(default_conf, &default_inv_freq);
+    _invFreq(negative_conf, &negative_inv_freq);
+    _invFreq(overfull_conf, &overfull_inv_freq);
+
+    for (negative_inv_freq) |f| {
+        try std.testing.expectEqual(@as(f32, 0.0), f);
+    }
+    for (default_inv_freq, overfull_inv_freq) |expected, actual| {
+        try std.testing.expectApproxEqRel(expected, actual, 1e-6);
+    }
 }
 
 test "real/img" {
