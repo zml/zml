@@ -156,7 +156,7 @@ pub const Session = struct {
 
             if (isEosToken(self.config, token_id)) break :generation;
 
-            const token = try decoder.feed_one(token_id);
+            const token = try decoder.feedOne(token_id);
             try stdout.writeAll(token);
             try stdout.flush();
 
