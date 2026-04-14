@@ -251,19 +251,22 @@ pub const Tokenizer = union(Tokenizers) {
     homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
+        _ = io;
+        _ = allocator;
         if (std.mem.endsWith(u8, model, ".pb")) {
             return .{ .sentencepiece = try .fromFile(model) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .iree = try .fromFile(allocator, io, model) };
+            return .{ .hftokenizers = try .fromFile(model) };
         }
 
         return error.InvalidArgument;
     }
 
     pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
+        _ = allocator;
         if (bytes[0] == '{') {
-            return .{ .iree = try .fromBytes(allocator, bytes) };
+            return .{ .hftokenizers = try .fromBytes(bytes) };
         }
         return .{ .sentencepiece = try .fromBytes(bytes) };
     }
