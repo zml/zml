@@ -7,8 +7,8 @@ generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
 The pipeline produces video+audio from a text prompt, with optional image conditioning:
 
-1. **Python** — Gemma forward pass (hidden states) + position/mask computation
-2. **Zig** — Everything else on GPU: text embedding post-processing (connector blocks), noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
+1. **Python** — Gemma forward pass (hidden states export)
+2. **Zig** — Everything else on GPU: text embedding post-processing (connector blocks), position/mask/clean-latent construction, noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
 
 When `--image` is provided, the first frame is conditioned on a reference image
 via VAE encoding + per-token mask blending.
@@ -19,14 +19,15 @@ passing GPU buffers between phases without intermediate files.
 ```
 Python (export)                Zig (inference)
 ───────────────                ──────────────────────────────────────────────────
-Gemma forward ──┐              Text embedding post-processing (connectors)
-positions       ├─→ inputs ──→ Noise generation (Box-Muller, seeded RNG)
-masks           │              Stage 1 (30 steps × 4 passes)
-clean latents   ┘              Bridge (upsample 2×, re-noise)
-                               Stage 2 (3 steps × 1 pass, distilled sigmas)
-                               Video VAE decode → RGB frames
-                               Audio VAE decode → vocoder + BWE → waveform
-                               ffmpeg mux → output.mp4
+Gemma forward ──→ hidden    ──→ Text embedding post-processing (connectors)
+                  states        Positions + masks + clean latents (from geometry)
+                                Noise generation (Box-Muller, seeded RNG)
+                                Stage 1 (30 steps × 4 passes)
+                                Bridge (upsample 2×, re-noise)
+                                Stage 2 (3 steps × 1 pass, distilled sigmas)
+                                Video VAE decode → RGB frames
+                                Audio VAE decode → vocoder + BWE → waveform
+                                ffmpeg mux → output.mp4
 ```
 
 ## File Map
@@ -48,7 +49,7 @@ clean latents   ┘              Bridge (upsample 2×, re-noise)
 ### Python
 | File | Purpose |
 |------|---------|
-| `export_pipeline.py` | Run full Python reference pipeline; export Gemma hidden states, positions, masks, and metadata for Zig inference |
+| `export_pipeline.py` | Run full Python reference pipeline; export Gemma hidden states and metadata for Zig inference |
 
 ## What `export_pipeline.py` does
 
@@ -79,8 +80,6 @@ the denoising loop.
 |------|----------|
 | `pos_hidden_states.safetensors` | Gemma hidden states for positive prompt (`stacked_hidden_states` + `attention_mask`). Used by Zig |
 | `neg_hidden_states.safetensors` | Gemma hidden states for negative prompt. Used by Zig |
-| `unconditioned_stage1_inputs.safetensors` | 8 tensors (see below) — always produced. Used for input by Zig |
-| `conditioned_stage1_inputs.safetensors` | Same 8 tensors but with image conditioning applied (only with `--image`). Only for debug purpose |
 | `conditioned_stage2_inputs.safetensors` | Stage 2 captured state + recovered noise (only with `--image`). Only for debug purpose |
 | `stage2_noise.safetensors` | Recovered Stage 2 noise (kept for reference; **not used by Zig** — Zig generates its own. Only for debug purpose) |
 | `pipeline_meta.json` | Latent geometry, guidance params, generation config. Used for metadata by Zig |
@@ -88,24 +87,22 @@ the denoising loop.
 | `ref/upsampled.safetensors` | Upscaled video latent (Python reference). Only for debug purpose |
 | `ref/stage2_outputs.safetensors` | Stage 2 final latents (Python reference). Only for debug purpose |
 
-### Tensors in `unconditioned_stage1_inputs.safetensors`
+### Stage 1 initial state (computed by Zig)
 
-These are the 8 tensors that Zig loads at runtime:
+Zig computes all Stage 1 initial state tensors from the pipeline geometry in
+`pipeline_meta.json` — no exported safetensors needed:
 
-| Tensor | Shape (example: 1024×1536, 121 frames) | What it is |
-|--------|----------------------------------------|------------|
-| `video_denoise_mask` | `[1, 12240, 1]` | Per-token denoise weight. Unconditioned: all 1.0. Image: 0.0 for first-frame tokens |
-| `audio_denoise_mask` | `[1, 1020, 1]` | Same for audio (always all 1.0) |
-| `video_clean_latent` | `[1, 12240, 128]` | Clean signal to blend with noise. Unconditioned: all zeros. Image: VAE-encoded image at frame-0 positions |
-| `audio_clean_latent` | `[1, 1020, 128]` | Same for audio (always zeros) |
-| `video_positions` | `[1, 12240, 3]` | RoPE position ids `[t, h, w]` — deterministic from latent geometry |
-| `audio_positions` | `[1, 1020, 3]` | Same for audio |
-| `video_latent` | `[1, 12240, 128]` | Pre-noised video latent (**not used by Zig** — Zig generates its own noise) |
-| `audio_latent` | `[1, 1020, 128]` | Pre-noised audio latent (**not used by Zig** — Zig generates its own noise) |
+| Tensor | Shape | Zig computation |
+|--------|-------|------------------|
+| `video_positions` | `[1, 3, T_v, 2]` bf16 | `computeVideoPositions(F, H, W, fps)` |
+| `audio_positions` | `[1, 1, T_a, 2]` f32 | `computeAudioPositions(T_a)` |
+| `video_denoise_mask` | `[1, T_v, 1]` f32 | All 1.0 (image conditioning modifies after) |
+| `audio_denoise_mask` | `[1, T_a, 1]` f32 | All 1.0 |
+| `video_clean_latent` | `[1, T_v, 128]` bf16 | All zeros (image conditioning modifies after) |
+| `audio_clean_latent` | `[1, T_a, 128]` bf16 | All zeros |
 
-Zig loads 6 of these 8 tensors (skips `video_latent` and `audio_latent` since
-noise is generated natively). Text embeddings (context vectors) are computed in
-Zig from the Gemma hidden states via `text_embeddings.zig`.
+Text embeddings (context vectors) are computed in Zig from the Gemma hidden
+states via `text_embeddings.zig`.
 
 ## Running the Unified Pipeline
 
@@ -138,7 +135,6 @@ python examples/ltx/export_pipeline.py \
 This produces:
 - `$OUT/pos_hidden_states.safetensors` — Gemma hidden states (positive prompt)
 - `$OUT/neg_hidden_states.safetensors` — Gemma hidden states (negative prompt)
-- `$OUT/unconditioned_stage1_inputs.safetensors` — positions, denoise masks, clean latents (8 tensors described above)
 - `$OUT/pipeline_meta.json` — latent geometry and guidance parameters
 
 To generate with image conditioning, add `--image /path/to/image.jpg`.
@@ -152,7 +148,6 @@ bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference 
   --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
   --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
   --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-  --stage1-inputs $OUT/unconditioned_stage1_inputs.safetensors \
   --meta $OUT/pipeline_meta.json \
   --gemma-hidden-states-pos $OUT/pos_hidden_states.safetensors \
   --gemma-hidden-states-neg $OUT/neg_hidden_states.safetensors \
@@ -182,8 +177,8 @@ runs the VAE encoder on GPU, and modifies the mask/clean_latent/noised_latent
 before denoising begins.
 
 Passing `--image` to `export_pipeline.py` is only useful for generating
-**reference tensors** (`conditioned_stage1_inputs.safetensors`,
-`encoder_activations.safetensors`) for validation against the Zig output.
+**reference tensors** (`encoder_activations.safetensors`) for validation
+against the Zig output.
 
 In image-conditioned mode, the denoise mask and clean latent encode the conditioning:
 - **Denoise mask**: 0.0 for first-frame tokens (keep clean), 1.0 for the rest (fully denoise)
@@ -200,3 +195,9 @@ Text embedding post-processing (FeatureExtractorV2 + Embeddings1DConnector with
 8 transformer blocks, SPLIT RoPE, gated attention) was migrated from Python to
 Zig. Python now only runs the Gemma forward pass; the connector blocks that
 transform hidden states into video/audio context embeddings run entirely in Zig.
+
+Stage 1 initial state (positions, denoise masks, clean latents) is now computed
+in Zig from the pipeline geometry metadata, eliminating the need for the
+`unconditioned_stage1_inputs.safetensors` file. This covers both unconditioned
+and image-conditioned paths (image conditioning applies modifications after
+the initial state construction).

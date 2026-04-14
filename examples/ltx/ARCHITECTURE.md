@@ -84,20 +84,21 @@ noise, once for audio noise).
 
 ### 4.1  Inputs
 
-Stage 1 consumes pre-computed inputs from a safetensors file:
+Stage 1 initial state is computed on host from the pipeline geometry
+(`pipeline_meta.json`) — no safetensors file needed:
 
-| Tensor | Shape | Description |
-|--------|-------|-------------|
-| `video_clean_latent` | `[1, T_v, 128]` bf16 | Zero-padded video latent |
-| `audio_clean_latent` | `[1, T_a, 128]` bf16 | Zero-padded audio latent |
-| `video_denoise_mask` | `[1, T_v, 1]` f32 | 1.0 = denoise, 0.0 = keep |
-| `audio_denoise_mask` | `[1, T_a, 1]` f32 | Likewise |
-| `video_positions` | `[1, 3, T_v, 2]` bf16 | RoPE coordinates (F, H, W) |
-| `audio_positions` | `[1, 1, T_a, 2]` f32 | RoPE coordinates (T) |
-| `v_context_pos/neg` | `[1, S, 4096]` bf16 | Text-conditioned embeddings (from Gemma) |
-| `a_context_pos/neg` | `[1, S, 2048]` bf16 | Text-conditioned embeddings (from Gemma)|
+| Tensor | Shape | How computed |
+|--------|-------|--------------|
+| `video_clean_latent` | `[1, T_v, 128]` bf16 | All zeros (image conditioning modifies after) |
+| `audio_clean_latent` | `[1, T_a, 128]` bf16 | All zeros |
+| `video_denoise_mask` | `[1, T_v, 1]` f32 | All 1.0 (image conditioning modifies after) |
+| `audio_denoise_mask` | `[1, T_a, 1]` f32 | All 1.0 |
+| `video_positions` | `[1, 3, T_v, 2]` bf16 | `computeVideoPositions(F, H, W, fps)` — pixel-coord grid |
+| `audio_positions` | `[1, 1, T_a, 2]` f32 | `computeAudioPositions(T_a)` — time intervals in seconds |
+| `v_context_pos/neg` | `[1, S, 4096]` bf16 | Computed by Zig from Gemma hidden states |
+| `a_context_pos/neg` | `[1, S, 2048]` bf16 | Computed by Zig from Gemma hidden states |
 
-These are loaded at [inference.zig L638](inference.zig#L638).
+Where `T_v = f_lat × h_lat × w_lat` and `T_a` are from `pipeline_meta.json`.
 
 ### 4.2  Result Structs (Buffer hand-off)
 

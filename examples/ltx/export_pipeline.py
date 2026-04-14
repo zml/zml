@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """Export pipeline: run the full two-stage LTX-2.3 pipeline in Python and
-capture all intermediate states for the Zig inference binary.
+capture all intermediate states for validation against the Zig inference binary.
 
 Supports both text-to-video (default) and image-conditioned generation
 (pass --image).  When --image is provided, the VAE encoder is also run and
 activations are captured for validation.
 
+The Zig inference binary only needs:
+  - Gemma hidden states (pos + neg)
+  - pipeline_meta.json (latent geometry)
+All other outputs are reference data for debugging/validation.
+
 Outputs (always):
-  {out}/pos_hidden_states.safetensors       — Gemma hidden states (positive prompt)
-  {out}/neg_hidden_states.safetensors       — Gemma hidden states (negative prompt)
-  {out}/unconditioned_stage1_inputs.safetensors — Stage 1 inputs (no image)
-  {out}/stage2_noise.safetensors                — Pre-drawn Stage 2 noise
-  {out}/ref/stage1_outputs.safetensors           — Stage 1 denoised latents
-  {out}/ref/upsampled.safetensors                — Upscaled video latent
-  {out}/ref/stage2_outputs.safetensors           — Stage 2 denoised latents
-  {out}/pipeline_meta.json               — Pipeline config metadata
+  {out}/pos_hidden_states.safetensors       — Gemma hidden states (positive prompt) [used by Zig]
+  {out}/neg_hidden_states.safetensors       — Gemma hidden states (negative prompt) [used by Zig]
+  {out}/pipeline_meta.json               — Pipeline config metadata [used by Zig]
+  {out}/stage2_noise.safetensors                — Pre-drawn Stage 2 noise (reference only)
+  {out}/ref/stage1_outputs.safetensors           — Stage 1 denoised latents (reference only)
+  {out}/ref/upsampled.safetensors                — Upscaled video latent (reference only)
+  {out}/ref/stage2_outputs.safetensors           — Stage 2 denoised latents (reference only)
   {out}/python_reference.mp4             — Full-Python video (with --decode-video)
 
 Usage (on GPU server):
@@ -503,67 +507,6 @@ def main() -> None:
     print(f"    video_latent (unpatchified): {list(video_state_s1.latent.shape)}")
 
     # ========================================================================
-    # Export: Conditioned Stage 1 inputs
-    # ========================================================================
-    print("\n=== Exporting conditioned Stage 1 inputs ===")
-    vs1 = captured_s1["video"]
-    as1 = captured_s1["audio"]
-
-    if has_image:
-        s1_inputs = {
-            "video_latent": vs1.latent,
-            "audio_latent": as1.latent,
-            "video_denoise_mask": vs1.denoise_mask,
-            "audio_denoise_mask": as1.denoise_mask,
-            "video_clean_latent": vs1.clean_latent,
-            "audio_clean_latent": as1.clean_latent,
-            "video_positions": vs1.positions,
-            "audio_positions": as1.positions,
-        }
-        save_safetensors(s1_inputs, out / "conditioned_stage1_inputs.safetensors")
-
-    # Also export UNconditioned Stage 1 inputs (before image tokens were injected).
-    # When no image: the captured state is already unconditioned.
-    # When image: reconstruct by undoing conditioning on the first n_img video tokens.
-    if has_image:
-        s1_h_lat = s1_h // 32
-        s1_w_lat = s1_w // 32
-        n_img = s1_h_lat * s1_w_lat
-        sigma_0 = sigmas[0].item()
-
-        uncond_video_mask = torch.ones_like(vs1.denoise_mask)
-        uncond_video_clean = torch.zeros_like(vs1.clean_latent)
-        uncond_video_latent = vs1.latent.clone()
-        fresh_noise = torch.randn(1, n_img, uncond_video_latent.shape[-1],
-                                  device=uncond_video_latent.device, dtype=torch.float32,
-                                  generator=torch.Generator(device=uncond_video_latent.device).manual_seed(args.seed + 999))
-        uncond_video_latent[:, :n_img, :] = (fresh_noise * sigma_0).to(uncond_video_latent.dtype)
-
-        s1_uncond_inputs = {
-            "video_latent": uncond_video_latent,
-            "audio_latent": as1.latent,
-            "video_denoise_mask": uncond_video_mask,
-            "audio_denoise_mask": as1.denoise_mask,
-            "video_clean_latent": uncond_video_clean,
-            "audio_clean_latent": as1.clean_latent,
-            "video_positions": vs1.positions,
-            "audio_positions": as1.positions,
-        }
-    else:
-        # No image → captured state is already unconditioned
-        s1_uncond_inputs = {
-            "video_latent": vs1.latent,
-            "audio_latent": as1.latent,
-            "video_denoise_mask": vs1.denoise_mask,
-            "audio_denoise_mask": as1.denoise_mask,
-            "video_clean_latent": vs1.clean_latent,
-            "audio_clean_latent": as1.clean_latent,
-            "video_positions": vs1.positions,
-            "audio_positions": as1.positions,
-        }
-    save_safetensors(s1_uncond_inputs, out / "unconditioned_stage1_inputs.safetensors")
-
-    # ========================================================================
     # Export: Stage 1 reference outputs
     # ========================================================================
     print("\n=== Exporting Stage 1 reference outputs ===")
@@ -863,20 +806,17 @@ def main() -> None:
         print(f"Strength:  {args.strength}")
         print(f"\nEncoder activations:     {out / 'encoder_activations.safetensors'}")
         print(f"Preprocessed images:     {out / 'image_preprocessed.safetensors'}")
-        print(f"\nConditioned Stage 1:     {out / 'conditioned_stage1_inputs.safetensors'}")
         n_img_s1 = h_lat_s1 * w_lat_s1
         n_img_s2 = h_lat * w_lat
-        print(f"  → n_image_tokens = {n_img_s1} (h_lat={h_lat_s1}, w_lat={w_lat_s1})")
+        print(f"  → n_image_tokens: s1={n_img_s1} (h={h_lat_s1}, w={w_lat_s1}), s2={n_img_s2} (h={h_lat}, w={w_lat})")
         print(f"Conditioned Stage 2:     {out / 'conditioned_stage2_inputs.safetensors'}")
-        print(f"  → n_image_tokens = {n_img_s2} (h_lat={h_lat}, w_lat={w_lat})")
     else:
         print(f"\nMode: unconditioned (text-to-video)")
     print(f"Prompt:    {args.prompt!r}")
     print(f"\nGemma hidden states:")
     print(f"  Positive: {out / 'pos_hidden_states.safetensors'}")
     print(f"  Negative: {out / 'neg_hidden_states.safetensors'}")
-    print(f"\nUnconditioned Stage 1:   {out / 'unconditioned_stage1_inputs.safetensors'}")
-    print(f"Stage 2 noise:           {out / 'stage2_noise.safetensors'}")
+    print(f"\nStage 2 noise:           {out / 'stage2_noise.safetensors'}")
     print(f"Pipeline metadata:       {out / 'pipeline_meta.json'}")
     if python_video_path:
         print(f"Full-Python ref video:   {python_video_path}")

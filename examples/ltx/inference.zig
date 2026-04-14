@@ -12,9 +12,10 @@
 ///       --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
 ///       --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
 ///       --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-///       --stage1-inputs /root/e2e_demo/stage1_inputs.safetensors \
-///       --seed 42 \
 ///       --meta /root/e2e_demo/pipeline_meta.json \
+///       --gemma-hidden-states-pos /root/e2e_demo/pos_hidden_states.safetensors \
+///       --gemma-hidden-states-neg /root/e2e_demo/neg_hidden_states.safetensors \
+///       --seed 42 \
 ///       --output-dir /root/e2e_demo/unified_out/ \
 ///       --bf16-attn-stage2
 const std = @import("std");
@@ -60,7 +61,6 @@ const CliArgs = struct {
     stage1_ckpt: []const u8,
     stage2_ckpt: []const u8,
     upsampler_ckpt: []const u8,
-    stage1_inputs: []const u8,
     meta: []const u8,
     output_dir: []const u8,
     seed: u64,
@@ -77,7 +77,6 @@ fn parseArgs(it: anytype) !CliArgs {
         .stage1_ckpt = undefined,
         .stage2_ckpt = undefined,
         .upsampler_ckpt = undefined,
-        .stage1_inputs = undefined,
         .meta = undefined,
         .output_dir = undefined,
         .seed = 42,
@@ -88,7 +87,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .gemma_hidden_states_pos = undefined,
         .gemma_hidden_states_neg = undefined,
     };
-    var have = [_]bool{false} ** 8;
+    var have = [_]bool{false} ** 7;
 
     _ = it.next(); // exe name
 
@@ -102,15 +101,12 @@ fn parseArgs(it: anytype) !CliArgs {
         } else if (std.mem.eql(u8, arg, "--upsampler-ckpt")) {
             args.upsampler_ckpt = it.next() orelse return error.InvalidArgs;
             have[2] = true;
-        } else if (std.mem.eql(u8, arg, "--stage1-inputs")) {
-            args.stage1_inputs = it.next() orelse return error.InvalidArgs;
-            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--meta")) {
             args.meta = it.next() orelse return error.InvalidArgs;
-            have[4] = true;
+            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--output-dir")) {
             args.output_dir = it.next() orelse return error.InvalidArgs;
-            have[5] = true;
+            have[4] = true;
         } else if (std.mem.eql(u8, arg, "--seed")) {
             const seed_str = it.next() orelse return error.InvalidArgs;
             args.seed = std.fmt.parseInt(u64, seed_str, 10) catch return error.InvalidArgs;
@@ -124,10 +120,10 @@ fn parseArgs(it: anytype) !CliArgs {
             args.image = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
             args.gemma_hidden_states_pos = it.next() orelse return error.InvalidArgs;
-            have[6] = true;
+            have[5] = true;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-neg")) {
             args.gemma_hidden_states_neg = it.next() orelse return error.InvalidArgs;
-            have[7] = true;
+            have[6] = true;
         }
     }
 
@@ -135,10 +131,10 @@ fn parseArgs(it: anytype) !CliArgs {
         if (!h) {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
-                    "--upsampler-ckpt <path> --stage1-inputs <path> " ++
+                    "--upsampler-ckpt <path> " ++
                     "--meta <path> --output-dir <path> " ++
                     "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
-                    "[--seed <int>] " ++
+                    "[--seed <int>] [--image <path>] " ++
                     "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
@@ -432,7 +428,6 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  stage1-ckpt:     {s}", .{args.stage1_ckpt});
     std.log.info("  stage2-ckpt:     {s}", .{args.stage2_ckpt});
     std.log.info("  upsampler-ckpt:  {s}", .{args.upsampler_ckpt});
-    std.log.info("  stage1-inputs:   {s}", .{args.stage1_inputs});
     std.log.info("  seed:            {d}", .{args.seed});
     std.log.info("  meta:            {s}", .{args.meta});
     std.log.info("  output-dir:      {s}", .{args.output_dir});
@@ -468,7 +463,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
+    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -609,7 +604,6 @@ fn runStage1(
     platform: *zml.Platform,
     sharding: zml.sharding.Sharding,
     ckpt_path: []const u8,
-    inputs_path: []const u8,
     use_bf16_attn: bool,
     image_path: ?[]const u8,
     pipe_meta: PipelineMeta,
@@ -632,7 +626,7 @@ fn runStage1(
         NUM_STAGE1_STEPS, sigmas[0], sigmas[NUM_STAGE1_STEPS],
     });
 
-    // ---- Open stores ----
+    // ---- Open checkpoint store ----
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
         return err;
@@ -641,29 +635,75 @@ fn runStage1(
     var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
     defer ckpt_store.deinit();
 
-    var inputs_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, inputs_path) catch |err| {
-        std.log.err("Failed to open inputs: {s}", .{inputs_path});
-        return err;
-    };
-    defer inputs_reg.deinit();
-    var inputs_store: zml.io.TensorStore = .fromRegistry(allocator, &inputs_reg);
-    defer inputs_store.deinit();
+    // ---- Compute Stage 1 initial state on host ----
+    const s1 = pipe_meta.stage1;
+    const fps = pipe_meta.frame_rate;
+    const F = s1.f_lat;
+    const H_s1 = s1.h_lat;
+    const W_s1 = s1.w_lat;
+    const T_a: i64 = s1.t_audio;
+    const C: i64 = 128;
+    const T_v1 = F * H_s1 * W_s1;
 
-    // ---- Load inputs ----
-    std.log.info("Loading Stage 1 inputs...", .{});
+    std.log.info("Computing Stage 1 initial state (T_v={d}, T_a={d})...", .{ T_v1, T_a });
 
-    var v_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_denoise_mask", sharding);
-    defer v_mask_buf.deinit();
-    var a_mask_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_denoise_mask", sharding);
-    defer a_mask_buf.deinit();
-    var v_clean_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_clean_latent", sharding);
-    defer v_clean_buf.deinit();
-    var a_clean_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_clean_latent", sharding);
-    defer a_clean_buf.deinit();
-    var v_positions_buf = try loadBuf(allocator, io, platform, &inputs_store, "video_positions", sharding);
+    // Video positions: [1, 3, T_v1, 2] bf16
+    const video_pos_bytes = try computeVideoPositions(allocator, F, H_s1, W_s1, fps);
+    defer allocator.free(video_pos_bytes);
+    const video_pos_shape = zml.Shape.init(.{ 1, 3, T_v1, 2 }, .bf16);
+    var v_positions_buf = try zml.Buffer.fromBytes(io, platform, video_pos_shape, sharding, video_pos_bytes);
     defer v_positions_buf.deinit();
-    var a_positions_buf = try loadBuf(allocator, io, platform, &inputs_store, "audio_positions", sharding);
+
+    // Audio positions: [1, 1, T_a, 2] f32
+    const audio_pos_bytes = try computeAudioPositions(allocator, T_a);
+    defer allocator.free(audio_pos_bytes);
+    const audio_pos_shape = zml.Shape.init(.{ 1, 1, T_a, 2 }, .f32);
+    var a_positions_buf = try zml.Buffer.fromBytes(io, platform, audio_pos_shape, sharding, audio_pos_bytes);
     defer a_positions_buf.deinit();
+
+    // Denoise masks: all ones [1, T, 1] f32
+    const v_mask_shape = zml.Shape.init(.{ 1, T_v1, 1 }, .f32);
+    const a_mask_shape = zml.Shape.init(.{ 1, T_a, 1 }, .f32);
+    const v_mask_host = try allocator.alloc(u8, v_mask_shape.byteSize());
+    defer allocator.free(v_mask_host);
+    const a_mask_host = try allocator.alloc(u8, a_mask_shape.byteSize());
+    defer allocator.free(a_mask_host);
+    fillOnesF32(v_mask_host);
+    fillOnesF32(a_mask_host);
+    var v_mask_buf = try zml.Buffer.fromBytes(io, platform, v_mask_shape, sharding, v_mask_host);
+    defer v_mask_buf.deinit();
+    var a_mask_buf = try zml.Buffer.fromBytes(io, platform, a_mask_shape, sharding, a_mask_host);
+    defer a_mask_buf.deinit();
+
+    // Clean latents: all zeros [1, T, 128] bf16
+    const v_clean_shape = zml.Shape.init(.{ 1, T_v1, C }, .bf16);
+    const a_clean_shape = zml.Shape.init(.{ 1, T_a, C }, .bf16);
+    const v_clean_host = try allocator.alloc(u8, v_clean_shape.byteSize());
+    defer allocator.free(v_clean_host);
+    const a_clean_host = try allocator.alloc(u8, a_clean_shape.byteSize());
+    defer allocator.free(a_clean_host);
+    @memset(v_clean_host, 0);
+    @memset(a_clean_host, 0);
+    var v_clean_buf = try zml.Buffer.fromBytes(io, platform, v_clean_shape, sharding, v_clean_host);
+    defer v_clean_buf.deinit();
+    var a_clean_buf = try zml.Buffer.fromBytes(io, platform, a_clean_shape, sharding, a_clean_host);
+    defer a_clean_buf.deinit();
+
+    std.log.info("  video_positions:   {any}", .{v_positions_buf.shape().dims()});
+    std.log.info("  audio_positions:   {any}", .{a_positions_buf.shape().dims()});
+    std.log.info("  video_mask:        {any}", .{v_mask_buf.shape().dims()});
+    std.log.info("  audio_mask:        {any}", .{a_mask_buf.shape().dims()});
+    std.log.info("  video_clean:       {any}", .{v_clean_buf.shape().dims()});
+    std.log.info("  audio_clean:       {any}", .{a_clean_buf.shape().dims()});
+
+    if (dump_intermediates) {
+        try writeBuffer(allocator, io, v_positions_buf, output_dir, "s1_video_positions.bin");
+        try writeBuffer(allocator, io, a_positions_buf, output_dir, "s1_audio_positions.bin");
+        try writeBuffer(allocator, io, v_mask_buf, output_dir, "s1_video_mask.bin");
+        try writeBuffer(allocator, io, a_mask_buf, output_dir, "s1_audio_mask.bin");
+        try writeBuffer(allocator, io, v_clean_buf, output_dir, "s1_video_clean.bin");
+        try writeBuffer(allocator, io, a_clean_buf, output_dir, "s1_audio_clean.bin");
+    }
 
     // Text contexts — positive AND negative for Stage 1 guidance.
     // Positive contexts are kept alive and returned for Stage 2.
