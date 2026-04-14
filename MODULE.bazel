@@ -25,6 +25,12 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.0")
+git_override(
+    module_name = "llvm",
+    commit = "9086d034fa7b91b61db0ad66fc78453e576299cd",
+    remote = "https://github.com/hermeticbuild/hermetic-llvm.git",
+)
+
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
