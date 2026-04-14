@@ -117,7 +117,7 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            const token = try decoder.feed_one(token_id);
+            const token = try decoder.feedOne(token_id);
             if (self.think_start) |think_start| if (token_id == think_start) {
                 try stdout.writeAll("\x1b[2m");
             };

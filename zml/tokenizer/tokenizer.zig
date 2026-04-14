@@ -191,49 +191,36 @@ pub const Tokenizer = union(Tokenizers) {
             }
         }
 
-        //
-        // Convenience methods built on top of the stream API
-        //
-
         pub fn decodeAlloc(self: *Decoder, allocator: std.mem.Allocator, token_ids: []const u32) !std.ArrayList(u8) {
-            var tokens: std.ArrayList(u8) = try .initCapacity(allocator, token_ids.len * 4);
-            var remaining = token_ids;
-            while (remaining.len > 0) {
-                const fout = try self.feed(remaining);
-                try tokens.appendSlice(allocator, fout.tokens);
-                remaining = remaining[fout.consumed..];
+            switch (self.*) {
+                .iree => |*d| {
+                    var tokens: std.ArrayList(u8) = try .initCapacity(allocator, token_ids.len * 4);
+                    var remaining = token_ids;
+                    while (remaining.len > 0) {
+                        const consumed, const decoded_tokens = try d.feed(remaining);
+                        try tokens.appendSlice(allocator, decoded_tokens);
+                        remaining = remaining[consumed..];
+                    }
+                    try tokens.appendSlice(allocator, try self.finalize());
+                    return tokens;
+                },
+                inline else => |*d| {
+                    return .fromOwnedSlice(try allocator.dupe(u8, try d.decode(token_ids)));
+                },
             }
-            try tokens.appendSlice(allocator, try self.finalize());
-            return tokens;
-        }
-
-        //
-        // Stream API
-        //
-
-        pub const FeedOutput = struct {
-            consumed: usize,
-            /// Only valid until the next feed/finalize call and while the decoder is alive.
-            tokens: []const u8,
-        };
-
-        pub fn feed(self: *Decoder, token_ids: []const u32) !FeedOutput {
-            return switch (self.*) {
-                .iree => |*v| {
-                    const consumed, const tokens = try v.feed(token_ids);
-                    return .{ .consumed = consumed, .tokens = tokens };
-                },
-                inline else => |*v| {
-                    const tokens = try v.decode(token_ids);
-                    return .{ .consumed = token_ids.len, .tokens = tokens };
-                },
-            };
         }
 
         // Only valid until the next decode and while the decoder is alive.
-        pub fn feed_one(self: *Decoder, token_id: u32) ![]const u8 {
-            const fout = try self.feed(&.{token_id});
-            return fout.tokens;
+        pub fn feedOne(self: *Decoder, token_id: u32) ![]const u8 {
+            switch (self.*) {
+                .iree => |*d| {
+                    _, const tokens = try d.feed(&.{token_id});
+                    return tokens;
+                },
+                inline else => |*d| {
+                    return try d.next(token_id) orelse &.{};
+                },
+            }
         }
 
         /// Output is only valid until the next feed/finalize call and while the decoder is alive.
