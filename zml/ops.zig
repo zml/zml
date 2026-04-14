@@ -1518,9 +1518,9 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     }
 
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
-    var metadata_attributes: [metadata_type_info.@"struct".fields.len]mlir.NamedAttribute = undefined;
-    inline for (metadata_type_info.@"struct".fields, 0..) |field, i| {
-        const attribute: *const mlir.Attribute = switch (@typeInfo(field.type)) {
+    var metadata_attribute_list = std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
+    inline for (metadata_type_info.@"struct".fields) |field| {
+        const maybe_attribute: ?*const mlir.Attribute = switch (@typeInfo(field.type)) {
             .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
             .int => |int_field| switch (int_field.signedness) {
                 .signed => switch (int_field.bits) {
@@ -1552,15 +1552,29 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
                     @panic("Unsupported pointer type in metadata"),
                 else => @panic("Unsupported pointer type in metadata"),
             },
+            .optional => |optional_info| if (@field(metadata, field.name) != null) switch (@typeInfo(optional_info.child)) {
+                .float => |float_field| switch (float_field.bits) {
+                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
+                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
+                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
+                    else => @panic("Unsupported DataType"),
+                },
+
+                else => @panic("Unsupported optional child type in metadata"),
+            } else null,
             else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
         };
-        metadata_attributes[i] = mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute);
+        if (maybe_attribute) |attribute| {
+            metadata_attribute_list.appendAssumeCapacity(mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute));
+        }
     }
 
-    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, &(metadata_attributes ++ [_]mlir.NamedAttribute{
+    metadata_attribute_list.appendSliceAssumeCapacity(&[_]mlir.NamedAttribute{
         .named(ctx.mlir_ctx, "pjrt_api", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_api))))),
         .named(ctx.mlir_ctx, "pjrt_client", mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @bitCast(@intFromPtr(ctx.platform.pjrt_client))))),
-    }));
+    });
+
+    const backend_config = mlir.dictionaryAttribute(ctx.mlir_ctx, metadata_attribute_list.items);
 
     const operand_layouts = allocator.alloc([]const usize, input_shapes.len) catch unreachable;
     for (input_shapes, 0..) |shape, i| {

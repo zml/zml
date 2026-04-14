@@ -319,6 +319,7 @@ pub const paged = struct {
         target_num_prgms: usize,
         num_2d_prgms: usize,
         max_seqlen_q: usize,
+        scale: ?f32,
 
         pub fn numQueriesPerKv(self: PagedAttentionOptions) usize {
             return self.num_heads / self.num_kv_heads;
@@ -382,6 +383,7 @@ pub const paged = struct {
                         .target_num_prgms = target_num_prgms,
                         .num_2d_prgms = num_2d_prgms,
                         .max_seqlen_q = ctx_.options.max_seqlen_q,
+                        .scale = ctx_.opts.scale,
                     };
 
                     const use_2d_kernel = use2dKernel(
@@ -458,7 +460,7 @@ pub const paged = struct {
         const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[1]));
         const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[2]));
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
-        const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
+        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
 
         const output = zml.ops.triton(.{
@@ -575,7 +577,7 @@ pub const paged = struct {
         const v_strides_1_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[1]));
         const v_strides_2_ptr = zml.Tensor.constant(zml.DataType.i64.constant(v_strides[2]));
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
-        const scale: f32 = @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
+        const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
