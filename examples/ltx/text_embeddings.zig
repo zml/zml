@@ -185,9 +185,9 @@ pub const ConnectorAttention = struct {
             @intCast(gw.dim(.h))
         else
             @panic("Cannot infer num_heads for connector attention: " ++
-            "the checkpoint does not contain 'to_gate_logits.weight' at this prefix. " ++
-            "Gated attention is required — verify the LTX checkpoint includes gate weights " ++
-            "for the embeddings connector blocks.");
+                "the checkpoint does not contain 'to_gate_logits.weight' at this prefix. " ++
+                "Gated attention is required — verify the LTX checkpoint includes gate weights " ++
+                "for the embeddings connector blocks.");
 
         return .{
             .attn = .{ .has_gated_attention = has_gate, .num_heads = num_heads },
