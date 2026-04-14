@@ -250,7 +250,7 @@ Changes: `computeTextEmbeddings()` helper (~130 lines) added to `inference.zig`,
 
 **Validated:** End-to-end pipeline run on GPU server produces clean MP4 output.
 
-### M4: Consolidate to single Python command
+### M4: Consolidate to single Python command ✅ DONE
 
 **Goal:** Go from 2 Python commands + 1 Zig command to 1 Python + 1 Zig.
 Hidden states are now the canonical text interface — Zig always computes

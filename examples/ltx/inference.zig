@@ -68,8 +68,8 @@ const CliArgs = struct {
     bf16_attn_stage2: bool,
     dump_intermediates: bool,
     image: ?[]const u8,
-    gemma_hidden_states_pos: ?[]const u8,
-    gemma_hidden_states_neg: ?[]const u8,
+    gemma_hidden_states_pos: []const u8,
+    gemma_hidden_states_neg: []const u8,
 };
 
 fn parseArgs(it: anytype) !CliArgs {
@@ -85,10 +85,10 @@ fn parseArgs(it: anytype) !CliArgs {
         .bf16_attn_stage2 = false,
         .dump_intermediates = false,
         .image = null,
-        .gemma_hidden_states_pos = null,
-        .gemma_hidden_states_neg = null,
+        .gemma_hidden_states_pos = undefined,
+        .gemma_hidden_states_neg = undefined,
     };
-    var have = [_]bool{false} ** 6;
+    var have = [_]bool{false} ** 8;
 
     _ = it.next(); // exe name
 
@@ -124,8 +124,10 @@ fn parseArgs(it: anytype) !CliArgs {
             args.image = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
             args.gemma_hidden_states_pos = it.next() orelse return error.InvalidArgs;
+            have[6] = true;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-neg")) {
             args.gemma_hidden_states_neg = it.next() orelse return error.InvalidArgs;
+            have[7] = true;
         }
     }
 
@@ -134,9 +136,10 @@ fn parseArgs(it: anytype) !CliArgs {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
                     "--upsampler-ckpt <path> --stage1-inputs <path> " ++
-                    "--meta <path> --output-dir <path> [--seed <int>] " ++
-                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates] " ++
-                    "[--gemma-hidden-states-pos <path>] [--gemma-hidden-states-neg <path>]",
+                    "--meta <path> --output-dir <path> " ++
+                    "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
+                    "[--seed <int>] " ++
+                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
             return error.InvalidArgs;
@@ -437,8 +440,8 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
     std.log.info("  image:             {s}", .{args.image orelse "(none)"});
-    std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos orelse "(none)"});
-    std.log.info("  gemma-hs-neg:      {s}", .{args.gemma_hidden_states_neg orelse "(none)"});
+    std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos});
+    std.log.info("  gemma-hs-neg:      {s}", .{args.gemma_hidden_states_neg});
 
     // ---- Ensure output directory exists ----
     try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
@@ -613,8 +616,8 @@ fn runStage1(
     dump_intermediates: bool,
     output_dir: []const u8,
     seed: u64,
-    gemma_hs_pos_path: ?[]const u8,
-    gemma_hs_neg_path: ?[]const u8,
+    gemma_hs_pos_path: []const u8,
+    gemma_hs_neg_path: []const u8,
 ) !Stage1Result {
     // ---- Sigma schedule ----
     const sigmas = model.computeSigmaSchedule(
@@ -664,31 +667,14 @@ fn runStage1(
 
     // Text contexts — positive AND negative for Stage 1 guidance.
     // Positive contexts are kept alive and returned for Stage 2.
-    // When --gemma-hidden-states-pos/neg are provided, compute contexts from
-    // Gemma hidden states using the Zig EmbeddingsProcessor. Otherwise, load
-    // pre-computed contexts from the stage1-inputs safetensors.
-    var v_context_pos_buf: zml.Buffer = undefined;
-    var a_context_pos_buf: zml.Buffer = undefined;
-    var v_context_neg_buf: zml.Buffer = undefined;
-    var a_context_neg_buf: zml.Buffer = undefined;
+    // Compute from Gemma hidden states using the Zig EmbeddingsProcessor.
+    std.log.info("Computing text embeddings from Gemma hidden states...", .{});
 
-    if (gemma_hs_pos_path != null or gemma_hs_neg_path != null) {
-        // Both paths must be provided together.
-        const pos_path = gemma_hs_pos_path orelse @panic("--gemma-hidden-states-neg requires --gemma-hidden-states-pos");
-        const neg_path = gemma_hs_neg_path orelse @panic("--gemma-hidden-states-pos requires --gemma-hidden-states-neg");
-        std.log.info("Computing text embeddings from Gemma hidden states...", .{});
-
-        const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, pos_path, neg_path);
-        v_context_pos_buf = emb_result.v_context_pos;
-        a_context_pos_buf = emb_result.a_context_pos;
-        v_context_neg_buf = emb_result.v_context_neg;
-        a_context_neg_buf = emb_result.a_context_neg;
-    } else {
-        v_context_pos_buf = try loadBuf(allocator, io, platform, &inputs_store, "v_context_pos", sharding);
-        a_context_pos_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_pos", sharding);
-        v_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "v_context_neg", sharding);
-        a_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_neg", sharding);
-    }
+    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, gemma_hs_pos_path, gemma_hs_neg_path);
+    var v_context_pos_buf = emb_result.v_context_pos;
+    var a_context_pos_buf = emb_result.a_context_pos;
+    var v_context_neg_buf = emb_result.v_context_neg;
+    var a_context_neg_buf = emb_result.a_context_neg;
     defer v_context_neg_buf.deinit();
     defer a_context_neg_buf.deinit();
 

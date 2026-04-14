@@ -7,6 +7,8 @@ Supports both text-to-video (default) and image-conditioned generation
 activations are captured for validation.
 
 Outputs (always):
+  {out}/pos_hidden_states.safetensors       — Gemma hidden states (positive prompt)
+  {out}/neg_hidden_states.safetensors       — Gemma hidden states (negative prompt)
   {out}/unconditioned_stage1_inputs.safetensors — Stage 1 inputs (no image)
   {out}/stage2_noise.safetensors                — Pre-drawn Stage 2 noise
   {out}/ref/stage1_outputs.safetensors           — Stage 1 denoised latents
@@ -45,13 +47,21 @@ from ltx_core.components.schedulers import LTX2Scheduler
 from ltx_core.model.transformer import X0Model
 from ltx_core.model.video_vae import TilingConfig, VideoEncoder, get_video_chunks_number
 from ltx_core.types import LatentState, VideoPixelShape
+from ltx_core.loader import DummyRegistry
+from ltx_core.loader.single_gpu_model_builder import SingleGPUModelBuilder as Builder
+from ltx_core.text_encoders.gemma.encoders.encoder_configurator import (
+    EMBEDDINGS_PROCESSOR_KEY_OPS,
+    GEMMA_LLM_KEY_OPS,
+    GEMMA_MODEL_OPS,
+    EmbeddingsProcessorConfigurator,
+    GemmaTextEncoderConfigurator,
+)
 from ltx_pipelines.utils import (
     AudioDecoder,
     DiffusionStage,
     FactoryGuidedDenoiser,
     ImageConditioner,
     ModalitySpec,
-    PromptEncoder,
     SimpleDenoiser,
     VideoDecoder,
     VideoUpsampler,
@@ -60,6 +70,7 @@ from ltx_pipelines.utils import (
     euler_denoising_loop,
     get_device,
 )
+from ltx_pipelines.utils.blocks import gpu_model, module_ops_from_gemma_root
 from ltx_pipelines.utils.args import ImageConditioningInput
 from ltx_pipelines.utils.constants import STAGE_2_DISTILLED_SIGMA_VALUES
 from ltx_pipelines.utils.media_io import (
@@ -301,9 +312,6 @@ def main() -> None:
     # ========================================================================
     print("\n=== Loading models ===")
 
-    prompt_encoder = PromptEncoder(
-        args.checkpoint, args.gemma_root, dtype, device,
-    )
     upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
 
     stage_1_diffusion = DiffusionStage(args.checkpoint, dtype, device)
@@ -313,17 +321,75 @@ def main() -> None:
     noiser = GaussianNoiser(generator=generator)
 
     # ========================================================================
-    # Text encoding
+    # Text encoding: Gemma forward pass → hidden states → EmbeddingsProcessor
     # ========================================================================
-    print("\n=== Text encoding ===")
-    ctx_p, ctx_n = prompt_encoder(
-        [args.prompt, args.negative_prompt],
-        enhance_first_prompt=False,
-        enhance_prompt_image=None,
-        enhance_prompt_seed=args.seed,
+    print("\n=== Text encoding: Gemma forward pass ===")
+
+    def find_matching_file(root: str, pattern: str) -> Path:
+        root_path = Path(root)
+        matches = list(root_path.rglob(pattern))
+        if not matches:
+            raise FileNotFoundError(f"No file matching {pattern!r} under {root}")
+        return matches[0]
+
+    gemma_root = args.gemma_root
+    module_ops = module_ops_from_gemma_root(gemma_root)
+    model_folder = find_matching_file(gemma_root, "model*.safetensors").parent
+    weight_paths = [str(p) for p in model_folder.rglob("*.safetensors")]
+
+    text_encoder_builder = Builder(
+        model_path=tuple(weight_paths),
+        model_class_configurator=GemmaTextEncoderConfigurator,
+        model_sd_ops=GEMMA_LLM_KEY_OPS,
+        module_ops=(GEMMA_MODEL_OPS, *module_ops),
+        registry=DummyRegistry(),
     )
-    v_context_p, a_context_p = ctx_p.video_encoding, ctx_p.audio_encoding
-    v_context_n, a_context_n = ctx_n.video_encoding, ctx_n.audio_encoding
+
+    raw_outputs = []
+    with gpu_model(text_encoder_builder.build(device=device, dtype=dtype).eval()) as text_encoder:
+        for i, prompt in enumerate([args.prompt, args.negative_prompt]):
+            hidden_states, attention_mask = text_encoder.encode(prompt)
+            raw_outputs.append((hidden_states, attention_mask))
+            label = "pos" if i == 0 else "neg"
+            print(f"  {label}: {len(hidden_states)} layers, "
+                  f"shape={list(hidden_states[0].shape)}, "
+                  f"mask sum={attention_mask.sum().item()}/{attention_mask.shape[-1]}")
+
+    # Save hidden states as sidecar files
+    print("\n=== Saving Gemma hidden states ===")
+    for i, (hidden_states, attention_mask) in enumerate(raw_outputs):
+        label = "pos" if i == 0 else "neg"
+        stacked = torch.stack(list(hidden_states), dim=-1)  # [1, S, 3840, 49]
+        save_safetensors(
+            {"stacked_hidden_states": stacked.to(dtype), "attention_mask": attention_mask},
+            out / f"{label}_hidden_states.safetensors",
+        )
+
+    # Run EmbeddingsProcessor to get final contexts (needed internally for denoising)
+    print("\n=== Text encoding: EmbeddingsProcessor ===")
+
+    embeddings_processor_builder = Builder(
+        model_path=args.checkpoint,
+        model_class_configurator=EmbeddingsProcessorConfigurator,
+        model_sd_ops=EMBEDDINGS_PROCESSOR_KEY_OPS,
+        registry=DummyRegistry(),
+    )
+
+    with gpu_model(
+        embeddings_processor_builder.build(device=device, dtype=dtype).to(device).eval()
+    ) as embeddings_processor:
+        contexts = []
+        for i, (hidden_states, attention_mask) in enumerate(raw_outputs):
+            label = "pos" if i == 0 else "neg"
+            result = embeddings_processor.process_hidden_states(
+                hidden_states, attention_mask, padding_side="left"
+            )
+            contexts.append(result)
+            print(f"  {label}: video={list(result.video_encoding.shape)}, "
+                  f"audio={list(result.audio_encoding.shape)}")
+
+    v_context_p, a_context_p = contexts[0].video_encoding, contexts[0].audio_encoding
+    v_context_n, a_context_n = contexts[1].video_encoding, contexts[1].audio_encoding
 
     print(f"  v_context_pos: {list(v_context_p.shape)} {v_context_p.dtype}")
     print(f"  a_context_pos: {list(a_context_p.shape)} {a_context_p.dtype}")
@@ -453,10 +519,6 @@ def main() -> None:
             "audio_clean_latent": as1.clean_latent,
             "video_positions": vs1.positions,
             "audio_positions": as1.positions,
-            "v_context_pos": v_context_p,
-            "a_context_pos": a_context_p,
-            "v_context_neg": v_context_n,
-            "a_context_neg": a_context_n,
         }
         save_safetensors(s1_inputs, out / "conditioned_stage1_inputs.safetensors")
 
@@ -486,10 +548,6 @@ def main() -> None:
             "audio_clean_latent": as1.clean_latent,
             "video_positions": vs1.positions,
             "audio_positions": as1.positions,
-            "v_context_pos": v_context_p,
-            "a_context_pos": a_context_p,
-            "v_context_neg": v_context_n,
-            "a_context_neg": a_context_n,
         }
     else:
         # No image → captured state is already unconditioned
@@ -502,10 +560,6 @@ def main() -> None:
             "audio_clean_latent": as1.clean_latent,
             "video_positions": vs1.positions,
             "audio_positions": as1.positions,
-            "v_context_pos": v_context_p,
-            "a_context_pos": a_context_p,
-            "v_context_neg": v_context_n,
-            "a_context_neg": a_context_n,
         }
     save_safetensors(s1_uncond_inputs, out / "unconditioned_stage1_inputs.safetensors")
 
@@ -818,6 +872,9 @@ def main() -> None:
     else:
         print(f"\nMode: unconditioned (text-to-video)")
     print(f"Prompt:    {args.prompt!r}")
+    print(f"\nGemma hidden states:")
+    print(f"  Positive: {out / 'pos_hidden_states.safetensors'}")
+    print(f"  Negative: {out / 'neg_hidden_states.safetensors'}")
     print(f"\nUnconditioned Stage 1:   {out / 'unconditioned_stage1_inputs.safetensors'}")
     print(f"Stage 2 noise:           {out / 'stage2_noise.safetensors'}")
     print(f"Pipeline metadata:       {out / 'pipeline_meta.json'}")
