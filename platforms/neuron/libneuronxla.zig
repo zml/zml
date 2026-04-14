@@ -223,6 +223,12 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     });
     _ = try child.wait(io);
 
+    // neuronx-cc exits 0 even on compilation failure
+    std.Io.Dir.access(.cwd(), io, neff_file, .{}) catch |err| {
+        log.err("neuronx-cc did not produce output NEFF {s}: {}", .{ neff_file, err });
+        return error.NeuronxCcFailed;
+    };
+
     const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
         return err;
