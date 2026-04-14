@@ -81,12 +81,9 @@ pub const Memory = struct {
     platform: *const Platform,
     addressable_by_devices: []*const Device,
 
-    fn init(allocator: std.mem.Allocator, pjrt_memory: *const pjrt.Memory, platform: *Platform, all_devices: []const Device) !Memory {
+    fn init(allocator: std.mem.Allocator, pjrt_memory: *const pjrt.Memory, platform: *Platform) !Memory {
         const pjrt_addressable_by_devices = pjrt_memory.addressableByDevices(platform.pjrt_api);
         const addressable_by_devices = try allocator.alloc(*const Device, pjrt_addressable_by_devices.len);
-        for (pjrt_addressable_by_devices, addressable_by_devices) |pjrt_device, *addressable_by_device| {
-            addressable_by_device.* = &all_devices[pjrt_device.localHardwareId(platform.pjrt_api)];
-        }
 
         return .{
             .pjrt_memory = pjrt_memory,
@@ -117,6 +114,13 @@ pub const Memory = struct {
     fn deinit(self: *Memory, allocator: std.mem.Allocator) void {
         allocator.free(self.addressable_devices);
     }
+
+    fn populateAddressableByDevices(self: *Memory) void {
+        const pjrt_addressable_by_devices = self.pjrt_memory.addressableByDevices(self.platform.pjrt_api);
+        for (pjrt_addressable_by_devices, self.addressable_by_devices) |pjrt_device, *addressable_by_device| {
+            addressable_by_device.* = self.platform.deviceFromPjrt(pjrt_device);
+        }
+    }
 };
 
 pub const Device = struct {
@@ -125,11 +129,11 @@ pub const Device = struct {
     pjrt_desc: *const pjrt.DeviceDescription,
     addressable_memories: []*const Memory,
 
-    fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform, all_addressable_memories: []const Memory) !Device {
+    fn init(allocator: std.mem.Allocator, pjrt_device_: *const pjrt.Device, platform: *const Platform) !Device {
         const pjrt_addressable_memories = pjrt_device_.addressableMemories(platform.pjrt_api);
         const addressable_memories = try allocator.alloc(*const Memory, pjrt_addressable_memories.len);
         for (pjrt_addressable_memories, addressable_memories) |pjrt_memory, *addressable_memory| {
-            addressable_memory.* = &all_addressable_memories[pjrt_memory.id(platform.pjrt_api)];
+            addressable_memory.* = platform.memoryFromPjrt(pjrt_memory);
         }
 
         return .{
@@ -153,7 +157,7 @@ pub const Device = struct {
     }
 
     pub fn localHardwareId(self: Device) i32 {
-        return self.device.localHardwareId(self.platform.pjrt_api);
+        return @intCast(self.pjrt_device.localHardwareId(self.platform.pjrt_api));
     }
 
     pub fn kind(self: Device) []const u8 {
@@ -181,8 +185,11 @@ pub const Device = struct {
 
     pub fn memory(self: Device, memory_kind: Memory.Kind) *const Memory {
         if (memory_kind == .default) {
-            const mem = self.pjrt_device.defaultMemory(self.platform.pjrt_api);
-            return &self.platform.memories[mem.id(self.platform.pjrt_api)];
+            const pjrt_memory = self.pjrt_device.defaultMemory(self.platform.pjrt_api);
+            for (self.addressable_memories) |mem| {
+                if (mem.pjrt_memory == pjrt_memory) return mem;
+            }
+            return self.platform.memoryFromPjrt(pjrt_memory);
         }
 
         for (self.addressable_memories) |mem| {
@@ -258,11 +265,14 @@ pub const Platform = struct {
 
             // TODO: part of the complication here is that we layout the data in spaghetti mode,
             // where devices and memories point to each other and also point to the platform.
-            for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(arena, pjrt_device, platform, memories);
-            }
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
-                platform_memory.* = try .init(arena, pjrt_memory, platform, devices);
+                platform_memory.* = try .init(arena, pjrt_memory, platform);
+            }
+            for (pjrt_devices, devices) |pjrt_device, *platform_device| {
+                platform_device.* = try .init(arena, pjrt_device, platform);
+            }
+            for (memories) |*platform_memory| {
+                platform_memory.populateAddressableByDevices();
             }
 
             platform.physical_mesh = try switch (options.physical_mesh) {
@@ -540,6 +550,20 @@ pub const Platform = struct {
         entry.value_ptr.* = sharding;
 
         return sharding;
+    }
+
+    fn memoryFromPjrt(self: *const Platform, pjrt_memory: *const pjrt.Memory) *const Memory {
+        for (self.memories) |*mem| {
+            if (mem.pjrt_memory == pjrt_memory) return mem;
+        }
+        unreachable;
+    }
+
+    fn deviceFromPjrt(self: *const Platform, pjrt_device: *const pjrt.Device) *const Device {
+        for (self.devices) |*device| {
+            if (device.pjrt_device == pjrt_device) return device;
+        }
+        unreachable;
     }
 };
 
