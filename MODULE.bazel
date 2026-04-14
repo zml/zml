@@ -6,7 +6,6 @@ bazel_dep(name = "abseil-cpp", version = "20250814.1", repo_name = "com_google_a
 bazel_dep(name = "bazel_lib", version = "3.2.2")
 bazel_dep(name = "aspect_rules_py", version = "1.8.4")
 bazel_dep(name = "bazel_skylib", version = "1.9.0")
-
 ## Needed by iree
 bazel_dep(name = "libbacktrace", version = "1.0.0-20250926-7939218")
 bazel_dep(name = "patchelf", version = "0.18.0.bcr.1")
@@ -21,6 +20,7 @@ bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
 bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
+bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 bazel_dep(name = "tar.bzl", version = "0.9.0")
@@ -83,7 +83,7 @@ uv.configure(version = "0.9.30")
 
 python = use_extension("@rules_python//python/extensions:python.bzl", "python")
 python.toolchain(python_version = "3.12")
-use_repo(python, "python_3_12", "python_versions")
+use_repo(python, "python_versions", "python_3_12")
 
 pip = use_extension("@rules_python//python/extensions:pip.bzl", "pip")
 
@@ -140,7 +140,7 @@ cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "cuda_nvml_dev", "libpjrt_cuda")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "amd-smi-lib", "hipblaslt", "libpjrt_rocm", "libdrm2-amdgpu", "libdrm-amdgpu-amdgpu1", "rocblas")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -154,7 +154,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "translate-c", "stb", "uucode", "xla", "zigimg")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -183,6 +183,30 @@ use_repo(
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")
 llvm.configure()
 use_repo(llvm, "llvm-project")
+
+rs_toolchains = use_extension("@rules_rs//rs/experimental/toolchains:module_extension.bzl", "toolchains")
+rs_toolchains.toolchain(
+    edition = "2024",
+    version = "1.94.0",
+)
+use_repo(rs_toolchains, "default_rust_toolchains")
+
+register_toolchains("@default_rust_toolchains//:all")
+
+crate = use_extension("@rules_rs//rs:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lock = "//zml/tokenizer/hftokenizers:Cargo.lock",
+    cargo_toml = "//zml/tokenizer/hftokenizers:Cargo.toml",
+    platform_triples = [
+        "aarch64-apple-darwin",
+        "x86_64-apple-darwin",
+        "aarch64-unknown-linux-gnu",
+        "x86_64-unknown-linux-gnu",
+    ],
+    use_experimental_platforms = True,
+)
+use_repo(crate, "crates")
 
 apt = use_extension("@rules_distroless//apt:extensions.bzl", "apt")
 apt.install(
@@ -226,6 +250,7 @@ use_repo(
     "distroless_cc_debian12",
     "distroless_cc_debian12_linux_amd64",
 )
+
 
 git_override(
     module_name = "rules_zig",
