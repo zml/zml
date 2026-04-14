@@ -542,41 +542,6 @@ pub fn forwardMainVocoder(mel_spec: Tensor, params: *const MainVocoderParams) Te
     );
 }
 
-/// Debug: rearrange + conv_pre + ups[0] for isolating numerical issues.
-pub fn forwardAfterUps0(mel_spec: Tensor, params: *const MainVocoderParams) Tensor {
-    var x = ensureF32(mel_spec).transpose(.{ 0, 1, 3, 2 });
-    x = x.reshape(.{ x.dim(0), -1, x.dim(3) });
-    x = forwardVocConv1d(x, params.conv_pre, .{ .padding = 3 });
-
-    // ups[0]: ConvTranspose1d
-    const k = params.ups[0].weight.dim(2);
-    const stride = @divTrunc(k, 2);
-    const pytorch_padding = @divTrunc(k - stride, 2);
-    x = forwardVocConvTranspose1d(x, params.ups[0], stride, pytorch_padding);
-    return x;
-}
-
-/// Debug: rearrange + conv_pre + ups[0] + first resblock stage.
-pub fn forwardAfterStage0(mel_spec: Tensor, params: *const MainVocoderParams) Tensor {
-    var x = ensureF32(mel_spec).transpose(.{ 0, 1, 3, 2 });
-    x = x.reshape(.{ x.dim(0), -1, x.dim(3) });
-    x = forwardVocConv1d(x, params.conv_pre, .{ .padding = 3 });
-
-    // ups[0]
-    const k = params.ups[0].weight.dim(2);
-    const stride = @divTrunc(k, 2);
-    const pytorch_padding = @divTrunc(k - stride, 2);
-    x = forwardVocConvTranspose1d(x, params.ups[0], stride, pytorch_padding);
-
-    // resblocks 0,1,2 → mean
-    const dilations = [3]i64{ 1, 3, 5 };
-    var block_sum = forwardAMPBlock1(x, params.resblocks[0], dilations);
-    block_sum = block_sum.add(forwardAMPBlock1(x, params.resblocks[1], dilations));
-    block_sum = block_sum.add(forwardAMPBlock1(x, params.resblocks[2], dilations));
-    x = block_sum.divByConst(3);
-    return x;
-}
-
 /// Stage 2: BWE pipeline — 16kHz waveform → 48kHz waveform.
 /// Takes the main vocoder output, computes mel-STFT, runs BWE generator,
 /// adds sinc-resampled skip connection, clamps to [-1, 1].
@@ -626,51 +591,4 @@ pub fn forwardBWEPipeline(waveform_16k: Tensor, params: *const BWEPipelineParams
     output = output.slice1d(2, .{ .end = output_length });
 
     return output;
-}
-
-// ====================================================================
-// Debug forward functions for BWE pipeline bisection
-// ====================================================================
-
-/// Helper: pad waveform to multiple of hop_length (shared by BWE debug fns).
-fn bwePadInput(waveform_16k: Tensor) Tensor {
-    const hop_length: i64 = 80;
-    var x = waveform_16k;
-    const length_low_rate = x.dim(2);
-    const remainder = @mod(length_low_rate, hop_length);
-    const pad_amount = if (remainder != 0) hop_length - remainder else 0;
-    if (pad_amount > 0) {
-        const right_zeros = Tensor.zeroes(x.shape().set(2, pad_amount));
-        x = Tensor.concatenate(&.{ x, right_zeros }, 2);
-    }
-    return x;
-}
-
-/// Debug: BWE compute mel only — returns log-mel [B, 2, n_mels, T_frames] (before transpose).
-pub fn forwardBWEComputeMel(waveform_16k: Tensor, params: *const BWEPipelineParams) Tensor {
-    const x = bwePadInput(waveform_16k);
-    return forwardComputeMel(x, params.mel_stft);
-}
-
-/// Debug: BWE sinc resample skip only — returns [B, 2, T_skip].
-pub fn forwardBWESincSkip(waveform_16k: Tensor) Tensor {
-    const x = bwePadInput(waveform_16k);
-    return forwardSincResample3x(x);
-}
-
-/// Debug: BWE residual only (mel → BWE generator) — returns [B, 2, T_bwe].
-pub fn forwardBWEResidual(waveform_16k: Tensor, params: *const BWEPipelineParams) Tensor {
-    const x = bwePadInput(waveform_16k);
-    const mel = forwardComputeMel(x, params.mel_stft);
-    const mel_for_bwe = mel.transpose(.{ 0, 1, 3, 2 });
-    return forwardVocoderGeneric(
-        mel_for_bwe,
-        params.bwe_generator.conv_pre,
-        params.bwe_generator.ups,
-        params.bwe_generator.resblocks,
-        params.bwe_generator.act_post,
-        params.bwe_generator.conv_post,
-        5,
-        false,
-    );
 }
