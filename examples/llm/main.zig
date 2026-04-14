@@ -32,8 +32,9 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
-        \\                       (only used by LFM2 which uses multiple kernels by default)
+        \\   --single            Create a single monolithic kernel encompassing all the layers.
+        \\                       Supported by LFM2 and Llama. LFM2 defaults to multi-kernel, Llama
+        \\                       defaults to multi-kernel.
         \\
     ;
 };
@@ -123,10 +124,19 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
-    defer model.unloadBuffers(&model_buffers, allocator);
+    var model_buffers, var compiled_model = b: {
+        var buffers_future = io.async(models.LoadedModel.loadBuffers, .{ &model, allocator, io, platform, &store, &progress, shardings });
+        errdefer if (buffers_future.cancel(io)) |e| e.deinit() else |_| {};
 
-    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
+        var compile_future = io.async(models.LoadedModel.compile, .{ &model, allocator, io, platform, backend, shardings, args.seqlen, args.single, &progress });
+        errdefer if (compile_future.cancel(io)) |e| e.deinit() else |_| {};
+
+        break :b .{
+            buffers_future.await(io) catch unreachable,
+            compile_future.await(io) catch unreachable,
+        };
+    };
+    defer model.unloadBuffers(&model_buffers, allocator);
     defer compiled_model.deinit();
 
     progress.end();

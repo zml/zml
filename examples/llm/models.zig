@@ -83,6 +83,7 @@ pub const LoadedModel = union(ModelType) {
         backend: zml.attention.attention.Backend,
         shardings: Shardings,
         seqlen: usize,
+        single: bool,
         progress: *std.Progress.Node,
     ) !CompiledModel {
         const inner: CompiledModel.Inner = switch (self.*) {
@@ -93,6 +94,7 @@ pub const LoadedModel = union(ModelType) {
                 backend,
                 shardings,
                 seqlen,
+                single,
                 progress,
             ) },
             .llama => |*m| .{ .llama = try m.compile(
@@ -102,6 +104,7 @@ pub const LoadedModel = union(ModelType) {
                 backend,
                 shardings,
                 seqlen,
+                single,
                 progress,
             ) },
             .qwen3_5 => |*m| .{ .qwen3_5 = try m.compile(
@@ -111,6 +114,7 @@ pub const LoadedModel = union(ModelType) {
                 backend,
                 shardings,
                 seqlen,
+                single,
                 progress,
             ) },
         };

@@ -102,12 +102,6 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
-        var prefill_args = try self.compiled_model.prefill_exe.args(self.allocator);
-        defer prefill_args.deinit(self.allocator);
-
-        var prefill_results = try self.compiled_model.prefill_exe.results(self.allocator);
-        defer prefill_results.deinit(self.allocator);
-
         const prefill_tokens_slice: zml.Slice = try .alloc(self.allocator, .init(.{self.seqlen}, .u32));
         defer prefill_tokens_slice.free(self.allocator);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
@@ -120,31 +114,25 @@ pub const Session = struct {
         var prefill_token_pos_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32, replicated_sharding);
         defer prefill_token_pos_buffer.deinit();
 
-        prefill_args.set(.{
-            self.model_buffers,
-            prefill_tokens_buffer,
-            prefill_token_pos_buffer,
-            &self.kv_cache_buffers,
-            &self.rng_buffers,
-            &self.attention_metadata_buffers,
+        try self.compiled_model.prefill.run(.{
+            .allocator = self.allocator,
+            .io = self.io,
+            .platform = self.platform,
+            .model_buffers = self.model_buffers,
+            .tokens_buf = &prefill_tokens_buffer,
+            .token_index_buf = &prefill_token_pos_buffer,
+            .kv_cache_buffers = &self.kv_cache_buffers,
+            .rng_buf = &self.rng_buffers,
+            .attention_metadata_buffers = &self.attention_metadata_buffers,
         });
-        self.compiled_model.prefill_exe.call(prefill_args, &prefill_results);
 
-        prefill_results.fill(.{ &prefill_tokens_buffer, &self.kv_cache_buffers, &self.rng_buffers });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
-
         self.generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
-
-        var decode_args = try self.compiled_model.decode_exe.args(self.allocator);
-        defer decode_args.deinit(self.allocator);
-
-        var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
-        defer decode_results.deinit(self.allocator);
 
         const replicated_sharding = try zml.sharding.replicatedSharding(self.platform);
 
@@ -167,17 +155,18 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, replicated_sharding);
             defer token_pos_buffer.deinit();
 
-            decode_args.set(.{
-                self.model_buffers,
-                current_token_buffer,
-                token_pos_buffer,
-                &self.kv_cache_buffers,
-                &self.rng_buffers,
-                &self.attention_metadata_buffers,
+            try self.compiled_model.decode.run(.{
+                .allocator = self.allocator,
+                .io = self.io,
+                .platform = self.platform,
+                .model_buffers = self.model_buffers,
+                .tokens_buf = &current_token_buffer,
+                .token_index_buf = &token_pos_buffer,
+                .kv_cache_buffers = &self.kv_cache_buffers,
+                .rng_buf = &self.rng_buffers,
+                .attention_metadata_buffers = &self.attention_metadata_buffers,
             });
-            self.compiled_model.decode_exe.call(decode_args, &decode_results);
 
-            decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 

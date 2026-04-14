@@ -118,9 +118,10 @@ pub const LoadedModel = struct {
         backend: zml.attention.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
+        single: bool,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, false, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, single, shardings);
         return inference.CompiledModel.init(allocator, io, @constCast(platform), self, self.inner, params, progress);
     }
 };

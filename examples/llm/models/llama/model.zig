@@ -106,9 +106,10 @@ pub const LoadedModel = struct {
         backend: zml.attention.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
+        single: bool,
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
-        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, shardings);
+        const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), backend, single, shardings);
         return inference.CompiledModel.init(allocator, io, platform, self, self.inner, params, progress);
     }
 };
@@ -212,6 +213,19 @@ pub const Model = struct {
         const new_tokens, const new_rng = self.sampleTokens(self.lm_head, out, rng, self.gen_opts);
 
         return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache, new_rng };
+    }
+
+    /// Composed-kernel finalize: final RMSNorm + LM head + sampling.
+    /// Compiled as a separate kernel when `CompilationParameters.single == false`.
+    pub fn finalize(
+        self: Model,
+        hidden: zml.Tensor,
+        tokens: zml.Tensor,
+        rng: zml.Tensor.Rng,
+    ) struct { zml.Tensor, zml.Tensor.Rng } {
+        const normalized = self.model.norm.forward(hidden);
+        const new_tokens, const new_rng = self.sampleTokens(self.lm_head, normalized, rng, self.gen_opts);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
     }
 
     pub fn sampleTokens(
@@ -366,6 +380,30 @@ pub const TransformerLayer = struct {
             .withPartitioning(.{ .d = .replicated });
 
         return .{ x2.reuseBuffer(x0), updated_kv_cache };
+    }
+
+    /// Composed-kernel variant: takes `layer_index` as a runtime tensor so the
+    /// same compiled kernel can be reused for every layer.
+    pub fn forwardComposed(
+        self: TransformerLayer,
+        x0: zml.Tensor,
+        token_index: zml.Tensor,
+        layer_index: zml.Tensor,
+        kv_cache_: KvCache,
+        attention_metadata: zml.attention.attention.Metadata,
+        attention_parameters: zml.attention.attention.Parameters,
+    ) struct { zml.Tensor, KvCache, zml.Tensor } {
+        var kv_cache = kv_cache_;
+        kv_cache.layer_index = layer_index;
+        const hidden, const updated_kv_cache = self.forward(
+            x0,
+            token_index,
+            kv_cache,
+            attention_metadata,
+            attention_parameters,
+        );
+        const new_layer_index = layer_index.add(zml.Tensor.scalar(@as(u32, 1), .u32));
+        return .{ hidden, updated_kv_cache.reuseBuffer(kv_cache_), new_layer_index.reuseBuffer(layer_index) };
     }
 };
 
