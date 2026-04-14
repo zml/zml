@@ -27,8 +27,136 @@ const Args = struct {
     ;
 };
 
+// const GemmaLayer0Mlp = struct {
+//     up_proj: zml.nn.Linear,
+//     gate_proj: zml.nn.Linear,
+//     down_proj: zml.nn.Linear,
+//     quantization_tensors: QuantizationTensors,
+
+//     const QuantizationTensors = struct {
+//         up_proj_input_scale: zml.Tensor,
+//         up_proj_scale: zml.Tensor,
+//         up_proj_scale_2: zml.Tensor,
+
+//         gate_proj_input_scale: zml.Tensor,
+//         gate_proj_scale: zml.Tensor,
+//         gate_proj_scale_2: zml.Tensor,
+
+//         down_proj_input_scale: zml.Tensor,
+//         down_proj_scale: zml.Tensor,
+//         down_proj_scale_2: zml.Tensor,
+//     };
+
+//     pub fn init(store: zml.io.TensorStore.View) !GemmaLayer0Mlp {
+//         const up_proj_store = store.withPrefix("up_proj");
+//         const gate_proj_store = store.withPrefix("gate_proj");
+//         const down_proj_store = store.withPrefix("down_proj");
+
+//         const up_weight = up_proj_store.createTensor("weight", .{ .dout, .d_packed }, null);
+//         const gate_weight = gate_proj_store.createTensor("weight", .{ .dout, .d_packed }, null);
+//         const down_weight = down_proj_store.createTensor("weight", .{ .dout, .d_packed }, null);
+
+//         const up_proj_input_scale = up_proj_store.maybeCreateTensor("input_scale", .{}, null) orelse return error.MissingQuantizationTensors;
+//         const up_proj_scale = up_proj_store.maybeCreateTensor("weight_scale", .{ .dout, .d_group }, null) orelse return error.MissingQuantizationTensors;
+//         const up_proj_scale_2 = up_proj_store.maybeCreateTensor("weight_scale_2", .{}, null) orelse return error.MissingQuantizationTensors;
+
+//         const gate_proj_input_scale = gate_proj_store.maybeCreateTensor("input_scale", .{}, null) orelse return error.MissingQuantizationTensors;
+//         const gate_proj_scale = gate_proj_store.maybeCreateTensor("weight_scale", .{ .dout, .d_group }, null) orelse return error.MissingQuantizationTensors;
+//         const gate_proj_scale_2 = gate_proj_store.maybeCreateTensor("weight_scale_2", .{}, null) orelse return error.MissingQuantizationTensors;
+
+//         const down_proj_input_scale = down_proj_store.maybeCreateTensor("input_scale", .{}, null) orelse return error.MissingQuantizationTensors;
+//         const down_proj_scale = down_proj_store.maybeCreateTensor("weight_scale", .{ .dout, .d_group }, null) orelse return error.MissingQuantizationTensors;
+//         const down_proj_scale_2 = down_proj_store.maybeCreateTensor("weight_scale_2", .{}, null) orelse return error.MissingQuantizationTensors;
+
+//         return .{
+//             .up_proj = .init(up_weight, null, .d),
+//             .gate_proj = .init(gate_weight, null, .d),
+//             .down_proj = .init(down_weight, null, .d),
+//             .quantization_tensors = .{
+//                 .up_proj_input_scale = up_proj_input_scale,
+//                 .up_proj_scale = up_proj_scale,
+//                 .up_proj_scale_2 = up_proj_scale_2,
+//                 .gate_proj_input_scale = gate_proj_input_scale,
+//                 .gate_proj_scale = gate_proj_scale,
+//                 .gate_proj_scale_2 = gate_proj_scale_2,
+//                 .down_proj_input_scale = down_proj_input_scale,
+//                 .down_proj_scale = down_proj_scale,
+//                 .down_proj_scale_2 = down_proj_scale_2,
+//             },
+//         };
+//     }
+
+//     pub fn load(
+//         self: *const GemmaLayer0Mlp,
+//         allocator: std.mem.Allocator,
+//         io: std.Io,
+//         platform: *const zml.Platform,
+//         store: *const zml.io.TensorStore,
+//         replicated: zml.sharding.Sharding,
+//     ) !zml.Bufferized(GemmaLayer0Mlp) {
+//         return zml.io.load(GemmaLayer0Mlp, self, allocator, io, platform, store, .{
+//             .parallelism = 1,
+//             .shardings = &.{replicated},
+//             .dma_chunks = 2,
+//             .dma_chunk_size = 16 * 1024 * 1024,
+//         });
+//     }
+
+//     pub fn unloadBuffers(self: *zml.Bufferized(GemmaLayer0Mlp)) void {
+//         self.up_proj.weight.deinit();
+//         if (self.up_proj.bias) |*bias| bias.deinit();
+//         self.gate_proj.weight.deinit();
+//         if (self.gate_proj.bias) |*bias| bias.deinit();
+//         self.down_proj.weight.deinit();
+//         if (self.down_proj.bias) |*bias| bias.deinit();
+
+//         self.quantization_tensors.up_proj_input_scale.deinit();
+//         self.quantization_tensors.up_proj_scale.deinit();
+//         self.quantization_tensors.up_proj_scale_2.deinit();
+//         self.quantization_tensors.gate_proj_input_scale.deinit();
+//         self.quantization_tensors.gate_proj_scale.deinit();
+//         self.quantization_tensors.gate_proj_scale_2.deinit();
+//         self.quantization_tensors.down_proj_input_scale.deinit();
+//         self.quantization_tensors.down_proj_scale.deinit();
+//         self.quantization_tensors.down_proj_scale_2.deinit();
+//     }
+
+//     pub fn forward(self: GemmaLayer0Mlp, x: zml.Tensor) zml.Tensor {
+//         const up_proj_scale_bf16 = self.quantization_tensors.up_proj_scale_2.convert(.bf16);
+//         const gate_proj_scale_bf16 = self.quantization_tensors.gate_proj_scale_2.convert(.bf16);
+//         const down_proj_scale_bf16 = self.quantization_tensors.down_proj_scale_2.convert(.bf16);
+//         const out_quantized = quantizeActivationNVFP4(x);
+//         const proj = forwardLinearDequantizeNVFP4(
+//             self.up_proj,
+//             out_quantized.block,
+//             out_quantized.scale,
+//             self.quantization_tensors.up_proj_scale,
+//             up_proj_scale_bf16,
+//         );
+
+//         var output = forwardLinearDequantizeNVFP4(
+//             self.gate_proj,
+//             out_quantized.block,
+//             out_quantized.scale,
+//             self.quantization_tensors.gate_proj_scale,
+//             gate_proj_scale_bf16,
+//         );
+//         output = output.gelu().mul(proj).rename(.{ .dout = .d });
+
+//         const activated_quant = quantizeActivationNVFP4(output);
+
+//         return forwardLinearDequantizeNVFP4(
+//             self.down_proj,
+//             activated_quant.block,
+//             activated_quant.scale,
+//             self.quantization_tensors.down_proj_scale,
+//             down_proj_scale_bf16,
+//         );
+//     }
+// };
+
 pub fn scale_dot_product(lhs_block: zml.Tensor, lhs_scale: zml.Tensor, rhs_block: zml.Tensor, rhs_scale: zml.Tensor, global_scale: zml.Tensor) zml.Tensor {
-    const output_shape = zml.Shape.init(.{ .b = lhs_block.dim(.b), .dout = rhs_block.dim(.dout) }, .bf16);
+    const output_shape = zml.Shape.init(.{ .b = lhs_block.dim(.b), .dout = rhs_block.dim(.dout) }, .f32);
     // const dequant_type: []const u8 = "BF16";
     return zml.ops.customCall(
         "__op$block_scaled_dot",
@@ -59,31 +187,77 @@ const QuantizeNVFP4Result = struct {
     scale: zml.Tensor,
 };
 
+const RmsNorm = struct {
+    weight: zml.Tensor,
+    eps: f32,
+
+    pub fn init(store: zml.io.TensorStore.View, eps: f32) RmsNorm {
+        return .{
+            .weight = store.createTensor("weight", .{.d}, .{ .d = .replicated }),
+            .eps = eps,
+        };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
+    /// L2 normalization of input tensor along `.d` axis.
+    pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
+        const x = if (input.shape().isFullyTagged()) input else input.withPartialTags(.{.d});
+        const normalized = zml.nn.rmsNorm(x, .d, self.eps);
+        return normalized.mul(self.weight.convert(x.dtype()).withTags(.{.d}).broad(x.shape()));
+    }
+};
+
 /// Quantize activations into NVFP4 blocks and per-block scales.
-///
-/// This helper is intentionally not wired in the model forward path yet.
-pub fn quantizeActivationNVFP4(x: zml.Tensor) QuantizeNVFP4Result {
+/// Matches vLLM NVFP4 quant math (global scale aware).
+pub fn quantizeActivationNVFP4(x: zml.Tensor, input_global_scale: zml.Tensor) QuantizeNVFP4Result {
     const block_size: i64 = block_config;
     const d_group = @divExact(x.dim(.d), block_size);
 
-    const quant_shape = zml.Shape.init(.{ .b = x.dim(.b), .d = x.dim(.d) }, .f4e2m1);
-    const scale_shape = zml.Shape.init(.{ .b = x.dim(.b), .d_group = d_group }, .f8e4m3fn);
+    // Reshape into blocks: [b, d_group, d_block]
+    const x_blocks = x.reshape(.{ .b = x.dim(.b), .d_group = d_group, .d_block = block_size });
 
-    const outputs: [2]zml.Tensor = zml.ops.customCall(
-        "__op$quantize",
-        .{x},
-        .{ quant_shape, scale_shape },
-        .{},
-        .{ .has_side_effect = false },
-    );
+    // amax per block
+    var amax = x_blocks.abs().max(.d_block);
+    // Ensure scale has rank-2 shape: [b, d_group]
+    amax = amax.reshape(.{ .b = x.dim(.b), .d_group = d_group });
+
+    // scale = input_global_scale * (amax * (1/6))
+    const one_sixth = zml.Tensor.scalar(@as(f32, 1.0 / 6.0), .f32);
+    const input_scale_bc = input_global_scale.broad(amax.shape());
+    var scale = amax.mul(one_sixth.broad(amax.shape())).mul(input_scale_bc);
+
+    // Clamp scale to FP8 E4M3 range (max 448) to match vLLM behavior.
+    const max_scale = zml.Tensor.scalar(@as(f32, 448.0), .f32).broad(scale.shape());
+    scale = scale.minimum(max_scale);
+
+    // output_scale = reciprocal(scale * reciprocal(input_global_scale))
+    const zero = zml.Tensor.scalar(@as(f32, 0.0), .f32);
+    const huge = zml.Tensor.scalar(@as(f32, 1e8), .f32);
+    const input_scale_inv = zml.Tensor.scalar(@as(f32, 1.0), .f32).div(input_global_scale);
+    const input_scale_inv_bc = input_scale_inv.broad(scale.shape());
+    const denom = scale.mul(input_scale_inv_bc);
+    const denom_safe = denom.add(denom.cmp(.EQ, zero.broad(denom.shape())).select(huge.broad(denom.shape()), zero.broad(denom.shape())));
+    const output_scale = zml.Tensor.scalar(@as(f32, 1.0), .f32).div(denom_safe);
+
+    // Apply output_scale to blocks and clamp to [-6, 6].
+    const output_scale_bc = output_scale.broad(x_blocks.shape());
+    var scaled_x = x_blocks.mul(output_scale_bc).reshape(.{ .b = x.dim(.b), .d = x.dim(.d) });
+    const min_val = zml.Tensor.scalar(@as(f32, -6.0), .f32).broad(scaled_x.shape());
+    const max_val = zml.Tensor.scalar(@as(f32, 6.0), .f32).broad(scaled_x.shape());
+    scaled_x = scaled_x.maximum(min_val).minimum(max_val);
 
     return .{
-        .block = outputs[0],
-        .scale = outputs[1],
+        .block = scaled_x.convert(.f4e2m1),
+        .scale = scale.convert(.f8e4m3fn),
     };
 }
 
-const GemmaLayer0Mlp = struct {
+const MatmulNVFP4 = struct {
+    pre_feedforward_layernorm: RmsNorm,
+    post_feedforward_layernorm: RmsNorm,
     up_proj: zml.nn.Linear,
     gate_proj: zml.nn.Linear,
     down_proj: zml.nn.Linear,
@@ -103,10 +277,11 @@ const GemmaLayer0Mlp = struct {
         down_proj_scale_2: zml.Tensor,
     };
 
-    pub fn init(store: zml.io.TensorStore.View) !GemmaLayer0Mlp {
-        const up_proj_store = store.withPrefix("up_proj");
-        const gate_proj_store = store.withPrefix("gate_proj");
-        const down_proj_store = store.withPrefix("down_proj");
+    pub fn init(store: zml.io.TensorStore.View) !MatmulNVFP4 {
+        const mlp_store = store.withPrefix("mlp");
+        const up_proj_store = mlp_store.withPrefix("up_proj");
+        const gate_proj_store = mlp_store.withPrefix("gate_proj");
+        const down_proj_store = mlp_store.withPrefix("down_proj");
 
         const up_weight = up_proj_store.createTensor("weight", .{ .dout, .d_packed }, null);
         const gate_weight = gate_proj_store.createTensor("weight", .{ .dout, .d_packed }, null);
@@ -125,6 +300,8 @@ const GemmaLayer0Mlp = struct {
         const down_proj_scale_2 = down_proj_store.maybeCreateTensor("weight_scale_2", .{}, null) orelse return error.MissingQuantizationTensors;
 
         return .{
+            .pre_feedforward_layernorm = RmsNorm.init(store.withPrefix("pre_feedforward_layernorm"), 1e-6),
+            .post_feedforward_layernorm = RmsNorm.init(store.withPrefix("post_feedforward_layernorm"), 1e-6),
             .up_proj = .init(up_weight, null, .d),
             .gate_proj = .init(gate_weight, null, .d),
             .down_proj = .init(down_weight, null, .d),
@@ -142,15 +319,62 @@ const GemmaLayer0Mlp = struct {
         };
     }
 
+    pub fn forward(self: MatmulNVFP4, x: zml.Tensor) zml.Tensor {
+        x.print("Input to MLP (before layernorm): ");
+        const x_norm = self.pre_feedforward_layernorm.forward(x);
+        const x_fp32 = x_norm.convert(.f32);
+
+        const up_input_scale = self.quantization_tensors.up_proj_input_scale;
+        const gate_input_scale = self.quantization_tensors.gate_proj_input_scale;
+        const down_input_scale = self.quantization_tensors.down_proj_input_scale;
+        const up_proj_scale_global = self.quantization_tensors.up_proj_scale_2.mul(up_input_scale);
+        const gate_proj_scale_global = self.quantization_tensors.gate_proj_scale_2.mul(gate_input_scale);
+        const down_proj_scale_global = self.quantization_tensors.down_proj_scale_2.mul(down_input_scale);
+
+        const x_quantized_up = quantizeActivationNVFP4(x_fp32, up_input_scale);
+
+        const up_out = forwardLinearDequantizeNVFP4(
+            self.up_proj,
+            x_quantized_up.block,
+            x_quantized_up.scale,
+            self.quantization_tensors.up_proj_scale,
+            up_proj_scale_global,
+        );
+
+        const x_quantized_gate = quantizeActivationNVFP4(x_fp32, gate_input_scale);
+        const gate_out = forwardLinearDequantizeNVFP4(
+            self.gate_proj,
+            x_quantized_gate.block,
+            x_quantized_gate.scale,
+            self.quantization_tensors.gate_proj_scale,
+            gate_proj_scale_global,
+        );
+
+        const output = gate_out.gelu().mul(up_out).rename(.{ .dout = .d });
+
+        const activated_quant = quantizeActivationNVFP4(output, down_input_scale);
+
+        const out = forwardLinearDequantizeNVFP4(
+            self.down_proj,
+            activated_quant.block,
+            activated_quant.scale,
+            self.quantization_tensors.down_proj_scale,
+            down_proj_scale_global,
+        );
+
+        const out_norm = self.post_feedforward_layernorm.forward(out.rename(.{ .dout = .d }));
+        return out_norm;
+    }
+
     pub fn load(
-        self: *const GemmaLayer0Mlp,
+        self: *const MatmulNVFP4,
         allocator: std.mem.Allocator,
         io: std.Io,
         platform: *const zml.Platform,
         store: *const zml.io.TensorStore,
         replicated: zml.sharding.Sharding,
-    ) !zml.Bufferized(GemmaLayer0Mlp) {
-        return zml.io.load(GemmaLayer0Mlp, self, allocator, io, platform, store, .{
+    ) !zml.Bufferized(MatmulNVFP4) {
+        return zml.io.load(MatmulNVFP4, self, allocator, io, platform, store, .{
             .parallelism = 1,
             .shardings = &.{replicated},
             .dma_chunks = 2,
@@ -158,7 +382,9 @@ const GemmaLayer0Mlp = struct {
         });
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(GemmaLayer0Mlp)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(MatmulNVFP4)) void {
+        RmsNorm.unloadBuffers(&self.pre_feedforward_layernorm);
+        RmsNorm.unloadBuffers(&self.post_feedforward_layernorm);
         self.up_proj.weight.deinit();
         if (self.up_proj.bias) |*bias| bias.deinit();
         self.gate_proj.weight.deinit();
@@ -175,39 +401,6 @@ const GemmaLayer0Mlp = struct {
         self.quantization_tensors.down_proj_input_scale.deinit();
         self.quantization_tensors.down_proj_scale.deinit();
         self.quantization_tensors.down_proj_scale_2.deinit();
-    }
-
-    pub fn forward(self: GemmaLayer0Mlp, x: zml.Tensor) zml.Tensor {
-        const up_proj_scale_bf16 = self.quantization_tensors.up_proj_scale_2.convert(.bf16);
-        const gate_proj_scale_bf16 = self.quantization_tensors.gate_proj_scale_2.convert(.bf16);
-        const down_proj_scale_bf16 = self.quantization_tensors.down_proj_scale_2.convert(.bf16);
-        const out_quantized = quantizeActivationNVFP4(x);
-        const proj = forwardLinearDequantizeNVFP4(
-            self.up_proj,
-            out_quantized.block,
-            out_quantized.scale,
-            self.quantization_tensors.up_proj_scale,
-            up_proj_scale_bf16,
-        );
-
-        var output = forwardLinearDequantizeNVFP4(
-            self.gate_proj,
-            out_quantized.block,
-            out_quantized.scale,
-            self.quantization_tensors.gate_proj_scale,
-            gate_proj_scale_bf16,
-        );
-        output = output.gelu().mul(proj).rename(.{ .dout = .d });
-
-        const activated_quant = quantizeActivationNVFP4(output);
-
-        return forwardLinearDequantizeNVFP4(
-            self.down_proj,
-            activated_quant.block,
-            activated_quant.scale,
-            self.quantization_tensors.down_proj_scale,
-            down_proj_scale_bf16,
-        );
     }
 };
 
@@ -278,8 +471,8 @@ pub fn main(init: std.process.Init) !void {
     var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
     defer store.deinit();
 
-    const mlp_prefix = "model.language_model.layers.0.mlp";
-    const mlp = try GemmaLayer0Mlp.init(store.view().withPrefix(mlp_prefix));
+    const mlp_prefix = "model.language_model.layers.0";
+    const mlp = try MatmulNVFP4.init(store.view().withPrefix(mlp_prefix));
 
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
@@ -296,7 +489,12 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("Loading MLP buffers", .{});
     var mlp_buffers = try mlp.load(allocator, io, platform, &store, replicated);
-    defer GemmaLayer0Mlp.unloadBuffers(&mlp_buffers);
+    defer MatmulNVFP4.unloadBuffers(&mlp_buffers);
+
+    var up_input_scale_slice = try mlp_buffers.quantization_tensors.up_proj_input_scale.toSliceAlloc(allocator, io);
+    defer up_input_scale_slice.free(allocator);
+    const up_input_scale_value = up_input_scale_slice.constItems(f32)[0];
+    _ = up_input_scale_value; // autofix
 
     const input_len = batch_dim * input_dim;
     const input_data = try allocator.alloc(BFloat16, @intCast(input_len));
@@ -305,7 +503,7 @@ pub fn main(init: std.process.Init) !void {
     var prng = std.Random.DefaultPrng.init(args.seed);
     const rng = prng.random();
     for (input_data) |*v| {
-        const sample = (rng.float(f32) * 2.0) - 1.0;
+        const sample = (rng.float(f32) * 0.2) - 0.1;
         v.* = BFloat16.fromF32(sample);
     }
 
@@ -326,11 +524,11 @@ pub fn main(init: std.process.Init) !void {
     var out_slice = try output.toSliceAlloc(allocator, io);
     defer out_slice.free(allocator);
 
-    const output_bf16 = out_slice.constItems(BFloat16);
-    const preview_len = @min(output_bf16.len, 8);
-    var output_preview_f32: [8]f32 = undefined;
+    const output_f32 = out_slice.constItems(f32);
+    const preview_len = @min(output_f32.len, 20);
+    var output_preview_f32: [20]f32 = undefined;
     for (0..preview_len) |i| {
-        output_preview_f32[i] = output_bf16[i].toF32();
+        output_preview_f32[i] = output_f32[i];
     }
 
     log.info("NVFP4 MLP run complete", .{});
