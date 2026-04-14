@@ -9,6 +9,7 @@ zig_binary(
         "conv_ops.zig",
         "image_loading.zig",
         "model.zig",
+        "text_embeddings.zig",
         "upsampler.zig",
         "video_vae.zig",
         "video_vae_encoder.zig",

@@ -22,6 +22,7 @@ const zml = @import("zml");
 const model = @import("model.zig");
 const conv_ops = @import("conv_ops.zig");
 const image_loading = @import("image_loading.zig");
+const text_embeddings = @import("text_embeddings.zig");
 const upsampler = @import("upsampler.zig");
 const video_vae = @import("video_vae.zig");
 const video_vae_encoder = @import("video_vae_encoder.zig");
@@ -67,6 +68,8 @@ const CliArgs = struct {
     bf16_attn_stage2: bool,
     dump_intermediates: bool,
     image: ?[]const u8,
+    gemma_hidden_states_pos: []const u8,
+    gemma_hidden_states_neg: []const u8,
 };
 
 fn parseArgs(it: anytype) !CliArgs {
@@ -82,8 +85,10 @@ fn parseArgs(it: anytype) !CliArgs {
         .bf16_attn_stage2 = false,
         .dump_intermediates = false,
         .image = null,
+        .gemma_hidden_states_pos = undefined,
+        .gemma_hidden_states_neg = undefined,
     };
-    var have = [_]bool{false} ** 6;
+    var have = [_]bool{false} ** 8;
 
     _ = it.next(); // exe name
 
@@ -117,6 +122,12 @@ fn parseArgs(it: anytype) !CliArgs {
             args.dump_intermediates = true;
         } else if (std.mem.eql(u8, arg, "--image")) {
             args.image = it.next() orelse return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
+            args.gemma_hidden_states_pos = it.next() orelse return error.InvalidArgs;
+            have[6] = true;
+        } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-neg")) {
+            args.gemma_hidden_states_neg = it.next() orelse return error.InvalidArgs;
+            have[7] = true;
         }
     }
 
@@ -125,7 +136,9 @@ fn parseArgs(it: anytype) !CliArgs {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
                     "--upsampler-ckpt <path> --stage1-inputs <path> " ++
-                    "--meta <path> --output-dir <path> [--seed <int>] " ++
+                    "--meta <path> --output-dir <path> " ++
+                    "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
+                    "[--seed <int>] " ++
                     "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
@@ -427,6 +440,8 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
     std.log.info("  image:             {s}", .{args.image orelse "(none)"});
+    std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos});
+    std.log.info("  gemma-hs-neg:      {s}", .{args.gemma_hidden_states_neg});
 
     // ---- Ensure output directory exists ----
     try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
@@ -453,7 +468,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed);
+    var s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.stage1_inputs, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -601,6 +616,8 @@ fn runStage1(
     dump_intermediates: bool,
     output_dir: []const u8,
     seed: u64,
+    gemma_hs_pos_path: []const u8,
+    gemma_hs_neg_path: []const u8,
 ) !Stage1Result {
     // ---- Sigma schedule ----
     const sigmas = model.computeSigmaSchedule(
@@ -650,11 +667,15 @@ fn runStage1(
 
     // Text contexts — positive AND negative for Stage 1 guidance.
     // Positive contexts are kept alive and returned for Stage 2.
-    var v_context_pos_buf = try loadBuf(allocator, io, platform, &inputs_store, "v_context_pos", sharding);
-    var a_context_pos_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_pos", sharding);
-    var v_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "v_context_neg", sharding);
+    // Compute from Gemma hidden states using the Zig EmbeddingsProcessor.
+    std.log.info("Computing text embeddings from Gemma hidden states...", .{});
+
+    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, gemma_hs_pos_path, gemma_hs_neg_path);
+    var v_context_pos_buf = emb_result.v_context_pos;
+    var a_context_pos_buf = emb_result.a_context_pos;
+    var v_context_neg_buf = emb_result.v_context_neg;
+    var a_context_neg_buf = emb_result.a_context_neg;
     defer v_context_neg_buf.deinit();
-    var a_context_neg_buf = try loadBuf(allocator, io, platform, &inputs_store, "a_context_neg", sharding);
     defer a_context_neg_buf.deinit();
 
     // ---- Generate noise and run noise init ----
@@ -2317,6 +2338,160 @@ fn runToDenoised(
     args.set(.{ sample, velocity, mask, sigma });
     exe.call(args, &results);
     return results.get(zml.Buffer);
+}
+
+// ============================================================================
+// Text Embeddings from Gemma Hidden States
+// ============================================================================
+
+const TextEmbeddingsResult = struct {
+    v_context_pos: zml.Buffer,
+    a_context_pos: zml.Buffer,
+    v_context_neg: zml.Buffer,
+    a_context_neg: zml.Buffer,
+};
+
+/// Compile and run the text embeddings processor on both pos and neg hidden states.
+/// Uses weights from the LTX checkpoint (text_embedding_projection.* and
+/// model.diffusion_model.{video,audio}_embeddings_connector.*).
+fn computeTextEmbeddings(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    ckpt_store: *zml.io.TensorStore,
+    pos_path: []const u8,
+    neg_path: []const u8,
+) !TextEmbeddingsResult {
+    // ---- Initialize processor params from checkpoint ----
+    const proc_init = text_embeddings.EmbeddingsProcessor.initParams(ckpt_store.view());
+    const processor = proc_init.processor;
+    const proc_params = proc_init.params;
+
+    // ---- Open pos hidden states to get shapes for compilation ----
+    var pos_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, pos_path) catch |err| {
+        std.log.err("Failed to open pos hidden states: {s}", .{pos_path});
+        return err;
+    };
+    defer pos_reg.deinit();
+    var pos_store: zml.io.TensorStore = .fromRegistry(allocator, &pos_reg);
+    defer pos_store.deinit();
+
+    var pos_hs_buf = try loadBuf(allocator, io, platform, &pos_store, "stacked_hidden_states", sharding);
+    defer pos_hs_buf.deinit();
+    var pos_mask_buf = try loadBuf(allocator, io, platform, &pos_store, "attention_mask", sharding);
+    defer pos_mask_buf.deinit();
+
+    std.log.info("  pos stacked_hidden_states: {s} {any}", .{ @tagName(pos_hs_buf.shape().dtype()), pos_hs_buf.shape().dims() });
+    std.log.info("  pos attention_mask:        {s} {any}", .{ @tagName(pos_mask_buf.shape().dtype()), pos_mask_buf.shape().dims() });
+
+    // ---- Compile graph ----
+    std.log.info("Compiling text embeddings processor...", .{});
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        text_embeddings.forwardEmbeddingsProcessor,
+        .{
+            &processor,
+            zml.Tensor.fromShape(pos_hs_buf.shape()),
+            zml.Tensor.fromShape(pos_mask_buf.shape()),
+            proc_params,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer exe.deinit();
+
+    // ---- Load model weights ----
+    std.log.info("Loading text embeddings weights...", .{});
+    var weight_bufs = try zml.io.load(
+        text_embeddings.EmbeddingsProcessor.Params,
+        &proc_params,
+        allocator,
+        io,
+        platform,
+        ckpt_store,
+        .{
+            .shardings = &.{sharding},
+            .parallelism = 4,
+            .dma_chunks = 4,
+            .dma_chunk_size = 16 * zml.MiB,
+        },
+    );
+    defer text_embeddings.EmbeddingsProcessor.unloadBuffers(&weight_bufs);
+
+    // ---- Run on positive hidden states ----
+    std.log.info("Running text embeddings on positive prompt...", .{});
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+
+    exe_args.set(.{ pos_hs_buf, pos_mask_buf, weight_bufs });
+    exe.call(exe_args, &results);
+
+    var pos_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
+    const v_context_pos = pos_out.v_context;
+    const a_context_pos = pos_out.a_context;
+    pos_out.binary_mask.deinit();
+
+    std.log.info("  v_context_pos: {s} {any}", .{ @tagName(v_context_pos.shape().dtype()), v_context_pos.shape().dims() });
+    std.log.info("  a_context_pos: {s} {any}", .{ @tagName(a_context_pos.shape().dtype()), a_context_pos.shape().dims() });
+
+    // ---- Run on negative hidden states ----
+    std.log.info("Running text embeddings on negative prompt...", .{});
+    var neg_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, neg_path) catch |err| {
+        std.log.err("Failed to open neg hidden states: {s}", .{neg_path});
+        return err;
+    };
+    defer neg_reg.deinit();
+    var neg_store: zml.io.TensorStore = .fromRegistry(allocator, &neg_reg);
+    defer neg_store.deinit();
+
+    var neg_hs_buf = try loadBuf(allocator, io, platform, &neg_store, "stacked_hidden_states", sharding);
+    defer neg_hs_buf.deinit();
+    var neg_mask_buf = try loadBuf(allocator, io, platform, &neg_store, "attention_mask", sharding);
+    defer neg_mask_buf.deinit();
+
+    // Reuse the same compiled exe — validate that neg shapes match pos (both must be S=1024).
+    if (!neg_hs_buf.shape().eql(pos_hs_buf.shape())) {
+        std.log.err(
+            "Negative hidden states shape {any} ({s}) does not match positive {any} ({s}). " ++
+                "Both must have the same shape/dtype for the compiled graph.",
+            .{
+                neg_hs_buf.shape().dims(), @tagName(neg_hs_buf.shape().dtype()),
+                pos_hs_buf.shape().dims(), @tagName(pos_hs_buf.shape().dtype()),
+            },
+        );
+        return error.ShapeMismatch;
+    }
+    if (!neg_mask_buf.shape().eql(pos_mask_buf.shape())) {
+        std.log.err(
+            "Negative attention mask shape {any} ({s}) does not match positive {any} ({s}). " ++
+                "Both must have the same shape/dtype for the compiled graph.",
+            .{
+                neg_mask_buf.shape().dims(), @tagName(neg_mask_buf.shape().dtype()),
+                pos_mask_buf.shape().dims(), @tagName(pos_mask_buf.shape().dtype()),
+            },
+        );
+        return error.ShapeMismatch;
+    }
+    exe_args.set(.{ neg_hs_buf, neg_mask_buf, weight_bufs });
+    exe.call(exe_args, &results);
+
+    var neg_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
+    const v_context_neg = neg_out.v_context;
+    const a_context_neg = neg_out.a_context;
+    neg_out.binary_mask.deinit();
+
+    std.log.info("  v_context_neg: {s} {any}", .{ @tagName(v_context_neg.shape().dtype()), v_context_neg.shape().dims() });
+    std.log.info("  a_context_neg: {s} {any}", .{ @tagName(a_context_neg.shape().dtype()), a_context_neg.shape().dims() });
+
+    return .{
+        .v_context_pos = v_context_pos,
+        .a_context_pos = a_context_pos,
+        .v_context_neg = v_context_neg,
+        .a_context_neg = a_context_neg,
+    };
 }
 
 fn loadBuf(

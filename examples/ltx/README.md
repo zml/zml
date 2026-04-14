@@ -7,8 +7,8 @@ generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
 
 The pipeline produces video+audio from a text prompt, with optional image conditioning:
 
-1. **Python** — Text encoding (Gemma/T5 prompt → context embeddings) + position/mask computation
-2. **Zig** — Everything else on GPU: noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
+1. **Python** — Gemma forward pass (hidden states) + position/mask computation
+2. **Zig** — Everything else on GPU: text embedding post-processing (connector blocks), noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
 
 When `--image` is provided, the first frame is conditioned on a reference image
 via VAE encoding + per-token mask blending.
@@ -19,10 +19,11 @@ passing GPU buffers between phases without intermediate files.
 ```
 Python (export)                Zig (inference)
 ───────────────                ──────────────────────────────────────────────────
-text encoding ──┐              Noise generation (Box-Muller, seeded RNG)
-positions       ├─→ inputs ──→ Stage 1 (30 steps × 4 passes)
-masks           │              Bridge (upsample 2×, re-noise)
-clean latents   ┘              Stage 2 (3 steps × 1 pass, distilled sigmas)
+Gemma forward ──┐              Text embedding post-processing (connectors)
+positions       ├─→ inputs ──→ Noise generation (Box-Muller, seeded RNG)
+masks           │              Stage 1 (30 steps × 4 passes)
+clean latents   ┘              Bridge (upsample 2×, re-noise)
+                               Stage 2 (3 steps × 1 pass, distilled sigmas)
                                Video VAE decode → RGB frames
                                Audio VAE decode → vocoder + BWE → waveform
                                ffmpeg mux → output.mp4
@@ -41,17 +42,20 @@ clean latents   ┘              Stage 2 (3 steps × 1 pass, distilled sigmas)
 | `vocoder.zig` | Vocoder + BWE (BigVGAN, sinc resampler, STFT, mel projection) |
 | `video_vae_encoder.zig` | Video VAE encoder (for image conditioning) |
 | `image_loading.zig` | JPEG/PNG loading via stb_image, bilinear resize, center crop, bf16 normalize |
-| `inference.zig` | **Unified pipeline**: noise gen → Stage 1 → bridge → Stage 2 → VAE decode → vocoder in one binary |
+| `text_embeddings.zig` | Text embedding post-processing: FeatureExtractorV2 + Embeddings1DConnector (8 transformer blocks, SPLIT RoPE) |
+| `inference.zig` | **Unified pipeline**: text embeddings → noise gen → Stage 1 → bridge → Stage 2 → VAE decode → vocoder in one binary |
 
 ### Python
 | File | Purpose |
 |------|---------|
-| `export_pipeline.py` | Run full Python reference pipeline; export text embeddings, positions, masks, and metadata for Zig inference |
+| `export_pipeline.py` | Run full Python reference pipeline; export Gemma hidden states, positions, masks, and metadata for Zig inference |
 
 ## What `export_pipeline.py` does
 
 The export script runs the **entire** LTX-2.3 pipeline in Python and captures
-intermediate states at specific points using callback hooks.
+intermediate states at specific points using callback hooks. It also runs the
+Gemma forward pass and saves the raw hidden states as sidecar files — the
+text embedding post-processing (connectors) is done in Zig.
 
 ### How capture works: the `DiffusionStage.__call__` → `loop` callback
 
@@ -73,8 +77,10 @@ the denoising loop.
 
 | File | Contents |
 |------|----------|
-| `unconditioned_stage1_inputs.safetensors` | 12 tensors (see below) — always produced. Used for input by Zig |
-| `conditioned_stage1_inputs.safetensors` | Same 12 tensors but with image conditioning applied (only with `--image`). Only for debug purpose |
+| `pos_hidden_states.safetensors` | Gemma hidden states for positive prompt (`stacked_hidden_states` + `attention_mask`). Used by Zig |
+| `neg_hidden_states.safetensors` | Gemma hidden states for negative prompt. Used by Zig |
+| `unconditioned_stage1_inputs.safetensors` | 8 tensors (see below) — always produced. Used for input by Zig |
+| `conditioned_stage1_inputs.safetensors` | Same 8 tensors but with image conditioning applied (only with `--image`). Only for debug purpose |
 | `conditioned_stage2_inputs.safetensors` | Stage 2 captured state + recovered noise (only with `--image`). Only for debug purpose |
 | `stage2_noise.safetensors` | Recovered Stage 2 noise (kept for reference; **not used by Zig** — Zig generates its own. Only for debug purpose) |
 | `pipeline_meta.json` | Latent geometry, guidance params, generation config. Used for metadata by Zig |
@@ -84,7 +90,7 @@ the denoising loop.
 
 ### Tensors in `unconditioned_stage1_inputs.safetensors`
 
-These are the 12 tensors that Zig loads at runtime:
+These are the 8 tensors that Zig loads at runtime:
 
 | Tensor | Shape (example: 1024×1536, 121 frames) | What it is |
 |--------|----------------------------------------|------------|
@@ -94,16 +100,12 @@ These are the 12 tensors that Zig loads at runtime:
 | `audio_clean_latent` | `[1, 1020, 128]` | Same for audio (always zeros) |
 | `video_positions` | `[1, 12240, 3]` | RoPE position ids `[t, h, w]` — deterministic from latent geometry |
 | `audio_positions` | `[1, 1020, 3]` | Same for audio |
-| `v_context_pos` | `[1, S, 4096]` | Gemma positive prompt encoding (video) |
-| `a_context_pos` | `[1, S, 2048]` | T5 positive prompt encoding (audio) |
-| `v_context_neg` | `[1, S, 4096]` | Gemma negative prompt encoding (video) |
-| `a_context_neg` | `[1, S, 2048]` | T5 negative prompt encoding (audio) |
 | `video_latent` | `[1, 12240, 128]` | Pre-noised video latent (**not used by Zig** — Zig generates its own noise) |
 | `audio_latent` | `[1, 1020, 128]` | Pre-noised audio latent (**not used by Zig** — Zig generates its own noise) |
 
-Zig loads 10 of these 12 tensors (skips `video_latent` and `audio_latent` since
-noise is generated natively). The text embeddings are the main remaining Python
-dependency — they require running Gemma 3 (12B) and T5 inference.
+Zig loads 6 of these 8 tensors (skips `video_latent` and `audio_latent` since
+noise is generated natively). Text embeddings (context vectors) are computed in
+Zig from the Gemma hidden states via `text_embeddings.zig`.
 
 ## Running the Unified Pipeline
 
@@ -134,7 +136,9 @@ python examples/ltx/export_pipeline.py \
 ```
 
 This produces:
-- `$OUT/unconditioned_stage1_inputs.safetensors` — text embeddings, positions, denoise masks, clean latents (12 tensors described above)
+- `$OUT/pos_hidden_states.safetensors` — Gemma hidden states (positive prompt)
+- `$OUT/neg_hidden_states.safetensors` — Gemma hidden states (negative prompt)
+- `$OUT/unconditioned_stage1_inputs.safetensors` — positions, denoise masks, clean latents (8 tensors described above)
 - `$OUT/pipeline_meta.json` — latent geometry and guidance parameters
 
 To generate with image conditioning, add `--image /path/to/image.jpg`.
@@ -150,6 +154,8 @@ bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference 
   --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
   --stage1-inputs $OUT/unconditioned_stage1_inputs.safetensors \
   --meta $OUT/pipeline_meta.json \
+  --gemma-hidden-states-pos $OUT/pos_hidden_states.safetensors \
+  --gemma-hidden-states-neg $OUT/neg_hidden_states.safetensors \
   --output-dir $OUT/unified \
   --bf16-attn-stage2
 ```
@@ -159,6 +165,8 @@ This runs the full pipeline on GPU and writes `$OUT/unified/output.mp4` directly
 **Flags:**
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--gemma-hidden-states-pos <path>` | (required) | Gemma hidden states for positive prompt |
+| `--gemma-hidden-states-neg <path>` | (required) | Gemma hidden states for negative prompt |
 | `--seed <int>` | 42 | RNG seed for noise generation (all stages) |
 | `--bf16-attn-stage1` | off | Use bf16 attention in Stage 1 (saves VRAM) |
 | `--bf16-attn-stage2` | off | Use bf16 attention in Stage 2 (recommended — avoids OOM after spatial upsample) |
@@ -187,3 +195,8 @@ In image-conditioned mode, the denoise mask and clean latent encode the conditio
 
 Noise generation and sigma schedule computation were migrated from Python to Zig
 (Box-Muller via `Tensor.Rng`, logistic sigma schedule in `computeSigmaSchedule()`).
+
+Text embedding post-processing (FeatureExtractorV2 + Embeddings1DConnector with
+8 transformer blocks, SPLIT RoPE, gated attention) was migrated from Python to
+Zig. Python now only runs the Gemma forward pass; the connector blocks that
+transform hidden states into video/audio context embeddings run entirely in Zig.
