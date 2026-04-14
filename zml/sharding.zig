@@ -916,8 +916,18 @@ pub const PhysicalMesh = struct {
         return CoordsTopology.buildMeshNode(allocator, indexed, axis_sizes[0..rank], axis_tags[0..rank], axis_strides[0..rank], 0, 0);
     }
 
-    pub fn neuron(_: std.mem.Allocator, _: []const PlatformDevice) !PhysicalNode {
-        stdx.debug.panic("neuron topology not implemented", .{});
+    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
+
+        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+
+        return .{
+            .branch = .{
+                .tag = .link,
+                .geometry = .point_to_point,
+                .children = nodes,
+            },
+        };
     }
 };
 
