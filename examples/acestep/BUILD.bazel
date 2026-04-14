@@ -13,6 +13,12 @@ zig_binary(
         "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//activations.safetensors",
     ],
     main = "main.zig",
+    srcs = [
+        "main.zig",
+        "acellm.zig",
+        "inference.zig",
+        "aceemb.zig",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//bazel",
