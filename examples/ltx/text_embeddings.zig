@@ -33,8 +33,8 @@ const CONNECTOR_ROPE_THETA: f64 = 10000.0;
 /// Max positional embedding position for connectors.
 const CONNECTOR_MAX_POS: i64 = 4096;
 
-/// Maximum number of transformer blocks in a connector.
-const MAX_CONNECTOR_BLOCKS: usize = 8;
+/// Number of transformer blocks in each connector (LTX-2.3 requires exactly 8).
+const NUM_CONNECTOR_BLOCKS: usize = 8;
 
 // ============================================================================
 // Feature Extractor V2
@@ -135,11 +135,9 @@ pub const FeatureExtractorV2 = struct {
 // ============================================================================
 // The connector uses the same Attention architecture as the main transformer
 // (QKV + q/k RMSNorm + RoPE + gated attention + SDPA + output projection).
-// However, the connector MAY or MAY NOT have gated attention.
-// We detect this from whether the checkpoint contains to_gate_logits weights.
+// Gated attention is required — num_heads is inferred from the gate weight shape.
 
 pub const ConnectorAttention = struct {
-    has_gated_attention: bool,
     num_heads: usize,
 
     pub const Params = struct {
@@ -148,7 +146,7 @@ pub const ConnectorAttention = struct {
         to_q: zml.nn.Linear,
         to_k: zml.nn.Linear,
         to_v: zml.nn.Linear,
-        to_gate_logits: ?zml.nn.Linear,
+        to_gate_logits: zml.nn.Linear,
         to_out: zml.nn.Linear,
 
         pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
@@ -160,37 +158,29 @@ pub const ConnectorAttention = struct {
             if (params.to_k.bias) |*b| b.deinit();
             params.to_v.weight.deinit();
             if (params.to_v.bias) |*b| b.deinit();
-            if (params.to_gate_logits) |*gate| {
-                gate.weight.deinit();
-                if (gate.bias) |*b| b.deinit();
-            }
+            params.to_gate_logits.weight.deinit();
+            if (params.to_gate_logits.bias) |*b| b.deinit();
             params.to_out.weight.deinit();
             if (params.to_out.bias) |*b| b.deinit();
         }
     };
 
-    /// Initialize attention params, detecting gated attention from checkpoint.
+    /// Initialize attention params from checkpoint. Gated attention is required:
+    /// num_heads is inferred from the gate weight shape.
     /// store should point to the attn1 prefix, e.g.:
     ///   model.diffusion_model.video_embeddings_connector.transformer_1d_blocks.0.attn1.
     pub fn initParams(store: zml.io.TensorStore.View) struct { attn: ConnectorAttention, params: Params } {
         const to_out_store = store.withPrefix("to_out").withLayer(0);
-        const has_gate = store.hasKey("to_gate_logits.weight");
 
         const q_weight = store.withPrefix("to_q").createTensor("weight", .{ .d_q, .d }, null);
-        const gate_weight = if (has_gate) store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, null) else null;
+        const gate_weight = store.withPrefix("to_gate_logits").createTensor("weight", .{ .h, .d }, null);
 
         // Infer num_heads from gate weight (exact heads count).
         // Python: gate = nn.Linear(query_dim, heads) → gate weight[0] = num_heads exactly.
-        const num_heads: usize = if (gate_weight) |gw|
-            @intCast(gw.dim(.h))
-        else
-            @panic("Cannot infer num_heads for connector attention: " ++
-                "the checkpoint does not contain 'to_gate_logits.weight' at this prefix. " ++
-                "Gated attention is required — verify the LTX checkpoint includes gate weights " ++
-                "for the embeddings connector blocks.");
+        const num_heads: usize = @intCast(gate_weight.dim(.h));
 
         return .{
-            .attn = .{ .has_gated_attention = has_gate, .num_heads = num_heads },
+            .attn = .{ .num_heads = num_heads },
             .params = .{
                 .q_norm_weight = store.withPrefix("q_norm").createTensor("weight", .{.d_q}, null),
                 .k_norm_weight = store.withPrefix("k_norm").createTensor("weight", .{.d_k}, null),
@@ -209,11 +199,11 @@ pub const ConnectorAttention = struct {
                     store.withPrefix("to_v").createTensor("bias", .{.d_v}, null),
                     .d,
                 ),
-                .to_gate_logits = if (gate_weight) |gw| zml.nn.Linear.init(
-                    gw,
+                .to_gate_logits = .init(
+                    gate_weight,
                     store.withPrefix("to_gate_logits").createTensor("bias", .{.h}, null),
                     .d,
-                ) else null,
+                ),
                 .to_out = .init(
                     to_out_store.createTensor("weight", .{ .d, .d_v }, null),
                     to_out_store.createTensor("bias", .{.d}, null),
@@ -275,22 +265,20 @@ pub const ConnectorAttention = struct {
             .{ .attn_mask = sdpa_mask },
         ).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
-        // Optional gated attention: gates = 2 * sigmoid(logits)
+        // Gated attention: gates = 2 * sigmoid(logits)
         // Python: gate_logits = self.to_gate_logits(x) → [B, T, H]
         //         out = out.view(B, T, H, D) * (2 * sigmoid(gate_logits)).unsqueeze(-1)
         //         out = out.view(B, T, H*D)
-        if (self.has_gated_attention) {
-            if (params.to_gate_logits) |gate_linear| {
-                var gate_logits = x32.dot(gate_linear.weight.convert(.f32), .d);
-                if (gate_linear.bias) |bias| {
-                    gate_logits = gate_logits.add(bias.convert(.f32).broad(gate_logits.shape()));
-                }
-                // gate_logits is [B, T, H] — rename .t → .q and add .hd=1 for broadcasting
-                const gate = gate_logits.sigmoid().scale(2.0)
-                    .rename(.{ .t = .q })
-                    .insertAxes(3, .{.hd}); // [B, Q, H, HD=1]
-                attn = attn.mul(gate.broad(attn.shape()));
+        {
+            var gate_logits = x32.dot(params.to_gate_logits.weight.convert(.f32), .d);
+            if (params.to_gate_logits.bias) |bias| {
+                gate_logits = gate_logits.add(bias.convert(.f32).broad(gate_logits.shape()));
             }
+            // gate_logits is [B, T, H] — rename .t → .q and add .hd=1 for broadcasting
+            const gate = gate_logits.sigmoid().scale(2.0)
+                .rename(.{ .t = .q })
+                .insertAxes(3, .{.hd}); // [B, Q, H, HD=1]
+            attn = attn.mul(gate.broad(attn.shape()));
         }
 
         // Merge heads and output projection
@@ -367,17 +355,16 @@ pub const ConnectorBlock = struct {
 pub const Embeddings1DConnector = struct {
     num_heads: usize,
     inner_dim: i64,
-    num_blocks: usize,
-    blocks: [MAX_CONNECTOR_BLOCKS]ConnectorBlock,
+    blocks: [NUM_CONNECTOR_BLOCKS]ConnectorBlock,
 
     pub const Params = struct {
         learnable_registers: Tensor,
-        block_params: [MAX_CONNECTOR_BLOCKS]ConnectorBlock.Params,
+        block_params: [NUM_CONNECTOR_BLOCKS]ConnectorBlock.Params,
     };
 
-    pub fn unloadBuffers(self: Embeddings1DConnector, params: *zml.Bufferized(Params)) void {
+    pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
         params.learnable_registers.deinit();
-        for (params.block_params[0..self.num_blocks]) |*bp| {
+        for (&params.block_params) |*bp| {
             ConnectorBlock.Params.unloadBuffers(bp);
         }
     }
@@ -387,37 +374,38 @@ pub const Embeddings1DConnector = struct {
     pub fn initParams(store: zml.io.TensorStore.View) struct { connector: Embeddings1DConnector, params: Params } {
         const blocks_store = store.withPrefix("transformer_1d_blocks");
 
-        // Detect number of blocks by probing for layer keys.
-        var num_blocks: usize = 0;
-        var block_inits: [MAX_CONNECTOR_BLOCKS]ConnectorBlock.InitResult = undefined;
-        while (num_blocks < MAX_CONNECTOR_BLOCKS) : (num_blocks += 1) {
-            const layer_store = blocks_store.withLayer(num_blocks).withPrefix("attn1").withPrefix("to_q");
-            if (!layer_store.hasKey("weight")) break;
-            block_inits[num_blocks] = ConnectorBlock.initParams(blocks_store.withLayer(num_blocks));
+        // Load all NUM_CONNECTOR_BLOCKS blocks. LTX-2.3 requires exactly this many.
+        var block_inits: [NUM_CONNECTOR_BLOCKS]ConnectorBlock.InitResult = undefined;
+        for (0..NUM_CONNECTOR_BLOCKS) |i| {
+            const layer_store = blocks_store.withLayer(i).withPrefix("attn1").withPrefix("to_q");
+            if (!layer_store.hasKey("weight")) {
+                std.debug.panic(
+                    "Connector block {d} not found in checkpoint (expected {d} blocks). " ++
+                        "This implementation requires exactly {d} transformer blocks per connector.",
+                    .{ i, NUM_CONNECTOR_BLOCKS, NUM_CONNECTOR_BLOCKS },
+                );
+            }
+            block_inits[i] = ConnectorBlock.initParams(blocks_store.withLayer(i));
         }
 
-        if (num_blocks == 0) @panic("No connector blocks found in checkpoint");
-
-        // Use num_heads from block 0's attention (inferred from gate or Q weight).
+        // Use num_heads from block 0's attention (inferred from gate weight shape).
         const num_heads = block_inits[0].block.attn.num_heads;
         const inner_dim = block_inits[0].params.attn.to_q.weight.dim(.d_q);
 
-        std.log.info("Connector: num_heads={}, inner_dim={}, head_dim={}, num_blocks={}, has_gate={}", .{
-            num_heads,  inner_dim,                                     @divExact(inner_dim, @as(i64, @intCast(num_heads))),
-            num_blocks, block_inits[0].block.attn.has_gated_attention,
+        std.log.info("Connector: num_heads={}, inner_dim={}, head_dim={}, num_blocks={}", .{
+            num_heads, inner_dim, @divExact(inner_dim, @as(i64, @intCast(num_heads))), NUM_CONNECTOR_BLOCKS,
         });
 
         var connector: Embeddings1DConnector = .{
             .num_heads = num_heads,
             .inner_dim = inner_dim,
-            .num_blocks = num_blocks,
             .blocks = undefined,
         };
         var params: Params = .{
             .learnable_registers = store.createTensor("learnable_registers", .{ .n_reg, .d }, null),
             .block_params = undefined,
         };
-        for (0..num_blocks) |i| {
+        for (0..NUM_CONNECTOR_BLOCKS) |i| {
             connector.blocks[i] = block_inits[i].block;
             params.block_params[i] = block_inits[i].params;
         }
@@ -457,7 +445,7 @@ pub const Embeddings1DConnector = struct {
 
         // 3. Run transformer blocks.
         //    After register replacement, mask is all zeros (attend everywhere) → pass null.
-        for (0..self.num_blocks) |i| {
+        for (0..NUM_CONNECTOR_BLOCKS) |i| {
             hidden_states = self.blocks[i].forward(
                 hidden_states,
                 params.block_params[i],
@@ -635,10 +623,10 @@ pub const EmbeddingsProcessor = struct {
         audio_connector: Embeddings1DConnector.Params,
     };
 
-    pub fn unloadBuffers(self: EmbeddingsProcessor, params: *zml.Bufferized(Params)) void {
+    pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
         FeatureExtractorV2.Params.unloadBuffers(&params.feature_extractor);
-        self.video_connector.unloadBuffers(&params.video_connector);
-        self.audio_connector.unloadBuffers(&params.audio_connector);
+        Embeddings1DConnector.unloadBuffers(&params.video_connector);
+        Embeddings1DConnector.unloadBuffers(&params.audio_connector);
     }
 
     pub const Result = struct {

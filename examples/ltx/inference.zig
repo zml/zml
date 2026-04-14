@@ -2417,7 +2417,7 @@ fn computeTextEmbeddings(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
-    defer processor.unloadBuffers(&weight_bufs);
+    defer text_embeddings.EmbeddingsProcessor.unloadBuffers(&weight_bufs);
 
     // ---- Run on positive hidden states ----
     std.log.info("Running text embeddings on positive prompt...", .{});
