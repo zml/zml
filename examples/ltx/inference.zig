@@ -2452,7 +2452,29 @@ fn computeTextEmbeddings(
     var neg_mask_buf = try loadBuf(allocator, io, platform, &neg_store, "attention_mask", sharding);
     defer neg_mask_buf.deinit();
 
-    // Reuse the same compiled exe (same shapes — S=1024 always).
+    // Reuse the same compiled exe — validate that neg shapes match pos (both must be S=1024).
+    if (!neg_hs_buf.shape().eql(pos_hs_buf.shape())) {
+        std.log.err(
+            "Negative hidden states shape {any} ({s}) does not match positive {any} ({s}). " ++
+                "Both must have the same shape/dtype for the compiled graph.",
+            .{
+                neg_hs_buf.shape().dims(),  @tagName(neg_hs_buf.shape().dtype()),
+                pos_hs_buf.shape().dims(), @tagName(pos_hs_buf.shape().dtype()),
+            },
+        );
+        return error.ShapeMismatch;
+    }
+    if (!neg_mask_buf.shape().eql(pos_mask_buf.shape())) {
+        std.log.err(
+            "Negative attention mask shape {any} ({s}) does not match positive {any} ({s}). " ++
+                "Both must have the same shape/dtype for the compiled graph.",
+            .{
+                neg_mask_buf.shape().dims(),  @tagName(neg_mask_buf.shape().dtype()),
+                pos_mask_buf.shape().dims(), @tagName(pos_mask_buf.shape().dtype()),
+            },
+        );
+        return error.ShapeMismatch;
+    }
     exe_args.set(.{ neg_hs_buf, neg_mask_buf, weight_bufs });
     exe.call(exe_args, &results);
 
