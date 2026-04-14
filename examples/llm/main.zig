@@ -32,7 +32,7 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
         \\
     ;
