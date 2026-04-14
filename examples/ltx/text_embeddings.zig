@@ -52,6 +52,13 @@ pub const FeatureExtractorV2 = struct {
     pub const Params = struct {
         video_linear: zml.nn.Linear,
         audio_linear: zml.nn.Linear,
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            params.video_linear.weight.deinit();
+            if (params.video_linear.bias) |*b| b.deinit();
+            params.audio_linear.weight.deinit();
+            if (params.audio_linear.bias) |*b| b.deinit();
+        }
     };
 
     /// Initialize feature extractor params from checkpoint store.
@@ -143,6 +150,23 @@ pub const ConnectorAttention = struct {
         to_v: zml.nn.Linear,
         to_gate_logits: ?zml.nn.Linear,
         to_out: zml.nn.Linear,
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            params.q_norm_weight.deinit();
+            params.k_norm_weight.deinit();
+            params.to_q.weight.deinit();
+            if (params.to_q.bias) |*b| b.deinit();
+            params.to_k.weight.deinit();
+            if (params.to_k.bias) |*b| b.deinit();
+            params.to_v.weight.deinit();
+            if (params.to_v.bias) |*b| b.deinit();
+            if (params.to_gate_logits) |*gate| {
+                gate.weight.deinit();
+                if (gate.bias) |*b| b.deinit();
+            }
+            params.to_out.weight.deinit();
+            if (params.to_out.bias) |*b| b.deinit();
+        }
     };
 
     /// Initialize attention params, detecting gated attention from checkpoint.
@@ -160,7 +184,10 @@ pub const ConnectorAttention = struct {
         const num_heads: usize = if (gate_weight) |gw|
             @intCast(gw.dim(.h))
         else
-            @panic("Cannot infer num_heads: no gate weight found and head_dim unknown");
+            @panic("Cannot infer num_heads for connector attention: " ++
+            "the checkpoint does not contain 'to_gate_logits.weight' at this prefix. " ++
+            "Gated attention is required — verify the LTX checkpoint includes gate weights " ++
+            "for the embeddings connector blocks.");
 
         return .{
             .attn = .{ .has_gated_attention = has_gate, .num_heads = num_heads },
@@ -289,6 +316,11 @@ pub const ConnectorBlock = struct {
     pub const Params = struct {
         attn: ConnectorAttention.Params,
         ff: model.FeedForward.Params,
+
+        pub fn unloadBuffers(params: *zml.Bufferized(Params)) void {
+            ConnectorAttention.Params.unloadBuffers(&params.attn);
+            model.FeedForward.Params.unloadBuffers(&params.ff);
+        }
     };
 
     pub const InitResult = struct { block: ConnectorBlock, params: Params };
@@ -342,6 +374,13 @@ pub const Embeddings1DConnector = struct {
         learnable_registers: Tensor,
         block_params: [MAX_CONNECTOR_BLOCKS]ConnectorBlock.Params,
     };
+
+    pub fn unloadBuffers(self: Embeddings1DConnector, params: *zml.Bufferized(Params)) void {
+        params.learnable_registers.deinit();
+        for (params.block_params[0..self.num_blocks]) |*bp| {
+            ConnectorBlock.Params.unloadBuffers(bp);
+        }
+    }
 
     /// Initialize connector from checkpoint store.
     /// store should point to e.g. model.diffusion_model.video_embeddings_connector.
@@ -595,6 +634,12 @@ pub const EmbeddingsProcessor = struct {
         video_connector: Embeddings1DConnector.Params,
         audio_connector: Embeddings1DConnector.Params,
     };
+
+    pub fn unloadBuffers(self: EmbeddingsProcessor, params: *zml.Bufferized(Params)) void {
+        FeatureExtractorV2.Params.unloadBuffers(&params.feature_extractor);
+        self.video_connector.unloadBuffers(&params.video_connector);
+        self.audio_connector.unloadBuffers(&params.audio_connector);
+    }
 
     pub const Result = struct {
         v_context: Tensor,

@@ -2403,7 +2403,7 @@ fn computeTextEmbeddings(
 
     // ---- Load model weights ----
     std.log.info("Loading text embeddings weights...", .{});
-    const weight_bufs = try zml.io.load(
+    var weight_bufs = try zml.io.load(
         text_embeddings.EmbeddingsProcessor.Params,
         &proc_params,
         allocator,
@@ -2417,6 +2417,7 @@ fn computeTextEmbeddings(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
+    defer processor.unloadBuffers(&weight_bufs);
 
     // ---- Run on positive hidden states ----
     std.log.info("Running text embeddings on positive prompt...", .{});
