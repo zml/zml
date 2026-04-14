@@ -1,5 +1,6 @@
 const std = @import("std");
 
+pub const hftokenizers = @import("hftokenizers");
 pub const iree = @import("iree");
 pub const sentencepiece = @import("sentencepiece");
 
@@ -8,6 +9,7 @@ pub const homemade = @import("homemade.zig");
 const log = std.log.scoped(.@"zml/tokenizer");
 
 const Tokenizers = enum {
+    hftokenizers,
     iree,
     sentencepiece,
     homemade,
@@ -15,6 +17,7 @@ const Tokenizers = enum {
 
 pub const Tokenizer = union(Tokenizers) {
     pub const Encoder = union(Tokenizers) {
+        hftokenizers: hftokenizers.Encoder,
         iree: iree.Tokenizer.Encoder,
         sentencepiece: sentencepiece.Encoder,
         homemade: homemade.Encoder,
@@ -171,6 +174,7 @@ pub const Tokenizer = union(Tokenizers) {
     };
 
     pub const Decoder = union(Tokenizers) {
+        hftokenizers: hftokenizers.Decoder,
         iree: iree.Tokenizer.Decoder,
         sentencepiece: sentencepiece.Decoder,
         homemade: homemade.Decoder,
@@ -241,24 +245,28 @@ pub const Tokenizer = union(Tokenizers) {
         }
     };
 
+    hftokenizers: *hftokenizers.HFTokenizer,
     iree: iree.Tokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
     homemade: *homemade.Tokenizer,
 
     pub fn fromFile(allocator: std.mem.Allocator, io: std.Io, model: []const u8) !Tokenizer {
+        _ = io;
+        _ = allocator;
         if (std.mem.endsWith(u8, model, ".pb")) {
             return .{ .sentencepiece = try .fromFile(model) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .iree = try .fromFile(allocator, io, model) };
+            return .{ .hftokenizers = try .fromFile(model) };
         }
 
         return error.InvalidArgument;
     }
 
     pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
+        _ = allocator;
         if (bytes[0] == '{') {
-            return .{ .iree = try .fromBytes(allocator, bytes) };
+            return .{ .hftokenizers = try .fromBytes(bytes) };
         }
         return .{ .sentencepiece = try .fromBytes(bytes) };
     }

@@ -1,15 +1,17 @@
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_test")
+load("@zml//bazel:zig_srcs.bzl", "zig_srcs")
 
 zig_library(
     name = "tokenizer",
+    tags = ["manual"],
     srcs = ["homemade.zig"],
     import_name = "zml/tokenizer",
     main = "tokenizer.zig",
-    tags = ["manual"],
     visibility = ["//visibility:public"],
     deps = [
         "//ffi:zig",
         "//stdx",
+        "//zml/tokenizer/hftokenizers",
         "//zml/tokenizer/iree",
         "//zml/tokenizer/sentencepiece",
     ],
@@ -28,7 +30,7 @@ zig_binary(
 zig_test(
     name = "test",
     deps = [
-        ":tokenizer",
+        ":tokenizer"
     ],
 )
 
