@@ -2458,7 +2458,7 @@ fn computeTextEmbeddings(
             "Negative hidden states shape {any} ({s}) does not match positive {any} ({s}). " ++
                 "Both must have the same shape/dtype for the compiled graph.",
             .{
-                neg_hs_buf.shape().dims(),  @tagName(neg_hs_buf.shape().dtype()),
+                neg_hs_buf.shape().dims(), @tagName(neg_hs_buf.shape().dtype()),
                 pos_hs_buf.shape().dims(), @tagName(pos_hs_buf.shape().dtype()),
             },
         );
@@ -2469,7 +2469,7 @@ fn computeTextEmbeddings(
             "Negative attention mask shape {any} ({s}) does not match positive {any} ({s}). " ++
                 "Both must have the same shape/dtype for the compiled graph.",
             .{
-                neg_mask_buf.shape().dims(),  @tagName(neg_mask_buf.shape().dtype()),
+                neg_mask_buf.shape().dims(), @tagName(neg_mask_buf.shape().dtype()),
                 pos_mask_buf.shape().dims(), @tagName(pos_mask_buf.shape().dtype()),
             },
         );
