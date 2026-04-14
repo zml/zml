@@ -1552,11 +1552,11 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
                     @panic("Unsupported pointer type in metadata"),
                 else => @panic("Unsupported pointer type in metadata"),
             },
-            .optional => |optional_info| if (@field(metadata, field.name) != null) switch (@typeInfo(optional_info.child)) {
+            .optional => |optional_info| if (@field(metadata, field.name)) |value| switch (@typeInfo(optional_info.child)) {
                 .float => |float_field| switch (float_field.bits) {
-                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
-                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
-                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
+                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, value)),
+                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, value)),
+                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, value)),
                     else => @panic("Unsupported DataType"),
                 },
 
