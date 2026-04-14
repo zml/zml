@@ -1518,7 +1518,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     }
 
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
-    var metadata_attribute_list: std.ArrayList(mlir.NamedAttribute) = .initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
+    var metadata_attribute_list = std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
     inline for (metadata_type_info.@"struct".fields) |field| {
         const maybe_attribute: ?*const mlir.Attribute = switch (@typeInfo(field.type)) {
             .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
