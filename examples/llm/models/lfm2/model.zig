@@ -9,6 +9,17 @@ const inference = @import("inference.zig");
 
 const log = std.log.scoped(.lfm);
 
+fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) bool {
+    return axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
+}
+
+pub fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partitions: i64) zml.Shape {
+    return if (kvHeadsAreReplicated(kv_heads, model_partitions))
+        kv_shape.withPartitioning(.{ .h = .replicated })
+    else
+        kv_shape.withPartitioning(.{ .h = .model });
+}
+
 pub const Config = struct {
     architectures: []const []const u8,
     block_auto_adjust_ff_dim: bool,
@@ -252,7 +263,7 @@ pub const TokenEmbedding = struct {
     weight: zml.Tensor,
 
     pub fn init(store: zml.io.TensorStore.View) TokenEmbedding {
-        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, null) };
+        return .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{ .voc = .replicated, .d = .model }) };
     }
 
     pub fn forward(self: TokenEmbedding, tokens: zml.Tensor) zml.Tensor {
@@ -263,7 +274,7 @@ pub const TokenEmbedding = struct {
 
     pub fn unembed(self: TokenEmbedding, embeds: zml.Tensor) zml.Tensor {
         stdx.debug.assert(embeds.shape().hasTags(.{.d}), "TokenEmbedding expects the input embeds to have a .d tag, got {f}", .{embeds.shape()});
-        return self.weight.dot(embeds, .d);
+        return embeds.dot(self.weight, .d);
     }
 };
 
@@ -273,7 +284,7 @@ pub const LmHead = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config, sampling_strategy: zml.nn.SamplingStrategy) LmHead {
         return .{
-            .embedding_norm = RmsNorm.init(store.withPrefix("embedding_norm"), config.norm_eps, .d),
+            .embedding_norm = RmsNorm.init(store.withPrefix("embedding_norm"), config.norm_eps, .d, .{ .d = .replicated }),
             .sampling_strategy = sampling_strategy,
         };
     }
@@ -306,8 +317,8 @@ pub const DecoderLayer = struct {
     }
 
     pub fn init(config: Config, store: zml.io.TensorStore.View, kind: OperatorKind) DecoderLayer {
-        const operator_norm = RmsNorm.init(store.withPrefix("operator_norm"), config.norm_eps, .d);
-        const ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), config.norm_eps, .d);
+        const operator_norm = RmsNorm.init(store.withPrefix("operator_norm"), config.norm_eps, .d, .{ .d = .replicated });
+        const ffn_norm = RmsNorm.init(store.withPrefix("ffn_norm"), config.norm_eps, .d, .{ .d = .replicated });
         const feed_forward = Mlp.init(store.withPrefix("feed_forward"));
         const operator: Operator = switch (kind) {
             .conv => .{ .conv = ShortConv.init(config, store.withPrefix("conv")) },
@@ -466,23 +477,36 @@ pub const Attention = struct {
     q_layernorm: RmsNorm,
     k_layernorm: RmsNorm,
     head_dim: usize,
-    num_key_value_groups: usize,
+    num_key_value_heads: usize,
     rope_opts: zml.nn.RopeOpts,
 
     pub fn init(config: Config, store: zml.io.TensorStore.View) Attention {
         const head_dim = config.hidden_size / config.num_attention_heads;
-        const num_key_value_groups = config.num_attention_heads / config.num_key_value_heads;
         return .{
-            .q_proj = initLinear(store.withPrefix("q_proj"), .d),
-            .k_proj = initLinear(store.withPrefix("k_proj"), .d),
-            .v_proj = initLinear(store.withPrefix("v_proj"), .d),
-            .out_proj = initLinear(store.withPrefix("out_proj"), .d),
-            .q_layernorm = RmsNorm.init(store.withPrefix("q_layernorm"), config.norm_eps, .hd),
-            .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd),
+            .q_proj = initLinearPartitioned(store.withPrefix("q_proj"), .d, .{ .out = .model, .d = .replicated }),
+            .k_proj = initLinearPartitioned(store.withPrefix("k_proj"), .d, .{ .out = .model, .d = .replicated }),
+            .v_proj = initLinearPartitioned(store.withPrefix("v_proj"), .d, .{ .out = .model, .d = .replicated }),
+            .out_proj = initLinearPartitioned(store.withPrefix("out_proj"), .d, .{ .out = .replicated, .d = .model }),
+            .q_layernorm = RmsNorm.init(store.withPrefix("q_layernorm"), config.norm_eps, .hd, .{ .hd = .replicated }),
+            .k_layernorm = RmsNorm.init(store.withPrefix("k_layernorm"), config.norm_eps, .hd, .{ .hd = .replicated }),
             .head_dim = head_dim,
-            .num_key_value_groups = num_key_value_groups,
+            .num_key_value_heads = config.num_key_value_heads,
             .rope_opts = .{ .layout = .sequential, .scaling = .{ .default = .{ .rope_theta = config.rope_theta } } },
         };
+    }
+
+    fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+        return if (replicate_kv_heads)
+            tensor.withPartitioning(.{ .seq = .replicated, .h = .replicated, .hd = .replicated })
+        else
+            tensor.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
+    }
+
+    fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+        return if (replicate_kv_heads)
+            tensor.withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated })
+        else
+            tensor.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
     }
 
     pub fn forward(
@@ -494,9 +518,16 @@ pub const Attention = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
-        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch 1;
+        const replicate_kv_heads = kvHeadsAreReplicated(@intCast(self.num_key_value_heads), model_partitions);
+        const x_qkv = x.withPartitioning(.{ .d = .replicated });
+
+        var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
+        q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
+        k = partitionProjectedKv(k, replicate_kv_heads);
+        v = partitionProjectedKv(v, replicate_kv_heads);
 
         q = self.q_layernorm.forward(q);
         k = self.k_layernorm.forward(k);
@@ -508,22 +539,36 @@ pub const Attention = struct {
 
         q = zml.nn.rope(q, token_positions, self.rope_opts);
         k = zml.nn.rope(k, token_positions, self.rope_opts);
+        q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
+        k = partitionProjectedKv(k, replicate_kv_heads);
+        v = partitionProjectedKv(v, replicate_kv_heads);
 
         q = q.rename(.{ .seq = .q });
         k = k.rename(.{ .seq = .k });
         v = v.rename(.{ .seq = .k });
+        q = q.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        k = partitionCachedKv(k, replicate_kv_heads);
+        v = partitionCachedKv(v, replicate_kv_heads);
 
         const new_kv_cache = kv_cache.update(k, v, tokens_position_offset, cache_index);
         k = new_kv_cache.keys(cache_index);
         v = new_kv_cache.values(cache_index);
+        k = partitionCachedKv(k, replicate_kv_heads);
+        v = partitionCachedKv(v, replicate_kv_heads);
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
-            .vanilla => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }),
-            else => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
+            .vanilla => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters)
+                .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
+                .merge(.{ .d = .{ .h, .hd } }),
+            else => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters)
+                .withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated })
+                .merge(.{ .d = .{ .h, .hd } })
+                .rename(.{ .q = .seq })
+                .insertAxes(.seq, .{.batch}),
         };
 
-        return .{ self.out_proj.forward(attn).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
+        return .{ self.out_proj.forward(attn).withPartitioning(.{ .d = .replicated }).reuseBuffer(x), new_kv_cache.reuseBuffer(kv_cache) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
@@ -618,7 +663,11 @@ pub const KvCache = struct {
 };
 
 fn initLinear(store: zml.io.TensorStore.View, tag: anytype) Linear {
-    return .init(store.createTensor("weight", .{ .out, tag }, null), null, tag);
+    return initLinearPartitioned(store, tag, null);
+}
+
+fn initLinearPartitioned(store: zml.io.TensorStore.View, tag: anytype, partitioning: anytype) Linear {
+    return .init(store.createTensor("weight", .{ .out, tag }, partitioning), null, tag);
 }
 
 pub const Linear = struct {
@@ -670,8 +719,8 @@ const RmsNorm = struct {
     eps: f32,
     tag: zml.Shape.Tag,
 
-    pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype) RmsNorm {
-        return .{ .weight = store.createTensor("weight", .{tag}, null), .eps = eps, .tag = zml.Shape.toTag(tag) };
+    pub fn init(store: zml.io.TensorStore.View, eps: f32, tag: anytype, partitioning: anytype) RmsNorm {
+        return .{ .weight = store.createTensor("weight", .{tag}, partitioning), .eps = eps, .tag = zml.Shape.toTag(tag) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
