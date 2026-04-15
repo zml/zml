@@ -163,7 +163,8 @@ pub const ComposedKernelExe = struct {
     }
 
     pub fn run(self: *const ComposedKernelExe, args: Args) !void {
-        var hidden_buf: zml.Buffer = blk: {
+        var hidden_buf: zml.Buffer = undefined;
+        {
             var exe_args = try self.embed_tokens.args(args.allocator);
             defer exe_args.deinit(args.allocator);
             var results = try self.embed_tokens.results(args.allocator);
@@ -171,8 +172,8 @@ pub const ComposedKernelExe = struct {
 
             exe_args.set(.{ args.model_buffers.text_model.embed_tokens, args.tokens_buf });
             self.embed_tokens.call(exe_args, &results);
-            break :blk results.get(zml.Buffer);
-        };
+            results.fill(.{&hidden_buf});
+        }
         defer hidden_buf.deinit();
 
         const replicated_sharding = try zml.sharding.replicatedSharding(args.platform);
@@ -208,13 +209,7 @@ pub const ComposedKernelExe = struct {
                         &layer_index_buf,
                     });
                     exe.call(exe_args, &results);
-
-                    var new_hidden, var new_kv_cache = results.get(struct {
-                        zml.Buffer,
-                        zml.Bufferized(model.KvCache),
-                    });
-                    replaceBuffer(&hidden_buf, &new_hidden);
-                    replaceKvCacheBuffers(args.kv_cache_buffers, &new_kv_cache);
+                    results.fill(.{ &hidden_buf, args.kv_cache_buffers });
                 },
                 .linear_attn => {
                     exe = self.linear_attn_layer orelse unreachable;
@@ -240,13 +235,7 @@ pub const ComposedKernelExe = struct {
                         &layer_index_buf,
                     });
                     exe.call(exe_args, &results);
-
-                    var new_hidden, var new_kv_cache = results.get(struct {
-                        zml.Buffer,
-                        zml.Bufferized(model.KvCache),
-                    });
-                    replaceBuffer(&hidden_buf, &new_hidden);
-                    replaceKvCacheBuffers(args.kv_cache_buffers, &new_kv_cache);
+                    results.fill(.{ &hidden_buf, args.kv_cache_buffers });
                 },
             }
         }
@@ -268,13 +257,7 @@ pub const ComposedKernelExe = struct {
             args.rng_buf,
         });
         self.head.call(exe_args, &results);
-
-        var new_tokens, var new_rng = results.get(struct {
-            zml.Buffer,
-            zml.Bufferized(zml.Tensor.Rng),
-        });
-        replaceBuffer(args.tokens_buf, &new_tokens);
-        replaceBuffer(&args.rng_buf._state, &new_rng._state);
+        results.fill(.{ args.tokens_buf, args.rng_buf });
     }
 };
 
@@ -510,28 +493,4 @@ fn firstLayer(layers: []const model.TransformerLayer, layer_type: model.LayerTyp
         }
     }
     return null;
-}
-
-fn replaceKvCacheBuffers(dst: *zml.Bufferized(model.KvCache), src: *zml.Bufferized(model.KvCache)) void {
-    replaceBuffer(&dst.self_attn.k, &src.self_attn.k);
-    replaceBuffer(&dst.self_attn.v, &src.self_attn.v);
-    replaceBuffer(&dst.self_attn.layer_index, &src.self_attn.layer_index);
-    replaceBuffer(&dst.gated_delta_net.conv_state, &src.gated_delta_net.conv_state);
-    replaceBuffer(&dst.gated_delta_net.recurrent_state, &src.gated_delta_net.recurrent_state);
-    replaceBuffer(&dst.gated_delta_net.layer_index, &src.gated_delta_net.layer_index);
-}
-
-fn replaceBuffer(dst: *zml.Buffer, src: *zml.Buffer) void {
-    if (!sameBufferHandle(dst.*, src.*)) {
-        dst.deinit();
-    }
-    dst.* = src.*;
-}
-
-fn sameBufferHandle(a: zml.Buffer, b: zml.Buffer) bool {
-    if (a._shards.len != b._shards.len) return false;
-    for (a._shards.constSlice(), b._shards.constSlice()) |a_shard, b_shard| {
-        if (a_shard != b_shard) return false;
-    }
-    return true;
 }
