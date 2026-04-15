@@ -37,6 +37,123 @@ comptime {
 pub const std_options: std.Options = .{ .log_level = .info };
 
 // ============================================================================
+// Phase timing
+// ============================================================================
+
+const PhaseTimer = struct {
+    name: []const u8,
+    io: std.Io,
+    compile_ns: i96 = 0,
+    load_ns: i96 = 0,
+    exec_ns: i96 = 0,
+    other_ns: i96 = 0,
+    step_times_ns: [MAX_STEPS]i96 = [_]i96{0} ** MAX_STEPS,
+    num_steps: usize = 0,
+    lap_ts: std.Io.Timestamp = .zero,
+
+    const MAX_STEPS = 64;
+
+    fn init(name: []const u8, io: std.Io) PhaseTimer {
+        return .{ .name = name, .io = io };
+    }
+
+    fn start(self: *PhaseTimer) void {
+        self.lap_ts = std.Io.Timestamp.now(self.io, .awake);
+    }
+
+    fn readLap(self: *PhaseTimer) i96 {
+        const now = std.Io.Timestamp.now(self.io, .awake);
+        const dt = now.nanoseconds - self.lap_ts.nanoseconds;
+        self.lap_ts = now;
+        return dt;
+    }
+
+    fn addCompile(self: *PhaseTimer) void {
+        self.compile_ns += self.readLap();
+    }
+
+    fn addLoad(self: *PhaseTimer) void {
+        self.load_ns += self.readLap();
+    }
+
+    fn addExec(self: *PhaseTimer) void {
+        self.exec_ns += self.readLap();
+    }
+
+    fn addOther(self: *PhaseTimer) void {
+        self.other_ns += self.readLap();
+    }
+
+    fn recordStep(self: *PhaseTimer, dt_ns: i96) void {
+        if (self.num_steps < MAX_STEPS) {
+            self.step_times_ns[self.num_steps] = dt_ns;
+            self.num_steps += 1;
+        }
+    }
+
+    fn totalNs(self: *const PhaseTimer) i96 {
+        return self.compile_ns + self.load_ns + self.exec_ns + self.other_ns;
+    }
+
+    fn fmtSecs(ns: i96) f64 {
+        return @as(f64, @floatFromInt(ns)) / 1_000_000_000.0;
+    }
+
+    fn printRow(self: *const PhaseTimer) void {
+        std.log.info("  {s:<20} | {d:>8.1} | {d:>8.1} | {d:>8.1} | {d:>8.1} | {d:>8.1}", .{
+            self.name,
+            fmtSecs(self.compile_ns),
+            fmtSecs(self.load_ns),
+            fmtSecs(self.exec_ns),
+            fmtSecs(self.other_ns),
+            fmtSecs(self.totalNs()),
+        });
+        if (self.num_steps > 0) {
+            var total_step: i96 = 0;
+            for (self.step_times_ns[0..self.num_steps]) |s| total_step += s;
+            const avg = fmtSecs(@divTrunc(total_step, @as(i96, @intCast(self.num_steps))));
+            std.log.info("    (per step avg)     |          |          | {d:>8.1} |          |", .{avg});
+        }
+    }
+};
+
+fn printTimingSummary(timers: []const *const PhaseTimer) void {
+    var total_compile: i96 = 0;
+    var total_load: i96 = 0;
+    var total_exec: i96 = 0;
+    var total_other: i96 = 0;
+    for (timers) |t| {
+        total_compile += t.compile_ns;
+        total_load += t.load_ns;
+        total_exec += t.exec_ns;
+        total_other += t.other_ns;
+    }
+    const total = total_compile + total_load + total_exec + total_other;
+
+    std.log.info("", .{});
+    std.log.info("====================== TIMING SUMMARY ======================", .{});
+    std.log.info("  {s:<20} | {s:>8} | {s:>8} | {s:>8} | {s:>8} | {s:>8}", .{
+        "Phase", "Compile", "Load", "Execute", "Other", "Total",
+    });
+    std.log.info("  {s:-<20}-+-{s:->8}-+-{s:->8}-+-{s:->8}-+-{s:->8}-+-{s:->8}", .{
+        "", "", "", "", "", "",
+    });
+    for (timers) |t| t.printRow();
+    std.log.info("  {s:-<20}-+-{s:->8}-+-{s:->8}-+-{s:->8}-+-{s:->8}-+-{s:->8}", .{
+        "", "", "", "", "", "",
+    });
+    std.log.info("  {s:<20} | {d:>8.1} | {d:>8.1} | {d:>8.1} | {d:>8.1} | {d:>8.1}", .{
+        "TOTAL",
+        PhaseTimer.fmtSecs(total_compile),
+        PhaseTimer.fmtSecs(total_load),
+        PhaseTimer.fmtSecs(total_exec),
+        PhaseTimer.fmtSecs(total_other),
+        PhaseTimer.fmtSecs(total),
+    });
+    std.log.info("=============================================================", .{});
+}
+
+// ============================================================================
 // Pipeline metadata (parsed from pipeline_meta.json)
 // ============================================================================
 
@@ -462,6 +579,21 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos});
     std.log.info("  gemma-hs-neg:      {s}", .{args.gemma_hidden_states_neg});
 
+    // ---- Validate dimensions ----
+    if (args.height % 32 != 0 or args.width % 32 != 0) {
+        std.log.err("--height ({d}) and --width ({d}) must be divisible by 32 (VAE spatial factor).", .{ args.height, args.width });
+        return error.InvalidArgs;
+    }
+    if (args.height % 64 != 0 or args.width % 64 != 0) {
+        std.log.warn("--height ({d}) or --width ({d}) not divisible by 64; Stage 1 will generate at a slightly different " ++
+            "aspect ratio and the bridge will crop to Stage 2 resolution. For best quality, use multiples of 64.", .{ args.height, args.width });
+    }
+    if ((args.num_frames - 1) % 8 != 0) {
+        const valid = ((args.num_frames - 1) / 8) * 8 + 1;
+        std.log.err("--num-frames ({d}) must be of the form 8k+1 (e.g. {d} or {d}).", .{ args.num_frames, valid, valid + 8 });
+        return error.InvalidArgs;
+    }
+
     // ---- Ensure output directory exists ----
     try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
 
@@ -484,13 +616,22 @@ pub fn main(init: std.process.Init) !void {
     defer platform.deinit(allocator, io);
     const sharding = try zml.sharding.replicatedSharding(platform);
 
+    // ---- Phase timers ----
+    var timer_s1 = PhaseTimer.init("Stage 1", io);
+    var timer_bridge = PhaseTimer.init("Bridge", io);
+    var timer_s2 = PhaseTimer.init("Stage 2", io);
+    var timer_video_vae = PhaseTimer.init("Video VAE Decode", io);
+    var timer_audio_vae = PhaseTimer.init("Audio VAE Decode", io);
+    var timer_vocoder = PhaseTimer.init("Vocoder + BWE", io);
+    var timer_mp4 = PhaseTimer.init("MP4 Encoding", io);
+
     // ========================================================================
     // Phase 1: Stage 1
     // ========================================================================
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg);
+    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg, &timer_s1);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -519,6 +660,7 @@ pub fn main(init: std.process.Init) !void {
         s1.rng_state,
         args.dump_intermediates,
         args.output_dir,
+        &timer_bridge,
     );
     // Stage 1 latent/context buffers are consumed by bridge (ownership transferred)
 
@@ -528,7 +670,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 3: Stage 2 — {d}-step distilled denoising ===", .{stage2_sigmas.len - 1});
 
-    var s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas);
+    var s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2);
 
     // Free bridge-only buffers (positions, masks, clean latents, contexts).
     // The noised latents (v_latent, a_latent) were consumed by Stage 2's loop
@@ -558,7 +700,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 4: Video VAE Decode ===", .{});
 
-    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta);
+    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, &timer_video_vae);
     defer video_frames.deinit();
 
     if (args.dump_intermediates) {
@@ -571,7 +713,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 5: Audio VAE Decode ===", .{});
 
-    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta);
+    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta, &timer_audio_vae);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, audio_mel, args.output_dir, "audio_mel.bin");
@@ -583,7 +725,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 6: Vocoder + BWE ===", .{});
 
-    var waveform_buf = try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel);
+    var waveform_buf = try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel, &timer_vocoder);
     defer waveform_buf.deinit();
     audio_mel.deinit();
 
@@ -616,7 +758,19 @@ pub fn main(init: std.process.Init) !void {
     // Also write interleaved waveform.bin for debugging
     try writeRawBytes(allocator, io, interleaved_bytes, args.output_dir, "waveform.bin");
 
+    timer_mp4.start();
     try encodeOutputMp4(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
+    timer_mp4.addExec();
+
+    // ========================================================================
+    // Timing Summary
+    // ========================================================================
+    const all_timers = [_]*const PhaseTimer{
+        &timer_s1,        &timer_bridge,    &timer_s2,
+        &timer_video_vae, &timer_audio_vae, &timer_vocoder,
+        &timer_mp4,
+    };
+    printTimingSummary(&all_timers);
 
     std.log.info("Done.", .{});
 }
@@ -639,7 +793,10 @@ fn runStage1(
     seed: u64,
     gemma_hs_pos_path: []const u8,
     gemma_hs_neg_path: []const u8,
+    timer: *PhaseTimer,
 ) !Stage1Result {
+    timer.start();
+
     // ---- Sigma schedule ----
     const sigmas = model.computeSigmaSchedule(
         NUM_STAGE1_STEPS,
@@ -907,6 +1064,7 @@ fn runStage1(
     }
 
     // ---- Compile executables ----
+    timer.addOther(); // host prep + text embeddings + noise gen/init + image cond
 
     std.log.info("Compiling preprocessing exe...", .{});
     const preprocess_shape = model.initPreprocessParams(ckpt_store.view());
@@ -1187,6 +1345,7 @@ fn runStage1(
     );
     defer guider_combine_exe.deinit();
     std.log.info("All Stage 1 exes compiled.", .{});
+    timer.addCompile();
 
     // ---- Load weights ----
     std.log.info("Loading 48 block weights...", .{});
@@ -1243,6 +1402,7 @@ fn runStage1(
     );
     defer model.OutputProjection.Params.unloadBuffers(&proj_a_bufs);
     std.log.info("All Stage 1 weights loaded.", .{});
+    timer.addLoad();
 
     // ---- Guidance scalars ----
     var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16, sharding);
@@ -1268,6 +1428,7 @@ fn runStage1(
     std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{NUM_STAGE1_STEPS});
 
     for (0..NUM_STAGE1_STEPS) |step_idx| {
+        const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = sigmas[step_idx];
         const sigma_next = sigmas[step_idx + 1];
 
@@ -1582,8 +1743,11 @@ fn runStage1(
         v_latent_buf = dv_out.next_latent;
         a_latent_buf = da_out.next_latent;
 
-        std.log.info("  Step {d} complete.", .{step_idx + 1});
+        const step_ns = step_start.untilNow(io, .awake).nanoseconds;
+        timer.recordStep(step_ns);
+        std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx + 1, PhaseTimer.fmtSecs(step_ns) });
     }
+    timer.addExec();
 
     std.log.info("Stage 1 denoising complete.", .{});
 
@@ -1616,7 +1780,9 @@ fn runBridge(
     rng_state: zml.Buffer,
     dump_intermediates: bool,
     output_dir: []const u8,
+    timer: *PhaseTimer,
 ) !BridgeResult {
+    timer.start();
     const s1 = pipe_meta.stage1;
     const s2 = pipe_meta.stage2;
     const fps = pipe_meta.frame_rate;
@@ -1654,6 +1820,7 @@ fn runBridge(
     // Step 1: Unpatchify video: [1, T_v1, 128] → [1, 128, F, H_s1, W_s1]
     // ========================================================================
     std.log.info("Compiling unpatchify...", .{});
+    timer.addOther(); // checkpoint stores opening
     const patchified_shape = zml.Shape.init(.{ 1, T_v1, C }, .bf16);
     const video_5d_s1_shape = zml.Shape.init(.{ 1, C, F, H_s1, W_s1 }, .bf16);
 
@@ -1668,6 +1835,7 @@ fn runBridge(
         .{ .shardings = &.{sharding} },
     );
     defer unpatch_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running unpatchify...", .{});
     var unpatch_args = try unpatch_exe.args(allocator);
@@ -1681,6 +1849,7 @@ fn runBridge(
     var s1_video_mut = s1_video;
     s1_video_mut.deinit();
     std.log.info("  Unpatchified: {any}", .{video_5d_buf.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
     // Step 2: Upsample: [1, 128, F, H_s1, W_s1] → [1, 128, F, H_s2, W_s2]
@@ -1701,6 +1870,7 @@ fn runBridge(
         .{ .shardings = &.{sharding} },
     );
     defer upsample_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Loading upsampler weights...", .{});
     const up_bufs = try zml.io.load(
@@ -1733,6 +1903,7 @@ fn runBridge(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
+    timer.addLoad(); // upsampler + stats weights
 
     std.log.info("Running upsampler...", .{});
     var up_args = try upsample_exe.args(allocator);
@@ -1744,19 +1915,23 @@ fn runBridge(
     var upsampled_buf = up_results.get(zml.Buffer);
     defer upsampled_buf.deinit();
     std.log.info("  Upsampled: {any}", .{upsampled_buf.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
-    // Step 3: Re-patchify video: [1, 128, F, H_s2, W_s2] → [1, T_v2, 128]
+    // Step 3: Crop + re-patchify video: [1, 128, F, 2*H_s1, 2*W_s1] → [1, T_v2, 128]
+    // When 2*H_s1 > H_s2 (height not divisible by 64), crop before patchify.
     // ========================================================================
     std.log.info("Compiling patchify...", .{});
+    const video_5d_s2_shape = zml.Shape.init(.{ 1, C, F, H_s2, W_s2 }, .bf16);
     var patchify_exe = try platform.compileFn(
         allocator,
         io,
-        upsampler.forwardPatchifyVideo,
-        .{zml.Tensor.fromShape(upsampled_buf.shape())},
+        upsampler.forwardCropAndPatchifyVideo,
+        .{ zml.Tensor.fromShape(upsampled_buf.shape()), video_5d_s2_shape },
         .{ .shardings = &.{sharding} },
     );
     defer patchify_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running patchify...", .{});
     var patch_args = try patchify_exe.args(allocator);
@@ -1767,6 +1942,7 @@ fn runBridge(
     patchify_exe.call(patch_args, &patch_results);
     var video_clean_buf = patch_results.get(zml.Buffer);
     std.log.info("  Re-patchified video: {any}", .{video_clean_buf.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
     // Step 4: Audio passthrough (already patchified from Stage 1)
@@ -1956,6 +2132,7 @@ fn runBridge(
     }
 
     std.log.info("Bridge complete.", .{});
+    timer.addOther(); // positions, masks, noise gen/init, image cond
 
     return .{
         .v_latent = v_latent_buf,
@@ -1984,7 +2161,9 @@ fn runStage2(
     bridge: *BridgeResult,
     use_bf16_attn: bool,
     stage2_sigmas: []const f32,
+    timer: *PhaseTimer,
 ) !Stage2Result {
+    timer.start();
     // ---- Open checkpoint store ----
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
@@ -2174,6 +2353,7 @@ fn runStage2(
     );
     defer denoise_a_exe.deinit();
     std.log.info("All Stage 2 exes compiled.", .{});
+    timer.addCompile();
 
     // ---- Load weights ----
     std.log.info("Loading 48 block weights...", .{});
@@ -2230,12 +2410,14 @@ fn runStage2(
     );
     defer model.OutputProjection.Params.unloadBuffers(&proj_a_bufs);
     std.log.info("All Stage 2 weights loaded.", .{});
+    timer.addLoad();
 
     // ---- Denoising loop: N-step Euler ----
     const num_steps = stage2_sigmas.len - 1;
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
 
     for (0..num_steps) |step_idx| {
+        const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = stage2_sigmas[step_idx];
         const sigma_next = stage2_sigmas[step_idx + 1];
 
@@ -2355,8 +2537,11 @@ fn runStage2(
         v_latent_buf = dv_out.next_latent;
         a_latent_buf = da_out.next_latent;
 
-        std.log.info("  Step {d} complete.", .{step_idx});
+        const step_ns = step_start.untilNow(io, .awake).nanoseconds;
+        timer.recordStep(step_ns);
+        std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx, PhaseTimer.fmtSecs(step_ns) });
     }
+    timer.addExec();
 
     std.log.info("Stage 2 denoising complete.", .{});
 
@@ -2604,7 +2789,9 @@ fn runVideoVaeDecode(
     ckpt_path: []const u8,
     v_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
+    timer: *PhaseTimer,
 ) !VideoFrames {
+    timer.start();
     const s2 = pipe_meta.stage2;
     const F = s2.f_lat;
     const H = s2.h_lat;
@@ -2640,6 +2827,7 @@ fn runVideoVaeDecode(
         .{ .shardings = &.{sharding} },
     );
     defer unpatch_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running unpatchify...", .{});
     var unpatch_args = try unpatch_exe.args(allocator);
@@ -2650,6 +2838,7 @@ fn runVideoVaeDecode(
     unpatch_exe.call(unpatch_args, &unpatch_results);
     const v_latent_5d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
     // Step 2: Load VAE decoder weights + per-channel stats
@@ -2689,13 +2878,17 @@ fn runVideoVaeDecode(
     );
 
     // ========================================================================
-    // Step 3: Compile and run the VAE decoder
+    // Step 3: Compile and run the VAE decoder (split into early+late stages
+    // to reduce XLA peak memory — each half is a separate compiled exe)
     // ========================================================================
-    std.log.info("Compiling VAE decoder...", .{});
-    var vae_exe = try platform.compileFn(
+    timer.addLoad(); // VAE + stats weights
+
+    // --- Early stage: denormalize + conv_in + up_blocks.0–5 ---
+    std.log.info("Compiling VAE decoder (early stage)...", .{});
+    var vae_early_exe = try platform.compileFn(
         allocator,
         io,
-        video_vae.forwardVideoVaeDecode,
+        video_vae.forwardVideoVaeDecodeEarly,
         .{
             zml.Tensor.fromShape(v_latent_5d.shape()),
             stats_shape,
@@ -2703,17 +2896,45 @@ fn runVideoVaeDecode(
         },
         .{ .shardings = &.{sharding} },
     );
-    defer vae_exe.deinit();
+    defer vae_early_exe.deinit();
+    timer.addCompile();
 
-    std.log.info("Running VAE decode...", .{});
-    var vae_args = try vae_exe.args(allocator);
-    defer vae_args.deinit(allocator);
-    var vae_results = try vae_exe.results(allocator);
-    defer vae_results.deinit(allocator);
-    vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
-    vae_exe.call(vae_args, &vae_results);
-    const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
+    std.log.info("Running VAE decode (early stage)...", .{});
+    var early_args = try vae_early_exe.args(allocator);
+    defer early_args.deinit(allocator);
+    var early_results = try vae_early_exe.results(allocator);
+    defer early_results.deinit(allocator);
+    early_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
+    vae_early_exe.call(early_args, &early_results);
+    const vae_mid = early_results.get(zml.Buffer);
+    std.log.info("  Early stage output: {any}", .{vae_mid.shape().dims()});
+    timer.addExec();
+
+    // --- Late stage: up_blocks.6–8 + PixelNorm + conv_out + unpatchify ---
+    std.log.info("Compiling VAE decoder (late stage)...", .{});
+    var vae_late_exe = try platform.compileFn(
+        allocator,
+        io,
+        video_vae.forwardVideoVaeDecodeLate,
+        .{
+            zml.Tensor.fromShape(vae_mid.shape()),
+            vae_params,
+        },
+        .{ .shardings = &.{sharding} },
+    );
+    defer vae_late_exe.deinit();
+    timer.addCompile();
+
+    std.log.info("Running VAE decode (late stage)...", .{});
+    var late_args = try vae_late_exe.args(allocator);
+    defer late_args.deinit(allocator);
+    var late_results = try vae_late_exe.results(allocator);
+    defer late_results.deinit(allocator);
+    late_args.set(.{ vae_mid, vae_bufs });
+    vae_late_exe.call(late_args, &late_results);
+    const decoded_video = late_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
     // Step 4: Post-process to uint8 and write frames.bin
@@ -2869,7 +3090,9 @@ fn runAudioVaeDecode(
     ckpt_path: []const u8,
     a_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
+    timer: *PhaseTimer,
 ) !zml.Buffer {
+    timer.start();
     const T_aud = pipe_meta.stage2.t_audio;
 
     // ---- Open checkpoint store ----
@@ -2898,6 +3121,7 @@ fn runAudioVaeDecode(
         .{ .shardings = &.{sharding} },
     );
     defer unpatch_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running audio unpatchify...", .{});
     var unpatch_args = try unpatch_exe.args(allocator);
@@ -2908,6 +3132,7 @@ fn runAudioVaeDecode(
     unpatch_exe.call(unpatch_args, &unpatch_results);
     const a_latent_4d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape().dims()});
+    timer.addExec();
 
     // ========================================================================
     // Step 2: Load audio VAE decoder weights + per-channel stats
@@ -2949,6 +3174,7 @@ fn runAudioVaeDecode(
     // ========================================================================
     // Step 3: Compile and run the audio VAE decoder
     // ========================================================================
+    timer.addLoad(); // audio VAE + stats weights
     std.log.info("Compiling audio VAE decoder...", .{});
     var audio_vae_exe = try platform.compileFn(
         allocator,
@@ -2962,6 +3188,7 @@ fn runAudioVaeDecode(
         .{ .shardings = &.{sharding} },
     );
     defer audio_vae_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running audio VAE decode...", .{});
     var audio_vae_args = try audio_vae_exe.args(allocator);
@@ -2972,6 +3199,7 @@ fn runAudioVaeDecode(
     audio_vae_exe.call(audio_vae_args, &audio_vae_results);
     const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
     std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape().dims()});
+    timer.addExec();
 
     return decoded_audio;
 }
@@ -2987,7 +3215,9 @@ fn runVocoderWithBWE(
     sharding: zml.sharding.Sharding,
     ckpt_path: []const u8,
     audio_mel: zml.Buffer,
+    timer: *PhaseTimer,
 ) !zml.Buffer {
+    timer.start();
     // ---- Open checkpoint store ----
     std.log.info("Opening checkpoint for vocoder...", .{});
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
@@ -3036,6 +3266,7 @@ fn runVocoderWithBWE(
     );
 
     // ---- Stage 1: Main vocoder — mel → 16kHz waveform ----
+    timer.addLoad(); // main + BWE weights
     std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape().dims()});
     var main_voc_exe = try platform.compileFn(
         allocator,
@@ -3045,6 +3276,7 @@ fn runVocoderWithBWE(
         .{ .shardings = &.{sharding} },
     );
     defer main_voc_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running main vocoder...", .{});
     var main_voc_args = try main_voc_exe.args(allocator);
@@ -3055,6 +3287,7 @@ fn runVocoderWithBWE(
     main_voc_exe.call(main_voc_args, &main_voc_results);
     const waveform_16k = main_voc_results.get(zml.Buffer);
     std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape().dims()});
+    timer.addExec();
 
     // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
@@ -3066,6 +3299,7 @@ fn runVocoderWithBWE(
         .{ .shardings = &.{sharding} },
     );
     defer bwe_exe.deinit();
+    timer.addCompile();
 
     std.log.info("Running BWE pipeline...", .{});
     var bwe_args = try bwe_exe.args(allocator);
@@ -3076,6 +3310,7 @@ fn runVocoderWithBWE(
     bwe_exe.call(bwe_args, &bwe_results);
     const waveform = bwe_results.get(zml.Buffer);
     std.log.info("  48kHz waveform: {any}", .{waveform.shape().dims()});
+    timer.addExec();
 
     return waveform;
 }
@@ -3178,12 +3413,13 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
 
 fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) PipelineMeta {
     const f_lat: i64 = @as(i64, @intCast((num_frames - 1) / 8)) + 1;
-    // Stage 1: half resolution
-    const h_lat_s1: i64 = @intCast(height / 2 / 32);
-    const w_lat_s1: i64 = @intCast(width / 2 / 32);
     // Stage 2: full resolution
     const h_lat_s2: i64 = @intCast(height / 32);
     const w_lat_s2: i64 = @intCast(width / 32);
+    // Stage 1: half of Stage 2 (ceiling division so that 2*s1 >= s2,
+    // enabling the 2× spatial upsampler to produce at least s2 resolution)
+    const h_lat_s1: i64 = @divTrunc(h_lat_s2 + 1, 2);
+    const w_lat_s1: i64 = @divTrunc(w_lat_s2 + 1, 2);
     // Audio tokens: round(num_frames / fps * 25)
     // Constants: sample_rate=16000, hop_length=160, downsample_factor=4
     // → latents_per_second = 16000 / (160 * 4) = 25

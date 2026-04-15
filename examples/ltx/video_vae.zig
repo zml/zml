@@ -261,6 +261,18 @@ pub fn forwardVideoVaeDecode(
     stats: PerChannelStats,
     params: VideoVaeDecoderParams,
 ) Tensor {
+    const early_out = forwardVideoVaeDecodeEarly(latent, stats, params);
+    return forwardVideoVaeDecodeLate(early_out, params);
+}
+
+/// VAE decoder early stages: denormalize + conv_in + up_blocks.0–5.
+/// Produces [B, 256, F_full, H_mid, W_mid] where DepthToSpace has already
+/// expanded temporal/spatial dims to intermediate resolution.
+pub fn forwardVideoVaeDecodeEarly(
+    latent: Tensor,
+    stats: PerChannelStats,
+    params: VideoVaeDecoderParams,
+) Tensor {
     // 1. Denormalize: x = latent * std_of_means + mean_of_means
     const stats_shape = latent.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1);
     const std_broad = stats.std_of_means.reshape(stats_shape).broad(latent.shape());
@@ -292,6 +304,18 @@ pub fn forwardVideoVaeDecode(
 
     // 8. up_blocks.5: DepthToSpace (2,1,1) → 512→256
     x = forwardDepthToSpace(x, params.up5, .{ 2, 1, 1 });
+
+    return x;
+}
+
+/// VAE decoder late stages: up_blocks.6–8 + PixelNorm + conv_out + unpatchify.
+/// Input: [B, 256, F_full, H_mid, W_mid] from early stage.
+/// Output: decoded video [B, 3, F_full, 4*H_mid, 4*W_mid] bf16.
+pub fn forwardVideoVaeDecodeLate(
+    x_in: Tensor,
+    params: VideoVaeDecoderParams,
+) Tensor {
+    var x = x_in;
 
     // 9. up_blocks.6: 6 ResBlocks @ 256ch
     x = forwardVaeResBlock(x, params.up6_res0);

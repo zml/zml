@@ -213,3 +213,21 @@ pub fn forwardPatchifyVideo(input: Tensor) Tensor {
         .transpose(.{ 0, 2, 3, 4, 1 })
         .reshape(.{ B, F * H * W, C });
 }
+
+/// Crop to target spatial dims then patchify: [1, 128, F, H_up, W_up] → [1, F*H*W, 128].
+/// Used after the 2× spatial upsampler when 2*s1 > s2 (i.e. the upsampled
+/// dimensions exceed the target Stage 2 latent dimensions).
+/// target_shape carries [1, 128, F, H_target, W_target].
+pub fn forwardCropAndPatchifyVideo(input: Tensor, target_shape: zml.Shape) Tensor {
+    const B = target_shape.dim(0);
+    const C = target_shape.dim(1);
+    const F = target_shape.dim(2);
+    const H = target_shape.dim(3);
+    const W = target_shape.dim(4);
+    // Crop spatial dims (nop when already matching)
+    return input
+        .slice1d(3, .{ .start = 0, .end = H })
+        .slice1d(4, .{ .start = 0, .end = W })
+        .transpose(.{ 0, 2, 3, 4, 1 })
+        .reshape(.{ B, F * H * W, C });
+}
