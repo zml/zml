@@ -369,7 +369,7 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
             }
         },
         .array => {
-            for (model, bufferized_) |src, *dst| {
+            for (model, bufferized_.*) |src, *dst| {
                 try bufferizeInner(allocator, src, dst);
             }
         },
