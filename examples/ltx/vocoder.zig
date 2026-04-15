@@ -498,7 +498,7 @@ fn forwardSincResample3x(x: Tensor) Tensor {
     const filt_1 = Tensor.constantTensor(filter_shape, std.mem.sliceAsBytes(&filter_data));
     const filt = filt_1.reverse(.{2}).broad(filter_shape.set(0, n_channels)); // [C, 1, 18] flipped (symmetric)
 
-    // MLIR padding for depthwise transposed conv: kernel_size - 1 = 42
+    // MLIR padding for depthwise transposed conv: kernel_size - 1 = 17
     const mlir_pad = kernel_size - 1;
     y = y.conv1d(filt, .{
         .lhs_dilation = ratio,
