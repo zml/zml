@@ -369,7 +369,7 @@ pub const TransformerLayer = struct {
     }
 };
 
-const RmsNorm = struct {
+pub const RmsNorm = struct {
     weight: zml.Tensor,
     eps: f32,
 
