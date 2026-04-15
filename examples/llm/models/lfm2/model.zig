@@ -263,7 +263,7 @@ pub const TokenEmbedding = struct {
 
     pub fn unembed(self: TokenEmbedding, embeds: zml.Tensor) zml.Tensor {
         stdx.debug.assert(embeds.shape().hasTags(.{.d}), "TokenEmbedding expects the input embeds to have a .d tag, got {f}", .{embeds.shape()});
-        return embeds.dot(self.weight, .d);
+        return self.weight.dot(embeds, .d);
     }
 };
 
