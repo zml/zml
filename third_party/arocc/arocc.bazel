@@ -1,3 +1,4 @@
+load("@bazel_skylib//rules:run_binary.bzl", "run_binary")
 load("@bazel_skylib//rules:write_file.bzl", "write_file")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 
@@ -92,12 +93,15 @@ zig_binary(
 )
 
 [
-    genrule(
+    run_binary(
         name = "def_{}".format(name),
         srcs = [name],
         outs = ["{}.zig".format(name)],
-        cmd = """$(location :generate-def) $< $@""",
-        tools = [":generate-def"],
+        args = [
+            "$(location {})".format(name),
+            "$(location {}.zig)".format(name),
+        ],
+        tool = ":generate-def",
     )
     for name in glob(["src/aro/**/*.def"])
 ]
