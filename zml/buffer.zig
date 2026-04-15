@@ -174,6 +174,14 @@ pub const Buffer = struct {
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
+        switch (self._platform.target) {
+            .neuron => {
+                log.warn("awaiting is not supported on Neuron", .{});
+                return;
+            },
+            .cpu, .cuda, .rocm, .tpu => {},
+        }
+
         for (self._shards.constSlice()) |buffer| {
             const ev = buffer.readyEvent(self._platform.pjrt_api);
             defer ev.deinit(self._platform.pjrt_api);
