@@ -70,8 +70,8 @@ pub fn main(init: std.process.Init) !void {
 
     acellm.unloadBuffers();
 
-    const max_emb_len = try aceemb_.maxEmbeddingLength(zml_handler, audio_metadata);
-    var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, max_emb_len);
+    const full_emb, const partial_emb = try aceemb_.embeddingLengths(zml_handler, audio_metadata);
+    var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, full_emb, partial_emb);
     defer aceemb.deinit(allocator);
 
     // Test model activations
@@ -84,9 +84,13 @@ pub fn main(init: std.process.Init) !void {
     const writer: *std.Io.Writer = &stdout.interface;
     const options: std.fmt.Number = .{};
     
-    std.log.info("Embedding shape", .{});
+    std.log.info("Caption embedding shape", .{});
     try text_emb.caption_embedding.shape.format(writer);
     try text_emb.caption_embedding.prettyPrint(writer, options);
+    
+    std.log.info("Lyric embedding shape", .{});
+    try text_emb.lyrics_embedding.shape.format(writer);
+    try text_emb.lyrics_embedding.prettyPrint(writer, options);
 
     aceemb.unloadBuffers();
 }
@@ -96,7 +100,7 @@ pub fn printSafetensors(allocator: std.mem.Allocator, io: std.Io, fpath: []const
     // Read model shapes.
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fpath);
     defer registry.deinit();
-    std.log.info("Found {d} activations in {s}", .{ registry.tensors.count(), fpath });
+    std.log.debug("Found {d} activations in {s}", .{ registry.tensors.count(), fpath });
 
     // Print model shapes
     const tensors: zml.safetensors.Tensors = registry.tensors;
@@ -104,7 +108,7 @@ pub fn printSafetensors(allocator: std.mem.Allocator, io: std.Io, fpath: []const
     for (0..data.len) |i| {
         const entry = data.get(i);
         const tensor: zml.safetensors.Tensor = tensors.get(entry.key).?;
-        std.log.info("Tensor(name={s} shape={f} size={d})", .{
+        std.log.debug("Tensor(name={s} shape={f} size={d})", .{
             tensor.name,
             tensor.shape,
             tensor.byteSize(),
