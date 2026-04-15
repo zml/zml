@@ -138,12 +138,14 @@ const HeadProgram = struct {
     pub fn forward(
         self: HeadProgram,
         hidden: zml.Tensor,
+        tokens: zml.Tensor,
         rng: zml.Tensor.Rng,
         sampling_strategy: zml.nn.SamplingStrategy,
     ) struct { zml.Tensor, zml.Tensor.Rng } {
         const normalized = self.norm.forward(hidden);
         const logits = self.lm_head.forward(normalized.withPartialTags(.{.d})).rename(.{ .dout = .voc });
-        return zml.nn.sampleTokens(logits, sampling_strategy, rng);
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, sampling_strategy, rng);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
     }
 };
 
@@ -262,6 +264,7 @@ pub const ComposedKernelExe = struct {
         exe_args.set(.{
             head_program_buffers,
             hidden_buf,
+            args.tokens_buf,
             args.rng_buf,
         });
         self.head.call(exe_args, &results);
@@ -491,6 +494,7 @@ fn compileHead(
         .forward,
         .{
             hidden,
+            .init(.{ .b = 1, .s = seqlen }, .u32),
             parameters.rng,
             qwen_model.gen_options.sampling_strategy,
         },

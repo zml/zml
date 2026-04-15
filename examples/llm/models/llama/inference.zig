@@ -115,6 +115,7 @@ const HeadProgram = struct {
     pub fn forward(
         self: HeadProgram,
         hidden: zml.Tensor,
+        tokens: zml.Tensor,
         rng: zml.Tensor.Rng,
         gen_opts: zml.nn.SamplingStrategy,
     ) struct { zml.Tensor, zml.Tensor.Rng } {
@@ -130,7 +131,8 @@ const HeadProgram = struct {
         if (logits.shape().hasTag(.voc) == null)
             logits = logits.rename(.{ .d = .voc });
 
-        return zml.nn.sampleTokens(logits, gen_opts, rng);
+        const new_tokens, const new_rng = zml.nn.sampleTokens(logits, gen_opts, rng);
+        return .{ new_tokens.convert(tokens.dtype()).reuseBuffer(tokens), new_rng };
     }
 };
 
@@ -204,6 +206,7 @@ pub const ComposedKernelExe = struct {
         exe_args.set(.{
             head_program_buffers,
             hidden_buf,
+            args.tokens_buf,
             args.rng_buf,
         });
         self.head.call(exe_args, &results);
@@ -403,6 +406,7 @@ fn compileHead(
         .forward,
         .{
             hidden,
+            .init(.{ .s = seqlen }, .u32),
             parameters.rng,
             llama_model.gen_opts,
         },
