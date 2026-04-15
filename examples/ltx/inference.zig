@@ -12,11 +12,11 @@
 ///       --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
 ///       --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
 ///       --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-///       --meta /root/e2e_demo/pipeline_meta.json \
 ///       --gemma-hidden-states-pos /root/e2e_demo/pos_hidden_states.safetensors \
 ///       --gemma-hidden-states-neg /root/e2e_demo/neg_hidden_states.safetensors \
 ///       --seed 42 \
 ///       --output-dir /root/e2e_demo/unified_out/ \
+///       --height 1024 --width 1536 --num-frames 121 --fps 24 \
 ///       --bf16-attn-stage2
 const std = @import("std");
 const zml = @import("zml");
@@ -61,7 +61,7 @@ const CliArgs = struct {
     stage1_ckpt: []const u8,
     stage2_ckpt: []const u8,
     upsampler_ckpt: []const u8,
-    meta: []const u8,
+    meta: ?[]const u8,
     output_dir: []const u8,
     seed: u64,
     bf16_attn_stage1: bool,
@@ -70,6 +70,11 @@ const CliArgs = struct {
     image: ?[]const u8,
     gemma_hidden_states_pos: []const u8,
     gemma_hidden_states_neg: []const u8,
+    // Generation params (used when --meta is not provided)
+    height: u32,
+    width: u32,
+    num_frames: u32,
+    fps: f64,
 };
 
 fn parseArgs(it: anytype) !CliArgs {
@@ -77,7 +82,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .stage1_ckpt = undefined,
         .stage2_ckpt = undefined,
         .upsampler_ckpt = undefined,
-        .meta = undefined,
+        .meta = null,
         .output_dir = undefined,
         .seed = 42,
         .bf16_attn_stage1 = false,
@@ -86,8 +91,12 @@ fn parseArgs(it: anytype) !CliArgs {
         .image = null,
         .gemma_hidden_states_pos = undefined,
         .gemma_hidden_states_neg = undefined,
+        .height = 1024,
+        .width = 1536,
+        .num_frames = 121,
+        .fps = 24.0,
     };
-    var have = [_]bool{false} ** 7;
+    var have = [_]bool{false} ** 6;
 
     _ = it.next(); // exe name
 
@@ -103,10 +112,9 @@ fn parseArgs(it: anytype) !CliArgs {
             have[2] = true;
         } else if (std.mem.eql(u8, arg, "--meta")) {
             args.meta = it.next() orelse return error.InvalidArgs;
-            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--output-dir")) {
             args.output_dir = it.next() orelse return error.InvalidArgs;
-            have[4] = true;
+            have[3] = true;
         } else if (std.mem.eql(u8, arg, "--seed")) {
             const seed_str = it.next() orelse return error.InvalidArgs;
             args.seed = std.fmt.parseInt(u64, seed_str, 10) catch return error.InvalidArgs;
@@ -120,10 +128,22 @@ fn parseArgs(it: anytype) !CliArgs {
             args.image = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
             args.gemma_hidden_states_pos = it.next() orelse return error.InvalidArgs;
-            have[5] = true;
+            have[4] = true;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-neg")) {
             args.gemma_hidden_states_neg = it.next() orelse return error.InvalidArgs;
-            have[6] = true;
+            have[5] = true;
+        } else if (std.mem.eql(u8, arg, "--height")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.height = std.fmt.parseInt(u32, val, 10) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--width")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.width = std.fmt.parseInt(u32, val, 10) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--num-frames")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.num_frames = std.fmt.parseInt(u32, val, 10) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--fps")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.fps = std.fmt.parseFloat(f64, val) catch return error.InvalidArgs;
         }
     }
 
@@ -131,10 +151,10 @@ fn parseArgs(it: anytype) !CliArgs {
         if (!h) {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
-                    "--upsampler-ckpt <path> " ++
-                    "--meta <path> --output-dir <path> " ++
+                    "--upsampler-ckpt <path> --output-dir <path> " ++
                     "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
-                    "[--seed <int>] [--image <path>] " ++
+                    "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
+                    "[--meta <path>] [--seed <int>] [--image <path>] " ++
                     "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
@@ -429,8 +449,12 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  stage2-ckpt:     {s}", .{args.stage2_ckpt});
     std.log.info("  upsampler-ckpt:  {s}", .{args.upsampler_ckpt});
     std.log.info("  seed:            {d}", .{args.seed});
-    std.log.info("  meta:            {s}", .{args.meta});
+    std.log.info("  meta:            {s}", .{args.meta orelse "(computed from --height/--width/--num-frames/--fps)"});
     std.log.info("  output-dir:      {s}", .{args.output_dir});
+    std.log.info("  height:            {d}", .{args.height});
+    std.log.info("  width:             {d}", .{args.width});
+    std.log.info("  num-frames:        {d}", .{args.num_frames});
+    std.log.info("  fps:               {d:.1}", .{args.fps});
     std.log.info("  bf16-attn-stage1:  {}", .{args.bf16_attn_stage1});
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
@@ -442,7 +466,10 @@ pub fn main(init: std.process.Init) !void {
     try std.Io.Dir.createDirPath(.cwd(), io, args.output_dir);
 
     // ---- Load pipeline metadata ----
-    const pipe_meta = try loadPipelineMeta(allocator, io, args.meta);
+    const pipe_meta = if (args.meta) |meta_path|
+        try loadPipelineMeta(allocator, io, meta_path)
+    else
+        computePipelineMeta(args.height, args.width, args.num_frames, args.fps);
     const stage2_sigmas: []const f32 = &model.stage2_distilled_sigmas;
     std.log.info("  Stage 1: F={d} H={d} W={d} T_a={d}", .{
         pipe_meta.stage1.f_lat, pipe_meta.stage1.h_lat, pipe_meta.stage1.w_lat, pipe_meta.stage1.t_audio,
@@ -3099,7 +3126,7 @@ fn writeBuffer(
 }
 
 // ============================================================================
-// Load pipeline_meta.json
+// Load pipeline_meta.json (legacy path, used when --meta is provided)
 // ============================================================================
 
 fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !PipelineMeta {
@@ -3141,6 +3168,41 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
             .w_lat = v.stage2.w_lat,
             .f_lat = v.stage2.f_lat,
             .t_audio = v.stage2.t_audio,
+        },
+    };
+}
+
+// ============================================================================
+// Compute PipelineMeta from generation params (no JSON file needed)
+// ============================================================================
+
+fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) PipelineMeta {
+    const f_lat: i64 = @as(i64, @intCast((num_frames - 1) / 8)) + 1;
+    // Stage 1: half resolution
+    const h_lat_s1: i64 = @intCast(height / 2 / 32);
+    const w_lat_s1: i64 = @intCast(width / 2 / 32);
+    // Stage 2: full resolution
+    const h_lat_s2: i64 = @intCast(height / 32);
+    const w_lat_s2: i64 = @intCast(width / 32);
+    // Audio tokens: round(num_frames / fps * 25)
+    // Constants: sample_rate=16000, hop_length=160, downsample_factor=4
+    // → latents_per_second = 16000 / (160 * 4) = 25
+    const duration: f64 = @as(f64, @floatFromInt(num_frames)) / fps;
+    const t_audio: i64 = @intFromFloat(@round(duration * 25.0));
+
+    return .{
+        .frame_rate = fps,
+        .stage1 = .{
+            .h_lat = h_lat_s1,
+            .w_lat = w_lat_s1,
+            .f_lat = f_lat,
+            .t_audio = t_audio,
+        },
+        .stage2 = .{
+            .h_lat = h_lat_s2,
+            .w_lat = w_lat_s2,
+            .f_lat = f_lat,
+            .t_audio = t_audio,
         },
     };
 }

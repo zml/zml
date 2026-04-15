@@ -8,8 +8,11 @@ activations are captured for validation.
 
 The Zig inference binary only needs:
   - Gemma hidden states (pos + neg)
-  - pipeline_meta.json (latent geometry)
 All other outputs are reference data for debugging/validation.
+
+Use --text-only to run ONLY the Gemma text encoder and save the hidden
+states.  This skips loading diffusion models (~44 GB VRAM), denoising,
+upsampling, and decoding — reducing runtime from ~20 min to ~30-40 s.
 
 Outputs (always):
   {out}/pos_hidden_states.safetensors       — Gemma hidden states (positive prompt) [used by Zig]
@@ -131,6 +134,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--decode-video", action="store_true",
         help="Decode final latents to MP4 (full-Python reference video)",
+    )
+    # Text-only mode
+    parser.add_argument(
+        "--text-only", action="store_true",
+        help="Run only Gemma text encoding → save hidden states, then exit. "
+             "Skips all diffusion models, denoising, upsampling, and decoding.",
     )
     return parser.parse_args()
 
@@ -312,20 +321,7 @@ def main() -> None:
         )
 
     # ========================================================================
-    # Model setup
-    # ========================================================================
-    print("\n=== Loading models ===")
-
-    upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
-
-    stage_1_diffusion = DiffusionStage(args.checkpoint, dtype, device)
-    stage_2_diffusion = DiffusionStage(args.stage2_checkpoint, dtype, device)
-
-    generator = torch.Generator(device=device).manual_seed(args.seed)
-    noiser = GaussianNoiser(generator=generator)
-
-    # ========================================================================
-    # Text encoding: Gemma forward pass → hidden states → EmbeddingsProcessor
+    # Text encoding: Gemma forward pass → hidden states
     # ========================================================================
     print("\n=== Text encoding: Gemma forward pass ===")
 
@@ -368,6 +364,31 @@ def main() -> None:
             {"stacked_hidden_states": stacked.to(dtype), "attention_mask": attention_mask},
             out / f"{label}_hidden_states.safetensors",
         )
+
+    # --text-only: early exit after saving hidden states
+    if args.text_only:
+        print("\n" + "=" * 70)
+        print("TEXT-ONLY EXPORT COMPLETE")
+        print("=" * 70)
+        print(f"\nGemma hidden states:")
+        print(f"  Positive: {out / 'pos_hidden_states.safetensors'}")
+        print(f"  Negative: {out / 'neg_hidden_states.safetensors'}")
+        print(f"\nThese files are all the Zig inference binary needs.")
+        print(f"Pass generation params (--height, --width, etc.) directly to the Zig binary.")
+        return
+
+    # ========================================================================
+    # Model setup (skipped in --text-only mode)
+    # ========================================================================
+    print("\n=== Loading models ===")
+
+    upsampler = VideoUpsampler(args.checkpoint, args.spatial_upsampler, dtype, device)
+
+    stage_1_diffusion = DiffusionStage(args.checkpoint, dtype, device)
+    stage_2_diffusion = DiffusionStage(args.stage2_checkpoint, dtype, device)
+
+    generator = torch.Generator(device=device).manual_seed(args.seed)
+    noiser = GaussianNoiser(generator=generator)
 
     # Run EmbeddingsProcessor to get final contexts (needed internally for denoising)
     print("\n=== Text encoding: EmbeddingsProcessor ===")
