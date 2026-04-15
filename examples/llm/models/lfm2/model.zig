@@ -9,17 +9,6 @@ const inference = @import("inference.zig");
 
 const log = std.log.scoped(.lfm);
 
-fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) bool {
-    return axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
-}
-
-pub fn partitionKvCacheShape(kv_shape: zml.Shape, kv_heads: i64, model_partitions: i64) zml.Shape {
-    return if (kvHeadsAreReplicated(kv_heads, model_partitions))
-        kv_shape.withPartitioning(.{ .h = .replicated })
-    else
-        kv_shape.withPartitioning(.{ .h = .model });
-}
-
 pub const Config = struct {
     architectures: []const []const u8,
     block_auto_adjust_ff_dim: bool,
@@ -495,20 +484,6 @@ pub const Attention = struct {
         };
     }
 
-    fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
-        return if (replicate_kv_heads)
-            tensor.withPartitioning(.{ .seq = .replicated, .h = .replicated, .hd = .replicated })
-        else
-            tensor.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-    }
-
-    fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
-        return if (replicate_kv_heads)
-            tensor.withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated })
-        else
-            tensor.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-    }
-
     pub fn forward(
         self: Attention,
         x: zml.Tensor,
@@ -518,16 +493,14 @@ pub const Attention = struct {
         attention_metadata: zml.attention.attention.Metadata,
         attention_parameters: zml.attention.attention.Parameters,
     ) struct { zml.Tensor, KvCache } {
-        const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch 1;
-        const replicate_kv_heads = kvHeadsAreReplicated(@intCast(self.num_key_value_heads), model_partitions);
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
 
         var q = self.q_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var k = self.k_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         var v = self.v_proj.forward(x_qkv).splitAxis(-1, .{ .h = .auto, .hd = self.head_dim });
         q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, replicate_kv_heads);
-        v = partitionProjectedKv(v, replicate_kv_heads);
+        k = k.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
 
         q = self.q_layernorm.forward(q);
         k = self.k_layernorm.forward(k);
@@ -540,21 +513,21 @@ pub const Attention = struct {
         q = zml.nn.rope(q, token_positions, self.rope_opts);
         k = zml.nn.rope(k, token_positions, self.rope_opts);
         q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        k = partitionProjectedKv(k, replicate_kv_heads);
-        v = partitionProjectedKv(v, replicate_kv_heads);
+        k = k.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
 
         q = q.rename(.{ .seq = .q });
         k = k.rename(.{ .seq = .k });
         v = v.rename(.{ .seq = .k });
         q = q.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = partitionCachedKv(k, replicate_kv_heads);
-        v = partitionCachedKv(v, replicate_kv_heads);
+        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
         const new_kv_cache = kv_cache.update(k, v, tokens_position_offset, cache_index);
         k = new_kv_cache.keys(cache_index);
         v = new_kv_cache.values(cache_index);
-        k = partitionCachedKv(k, replicate_kv_heads);
-        v = partitionCachedKv(v, replicate_kv_heads);
+        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
 
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {

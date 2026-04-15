@@ -22,16 +22,15 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
-        const model_partitions = shardings.model.numPartitions();
         const kv_shape = zml.Shape.init(.{
             .layer = mdl.num_attention_layers,
             .batch = 1,
             .k = seqlen,
             .h = config.num_key_value_heads,
             .hd = config.hidden_size / config.num_attention_heads,
-        }, mdl.embed_tokens.weight.dtype());
+        }, mdl.embed_tokens.weight.dtype()).withPartitioning(.{ .h = .model });
         const cache: model.Cache = .{
-            .kv = .init(model.partitionKvCacheShape(kv_shape, config.num_key_value_heads, model_partitions)),
+            .kv = .init(kv_shape),
             .conv = .init(.init(.{
                 .layer = mdl.num_conv_layers,
                 .batch = 1,
