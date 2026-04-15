@@ -96,14 +96,14 @@ pub const CompiledModel = struct {
         } else {
             const prefill_exe, const decode_exe = b: {
                 var prefill_future = io.async(compileComposedKernelExe, .{ allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings });
-                errdefer if (prefill_future.cancel(io)) |e| e.deinit() else |_| {};
+                defer if (prefill_future.cancel(io)) |e| e.deinit() else |_| {};
 
                 var decode_future = io.async(compileComposedKernelExe, .{ allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings });
-                errdefer if (decode_future.cancel(io)) |e| e.deinit() else |_| {};
+                defer if (decode_future.cancel(io)) |e| e.deinit() else |_| {};
 
                 break :b .{
-                    prefill_future.await(io) catch unreachable,
-                    decode_future.await(io) catch unreachable,
+                    try prefill_future.await(io),
+                    try decode_future.await(io),
                 };
             };
 
@@ -116,7 +116,7 @@ pub const CompiledModel = struct {
         }
     }
 
-    pub fn deinit(self: *CompiledModel) void {
+    pub fn deinit(self: CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
     }
@@ -353,10 +353,10 @@ fn compileComposedKernelExe(
         errdefer if (lm_head_future.cancel(io)) |e| e.deinit() else |_| {};
 
         break :b .{
-            embed_future.await(io) catch unreachable,
-            conv_future.await(io) catch unreachable,
-            attn_future.await(io) catch unreachable,
-            lm_head_future.await(io) catch unreachable,
+            try embed_future.await(io),
+            try conv_future.await(io),
+            try attn_future.await(io),
+            try lm_head_future.await(io),
         };
     };
 
