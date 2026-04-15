@@ -5,8 +5,9 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const acellm_ = @import("acellm.zig");
-const acedit_ = @import("acedit.zig");
-const acevae_ = @import("acevae.zig");
+const aceemb_ = @import("aceemb.zig");
+//const acedit_ = @import("acedit.zig");
+//const acevae_ = @import("acevae.zig");
 const inference = @import("inference.zig");
 
 pub const std_options: std.Options = .{
@@ -46,7 +47,7 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator);
-    
+
     const zml_handler: Zml_handler = .{
         .allocator = allocator,
         .arena = arena,
@@ -55,24 +56,39 @@ pub fn main(init: std.process.Init) !void {
     };
     var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
     defer acellm.deinit(allocator);
-    
+
     // Test model activations
     //try acellm.testModel(zml_handler);
 
-    const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
-    const metadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    defer metadata.deinit(allocator);
-    const audiocodes = try inference.runPhase2(metadata, zml_handler, &acellm);
-    defer audiocodes.deinit(allocator);
+    //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    //const audio_metadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
+    const audio_metadata: inference.AudioMetadata = .initExample();
+    //defer audio_metadata.deinit(allocator);
+    //const audio_codes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
+    const audio_codes: inference.AudioCodes = try .initExample(allocator);
+    defer audio_codes.deinit(allocator);
 
     acellm.unloadBuffers();
-    
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler);
-    defer acedit.deinit(allocator);
-    
-    // Test model activations
-    //try acedit.testModel(zml_handler, acedit);
 
+    const max_emb_len = try aceemb_.maxEmbeddingLength(zml_handler, audio_metadata);
+    var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, max_emb_len);
+    defer aceemb.deinit(allocator);
+
+    // Test model activations
+    //try acedit.testModel(zml_handler, aceemb);
+
+    const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
+    defer text_emb.deinit(allocator);
+    
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    const writer: *std.Io.Writer = &stdout.interface;
+    const options: std.fmt.Number = .{};
+    
+    std.log.info("Embedding shape", .{});
+    try text_emb.caption_embedding.shape.format(writer);
+    try text_emb.caption_embedding.prettyPrint(writer, options);
+
+    aceemb.unloadBuffers();
 }
 
 
