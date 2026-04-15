@@ -163,103 +163,238 @@ pub const ComposedKernelExe = struct {
     }
 
     pub fn run(self: *const ComposedKernelExe, args: Args) !void {
+        var state = try RunState.init(args.allocator, args.io, args.platform, self, args.model_buffers);
+        defer state.deinit(args.allocator);
+        try self.runWithState(args, &state);
+    }
+
+    pub fn runWithState(self: *const ComposedKernelExe, args: Args, state: *RunState) !void {
         var hidden_buf: zml.Buffer = undefined;
         {
-            var exe_args = try self.embed_tokens.args(args.allocator);
-            defer exe_args.deinit(args.allocator);
-            var results = try self.embed_tokens.results(args.allocator);
-            defer results.deinit(args.allocator);
-
-            exe_args.set(.{ args.model_buffers.text_model.embed_tokens, args.tokens_buf });
-            self.embed_tokens.call(exe_args, &results);
-            results.fill(.{&hidden_buf});
+            state.embed_args.setPartial(.{args.tokens_buf}, 0);
+            self.embed_tokens.call(state.embed_args, &state.embed_results);
+            state.embed_results.fill(.{&hidden_buf});
         }
         defer hidden_buf.deinit();
 
-        const replicated_sharding = try zml.sharding.replicatedSharding(args.platform);
-        var self_attn_layer_index: u32 = 0;
-        var linear_attn_layer_index: u32 = 0;
+        var self_attn_layer_index: usize = 0;
+        var linear_attn_layer_index: usize = 0;
 
         for (args.model_buffers.text_model.layers) |layer_buffers| {
-            var exe: zml.Exe = undefined;
-            var layer_index: u32 = undefined;
-
             switch (layer_buffers.attn) {
                 .self_attn => {
-                    exe = self.self_attn_layer orelse unreachable;
-                    layer_index = self_attn_layer_index;
+                    const exe = self.self_attn_layer orelse unreachable;
+                    const exe_args = &state.self_attn_layer_args[self_attn_layer_index];
+                    const layer_index_buf = &state.self_attn_layer_index_buffers[self_attn_layer_index];
                     self_attn_layer_index += 1;
 
-                    const layer_program_buffers: zml.Bufferized(SelfAttnLayerProgram) = .{
-                        .layer = layer_buffers,
-                    };
-                    var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, layer_index, .u32, replicated_sharding);
-                    defer layer_index_buf.deinit();
-
-                    var exe_args = try exe.args(args.allocator);
-                    defer exe_args.deinit(args.allocator);
-                    var results = try exe.results(args.allocator);
-                    defer results.deinit(args.allocator);
-
-                    exe_args.set(.{
-                        layer_program_buffers,
+                    exe_args.setPartial(.{
                         &hidden_buf,
                         args.token_index_buf,
                         args.kv_cache_buffers,
-                        &layer_index_buf,
-                    });
-                    exe.call(exe_args, &results);
-                    results.fill(.{ &hidden_buf, args.kv_cache_buffers });
+                        layer_index_buf,
+                    }, 0);
+                    exe.call(exe_args.*, &state.self_attn_layer_results.?);
+                    state.self_attn_layer_results.?.fill(.{ &hidden_buf, args.kv_cache_buffers });
                 },
                 .linear_attn => {
-                    exe = self.linear_attn_layer orelse unreachable;
-                    layer_index = linear_attn_layer_index;
+                    const exe = self.linear_attn_layer orelse unreachable;
+                    const exe_args = &state.linear_attn_layer_args[linear_attn_layer_index];
+                    const layer_index_buf = &state.linear_attn_layer_index_buffers[linear_attn_layer_index];
                     linear_attn_layer_index += 1;
 
-                    const layer_program_buffers: zml.Bufferized(LinearAttnLayerProgram) = .{
-                        .layer = layer_buffers,
-                    };
-                    var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, layer_index, .u32, replicated_sharding);
-                    defer layer_index_buf.deinit();
-
-                    var exe_args = try exe.args(args.allocator);
-                    defer exe_args.deinit(args.allocator);
-                    var results = try exe.results(args.allocator);
-                    defer results.deinit(args.allocator);
-
-                    exe_args.set(.{
-                        layer_program_buffers,
+                    exe_args.setPartial(.{
                         &hidden_buf,
                         args.token_index_buf,
                         args.kv_cache_buffers,
-                        &layer_index_buf,
-                    });
-                    exe.call(exe_args, &results);
-                    results.fill(.{ &hidden_buf, args.kv_cache_buffers });
+                        layer_index_buf,
+                    }, 0);
+                    exe.call(exe_args.*, &state.linear_attn_layer_results.?);
+                    state.linear_attn_layer_results.?.fill(.{ &hidden_buf, args.kv_cache_buffers });
                 },
             }
         }
 
-        const head_program_buffers: zml.Bufferized(HeadProgram) = .{
-            .norm = args.model_buffers.text_model.norm,
-            .lm_head = args.model_buffers.lm_head,
-        };
-
-        var exe_args = try self.head.args(args.allocator);
-        defer exe_args.deinit(args.allocator);
-        var results = try self.head.results(args.allocator);
-        defer results.deinit(args.allocator);
-
-        exe_args.set(.{
-            head_program_buffers,
+        state.head_args.setPartial(.{
             hidden_buf,
             args.tokens_buf,
             args.rng_buf,
-        });
-        self.head.call(exe_args, &results);
-        results.fill(.{ args.tokens_buf, args.rng_buf });
+        }, 0);
+        self.head.call(state.head_args, &state.head_results);
+        state.head_results.fill(.{ args.tokens_buf, args.rng_buf });
     }
 };
+
+pub const RunState = struct {
+    embed_args: zml.Exe.Arguments,
+    embed_results: zml.Exe.Results,
+    self_attn_layer_args: []zml.Exe.Arguments,
+    self_attn_layer_results: ?zml.Exe.Results,
+    linear_attn_layer_args: []zml.Exe.Arguments,
+    linear_attn_layer_results: ?zml.Exe.Results,
+    head_args: zml.Exe.Arguments,
+    head_results: zml.Exe.Results,
+    self_attn_layer_index_buffers: []zml.Buffer,
+    linear_attn_layer_index_buffers: []zml.Buffer,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        exe: *const ComposedKernelExe,
+        model_buffers: *model.Buffers,
+    ) !RunState {
+        var embed_args = try exe.embed_tokens.args(allocator);
+        errdefer embed_args.deinit(allocator);
+        embed_args.bake(.{model_buffers.text_model.embed_tokens});
+
+        var embed_results = try exe.embed_tokens.results(allocator);
+        errdefer embed_results.deinit(allocator);
+
+        const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+
+        const self_attn_layer_count = countSelfAttnLayers(model_buffers.text_model.layers);
+        const self_attn_layer_args = try allocator.alloc(zml.Exe.Arguments, self_attn_layer_count);
+        errdefer allocator.free(self_attn_layer_args);
+        var initialized_self_attn_layer_args: usize = 0;
+        errdefer {
+            for (self_attn_layer_args[0..initialized_self_attn_layer_args]) |*args_| args_.deinit(allocator);
+        }
+
+        const self_attn_layer_index_buffers = try allocator.alloc(zml.Buffer, self_attn_layer_count);
+        errdefer allocator.free(self_attn_layer_index_buffers);
+        var initialized_self_attn_layer_index_buffers: usize = 0;
+        errdefer {
+            for (self_attn_layer_index_buffers[0..initialized_self_attn_layer_index_buffers]) |*buffer| buffer.deinit();
+        }
+
+        if (exe.self_attn_layer) |self_attn_exe| {
+            var self_attn_dense_index: usize = 0;
+            for (model_buffers.text_model.layers) |layer_buffers| switch (layer_buffers.attn) {
+                .self_attn => {
+                    self_attn_layer_args[self_attn_dense_index] = try self_attn_exe.args(allocator);
+                    initialized_self_attn_layer_args += 1;
+                    const layer_program_buffers: zml.Bufferized(SelfAttnLayerProgram) = .{
+                        .layer = layer_buffers,
+                    };
+                    self_attn_layer_args[self_attn_dense_index].bake(.{layer_program_buffers});
+
+                    self_attn_layer_index_buffers[self_attn_dense_index] = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(self_attn_dense_index)), .u32, replicated_sharding);
+                    initialized_self_attn_layer_index_buffers += 1;
+
+                    self_attn_dense_index += 1;
+                },
+                else => {},
+            };
+        }
+
+        var self_attn_layer_results: ?zml.Exe.Results = if (exe.self_attn_layer) |self_attn_exe|
+            try self_attn_exe.results(allocator)
+        else
+            null;
+        errdefer if (self_attn_layer_results) |*results_| results_.deinit(allocator);
+
+        const linear_attn_layer_count = countLinearAttnLayers(model_buffers.text_model.layers);
+        const linear_attn_layer_args = try allocator.alloc(zml.Exe.Arguments, linear_attn_layer_count);
+        errdefer allocator.free(linear_attn_layer_args);
+        var initialized_linear_attn_layer_args: usize = 0;
+        errdefer {
+            for (linear_attn_layer_args[0..initialized_linear_attn_layer_args]) |*args_| args_.deinit(allocator);
+        }
+
+        const linear_attn_layer_index_buffers = try allocator.alloc(zml.Buffer, linear_attn_layer_count);
+        errdefer allocator.free(linear_attn_layer_index_buffers);
+        var initialized_linear_attn_layer_index_buffers: usize = 0;
+        errdefer {
+            for (linear_attn_layer_index_buffers[0..initialized_linear_attn_layer_index_buffers]) |*buffer| buffer.deinit();
+        }
+
+        if (exe.linear_attn_layer) |linear_attn_exe| {
+            var linear_attn_dense_index: usize = 0;
+            for (model_buffers.text_model.layers) |layer_buffers| switch (layer_buffers.attn) {
+                .linear_attn => {
+                    linear_attn_layer_args[linear_attn_dense_index] = try linear_attn_exe.args(allocator);
+                    initialized_linear_attn_layer_args += 1;
+                    const layer_program_buffers: zml.Bufferized(LinearAttnLayerProgram) = .{
+                        .layer = layer_buffers,
+                    };
+                    linear_attn_layer_args[linear_attn_dense_index].bake(.{layer_program_buffers});
+
+                    linear_attn_layer_index_buffers[linear_attn_dense_index] = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(linear_attn_dense_index)), .u32, replicated_sharding);
+                    initialized_linear_attn_layer_index_buffers += 1;
+
+                    linear_attn_dense_index += 1;
+                },
+                else => {},
+            };
+        }
+
+        var linear_attn_layer_results: ?zml.Exe.Results = if (exe.linear_attn_layer) |linear_attn_exe|
+            try linear_attn_exe.results(allocator)
+        else
+            null;
+        errdefer if (linear_attn_layer_results) |*results_| results_.deinit(allocator);
+
+        var head_args = try exe.head.args(allocator);
+        errdefer head_args.deinit(allocator);
+        const head_program_buffers: zml.Bufferized(HeadProgram) = .{
+            .norm = model_buffers.text_model.norm,
+            .lm_head = model_buffers.lm_head,
+        };
+        head_args.bake(.{head_program_buffers});
+
+        var head_results = try exe.head.results(allocator);
+        errdefer head_results.deinit(allocator);
+
+        return .{
+            .embed_args = embed_args,
+            .embed_results = embed_results,
+            .self_attn_layer_args = self_attn_layer_args,
+            .self_attn_layer_results = self_attn_layer_results,
+            .linear_attn_layer_args = linear_attn_layer_args,
+            .linear_attn_layer_results = linear_attn_layer_results,
+            .head_args = head_args,
+            .head_results = head_results,
+            .self_attn_layer_index_buffers = self_attn_layer_index_buffers,
+            .linear_attn_layer_index_buffers = linear_attn_layer_index_buffers,
+        };
+    }
+
+    pub fn deinit(self: *RunState, allocator: std.mem.Allocator) void {
+        self.embed_args.deinit(allocator);
+        self.embed_results.deinit(allocator);
+        for (self.self_attn_layer_args) |*args_| args_.deinit(allocator);
+        allocator.free(self.self_attn_layer_args);
+        if (self.self_attn_layer_results) |*results_| results_.deinit(allocator);
+        for (self.linear_attn_layer_args) |*args_| args_.deinit(allocator);
+        allocator.free(self.linear_attn_layer_args);
+        if (self.linear_attn_layer_results) |*results_| results_.deinit(allocator);
+        self.head_args.deinit(allocator);
+        self.head_results.deinit(allocator);
+        for (self.self_attn_layer_index_buffers) |*buffer| buffer.deinit();
+        allocator.free(self.self_attn_layer_index_buffers);
+        for (self.linear_attn_layer_index_buffers) |*buffer| buffer.deinit();
+        allocator.free(self.linear_attn_layer_index_buffers);
+    }
+};
+
+fn countSelfAttnLayers(layers: []const zml.Bufferized(model.TransformerLayer)) usize {
+    var count: usize = 0;
+    for (layers) |layer_buffers| switch (layer_buffers.attn) {
+        .self_attn => count += 1,
+        else => {},
+    };
+    return count;
+}
+
+fn countLinearAttnLayers(layers: []const zml.Bufferized(model.TransformerLayer)) usize {
+    var count: usize = 0;
+    for (layers) |layer_buffers| switch (layer_buffers.attn) {
+        .linear_attn => count += 1,
+        else => {},
+    };
+    return count;
+}
 
 fn compileModel(
     allocator: std.mem.Allocator,
