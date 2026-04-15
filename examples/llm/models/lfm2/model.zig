@@ -512,9 +512,6 @@ pub const Attention = struct {
 
         q = zml.nn.rope(q, token_positions, self.rope_opts);
         k = zml.nn.rope(k, token_positions, self.rope_opts);
-        q = q.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .seq = .replicated, .h = .model, .hd = .replicated });
 
         q = q.rename(.{ .seq = .q });
         k = k.rename(.{ .seq = .k });
