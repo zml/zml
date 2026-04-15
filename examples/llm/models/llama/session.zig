@@ -14,6 +14,8 @@ pub const Session = struct {
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
+    prefill_state: inference.RunState,
+    decode_state: inference.RunState,
     generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
     config: *const model.Config,
@@ -38,6 +40,12 @@ pub const Session = struct {
         var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, shardings.replicated);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
+        var prefill_state = try inference.RunState.init(allocator, io, platform, &compiled_model.prefill, model_buffers);
+        errdefer prefill_state.deinit(allocator);
+
+        var decode_state = try inference.RunState.init(allocator, io, platform, &compiled_model.decode, model_buffers);
+        errdefer decode_state.deinit(allocator);
+
         return .{
             .allocator = allocator,
             .io = io,
@@ -47,6 +55,8 @@ pub const Session = struct {
             .kv_cache_buffers = kv_cache_buffers,
             .attention_metadata_buffers = attention_metadata_buffers,
             .rng_buffers = rng_buffers,
+            .prefill_state = prefill_state,
+            .decode_state = decode_state,
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32)),
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
@@ -58,6 +68,8 @@ pub const Session = struct {
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
         zml.attention.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
+        self.prefill_state.deinit(self.allocator);
+        self.decode_state.deinit(self.allocator);
         self.generated_token_slice.free(self.allocator);
     }
 
@@ -115,7 +127,7 @@ pub const Session = struct {
         var prefill_token_pos_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32, replicated_sharding);
         defer prefill_token_pos_buffer.deinit();
 
-        try self.compiled_model.prefill.run(.{
+        try self.compiled_model.prefill.runWithState(.{
             .allocator = self.allocator,
             .io = self.io,
             .platform = self.platform,
@@ -125,7 +137,7 @@ pub const Session = struct {
             .kv_cache_buffers = &self.kv_cache_buffers,
             .rng_buf = &self.rng_buffers,
             .attention_metadata_buffers = self.attention_metadata_buffers,
-        });
+        }, &self.prefill_state);
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
         self.generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
@@ -156,7 +168,7 @@ pub const Session = struct {
             var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, replicated_sharding);
             defer token_pos_buffer.deinit();
 
-            try self.compiled_model.decode.run(.{
+            try self.compiled_model.decode.runWithState(.{
                 .allocator = self.allocator,
                 .io = self.io,
                 .platform = self.platform,
@@ -166,7 +178,7 @@ pub const Session = struct {
                 .kv_cache_buffers = &self.kv_cache_buffers,
                 .rng_buf = &self.rng_buffers,
                 .attention_metadata_buffers = self.attention_metadata_buffers,
-            });
+            }, &self.decode_state);
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 

@@ -148,64 +148,133 @@ pub const ComposedKernelExe = struct {
     }
 
     pub fn run(self: *const ComposedKernelExe, args: Args) !void {
+        var state = try RunState.init(args.allocator, args.io, args.platform, self, args.model_buffers);
+        defer state.deinit(args.allocator);
+        try self.runWithState(args, &state);
+    }
+
+    pub fn runWithState(self: *const ComposedKernelExe, args: Args, state: *RunState) !void {
         var hidden_buf: zml.Buffer = undefined;
         {
-            var exe_args = try self.embed_tokens.args(args.allocator);
-            defer exe_args.deinit(args.allocator);
-            var results = try self.embed_tokens.results(args.allocator);
-            defer results.deinit(args.allocator);
-
-            exe_args.set(.{ args.model_buffers.model.embed_tokens, args.tokens_buf });
-            self.embed_tokens.call(exe_args, &results);
-            results.fill(.{&hidden_buf});
+            state.embed_args.setPartial(.{args.tokens_buf}, 0);
+            self.embed_tokens.call(state.embed_args, &state.embed_results);
+            state.embed_results.fill(.{&hidden_buf});
         }
         defer hidden_buf.deinit();
 
-        const replicated_sharding = try zml.sharding.replicatedSharding(args.platform);
         for (args.model_buffers.model.layers, 0..) |layer_buffers, layer_index| {
-            var layer_index_buf = try zml.Buffer.scalar(args.io, args.platform, @as(u32, @intCast(layer_index)), .u32, replicated_sharding);
-            defer layer_index_buf.deinit();
-
-            const layer_program_buffers: zml.Bufferized(LayerProgram) = .{
-                .layer = layer_buffers,
-            };
-
-            var exe_args = try self.layer.args(args.allocator);
-            defer exe_args.deinit(args.allocator);
-            var results = try self.layer.results(args.allocator);
-            defer results.deinit(args.allocator);
-
-            exe_args.set(.{
-                layer_program_buffers,
+            _ = layer_buffers;
+            state.layer_args[layer_index].setPartial(.{
                 &hidden_buf,
                 args.token_index_buf,
                 args.kv_cache_buffers,
-                &layer_index_buf,
+                &state.layer_index_buffers[layer_index],
+            }, 0);
+            state.layer_args[layer_index].setPartial(.{
                 args.attention_metadata_buffers,
-            });
-            self.layer.call(exe_args, &results);
-            results.fill(.{ &hidden_buf, args.kv_cache_buffers });
+            }, 6);
+            self.layer.call(state.layer_args[layer_index], &state.layer_results);
+            state.layer_results.fill(.{ &hidden_buf, args.kv_cache_buffers });
         }
 
-        const head_program_buffers: zml.Bufferized(HeadProgram) = .{
-            .norm = args.model_buffers.model.norm,
-            .lm_head = args.model_buffers.lm_head,
-            .embed_tokens = args.model_buffers.model.embed_tokens,
-        };
-
-        var exe_args = try self.head.args(args.allocator);
-        defer exe_args.deinit(args.allocator);
-        var results = try self.head.results(args.allocator);
-        defer results.deinit(args.allocator);
-
-        exe_args.set(.{
-            head_program_buffers,
+        state.head_args.setPartial(.{
             hidden_buf,
             args.tokens_buf,
             args.rng_buf,
-        });
-        self.head.call(exe_args, &results);
-        results.fill(.{ args.tokens_buf, args.rng_buf });
+        }, 0);
+        self.head.call(state.head_args, &state.head_results);
+        state.head_results.fill(.{ args.tokens_buf, args.rng_buf });
+    }
+};
+
+pub const RunState = struct {
+    embed_args: zml.Exe.Arguments,
+    embed_results: zml.Exe.Results,
+    layer_args: []zml.Exe.Arguments,
+    layer_results: zml.Exe.Results,
+    head_args: zml.Exe.Arguments,
+    head_results: zml.Exe.Results,
+    layer_index_buffers: []zml.Buffer,
+
+    pub fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        exe: *const ComposedKernelExe,
+        model_buffers: *model.Buffers,
+    ) !RunState {
+        var embed_args = try exe.embed_tokens.args(allocator);
+        errdefer embed_args.deinit(allocator);
+        embed_args.bake(.{model_buffers.model.embed_tokens});
+
+        var embed_results = try exe.embed_tokens.results(allocator);
+        errdefer embed_results.deinit(allocator);
+
+        const layer_args = try allocator.alloc(zml.Exe.Arguments, model_buffers.model.layers.len);
+        errdefer allocator.free(layer_args);
+        var initialized_layer_args: usize = 0;
+        errdefer {
+            for (layer_args[0..initialized_layer_args]) |*args_| args_.deinit(allocator);
+        }
+
+        for (model_buffers.model.layers, 0..) |layer_buffers, i| {
+            layer_args[i] = try exe.layer.args(allocator);
+            initialized_layer_args += 1;
+            const layer_program_buffers: zml.Bufferized(LayerProgram) = .{
+                .layer = layer_buffers,
+            };
+            layer_args[i].bake(.{layer_program_buffers});
+        }
+
+        var layer_results = try exe.layer.results(allocator);
+        errdefer layer_results.deinit(allocator);
+
+        var head_args = try exe.head.args(allocator);
+        errdefer head_args.deinit(allocator);
+        const head_program_buffers: zml.Bufferized(HeadProgram) = .{
+            .norm = model_buffers.model.norm,
+            .lm_head = model_buffers.lm_head,
+            .embed_tokens = model_buffers.model.embed_tokens,
+        };
+        head_args.bake(.{head_program_buffers});
+
+        var head_results = try exe.head.results(allocator);
+        errdefer head_results.deinit(allocator);
+
+        const replicated_sharding = try zml.sharding.replicatedSharding(platform);
+        const layer_index_buffers = try allocator.alloc(zml.Buffer, model_buffers.model.layers.len);
+        errdefer allocator.free(layer_index_buffers);
+        var initialized_layer_index_buffers: usize = 0;
+        errdefer {
+            for (layer_index_buffers[0..initialized_layer_index_buffers]) |*buffer| buffer.deinit();
+        }
+
+        for (layer_index_buffers, 0..) |*buffer, i| {
+            buffer.* = try zml.Buffer.scalar(io, platform, @as(u32, @intCast(i)), .u32, replicated_sharding);
+            initialized_layer_index_buffers += 1;
+        }
+
+        return .{
+            .embed_args = embed_args,
+            .embed_results = embed_results,
+            .layer_args = layer_args,
+            .layer_results = layer_results,
+            .head_args = head_args,
+            .head_results = head_results,
+            .layer_index_buffers = layer_index_buffers,
+        };
+    }
+
+    pub fn deinit(self: *RunState, allocator: std.mem.Allocator) void {
+        self.embed_args.deinit(allocator);
+        self.embed_results.deinit(allocator);
+        for (self.layer_args) |*args_| args_.deinit(allocator);
+        allocator.free(self.layer_args);
+        self.layer_results.deinit(allocator);
+        self.head_args.deinit(allocator);
+        self.head_results.deinit(allocator);
+        for (self.layer_index_buffers) |*buffer| buffer.deinit();
+        allocator.free(self.layer_index_buffers);
     }
 };
 
