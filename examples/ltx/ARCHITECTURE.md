@@ -3,25 +3,27 @@
 ## 1. High-Level Pipeline
 
 LTX-2.3 generates audio+video from a text prompt (and optional image) through a
-**6-phase pipeline** orchestrated by a single binary. Each phase compiles one or
+**7-phase pipeline** orchestrated by a single binary. Each phase compiles one or
 more ZML graph functions into XLA executables, loads model weights, and runs them
 on-device.
 
 ```
-Phase 1  runStage1()     30-step guided denoising (4 passes/step × 48 blocks)
-Phase 2  runBridge()     unpatchify → 2× spatial upsample → patchify → noise init
-Phase 3  runStage2()     3-step distilled denoising (1 pass/step × 48 blocks)
-Phase 4  decodeVideo()   video VAE decoder (latent → pixel frames)
-Phase 5  decodeAudio()   audio VAE decoder (latent → mel spectrogram)
-Phase 6  vocoder + BWE   mel → 16kHz waveform → 48kHz stereo → MP4 mux
+Phase 0  (inside runStage1)  text embeddings: Gemma hidden states → context embeddings
+Phase 1  runStage1()         30-step guided denoising (4 passes/step × 48 blocks)
+Phase 2  runBridge()         unpatchify → 2× spatial upsample → patchify → noise init
+Phase 3  runStage2()         3-step distilled denoising (1 pass/step × 48 blocks)
+Phase 4  runVideoVaeDecode() video VAE decoder (latent → pixel frames)
+Phase 5  runAudioVaeDecode() audio VAE decoder (latent → mel spectrogram)
+Phase 6  runVocoderWithBWE() mel → 16kHz waveform → 48kHz stereo → MP4 mux
 ```
 
 A quick introduction to [mel spectrograms](https://huggingface.co/learn/audio-course/en/chapter1/audio_data#mel-spectrogram). 
 
 **Entry point:** `main()` in
-[inference.zig](inference.zig#L410).
-It parses CLI args, loads `pipeline_meta.json`, initialises the ZML platform,
-then calls each phase function in sequence.
+[inference.zig](inference.zig#L556).
+It parses CLI args, computes pipeline geometry from `--height`/`--width`/
+`--num-frames`/`--fps` (or loads a legacy `pipeline_meta.json` via `--meta`),
+initialises the ZML platform, then calls each phase function in sequence.
 
 GPU buffers flow directly between phases — no files touch disk unless
 `--dump-intermediates` is set.
@@ -32,8 +34,9 @@ GPU buffers flow directly between phases — no files touch disk unless
 
 | File | Role | Key exports |
 |------|------|-------------|
-| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, MP4 encoding | `main`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE` |
+| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, MP4 encoding | `main`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE`, `computeTextEmbeddings` |
 | [model.zig](model.zig) | Transformer core + denoising math | `LTXModel`, `BasicAVTransformerBlock`, `FeedForward`, `Attention`, `forwardPreprocess`, `forwardBlock0Native*`, `forwardGenerateNoise`, `forwardNoiseInit`, `forwardGuiderCombine`, `forwardDenoisingStep*`, `computeSigmaSchedule` |
+| [text_embeddings.zig](text_embeddings.zig) | Gemma hidden states → context embeddings (FeatureExtractor + 1D Connector) | `FeatureExtractorV2`, `Embeddings1DConnector`, `ConnectorBlock`, `EmbeddingsProcessor`, `forwardEmbeddingsProcessor` |
 | [conv_ops.zig](conv_ops.zig) | Shared convolution / norm primitives | `Conv3dWeight`, `Conv2dWeight`, `GroupNormWeight`, `PerChannelStats`, `PixelShuffle` |
 | [upsampler.zig](upsampler.zig) | Bridge CNN: 2× spatial latent upsample | `UpsamplerParams`, `forwardUpsample`, `forwardPatchifyVideo`, `forwardUnpatchifyVideo` |
 | [video_vae.zig](video_vae.zig) | Video VAE decoder (3D causal conv) | `forwardVideoVaeDecode` |
@@ -41,6 +44,7 @@ GPU buffers flow directly between phases — no files touch disk unless
 | [audio_vae.zig](audio_vae.zig) | Audio VAE decoder (2D causal conv) | `forwardAudioVaeDecode` |
 | [vocoder.zig](vocoder.zig) | BigVGAN + bandwidth extension (all-f32) | `forwardVocoderWithBWE` |
 | [image_loading.zig](image_loading.zig) | stb_image load + resize + normalise | `loadAndPreprocess` |
+| [export_pipeline.py](export_pipeline.py) | Python reference: run full pipeline, export Gemma hidden states + intermediates for validation | `--text-only` mode for Gemma export |
 
 ---
 
@@ -74,7 +78,7 @@ different real `zml.Buffer` inputs.
 > - `Buffer` = runtime device allocation (actual GPU memory)
 
 A concrete example is at
-[inference.zig L666](inference.zig#L666)
+[inference.zig L892](inference.zig#L892)
 where `forwardGenerateNoise` is compiled and then called twice (once for video
 noise, once for audio noise).
 
@@ -85,7 +89,7 @@ noise, once for audio noise).
 ### 4.1  Inputs
 
 Stage 1 initial state is computed on host from the pipeline geometry
-(`pipeline_meta.json`) — no safetensors file needed:
+(CLI args or legacy `--meta` JSON) — no safetensors file needed:
 
 | Tensor | Shape | How computed |
 |--------|-------|--------------|
@@ -95,20 +99,21 @@ Stage 1 initial state is computed on host from the pipeline geometry
 | `audio_denoise_mask` | `[1, T_a, 1]` f32 | All 1.0 |
 | `video_positions` | `[1, 3, T_v, 2]` bf16 | `computeVideoPositions(F, H, W, fps)` — pixel-coord grid |
 | `audio_positions` | `[1, 1, T_a, 2]` f32 | `computeAudioPositions(T_a)` — time intervals in seconds |
-| `v_context_pos/neg` | `[1, S, 4096]` bf16 | Computed by Zig from Gemma hidden states |
-| `a_context_pos/neg` | `[1, S, 2048]` bf16 | Computed by Zig from Gemma hidden states |
+| `v_context_pos/neg` | `[1, S, 4096]` bf16 | `computeTextEmbeddings()` — FeatureExtractorV2 + Embeddings1DConnector (see §5.1) |
+| `a_context_pos/neg` | `[1, S, 2048]` bf16 | `computeTextEmbeddings()` — FeatureExtractorV2 + Embeddings1DConnector (see §5.1) |
 
-Where `T_v = f_lat × h_lat × w_lat` and `T_a` are from `pipeline_meta.json`.
+Where `T_v = f_lat × h_lat × w_lat` and `T_a` are derived from the pipeline
+geometry (`computePipelineMeta()` in [inference.zig](inference.zig#L3367)).
 
 ### 4.2  Result Structs (Buffer hand-off)
 
 Each phase returns a result struct whose fields are live GPU buffers:
 
-- **`Stage1Result`** ([inference.zig L143](inference.zig#L143)):
+- **`Stage1Result`** ([inference.zig L289](inference.zig#L289)):
   denoised v/a latents + positive text contexts + RNG state.
-- **`BridgeResult`** ([inference.zig L163](inference.zig#L163)):
+- **`BridgeResult`** ([inference.zig L309](inference.zig#L309)):
   upsampled & re-noised latents + Stage 2 positions/masks/contexts/clean.
-- **`Stage2Result`** ([inference.zig L193](inference.zig#L193)):
+- **`Stage2Result`** ([inference.zig L339](inference.zig#L339)):
   final denoised v/a latents.
 
 Ownership transfers between phases — the caller frees what it no longer needs.
@@ -117,9 +122,48 @@ Ownership transfers between phases — the caller frees what it no longer needs.
 
 ## 5. Phase 1 — Stage 1: 30-Step Guided Denoising
 
-**Function:** [`runStage1()`](inference.zig#L591) (~900 lines)
+**Function:** [`runStage1()`](inference.zig#L766)
 
-### 5.1  Noise Generation & Initialisation
+### 5.1  Text Embeddings (Phase 0)
+
+Before denoising begins, `runStage1` calls
+[`computeTextEmbeddings()`](inference.zig#L2591)
+to convert raw Gemma-3-12B hidden states into the video and audio context
+embeddings consumed by the transformer's cross-attention layers. This is a full
+neural-network inference step, implemented in
+[text_embeddings.zig](text_embeddings.zig):
+
+```
+Gemma hidden states [B, S, 3840, 49]  (49 stacked layers)
+        │
+  FeatureExtractorV2  — per-token RMS norm → flatten → rescale_norm → dual linear
+        │
+  ┌─────┴─────┐
+  video feats  audio feats    [B, S, 4096] / [B, S, 2048]
+  │            │
+  Embeddings1DConnector (×2, one per modality)
+  │  — 128 learnable register tokens prepended
+  │  — 1D RoPE (θ=10000)
+  │  — 8 transformer blocks (self-attention + cross-attention + FF)
+  │  — final RMS norm
+  │  — register tokens stripped
+  │
+  v_context    a_context      [B, S, 4096] / [B, S, 2048]
+```
+
+The processor is compiled once and called twice (positive prompt, negative
+prompt). Weights come from the LTX checkpoint
+(`text_embedding_projection.*` and
+`model.diffusion_model.{video,audio}_embeddings_connector.*`).
+
+Key types in [text_embeddings.zig](text_embeddings.zig):
+- [`FeatureExtractorV2`](text_embeddings.zig#L51) — stack→norm→flatten→dual-linear
+- [`Embeddings1DConnector`](text_embeddings.zig#L355) — register insertion + 8-block transformer
+- [`ConnectorBlock`](text_embeddings.zig#L301) — single transformer block (self-attn + cross-attn + FF)
+- [`EmbeddingsProcessor`](text_embeddings.zig#L622) — orchestrates extractor + both connectors
+- [`forwardEmbeddingsProcessor()`](text_embeddings.zig#L747) — top-level graph function
+
+### 5.2  Noise Generation & Initialisation
 
 1. **Sigma schedule** — computed on the host (CPU):
    [`computeSigmaSchedule()`](model.zig#L1431) generates 31 values via a
@@ -128,7 +172,7 @@ Ownership transfers between phases — the caller frees what it no longer needs.
 2. **Box-Muller noise** — compiled graph function
    [`forwardGenerateNoise()`](model.zig#L1370): takes RNG state + target shape,
    returns updated RNG + Gaussian noise. Called twice (video draw #1, audio
-   draw #2) at [inference.zig L689](inference.zig#L689).
+   draw #2) at [inference.zig L907](inference.zig#L907).
 
 3. **Noise init** —
    [`forwardNoiseInit()`](model.zig#L1392):
@@ -136,7 +180,7 @@ Ownership transfers between phases — the caller frees what it no longer needs.
    This blends noise with the clean latent proportionally to the denoise mask
    and initial sigma.
 
-### 5.2  Compiled Executables (compiled once, called per-step)
+### 5.3  Compiled Executables (compiled once, called per-step)
 
 Stage 1 compiles **8 distinct executables** before entering the loop:
 
@@ -151,9 +195,9 @@ Stage 1 compiles **8 distinct executables** before entering the loop:
 | `denoise_v/a_exe` | `forwardDenoisingStepFromX0` | Euler step (x₀ + mask blending) |
 | `guider_combine_exe` | `forwardGuiderCombine` | CFG + STG + modality merge |
 
-Compilation happens at [inference.zig L821](inference.zig#L821).
+Compilation happens at [inference.zig L1050](inference.zig#L1050).
 
-### 5.3  The 4-Pass Guidance Loop
+### 5.4  The 4-Pass Guidance Loop
 
 Each of the 30 steps runs **4 full forward passes** through all 48 blocks:
 
@@ -164,7 +208,7 @@ Pass 3  STG           positive context, V-passthrough at block 28  → velocity_
 Pass 4  Isolated      positive context, zeroed AV cross-masks   → velocity_iso
 ```
 
-The loop body is at [inference.zig L1179](inference.zig#L1179).
+The loop body is at [inference.zig L1414](inference.zig#L1414).
 
 For each pass:
 1. Feed `(vx, ax)` from `forwardPreprocess` through 48 sequential block calls.
@@ -181,10 +225,10 @@ See [`forwardGuiderCombine()`](model.zig#L1507).
 Finally, `forwardDenoisingStepFromX0` takes one Euler step, replacing the
 latent buffers for the next iteration.
 
-### 5.4  Weight Loading Strategy
+### 5.5  Weight Loading Strategy
 
 The 48 transformer blocks' weights are loaded one at a time into GPU memory
-([inference.zig L1098](inference.zig#L1098)).
+([inference.zig L1335](inference.zig#L1335)).
 Each block shares the same compiled executable — only the weight buffer argument
 changes per block call.
 
@@ -192,7 +236,7 @@ changes per block call.
 
 ## 6. Phase 2 — Bridge
 
-**Function:** [`runBridge()`](inference.zig#L1515)
+**Function:** [`runBridge()`](inference.zig#L1751)
 
 The bridge converts Stage 1's low-res latent to Stage 2's high-res latent:
 
@@ -212,7 +256,7 @@ optionally re-applies image conditioning.
 
 ## 7. Phase 3 — Stage 2: 3-Step Distilled Denoising
 
-**Function:** [`runStage2()`](inference.zig#L1890)
+**Function:** [`runStage2()`](inference.zig#L2137)
 
 Much simpler than Stage 1:
 - **3 steps** (σ = `[0.909375, 0.725, 0.421875] → 0.0`)
@@ -325,7 +369,7 @@ Simpler since the distilled model outputs are used directly.
 
 ### 10.1  Video VAE Decode (Phase 4)
 
-**Function:** [`runVideoVaeDecode()`](inference.zig#L2357)
+**Function:** [`runVideoVaeDecode()`](inference.zig#L2766)
 **Model:** [video_vae.zig](video_vae.zig) — 3D causal convolution decoder
 
 Architecture: `conv_in → 9 up_blocks (ResBlock groups + DepthToSpace) → PixelNorm → SiLU → conv_out`
@@ -335,14 +379,14 @@ Frames are then extracted as uint8 RGB.
 
 ### 10.2  Audio VAE Decode (Phase 5)
 
-**Function:** [`runAudioVaeDecode()`](inference.zig#L2622)
+**Function:** [`runAudioVaeDecode()`](inference.zig#L3038)
 **Model:** [audio_vae.zig](audio_vae.zig) — 2D causal convolution decoder
 
 Converts `[1, 128, 1, T_audio]` latent → mel spectrogram.
 
 ### 10.3  Vocoder + BWE (Phase 6)
 
-**Function:** [`runVocoderWithBWE()`](inference.zig#L2741)
+**Function:** [`runVocoderWithBWE()`](inference.zig#L3164)
 **Model:** [vocoder.zig](vocoder.zig)
 
 Two-stage audio synthesis:
@@ -369,7 +413,7 @@ seed → initBuffer → [Stage 1: draw#1 video, draw#2 audio]
 ```
 
 See the `Tensor.Rng` type (from `zml`) and the draw sequence at
-[inference.zig L689](inference.zig#L689).
+[inference.zig L907](inference.zig#L907).
 
 ---
 
@@ -377,9 +421,9 @@ See the `Tensor.Rng` type (from `zml`) and the draw sequence at
 
 When `--image` is provided:
 
-1. [`encodeImageToTokens()`](inference.zig#L299) — load image → VAE encode →
+1. [`encodeImageToTokens()`](inference.zig#L445) — load image → VAE encode →
    patchify → `[1, n_img, 128]` token buffer.
-2. [`forwardApplyConditioning()`](inference.zig#L252) — splice image tokens
+2. [`forwardApplyConditioning()`](inference.zig#L398) — splice image tokens
    into the first frame positions of latent/clean/mask.
 
 The conditioning zeroes out the denoise mask for first-frame tokens (= keep
@@ -413,7 +457,7 @@ different weight buffers. This means:
 - The architecture only **requires** one block's weights on GPU at a time,
   which would enable weight streaming (load block N → call → free → load N+1).
   However, the current implementation loads all 48 blocks upfront
-  ([inference.zig L1098](inference.zig#L1098)), so they all reside in GPU
+  ([inference.zig L1335](inference.zig#L1335)), so they all reside in GPU
   memory simultaneously. This trades higher peak memory for speed — streaming
   would add 5,760 host→device transfers per stage (48 blocks × 4 passes × 30
   steps).
