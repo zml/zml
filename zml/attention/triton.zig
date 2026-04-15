@@ -201,15 +201,6 @@ pub const GenerationConfig = union(KernelKind) {
     reduce_segments_ptr: GenerationConfigReduce,
 };
 
-fn getGenerateBinPath(allocator: std.mem.Allocator) ![]const u8 {
-    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
-
-    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = runfiles.rlocation("zml/zml/attention/triton/sandbox", &sandbox_path_buf) catch unreachable;
-
-    return std.fs.path.join(allocator, &.{ sandbox_path.?, "bin", "generate" });
-}
-
 fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConfig) ![:0]const u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -649,10 +640,21 @@ pub const Runtime = struct {
     process: std.process.Child,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Runtime {
-        const path = try getGenerateBinPath(allocator);
-        defer allocator.free(path);
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
 
-        const process = try std.process.spawn(io, .{ .argv = &.{path}, .stdin = .pipe, .stdout = .pipe });
+        const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
+        const sandbox_path = runfiles.rlocationAlloc(arena.allocator(), "zml/zml/attention/triton/sandbox") catch unreachable;
+
+        var map: std.process.Environ.Map = .init(arena.allocator());
+        try map.put("LD_LIBRARY_PATH", std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "lib" }) catch unreachable);
+
+        const process = try std.process.spawn(io, .{
+            .argv = &.{std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "bin", "generate" }) catch unreachable},
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .environ_map = &map,
+        });
         errdefer process.kill(io);
 
         return .{ .process = process };

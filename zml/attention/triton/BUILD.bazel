@@ -87,6 +87,7 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":generate_files",
+        "@zlib1g",
     ],
     target_compatible_with = ["@platforms//os:linux"],
     add_directory_to_runfiles = False,
@@ -111,6 +112,7 @@ copy_to_directory(
         "triton_kernels": "site-packages/triton_kernels",
         "generate.py": "site-packages/generate.py",
         "generate": "bin/generate",
+        "lib/x86_64-linux-gnu": "lib",
     },
     visibility = ["//visibility:public"],
 )
