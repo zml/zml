@@ -2,6 +2,7 @@ const std = @import("std");
 
 const zml = @import("zml");
 const Tensor = zml.Tensor;
+const stdx = zml.stdx;
 
 const conv_ops = @import("conv_ops.zig");
 const Conv3dWeight = conv_ops.Conv3dWeight;
@@ -261,18 +262,6 @@ pub fn forwardVideoVaeDecode(
     stats: PerChannelStats,
     params: VideoVaeDecoderParams,
 ) Tensor {
-    const early_out = forwardVideoVaeDecodeEarly(latent, stats, params);
-    return forwardVideoVaeDecodeLate(early_out, params);
-}
-
-/// VAE decoder early stages: denormalize + conv_in + up_blocks.0–5.
-/// Produces [B, 256, F_full, H_mid, W_mid] where DepthToSpace has already
-/// expanded temporal/spatial dims to intermediate resolution.
-pub fn forwardVideoVaeDecodeEarly(
-    latent: Tensor,
-    stats: PerChannelStats,
-    params: VideoVaeDecoderParams,
-) Tensor {
     // 1. Denormalize: x = latent * std_of_means + mean_of_means
     const stats_shape = latent.shape().set(0, 1).set(2, 1).set(3, 1).set(4, 1);
     const std_broad = stats.std_of_means.reshape(stats_shape).broad(latent.shape());
@@ -305,18 +294,6 @@ pub fn forwardVideoVaeDecodeEarly(
     // 8. up_blocks.5: DepthToSpace (2,1,1) → 512→256
     x = forwardDepthToSpace(x, params.up5, .{ 2, 1, 1 });
 
-    return x;
-}
-
-/// VAE decoder late stages: up_blocks.6–8 + PixelNorm + conv_out + unpatchify.
-/// Input: [B, 256, F_full, H_mid, W_mid] from early stage.
-/// Output: decoded video [B, 3, F_full, 4*H_mid, 4*W_mid] bf16.
-pub fn forwardVideoVaeDecodeLate(
-    x_in: Tensor,
-    params: VideoVaeDecoderParams,
-) Tensor {
-    var x = x_in;
-
     // 9. up_blocks.6: 6 ResBlocks @ 256ch
     x = forwardVaeResBlock(x, params.up6_res0);
     x = forwardVaeResBlock(x, params.up6_res1);
@@ -341,4 +318,129 @@ pub fn forwardVideoVaeDecodeLate(
 
     // 13. Unpatchify: [B, 48, F, H, W] → [B, 3, F, 4H, 4W]
     return forwardUnpatchifyVae(x);
+}
+
+// ============================================================================
+// Temporal tiling for large-frame VAE decode
+// ============================================================================
+
+/// Tiling config for temporal chunking of the VAE decoder.
+/// tile_latent_frames=9 gives 65 pixel frames per tile.
+/// overlap_latent_frames=3 gives 17 pixel frames of blending overlap.
+pub const TemporalTilingConfig = struct {
+    tile_latent_frames: i64 = 9,
+    overlap_latent_frames: i64 = 3,
+
+    pub fn stride(self: TemporalTilingConfig) i64 {
+        return self.tile_latent_frames - self.overlap_latent_frames;
+    }
+
+    /// Number of pixel frames in the overlap region.
+    /// Each latent frame maps to 8 pixel frames, but the formula for a
+    /// contiguous range of N latent frames gives 8*(N-1)+1 pixel frames.
+    pub fn overlapPixelFrames(self: TemporalTilingConfig) i64 {
+        return 8 * (self.overlap_latent_frames - 1) + 1;
+    }
+};
+
+/// A single temporal tile: half-open range [lat_start, lat_end) in latent frames.
+pub const TemporalTile = struct {
+    lat_start: i64,
+    lat_end: i64, // exclusive, may exceed F' for the padded last tile
+    lat_actual_end: i64, // exclusive, clamped to F' (before padding)
+    px_start: i64,
+    px_end: i64, // exclusive, pixel frames for the actual (non-padded) content
+    is_first: bool,
+    is_last: bool,
+};
+
+/// Compute the list of temporal tiles for a given number of latent frames.
+/// Returns at most MAX_TILES tiles (enough for ~500 latent frames).
+const MAX_TILES = 64;
+
+pub fn computeTemporalTiles(
+    f_lat: i64,
+    config: TemporalTilingConfig,
+) struct { tiles: [MAX_TILES]TemporalTile, count: usize } {
+    const s = config.stride();
+    var result: [MAX_TILES]TemporalTile = undefined;
+    var count: usize = 0;
+
+    var start: i64 = 0;
+    while (start < f_lat) : (start += s) {
+        const end = @min(start + config.tile_latent_frames, f_lat);
+        const actual_end = end;
+
+        // Pixel frame range for the actual content of this tile.
+        // Latent frames [start..end) decode to pixel frames [px_start..px_end).
+        // Formula: latent frame i → pixel frames 8*i .. 8*i+1 (for a single frame).
+        // A contiguous range [a..b) of latent frames decodes to pixel [8*a .. 8*(b-1)+1).
+        // But the first latent frame of the whole sequence starts at pixel 0, and
+        // the VAE output for N latent frames is 8*(N-1)+1 pixel frames.
+        // So tile [start..end) in latent → pixel [8*start .. 8*start + 8*(end-start-1)+1).
+        const tile_actual_lat = actual_end - start;
+        const px_start = 8 * start;
+        const px_end = px_start + 8 * (tile_actual_lat - 1) + 1;
+
+        const is_first = (start == 0);
+        const is_last = (end >= f_lat);
+
+        stdx.debug.assert(count < MAX_TILES, "too many temporal tiles", .{});
+        result[count] = .{
+            .lat_start = start,
+            .lat_end = if (is_last and end < start + config.tile_latent_frames)
+                start + config.tile_latent_frames // padded to full tile size
+            else
+                end,
+            .lat_actual_end = actual_end,
+            .px_start = px_start,
+            .px_end = px_end,
+            .is_first = is_first,
+            .is_last = is_last,
+        };
+        count += 1;
+
+        if (is_last) break;
+    }
+
+    return .{ .tiles = result, .count = count };
+}
+
+/// Compute per-pixel-frame blend weights for a tile.
+/// Returns a weight array of length `px_count` (the tile's actual pixel frames).
+/// Overlap regions use a linear ramp [0..1]; non-overlap regions have weight 1.
+pub fn computeBlendWeights(
+    allocator: std.mem.Allocator,
+    tile: TemporalTile,
+    config: TemporalTilingConfig,
+) ![]f32 {
+    const px_count: usize = @intCast(tile.px_end - tile.px_start);
+    const weights = try allocator.alloc(f32, px_count);
+
+    // Fill with 1.0
+    @memset(weights, 1.0);
+
+    const overlap_px: usize = @intCast(config.overlapPixelFrames());
+
+    // Left ramp (except for the first tile — no blending needed on the left)
+    if (!tile.is_first and overlap_px > 0) {
+        const ramp_len = overlap_px;
+        for (0..@min(ramp_len, px_count)) |i| {
+            weights[i] = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(ramp_len - 1));
+        }
+    }
+
+    // Right ramp (except for the last tile — no blending needed on the right)
+    if (!tile.is_last and overlap_px > 0) {
+        const ramp_len = overlap_px;
+        for (0..@min(ramp_len, px_count)) |i| {
+            const idx = px_count - 1 - i;
+            const w = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(ramp_len - 1));
+            // Take the minimum of existing weight and the right ramp
+            // (handles the case where both ramps overlap in a very short tile)
+            weights[idx] = @min(weights[idx], w);
+        }
+    }
+
+    return weights;
 }

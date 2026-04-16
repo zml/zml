@@ -2877,18 +2877,33 @@ fn runVideoVaeDecode(
         },
     );
 
-    // ========================================================================
-    // Step 3: Compile and run the VAE decoder (split into early+late stages
-    // to reduce XLA peak memory — each half is a separate compiled exe)
-    // ========================================================================
     timer.addLoad(); // VAE + stats weights
 
-    // --- Early stage: denormalize + conv_in + up_blocks.0–5 ---
-    std.log.info("Compiling VAE decoder (early stage)...", .{});
-    var vae_early_exe = try platform.compileFn(
+    // ========================================================================
+    // Step 3: Tiling decision
+    // ========================================================================
+    const tiling_config: video_vae.TemporalTilingConfig = .{};
+    const use_tiling = F > tiling_config.tile_latent_frames;
+
+    if (use_tiling) {
+        std.log.info("Temporal tiling enabled: F'={d}, tile={d}, overlap={d}, stride={d}", .{
+            F, tiling_config.tile_latent_frames, tiling_config.overlap_latent_frames, tiling_config.stride(),
+        });
+        return runVideoVaeDecodeTiled(
+            allocator, io, platform, sharding, v_latent_5d,
+            vae_params, vae_bufs, stats_shape, stats_bufs,
+            F, H, W, tiling_config, timer,
+        );
+    }
+
+    // ========================================================================
+    // Fast path: single decode, no tiling
+    // ========================================================================
+    std.log.info("Compiling VAE decoder (single, no tiling)...", .{});
+    var vae_exe = try platform.compileFn(
         allocator,
         io,
-        video_vae.forwardVideoVaeDecodeEarly,
+        video_vae.forwardVideoVaeDecode,
         .{
             zml.Tensor.fromShape(v_latent_5d.shape()),
             stats_shape,
@@ -2896,49 +2911,231 @@ fn runVideoVaeDecode(
         },
         .{ .shardings = &.{sharding} },
     );
-    defer vae_early_exe.deinit();
+    defer vae_exe.deinit();
     timer.addCompile();
 
-    std.log.info("Running VAE decode (early stage)...", .{});
-    var early_args = try vae_early_exe.args(allocator);
-    defer early_args.deinit(allocator);
-    var early_results = try vae_early_exe.results(allocator);
-    defer early_results.deinit(allocator);
-    early_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
-    vae_early_exe.call(early_args, &early_results);
-    const vae_mid = early_results.get(zml.Buffer);
-    std.log.info("  Early stage output: {any}", .{vae_mid.shape().dims()});
+    std.log.info("Running VAE decode...", .{});
+    var vae_args = try vae_exe.args(allocator);
+    defer vae_args.deinit(allocator);
+    var vae_results = try vae_exe.results(allocator);
+    defer vae_results.deinit(allocator);
+    vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
+    vae_exe.call(vae_args, &vae_results);
+    const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
+    std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
     timer.addExec();
 
-    // --- Late stage: up_blocks.6–8 + PixelNorm + conv_out + unpatchify ---
-    std.log.info("Compiling VAE decoder (late stage)...", .{});
-    var vae_late_exe = try platform.compileFn(
+    return postProcessDecodedVideo(allocator, io, decoded_video);
+}
+
+/// Tiled VAE decode path: decode overlapping temporal chunks and blend on host.
+fn runVideoVaeDecodeTiled(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    v_latent_5d: zml.Buffer,
+    vae_params: video_vae.VideoVaeDecoderParams,
+    vae_bufs: zml.Bufferized(video_vae.VideoVaeDecoderParams),
+    stats_shape: conv_ops.PerChannelStats,
+    stats_bufs: zml.Bufferized(conv_ops.PerChannelStats),
+    F: i64,
+    H: i64,
+    W: i64,
+    config: video_vae.TemporalTilingConfig,
+    timer: *PhaseTimer,
+) !VideoFrames {
+    const C: i64 = 128;
+
+    // Compute tile plan
+    const tile_plan = video_vae.computeTemporalTiles(F, config);
+    std.log.info("  Tile plan: {d} tiles", .{tile_plan.count});
+
+    // Total pixel output dimensions
+    const F_px: usize = @intCast(8 * (F - 1) + 1);
+    const H_px: usize = @intCast(32 * H);
+    const W_px: usize = @intCast(32 * W);
+
+    // Compile VAE decoder once for the tile shape [1, 128, tile_latent_frames, H, W]
+    const tile_latent_shape = zml.Shape.init(.{ 1, C, config.tile_latent_frames, H, W }, .bf16);
+    std.log.info("Compiling VAE decoder for tile shape: {any}...", .{tile_latent_shape.dims()});
+    var vae_exe = try platform.compileFn(
         allocator,
         io,
-        video_vae.forwardVideoVaeDecodeLate,
+        video_vae.forwardVideoVaeDecode,
         .{
-            zml.Tensor.fromShape(vae_mid.shape()),
+            zml.Tensor.fromShape(tile_latent_shape),
+            stats_shape,
             vae_params,
         },
         .{ .shardings = &.{sharding} },
     );
-    defer vae_late_exe.deinit();
+    defer vae_exe.deinit();
     timer.addCompile();
 
-    std.log.info("Running VAE decode (late stage)...", .{});
-    var late_args = try vae_late_exe.args(allocator);
-    defer late_args.deinit(allocator);
-    var late_results = try vae_late_exe.results(allocator);
-    defer late_results.deinit(allocator);
-    late_args.set(.{ vae_mid, vae_bufs });
-    vae_late_exe.call(late_args, &late_results);
-    const decoded_video = late_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
-    std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
+    // Download full latent to host (tiny: 1*128*F*H*W*2 bytes ≈ few MB)
+    std.log.info("Downloading latent to host for tiling...", .{});
+    const latent_host = try v_latent_5d.toSliceAlloc(allocator, io);
+    defer latent_host.free(allocator);
+    const latent_bytes = latent_host.constData();
+
+    // Host accumulation buffers (f32 for precision during blending)
+    // Layout: [F_px, H_px, W_px, 3] in NHWC for easy frame-sequential access
+    const accum_len = F_px * H_px * W_px * 3;
+    const pixel_accum = try allocator.alloc(f32, accum_len);
+    defer allocator.free(pixel_accum);
+    @memset(pixel_accum, 0.0);
+
+    const weight_accum = try allocator.alloc(f32, F_px);
+    defer allocator.free(weight_accum);
+    @memset(weight_accum, 0.0);
+
+    // Process each tile
+    const tile_lat_frames_usize: usize = @intCast(config.tile_latent_frames);
+    const tile_byte_size: usize = @intCast(1 * C * config.tile_latent_frames * H * W * 2); // bf16=2 bytes
+
+    for (0..tile_plan.count) |tile_idx| {
+        const tile = tile_plan.tiles[tile_idx];
+        const actual_lat_frames: usize = @intCast(tile.lat_actual_end - tile.lat_start);
+
+        std.log.info("  Tile {d}/{d}: latent [{d}..{d}), actual={d} frames, pixel [{d}..{d})", .{
+            tile_idx + 1,
+            tile_plan.count,
+            tile.lat_start,
+            tile.lat_actual_end,
+            actual_lat_frames,
+            tile.px_start,
+            tile.px_end,
+        });
+
+        // Create tile latent on host: [1, 128, tile_latent_frames, H, W] bf16
+        // Copy actual frames, zero-pad if last tile is shorter.
+        const tile_buf = try allocator.alloc(u8, tile_byte_size);
+        defer allocator.free(tile_buf);
+        @memset(tile_buf, 0); // zero-fill (handles padding for short last tile)
+
+        // Copy frame data. Layout is [B=1, C=128, F, H, W] contiguous.
+        // Offset for frame f in the full latent: f * C * H * W * 2 bytes,
+        // but C is dim 1 (outermost after B), so frames are NOT contiguous
+        // in the standard [B,C,F,H,W] layout. We need to copy per-channel.
+        //
+        // Actually, in [B, C, F, H, W] layout with C=128:
+        //   stride of dim 2 (F) = H * W * 2 bytes
+        //   stride of dim 1 (C) = F * H * W * 2 bytes
+        // To slice frames [start..end) we need to copy, for each channel c:
+        //   source: c * F_full * HW2 + start * HW2 .. + end * HW2
+        //   dest:   c * tile_F * HW2 + 0 .. actual * HW2
+        const HW2: usize = @intCast(H * W * 2);
+        const F_full: usize = @intCast(F);
+        const start: usize = @intCast(tile.lat_start);
+
+        for (0..128) |c| {
+            const src_base = c * F_full * HW2 + start * HW2;
+            const dst_base = c * tile_lat_frames_usize * HW2;
+            const copy_len = actual_lat_frames * HW2;
+            @memcpy(tile_buf[dst_base..][0..copy_len], latent_bytes[src_base..][0..copy_len]);
+        }
+
+        // Upload tile to GPU
+        const tile_slice = zml.Slice.init(tile_latent_shape, tile_buf);
+        var tile_gpu = try zml.Buffer.fromSlice(io, platform, tile_slice, sharding);
+
+        // Run VAE decoder
+        var vae_args = try vae_exe.args(allocator);
+        defer vae_args.deinit(allocator);
+        var vae_results = try vae_exe.results(allocator);
+        defer vae_results.deinit(allocator);
+        vae_args.set(.{ tile_gpu, stats_bufs, vae_bufs });
+        vae_exe.call(vae_args, &vae_results);
+        var decoded_tile = vae_results.get(zml.Buffer); // [1, 3, F_tile_px, H_px, W_px] bf16
+        defer decoded_tile.deinit();
+
+        // Free GPU tile input immediately
+        tile_gpu.deinit();
+
+        // Download decoded tile to host
+        const tile_decoded_slice = try decoded_tile.toSliceAlloc(allocator, io);
+        defer tile_decoded_slice.free(allocator);
+        const tile_decoded_bytes = tile_decoded_slice.constData();
+
+        // Determine actual pixel frame count for this tile (crop padding)
+        const tile_F_px_full: usize = @intCast(decoded_tile.shape().dim(2)); // 8*(tile_lat-1)+1
+        const actual_px_frames: usize = @intCast(tile.px_end - tile.px_start);
+        const tile_F_px = @min(tile_F_px_full, actual_px_frames);
+
+        // Compute blend weights for this tile
+        const blend_weights = try video_vae.computeBlendWeights(allocator, tile, config);
+        defer allocator.free(blend_weights);
+
+        // Accumulate into pixel_accum with blending
+        // Decoded tile layout: [1, 3, F_tile_px, H_px, W_px] bf16
+        // Target layout: [F_px, H_px, W_px, 3] f32
+        const px_offset: usize = @intCast(tile.px_start);
+        for (0..tile_F_px) |f| {
+            const w = blend_weights[f];
+            const global_f = px_offset + f;
+            weight_accum[global_f] += w;
+
+            for (0..H_px) |h| {
+                for (0..W_px) |ww| {
+                    for (0..3) |c| {
+                        // Source: [1, 3, F, H, W] bf16
+                        const src_idx = (c * tile_F_px_full * H_px * W_px + f * H_px * W_px + h * W_px + ww) * 2;
+                        const bf16_bits = std.mem.readInt(u16, tile_decoded_bytes[src_idx..][0..2], .little);
+                        const f32_bits: u32 = @as(u32, bf16_bits) << 16;
+                        const val: f32 = @bitCast(f32_bits);
+
+                        // Accumulate weighted value
+                        const dst_idx = global_f * H_px * W_px * 3 + h * W_px * 3 + ww * 3 + c;
+                        pixel_accum[dst_idx] += val * w;
+                    }
+                }
+            }
+        }
+    }
     timer.addExec();
 
     // ========================================================================
-    // Step 4: Post-process to uint8 and write frames.bin
+    // Normalize and convert to u8
     // ========================================================================
+    std.log.info("Normalizing blended frames...", .{});
+    const num_pixels = F_px * H_px * W_px * 3;
+    const frames_u8 = try allocator.alloc(u8, num_pixels);
+
+    for (0..F_px) |f| {
+        const w = weight_accum[f];
+        if (w == 0.0) continue; // shouldn't happen
+        const inv_w = 1.0 / w;
+        for (0..H_px) |h| {
+            for (0..W_px) |ww| {
+                for (0..3) |c| {
+                    const idx = f * H_px * W_px * 3 + h * W_px * 3 + ww * 3 + c;
+                    const val = pixel_accum[idx] * inv_w;
+                    // (val + 1) / 2 * 255, clamped
+                    const normalized = @min(@max((val + 1.0) * 0.5, 0.0), 1.0);
+                    frames_u8[idx] = @intFromFloat(normalized * 255.0);
+                }
+            }
+        }
+    }
+
+    std.log.info("  Video frames: {d}x{d}, {d} frames (tiled)", .{ W_px, H_px, F_px });
+
+    return .{
+        .data = frames_u8,
+        .width = W_px,
+        .height = H_px,
+        .num_frames = F_px,
+        .allocator = allocator,
+    };
+}
+
+/// Post-process a decoded video buffer to u8 frames (non-tiled fast path).
+fn postProcessDecodedVideo(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    decoded_video: zml.Buffer,
+) !VideoFrames {
     std.log.info("Post-processing decoded video to frames...", .{});
 
     // Download bf16 tensor to host
