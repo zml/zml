@@ -2890,9 +2890,20 @@ fn runVideoVaeDecode(
             F, tiling_config.tile_latent_frames, tiling_config.overlap_latent_frames, tiling_config.stride(),
         });
         return runVideoVaeDecodeTiled(
-            allocator, io, platform, sharding, v_latent_5d,
-            vae_params, vae_bufs, stats_shape, stats_bufs,
-            F, H, W, tiling_config, timer,
+            allocator,
+            io,
+            platform,
+            sharding,
+            v_latent_5d,
+            vae_params,
+            vae_bufs,
+            stats_shape,
+            stats_bufs,
+            F,
+            H,
+            W,
+            tiling_config,
+            timer,
         );
     }
 
