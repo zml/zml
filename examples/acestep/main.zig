@@ -6,14 +6,13 @@ const stdx = zml.stdx;
 
 const acellm_ = @import("acellm.zig");
 const aceemb_ = @import("aceemb.zig");
-//const acedit_ = @import("acedit.zig");
+const acedit_ = @import("acedit.zig");
 //const acevae_ = @import("acevae.zig");
 const inference = @import("inference.zig");
 
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
-
 
 pub const Shardings = struct {
     replicated: zml.sharding.Sharding,
@@ -37,62 +36,89 @@ pub const Zml_handler = struct {
     allocator: std.mem.Allocator,
     arena: *std.heap.ArenaAllocator,
     io: std.Io,
-    platform: *zml.Platform
+    platform: *zml.Platform,
+    
+    pub fn fromInit(init: std.process.Init) !Zml_handler {
+        return .{
+            .arena = init.arena,
+            .allocator = init.gpa,
+            .io = init.io,
+            .platform = try .auto(init.gpa, init.io, .{}),
+        };
+    }
+    
+    pub fn deinit(self: *Zml_handler) void {
+        self.platform.deinit(self.allocator);
+    }
 };
 
 
 pub fn main(init: std.process.Init) !void {
-    const arena = init.arena;
-    const allocator = init.gpa;
-    const io = init.io;
-    const platform: *zml.Platform = try .auto(allocator, io, .{});
-    defer platform.deinit(allocator);
-
-    const zml_handler: Zml_handler = .{
-        .allocator = allocator,
-        .arena = arena,
-        .io = io,
-        .platform = platform,
-    };
-    var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
-    defer acellm.deinit(allocator);
+    var zml_handler: Zml_handler = try .fromInit(init);
+    defer zml_handler.deinit();
+    
+    //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    
+    // ------------------------------------------------
+    // Thinking/Inspiration phase : 5Hz LLM model
+    // ------------------------------------------------
+    
+    //var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
+    //defer acellm.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acellm.testModel(zml_handler);
 
-    //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
     //const audio_metadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
     const audio_metadata: inference.AudioMetadata = .initExample();
-    //defer audio_metadata.deinit(allocator);
+    //defer audio_metadata.deinit(zml_handler.allocator);
     //const audio_codes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
-    const audio_codes: inference.AudioCodes = try .initExample(allocator);
-    defer audio_codes.deinit(allocator);
+    const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
+    defer audio_codes.deinit(zml_handler.allocator);
 
-    acellm.unloadBuffers();
+    //acellm.unloadBuffers();
+    
+    // ------------------------------------------------
+    // The text inputs of the DiT need to be embedded
+    // using the AceEmb model embedding, not 5Hz
+    // ------------------------------------------------
 
     const full_emb, const partial_emb = try aceemb_.embeddingLengths(zml_handler, audio_metadata);
     var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, full_emb, partial_emb);
-    defer aceemb.deinit(allocator);
+    defer aceemb.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acedit.testModel(zml_handler, aceemb);
 
     const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
-    defer text_emb.deinit(allocator);
+    defer text_emb.deinit(zml_handler.allocator);
     
-    var stdout = std.Io.File.stdout().writer(io, &.{});
-    const writer: *std.Io.Writer = &stdout.interface;
-    const options: std.fmt.Number = .{};
-    
-    std.log.info("Caption embedding shape", .{});
-    try text_emb.caption_embedding.shape.format(writer);
-    try text_emb.caption_embedding.prettyPrint(writer, options);
-    
-    std.log.info("Lyric embedding shape", .{});
-    try text_emb.lyrics_embedding.shape.format(writer);
-    try text_emb.lyrics_embedding.prettyPrint(writer, options);
-
+    //try text_emb.print(zml_handler.io);
     aceemb.unloadBuffers();
+    
+    // ------------------------------------------------
+    // Generation phase : diffusion with DiT model
+    // ------------------------------------------------
+
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, full_emb, partial_emb);
+    defer acedit.deinit(zml_handler.allocator);
+
+    // Test model activations
+    //try acedit.testModel(zml_handler);
+
+    const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, text_emb);
+    defer diffused_latents.deinit(zml_handler.allocator);
+
+    try diffused_latents.print(zml_handler.io);
+    acedit.unloadBuffers();
+
+    // ------------------------------------------------
+    // Output latents of the DiT model are decoded
+    // with the VAE model
+    // ------------------------------------------------
+
+    // TODO
+
 }
 
 
