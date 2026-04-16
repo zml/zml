@@ -444,3 +444,39 @@ pub fn computeBlendWeights(
 
     return weights;
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+test "blend weights sum to 1.0 for every pixel frame (F'=16)" {
+    const allocator = std.testing.allocator;
+    const config: TemporalTilingConfig = .{};
+    const f_lat: i64 = 16;
+    const f_px: usize = @intCast(8 * (f_lat - 1) + 1); // 121
+
+    const tile_plan = computeTemporalTiles(f_lat, config);
+    try std.testing.expectEqual(@as(usize, 3), tile_plan.count);
+
+    // Accumulate total weight per pixel frame
+    var total_weight: [121]f32 = .{0.0} ** 121;
+
+    for (0..tile_plan.count) |i| {
+        const tile = tile_plan.tiles[i];
+        const weights = try computeBlendWeights(allocator, tile, config);
+        defer allocator.free(weights);
+
+        const px_offset: usize = @intCast(tile.px_start);
+        for (0..weights.len) |f| {
+            total_weight[px_offset + f] += weights[f];
+        }
+    }
+
+    // Every pixel frame must have total weight ≈ 1.0
+    for (0..f_px) |f| {
+        if (@abs(total_weight[f] - 1.0) > 1e-5) {
+            std.debug.print("Frame {d}: weight sum = {d:.6}\n", .{ f, total_weight[f] });
+            return error.TestUnexpectedResult;
+        }
+    }
+}

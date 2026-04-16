@@ -1,5 +1,5 @@
 load("@bazel_skylib//rules:build_test.bzl", "build_test")
-load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
 
 zig_binary(
     name = "inference",
@@ -26,5 +26,17 @@ build_test(
     name = "test",
     targets = [
         ":inference",
+    ],
+)
+
+zig_test(
+    name = "video_vae_test",
+    main = "video_vae.zig",
+    srcs = [
+        "conv_ops.zig",
+        "upsampler.zig",
+    ],
+    deps = [
+        "//zml",
     ],
 )
