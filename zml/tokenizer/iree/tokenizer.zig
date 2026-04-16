@@ -2,6 +2,8 @@ const std = @import("std");
 
 const c = @import("c");
 
+const log = std.log.scoped(.@"zml/tokenizer");
+
 pub const Error = error{
     Cancelled,
     Unknown,
@@ -35,17 +37,27 @@ inline fn byteSpan(bytes: []u8) c.iree_byte_span_t {
     return .{ .data = bytes.ptr, .data_length = bytes.len };
 }
 
-inline fn tokenOutput(ids: []c.iree_tokenizer_token_id_t) c.iree_tokenizer_token_output_t {
+inline fn tokenOutput(ids: []u32) c.iree_tokenizer_token_output_t {
+    comptime {
+        if (@sizeOf(c.iree_tokenizer_token_id_t) != @sizeOf(u32) or @alignOf(c.iree_tokenizer_token_id_t) != @alignOf(u32)) {
+            @compileError("iree_tokenizer_token_id_t must match u32 layout");
+        }
+    }
     return .{
         .capacity = ids.len,
-        .token_ids = ids.ptr,
+        .token_ids = @ptrCast(ids.ptr),
         .token_offsets = null,
         .type_ids = null,
     };
 }
 
-inline fn tokenIdList(ids: []const c.iree_tokenizer_token_id_t) c.iree_tokenizer_token_id_list_t {
-    return .{ .count = ids.len, .values = ids.ptr };
+inline fn tokenIdList(ids: []const u32) c.iree_tokenizer_token_id_list_t {
+    comptime {
+        if (@sizeOf(c.iree_tokenizer_token_id_t) != @sizeOf(u32) or @alignOf(c.iree_tokenizer_token_id_t) != @alignOf(u32)) {
+            @compileError("iree_tokenizer_token_id_t must match u32 layout");
+        }
+    }
+    return .{ .count = ids.len, .values = @ptrCast(ids.ptr) };
 }
 
 inline fn statusCode(status: c.iree_status_t) u32 {
@@ -78,10 +90,6 @@ fn assertOk(status: c.iree_status_t) !void {
 }
 
 pub const Tokenizer = struct {
-    const EncodeBatchSize = 256;
-    const DecodeOutputBatchSize = c.IREE_TOKENIZER_DECODE_OUTPUT_RECOMMENDED_SIZE;
-    const DecodeTokenBatchSize = 256;
-
     allocator: std.mem.Allocator,
     inner: *c.iree_tokenizer_t,
 
@@ -131,8 +139,6 @@ pub const Tokenizer = struct {
         state_storage: []u8,
         transform_buffer: []u8,
         state: *c.iree_tokenizer_encode_state_t,
-        output: [EncodeBatchSize]c.iree_tokenizer_token_id_t,
-        output_token_ids: [EncodeBatchSize]u32,
 
         fn init(tokenizer: *const Tokenizer) !Encoder {
             var state_size: usize = undefined;
@@ -159,8 +165,6 @@ pub const Tokenizer = struct {
                 .state_storage = state_storage,
                 .transform_buffer = transform_buffer,
                 .state = state.?,
-                .output = undefined,
-                .output_token_ids = undefined,
             };
         }
 
@@ -174,61 +178,160 @@ pub const Tokenizer = struct {
             c.iree_tokenizer_encode_state_reset(self.state, c.IREE_TOKENIZER_ENCODE_FLAG_AT_INPUT_START);
         }
 
-        pub fn feed(self: *Encoder, chunk: []const u8) !struct {
-            usize,
-            []const u32,
-        } {
-            var consumed: usize = 0;
-            var produced: usize = 0;
+        pub fn encodeAlloc(self: *Encoder, allocator: std.mem.Allocator, text: []const u8) ![]u32 {
+            var token_ids = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+            errdefer token_ids.deinit();
 
-            // Feeds an input |chunk| to the encoder. Tokens that can be definitively
-            // produced are written to |output|. Additional tokens may be produced by
-            // subsequent feed calls or by finalize once all input has been provided.
-            //
-            // Pull-based model: Output buffer capacity drives processing. The encoder
-            // pulls data through the pipeline (normalizer → segmenter → model) to
-            // fill the output buffer. Processing stops when output is full or input
-            // is exhausted.
-            //
-            // Returns:
-            // - |out_bytes_consumed|: Bytes consumed from |chunk|. May be less than
-            //   chunk.size if internal buffers (transform_buffer) fill up. Caller should
-            //   retry with remaining bytes: chunk.data + *out_bytes_consumed.
-            // - |out_token_count|: Tokens written to |output|.
-            //
-            // The function always makes progress if possible: it will consume input
-            // and/or produce tokens. Returns iree_ok_status() even if not all input
-            // was consumed (check out_bytes_consumed).
-            try assertOk(c.iree_tokenizer_encode_state_feed(
-                self.state,
-                stringView(chunk),
-                tokenOutput(&self.output),
-                &consumed,
-                &produced,
-            ));
+            try self.feed(text, &token_ids.writer);
+            try self.finalize(&token_ids.writer);
 
-            return .{
-                consumed,
-                @as([*]const u32, @ptrCast(&self.output))[0..produced],
-            };
+            const bytes = try token_ids.toOwnedSlice();
+            const aligned_bytes: []align(4) u8 = @alignCast(bytes[0..bytes.len]);
+            return std.mem.bytesAsSlice(u32, aligned_bytes);
         }
 
-        pub fn finalize(self: *Encoder) ![]const u32 {
-            var produced: usize = 0;
+        /// /!\ Assumes the writer provides buffers with proper alignment.
+        /// /!\ Remember to call the finalize() method
+        pub fn writer(self: *Encoder, buffer: []u8, out: *std.Io.Writer) Writer {
+            return Writer.init(self, buffer, out);
+        }
 
-            // Finalizes encoding by flushing any buffered data through the pipeline. Must
-            // be called after all input chunks have been fed. Any remaining tokens are
-            // written to |output|.
-            //
-            // Returns the number of tokens written in |out_token_count|. Returns
-            // IREE_STATUS_RESOURCE_EXHAUSTED if the output would exceed output.capacity.
-            try assertOk(c.iree_tokenizer_encode_state_finalize(
-                self.state,
-                tokenOutput(&self.output),
-                &produced,
-            ));
+        pub const Writer = struct {
+            encoder: *Encoder,
+            out: *std.Io.Writer,
+            interface: std.Io.Writer,
 
-            return @as([*]const u32, @ptrCast(&self.output))[0..produced];
+            fn init(encoder_: *Encoder, buffer: []u8, out: *std.Io.Writer) Writer {
+                return .{
+                    .encoder = encoder_,
+                    .out = out,
+                    .interface = .{
+                        .buffer = buffer,
+                        .vtable = &.{
+                            .drain = drain,
+                            .flush = flush,
+                            .rebase = std.Io.Writer.failingRebase,
+                        },
+                    },
+                };
+            }
+
+            pub fn finalize(self: *Writer) std.Io.Writer.Error!void {
+                try self.interface.flush();
+                self.encoder.finalize(self.out) catch |e| {
+                    log.err("Finalize failed with {s}", .{@errorName(e)});
+                    return error.WriteFailed;
+                };
+            }
+
+            fn flush(w: *std.Io.Writer) std.Io.Writer.Error!void {
+                if (w.end == 0) return;
+                const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+                try self.feed(w.buffer[0..w.end]);
+                w.end = 0;
+            }
+
+            fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
+                const self: *Writer = @alignCast(@fieldParentPtr("interface", w));
+
+                if (w.end != 0) {
+                    try self.feed(w.buffer[0..w.end]);
+                    w.end = 0;
+                }
+
+                var total: usize = 0;
+                // Prefix chunks: written once each.
+                for (data[0 .. data.len - 1]) |chunk| {
+                    try self.feed(chunk);
+                    total += chunk.len;
+                }
+                // Last chunk is the splat pattern.
+                const pattern = data[data.len - 1];
+                if (pattern.len == 0) return total;
+                for (0..splat) |_| {
+                    try self.feed(pattern);
+                    total += pattern.len;
+                }
+                return total;
+            }
+
+            fn feed(self: *Writer, chunk: []const u8) std.Io.Writer.Error!void {
+                self.encoder.feed(chunk, self.out) catch |e| {
+                    log.err("Feed failed with {s}", .{@errorName(e)});
+                    return error.WriteFailed;
+                };
+            }
+        };
+
+        /// /!\ Assumes the writer provides buffers with proper alignment.
+        pub fn feed(self: *Encoder, text: []const u8, out: *std.Io.Writer) !void {
+            var min_tokens: usize = @max(text.len / 4, 32);
+            var remaining = text;
+            while (remaining.len > 0) {
+                var consumed: usize = 0;
+                var produced: usize = 0;
+
+                assertOk(c.iree_tokenizer_encode_state_feed(
+                    self.state,
+                    stringView(remaining),
+                    tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
+                    &consumed,
+                    &produced,
+                )) catch |e| switch (e) {
+                    error.ResourceExhausted => {
+                        out.advance(produced * @sizeOf(u32));
+                        min_tokens -= produced;
+                        remaining = remaining[consumed..];
+                        produced = 0;
+                        consumed = 0;
+                    },
+                    else => return e,
+                };
+
+                if (produced == 0 and consumed == 0) {
+                    min_tokens *= 2;
+                    std.debug.assert(min_tokens < 1 << 20);
+                    continue;
+                }
+
+                out.advance(produced * @sizeOf(u32));
+                min_tokens -= produced;
+                remaining = remaining[consumed..];
+            }
+        }
+
+        /// /!\ Assumes the writer provides buffers with proper alignment.
+        pub fn finalize(self: *Encoder, out: *std.Io.Writer) !void {
+            var min_tokens: usize = 4;
+            while (true) {
+                var produced: usize = 0;
+
+                assertOk(c.iree_tokenizer_encode_state_finalize(
+                    self.state,
+                    tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
+                    &produced,
+                )) catch |e| switch (e) {
+                    error.ResourceExhausted => {
+                        out.advance(produced * @sizeOf(u32));
+                        min_tokens *= 2;
+                        std.debug.assert(min_tokens < 1 << 10);
+                        continue;
+                    },
+                    else => return e,
+                };
+
+                out.advance(produced * @sizeOf(u32));
+                break;
+            }
+        }
+
+        fn writableTokenSliceGreedy(out: *std.Io.Writer, min_tokens: usize) std.Io.Writer.Error![]u32 {
+            std.debug.assert(@mod(out.end, @sizeOf(u32)) == 0);
+            const bytes = try out.writableSliceGreedy(min_tokens * @sizeOf(u32));
+            std.debug.assert(@mod(@intFromPtr(bytes.ptr), 4) == 0);
+            const aligned_len = bytes.len - @mod(bytes.len, @sizeOf(u32));
+            const aligned_bytes: []align(4) u8 = @alignCast(bytes[0..aligned_len]);
+            return std.mem.bytesAsSlice(u32, aligned_bytes);
         }
     };
 
@@ -236,10 +339,8 @@ pub const Tokenizer = struct {
         tokenizer: *const Tokenizer,
         state_storage: []u8,
         state: *c.iree_tokenizer_decode_state_t,
-        output: [DecodeOutputBatchSize]u8,
-        input_ids: [DecodeTokenBatchSize]c.iree_tokenizer_token_id_t,
 
-        fn init(tokenizer: *const Tokenizer) (Error || std.mem.Allocator.Error)!Decoder {
+        fn init(tokenizer: *const Tokenizer) !Decoder {
             var state_size: usize = undefined;
             try assertOk(c.iree_tokenizer_decode_state_calculate_size(tokenizer.inner, &state_size));
             const state_storage = try tokenizer.allocator.alloc(u8, state_size);
@@ -257,8 +358,6 @@ pub const Tokenizer = struct {
                 .tokenizer = tokenizer,
                 .state_storage = state_storage,
                 .state = state.?,
-                .output = undefined,
-                .input_ids = undefined,
             };
         }
 
@@ -279,70 +378,108 @@ pub const Tokenizer = struct {
             self.state = state.?;
         }
 
-        pub fn feed(self: *Decoder, token_ids_: []const u32) !struct {
-            usize,
-            []const u8,
-        } {
-            const token_ids: []const c.iree_tokenizer_token_id_t =
-                @as([*]const i32, @ptrCast(token_ids_.ptr))[0..token_ids_.len];
-
+        pub fn feedOne(self: *Decoder, token_id: u32, out: []u8) ![]u8 {
+            std.debug.assert(out.len != 0);
             var consumed: usize = 0;
-            var written: usize = 0;
-
-            // Feeds |tokens| to the decoder. Text that can be definitively produced is
-            // written to |text_output| as raw UTF-8 bytes (not NUL-terminated). Additional
-            // text may be produced by subsequent feed calls or by finalize once all tokens
-            // have been provided.
-            //
-            // Pull-based model: Output buffer capacity drives processing. The decoder
-            // pulls tokens through the pipeline to fill the text output. Processing
-            // stops when output is full or tokens are exhausted.
-            //
-            // Returns iree_ok_status() always (errors are only from internal pipeline
-            // failures). Progress is indicated by the output parameters:
-            // - |out_tokens_consumed|: Tokens consumed from |tokens|. May be less than
-            //   tokens.count if text output fills up. Caller should retry with remaining
-            //   tokens: tokens.values + *out_tokens_consumed.
-            // - |out_text_length|: Bytes written to |text_output|.
-            //
-            // Zero-progress case: If both out_tokens_consumed and out_text_length are 0,
-            // the output buffer is genuinely exhausted (the next token's text does not fit
-            // in |text_output|). Callers must check for this to avoid infinite loops.
-            // Provide a larger output buffer or consume the already-written text.
+            var produced: usize = 0;
             try assertOk(c.iree_tokenizer_decode_state_feed(
                 self.state,
-                tokenIdList(token_ids),
-                mutableStringView(&self.output),
+                tokenIdList(&.{token_id}),
+                mutableStringView(out),
                 &consumed,
-                &written,
+                &produced,
             ));
-
-            return .{
-                consumed,
-                self.output[0..written],
-            };
+            std.debug.assert(consumed == 1);
+            return out[0..produced];
         }
 
-        pub fn finalize(self: *Decoder) ![]const u8 {
-            var written: usize = 0;
-
-            // Finalizes decoding by flushing any buffered data through the pipeline. Must
-            // be called after all tokens have been fed. Any remaining text is written to
-            // |text_output| as raw UTF-8 bytes (not NUL-terminated).
-            //
-            // Returns the number of bytes written in |out_text_length|. Returns
-            // IREE_STATUS_RESOURCE_EXHAUSTED if the output would exceed text_output.size.
+        pub fn finalize(self: *Decoder, out: []u8) ![]u8 {
+            std.debug.assert(out.len != 0);
+            var produced: usize = 0;
             try assertOk(c.iree_tokenizer_decode_state_finalize(
                 self.state,
-                mutableStringView(&self.output),
-                &written,
+                mutableStringView(out),
+                &produced,
             ));
-            return self.output[0..written];
+            return out[0..produced];
+        }
+
+        pub fn decode(self: *Decoder, token_ids: []const u32, out: *std.Io.Writer) !void {
+            var min_output: usize = @max(token_ids.len * 4, 32);
+            var remaining = token_ids;
+            while (remaining.len > 0) {
+                var consumed: usize = 0;
+                var produced: usize = 0;
+
+                assertOk(c.iree_tokenizer_decode_state_feed(
+                    self.state,
+                    tokenIdList(remaining),
+                    mutableStringView(try out.writableSliceGreedy(min_output)),
+                    &consumed,
+                    &produced,
+                )) catch |e| switch (e) {
+                    error.ResourceExhausted => {
+                        out.advance(produced);
+                        min_output -= produced;
+                        remaining = remaining[consumed..];
+                        produced = 0;
+                        consumed = 0;
+                    },
+                    else => return e,
+                };
+
+                if (produced == 0 and consumed == 0) {
+                    @branchHint(.unlikely);
+                    min_output *= 2;
+                    std.debug.assert(min_output < 1 << 20);
+                    continue;
+                }
+
+                out.advance(produced);
+                min_output -= produced;
+                remaining = remaining[consumed..];
+            }
+
+            min_output = 32;
+            while (true) {
+                var produced: usize = 0;
+
+                assertOk(c.iree_tokenizer_decode_state_finalize(
+                    self.state,
+                    mutableStringView(try out.writableSliceGreedy(min_output)),
+                    &produced,
+                )) catch |e| switch (e) {
+                    error.ResourceExhausted => {
+                        out.advance(produced);
+                        min_output *= 2;
+                        std.debug.assert(min_output < 1 << 10);
+                        continue;
+                    },
+                    else => return e,
+                };
+
+                out.advance(produced);
+                break;
+            }
         }
     };
 };
 
-test "huggingface json streaming encode/decode" {
+fn tokenOutputWriter(allocator: std.mem.Allocator) std.Io.Writer.Allocating {
+    return std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+}
+
+fn writtenTokenIds(out: *std.Io.Writer.Allocating) []const u32 {
+    const bytes = out.written();
+    const aligned_bytes: []align(4) u8 = @alignCast(bytes[0..bytes.len]);
+    return std.mem.bytesAsSlice(u32, aligned_bytes);
+}
+
+fn decodedTextWriter(allocator: std.mem.Allocator) std.Io.Writer.Allocating {
+    return std.Io.Writer.Allocating.init(allocator);
+}
+
+test "huggingface json encode/decode" {
     const allocator = std.testing.allocator;
     const json =
         \\{
@@ -370,17 +507,9 @@ test "huggingface json streaming encode/decode" {
 
     const text = "hello world";
 
-    var token_ids: std.ArrayList(u32) = .empty;
-    defer token_ids.deinit(allocator);
-    var remaining_txt: []const u8 = text;
-    while (remaining_txt.len > 0) {
-        const consumed, const ids = try encoder.feed(remaining_txt);
-        try token_ids.appendSlice(allocator, ids);
-        remaining_txt = remaining_txt[consumed..];
-    }
-    try token_ids.appendSlice(allocator, try encoder.finalize());
-
-    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids.items);
+    const token_ids = try encoder.encodeAlloc(allocator, text);
+    defer allocator.free(token_ids);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids);
 
     const token_hello = tokenizer.tokenId("hello") orelse unreachable;
     try std.testing.expectEqual(@as(u32, 1), token_hello);
@@ -391,15 +520,335 @@ test "huggingface json streaming encode/decode" {
     var decoder = try tokenizer.decoder();
     defer decoder.deinit();
 
-    var tokens: std.ArrayList(u8) = .empty;
-    defer tokens.deinit(allocator);
-    var remaining_ids: []const u32 = token_ids.items;
-    while (remaining_ids.len > 0) {
-        const consumed, const chunk = try decoder.feed(remaining_ids);
-        try tokens.appendSlice(allocator, chunk);
-        remaining_ids = remaining_ids[consumed..];
-    }
-    try tokens.appendSlice(allocator, try decoder.finalize());
+    var decoded = decodedTextWriter(allocator);
+    defer decoded.deinit();
+    try decoder.decode(token_ids, &decoded.writer);
+    try std.testing.expectEqualStrings("hello world", decoded.written());
+}
 
-    try std.testing.expectEqualStrings("hello world", tokens.items);
+test "writer" {
+    const allocator = std.testing.allocator;
+    const json =
+        \\{
+        \\  "model": {
+        \\    "type": "WordPiece",
+        \\    "unk_token": "[UNK]",
+        \\    "continuing_subword_prefix": "##",
+        \\    "max_input_chars_per_word": 100,
+        \\    "vocab": {
+        \\      "[UNK]": 0,
+        \\      "hello": 1,
+        \\      "world": 2
+        \\    }
+        \\  },
+        \\  "pre_tokenizer": {"type": "Whitespace"},
+        \\  "decoder": {"type": "WordPiece", "prefix": "##", "cleanup": false}
+        \\}
+    ;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, json);
+    defer tokenizer.deinit();
+
+    const text = "hello world";
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const token_ids_alloc = try encoder.encodeAlloc(allocator, text);
+    defer allocator.free(token_ids_alloc);
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids_alloc);
+
+    encoder.reset();
+    var buf: [1024]u8 = undefined;
+    var out = tokenOutputWriter(allocator);
+    defer out.deinit();
+    var writer = encoder.writer(&buf, &out.writer);
+    try writer.interface.writeAll(text);
+    try writer.finalize();
+    const token_ids = writtenTokenIds(&out);
+
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, token_ids);
+
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+
+    var decoded = decodedTextWriter(allocator);
+    defer decoded.deinit();
+    try decoder.decode(token_ids, &decoded.writer);
+    try std.testing.expectEqualStrings("hello world", decoded.written());
+}
+
+/// Shared tokenizer JSON config used by multiple tests.
+const test_tokenizer_json =
+    \\{
+    \\  "model": {
+    \\    "type": "WordPiece",
+    \\    "unk_token": "[UNK]",
+    \\    "continuing_subword_prefix": "##",
+    \\    "max_input_chars_per_word": 100,
+    \\    "vocab": {
+    \\      "[UNK]": 0,
+    \\      "hello": 1,
+    \\      "world": 2,
+    \\      "foo": 3,
+    \\      "bar": 4,
+    \\      "a": 5,
+    \\      "b": 6,
+    \\      "c": 7
+    \\    }
+    \\  },
+    \\  "pre_tokenizer": {"type": "Whitespace"},
+    \\  "decoder": {"type": "WordPiece", "prefix": "##", "cleanup": false}
+    \\}
+;
+
+test "writer with tiny buffer forces drain" {
+    // A buffer smaller than the input forces the drain path (not just flush).
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    // Buffer of 4 bytes; "hello world" is 11 bytes, so drain must be invoked.
+    var buf: [4]u8 = undefined;
+    var out = tokenOutputWriter(allocator);
+    defer out.deinit();
+    var writer = encoder.writer(&buf, &out.writer);
+    try writer.interface.writeAll("hello world");
+    try writer.finalize();
+
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, writtenTokenIds(&out));
+}
+
+test "writer byte-by-byte" {
+    // Feed one byte at a time through the writer to stress buffer/drain boundaries.
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    var buf: [1]u8 = undefined;
+    var out = tokenOutputWriter(allocator);
+    defer out.deinit();
+    var writer = encoder.writer(&buf, &out.writer);
+    for ("hello world") |byte| {
+        try writer.interface.writeByte(byte);
+    }
+    try writer.finalize();
+
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, writtenTokenIds(&out));
+}
+
+test "encoder reset between multiple encodes" {
+    // Ensure reset properly clears state so successive encodes are independent.
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    {
+        const ids = try encoder.encodeAlloc(allocator, "foo bar");
+        defer allocator.free(ids);
+        try std.testing.expectEqualSlices(u32, &.{ 3, 4 }, ids);
+    }
+
+    encoder.reset();
+
+    {
+        const ids = try encoder.encodeAlloc(allocator, "hello world");
+        defer allocator.free(ids);
+        try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, ids);
+    }
+
+    encoder.reset();
+
+    // Third encode to verify repeated resets work.
+    {
+        const ids = try encoder.encodeAlloc(allocator, "foo");
+        defer allocator.free(ids);
+        try std.testing.expectEqualSlices(u32, &.{3}, ids);
+    }
+}
+
+test "writer and encodeAlloc produce same results" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    const inputs = [_][]const u8{
+        "hello",
+        "hello world",
+        "foo bar",
+        "a b c",
+        "foo bar hello world a b c",
+    };
+
+    for (inputs) |text| {
+        var encoder = try tokenizer.encoder();
+        defer encoder.deinit();
+
+        const expected = try encoder.encodeAlloc(allocator, text);
+        defer allocator.free(expected);
+
+        encoder.reset();
+
+        var buf: [8]u8 = undefined;
+        var out = tokenOutputWriter(allocator);
+        defer out.deinit();
+        var writer = encoder.writer(&buf, &out.writer);
+        try writer.interface.writeAll(text);
+        try writer.finalize();
+
+        try std.testing.expectEqualSlices(u32, expected, writtenTokenIds(&out));
+    }
+}
+
+test "encode empty string" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    // encodeAlloc with empty string should produce no tokens.
+    {
+        const ids = try encoder.encodeAlloc(allocator, "");
+        defer allocator.free(ids);
+        try std.testing.expectEqual(@as(usize, 0), ids.len);
+    }
+
+    encoder.reset();
+
+    // Writer with empty string should also produce no tokens.
+    {
+        var buf: [16]u8 = undefined;
+        var out = tokenOutputWriter(allocator);
+        defer out.deinit();
+        var writer = encoder.writer(&buf, &out.writer);
+        try writer.interface.writeAll("");
+        try writer.finalize();
+        try std.testing.expectEqual(@as(usize, 0), writtenTokenIds(&out).len);
+    }
+}
+
+test "unknown tokens" {
+    // Words not in the vocabulary should map to the [UNK] token (id 0).
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    const ids = try encoder.encodeAlloc(allocator, "unknown");
+    defer allocator.free(ids);
+    try std.testing.expectEqualSlices(u32, &.{0}, ids);
+}
+
+test "decode round-trip" {
+    // Encode then decode several strings and verify round-trip fidelity.
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    const inputs = [_][]const u8{
+        "hello",
+        "hello world",
+        "foo bar",
+        "a b c",
+    };
+
+    for (inputs) |text| {
+        var encoder = try tokenizer.encoder();
+        defer encoder.deinit();
+
+        const ids = try encoder.encodeAlloc(allocator, text);
+        defer allocator.free(ids);
+
+        var decoder = try tokenizer.decoder();
+        defer decoder.deinit();
+
+        var decoded = decodedTextWriter(allocator);
+        defer decoded.deinit();
+        try decoder.decode(ids, &decoded.writer);
+
+        try std.testing.expectEqualStrings(text, decoded.written());
+    }
+}
+
+test "decoder reset between decodes" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var decoder = try tokenizer.decoder();
+    defer decoder.deinit();
+
+    {
+        var text = decodedTextWriter(allocator);
+        defer text.deinit();
+        try decoder.decode(&.{ 1, 2 }, &text.writer);
+        try std.testing.expectEqualStrings("hello world", text.written());
+    }
+
+    try decoder.reset();
+
+    {
+        var text = decodedTextWriter(allocator);
+        defer text.deinit();
+        try decoder.decode(&.{ 3, 4 }, &text.writer);
+        try std.testing.expectEqualStrings("foo bar", text.written());
+    }
+}
+
+test "tokenId lookup" {
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    try std.testing.expectEqual(@as(u32, 0), tokenizer.tokenId("[UNK]").?);
+    try std.testing.expectEqual(@as(u32, 1), tokenizer.tokenId("hello").?);
+    try std.testing.expectEqual(@as(u32, 2), tokenizer.tokenId("world").?);
+    try std.testing.expectEqual(@as(u32, 3), tokenizer.tokenId("foo").?);
+    try std.testing.expectEqual(@as(u32, 4), tokenizer.tokenId("bar").?);
+    try std.testing.expect(tokenizer.tokenId("nonexistent") == null);
+    try std.testing.expect(tokenizer.tokenId("") == null);
+}
+
+test "writer with pre-allocated output writer" {
+    // Pass an already-allocated aligned output writer to the encoder stream.
+    const allocator = std.testing.allocator;
+
+    var tokenizer = try Tokenizer.fromBytes(allocator, test_tokenizer_json);
+    defer tokenizer.deinit();
+
+    var encoder = try tokenizer.encoder();
+    defer encoder.deinit();
+
+    var out = tokenOutputWriter(allocator);
+    defer out.deinit();
+    try out.ensureUnusedCapacity(64 * @sizeOf(u32));
+
+    var buf: [32]u8 = undefined;
+    var writer = encoder.writer(&buf, &out.writer);
+    try writer.interface.writeAll("hello world");
+    try writer.finalize();
+
+    try std.testing.expectEqualSlices(u32, &.{ 1, 2 }, writtenTokenIds(&out));
 }
