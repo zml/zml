@@ -73,29 +73,29 @@ pub fn main(init: std.process.Init) !void {
 
     const replicated = try zml.sharding.replicatedSharding(platform);
 
-    // try testLayer(
-    //     allocator,
-    //     io,
-    //     platform,
-    //     activation_store.view(),
-    //     "nvfp4_quant.from_scratch",
-    //     Nvfp4FromScratch{},
-    //     {},
-    //     replicated,
-    //     .{ .absolute_tolerance = 1e-6, .relative_tolerance = 1e-6 },
-    // );
-
     try testLayer(
         allocator,
         io,
         platform,
         activation_store.view(),
-        "nvfp4_quant.custom_call",
-        Nvfp4CustomCall{},
+        "nvfp4_quant.from_scratch",
+        Nvfp4FromScratch{},
         {},
         replicated,
         .{ .absolute_tolerance = 1e-6, .relative_tolerance = 1e-6 },
     );
+
+    // try testLayer(
+    //     allocator,
+    //     io,
+    //     platform,
+    //     activation_store.view(),
+    //     "nvfp4_quant.custom_call",
+    //     Nvfp4CustomCall{},
+    //     {},
+    //     replicated,
+    //     .{ .absolute_tolerance = 1e-6, .relative_tolerance = 1e-6 },
+    // );
 }
 
 fn testLayer(
@@ -162,12 +162,22 @@ fn printFirst20(io: std.Io, label: []const u8, buffer: zml.Buffer) !void {
     const slice = try buffer.toSliceAlloc(allocator, io);
     defer slice.free(allocator);
 
-    const values = slice.constItems(f32);
-    const n = @min(values.len, 20);
+    switch (buffer.shape().dtype()) {
+        inline else => |dt| {
+            const T = dt.toZigType();
+            const values = slice.constItems(T);
+            const n = @min(values.len, 20);
 
-    std.log.info("{s} first {d} values:", .{ label, n });
-    for (values[0..n], 0..) |value, i| {
-        std.log.info("  [{d}] {d}", .{ i, value });
+            std.log.info("{s} ({s}) first {d} values:", .{ label, dt.str(), n });
+            for (values[0..n], 0..) |value, i| {
+                switch (comptime dt.class()) {
+                    .float => std.log.info("  [{d}] {d}", .{ i, zml.floats.floatCast(f32, value) }),
+                    .integer => std.log.info("  [{d}] {d}", .{ i, value }),
+                    .bool => std.log.info("  [{d}] {}", .{ i, value }),
+                    .complex => std.log.info("  [{d}] {any}", .{ i, value }),
+                }
+            }
+        },
     }
 }
 
@@ -249,6 +259,8 @@ fn quantizeNVFP4CustomCall(x: zml.Tensor) QuantizeNVFP4Result {
 }
 
 fn quantizeNVFP4FromScratch(x: zml.Tensor, input_global_scale_inv: zml.Tensor) QuantizeNVFP4Result {
+    x.print("input in custom quantization");
+    input_global_scale_inv.print("input global scale inv in custom quantization");
     const x_f32 = x.convert(.f32);
     const block_size: i64 = 16;
     const d_group = @divExact(x_f32.dim(.d), block_size);
@@ -262,6 +274,7 @@ fn quantizeNVFP4FromScratch(x: zml.Tensor, input_global_scale_inv: zml.Tensor) Q
     const fp4_max = zml.Tensor.scalar(@as(f32, 6.0), .f32);
     const fp8_max = zml.Tensor.scalar(@as(f32, 448.0), .f32);
     const fp8_min = zml.Tensor.scalar(@as(f32, -448.0), .f32);
+    const zero = zml.Tensor.scalar(@as(f32, 0.0), .f32);
 
     const input_global_scale = one.div(input_global_scale_inv);
 
@@ -269,12 +282,15 @@ fn quantizeNVFP4FromScratch(x: zml.Tensor, input_global_scale_inv: zml.Tensor) Q
         const amax_norm = amax.div(fp4_max.broad(amax.shape()));
         var s = input_global_scale.broad(amax.shape()).mul(amax_norm);
         s = s.maximum(fp8_min.broad(s.shape())).minimum(fp8_max.broad(s.shape()));
-        break :blk s.convert(.f8e4m3fn).convert(.f32);
+        break :blk quantizeE4M3FnLikeTorch(s);
     };
 
     const input_scale_recip = input_global_scale_inv.broad(scale.shape());
-    const denom = scale.mul(input_scale_recip);
-    const output_scale = one.broad(denom.shape()).div(denom);
+    const denom = scale.convert(.f32).mul(input_scale_recip);
+    const output_scale = denom.cmp(.EQ, zero).select(
+        zero.broad(denom.shape()),
+        one.broad(denom.shape()).div(denom),
+    );
 
     var scaled_x = x_blocks.mul(output_scale.broad(x_blocks.shape()))
         .reshape(.{ .b = x_f32.dim(.b), .d = x_f32.dim(.d) });
@@ -284,7 +300,67 @@ fn quantizeNVFP4FromScratch(x: zml.Tensor, input_global_scale_inv: zml.Tensor) Q
         .minimum(fp4_max.broad(scaled_x.shape()));
 
     return .{
-        .block = scaled_x.convert(.f4e2m1),
-        .scale = scale.convert(.f8e4m3fn),
+        .block = quantizeFp4LikeVllm(scaled_x).convert(.f4e2m1),
+        .scale = scale.convert(.f32).convert(.f8e4m3fn),
     };
+}
+
+fn quantizeFp4LikeVllm(x: zml.Tensor) zml.Tensor {
+    const x_abs = x.abs();
+    var q = zml.Tensor.scalar(@as(f32, 0.0), .f32).broad(x.shape());
+
+    q = x_abs.cmp(.GT, zml.Tensor.scalar(@as(f32, 0.25), .f32)).select(zml.Tensor.scalar(@as(f32, 0.5), .f32), q);
+    q = x_abs.cmp(.GE, zml.Tensor.scalar(@as(f32, 0.75), .f32)).select(zml.Tensor.scalar(@as(f32, 1.0), .f32), q);
+    q = x_abs.cmp(.GT, zml.Tensor.scalar(@as(f32, 1.25), .f32)).select(zml.Tensor.scalar(@as(f32, 1.5), .f32), q);
+    q = x_abs.cmp(.GE, zml.Tensor.scalar(@as(f32, 1.75), .f32)).select(zml.Tensor.scalar(@as(f32, 2.0), .f32), q);
+    q = x_abs.cmp(.GT, zml.Tensor.scalar(@as(f32, 2.5), .f32)).select(zml.Tensor.scalar(@as(f32, 3.0), .f32), q);
+    q = x_abs.cmp(.GE, zml.Tensor.scalar(@as(f32, 3.5), .f32)).select(zml.Tensor.scalar(@as(f32, 4.0), .f32), q);
+    q = x_abs.cmp(.GT, zml.Tensor.scalar(@as(f32, 5.0), .f32)).select(zml.Tensor.scalar(@as(f32, 6.0), .f32), q);
+
+    const sign = x.cmp(.LT, zml.Tensor.scalar(@as(f32, 0.0), .f32)).select(
+        zml.Tensor.scalar(@as(f32, -1.0), .f32),
+        zml.Tensor.scalar(@as(f32, 1.0), .f32),
+    );
+    return q.mul(sign);
+}
+
+fn quantizeE4M3FnLikeTorch(x: zml.Tensor) zml.Tensor {
+    const abs_x = x.abs();
+    var q_abs = zml.Tensor.scalar(@as(f32, 0.0), .f32).broad(x.shape());
+
+    inline for (fp8e4m3fn_boundaries, fp8e4m3fn_positive_values[0..]) |boundary, value| {
+        q_abs = abs_x.cmp(.GT, zml.Tensor.scalar(boundary, .f32)).select(
+            zml.Tensor.scalar(value, .f32),
+            q_abs,
+        );
+    }
+
+    const sign = x.cmp(.LT, zml.Tensor.scalar(@as(f32, 0.0), .f32)).select(
+        zml.Tensor.scalar(@as(f32, -1.0), .f32),
+        zml.Tensor.scalar(@as(f32, 1.0), .f32),
+    );
+    return q_abs.mul(sign);
+}
+
+const fp8e4m3fn_positive_values = buildPositiveFiniteE4M3FnValues();
+const fp8e4m3fn_boundaries = buildPositiveFiniteE4M3FnBoundaries(fp8e4m3fn_positive_values);
+
+fn buildPositiveFiniteE4M3FnValues() [126]f32 {
+    var values: [126]f32 = undefined;
+    inline for (1..127) |bits_usize| {
+        const bits: u8 = @intCast(bits_usize);
+        values[bits_usize - 1] = zml.floats.Float8E4M3FN.toF32(@bitCast(bits));
+    }
+    return values;
+}
+
+fn buildPositiveFiniteE4M3FnBoundaries(comptime values: [126]f32) [126]f32 {
+    var boundaries: [126]f32 = undefined;
+    boundaries[0] = values[0] / 2.0;
+
+    inline for (1..values.len) |i| {
+        boundaries[i] = (values[i - 1] + values[i]) / 2.0;
+    }
+
+    return boundaries;
 }
