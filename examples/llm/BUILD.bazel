@@ -61,6 +61,7 @@ oci_image(
     entrypoint = ["./{}/llm".format(package_name())],
     target_compatible_with = [
         "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
     ],
     tars = [":archive"],
     tags = ["manual"]
@@ -93,6 +94,10 @@ oci_image(
     name = "image_debug_",
     base = "@debian_12",
     entrypoint = ["./examples/llm/llm"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
     tars = [":archive"],
     tags = ["manual"],
 )

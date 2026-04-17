@@ -65,6 +65,10 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ":entrypoint",
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
     tars = [":archive"],
     tags = ["manual"],
 )

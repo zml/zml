@@ -140,8 +140,20 @@ use_repo(pip, "xprof_nightly")
 pip.parse(
     download_only = True,
     hub_name = "triton_py_deps",
+    extra_pip_args = [
+        "--abi=cp312",
+        "--implementation=cp",
+        "--python-version=312",
+        "--platform=linux_x86_64",
+        "--platform=manylinux2014_x86_64",
+        "--platform=manylinux_2_27_x86_64",
+        "--platform=manylinux_2_28_x86_64",
+        "--platform=manylinux_2_29_x86_64",
+        "--platform=manylinux_2_37_x86_64",
+    ],
     python_version = "3.12",
     requirements_lock = "//zml/attention/triton:requirements.lock.txt",
+    target_platforms = ["linux_x86_64"],
 )
 use_repo(pip, "triton_py_deps")
 
@@ -252,7 +264,7 @@ oci.pull(
 oci.pull(
     name = "debian_12",
     digest = "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
-    image = "docker.io/library/debian:12",
+    image = "mirror.gcr.io/library/debian:12",
     platforms = ["linux/amd64"],
 )
 use_repo(

@@ -105,7 +105,6 @@ def _zls_toolchains_repo_impl(rctx):
 toolchain(
     name = "{platform}_toolchain",
     exec_compatible_with = {compatible_with},
-    target_compatible_with = {compatible_with},
     toolchain = "@zls_{platform}//:toolchain",
     toolchain_type = "@zml//third_party/zls:toolchain_type",
 )
