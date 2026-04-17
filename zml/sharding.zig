@@ -28,6 +28,15 @@ pub const Partitioning = struct {
     partitioner: Partitioner,
     shardings: []const Sharding,
 
+    // TT currently doesn't support Shardy open dimensions
+    // https://github.com/tenstorrent/tt-mlir/blob/c440cae68ca060026a779b81c5f83815c547d504/lib/Dialect/StableHLO/Utils/ShardyUtils.cpp#L574
+    close_open_dims: bool = false,
+
+    // TT asserts a single `sdy.mesh` op per module
+    // https://github.com/tenstorrent/tt-mlir/blob/8a964d3cf8310d65dd6bd4e37d3a197996c1756c/lib/Conversion/StableHLOToTTIR/ShardyToTTIRPatterns.cpp#L171-L174
+    // https://github.com/tenstorrent/tt-mlir/blob/8a964d3cf8310d65dd6bd4e37d3a197996c1756c/lib/Dialect/StableHLO/Utils/ShardyUtils.cpp#L107
+    single_mesh: bool = false,
+
     pub fn init(partitioner: Partitioner, shardings: []const Sharding) !Partitioning {
         stdx.debug.assert(shardings.len >= 1, "Waiting at leat 1 sharding strategy to be implemented", .{});
         var plan: Partitioning = .{ .partitioner = partitioner, .shardings = shardings };
@@ -70,9 +79,12 @@ pub const Partitioning = struct {
     }
 
     pub fn tensorShardingAttr(self: Partitioning, allocator: std.mem.Allocator, shape: Shape, sharding: ?Sharding) ![]const u8 {
-        const selected_sharding = sharding orelse try self.selectSharding(shape);
+        const selected_sharding = if (self.single_mesh)
+            self.primarySharding()
+        else
+            sharding orelse try self.selectSharding(shape);
         return switch (self.partitioner) {
-            .shardy => try selected_sharding.sdyShardingAttrForShape(allocator, shape),
+            .shardy => try selected_sharding.sdyShardingAttrForShape(allocator, shape, .{ .close_open_dims = self.close_open_dims }),
             .gspmd => try selected_sharding.gspmdShardingAttrForShape(allocator, shape),
         };
     }
@@ -1292,7 +1304,11 @@ pub const Sharding = struct {
         };
     }
 
-    pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub const SdyAttrOptions = struct {
+        close_open_dims: bool = false,
+    };
+
+    pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape, opts: SdyAttrOptions) ![]const u8 {
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1301,6 +1317,7 @@ pub const Sharding = struct {
             }
         }
         const all_replicated = !any_explicit;
+        const open_marker: []const u8 = if (opts.close_open_dims) "{}" else "{?}";
 
         const mapping = self.getDimMapping(shape);
         var out: std.Io.Writer.Allocating = .init(allocator);
@@ -1326,7 +1343,7 @@ pub const Sharding = struct {
                             try out.writer.writeAll("}");
                         }
                     } else {
-                        try out.writer.writeAll("{?}");
+                        try out.writer.writeAll(open_marker);
                     }
                 },
                 .replicated => try out.writer.writeAll("{}"),
@@ -1334,7 +1351,7 @@ pub const Sharding = struct {
                     if (all_replicated) {
                         try out.writer.writeAll("{}");
                     } else {
-                        try out.writer.writeAll("{?}");
+                        try out.writer.writeAll(open_marker);
                     }
                 },
             }
@@ -1933,7 +1950,7 @@ const ShardingTest = struct {
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
-            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape);
+            const actual_attr = try sharding.sdyShardingAttrForShape(self.allocator, s.shape, .{});
             defer self.allocator.free(actual_attr);
             try std.testing.expectEqualStrings(expected_attr, actual_attr);
         }

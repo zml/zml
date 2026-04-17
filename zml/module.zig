@@ -117,7 +117,10 @@ pub const CompilationContext = struct {
             }
         }
 
-        const partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable;
+        var partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable;
+
+        partitioning.close_open_dims = platform.target == .tt;
+        partitioning.single_mesh = platform.target == .tt;
 
         return .{
             .allocator = allocator,
@@ -251,7 +254,12 @@ fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
     switch (partitioning.partitioner) {
         .gspmd => {},
         .shardy => {
-            for (partitioning.shardings) |sharding| {
+            const shardings_to_emit = if (partitioning.single_mesh)
+                partitioning.shardings[0..1]
+            else
+                partitioning.shardings;
+
+            for (shardings_to_emit) |sharding| {
                 const attr_str = try sharding.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
@@ -614,6 +622,11 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
         break :blk options;
     };
 
+    if (platform.target == .tt) {
+        tt_compile_mutex.lockUncancelable(io);
+    }
+    defer if (platform.target == .tt) tt_compile_mutex.unlock(io);
+
     const loaded_executable = try pjrtx.Client.compile(
         platform.pjrt_client,
         platform.pjrt_api,
@@ -626,3 +639,5 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
 
     return loaded_executable;
 }
+
+var tt_compile_mutex: std.Io.Mutex = .init;
