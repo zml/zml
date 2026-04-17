@@ -1499,6 +1499,58 @@ fn manualComputationSliceToReturn(comptime ReturnT: type, outputs: []Tensor) Ret
     return outputs;
 }
 
+fn metadataIntegerFieldToMlirAttribute(mlir_ctx: *mlir.Context, int_field: std.builtin.Type.Int, value: anytype) *const mlir.Attribute {
+    return switch (int_field.signedness) {
+        .signed => switch (int_field.bits) {
+            8 => mlir.integerAttribute(mlir_ctx, .i8, value),
+            16 => mlir.integerAttribute(mlir_ctx, .i16, value),
+            32 => mlir.integerAttribute(mlir_ctx, .i32, value),
+            64 => mlir.integerAttribute(mlir_ctx, .i64, value),
+            else => @panic("Unsupported DataType"),
+        },
+        .unsigned => switch (int_field.bits) {
+            8 => mlir.integerAttribute(mlir_ctx, .u8, value),
+            16 => mlir.integerAttribute(mlir_ctx, .u16, value),
+            32 => mlir.integerAttribute(mlir_ctx, .u32, value),
+            64 => mlir.integerAttribute(mlir_ctx, .u64, value),
+            else => @panic("Unsupported DataType"),
+        },
+    };
+}
+
+fn metadataFloatFieldToMlirAttribute(mlir_ctx: *mlir.Context, float_field: std.builtin.Type.Float, value: anytype) *const mlir.Attribute {
+    return switch (float_field.bits) {
+        16 => mlir.floatAttribute(mlir_ctx, .f16, @as(f64, value)),
+        32 => mlir.floatAttribute(mlir_ctx, .f32, @as(f64, value)),
+        64 => mlir.floatAttribute(mlir_ctx, .f64, @as(f64, value)),
+        else => @panic("Unsupported DataType"),
+    };
+}
+
+fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value: anytype) ?*const mlir.Attribute {
+    const type_info = @typeInfo(T);
+    return switch (type_info) {
+        .comptime_int => mlir.integerAttribute(mlir_ctx, .u64, @as(u64, value)),
+        .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, value),
+        .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, value),
+        .bool => mlir.boolAttribute(mlir_ctx, value),
+        .pointer => |pointer_info| switch (pointer_info.size) {
+            .slice => if (pointer_info.child == u8)
+                mlir.stringAttribute(mlir_ctx, value)
+            else
+                @panic("Unsupported pointer type in metadata"),
+            else => @panic("Unsupported pointer type in metadata"),
+        },
+        .optional => |optional_info| if (value) |wrapped_value| switch (@typeInfo(optional_info.child)) {
+            .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, wrapped_value),
+            .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, wrapped_value),
+            .bool => mlir.boolAttribute(mlir_ctx, wrapped_value),
+            else => @panic("Unsupported optional child type in metadata"),
+        } else null,
+        else => @compileError("Unsupported metadata type: " ++ @typeName(T)),
+    };
+}
+
 fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
     const ctx = CompilationContext.current();
     const allocator = ctx.arena.allocator();
@@ -1520,51 +1572,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
     var metadata_attribute_list = std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
     inline for (metadata_type_info.@"struct".fields) |field| {
-        const maybe_attribute: ?*const mlir.Attribute = switch (@typeInfo(field.type)) {
-            .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
-            .int => |int_field| switch (int_field.signedness) {
-                .signed => switch (int_field.bits) {
-                    8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(metadata, field.name)),
-                    16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @field(metadata, field.name)),
-                    32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @field(metadata, field.name)),
-                    64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @field(metadata, field.name)),
-                    else => @panic("Unsupported DataType"),
-                },
-                .unsigned => switch (int_field.bits) {
-                    8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @field(metadata, field.name)),
-                    16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @field(metadata, field.name)),
-                    32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @field(metadata, field.name)),
-                    64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @field(metadata, field.name)),
-                    else => @panic("Unsupported DataType"),
-                },
-            },
-            .float => |float_field| switch (float_field.bits) {
-                16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
-                32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
-                64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
-                else => @panic("Unsupported DataType"),
-            },
-            .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(metadata, field.name)),
-            .pointer => |pointer_info| switch (pointer_info.size) {
-                .slice => if (pointer_info.child == u8)
-                    mlir.stringAttribute(ctx.mlir_ctx, @field(metadata, field.name))
-                else
-                    @panic("Unsupported pointer type in metadata"),
-                else => @panic("Unsupported pointer type in metadata"),
-            },
-            .optional => |optional_info| if (@field(metadata, field.name)) |value| switch (@typeInfo(optional_info.child)) {
-                .float => |float_field| switch (float_field.bits) {
-                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, value)),
-                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, value)),
-                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, value)),
-                    else => @panic("Unsupported DataType"),
-                },
-
-                else => @panic("Unsupported optional child type in metadata"),
-            } else null,
-            else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
-        };
-        if (maybe_attribute) |attribute| {
+        if (metadataFieldToMlirAttribute(ctx.mlir_ctx, field.type, @field(metadata, field.name))) |attribute| {
             metadata_attribute_list.appendAssumeCapacity(mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute));
         }
     }
