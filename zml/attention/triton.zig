@@ -119,6 +119,19 @@ pub const KernelKind = enum {
     reduce_segments_ptr,
 };
 
+pub const DataType = enum {
+    bf16,
+    fp8e4nv,
+
+    pub fn fromDType(dt: zml.DataType) DataType {
+        return switch (dt) {
+            .bf16 => DataType.bf16,
+            .f8e4m3fn => DataType.fp8e4nv,
+            else => stdx.debug.panic("Unsupported data type: {}", .{dt}),
+        };
+    }
+};
+
 pub const GenerationConfig2D = struct {
     pub const Dimensions = struct {
         num_tokens: usize,
@@ -131,6 +144,8 @@ pub const GenerationConfig2D = struct {
         num_blocks_per_seq: usize,
         num_qq_tokens: ?usize = null,
         max_seqlen_q: usize,
+        q_dtype: DataType,
+        kv_dtype: DataType,
     };
 
     pub const FeatureFlags = struct {
@@ -159,6 +174,8 @@ pub const GenerationConfig3D = struct {
         num_blocks_per_seq: usize,
         num_qq_tokens: ?usize = null,
         cu_count: usize,
+        q_dtype: DataType,
+        kv_dtype: DataType,
     };
 
     pub const FeatureFlags = struct {
@@ -184,6 +201,7 @@ pub const GenerationConfigReduce = struct {
         batch_size: usize,
         num_blocks_per_seq: usize,
         cu_count: usize,
+        out_dtype: DataType,
     };
 
     pub const FeatureFlags = struct {
@@ -223,8 +241,10 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
     const response: std.json.Value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), allocating.written(), .{});
     return if (response.object.get("ok").?.bool)
         try allocator.dupeZ(u8, response.object.get("result").?.string)
-    else
-        error.GenerationFailed;
+    else b: {
+        std.log.err("{s}", .{response.object.get("error").?.string});
+        break :b error.GenerationFailed;
+    };
 }
 
 fn getCuCount() usize {
@@ -415,6 +435,8 @@ pub const paged = struct {
                     .num_kv_heads = paged_attention_opts.num_kv_heads,
                     .num_tokens = paged_attention_opts.num_tokens,
                     .max_seqlen_q = parameters.options_.max_seqlen_q,
+                    .q_dtype = .fromDType(q.dtype()),
+                    .kv_dtype = .fromDType(k_cache.dtype()),
                 },
                 .config = config,
                 .feature_flags = .{
@@ -453,6 +475,7 @@ pub const paged = struct {
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
+        const fp8_scale = zml.Tensor.constant(zml.DataType.f32.one());
 
         const output = zml.ops.triton(.{
             q,
@@ -464,9 +487,9 @@ pub const paged = struct {
             dummy, // alibi_slopes_ptr
             dummy, // qq_bias_ptr
             scale_ptr,
-            dummy, // k_scale_ptr
-            dummy, // v_scale_ptr
-            dummy, // out_scale_ptr
+            fp8_scale, // k_scale_ptr
+            fp8_scale, // v_scale_ptr
+            fp8_scale, // out_scale_ptr
             dummy, // softcap_ptr
             block_table_strides_ptr,
             q_strides_0_ptr,
@@ -511,6 +534,8 @@ pub const paged = struct {
                     .num_kv_heads = paged_attention_opts.num_kv_heads,
                     .num_tokens = paged_attention_opts.num_tokens,
                     .cu_count = paged_attention_opts.cu_count,
+                    .q_dtype = .fromDType(q.dtype()),
+                    .kv_dtype = .fromDType(k_cache.dtype()),
                 },
                 .config = config.attention,
                 .feature_flags = .{
@@ -541,6 +566,7 @@ pub const paged = struct {
                     .batch_size = paged_attention_opts.batch_size,
                     .num_blocks_per_seq = paged_attention_opts.max_num_block_per_seq,
                     .cu_count = paged_attention_opts.cu_count,
+                    .out_dtype = .fromDType(q.dtype()),
                 },
                 .config = config.reduce,
                 .feature_flags = .{
@@ -570,6 +596,7 @@ pub const paged = struct {
         const num_seqs_ptr = zml.Tensor.constant(zml.DataType.i32.constant(parameters.block_table.dim(0)));
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
+        const fp8_scale = zml.Tensor.constant(zml.DataType.f32.one());
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
         const attn_output = zml.ops.triton(.{
@@ -582,8 +609,8 @@ pub const paged = struct {
             dummy, // alibi_slopes_ptr
             dummy, // qq_bias_ptr
             scale_ptr,
-            dummy, // k_scale_ptr
-            dummy, // v_scale_ptr
+            fp8_scale, // k_scale_ptr
+            fp8_scale, // v_scale_ptr
             dummy, // softcap_ptr
             block_table_strides_ptr,
             q_strides_0_ptr,
@@ -616,7 +643,7 @@ pub const paged = struct {
             attn_output[2],
             parameters.seq_lens,
             num_seqs_ptr,
-            dummy, // out_scale_inv_ptr
+            fp8_scale, // out_scale_inv_ptr
             q_strides_0_ptr,
             q_strides_1_ptr,
             block_table_strides_ptr,

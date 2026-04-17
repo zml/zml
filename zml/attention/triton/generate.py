@@ -104,7 +104,9 @@ def compile_2d_ptr(cfg: dict) -> str:
     num_queries_per_kv = num_heads // num_kv_heads
 
     q_shape = (num_tokens, num_heads, head_dim)
+    q_dtype = dims["q_dtype"]
     kv_shape = (num_blocks, block_size, num_kv_heads, head_dim)
+    kv_dtype = dims["kv_dtype"]
 
     flags = cfg["feature_flags"]
     use_alibi_slopes = flags["use_alibi_slopes"]
@@ -124,10 +126,10 @@ def compile_2d_ptr(cfg: dict) -> str:
     total_q_blocks = cfg_2d["total_q_blocks"]
 
     kwargs = {
-        "output_ptr": FakeTensor("bf16", q_shape),
-        "query_ptr": FakeTensor("bf16", q_shape),
-        "key_cache_ptr": FakeTensor("bf16", kv_shape),
-        "value_cache_ptr": FakeTensor("bf16", kv_shape),
+        "output_ptr": FakeTensor(q_dtype, q_shape),
+        "query_ptr": FakeTensor(q_dtype, q_shape),
+        "key_cache_ptr": FakeTensor(kv_dtype, kv_shape),
+        "value_cache_ptr": FakeTensor(kv_dtype, kv_shape),
         "sink_ptr": FakeTensor("fp32", (num_heads,)),
         "block_tables_ptr": FakeTensor("i32", (batch_size, num_blocks_per_seq)),
         "seq_lens_ptr": FakeTensor("i32", (batch_size,)),
@@ -207,7 +209,9 @@ def compile_3d_ptr(cfg: dict) -> str:
     total_q_blocks = attn_cfg["total_q_blocks"]
 
     q_shape = (num_tokens, num_heads, head_dim)
+    q_dtype = dims["q_dtype"]
     kv_shape = (num_blocks, block_size, num_kv_heads, head_dim)
+    kv_dtype = dims["kv_dtype"]
     segm_out_shape = (num_tokens, num_heads, num_segments_per_seq, triton.next_power_of_2(head_dim))
     segm_stat_shape = (num_tokens, num_heads, num_segments_per_seq)
 
@@ -220,9 +224,9 @@ def compile_3d_ptr(cfg: dict) -> str:
     use_qq_bias = "num_qq_tokens" in dims
 
     kwargs = {
-        "query_ptr": FakeTensor("bf16", q_shape),
-        "key_cache_ptr": FakeTensor("bf16", kv_shape),
-        "value_cache_ptr": FakeTensor("bf16", kv_shape),
+        "query_ptr": FakeTensor(q_dtype, q_shape),
+        "key_cache_ptr": FakeTensor(kv_dtype, kv_shape),
+        "value_cache_ptr": FakeTensor(kv_dtype, kv_shape),
         "sink_ptr": FakeTensor("fp32", (num_heads,)),
         "block_tables_ptr": FakeTensor("i32", (batch_size, num_blocks_per_seq)),
         "seq_lens_ptr": FakeTensor("i32", (batch_size,)),
@@ -300,6 +304,7 @@ def compile_reduce_ptr(cfg: dict) -> str:
     block_q = reduce_cfg["block_q"]
     
     out_shape = (num_tokens, num_heads, head_dim)
+    out_dtype = dims["out_dtype"]
     segm_out_shape = (num_tokens, num_heads, num_segments_per_seq, head_dim)
     segm_stat_shape = (num_tokens, num_heads, num_segments_per_seq)
     out_strides = contiguous_strides(out_shape)
@@ -324,7 +329,7 @@ def compile_reduce_ptr(cfg: dict) -> str:
         "BLOCK_Q": block_q,
         "NUM_SEGMENTS_PER_SEQ": num_segments_per_seq,
         "USE_FP8": use_fp8,
-        "output_ptr": FakeTensor("bf16", out_shape),
+        "output_ptr": FakeTensor(out_dtype, out_shape),
         "num_warps": num_warps,
         "num_stages": num_stages,
     }
