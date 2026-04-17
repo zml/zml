@@ -31,7 +31,7 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "56911842f4527df036e8d52e78dd0f54a22d4215",
+    commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
     remote = "https://github.com/zml/rules_zig.git",
 )
 

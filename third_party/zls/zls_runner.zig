@@ -4,6 +4,7 @@
 ///
 /// This file is used as a template by `zls_write_runner_zig_src.bzl`.
 const std = @import("std");
+const fs = std.fs;
 
 const bazel_builtin = @import("bazel_builtin");
 const runfiles = @import("runfiles");
@@ -42,23 +43,13 @@ pub fn main(init: std.process.Init) !void {
 
     const zig_exe_rpath = "@@__ZIG_EXE_RPATH__@@";
     var zig_exe_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const zig_exe_path = blk2: {
-        if (zig_exe_rpath[0] == '/') {
-            break :blk2 zig_exe_rpath;
-        } else {
-            break :blk2 try r.rlocation(zig_exe_rpath, &zig_exe_path_buf) orelse
-                return error.RLocationNotFound;
-        }
-    };
+    const zig_exe_path = try r.rlocation(zig_exe_rpath, &zig_exe_path_buf) orelse
+        return error.RLocationNotFound;
 
-    const zig_lib_path = "@@__ZIG_LIB_PATH__@@";
-    const zig_lib_computed_path = blk: {
-        if (zig_lib_path[0] == '/') {
-            break :blk zig_lib_path;
-        } else {
-            break :blk null;
-        }
-    };
+    const zig_lib_path = "@@__ZIG_LIB_RPATH__@@";
+    var zig_lib_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const zig_lib_computed_path = try r.rlocation(zig_lib_path, &zig_lib_path_buf) orelse
+        return error.RLocationNotFound;
 
     const zls_build_runner_rpath = "@@__ZLS_BUILD_RUNNER_RPATH__@@";
     var zls_build_runner_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
