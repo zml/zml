@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const CompilationContext = zml.module.CompilationContext;
 
 const log = std.log.scoped(.sharding);
 pub const std_options: std.Options = .{
