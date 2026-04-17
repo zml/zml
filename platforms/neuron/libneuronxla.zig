@@ -191,21 +191,19 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
-    var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const neuronx_cc_path = try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
-        stdx.process.selfSharedObjectDirPath(),
-        "..",
-        "bin",
-        "neuronx-cc",
-    });
-
     {
         const gil_state = c.PyEval_SaveThread();
         defer c.PyEval_RestoreThread(gil_state);
 
+        var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
         var child = try std.process.spawn(io, .{
             .argv = &.{
-                neuronx_cc_path,
+                try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
+                    stdx.process.selfSharedObjectDirPath(),
+                    "..",
+                    "bin",
+                    "neuronx-cc",
+                }),
                 "compile",
                 "--framework=XLA",
                 "--target",
@@ -227,14 +225,21 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
             .stderr = .ignore,
             .cwd = .{ .path = tmp_dir },
         });
-        _ = try child.wait(io);
-    }
 
-    // neuronx-cc exits 0 even on compilation failure
-    std.Io.Dir.access(.cwd(), io, neff_file, .{}) catch |err| {
-        log.err("neuronx-cc did not produce output NEFF {s}: {}", .{ neff_file, err });
-        return error.NeuronxCcFailed;
-    };
+        const term = try child.wait(io);
+        switch (term) {
+            .exited => |exit_code| {
+                if (exit_code != 0) {
+                    log.err("neuronx-cc failed: {}", .{exit_code});
+                    return error.NeuronxCcFailed;
+                }
+            },
+            else => {
+                log.err("neuronx-cc failed, unknown error", .{});
+                return error.NeuronxCcFailedUnknown;
+            },
+        }
+    }
 
     const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
