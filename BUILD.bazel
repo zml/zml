@@ -1,5 +1,11 @@
 load("//third_party/zls:zls_completion.bzl", "zls_completion")
 
+alias(
+    name = "translate-c",
+    actual = "@translate-c//:translate-c",
+    visibility = ["//visibility:public"],
+)
+
 zls_completion(
     name = "completion",
     visibility = ["//visibility:public"],
