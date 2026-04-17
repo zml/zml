@@ -7,7 +7,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.1"
+_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.2"
 
 def _rocm_dlopen_patchelf(name, src):
     return "\n".join([
@@ -254,8 +254,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-03-26T11-30-00Z/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "6649e89831570926bf127f7e57f25dca4f526e22764f2df0d689818badc1d4fe",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-04-17/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "b19db71d3d9aa43bda961a22e81b6a2f48ba2c633a18010c07a66b4ca48ec4d2",
     )
 
     return mctx.extension_metadata(
