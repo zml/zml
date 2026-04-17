@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const c = @import("c");
-const runfiles = @import("runfiles");
 
 fn pyStatusCheck(status: c.PyStatus) void {
     if (c.PyStatus_Exception(status) != 0) {
@@ -34,9 +33,6 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer threaded.deinit();
 
     const io = threaded.io();
-
-    var arena = std.heap.ArenaAllocator.init(allocator);
-    defer arena.deinit();
 
     {
         var preconfig: c.PyPreConfig = undefined;
@@ -92,20 +88,30 @@ pub fn main(init: std.process.Init.Minimal) !void {
     pyStatusCheck(c.Py_InitializeFromConfig(&config));
     defer c.Py_Finalize();
 
-    const module = c.PyImport_ImportModule("generate");
+    const module = c.PyImport_ImportModule("gen_ir");
     if (module == null) {
         c.PyErr_Print();
-        return;
+        return error.PythonModuleImportFailed;
     }
     defer c.Py_DecRef(module);
 
     const func = c.PyObject_GetAttrString(module, "main");
+    if (func == null) {
+        std.log.err("Python module 'gen_ir' is missing required attribute 'main'", .{});
+        c.PyErr_Print();
+        return error.PythonAttributeLookupFailed;
+    }
     defer c.Py_DecRef(func);
+
+    if (c.PyCallable_Check(func) == 0) {
+        std.log.err("Python attribute 'gen_ir.main' is not callable", .{});
+        return error.PythonAttributeNotCallable;
+    }
 
     const result = c.PyObject_CallNoArgs(func);
     if (result == null) {
         c.PyErr_Print();
-        return;
+        return error.PythonExecutionFailed;
     }
     defer c.Py_DecRef(result);
 }

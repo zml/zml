@@ -34,6 +34,7 @@ zig_library(
         "attention/attention.zig",
         "attention/flashattn.zig",
         "attention/paged_attention.zig",
+        "attention/tpu_attention.zig",
         "attention/triton.zig",
         "buffer.zig",
         "constants.zig",

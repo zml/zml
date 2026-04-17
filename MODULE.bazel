@@ -157,6 +157,16 @@ pip.parse(
 )
 use_repo(pip, "triton_py_deps")
 
+# For TPU IR generation
+pip.parse(
+    download_only = False,
+    hub_name = "tpu_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//platforms/tpu:requirements.lock.txt",
+    target_platforms = ["linux_x86_64"],
+)
+use_repo(pip, "tpu_py_deps")
+
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
