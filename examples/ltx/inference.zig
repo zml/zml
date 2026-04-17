@@ -744,7 +744,8 @@ pub fn main(init: std.process.Init) !void {
     defer waveform_buf.deinit();
     audio_mel.deinit();
 
-    s2.deinit();
+    // s2.v_latent was already freed inside runVideoVaeDecode; only free a_latent.
+    s2.a_latent.deinit();
 
     // ========================================================================
     // Final: Encode video + audio → output.mp4
