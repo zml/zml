@@ -938,7 +938,7 @@ pub const PhysicalMesh = struct {
         return .{
             .branch = .{
                 .tag = .link,
-                .geometry = .point_to_point,
+                .geometry = .{ .ring = .closed_ring },
                 .children = nodes,
             },
         };
