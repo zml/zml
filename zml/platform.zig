@@ -722,9 +722,7 @@ fn printCallbackInner(call_frame: *pjrt.ffi.CallFrame) !?*pjrt.ffi.Error {
     });
 
     pjrt_buffer = try pjrt_buffer.copyToMemory(pjrt_api, first_non_device_memory);
-    if (pjrt_buffer.readyEvent(pjrt_api)) |e| {
-        try e.awaitRaw(pjrt_api);
-    }
+    try pjrt_buffer.readyEvent(pjrt_api).awaitRaw(pjrt_api);
 
     const host_visible_data: [*]u8 = @ptrCast(@alignCast(try pjrt_buffer.opaqueDeviceMemoryDataPointer(pjrt_api)));
 

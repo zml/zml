@@ -1245,11 +1245,11 @@ pub const Buffer = opaque {
         return @ptrCast(ret.dst_buffer.?);
     }
 
-    pub fn readyEvent(self: *const Buffer, api: *const Api) ?*Event {
+    pub fn readyEvent(self: *const Buffer, api: *const Api) *Event {
         const ret = api.call(.PJRT_Buffer_ReadyEvent, .{
             .buffer = self.inner(),
         }) catch unreachable;
-        return @ptrCast(ret.event);
+        return @ptrCast(ret.event.?);
     }
 
     pub fn opaqueDeviceMemoryDataPointer(self: *const Buffer, api: *const Api) ApiError!*anyopaque {
