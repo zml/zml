@@ -259,7 +259,11 @@ pub const Exe = struct {
         stdx.debug.assert(opts.wait == false or io != null, "io should not be null when waiting for execution completion", .{});
         var events = [_]?*pjrt.Event{null} ** Platform.MAX_NUM_DEVICES;
 
-        const events_slice: ?[]?*pjrt.Event = if (opts.wait) events[0..@intCast(self.num_partitions)] else null;
+        const partition_events = events[0..@intCast(self.num_partitions)];
+        const events_slice: ?[]?*pjrt.Event = switch (self.platform.target) {
+            .neuron => partition_events,
+            .cpu, .cuda, .rocm, .tpu => if (opts.wait) partition_events else null,
+        };
 
         self.exe.execute(self.platform.pjrt_api, .{
             .arguments = arguments.flat_buffers.buffers,
@@ -275,12 +279,21 @@ pub const Exe = struct {
             std.debug.panic("PJRT_LoadedExecutable_Execute failed with: {}", .{err});
         };
 
-        if (opts.wait) {
-            for (events_slice.?) |e| {
-                if (e) |ev| {
-                    ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+        switch (self.platform.target) {
+            .neuron => {
+                for (events_slice.?) |e| {
+                    if (e) |ev| {
+                        ev.deinit(self.platform.pjrt_api);
+                    }
                 }
-            }
+            },
+            .cpu, .cuda, .rocm, .tpu => if (opts.wait) {
+                for (events_slice.?) |e| {
+                    if (e) |ev| {
+                        ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                    }
+                }
+            },
         }
     }
 

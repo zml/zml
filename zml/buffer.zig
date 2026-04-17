@@ -175,10 +175,9 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !void {
         for (self._shards.constSlice()) |buffer| {
-            if (buffer.readyEvent(self._platform.pjrt_api)) |e| {
-                defer e.deinit(self._platform.pjrt_api);
-                try e.await(self._platform.pjrt_api, io);
-            }
+            const ev = buffer.readyEvent(self._platform.pjrt_api);
+            defer ev.deinit(self._platform.pjrt_api);
+            try ev.await(self._platform.pjrt_api, io);
         }
     }
 
