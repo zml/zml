@@ -157,13 +157,32 @@ fn printTimingSummary(timers: []const *const PhaseTimer) void {
 // Bufferized struct helpers
 // ============================================================================
 
-/// Free all GPU buffers inside a Bufferized(T) struct whose fields are zml.Buffer.
+/// Recursively free all GPU buffers inside a Bufferized(T) struct.
+/// Handles nested structs, arrays, and optionals.
 fn deinitBufferizedFields(val: anytype) void {
     const T = @TypeOf(val.*);
     const fields = @typeInfo(T).@"struct".fields;
     inline for (fields) |field| {
         if (field.type == zml.Buffer) {
             @field(val, field.name).deinit();
+        } else if (@typeInfo(field.type) == .@"struct") {
+            deinitBufferizedFields(&@field(val, field.name));
+        } else if (@typeInfo(field.type) == .array) {
+            const Child = @typeInfo(field.type).array.child;
+            if (Child == zml.Buffer) {
+                for (&@field(val, field.name)) |*buf| buf.deinit();
+            } else if (@typeInfo(Child) == .@"struct") {
+                for (&@field(val, field.name)) |*elem| deinitBufferizedFields(elem);
+            }
+        } else if (@typeInfo(field.type) == .optional) {
+            const Child = @typeInfo(field.type).optional.child;
+            if (@field(val, field.name) != null) {
+                if (Child == zml.Buffer) {
+                    @field(val, field.name).?.deinit();
+                } else if (@typeInfo(Child) == .@"struct") {
+                    deinitBufferizedFields(&(@field(val, field.name).?));
+                }
+            }
         }
     }
 }
@@ -489,7 +508,7 @@ fn encodeImageToTokens(
     defer exe.deinit();
 
     std.log.info("  Loading encoder weights...", .{});
-    const encoder_bufs = try zml.io.load(
+    var encoder_bufs = try zml.io.load(
         video_vae_encoder.VideoVaeEncoderParams,
         &encoder_shape,
         allocator,
@@ -503,7 +522,8 @@ fn encodeImageToTokens(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
-    const stats_bufs = try zml.io.load(
+    defer deinitBufferizedFields(&encoder_bufs);
+    var stats_bufs = try zml.io.load(
         conv_ops.PerChannelStats,
         &stats_shape,
         allocator,
@@ -517,6 +537,7 @@ fn encodeImageToTokens(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
+    defer deinitBufferizedFields(&stats_bufs);
 
     std.log.info("  Running encoder...", .{});
     var args = try exe.args(allocator);
@@ -771,8 +792,9 @@ pub fn main(init: std.process.Init) !void {
     }
     const interleaved_bytes = std.mem.sliceAsBytes(interleaved);
 
-    // Also write interleaved waveform.bin for debugging
-    try writeRawBytes(allocator, io, interleaved_bytes, args.output_dir, "waveform.bin");
+    if (args.dump_intermediates) {
+        try writeRawBytes(allocator, io, interleaved_bytes, args.output_dir, "waveform.bin");
+    }
 
     timer_mp4.start();
     try encodeOutputMp4(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
@@ -1141,7 +1163,7 @@ fn runStage1(
         preprocess_bufs,
     });
     preprocess_exe.callOpts(io, pre_args_init, &pre_results_init, .{ .wait = true });
-    const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
+    var init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block executables ----
     var block_params_shape = try allocator.create(model.FullStepParams);
@@ -1240,13 +1262,18 @@ fn runStage1(
     std.log.info("Compiling output projection exes...", .{});
     const v_emb_shape = init_pre_out.v_embedded_timestep.shape();
     const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
+    const init_vx_shape = init_pre_out.vx.shape();
+    const init_ax_shape = init_pre_out.ax.shape();
+
+    // Free shape-discovery preprocessing outputs — all shapes extracted.
+    deinitBufferizedFields(&init_pre_out);
 
     var proj_v_exe = try platform.compileFn(
         allocator,
         io,
         model.forwardOutputProjection,
         .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
+            zml.Tensor.fromShape(init_vx_shape).withPartialTags(.{ .b, .t, .d }),
             zml.Tensor.fromShape(v_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.norm_proj_out,
         },
@@ -1259,7 +1286,7 @@ fn runStage1(
         io,
         model.forwardOutputProjection,
         .{
-            zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
+            zml.Tensor.fromShape(init_ax_shape).withPartialTags(.{ .b, .t, .d }),
             zml.Tensor.fromShape(a_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.audio_norm_proj_out,
         },
@@ -1932,6 +1959,14 @@ fn runBridge(
     defer up_results.deinit(allocator);
     up_args.set(.{ video_5d_buf, up_bufs, stats_bufs });
     upsample_exe.callOpts(io, up_args, &up_results, .{ .wait = true });
+
+    // Free upsampler weights — no longer needed after upsample.
+    {
+        var up_bufs_mut = up_bufs;
+        deinitBufferizedFields(&up_bufs_mut);
+        var stats_bufs_mut = stats_bufs;
+        deinitBufferizedFields(&stats_bufs_mut);
+    }
     var upsampled_buf = up_results.get(zml.Buffer);
     defer upsampled_buf.deinit();
     std.log.info("  Upsampled: {any}", .{upsampled_buf.shape().dims()});
@@ -2050,7 +2085,9 @@ fn runBridge(
         gen_a_args.set(.{ rng_buf, audio_clean_buf });
         noise_gen_a_exe.callOpts(io, gen_a_args, &gen_a_results, .{ .wait = true });
         rng_buf._state.deinit();
-        _, a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+        var final_rng: zml.Bufferized(zml.Tensor.Rng) = undefined;
+        final_rng, a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+        final_rng._state.deinit(); // Free final RNG state — not needed after bridge
     }
     defer v_noise_buf.deinit();
     defer a_noise_buf.deinit();
@@ -2259,7 +2296,7 @@ fn runStage2(
         preprocess_bufs,
     });
     preprocess_exe.callOpts(io, pre_args_init, &pre_results_init, .{ .wait = true });
-    const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
+    var init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block exe ----
     std.log.info("Compiling Stage 2 block exe (bf16_attn={})...", .{use_bf16_attn});
@@ -2310,13 +2347,18 @@ fn runStage2(
     std.log.info("Compiling Stage 2 output projection exes...", .{});
     const v_emb_shape = init_pre_out.v_embedded_timestep.shape();
     const a_emb_shape = init_pre_out.a_embedded_timestep.shape();
+    const init_vx_shape = init_pre_out.vx.shape();
+    const init_ax_shape = init_pre_out.ax.shape();
+
+    // Free shape-discovery preprocessing outputs — all shapes extracted.
+    deinitBufferizedFields(&init_pre_out);
 
     var proj_v_exe = try platform.compileFn(
         allocator,
         io,
         model.forwardOutputProjection,
         .{
-            zml.Tensor.fromShape(init_pre_out.vx.shape()).withPartialTags(.{ .b, .t, .d }),
+            zml.Tensor.fromShape(init_vx_shape).withPartialTags(.{ .b, .t, .d }),
             zml.Tensor.fromShape(v_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.norm_proj_out,
         },
@@ -2329,7 +2371,7 @@ fn runStage2(
         io,
         model.forwardOutputProjection,
         .{
-            zml.Tensor.fromShape(init_pre_out.ax.shape()).withPartialTags(.{ .b, .t, .d }),
+            zml.Tensor.fromShape(init_ax_shape).withPartialTags(.{ .b, .t, .d }),
             zml.Tensor.fromShape(a_emb_shape).withPartialTags(.{ .b, .t, .d_emb }),
             block_params_shape.audio_norm_proj_out,
         },
@@ -2933,6 +2975,13 @@ fn runVideoVaeDecode(
     // Step 4: Dispatch to tiled or single-shot decode
     // ========================================================================
     if (use_tiling) {
+        defer {
+            // Free VAE weights after tiled decode completes.
+            var vae_bufs_mut = vae_bufs;
+            deinitBufferizedFields(&vae_bufs_mut);
+            var stats_bufs_mut = stats_bufs;
+            deinitBufferizedFields(&stats_bufs_mut);
+        }
         return runVideoVaeDecodeTiled(
             allocator,
             io,
@@ -2977,10 +3026,19 @@ fn runVideoVaeDecode(
     vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
     vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
     v_latent_5d.deinit(); // Free GPU latent after VAE consumes it
-    const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
+    var decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
     timer.addExec();
 
+    // Free VAE weights — no longer needed after decode.
+    {
+        var vae_bufs_mut = vae_bufs;
+        deinitBufferizedFields(&vae_bufs_mut);
+        var stats_bufs_mut = stats_bufs;
+        deinitBufferizedFields(&stats_bufs_mut);
+    }
+
+    defer decoded_video.deinit(); // Free GPU buffer after download to host
     return postProcessDecodedVideo(allocator, io, decoded_video);
 }
 
@@ -3381,7 +3439,7 @@ fn runAudioVaeDecode(
     defer unpatch_results.deinit(allocator);
     unpatch_args.set(.{a_latent_patchified});
     unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
-    const a_latent_4d = unpatch_results.get(zml.Buffer);
+    var a_latent_4d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape().dims()});
     timer.addExec();
 
@@ -3448,9 +3506,18 @@ fn runAudioVaeDecode(
     defer audio_vae_results.deinit(allocator);
     audio_vae_args.set(.{ a_latent_4d, audio_stats_bufs, audio_vae_bufs });
     audio_vae_exe.callOpts(io, audio_vae_args, &audio_vae_results, .{ .wait = true });
+    a_latent_4d.deinit(); // Free intermediate unpatchified latent
     const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
     std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape().dims()});
     timer.addExec();
+
+    // Free audio VAE weights — no longer needed after decode.
+    {
+        var audio_vae_bufs_mut = audio_vae_bufs;
+        deinitBufferizedFields(&audio_vae_bufs_mut);
+        var audio_stats_bufs_mut = audio_stats_bufs;
+        deinitBufferizedFields(&audio_stats_bufs_mut);
+    }
 
     return decoded_audio;
 }
@@ -3536,9 +3603,15 @@ fn runVocoderWithBWE(
     defer main_voc_results.deinit(allocator);
     main_voc_args.set(.{ audio_mel, &main_voc_bufs });
     main_voc_exe.callOpts(io, main_voc_args, &main_voc_results, .{ .wait = true });
-    const waveform_16k = main_voc_results.get(zml.Buffer);
+    var waveform_16k = main_voc_results.get(zml.Buffer);
     std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape().dims()});
     timer.addExec();
+
+    // Free main vocoder weights — no longer needed, BWE uses separate weights.
+    {
+        var main_voc_bufs_mut = main_voc_bufs;
+        deinitBufferizedFields(&main_voc_bufs_mut);
+    }
 
     // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
@@ -3559,9 +3632,16 @@ fn runVocoderWithBWE(
     defer bwe_results.deinit(allocator);
     bwe_args.set(.{ waveform_16k, &bwe_bufs });
     bwe_exe.callOpts(io, bwe_args, &bwe_results, .{ .wait = true });
+    waveform_16k.deinit(); // Free intermediate 16kHz waveform
     const waveform = bwe_results.get(zml.Buffer);
     std.log.info("  48kHz waveform: {any}", .{waveform.shape().dims()});
     timer.addExec();
+
+    // Free BWE weights — no longer needed.
+    {
+        var bwe_bufs_mut = bwe_bufs;
+        deinitBufferizedFields(&bwe_bufs_mut);
+    }
 
     return waveform;
 }
