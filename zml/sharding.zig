@@ -19,7 +19,7 @@ pub const Partitioning = struct {
 
         pub fn fromTarget(target: Target) Partitioner {
             return switch (target) {
-                .cpu, .cuda, .rocm, .tpu => .shardy,
+                .cpu, .cuda, .rocm, .tpu, .tt => .shardy,
                 .neuron => .gspmd,
             };
         }
@@ -629,7 +629,7 @@ pub const PhysicalMesh = struct {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
             .neuron => &.{ .link_x, .link_y, .link_z, .link },
-            .cuda, .rocm => &.{.link},
+            .cuda, .rocm, .tt => &.{.link},
             .cpu => &.{.bus},
         };
     }
@@ -858,6 +858,7 @@ pub const PhysicalMesh = struct {
             .cuda, .rocm => gpu(allocator, platform_devices),
             .tpu => tpu(allocator, platform_devices),
             .neuron => neuron(allocator, platform_devices),
+            .tt => tt(allocator, platform_devices),
         };
         errdefer freeNode(allocator, root);
 
@@ -932,6 +933,20 @@ pub const PhysicalMesh = struct {
 
     pub fn neuron(_: std.mem.Allocator, _: []const PlatformDevice) !PhysicalNode {
         stdx.debug.panic("neuron topology not implemented", .{});
+    }
+
+    pub fn tt(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
+
+        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+
+        return .{
+            .branch = .{
+                .tag = .link,
+                .geometry = .{ .ring = .closed_ring },
+                .children = nodes,
+            },
+        };
     }
 };
 

@@ -45,7 +45,7 @@ fn disableXlaLogs() void {
 
 fn validateDeviceCount(target: Target, num_devices: usize) !void {
     switch (target) {
-        .cpu, .cuda, .rocm, .tpu, .neuron => {
+        .cpu, .cuda, .rocm, .tpu, .neuron, .tt => {
             if (num_devices == 0) {
                 log.err("Platform {} requires at least 1 device, got {}", .{ target, num_devices });
                 return error.ZeroVisibleDevices;
@@ -110,7 +110,7 @@ pub const Memory = struct {
                 };
                 return zml_kind == kind_;
             },
-            .cpu, .neuron => return true,
+            .cpu, .neuron, .tt => return true,
         }
     }
 
@@ -289,6 +289,7 @@ pub const Platform = struct {
 
     pub fn auto(allocator: std.mem.Allocator, io: std.Io, options: CreateOptions) !*Platform {
         const ordered_targets: []const Target = &.{
+            .tt,
             .tpu,
             .neuron,
             .rocm,
@@ -529,6 +530,7 @@ pub const CreateOptions = struct {
     rocm: struct {} = .{},
     tpu: struct {} = .{},
     neuron: struct {} = .{},
+    tt: struct {} = .{},
 
     pub const Cpu = struct {
         device_count: u32,

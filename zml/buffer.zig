@@ -119,6 +119,7 @@ pub const Buffer = struct {
                     );
                     break :blk default_layout.?.toMemoryLayout();
                 },
+                .tt => .{ .strides = .{ .byte_strides = sub_slice.byte_strides.constSlice() } },
                 else => .{
                     .tiled = .{
                         .minor_to_major = constants.minorToMajor(shard.shape.rank()),
@@ -201,6 +202,7 @@ pub const Buffer = struct {
 
         for (res.placement().shards.constSlice()) |shard| {
             var default_layout: ?pjrt.DefaultMemoryLayout = null;
+
             const layout: pjrt.MemoryLayout = switch (platform.target) {
                 .tpu => blk: {
                     default_layout = try platform.pjrt_client.defaultMemoryLayout(
@@ -209,6 +211,9 @@ pub const Buffer = struct {
                         shard.shape.dims(),
                     );
                     break :blk default_layout.?.toMemoryLayout();
+                },
+                .tt => blk: {
+                    break :blk .{ .strides = .{ .byte_strides = shard.shape.computeByteStrides().constSlice() } };
                 },
                 else => .{
                     .tiled = .{
