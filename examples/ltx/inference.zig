@@ -154,6 +154,21 @@ fn printTimingSummary(timers: []const *const PhaseTimer) void {
 }
 
 // ============================================================================
+// Bufferized struct helpers
+// ============================================================================
+
+/// Free all GPU buffers inside a Bufferized(T) struct whose fields are zml.Buffer.
+fn deinitBufferizedFields(val: anytype) void {
+    const T = @TypeOf(val.*);
+    const fields = @typeInfo(T).@"struct".fields;
+    inline for (fields) |field| {
+        if (field.type == zml.Buffer) {
+            @field(val, field.name).deinit();
+        }
+    }
+}
+
+// ============================================================================
 // Pipeline metadata (parsed from pipeline_meta.json)
 // ============================================================================
 
@@ -1738,6 +1753,10 @@ fn runStage1(
         guided_v_x0.deinit();
         guided_a_x0.deinit();
 
+        // Free preprocessing outputs — they are recreated each step.
+        var pre_out_mut = pre_out;
+        deinitBufferizedFields(&pre_out_mut);
+
         v_latent_buf.deinit();
         a_latent_buf.deinit();
         v_latent_buf = dv_out.next_latent;
@@ -2531,6 +2550,10 @@ fn runStage2(
 
         video_vel.deinit();
         audio_vel.deinit();
+
+        // Free preprocessing outputs — they are recreated each step.
+        var pre_out_mut = pre_out;
+        deinitBufferizedFields(&pre_out_mut);
 
         v_latent_buf.deinit();
         a_latent_buf.deinit();
