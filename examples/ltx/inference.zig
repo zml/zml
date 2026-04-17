@@ -509,7 +509,7 @@ fn encodeImageToTokens(
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{ image_buf, stats_bufs, encoder_bufs });
-    exe.call(args, &results);
+    exe.callOpts(io, args, &results, .{ .wait = true });
     return results.get(zml.Buffer);
 }
 
@@ -544,7 +544,7 @@ fn applyConditioning(
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{ v_latent, v_clean, v_mask, img_tokens });
-    exe.call(args, &results);
+    exe.callOpts(io, args, &results, .{ .wait = true });
     const out = results.get(zml.Bufferized(ConditioningResult));
     return .{ .latent = out.latent, .clean = out.clean_latent, .mask = out.denoise_mask };
 }
@@ -937,7 +937,7 @@ fn runStage1(
     var gen_v_results = try noise_gen_v_exe.results(allocator);
     defer gen_v_results.deinit(allocator);
     gen_v_args.set(.{ rng_buf, v_clean_buf });
-    noise_gen_v_exe.call(gen_v_args, &gen_v_results);
+    noise_gen_v_exe.callOpts(io, gen_v_args, &gen_v_results, .{ .wait = true });
     rng_buf._state.deinit();
     rng_buf, var v_noise_buf = gen_v_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
     defer v_noise_buf.deinit();
@@ -948,7 +948,7 @@ fn runStage1(
     var gen_a_results = try noise_gen_a_exe.results(allocator);
     defer gen_a_results.deinit(allocator);
     gen_a_args.set(.{ rng_buf, a_clean_buf });
-    noise_gen_a_exe.call(gen_a_args, &gen_a_results);
+    noise_gen_a_exe.callOpts(io, gen_a_args, &gen_a_results, .{ .wait = true });
     rng_buf._state.deinit();
     rng_buf, var a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
     defer a_noise_buf.deinit();
@@ -1004,7 +1004,7 @@ fn runStage1(
     var ni_v_results = try noise_init_v_exe.results(allocator);
     defer ni_v_results.deinit(allocator);
     ni_v_args.set(.{ v_clean_buf, v_noise_buf, v_mask_buf, noise_scale_buf });
-    noise_init_v_exe.call(ni_v_args, &ni_v_results);
+    noise_init_v_exe.callOpts(io, ni_v_args, &ni_v_results, .{ .wait = true });
     var v_latent_buf = ni_v_results.get(zml.Buffer);
 
     // Audio noise init
@@ -1013,7 +1013,7 @@ fn runStage1(
     var ni_a_results = try noise_init_a_exe.results(allocator);
     defer ni_a_results.deinit(allocator);
     ni_a_args.set(.{ a_clean_buf, a_noise_buf, a_mask_buf, noise_scale_buf });
-    noise_init_a_exe.call(ni_a_args, &ni_a_results);
+    noise_init_a_exe.callOpts(io, ni_a_args, &ni_a_results, .{ .wait = true });
     var a_latent_buf = ni_a_results.get(zml.Buffer);
 
     std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape().dims()});
@@ -1124,7 +1124,7 @@ fn runStage1(
         v_context_pos_buf, a_context_pos_buf,
         preprocess_bufs,
     });
-    preprocess_exe.call(pre_args_init, &pre_results_init);
+    preprocess_exe.callOpts(io, pre_args_init, &pre_results_init, .{ .wait = true });
     const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block executables ----
@@ -1459,7 +1459,7 @@ fn runStage1(
             v_context_pos_buf, a_context_pos_buf,
             preprocess_bufs,
         });
-        preprocess_exe.call(pre_args, &pre_results);
+        preprocess_exe.callOpts(io, pre_args, &pre_results, .{ .wait = true });
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- Pass 1: Conditional (positive context, normal blocks) ----
@@ -1490,7 +1490,7 @@ fn runStage1(
                 pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
-            block_normal_exe.call(blk_args, &blk_results);
+            block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
             if (i > 0) {
                 cond_h_v.deinit();
@@ -1500,13 +1500,13 @@ fn runStage1(
             cond_h_a = out.ax_out;
         }
 
-        var cond_v_vel = try runOutputProjection(allocator, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var cond_a_vel = try runOutputProjection(allocator, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        var cond_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var cond_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
         cond_h_v.deinit();
         cond_h_a.deinit();
 
-        var cond_v_x0 = try runToDenoised(allocator, &to_denoised_v_exe, v_latent_buf, cond_v_vel, v_mask_buf, sigma_buf);
-        var cond_a_x0 = try runToDenoised(allocator, &to_denoised_a_exe, a_latent_buf, cond_a_vel, a_mask_buf, sigma_buf);
+        var cond_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, cond_v_vel, v_mask_buf, sigma_buf);
+        var cond_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, cond_a_vel, a_mask_buf, sigma_buf);
         cond_v_vel.deinit();
         cond_a_vel.deinit();
 
@@ -1538,7 +1538,7 @@ fn runStage1(
                 pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
-            block_normal_exe.call(blk_args, &blk_results);
+            block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
             if (i > 0) {
                 neg_h_v.deinit();
@@ -1548,13 +1548,13 @@ fn runStage1(
             neg_h_a = out.ax_out;
         }
 
-        var neg_v_vel = try runOutputProjection(allocator, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var neg_a_vel = try runOutputProjection(allocator, &proj_a_exe, neg_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        var neg_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var neg_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, neg_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
         neg_h_v.deinit();
         neg_h_a.deinit();
 
-        var neg_v_x0 = try runToDenoised(allocator, &to_denoised_v_exe, v_latent_buf, neg_v_vel, v_mask_buf, sigma_buf);
-        var neg_a_x0 = try runToDenoised(allocator, &to_denoised_a_exe, a_latent_buf, neg_a_vel, a_mask_buf, sigma_buf);
+        var neg_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, neg_v_vel, v_mask_buf, sigma_buf);
+        var neg_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, neg_a_vel, a_mask_buf, sigma_buf);
         neg_v_vel.deinit();
         neg_a_vel.deinit();
 
@@ -1587,7 +1587,7 @@ fn runStage1(
                     pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
-                block_stg_exe.call(blk_args, &blk_results);
+                block_stg_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
                     ptb_h_v.deinit();
@@ -1618,7 +1618,7 @@ fn runStage1(
                     pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
-                block_normal_exe.call(blk_args, &blk_results);
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
                     ptb_h_v.deinit();
@@ -1629,13 +1629,13 @@ fn runStage1(
             }
         }
 
-        var ptb_v_vel = try runOutputProjection(allocator, &proj_v_exe, ptb_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var ptb_a_vel = try runOutputProjection(allocator, &proj_a_exe, ptb_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        var ptb_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, ptb_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var ptb_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, ptb_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
         ptb_h_v.deinit();
         ptb_h_a.deinit();
 
-        var ptb_v_x0 = try runToDenoised(allocator, &to_denoised_v_exe, v_latent_buf, ptb_v_vel, v_mask_buf, sigma_buf);
-        var ptb_a_x0 = try runToDenoised(allocator, &to_denoised_a_exe, a_latent_buf, ptb_a_vel, a_mask_buf, sigma_buf);
+        var ptb_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, ptb_v_vel, v_mask_buf, sigma_buf);
+        var ptb_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, ptb_a_vel, a_mask_buf, sigma_buf);
         ptb_v_vel.deinit();
         ptb_a_vel.deinit();
 
@@ -1668,7 +1668,7 @@ fn runStage1(
                 pre_out.v2a_k_pe_sin,         zero_mask_buf,
                 block_params_bufs[i],
             });
-            block_iso_exe.call(blk_args, &blk_results);
+            block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
             if (i > 0) {
                 iso_h_v.deinit();
@@ -1678,13 +1678,13 @@ fn runStage1(
             iso_h_a = out.ax_out;
         }
 
-        var iso_v_vel = try runOutputProjection(allocator, &proj_v_exe, iso_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var iso_a_vel = try runOutputProjection(allocator, &proj_a_exe, iso_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        var iso_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, iso_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var iso_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, iso_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
         iso_h_v.deinit();
         iso_h_a.deinit();
 
-        var iso_v_x0 = try runToDenoised(allocator, &to_denoised_v_exe, v_latent_buf, iso_v_vel, v_mask_buf, sigma_buf);
-        var iso_a_x0 = try runToDenoised(allocator, &to_denoised_a_exe, a_latent_buf, iso_a_vel, a_mask_buf, sigma_buf);
+        var iso_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, iso_v_vel, v_mask_buf, sigma_buf);
+        var iso_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, iso_a_vel, a_mask_buf, sigma_buf);
         iso_v_vel.deinit();
         iso_a_vel.deinit();
 
@@ -1701,7 +1701,7 @@ fn runStage1(
             cfg_v_buf, stg_v_buf, mod_v_buf, rescale_v_buf,
             cfg_a_buf, stg_a_buf, mod_a_buf, rescale_a_buf,
         });
-        guider_combine_exe.call(gc_args, &gc_results);
+        guider_combine_exe.callOpts(io, gc_args, &gc_results, .{ .wait = true });
         const gc_out = gc_results.get(zml.Bufferized(model.GuiderCombineResult));
 
         var guided_v_x0 = gc_out.guided_v;
@@ -1724,7 +1724,7 @@ fn runStage1(
         var dv_results = try denoise_v_exe.results(allocator);
         defer dv_results.deinit(allocator);
         dv_args.set(.{ v_latent_buf, guided_v_x0, v_mask_buf, v_clean_buf, sigma_buf, sigma_next_buf });
-        denoise_v_exe.call(dv_args, &dv_results);
+        denoise_v_exe.callOpts(io, dv_args, &dv_results, .{ .wait = true });
         const dv_out = dv_results.get(zml.Bufferized(model.DenoisingStepResult));
 
         var da_args = try denoise_a_exe.args(allocator);
@@ -1732,7 +1732,7 @@ fn runStage1(
         var da_results = try denoise_a_exe.results(allocator);
         defer da_results.deinit(allocator);
         da_args.set(.{ a_latent_buf, guided_a_x0, a_mask_buf, a_clean_buf, sigma_buf, sigma_next_buf });
-        denoise_a_exe.call(da_args, &da_results);
+        denoise_a_exe.callOpts(io, da_args, &da_results, .{ .wait = true });
         const da_out = da_results.get(zml.Bufferized(model.DenoisingStepResult));
 
         guided_v_x0.deinit();
@@ -1843,7 +1843,7 @@ fn runBridge(
     var unpatch_results = try unpatch_exe.results(allocator);
     defer unpatch_results.deinit(allocator);
     unpatch_args.set(.{s1_video});
-    unpatch_exe.call(unpatch_args, &unpatch_results);
+    unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
     var video_5d_buf = unpatch_results.get(zml.Buffer);
     defer video_5d_buf.deinit();
     var s1_video_mut = s1_video;
@@ -1911,7 +1911,7 @@ fn runBridge(
     var up_results = try upsample_exe.results(allocator);
     defer up_results.deinit(allocator);
     up_args.set(.{ video_5d_buf, up_bufs, stats_bufs });
-    upsample_exe.call(up_args, &up_results);
+    upsample_exe.callOpts(io, up_args, &up_results, .{ .wait = true });
     var upsampled_buf = up_results.get(zml.Buffer);
     defer upsampled_buf.deinit();
     std.log.info("  Upsampled: {any}", .{upsampled_buf.shape().dims()});
@@ -1939,7 +1939,7 @@ fn runBridge(
     var patch_results = try patchify_exe.results(allocator);
     defer patch_results.deinit(allocator);
     patch_args.set(.{upsampled_buf});
-    patchify_exe.call(patch_args, &patch_results);
+    patchify_exe.callOpts(io, patch_args, &patch_results, .{ .wait = true });
     var video_clean_buf = patch_results.get(zml.Buffer);
     std.log.info("  Re-patchified video: {any}", .{video_clean_buf.shape().dims()});
     timer.addExec();
@@ -2018,7 +2018,7 @@ fn runBridge(
         var gen_v_results = try noise_gen_v_exe.results(allocator);
         defer gen_v_results.deinit(allocator);
         gen_v_args.set(.{ rng_buf, video_clean_buf });
-        noise_gen_v_exe.call(gen_v_args, &gen_v_results);
+        noise_gen_v_exe.callOpts(io, gen_v_args, &gen_v_results, .{ .wait = true });
         rng_buf._state.deinit();
         rng_buf, v_noise_buf = gen_v_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
 
@@ -2028,7 +2028,7 @@ fn runBridge(
         var gen_a_results = try noise_gen_a_exe.results(allocator);
         defer gen_a_results.deinit(allocator);
         gen_a_args.set(.{ rng_buf, audio_clean_buf });
-        noise_gen_a_exe.call(gen_a_args, &gen_a_results);
+        noise_gen_a_exe.callOpts(io, gen_a_args, &gen_a_results, .{ .wait = true });
         rng_buf._state.deinit();
         _, a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
     }
@@ -2085,7 +2085,7 @@ fn runBridge(
     var ni_v_results = try noise_init_v_exe.results(allocator);
     defer ni_v_results.deinit(allocator);
     ni_v_args.set(.{ video_clean_buf, v_noise_buf, v_mask_buf, sigma0_buf });
-    noise_init_v_exe.call(ni_v_args, &ni_v_results);
+    noise_init_v_exe.callOpts(io, ni_v_args, &ni_v_results, .{ .wait = true });
     var v_latent_buf = ni_v_results.get(zml.Buffer);
 
     // Audio noise init
@@ -2094,7 +2094,7 @@ fn runBridge(
     var ni_a_results = try noise_init_a_exe.results(allocator);
     defer ni_a_results.deinit(allocator);
     ni_a_args.set(.{ audio_clean_buf, a_noise_buf, a_mask_buf, sigma0_buf });
-    noise_init_a_exe.call(ni_a_args, &ni_a_results);
+    noise_init_a_exe.callOpts(io, ni_a_args, &ni_a_results, .{ .wait = true });
     const a_latent_buf = ni_a_results.get(zml.Buffer);
 
     std.log.info("  video_latent (noised)", .{});
@@ -2238,7 +2238,7 @@ fn runStage2(
         bridge.v_context,   bridge.a_context,
         preprocess_bufs,
     });
-    preprocess_exe.call(pre_args_init, &pre_results_init);
+    preprocess_exe.callOpts(io, pre_args_init, &pre_results_init, .{ .wait = true });
     const init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block exe ----
@@ -2446,7 +2446,7 @@ fn runStage2(
             bridge.v_context,   bridge.a_context,
             preprocess_bufs,
         });
-        preprocess_exe.call(pre_args, &pre_results);
+        preprocess_exe.callOpts(io, pre_args, &pre_results, .{ .wait = true });
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- 2. 48-block chain ----
@@ -2477,7 +2477,7 @@ fn runStage2(
                 pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                 block_params_bufs[i],
             });
-            block_exe.call(blk_args, &blk_results);
+            block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
 
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
             if (i > 0) {
@@ -2496,7 +2496,7 @@ fn runStage2(
         var proj_v_results = try proj_v_exe.results(allocator);
         defer proj_v_results.deinit(allocator);
         proj_v_args.set(.{ h_v, pre_out.v_embedded_timestep, proj_v_bufs });
-        proj_v_exe.call(proj_v_args, &proj_v_results);
+        proj_v_exe.callOpts(io, proj_v_args, &proj_v_results, .{ .wait = true });
         var video_vel = proj_v_results.get(zml.Buffer);
 
         var proj_a_args = try proj_a_exe.args(allocator);
@@ -2504,7 +2504,7 @@ fn runStage2(
         var proj_a_results = try proj_a_exe.results(allocator);
         defer proj_a_results.deinit(allocator);
         proj_a_args.set(.{ h_a, pre_out.a_embedded_timestep, proj_a_bufs });
-        proj_a_exe.call(proj_a_args, &proj_a_results);
+        proj_a_exe.callOpts(io, proj_a_args, &proj_a_results, .{ .wait = true });
         var audio_vel = proj_a_results.get(zml.Buffer);
 
         h_v.deinit();
@@ -2518,7 +2518,7 @@ fn runStage2(
         var dv_results = try denoise_v_exe.results(allocator);
         defer dv_results.deinit(allocator);
         dv_args.set(.{ v_latent_buf, video_vel, bridge.v_mask, bridge.v_clean, sigma_buf, sigma_next_buf });
-        denoise_v_exe.call(dv_args, &dv_results);
+        denoise_v_exe.callOpts(io, dv_args, &dv_results, .{ .wait = true });
         const dv_out = dv_results.get(zml.Bufferized(model.DenoisingStepResult));
 
         var da_args = try denoise_a_exe.args(allocator);
@@ -2526,7 +2526,7 @@ fn runStage2(
         var da_results = try denoise_a_exe.results(allocator);
         defer da_results.deinit(allocator);
         da_args.set(.{ a_latent_buf, audio_vel, bridge.a_mask, bridge.a_clean, sigma_buf, sigma_next_buf });
-        denoise_a_exe.call(da_args, &da_results);
+        denoise_a_exe.callOpts(io, da_args, &da_results, .{ .wait = true });
         const da_out = da_results.get(zml.Bufferized(model.DenoisingStepResult));
 
         video_vel.deinit();
@@ -2561,6 +2561,7 @@ fn runStage2(
 
 fn runOutputProjection(
     allocator: std.mem.Allocator,
+    io: std.Io,
     exe: anytype,
     h: zml.Buffer,
     emb_ts: zml.Buffer,
@@ -2571,12 +2572,13 @@ fn runOutputProjection(
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{ h, emb_ts, bufs });
-    exe.call(args, &results);
+    exe.callOpts(io, args, &results, .{ .wait = true });
     return results.get(zml.Buffer);
 }
 
 fn runToDenoised(
     allocator: std.mem.Allocator,
+    io: std.Io,
     exe: anytype,
     sample: zml.Buffer,
     velocity: zml.Buffer,
@@ -2588,7 +2590,7 @@ fn runToDenoised(
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
     args.set(.{ sample, velocity, mask, sigma });
-    exe.call(args, &results);
+    exe.callOpts(io, args, &results, .{ .wait = true });
     return results.get(zml.Buffer);
 }
 
@@ -2679,7 +2681,7 @@ fn computeTextEmbeddings(
     defer results.deinit(allocator);
 
     exe_args.set(.{ pos_hs_buf, pos_mask_buf, weight_bufs });
-    exe.call(exe_args, &results);
+    exe.callOpts(io, exe_args, &results, .{ .wait = true });
 
     var pos_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
     const v_context_pos = pos_out.v_context;
@@ -2728,7 +2730,7 @@ fn computeTextEmbeddings(
         return error.ShapeMismatch;
     }
     exe_args.set(.{ neg_hs_buf, neg_mask_buf, weight_bufs });
-    exe.call(exe_args, &results);
+    exe.callOpts(io, exe_args, &results, .{ .wait = true });
 
     var neg_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
     const v_context_neg = neg_out.v_context;
@@ -2835,13 +2837,37 @@ fn runVideoVaeDecode(
     var unpatch_results = try unpatch_exe.results(allocator);
     defer unpatch_results.deinit(allocator);
     unpatch_args.set(.{v_latent_patchified});
-    unpatch_exe.call(unpatch_args, &unpatch_results);
-    const v_latent_5d = unpatch_results.get(zml.Buffer);
+    unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
+    var v_latent_5d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape().dims()});
     timer.addExec();
 
+    // Free the patchified input — no longer needed after unpatchify.
+    var patchified_input = v_latent_patchified;
+    patchified_input.deinit();
+
     // ========================================================================
-    // Step 2: Load VAE decoder weights + per-channel stats
+    // Step 2: Tiling decision — for tiled path, download latent to host
+    // and free GPU buffer BEFORE loading VAE weights to minimize peak memory.
+    // ========================================================================
+    const tiling_config: video_vae.TemporalTilingConfig = .{};
+    const use_tiling = F > tiling_config.tile_latent_frames;
+
+    // For tiled path: download to host and free GPU latent early
+    var latent_host: ?zml.Slice = null;
+    if (use_tiling) {
+        std.log.info("Temporal tiling enabled: F'={d}, tile={d}, overlap={d}, stride={d}", .{
+            F, tiling_config.tile_latent_frames, tiling_config.overlap_latent_frames, tiling_config.stride(),
+        });
+        std.log.info("Downloading latent to host for tiling...", .{});
+        latent_host = try v_latent_5d.toSliceAlloc(allocator, io);
+        // Free 5D GPU latent — we have the host copy, tiles will be uploaded individually.
+        v_latent_5d.deinit();
+    }
+    defer if (latent_host) |lh| lh.free(allocator);
+
+    // ========================================================================
+    // Step 3: Load VAE decoder weights + per-channel stats
     // ========================================================================
     std.log.info("Loading VAE decoder weights...", .{});
     var vae_params = video_vae.initVideoVaeDecoderParams(ckpt_store.view());
@@ -2880,21 +2906,15 @@ fn runVideoVaeDecode(
     timer.addLoad(); // VAE + stats weights
 
     // ========================================================================
-    // Step 3: Tiling decision
+    // Step 4: Dispatch to tiled or single-shot decode
     // ========================================================================
-    const tiling_config: video_vae.TemporalTilingConfig = .{};
-    const use_tiling = F > tiling_config.tile_latent_frames;
-
     if (use_tiling) {
-        std.log.info("Temporal tiling enabled: F'={d}, tile={d}, overlap={d}, stride={d}", .{
-            F, tiling_config.tile_latent_frames, tiling_config.overlap_latent_frames, tiling_config.stride(),
-        });
         return runVideoVaeDecodeTiled(
             allocator,
             io,
             platform,
             sharding,
-            v_latent_5d,
+            latent_host.?,
             vae_params,
             vae_bufs,
             stats_shape,
@@ -2931,7 +2951,8 @@ fn runVideoVaeDecode(
     var vae_results = try vae_exe.results(allocator);
     defer vae_results.deinit(allocator);
     vae_args.set(.{ v_latent_5d, stats_bufs, vae_bufs });
-    vae_exe.call(vae_args, &vae_results);
+    vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
+    v_latent_5d.deinit(); // Free GPU latent after VAE consumes it
     const decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
     timer.addExec();
@@ -2940,12 +2961,14 @@ fn runVideoVaeDecode(
 }
 
 /// Tiled VAE decode path: decode overlapping temporal chunks and blend on host.
+/// The latent has already been downloaded to host (latent_host) and the GPU buffer freed
+/// to minimize peak GPU memory during VAE weight loading and execution.
 fn runVideoVaeDecodeTiled(
     allocator: std.mem.Allocator,
     io: std.Io,
     platform: *zml.Platform,
     sharding: zml.sharding.Sharding,
-    v_latent_5d: zml.Buffer,
+    latent_host: zml.Slice,
     vae_params: video_vae.VideoVaeDecoderParams,
     vae_bufs: zml.Bufferized(video_vae.VideoVaeDecoderParams),
     stats_shape: conv_ops.PerChannelStats,
@@ -2984,10 +3007,6 @@ fn runVideoVaeDecodeTiled(
     defer vae_exe.deinit();
     timer.addCompile();
 
-    // Download full latent to host (tiny: 1*128*F*H*W*2 bytes ≈ few MB)
-    std.log.info("Downloading latent to host for tiling...", .{});
-    const latent_host = try v_latent_5d.toSliceAlloc(allocator, io);
-    defer latent_host.free(allocator);
     const latent_bytes = latent_host.constData();
 
     // Host accumulation buffers (f32 for precision during blending)
@@ -3057,7 +3076,7 @@ fn runVideoVaeDecodeTiled(
         var vae_results = try vae_exe.results(allocator);
         defer vae_results.deinit(allocator);
         vae_args.set(.{ tile_gpu, stats_bufs, vae_bufs });
-        vae_exe.call(vae_args, &vae_results);
+        vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
         var decoded_tile = vae_results.get(zml.Buffer); // [1, 3, F_tile_px, H_px, W_px] bf16
         defer decoded_tile.deinit();
 
@@ -3337,7 +3356,7 @@ fn runAudioVaeDecode(
     var unpatch_results = try unpatch_exe.results(allocator);
     defer unpatch_results.deinit(allocator);
     unpatch_args.set(.{a_latent_patchified});
-    unpatch_exe.call(unpatch_args, &unpatch_results);
+    unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
     const a_latent_4d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape().dims()});
     timer.addExec();
@@ -3404,7 +3423,7 @@ fn runAudioVaeDecode(
     var audio_vae_results = try audio_vae_exe.results(allocator);
     defer audio_vae_results.deinit(allocator);
     audio_vae_args.set(.{ a_latent_4d, audio_stats_bufs, audio_vae_bufs });
-    audio_vae_exe.call(audio_vae_args, &audio_vae_results);
+    audio_vae_exe.callOpts(io, audio_vae_args, &audio_vae_results, .{ .wait = true });
     const decoded_audio = audio_vae_results.get(zml.Buffer); // [1, 2, T_out, 64] bf16
     std.log.info("  Decoded audio mel: {any}", .{decoded_audio.shape().dims()});
     timer.addExec();
@@ -3492,7 +3511,7 @@ fn runVocoderWithBWE(
     var main_voc_results = try main_voc_exe.results(allocator);
     defer main_voc_results.deinit(allocator);
     main_voc_args.set(.{ audio_mel, &main_voc_bufs });
-    main_voc_exe.call(main_voc_args, &main_voc_results);
+    main_voc_exe.callOpts(io, main_voc_args, &main_voc_results, .{ .wait = true });
     const waveform_16k = main_voc_results.get(zml.Buffer);
     std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape().dims()});
     timer.addExec();
@@ -3515,7 +3534,7 @@ fn runVocoderWithBWE(
     var bwe_results = try bwe_exe.results(allocator);
     defer bwe_results.deinit(allocator);
     bwe_args.set(.{ waveform_16k, &bwe_bufs });
-    bwe_exe.call(bwe_args, &bwe_results);
+    bwe_exe.callOpts(io, bwe_args, &bwe_results, .{ .wait = true });
     const waveform = bwe_results.get(zml.Buffer);
     std.log.info("  48kHz waveform: {any}", .{waveform.shape().dims()});
     timer.addExec();

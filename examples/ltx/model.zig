@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const zml = @import("zml");
+const stdx = zml.stdx;
 const Tensor = zml.Tensor;
 
 // ============================================================================
@@ -304,7 +305,27 @@ pub const OutputProjection = struct {
 // Python ref: ltx_core/models/attention.py — Attention, CrossAttention
 // ============================================================================
 
-/// Like zml.nn.sdpa but computes softmax in native dtype (no f32 upcast)
+/// Like zml.nn.sdpa but computes softmax in native dtype (no f32 upcast).
+///
+/// Hierarchical concatenation that works around Tensor.concatenate's 32-tensor limit.
+/// Groups chunks into batches of up to 32, concatenates each group, then concatenates
+/// the groups. Supports up to 32×32 = 1024 chunks.
+fn hierarchicalConcatenate(chunks: []const Tensor, comptime axis: anytype) Tensor {
+    const MAX_CONCAT = 32;
+    if (chunks.len <= MAX_CONCAT) {
+        return Tensor.concatenate(chunks, axis);
+    }
+    const n_groups = (chunks.len + MAX_CONCAT - 1) / MAX_CONCAT;
+    stdx.debug.assert(n_groups <= MAX_CONCAT, "hierarchicalConcatenate: n_groups={} exceeds {}", .{ n_groups, MAX_CONCAT });
+    var groups: [MAX_CONCAT]Tensor = undefined;
+    for (0..n_groups) |g| {
+        const start = g * MAX_CONCAT;
+        const end = @min((g + 1) * MAX_CONCAT, chunks.len);
+        groups[g] = Tensor.concatenate(chunks[start..end], axis);
+    }
+    return Tensor.concatenate(groups[0..n_groups], axis);
+}
+
 /// and chunks along the query dimension to avoid materializing a full Q×K^T
 /// matrix. For Stage 2 video self-attention ([32, 24576, 24576] bf16 ≈ 36 GiB),
 /// the full matrix can't fit in GPU memory. Chunking queries into blocks of
@@ -339,9 +360,11 @@ fn sdpaNoF32Upcast(q_: Tensor, k_: Tensor, v_: Tensor, opts: zml.nn.SdpaOpts) Te
 
     // Process each chunk: slice Q (and optionally the mask) along the .q axis,
     // compute attention with the full K/V, and collect results.
-    // concatenate supports up to 32 tensors — 24576/1024 = 24 chunks, well within limit.
-    var chunk_results: [32]Tensor = undefined;
-    std.debug.assert(n_chunks <= 32);
+    // Tensor.concatenate supports up to 32 tensors, so we use hierarchical
+    // concatenation for large sequence lengths (e.g. Stage 2 at 1024×1536 → 93696 tokens → 92 chunks).
+    const MAX_CHUNKS = 1024;
+    var chunk_results: [MAX_CHUNKS]Tensor = undefined;
+    stdx.debug.assert(n_chunks <= MAX_CHUNKS, "sdpaNoF32Upcast: n_chunks={} exceeds MAX_CHUNKS={}", .{ n_chunks, MAX_CHUNKS });
 
     var ci: usize = 0;
     while (ci < n_chunks) : (ci += 1) {
@@ -359,8 +382,9 @@ fn sdpaNoF32Upcast(q_: Tensor, k_: Tensor, v_: Tensor, opts: zml.nn.SdpaOpts) Te
         chunk_results[ci] = aw.dot(v, .k);
     }
 
-    // Concatenate chunks back along the query axis and finalize.
-    const attn = Tensor.concatenate(chunk_results[0..n_chunks], .q);
+    // Hierarchical concatenation: Tensor.concatenate supports max 32 tensors,
+    // so group into batches of 32, concatenate each group, then concatenate groups.
+    const attn = hierarchicalConcatenate(chunk_results[0..n_chunks], .q);
     return attn.transpose(q.shape()).merge(.{ .h = .{ .h, .hq } });
 }
 
