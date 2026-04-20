@@ -83,12 +83,6 @@ pub fn main(init: std.process.Init) !void {
 
     log.info("\n{f}", .{platform.fmtVerbose()});
 
-    var profiler = try platform.profiler(allocator, io, .defaults);
-    defer profiler.deinit();
-
-    try profiler.start();
-    defer _ = profiler.stop() catch unreachable;
-
     const backend = args.backend orelse b: {
         const selected = zml.attention.attention.Backend.auto(platform);
         log.info("Selected backend: {}", .{selected});

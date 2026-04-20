@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const zml = @import("zml");
-const tracer = zml.tracer;
 
 const common = @import("models/common.zig");
 pub const Shardings = common.Shardings;
@@ -35,9 +34,6 @@ pub const LoadedModel = union(ModelType) {
         store: zml.io.TensorStore.View,
         generation: GenerationOptions,
     ) !LoadedModel {
-        var trace = try tracer.scope("llm.model.load", .{});
-        defer trace.end();
-
         const model_type = try detectModelType(allocator, io, repo);
         log.info("Detected model type: {}", .{model_type});
 
@@ -55,9 +51,6 @@ pub const LoadedModel = union(ModelType) {
     }
 
     pub fn loadBuffers(self: *LoadedModel, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *zml.io.TensorStore, progress: *std.Progress.Node, shardings: Shardings) !Buffers {
-        var trace = try tracer.scope("llm.model.load_buffers", .{});
-        defer trace.end();
-
         return switch (self.*) {
             .lfm2 => |*m| .{ .lfm2 = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
             .llama => |*m| .{ .llama = try m.loadBuffers(allocator, io, platform, store, progress, shardings) },
@@ -92,11 +85,6 @@ pub const LoadedModel = union(ModelType) {
         seqlen: usize,
         progress: *std.Progress.Node,
     ) !CompiledModel {
-        var trace = try tracer.scope("llm.model.compile", .{
-            .seqlen = seqlen,
-        });
-        defer trace.end();
-
         const inner: CompiledModel.Inner = switch (self.*) {
             .lfm2 => |*m| .{ .lfm2 = try m.compile(
                 allocator,
@@ -159,11 +147,6 @@ pub const CompiledModel = struct {
         model_buffers: *Buffers,
         tokenizer: zml.tokenizer.Tokenizer,
     ) !Session {
-        var trace = try tracer.scope("llm.session.init", .{
-            .seqlen = self.seqlen,
-        });
-        defer trace.end();
-
         return switch (self.inner) {
             .lfm2 => |*compiled| .{
                 .inner = .{ .lfm2 = try lfm2.Session.init(
@@ -225,44 +208,24 @@ pub const Session = struct {
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
-        var trace = try tracer.scope("llm.prefill", .{
-            .tokens = all_tokens.len,
-        });
-        defer trace.end();
-
         try switch (self.inner) {
             inline else => |*s| s.runPrefill(all_tokens),
         };
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), writer: *std.Io.Writer) !void {
-        var trace = try tracer.scope("llm.decode", .{
-            .tokens_before = all_tokens.items.len,
-        });
-        defer trace.end();
-
         try switch (self.inner) {
             inline else => |*s| s.runDecode(all_tokens, writer),
         };
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
-        var trace = try tracer.scope("llm.tokenize_prompt", .{
-            .prompt_len = prompt.len,
-        });
-        defer trace.end();
-
         return switch (self.inner) {
             inline else => |*s| s.tokenizePrompt(allocator, prompt),
         };
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
-        var trace = try tracer.scope("llm.tokenize_turn", .{
-            .prompt_len = prompt.len,
-        });
-        defer trace.end();
-
         return switch (self.inner) {
             inline else => |*s| s.tokenizeTurn(allocator, prompt),
         };
