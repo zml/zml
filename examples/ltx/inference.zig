@@ -1,7 +1,7 @@
 /// Unified end-to-end pipeline: Stage 1 → Bridge → Stage 2
 ///
 /// Runs the full LTX-2.3 denoising pipeline in a single binary:
-///   1. Stage 1: 30-step guided denoising (4-pass per step × 48 blocks)
+///   1. Stage 1: N-step guided denoising (4-pass per step × 48 blocks, default 30)
 ///   2. Bridge:  unpatchify → upsample → patchify → noise init
 ///   3. Stage 2: 3-step distilled denoising (1-pass × 48 blocks)
 ///
@@ -217,6 +217,7 @@ const CliArgs = struct {
     seed: u64,
     bf16_attn_stage1: bool,
     bf16_attn_stage2: bool,
+    num_inference_steps: usize,
     dump_intermediates: bool,
     image: ?[]const u8,
     gemma_hidden_states_pos: []const u8,
@@ -238,6 +239,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .seed = 42,
         .bf16_attn_stage1 = false,
         .bf16_attn_stage2 = false,
+        .num_inference_steps = model.stage1_default_schedule.num_steps,
         .dump_intermediates = false,
         .image = null,
         .gemma_hidden_states_pos = undefined,
@@ -273,6 +275,13 @@ fn parseArgs(it: anytype) !CliArgs {
             args.bf16_attn_stage1 = true;
         } else if (std.mem.eql(u8, arg, "--bf16-attn-stage2")) {
             args.bf16_attn_stage2 = true;
+        } else if (std.mem.eql(u8, arg, "--num-inference-steps")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.num_inference_steps = std.fmt.parseInt(usize, val, 10) catch return error.InvalidArgs;
+            if (args.num_inference_steps == 0 or args.num_inference_steps > MAX_STAGE1_STEPS) {
+                std.log.err("--num-inference-steps must be between 1 and {d}", .{MAX_STAGE1_STEPS});
+                return error.InvalidArgs;
+            }
         } else if (std.mem.eql(u8, arg, "--dump-intermediates")) {
             args.dump_intermediates = true;
         } else if (std.mem.eql(u8, arg, "--image")) {
@@ -305,7 +314,7 @@ fn parseArgs(it: anytype) !CliArgs {
                     "--upsampler-ckpt <path> --output-dir <path> " ++
                     "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
                     "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
-                    "[--meta <path>] [--seed <int>] [--image <path>] " ++
+                    "[--num-inference-steps <int>] [--meta <path>] [--seed <int>] [--image <path>] " ++
                     "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
                 .{},
             );
@@ -399,8 +408,8 @@ const VideoFrames = struct {
 /// STG perturbation block index (0-based). Matches LTX_2_3_PARAMS.stg_blocks=[28].
 const STG_BLOCK_IDX: usize = 28;
 
-/// Number of Stage 1 denoising steps.
-const NUM_STAGE1_STEPS: usize = model.stage1_default_schedule.num_steps;
+/// Comptime upper bound for Stage 1 step count (sizes the sigma schedule array).
+const MAX_STAGE1_STEPS: usize = 50;
 
 // ============================================================================
 // Image conditioning: graph functions + runtime helper
@@ -610,6 +619,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  fps:               {d:.1}", .{args.fps});
     std.log.info("  bf16-attn-stage1:  {}", .{args.bf16_attn_stage1});
     std.log.info("  bf16-attn-stage2:  {}", .{args.bf16_attn_stage2});
+    std.log.info("  num-inference-steps: {d}", .{args.num_inference_steps});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
     std.log.info("  image:             {s}", .{args.image orelse "(none)"});
     std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos});
@@ -665,7 +675,7 @@ pub fn main(init: std.process.Init) !void {
     // Phase 1: Stage 1
     // ========================================================================
     std.log.info("", .{});
-    std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
+    std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{args.num_inference_steps});
 
     const s1 = try runStage1(
         allocator,
@@ -681,6 +691,7 @@ pub fn main(init: std.process.Init) !void {
         args.seed,
         args.gemma_hidden_states_pos,
         args.gemma_hidden_states_neg,
+        args.num_inference_steps,
         &timer_s1,
     );
 
@@ -829,7 +840,7 @@ pub fn main(init: std.process.Init) !void {
 }
 
 // ============================================================================
-// Phase 1: Stage 1 — 30-step guided denoising
+// Phase 1: Stage 1 — guided denoising
 // ============================================================================
 
 fn runStage1(
@@ -846,21 +857,23 @@ fn runStage1(
     seed: u64,
     gemma_hs_pos_path: []const u8,
     gemma_hs_neg_path: []const u8,
+    num_stage1_steps: usize,
     timer: *PhaseTimer,
 ) !Stage1Result {
     timer.start();
 
     // ---- Sigma schedule ----
+    // sigmas is [MAX_STAGE1_STEPS + 1]f32; only entries [0..num_stage1_steps] are valid.
     const sigmas = model.computeSigmaSchedule(
-        NUM_STAGE1_STEPS,
-        NUM_STAGE1_STEPS,
+        MAX_STAGE1_STEPS,
+        num_stage1_steps,
         model.MAX_SHIFT_ANCHOR, // In python reference implementation, the number of tokens used for computing the sigma shift when no latent tensor is available, is the same regardless of the resolution.
         model.stage1_default_schedule.max_shift,
         model.stage1_default_schedule.base_shift,
         model.stage1_default_schedule.terminal,
     );
     std.log.info("Sigma schedule ({d} steps): [{d:.6} ... {d:.6}]", .{
-        NUM_STAGE1_STEPS, sigmas[0], sigmas[NUM_STAGE1_STEPS],
+        num_stage1_steps, sigmas[0], sigmas[num_stage1_steps],
     });
 
     // ---- Open checkpoint store ----
@@ -1482,17 +1495,17 @@ fn runStage1(
     var rescale_a_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.7), .f32, sharding);
     defer rescale_a_buf.deinit();
 
-    // ---- Denoising loop: 30 steps × 4 passes ----
-    std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{NUM_STAGE1_STEPS});
+    // ---- Denoising loop ----
+    std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{num_stage1_steps});
 
-    for (0..NUM_STAGE1_STEPS) |step_idx| {
+    for (0..num_stage1_steps) |step_idx| {
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = sigmas[step_idx];
         const sigma_next = sigmas[step_idx + 1];
 
         std.log.info("", .{});
         std.log.info("===== Step {d}/{d}: sigma={d:.6} -> {d:.6} =====", .{
-            step_idx + 1, NUM_STAGE1_STEPS, sigma, sigma_next,
+            step_idx + 1, num_stage1_steps, sigma, sigma_next,
         });
 
         var sigma_1d = try sigma1dBuffer(io, platform, sigma, sharding);
