@@ -100,13 +100,13 @@ pub fn main(init: std.process.Init) !void {
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, full_emb, partial_emb);
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, full_emb, partial_emb, audio_codes.len());
     defer acedit.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acedit.testModel(zml_handler);
 
-    const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, text_emb);
+    const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, text_emb, audio_codes);
     defer diffused_latents.deinit(zml_handler.allocator);
 
     try diffused_latents.print(zml_handler.io);

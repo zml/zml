@@ -1,16 +1,3 @@
-# Copyright 2025 The ACESTEO Team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import math
 import time
 from typing import Callable, List, Optional, Union
@@ -1310,27 +1297,10 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         past_key_values: Optional[EncoderDecoderCache] = None,
         cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
-        output_attentions: Optional[bool] = False,
-        return_hidden_states: int = None,
         custom_layers_config: Optional[dict] = None,
         enable_early_exit: bool = False,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ):
-
-        use_cache = use_cache if use_cache is not None else self.config.use_cache
-
-        # Disable cache during training or when gradient checkpointing is enabled
-        if self.gradient_checkpointing and self.training and use_cache:
-            logger.warning_once(
-                "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`."
-            )
-            use_cache = False
-        if self.training:
-            use_cache = False
-    
-        # Initialize cache if needed (only during inference for auto-regressive generation)
-        if not self.training and use_cache and past_key_values is None:
-            past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
 
         # Compute timestep embeddings for diffusion conditioning
         # Two embeddings: one for timestep t, one for timestep difference (t - r)
@@ -1365,76 +1335,57 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         # Position IDs
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
-
-
+            
         seq_len = hidden_states.shape[1]
         encoder_seq_len = encoder_hidden_states.shape[1]
         dtype = hidden_states.dtype
         device = hidden_states.device
-        
-        # 判断是否使用 Flash Attention 2
-        is_flash_attn = (self.config._attn_implementation == "flash_attention_2")
 
         # 初始化 Mask 变量
         full_attn_mask = None
         sliding_attn_mask = None
         encoder_attention_mask = None
         attention_mask = None
-        if is_flash_attn:
-            # -------------------------------------------------------
-            # 场景 A: Flash Attention 模式
-            # -------------------------------------------------------
-            # FA 不需要 4D Mask。
-            # 如果有 padding mask (attention_mask [B, L])，直接传给它即可。
-            # 如果没有 padding mask，传 None。
-            # 滑动窗口逻辑由 Layer 内部传给 FA kernel 的 sliding_window 参数控制。
-            full_attn_mask = attention_mask
-            
-            # 这里的逻辑是：如果配置启用了滑动窗口，FA 模式下我们也只需要传基础的 padding mask
-            # Layer 会自己决定是否调用带 sliding window 的 kernel
-            sliding_attn_mask = attention_mask if self.config.use_sliding_window else None
-
-        else:
-            # -------------------------------------------------------
-            # 场景 B: CPU / Mac / SDPA (Eager 模式)
-            # -------------------------------------------------------
-            # 必须手动生成 4D Mask [B, 1, L, L]
-            
-            # 1. Full Attention (Bidirectional, Global)
-            # 对应原来的 create_causal_mask + bidirectional
-            full_attn_mask = create_4d_mask(
-                seq_len=seq_len,
-                dtype=dtype,
-                device=device,
-                attention_mask=attention_mask,     # [B, L]
-                sliding_window=None,
-                is_sliding_window=False,
-                is_causal=False                    # <--- 关键：双向注意力
-            )
-            max_len = max(seq_len, encoder_seq_len)
-            
-            encoder_attention_mask = create_4d_mask(
-                seq_len=max_len,
-                dtype=dtype,
-                device=device,
-                attention_mask=attention_mask,     # [B, L]
-                sliding_window=None,
-                is_sliding_window=False,
-                is_causal=False                    # <--- 关键：双向注意力
-            )
-            encoder_attention_mask = encoder_attention_mask[:, :, :seq_len, :encoder_seq_len]
-            # 2. Sliding Attention (Bidirectional, Local)
-            # 对应原来的 create_sliding_window... + bidirectional
-            if self.config.use_sliding_window:
-                sliding_attn_mask = create_4d_mask(
-                    seq_len=seq_len,
-                    dtype=dtype,
-                    device=device,
-                    attention_mask=attention_mask, # [B, L]
-                    sliding_window=self.config.sliding_window,
-                    is_sliding_window=True,        # <--- 开启滑动窗口
-                    is_causal=False                # <--- 关键：双向注意力
-                )
+        
+        # -------------------------------------------------------
+        # 场景 B: CPU / Mac / SDPA (Eager 模式)
+        # -------------------------------------------------------
+        # 必须手动生成 4D Mask [B, 1, L, L]
+        
+        # 1. Full Attention (Bidirectional, Global)
+        # 对应原来的 create_causal_mask + bidirectional
+        full_attn_mask = create_4d_mask(
+            seq_len=seq_len,
+            dtype=dtype,
+            device=device,
+            attention_mask=attention_mask,     # [B, L]
+            sliding_window=None,
+            is_sliding_window=False,
+            is_causal=False                    # <--- 关键：双向注意力
+        )
+        max_len = max(seq_len, encoder_seq_len)
+        
+        encoder_attention_mask = create_4d_mask(
+            seq_len=max_len,
+            dtype=dtype,
+            device=device,
+            attention_mask=attention_mask,     # [B, L]
+            sliding_window=None,
+            is_sliding_window=False,
+            is_causal=False                    # <--- 关键：双向注意力
+        )
+        encoder_attention_mask = encoder_attention_mask[:, :, :seq_len, :encoder_seq_len]
+        # 2. Sliding Attention (Bidirectional, Local)
+        # 对应原来的 create_sliding_window... + bidirectional
+        sliding_attn_mask = create_4d_mask(
+            seq_len=seq_len,
+            dtype=dtype,
+            device=device,
+            attention_mask=attention_mask, # [B, L]
+            sliding_window=self.config.sliding_window,
+            is_sliding_window=True,        # <--- 开启滑动窗口
+            is_causal=False                # <--- 关键：双向注意力
+        )
 
         # 构建 Mapping
         self_attn_mask_mapping = {
@@ -1445,16 +1396,6 @@ class AceStepDiTModel(AceStepPreTrainedModel):
 
         # Create position embeddings to be shared across all decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
-        all_cross_attentions = () if output_attentions else None
-
-        # Handle early exit for custom layer configurations
-        max_needed_layer = float('inf')
-        if custom_layers_config is not None and enable_early_exit:
-            max_needed_layer = max(custom_layers_config.keys())
-            # Force output_attentions to True when early exit is enabled for attention extraction
-            output_attentions = True
-            if all_cross_attentions is None:
-                all_cross_attentions = ()
 
         # Process through transformer layers
         for index_block, layer_module in enumerate(self.layers):
@@ -1466,7 +1407,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 self_attn_mask_mapping[layer_module.attention_type],
                 position_ids,
                 past_key_values,
-                output_attentions,
+                False,
                 use_cache,
                 cache_position,
                 encoder_hidden_states,
@@ -1474,15 +1415,6 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 **flash_attn_kwargs,
             )
             hidden_states = layer_outputs[0]
-
-            if output_attentions and self.layers[index_block].use_cross_attention:
-                # layer_outputs structure: (hidden_states, self_attn_weights, cross_attn_weights)
-                # Extract the last element which is cross_attn_weights
-                if len(layer_outputs) >= 3:
-                    all_cross_attentions += (layer_outputs[2],)
-        
-        if return_hidden_states:
-            return hidden_states
 
         # Extract scale-shift parameters for adaptive output normalization
         shift, scale = (self.scale_shift_table + temb.unsqueeze(1)).chunk(2, dim=1)
@@ -1498,9 +1430,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         hidden_states = hidden_states[:, :original_seq_len, :]
         
         outputs = (hidden_states, past_key_values)
-
-        if output_attentions:
-            outputs += (all_cross_attentions,)
+        
         return outputs
 
 class AceStepConditionEncoder(AceStepPreTrainedModel):
@@ -1549,39 +1479,6 @@ class AceStepConditionEncoder(AceStepPreTrainedModel):
         encoder_hidden_states, encoder_attention_mask = pack_sequences(lyric_hidden_states, timbre_embs_unpack, lyric_attention_mask, timbre_embs_mask)
         encoder_hidden_states, encoder_attention_mask = pack_sequences(encoder_hidden_states, text_hidden_states, encoder_attention_mask, text_attention_mask)
         return encoder_hidden_states, encoder_attention_mask
-
-
-def _repaint_step_injection(xt, clean_src, mask, t_next, noise):
-    """Replace non-repaint regions of *xt* with noised source latents."""
-    zt = t_next * noise + (1.0 - t_next) * clean_src
-    m = mask.unsqueeze(-1).expand_as(xt)
-    return torch.where(m, xt, zt)
-
-
-def _repaint_boundary_blend(x_gen, clean_src, mask, cf_frames):
-    """Blend generated latents with source at repaint boundaries."""
-    soft = mask.float().clone()
-    if cf_frames <= 0:
-        m = soft.unsqueeze(-1).expand_as(x_gen)
-        return m * x_gen + (1.0 - m) * clean_src
-    B, T = mask.shape
-    for b in range(B):
-        row = mask[b]
-        if row.all() or not row.any():
-            continue
-        idx = torch.nonzero(row, as_tuple=False).squeeze(-1)
-        if idx.numel() == 0:
-            continue
-        left, right = idx[0].item(), idx[-1].item() + 1
-        fs = max(left - cf_frames, 0)
-        if left - fs > 0:
-            soft[b, fs:left] = torch.linspace(0, 1, left - fs + 2, device=soft.device)[1:-1]
-        fe = min(right + cf_frames, T)
-        if fe - right > 0:
-            soft[b, right:fe] = torch.linspace(1, 0, fe - right + 2, device=soft.device)[1:-1]
-    m = soft.unsqueeze(-1).expand_as(x_gen)
-    return m * x_gen + (1.0 - m) * clean_src
-
 
 class AceStepConditionGenerationModel(AceStepPreTrainedModel):
     """
@@ -1840,73 +1737,13 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
         repaint_injection_ratio: float = 0.5,
         **kwargs,
     ):
-        # Valid shifts: only discrete values 1, 2, 3 are supported
-        VALID_SHIFTS = [1.0, 2.0, 3.0]
-        
-        # Valid timesteps: all unique timesteps from shift=1,2,3 with fix_nfe=8 (total 20 values)
-        VALID_TIMESTEPS = [
-            1.0, 0.9545454545454546, 0.9333333333333333, 0.9, 0.875, 
-            0.8571428571428571, 0.8333333333333334, 0.7692307692307693, 0.75, 
-            0.6666666666666666, 0.6428571428571429, 0.625, 0.5454545454545454, 
-            0.5, 0.4, 0.375, 0.3, 0.25, 0.2222222222222222, 0.125
-        ]
-        
-        # Pre-defined timestep schedules for each valid shift (fix_nfe=8, excluding final 0)
-        SHIFT_TIMESTEPS = {
-            1.0: [1.0, 0.875, 0.75, 0.625, 0.5, 0.375, 0.25, 0.125],
-            2.0: [1.0, 0.9333333333333333, 0.8571428571428571, 0.7692307692307693, 0.6666666666666666, 0.5454545454545454, 0.4, 0.2222222222222222],
-            3.0: [1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3],
-        }
-        
         # Determine the timestep schedule to use
-        t_schedule_list = None
-        
-        if timesteps is not None:
-            # Process custom timesteps: map each value to nearest valid timestep
-            timesteps_list = timesteps.tolist() if isinstance(timesteps, torch.Tensor) else list(timesteps)
-            
-            # Remove trailing zeros
-            while len(timesteps_list) > 0 and timesteps_list[-1] == 0:
-                timesteps_list.pop()
-            
-            # Validate length: 1-20
-            if len(timesteps_list) < 1:
-                logger.warning(f"timesteps length is too short after removing trailing zeros, using default shift={shift}")
-            elif len(timesteps_list) > 20:
-                logger.warning(f"timesteps length={len(timesteps_list)} exceeds maximum 20, truncating to 20")
-                timesteps_list = timesteps_list[:20]
-                t_schedule_list = timesteps_list
-            else:
-                t_schedule_list = timesteps_list
-            
-            if t_schedule_list is not None:
-                # Map each timestep to nearest valid timestep
-                original_timesteps = t_schedule_list.copy()
-                mapped_timesteps = []
-                for t in t_schedule_list:
-                    nearest = min(VALID_TIMESTEPS, key=lambda x: abs(x - t))
-                    mapped_timesteps.append(nearest)
-                
-                if original_timesteps != mapped_timesteps:
-                    logger.warning(f"timesteps mapped to nearest valid values: {original_timesteps} -> {mapped_timesteps}")
-                
-                t_schedule_list = mapped_timesteps
-        
-        if t_schedule_list is None:
-            # Use shift-based schedule: round to nearest valid shift
-            original_shift = shift
-            shift = min(VALID_SHIFTS, key=lambda x: abs(x - shift))
-            if original_shift != shift:
-                logger.warning(f"shift={original_shift} not supported, rounded to nearest valid shift={shift}")
-            t_schedule_list = SHIFT_TIMESTEPS[shift]
+        t_schedule_list = [1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3]
         
         if attention_mask is None:
             latent_length = src_latents.shape[1]
             attention_mask = torch.ones(src_latents.shape[0], latent_length, device=src_latents.device, dtype=src_latents.dtype)
         
-        time_costs = {}
-        start_time = time.time()
-        total_start_time = start_time
         encoder_hidden_states, encoder_attention_mask, context_latents = self.prepare_condition(
             text_hidden_states=text_hidden_states,
             text_attention_mask=text_attention_mask,
@@ -1924,74 +1761,24 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
             audio_codes=audio_codes,
         )
         
-        encoder_hidden_states_non_cover, encoder_attention_mask_non_cover, context_latents_non_cover = None, None, None
-        if audio_cover_strength < 1.0:
-            non_is_covers = torch.zeros_like(is_covers, device=is_covers.device, dtype=is_covers.dtype)
-            # Use silence_latent for non-cover condition to simulate text2music mode (no reference audio)
-            silence_latent_expanded = silence_latent[:, :src_latents.shape[1], :].expand(src_latents.shape[0], -1, -1)
-            encoder_hidden_states_non_cover, encoder_attention_mask_non_cover, context_latents_non_cover = self.prepare_condition(
-            text_hidden_states=non_cover_text_hidden_states,
-            text_attention_mask=non_cover_text_attention_mask,
-            lyric_hidden_states=lyric_hidden_states,
-            lyric_attention_mask=lyric_attention_mask,
-            refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
-            refer_audio_order_mask=refer_audio_order_mask,
-            hidden_states=silence_latent_expanded,
-            attention_mask=attention_mask,
-            silence_latent=silence_latent,
-            src_latents=silence_latent_expanded,
-            chunk_masks=chunk_masks,
-            is_covers=non_is_covers,
-            precomputed_lm_hints_25Hz=None,
-            audio_codes=None,
-        )
-        
-        end_time = time.time()
-        time_costs["encoder_time_cost"] = end_time - start_time
-        start_time = end_time
-        
-        noise = self.prepare_noise(context_latents, seed)
         bsz, device, dtype = context_latents.shape[0], context_latents.device, context_latents.dtype
         past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
         
-        # Cover noise initialization: blend noise with src_latents
-        if cover_noise_strength > 0.0:
-            # cover_noise_strength=1 means closest to src, so noise_level should be low
-            effective_noise_level = 1.0 - cover_noise_strength
-            # Find nearest valid timestep from t_schedule
-            nearest_t = min(t_schedule_list, key=lambda x: abs(x - effective_noise_level))
-            # xt = nearest_t * noise + (1 - nearest_t) * src_latents
-            xt = self.renoise(src_latents, nearest_t, noise)
-            # Truncate t_schedule to start from nearest_t
-            start_idx = t_schedule_list.index(nearest_t)
-            t_schedule_list = t_schedule_list[start_idx:]
-            logger.info(
-                f"[generate_audio] Cover mode: cover_noise_strength={cover_noise_strength}, "
-                f"effective_noise_level={effective_noise_level:.4f}, nearest_t={nearest_t:.4f}, "
-                f"remaining_steps={len(t_schedule_list)}"
-            )
-        else:
-            xt = noise
+        src_latents_shape = (context_latents.shape[0], context_latents.shape[1], context_latents.shape[-1] // 2)
+        noise = torch.randn(src_latents_shape, device=device, dtype=dtype)
+        
+        # Cover noise initialization
+        xt = noise
         
         # Use pre-computed t_schedule_list (already validated and mapped to valid timesteps)
         t_schedule = torch.tensor(t_schedule_list, device=device, dtype=dtype)
         num_steps = len(t_schedule)
         
-        # Recalculate cover_steps based on actual num_steps
-        cover_steps = int(num_steps * audio_cover_strength)
-        _switched_to_non_cover = False
         for step_idx in range(num_steps):
             current_timestep = t_schedule[step_idx].item()
             t_curr_tensor = current_timestep * torch.ones((bsz,), device=device, dtype=dtype)
-            
-            if step_idx >= cover_steps and not _switched_to_non_cover:
-                _switched_to_non_cover = True
-                encoder_hidden_states = encoder_hidden_states_non_cover
-                encoder_attention_mask = encoder_attention_mask_non_cover
-                context_latents = context_latents_non_cover
-                past_key_values = EncoderDecoderCache(DynamicCache(), DynamicCache())
-            
-            with torch.no_grad():        
+    
+            with torch.no_grad():
                 decoder_outputs = self.decoder(
                     hidden_states=xt,
                     timestep=t_curr_tensor,
@@ -2009,196 +1796,14 @@ class AceStepConditionGenerationModel(AceStepPreTrainedModel):
             
             # On final step, directly compute x0 from noise
             if step_idx == num_steps - 1:
-                xt = self.get_x0_from_noise(xt, vt, t_curr_tensor)
+                xt = xt - vt * t_curr_tensor.unsqueeze(-1).unsqueeze(-1)
                 break
             
-            # Update x_t based on inference method
-            if infer_method == "sde":
-                # Stochastic Differential Equation: predict clean, then re-add noise
-                pred_clean = self.get_x0_from_noise(xt, vt, t_curr_tensor)
-                next_timestep = t_schedule[step_idx + 1].item()
-                xt = self.renoise(pred_clean, next_timestep)
-                t_after_step = next_timestep
-            elif infer_method == "ode":
-                # Ordinary Differential Equation: Euler method
-                # dx/dt = -v, so x_{t+1} = x_t - v_t * dt
-                next_timestep = t_schedule[step_idx + 1].item()
-                dt = current_timestep - next_timestep
-                dt_tensor = dt * torch.ones((bsz,), device=device, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
-                xt = xt - vt * dt_tensor
-                t_after_step = next_timestep
-
-            injection_cutoff = round(repaint_injection_ratio * num_steps)
-            if repaint_mask is not None and clean_src_latents is not None and step_idx < injection_cutoff:
-                xt = _repaint_step_injection(
-                    xt, clean_src_latents, repaint_mask, t_after_step, noise,
-                )
+            # Ordinary Differential Equation: Euler method
+            # dx/dt = -v, so x_{t+1} = x_t - v_t * dt
+            next_timestep = t_schedule[step_idx + 1].item()
+            dt = current_timestep - next_timestep
+            dt_tensor = dt * torch.ones((bsz,), device=device, dtype=dtype).unsqueeze(-1).unsqueeze(-1)
+            xt = xt - vt * dt_tensor
         
-        x_gen = xt
-        if repaint_mask is not None and clean_src_latents is not None and repaint_crossfade_frames > 0:
-            x_gen = _repaint_boundary_blend(
-                x_gen, clean_src_latents, repaint_mask, repaint_crossfade_frames,
-            )
-        end_time = time.time()
-        time_costs["diffusion_time_cost"] = end_time - start_time
-        time_costs["diffusion_per_step_time_cost"] = time_costs["diffusion_time_cost"] / num_steps
-        time_costs["total_time_cost"] = end_time - total_start_time
-        return {
-            "target_latents": x_gen,
-            "time_costs": time_costs,
-        }
-
-
-def test_forward(model, seed=42):
-    # Fix random seed for reproducibility
-    import random
-    import numpy as np
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-    
-    # Get model dtype and device
-    model_dtype = next(model.parameters()).dtype
-    device = next(model.parameters()).device
-    
-    print(f"Testing with dtype: {model_dtype}, device: {device}, seed: {seed}")
-    
-    # Test data preparation with matching dtype
-    text_hidden_states = torch.randn(2, 77, 1024, dtype=model_dtype, device=device)
-    text_attention_mask = torch.ones(2, 77, dtype=model_dtype, device=device)
-    lyric_hidden_states = torch.randn(2, 123, 1024, dtype=model_dtype, device=device)
-    lyric_attention_mask = torch.ones(2, 123, dtype=model_dtype, device=device)
-    refer_audio_acoustic_hidden_states_packed = torch.randn(3, 750, 64, dtype=model_dtype, device=device)
-    refer_audio_order_mask = torch.LongTensor([0, 0, 1]).to(device)
-
-    # Base config: 25 Hz hidden states → 10 s = 250 frames (round to int)
-    base_seconds = 10
-    frames_per_second = 25
-    base_seq_len = base_seconds * frames_per_second
-
-    hidden_states = torch.randn(2, base_seq_len, 64, dtype=model_dtype, device=device)
-    attention_mask = torch.ones(2, base_seq_len, dtype=model_dtype, device=device)
-    # Add some padding to test mask behavior
-    pad_start = max(base_seq_len // 2, 1)
-    attention_mask[0, pad_start:] = 0
-    chunk_mask = torch.ones(2, base_seq_len, 64, dtype=model_dtype, device=device)
-    chunk_mask[0, pad_start:] = 0
-
-    silence_latent = torch.randn(2, base_seq_len, 64, dtype=model_dtype, device=device)
-    # New required parameters for updated training logic
-    src_latents = torch.randn(2, base_seq_len, 64, dtype=model_dtype, device=device)  # Source latents for context
-    is_covers = torch.tensor([0, 1], dtype=torch.long, device=device)  # Cover song indicators (0=original, 1=cover)
-
-    # Test 1: Flow matching training (using 10s sequence for sanity check by default)
-    print(f"Testing flow matching training with {base_seconds}s sequence ({base_seq_len} frames @ {frames_per_second}Hz)...")
-    outputs = model.training_losses(
-        hidden_states=hidden_states,
-        attention_mask=attention_mask,
-        chunk_masks=chunk_mask,
-        text_hidden_states=text_hidden_states,
-        text_attention_mask=text_attention_mask,
-        lyric_hidden_states=lyric_hidden_states,
-        lyric_attention_mask=lyric_attention_mask,
-        refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
-        refer_audio_order_mask=refer_audio_order_mask,
-        silence_latent=silence_latent,
-        src_latents=src_latents,
-        is_covers=is_covers,
-        cfg_ratio=0.15,
-    )
-    loss = outputs['diffusion_loss']
-    print(f"Flow matching loss: {loss.item():.6f}")
-    print(f"  Loss stats - min: {loss.min().item():.6f}, max: {loss.max().item():.6f}, mean: {loss.mean().item():.6f}, std: {loss.std().item() if loss.numel() > 1 else 0:.6f}")
-
-    # Test 2: Generation with flow matching, testing throughput for different sequence lengths
-    lengths_seconds = [10, 30, 60, 120, 180, 240]
-    infer_steps = 2  # Can be increased as needed (e.g., 50/100) to better approximate real inference
-
-    print("\n===== Throughput benchmark (25Hz hidden states) =====")
-    for seconds in lengths_seconds:
-        seq_len = seconds * frames_per_second
-
-        # Reconstruct inputs for current sequence length
-        cur_hidden_states = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
-        cur_attention_mask = torch.ones(2, seq_len, dtype=model_dtype, device=device)
-        cur_chunk_mask = torch.ones(2, seq_len, 64, dtype=model_dtype, device=device)
-        cur_silence_latent = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
-        cur_src_latents = torch.randn(2, seq_len, 64, dtype=model_dtype, device=device)
-
-        print(f"\n--- {seconds}s input ({seq_len} frames @ {frames_per_second}Hz) ---")
-        outputs = model.generate_audio(
-            text_hidden_states=text_hidden_states,
-            text_attention_mask=text_attention_mask,
-            lyric_hidden_states=lyric_hidden_states,
-            lyric_attention_mask=lyric_attention_mask,
-            refer_audio_acoustic_hidden_states_packed=refer_audio_acoustic_hidden_states_packed,
-            refer_audio_order_mask=refer_audio_order_mask,
-            src_latents=cur_src_latents,
-            chunk_masks=cur_chunk_mask,
-            silence_latent=cur_silence_latent,
-            infer_steps=infer_steps,
-            is_covers=is_covers,
-            seed=1234,
-        )
-
-        target_latents = outputs["target_latents"]
-        time_costs = outputs.get("time_costs", {})
-
-        total_time = time_costs.get("total_time_cost", None)
-        diffusion_time = time_costs.get("diffusion_time_cost", None)
-
-        # Output shape and statistics
-        print(f"Generated latents shape: {target_latents.shape}")
-        print(
-            f"Stats - min: {target_latents.min().item():.4f}, "
-            f"max: {target_latents.max().item():.4f}, "
-            f"mean: {target_latents.mean().item():.4f}, "
-            f"std: {target_latents.std().item():.4f}"
-        )
-
-        # Calculate throughput: statistics by frame count and audio seconds
-        bsz, t_len = target_latents.shape[0], target_latents.shape[1]
-        audio_seconds = t_len / frames_per_second
-
-        if total_time is not None:
-            frames_throughput = (bsz * t_len) / total_time
-            seconds_throughput = (bsz * audio_seconds) / total_time
-            print(
-                f"Time costs: total={total_time:.4f}s, diffusion={diffusion_time:.4f}s "
-                f"({infer_steps} steps)"
-                if diffusion_time is not None
-                else f"Time costs: total={total_time:.4f}s"
-            )
-            print(
-                f"Throughput (based on total_time): "
-                f"{frames_throughput:.2f} frames/s, "
-                f"{seconds_throughput:.2f} audio-seconds/s (batch={bsz})"
-            )
-        else:
-            print("Time costs not available in outputs['time_costs']; only basic stats printed.")
-
-
-if __name__ == "__main__":
-    from torch.profiler import profile, record_function, ProfilerActivity
-    import os, torch
-    import time
-    from transformers import AutoModel
-    config = AceStepConfig()
-    start = time.time()
-    import os
-    model_dir = os.path.dirname(os.path.abspath(__file__))
-    model = AceStepConditionGenerationModel.from_pretrained(model_dir)
-    end = time.time()
-    # model.config._attn_implementation = "sdpa"
-    model.config._attn_implementation = "flash_attention_2"
-    model.eval()
-    # model = model.to("cpu")
-    # model = model.float()
-    model = model.to("cuda")
-    model = model.bfloat16()
-    test_forward(model)
+        return xt
