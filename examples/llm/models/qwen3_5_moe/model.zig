@@ -10,6 +10,123 @@ const inference = @import("inference.zig");
 
 const log = std.log.scoped(.qwen3_5);
 
+const LoadCtx = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const zml.Platform,
+    store: *const zml.io.TensorStore,
+    shardings: []const zml.sharding.Sharding,
+    replicated_sharding: zml.sharding.Sharding,
+    dma_allocators: []zml.mem.DmaAllocator,
+    pinned_buffer_pools: []zml.mem.DynamicBufferPool,
+    total_bytes: usize = 0,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        platform: *const zml.Platform,
+        store: *const zml.io.TensorStore,
+        shardings: []const zml.sharding.Sharding,
+    ) !LoadCtx {
+        const dma_allocators = try allocator.alloc(zml.mem.DmaAllocator, platform.devices.len);
+        errdefer allocator.free(dma_allocators);
+        for (platform.devices, 0..) |*device, i| {
+            dma_allocators[i] = .init(allocator, device);
+        }
+
+        const pinned_buffer_pools = try allocator.alloc(zml.mem.DynamicBufferPool, platform.devices.len);
+        errdefer allocator.free(pinned_buffer_pools);
+        for (pinned_buffer_pools) |*pool| {
+            pool.* = .init(32, 128 * zml.MiB);
+        }
+
+        return .{
+            .allocator = allocator,
+            .io = io,
+            .platform = platform,
+            .store = store,
+            .shardings = shardings,
+            .replicated_sharding = try zml.sharding.replicatedSharding(platform),
+            .dma_allocators = dma_allocators,
+            .pinned_buffer_pools = pinned_buffer_pools,
+        };
+    }
+
+    fn deinit(self: *LoadCtx) void {
+        for (self.pinned_buffer_pools, 0..) |*pool, i| {
+            pool.deinit(self.dma_allocators[i].allocator());
+        }
+        self.allocator.free(self.pinned_buffer_pools);
+        self.allocator.free(self.dma_allocators);
+    }
+
+    fn loadBuf(self: *LoadCtx, tensor: *const zml.Tensor, progress: ?*std.Progress.Node) !zml.Buffer {
+        var reader = try self.store.getReaderById(tensor.id, self.io, &.{});
+        defer reader.deinit();
+
+        const shape = reader.tensor.shape;
+        const sharding = zml.sharding.pickSharding(self.shardings, shape, .explicit_axis_binding) orelse self.replicated_sharding;
+
+        var buffer: zml.Buffer = undefined;
+        var writer = try zml.io.MemoryWriter.init(
+            self.allocator,
+            self.io,
+            self.platform,
+            self.pinned_buffer_pools,
+            self.dma_allocators,
+            shape,
+            sharding,
+            &buffer,
+        );
+        defer writer.deinit(self.allocator);
+
+        const scale = 1024;
+        if (progress) |p| {
+            var node = p.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+            defer node.end();
+            writer.setProgress(&node);
+            defer writer.setProgress(null);
+            var progress_writer: zml.io.ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+            const total = try reader.interface.streamRemaining(&progress_writer.interface);
+            try progress_writer.interface.flush();
+            self.total_bytes += total;
+        } else {
+            const total = try reader.interface.streamRemaining(writer.interface());
+            try writer.interface().flush();
+            self.total_bytes += total;
+        }
+
+        return buffer;
+    }
+
+    fn loadOptionalBuf(self: *LoadCtx, tensor: ?zml.Tensor, progress: ?*std.Progress.Node) !?zml.Buffer {
+        if (tensor) |*t| {
+            return try self.loadBuf(t, progress);
+        }
+        return null;
+    }
+
+    fn loadLinearBuf(
+        self: *LoadCtx,
+        linear: *const zml.nn.Linear,
+        progress: ?*std.Progress.Node,
+    ) !zml.Bufferized(zml.nn.Linear) {
+        var weight = try self.loadBuf(&linear.weight, progress);
+        errdefer weight.deinit();
+
+        var bias: ?zml.Buffer = null;
+        errdefer if (bias) |*b| b.deinit();
+        if (linear.bias) |*tensor| {
+            bias = try self.loadBuf(tensor, progress);
+        }
+
+        return .{
+            .weight = weight,
+            .bias = bias,
+        };
+    }
+};
+
 pub const Config = struct {
     text_config: TextConfig,
 };
@@ -90,183 +207,24 @@ pub const LoadedModel = struct {
     ) !Buffers {
         progress.increaseEstimatedTotalItems(store.view().count());
         const now: std.Io.Timestamp = .now(io, .awake);
-        var total_bytes: usize = 0;
+        const all_shardings = shardings.all();
+        var ctx = try LoadCtx.init(allocator, io, platform, store, &all_shardings);
+        defer ctx.deinit();
         defer {
             const took = now.untilNow(io, .awake);
             const bytes_per_sec: u64 = @intFromFloat(
-                @as(f64, @floatFromInt(total_bytes)) /
+                @as(f64, @floatFromInt(ctx.total_bytes)) /
                     (@as(f64, @floatFromInt(took.nanoseconds)) / std.time.ns_per_s),
             );
-            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
+            log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ ctx.total_bytes, took, bytes_per_sec });
         }
 
-        const all_shardings = shardings.all();
-        var buffers = try zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
-            .dma_chunks = 32,
-            .dma_chunk_size = 128 * zml.MiB,
-            .progress = progress,
-            .shardings = &all_shardings,
-            .parallelism = 16,
-            .total_bytes = &total_bytes,
-        });
-        errdefer TextModel.unloadBuffers(&buffers.text_model, allocator);
-
-        try self.packExpertWeights(allocator, io, platform, &buffers, all_shardings);
-        return buffers;
-    }
-
-    fn packExpertWeights(
-        self: *LoadedModel,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        buffers: *Buffers,
-        shardings: [2]zml.sharding.Sharding,
-    ) !void {
-        var pack_gate_up_exe: ?zml.Exe = null;
-        defer if (pack_gate_up_exe) |*exe| exe.deinit();
-        var pack_gate_up_scale_exe: ?zml.Exe = null;
-        defer if (pack_gate_up_scale_exe) |*exe| exe.deinit();
-        var pack_down_exe: ?zml.Exe = null;
-        defer if (pack_down_exe) |*exe| exe.deinit();
-        var pack_down_scale_exe: ?zml.Exe = null;
-        defer if (pack_down_scale_exe) |*exe| exe.deinit();
-
-        for (self.inner.text_model.layers, buffers.text_model.layers) |*layer_model, *layer_buffers| {
-            // If model is already packed -> skip
-            if (layer_model.moe.layout != .per_expert) continue;
-
-            // Compile the repacker exec
-            if (pack_gate_up_exe == null) {
-                pack_gate_up_exe = try platform.compileFn(
-                    allocator,
-                    io,
-                    MoeRepacker.packGateUp,
-                    .{ layer_model.moe.slice_gate_proj, layer_model.moe.slice_up_proj },
-                    .{ .shardings = &shardings },
-                );
-                pack_gate_up_scale_exe = try platform.compileFn(
-                    allocator,
-                    io,
-                    MoeRepacker.packGateUp,
-                    .{ layer_model.moe.slice_gate_proj_scale, layer_model.moe.slice_up_proj_scale },
-                    .{ .shardings = &shardings },
-                );
-                pack_down_exe = try platform.compileFn(
-                    allocator,
-                    io,
-                    MoeRepacker.packExperts,
-                    .{layer_model.moe.slice_down_proj},
-                    .{ .shardings = &shardings },
-                );
-                pack_down_scale_exe = try platform.compileFn(
-                    allocator,
-                    io,
-                    MoeRepacker.packExperts,
-                    .{layer_model.moe.slice_down_proj_scale},
-                    .{ .shardings = &shardings },
-                );
-            }
-
-            // Repack gate_up weights and scales, and down_proj weights and scales
-            var gate_up_args = try pack_gate_up_exe.?.args(allocator);
-            defer gate_up_args.deinit(allocator);
-            for (layer_buffers.moe.slice_gate_proj, 0..) |buffer, i| {
-                gate_up_args.setPartial(buffer, i);
-            }
-            for (layer_buffers.moe.slice_up_proj, 0..) |buffer, i| {
-                gate_up_args.setPartial(buffer, layer_buffers.moe.slice_gate_proj.len + i);
-            }
-
-            var gate_up_results = try pack_gate_up_exe.?.results(allocator);
-            defer gate_up_results.deinit(allocator);
-            pack_gate_up_exe.?.call(gate_up_args, &gate_up_results);
-            const gate_up_buffer = gate_up_results.get(zml.Buffer);
-
-            var gate_up_scale_args = try pack_gate_up_scale_exe.?.args(allocator);
-            defer gate_up_scale_args.deinit(allocator);
-            for (layer_buffers.moe.slice_gate_proj_scale, 0..) |buffer, i| {
-                gate_up_scale_args.setPartial(buffer, i);
-            }
-            for (layer_buffers.moe.slice_up_proj_scale, 0..) |buffer, i| {
-                gate_up_scale_args.setPartial(buffer, layer_buffers.moe.slice_gate_proj_scale.len + i);
-            }
-
-            var gate_up_scale_results = try pack_gate_up_scale_exe.?.results(allocator);
-            defer gate_up_scale_results.deinit(allocator);
-            pack_gate_up_scale_exe.?.call(gate_up_scale_args, &gate_up_scale_results);
-            const gate_up_scale_buffer = gate_up_scale_results.get(zml.Buffer);
-
-            var down_args = try pack_down_exe.?.args(allocator);
-            defer down_args.deinit(allocator);
-            for (layer_buffers.moe.slice_down_proj, 0..) |buffer, i| {
-                down_args.setPartial(buffer, i);
-            }
-
-            var down_results = try pack_down_exe.?.results(allocator);
-            defer down_results.deinit(allocator);
-            pack_down_exe.?.call(down_args, &down_results);
-            const down_buffer = down_results.get(zml.Buffer);
-
-            var down_scale_args = try pack_down_scale_exe.?.args(allocator);
-            defer down_scale_args.deinit(allocator);
-            for (layer_buffers.moe.slice_down_proj_scale, 0..) |buffer, i| {
-                down_scale_args.setPartial(buffer, i);
-            }
-
-            var down_scale_results = try pack_down_scale_exe.?.results(allocator);
-            defer down_scale_results.deinit(allocator);
-            pack_down_scale_exe.?.call(down_scale_args, &down_scale_results);
-            const down_scale_buffer = down_scale_results.get(zml.Buffer);
-
-            allocator.free(layer_model.moe.slice_gate_proj);
-            allocator.free(layer_model.moe.slice_gate_proj_scale);
-            allocator.free(layer_model.moe.slice_up_proj);
-            allocator.free(layer_model.moe.slice_up_proj_scale);
-            allocator.free(layer_model.moe.slice_down_proj);
-            allocator.free(layer_model.moe.slice_down_proj_scale);
-
-            for (layer_buffers.moe.slice_gate_proj) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_gate_proj);
-            for (layer_buffers.moe.slice_gate_proj_scale) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_gate_proj_scale);
-            for (layer_buffers.moe.slice_up_proj) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_up_proj);
-            for (layer_buffers.moe.slice_up_proj_scale) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_up_proj_scale);
-            for (layer_buffers.moe.slice_down_proj) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_down_proj);
-            for (layer_buffers.moe.slice_down_proj_scale) |*buffer| buffer.deinit();
-            allocator.free(layer_buffers.moe.slice_down_proj_scale);
-
-            layer_model.moe.layout = .packed_weights;
-            layer_model.moe.gate_up_proj = zml.Tensor.fromShape(gate_up_buffer.shape());
-            layer_model.moe.gate_up_proj_scale = zml.Tensor.fromShape(gate_up_scale_buffer.shape());
-            layer_model.moe.down_proj = zml.Tensor.fromShape(down_buffer.shape());
-            layer_model.moe.down_proj_scale = zml.Tensor.fromShape(down_scale_buffer.shape());
-            layer_model.moe.slice_gate_proj = &.{};
-            layer_model.moe.slice_gate_proj_scale = &.{};
-            layer_model.moe.slice_up_proj = &.{};
-            layer_model.moe.slice_up_proj_scale = &.{};
-            layer_model.moe.slice_down_proj = &.{};
-            layer_model.moe.slice_down_proj_scale = &.{};
-
-            layer_buffers.moe.gate_up_proj = gate_up_buffer;
-            layer_buffers.moe.gate_up_proj_scale = gate_up_scale_buffer;
-            layer_buffers.moe.down_proj = down_buffer;
-            layer_buffers.moe.down_proj_scale = down_scale_buffer;
-            layer_buffers.moe.slice_gate_proj = &.{};
-            layer_buffers.moe.slice_gate_proj_scale = &.{};
-            layer_buffers.moe.slice_up_proj = &.{};
-            layer_buffers.moe.slice_up_proj_scale = &.{};
-            layer_buffers.moe.slice_down_proj = &.{};
-            layer_buffers.moe.slice_down_proj_scale = &.{};
-        }
+        return try self.inner.loadBuffers(&ctx, store.view(), progress);
     }
 
     pub fn unloadBuffers(self: *const LoadedModel, buffers: *Buffers, allocator: std.mem.Allocator) void {
         _ = self;
-        TextModel.unloadBuffers(&buffers.text_model, allocator);
+        Model.unloadBuffers(buffers, allocator);
     }
 
     pub fn compile(
@@ -280,10 +238,7 @@ pub const LoadedModel = struct {
         progress: *std.Progress.Node,
     ) !inference.CompiledModel {
         _ = backend;
-        const moe_dtype = if (self.inner.text_model.layers[0].moe.gate_up_proj) |gate_up_proj|
-            gate_up_proj.dtype()
-        else
-            self.inner.text_model.layers[0].moe.shared_expert.gate_proj.weight.dtype();
+        const moe_dtype = self.inner.text_model.layers[0].moe.gate_up_proj.dtype();
         log.info("Moe dtype : {}", .{moe_dtype});
         const moe_backend = try zml.moe.Backend.auto(platform, moe_dtype);
         const params = inference.CompilationParameters.init(self.inner, self.parsed_config.value, @intCast(seqlen), moe_backend, shardings);
@@ -360,6 +315,17 @@ pub const Model = struct {
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
+    }
+
+    pub fn loadBuffers(
+        self: *Model,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(Model) {
+        return .{
+            .text_model = try self.text_model.loadBuffers(ctx, store.withPrefix("model.language_model"), progress),
+        };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Model), allocator: std.mem.Allocator) void {
@@ -453,6 +419,46 @@ pub const TextModel = struct {
         self.lm_head.weight.deinit();
     }
 
+    pub fn loadBuffers(
+        self: *TextModel,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(TextModel) {
+        var embed_tokens: zml.Bufferized(zml.nn.TokenEmbedding) = .{
+            .weight = try ctx.loadBuf(&self.embed_tokens.weight, progress),
+        };
+        errdefer embed_tokens.weight.deinit();
+
+        const layers = try ctx.allocator.alloc(zml.Bufferized(TransformerLayer), self.layers.len);
+        errdefer ctx.allocator.free(layers);
+        var loaded_layers: usize = 0;
+        errdefer for (layers[0..loaded_layers]) |*layer| {
+            TransformerLayer.unloadBuffers(layer, ctx.allocator);
+        };
+
+        for (self.layers, 0..) |*layer, i| {
+            layers[i] = try layer.loadBuffers(ctx, store.withPrefix("layers").withLayer(i), progress);
+            loaded_layers = i + 1;
+        }
+
+        var norm = try self.norm.loadBuffers(ctx, store.withPrefix("norm"), progress);
+        errdefer RmsNorm.unloadBuffers(&norm);
+
+        var lm_head = try ctx.loadLinearBuf(&self.lm_head, progress);
+        errdefer {
+            lm_head.weight.deinit();
+            if (lm_head.bias) |*bias| bias.deinit();
+        }
+
+        return .{
+            .embed_tokens = embed_tokens,
+            .layers = layers,
+            .norm = norm,
+            .lm_head = lm_head,
+        };
+    }
+
     pub fn sampler(self: TextModel) Sampler {
         return .{
             .norm = self.norm,
@@ -528,6 +534,43 @@ pub const TransformerLayer = struct {
         }
         Moe.unloadBuffers(&self.moe, allocator);
         RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+    }
+
+    pub fn loadBuffers(
+        self: *TransformerLayer,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(TransformerLayer) {
+        var input_layernorm = try self.input_layernorm.loadBuffers(ctx, store.withPrefix("input_layernorm"), progress);
+        errdefer RmsNorm.unloadBuffers(&input_layernorm);
+
+        var attn: zml.Bufferized(Attn) = undefined;
+        switch (self.attn) {
+            .self_attn => |*self_attn| {
+                attn = .{ .self_attn = try self_attn.loadBuffers(ctx, store.withPrefix("self_attn"), progress) };
+            },
+            .linear_attn => |*linear_attn| {
+                attn = .{ .linear_attn = try linear_attn.loadBuffers(ctx, store.withPrefix("linear_attn"), progress) };
+            },
+        }
+        errdefer switch (attn) {
+            .self_attn => |*self_attn| SelfAttn.unloadBuffers(self_attn),
+            .linear_attn => |*linear_attn| GatedDeltaNet.unloadBuffers(linear_attn),
+        };
+
+        var moe = try self.moe.loadBuffers(ctx, store.withPrefix("mlp"), progress);
+        errdefer Moe.unloadBuffers(&moe, ctx.allocator);
+
+        var post_attention_layernorm = try self.post_attention_layernorm.loadBuffers(ctx, store.withPrefix("post_attention_layernorm"), progress);
+        errdefer RmsNorm.unloadBuffers(&post_attention_layernorm);
+
+        return .{
+            .input_layernorm = input_layernorm,
+            .attn = attn,
+            .moe = moe,
+            .post_attention_layernorm = post_attention_layernorm,
+        };
     }
 
     pub fn forwardSelfAttn(
@@ -692,6 +735,61 @@ pub const SelfAttn = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
+    pub fn loadBuffers(
+        self: *SelfAttn,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(SelfAttn) {
+        var q_proj = try ctx.loadLinearBuf(&self.q_proj, progress);
+        errdefer {
+            q_proj.weight.deinit();
+            if (q_proj.bias) |*bias| bias.deinit();
+        }
+        var k_proj = try ctx.loadLinearBuf(&self.k_proj, progress);
+        errdefer {
+            k_proj.weight.deinit();
+            if (k_proj.bias) |*bias| bias.deinit();
+        }
+        var v_proj = try ctx.loadLinearBuf(&self.v_proj, progress);
+        errdefer {
+            v_proj.weight.deinit();
+            if (v_proj.bias) |*bias| bias.deinit();
+        }
+        var o_proj = try ctx.loadLinearBuf(&self.o_proj, progress);
+        errdefer {
+            o_proj.weight.deinit();
+            if (o_proj.bias) |*bias| bias.deinit();
+        }
+
+        var q_proj_scale = try ctx.loadOptionalBuf(self.q_proj_scale, progress);
+        errdefer if (q_proj_scale) |*buffer| buffer.deinit();
+        var k_proj_scale = try ctx.loadOptionalBuf(self.k_proj_scale, progress);
+        errdefer if (k_proj_scale) |*buffer| buffer.deinit();
+        var v_proj_scale = try ctx.loadOptionalBuf(self.v_proj_scale, progress);
+        errdefer if (v_proj_scale) |*buffer| buffer.deinit();
+        var o_proj_scale = try ctx.loadOptionalBuf(self.o_proj_scale, progress);
+        errdefer if (o_proj_scale) |*buffer| buffer.deinit();
+
+        var q_norm = try self.q_norm.loadBuffers(ctx, store.withPrefix("q_norm"), progress);
+        errdefer RmsNorm.unloadBuffers(&q_norm);
+        var k_norm = try self.k_norm.loadBuffers(ctx, store.withPrefix("k_norm"), progress);
+        errdefer RmsNorm.unloadBuffers(&k_norm);
+
+        return .{
+            .q_proj = q_proj,
+            .q_proj_scale = q_proj_scale,
+            .k_proj = k_proj,
+            .k_proj_scale = k_proj_scale,
+            .v_proj = v_proj,
+            .v_proj_scale = v_proj_scale,
+            .q_norm = q_norm,
+            .k_norm = k_norm,
+            .o_proj = o_proj,
+            .o_proj_scale = o_proj_scale,
+        };
+    }
+
     fn projectQAndGate(self: SelfAttn, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const q_proj = forwardLinearDequantizeFp8(x, self.q_proj, self.q_proj_scale)
             .splitAxis(.dout, .{ .h = self.num_heads, .hd = 2 * self.head_dim });
@@ -808,6 +906,46 @@ pub const Mlp = struct {
         if (self.down_proj_scale) |*scale| scale.deinit();
     }
 
+    pub fn loadBuffers(
+        self: *Mlp,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(Mlp) {
+        _ = store;
+        var up_proj = try ctx.loadLinearBuf(&self.up_proj, progress);
+        errdefer {
+            up_proj.weight.deinit();
+            if (up_proj.bias) |*bias| bias.deinit();
+        }
+        var gate_proj = try ctx.loadLinearBuf(&self.gate_proj, progress);
+        errdefer {
+            gate_proj.weight.deinit();
+            if (gate_proj.bias) |*bias| bias.deinit();
+        }
+        var down_proj = try ctx.loadLinearBuf(&self.down_proj, progress);
+        errdefer {
+            down_proj.weight.deinit();
+            if (down_proj.bias) |*bias| bias.deinit();
+        }
+
+        var up_proj_scale = try ctx.loadOptionalBuf(self.up_proj_scale, progress);
+        errdefer if (up_proj_scale) |*scale| scale.deinit();
+        var gate_proj_scale = try ctx.loadOptionalBuf(self.gate_proj_scale, progress);
+        errdefer if (gate_proj_scale) |*scale| scale.deinit();
+        var down_proj_scale = try ctx.loadOptionalBuf(self.down_proj_scale, progress);
+        errdefer if (down_proj_scale) |*scale| scale.deinit();
+
+        return .{
+            .up_proj = up_proj,
+            .up_proj_scale = up_proj_scale,
+            .gate_proj = gate_proj,
+            .gate_proj_scale = gate_proj_scale,
+            .down_proj = down_proj,
+            .down_proj_scale = down_proj_scale,
+        };
+    }
+
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
         const up_projed = forwardLinearDequantizeFp8(x, self.up_proj, self.up_proj_scale);
         const gate = forwardLinearDequantizeFp8(x, self.gate_proj, self.gate_proj_scale);
@@ -834,6 +972,18 @@ const Router = struct {
         if (self.router.bias) |*bias| bias.deinit();
     }
 
+    pub fn loadBuffers(
+        self: *Router,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(Router) {
+        _ = store;
+        return .{
+            .router = try ctx.loadLinearBuf(&self.router, progress),
+        };
+    }
+
     pub fn forward(self: Router, x: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const router_logits = self.router.forward(x).convert(.f32);
         const routing = router_logits.topK(.{ .top_expert = .expert }, self.num_experts_per_tok, .{});
@@ -853,125 +1003,290 @@ pub const Moe = struct {
         down_proj_scale: zml.Tensor,
     };
 
-    layout: Layout,
     shared_expert: Mlp,
     shared_expert_gate: zml.nn.Linear,
-    gate_up_proj: ?zml.Tensor,
+    gate_up_proj: zml.Tensor,
     gate_up_proj_scale: ?zml.Tensor,
-    slice_gate_proj: []zml.Tensor,
-    slice_gate_proj_scale: []zml.Tensor,
-    slice_up_proj: []zml.Tensor,
-    slice_up_proj_scale: []zml.Tensor,
-    down_proj: ?zml.Tensor,
+    down_proj: zml.Tensor,
     down_proj_scale: ?zml.Tensor,
-    slice_down_proj: []zml.Tensor,
-    slice_down_proj_scale: []zml.Tensor,
     router: Router,
+    layout: Layout,
+    num_experts: usize,
 
-    fn repackExperts(tensors: []const zml.Tensor, axis_: anytype, tag: anytype) zml.Tensor {
-        stdx.debug.assert(tensors.len > 0, "expected at least one tensor to stack", .{});
+    pub fn init(_: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
+        const experts_store = store.withPrefix("experts");
+        const num_experts_i64 = config.text_config.num_experts orelse return error.MissingNumExperts;
+        const num_experts: usize = @intCast(num_experts_i64);
 
-        const shape0 = tensors[0].shape();
-        const stacked_shape = shape0.insertTag(axis_, 1, tag);
+        var layout: Layout = .packed_weights;
+        var gate_up_proj = experts_store.maybeCreateTensor("gate_up_proj", .{ .expert, .dout, .d }, null);
+        var down_proj = experts_store.maybeCreateTensor("down_proj", .{ .expert, .d, .dout }, null);
+        var gate_up_proj_scale = experts_store.maybeCreateTensor("gate_up_proj_scale", .{ .expert, .dout, .d }, null);
+        var down_proj_scale = experts_store.maybeCreateTensor("down_proj_scale", .{ .expert, .d, .dout }, null);
 
-        const allocator = CompilationContext.current().arena.allocator();
-        const reshaped = allocator.alloc(zml.Tensor, tensors.len) catch unreachable;
+        if (gate_up_proj == null or down_proj == null) {
+            layout = .per_expert;
 
-        for (tensors, 0..) |tensor, i| {
-            reshaped[i] = tensor.reshape(stacked_shape);
+            var gate_shape = experts_store.withLayer(0).withPrefix("gate_proj").getShape("weight") orelse return error.MissingGateProj;
+            var up_shape = experts_store.withLayer(0).withPrefix("up_proj").getShape("weight") orelse return error.MissingUpProj;
+            var down_shape = experts_store.withLayer(0).withPrefix("down_proj").getShape("weight") orelse return error.MissingDownProj;
+
+            gate_shape = gate_shape.withTags(.{ .dout, .d });
+            up_shape = up_shape.withTags(.{ .dout, .d });
+            down_shape = down_shape.withTags(.{ .d, .dout });
+
+            stdx.debug.assert(gate_shape.dim(.d) == up_shape.dim(.d), "gate/up input dims mismatch: {f} vs {f}", .{ gate_shape, up_shape });
+            const gate_up_shape = zml.Shape.init(.{
+                .expert = @as(i64, @intCast(num_experts)),
+                .dout = gate_shape.dim(.dout) + up_shape.dim(.dout),
+                .d = gate_shape.dim(.d),
+            }, gate_shape.dtype());
+
+            const down_packed_shape = zml.Shape.init(.{
+                .expert = @as(i64, @intCast(num_experts)),
+                .d = down_shape.dim(.d),
+                .dout = down_shape.dim(.dout),
+            }, down_shape.dtype());
+
+            gate_up_proj = zml.Tensor.fromShape(gate_up_shape);
+            down_proj = zml.Tensor.fromShape(down_packed_shape);
+
+            const gate_scale_shape = experts_store.withLayer(0).withPrefix("gate_proj").getShape("weight_scale_inv");
+            const up_scale_shape = experts_store.withLayer(0).withPrefix("up_proj").getShape("weight_scale_inv");
+            const down_scale_shape = experts_store.withLayer(0).withPrefix("down_proj").getShape("weight_scale_inv");
+            const has_scales = gate_scale_shape != null and up_scale_shape != null and down_scale_shape != null;
+
+            if (has_scales) {
+                const gate_scale = gate_scale_shape.?.withTags(.{ .dout, .d });
+                const up_scale = up_scale_shape.?.withTags(.{ .dout, .d });
+                const down_scale = down_scale_shape.?.withTags(.{ .d, .dout });
+                stdx.debug.assert(gate_scale.dim(.d) == up_scale.dim(.d), "gate/up scale input dims mismatch: {f} vs {f}", .{ gate_scale, up_scale });
+                gate_up_proj_scale = zml.Tensor.fromShape(zml.Shape.init(.{
+                    .expert = @as(i64, @intCast(num_experts)),
+                    .dout = gate_scale.dim(.dout) + up_scale.dim(.dout),
+                    .d = gate_scale.dim(.d),
+                }, gate_scale.dtype()));
+                down_proj_scale = zml.Tensor.fromShape(zml.Shape.init(.{
+                    .expert = @as(i64, @intCast(num_experts)),
+                    .d = down_scale.dim(.d),
+                    .dout = down_scale.dim(.dout),
+                }, down_scale.dtype()));
+            } else {
+                gate_up_proj_scale = null;
+                down_proj_scale = null;
+            }
         }
 
-        return zml.Tensor.concatenate(reshaped, axis_);
+        return .{
+            .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
+            .shared_expert_gate = .init(store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, null), .d),
+            .gate_up_proj = gate_up_proj.?,
+            .gate_up_proj_scale = gate_up_proj_scale,
+            .down_proj = down_proj.?,
+            .down_proj_scale = down_proj_scale,
+            .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok.?),
+            .layout = layout,
+            .num_experts = num_experts,
+        };
     }
 
-    fn initPerExpert(
-        allocator: std.mem.Allocator,
-        store: zml.io.TensorStore.View,
+    pub fn deinit(_: Moe, _: std.mem.Allocator) void {}
+
+    fn packExpertTensor(
+        ctx: *LoadCtx,
+        experts_store: zml.io.TensorStore.View,
         num_experts: usize,
         projection_name: []const u8,
         tensor_name: []const u8,
         tags: anytype,
-    ) ![]zml.Tensor {
-        const tensors = try allocator.alloc(zml.Tensor, num_experts);
-        errdefer allocator.free(tensors);
+        packed_shape: zml.Shape,
+    ) !zml.Buffer {
+        var packed_slice: zml.Slice = try .alloc(ctx.allocator, packed_shape);
+        defer packed_slice.free(ctx.allocator);
+        var offset: usize = 0;
 
-        for (tensors, 0..) |*tensor, i| {
-            tensor.* = store.withLayer(i).withPrefix(projection_name).createTensor(tensor_name, tags, null);
-        }
-        return tensors;
-    }
+        for (0..num_experts) |i| {
+            const tensor = experts_store.withLayer(i).withPrefix(projection_name).createTensor(tensor_name, tags, null);
+            var src = try ctx.loadBuf(&tensor, null);
+            defer src.deinit();
 
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !Moe {
-        const experts_store = store.withPrefix("experts");
-        const gate_up_proj_tensor = experts_store.maybeCreateTensor("gate_up_proj", .{ .expert, .dout, .d }, null);
-        const down_proj_tensor = experts_store.maybeCreateTensor("down_proj", .{ .expert, .d, .dout }, null);
+            var src_slice: zml.Slice = try .alloc(ctx.allocator, tensor.shape());
+            defer src_slice.free(ctx.allocator);
+            try src.toSlice(ctx.io, src_slice);
 
-        const num_experts_i64 = config.text_config.num_experts orelse return error.MissingNumExperts;
-        const num_experts: usize = @intCast(num_experts_i64);
-
-        var slice_gate_proj: []zml.Tensor = &.{};
-        var slice_gate_proj_scale: []zml.Tensor = &.{};
-        var slice_up_proj: []zml.Tensor = &.{};
-        var slice_up_proj_scale: []zml.Tensor = &.{};
-        var slice_down_proj: []zml.Tensor = &.{};
-        var slice_down_proj_scale: []zml.Tensor = &.{};
-
-        var layout: Layout = .packed_weights;
-
-        if (gate_up_proj_tensor == null) {
-            layout = .per_expert;
-            const new_slice_gate_proj = try initPerExpert(allocator, experts_store, num_experts, "gate_proj", "weight", .{ .dout, .d });
-            allocator.free(slice_gate_proj);
-            slice_gate_proj = new_slice_gate_proj;
-
-            const new_slice_gate_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "gate_proj", "weight_scale_inv", .{ .dout, .d });
-            allocator.free(slice_gate_proj_scale);
-            slice_gate_proj_scale = new_slice_gate_proj_scale;
-
-            const new_slice_up_proj = try initPerExpert(allocator, experts_store, num_experts, "up_proj", "weight", .{ .dout, .d });
-            allocator.free(slice_up_proj);
-            slice_up_proj = new_slice_up_proj;
-
-            const new_slice_up_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "up_proj", "weight_scale_inv", .{ .dout, .d });
-            allocator.free(slice_up_proj_scale);
-            slice_up_proj_scale = new_slice_up_proj_scale;
-
-            const new_slice_down_proj = try initPerExpert(allocator, experts_store, num_experts, "down_proj", "weight", .{ .d, .dout });
-            allocator.free(slice_down_proj);
-            slice_down_proj = new_slice_down_proj;
-
-            const new_slice_down_proj_scale = try initPerExpert(allocator, experts_store, num_experts, "down_proj", "weight_scale_inv", .{ .d, .dout });
-            allocator.free(slice_down_proj_scale);
-            slice_down_proj_scale = new_slice_down_proj_scale;
-        } else if (down_proj_tensor == null) {
-            return error.MissingDownProj;
+            const bytes = src_slice.data();
+            @memcpy(packed_slice.data()[offset .. offset + bytes.len], bytes);
+            offset += bytes.len;
         }
 
-        return .{
-            .layout = layout,
-            .shared_expert = Mlp.init(store.withPrefix("shared_expert")),
-            .shared_expert_gate = .init(store.withPrefix("shared_expert_gate").createTensor("weight", .{ .dout, .d }, null), store.withPrefix("shared_expert_gate").maybeCreateTensor("bias", .{.dout}, null), .d),
-            .gate_up_proj = gate_up_proj_tensor,
-            .gate_up_proj_scale = null,
-            .slice_gate_proj = slice_gate_proj,
-            .slice_gate_proj_scale = slice_gate_proj_scale,
-            .slice_up_proj = slice_up_proj,
-            .slice_up_proj_scale = slice_up_proj_scale,
-            .down_proj = down_proj_tensor,
-            .down_proj_scale = null,
-            .slice_down_proj = slice_down_proj,
-            .slice_down_proj_scale = slice_down_proj_scale,
-            .router = Router.init(store.withPrefix("gate"), config.text_config.num_experts_per_tok.?),
-        };
+        stdx.debug.assert(offset == packed_slice.data().len, "packed tensor byte size mismatch: packed={d} copied={d}", .{ packed_slice.data().len, offset });
+        const sharding = zml.sharding.pickSharding(ctx.shardings, packed_shape, .explicit_axis_binding) orelse ctx.replicated_sharding;
+        return zml.Buffer.fromSlice(ctx.io, ctx.platform, packed_slice, sharding);
     }
 
-    pub fn deinit(self: Moe, allocator: std.mem.Allocator) void {
-        allocator.free(self.slice_gate_proj);
-        allocator.free(self.slice_gate_proj_scale);
-        allocator.free(self.slice_up_proj);
-        allocator.free(self.slice_up_proj_scale);
-        allocator.free(self.slice_down_proj);
-        allocator.free(self.slice_down_proj_scale);
+    fn packGateUpExperts(
+        ctx: *LoadCtx,
+        experts_store: zml.io.TensorStore.View,
+        num_experts: usize,
+        packed_shape: zml.Shape,
+    ) !zml.Buffer {
+        var packed_slice: zml.Slice = try .alloc(ctx.allocator, packed_shape);
+        defer packed_slice.free(ctx.allocator);
+        var offset: usize = 0;
+
+        for (0..num_experts) |i| {
+            const gate = experts_store.withLayer(i).withPrefix("gate_proj").createTensor("weight", .{ .dout, .d }, null);
+            const up = experts_store.withLayer(i).withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, null);
+
+            var gate_buf = try ctx.loadBuf(&gate, null);
+            defer gate_buf.deinit();
+            var up_buf = try ctx.loadBuf(&up, null);
+            defer up_buf.deinit();
+
+            var gate_slice: zml.Slice = try .alloc(ctx.allocator, gate.shape());
+            defer gate_slice.free(ctx.allocator);
+            try gate_buf.toSlice(ctx.io, gate_slice);
+            @memcpy(packed_slice.data()[offset .. offset + gate_slice.data().len], gate_slice.data());
+            offset += gate_slice.data().len;
+
+            var up_slice: zml.Slice = try .alloc(ctx.allocator, up.shape());
+            defer up_slice.free(ctx.allocator);
+            try up_buf.toSlice(ctx.io, up_slice);
+            @memcpy(packed_slice.data()[offset .. offset + up_slice.data().len], up_slice.data());
+            offset += up_slice.data().len;
+        }
+
+        stdx.debug.assert(offset == packed_slice.data().len, "packed gate_up byte size mismatch: packed={d} copied={d}", .{ packed_slice.data().len, offset });
+        const sharding = zml.sharding.pickSharding(ctx.shardings, packed_shape, .explicit_axis_binding) orelse ctx.replicated_sharding;
+        return zml.Buffer.fromSlice(ctx.io, ctx.platform, packed_slice, sharding);
+    }
+
+    fn packGateUpScaleExperts(
+        ctx: *LoadCtx,
+        experts_store: zml.io.TensorStore.View,
+        num_experts: usize,
+        packed_shape: zml.Shape,
+    ) !zml.Buffer {
+        var packed_slice: zml.Slice = try .alloc(ctx.allocator, packed_shape);
+        defer packed_slice.free(ctx.allocator);
+        var offset: usize = 0;
+
+        for (0..num_experts) |i| {
+            const gate = experts_store.withLayer(i).withPrefix("gate_proj").createTensor("weight_scale_inv", .{ .dout, .d }, null);
+            const up = experts_store.withLayer(i).withPrefix("up_proj").createTensor("weight_scale_inv", .{ .dout, .d }, null);
+
+            var gate_buf = try ctx.loadBuf(&gate, null);
+            defer gate_buf.deinit();
+            var up_buf = try ctx.loadBuf(&up, null);
+            defer up_buf.deinit();
+
+            var gate_slice: zml.Slice = try .alloc(ctx.allocator, gate.shape());
+            defer gate_slice.free(ctx.allocator);
+            try gate_buf.toSlice(ctx.io, gate_slice);
+            @memcpy(packed_slice.data()[offset .. offset + gate_slice.data().len], gate_slice.data());
+            offset += gate_slice.data().len;
+
+            var up_slice: zml.Slice = try .alloc(ctx.allocator, up.shape());
+            defer up_slice.free(ctx.allocator);
+            try up_buf.toSlice(ctx.io, up_slice);
+            @memcpy(packed_slice.data()[offset .. offset + up_slice.data().len], up_slice.data());
+            offset += up_slice.data().len;
+        }
+
+        stdx.debug.assert(offset == packed_slice.data().len, "packed gate_up scale byte size mismatch: packed={d} copied={d}", .{ packed_slice.data().len, offset });
+        const sharding = zml.sharding.pickSharding(ctx.shardings, packed_shape, .explicit_axis_binding) orelse ctx.replicated_sharding;
+        return zml.Buffer.fromSlice(ctx.io, ctx.platform, packed_slice, sharding);
+    }
+
+    pub fn loadBuffers(
+        self: *Moe,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(Moe) {
+        var shared_expert = try self.shared_expert.loadBuffers(ctx, store.withPrefix("shared_expert"), progress);
+        errdefer Mlp.unloadBuffers(&shared_expert);
+
+        var shared_expert_gate = try ctx.loadLinearBuf(&self.shared_expert_gate, progress);
+        errdefer {
+            shared_expert_gate.weight.deinit();
+            if (shared_expert_gate.bias) |*bias| bias.deinit();
+        }
+
+        var router = try self.router.loadBuffers(ctx, store.withPrefix("gate"), progress);
+        errdefer Router.unloadBuffers(&router);
+
+        switch (self.layout) {
+            .packed_weights => {
+                var gate_up_proj = try ctx.loadBuf(&self.gate_up_proj, progress);
+                errdefer gate_up_proj.deinit();
+                var gate_up_proj_scale = try ctx.loadOptionalBuf(self.gate_up_proj_scale, progress);
+                errdefer if (gate_up_proj_scale) |*buffer| buffer.deinit();
+                var down_proj = try ctx.loadBuf(&self.down_proj, progress);
+                errdefer down_proj.deinit();
+                var down_proj_scale = try ctx.loadOptionalBuf(self.down_proj_scale, progress);
+                errdefer if (down_proj_scale) |*buffer| buffer.deinit();
+
+                return .{
+                    .shared_expert = shared_expert,
+                    .shared_expert_gate = shared_expert_gate,
+                    .gate_up_proj = gate_up_proj,
+                    .gate_up_proj_scale = gate_up_proj_scale,
+                    .down_proj = down_proj,
+                    .down_proj_scale = down_proj_scale,
+                    .router = router,
+                };
+            },
+            .per_expert => {
+                const experts_store = store.withPrefix("experts");
+                var gate_up_proj = try packGateUpExperts(ctx, experts_store, self.num_experts, self.gate_up_proj.shape());
+                errdefer gate_up_proj.deinit();
+                var down_proj = try packExpertTensor(
+                    ctx,
+                    experts_store,
+                    self.num_experts,
+                    "down_proj",
+                    "weight",
+                    .{ .d, .dout },
+                    self.down_proj.shape(),
+                );
+                errdefer down_proj.deinit();
+
+                var gate_up_proj_scale: ?zml.Buffer = null;
+                errdefer if (gate_up_proj_scale) |*buffer| buffer.deinit();
+                var down_proj_scale: ?zml.Buffer = null;
+                errdefer if (down_proj_scale) |*buffer| buffer.deinit();
+
+                if (self.gate_up_proj_scale != null and self.down_proj_scale != null) {
+                    gate_up_proj_scale = try packGateUpScaleExperts(ctx, experts_store, self.num_experts, self.gate_up_proj_scale.?.shape());
+                    down_proj_scale = try packExpertTensor(
+                        ctx,
+                        experts_store,
+                        self.num_experts,
+                        "down_proj",
+                        "weight_scale_inv",
+                        .{ .d, .dout },
+                        self.down_proj_scale.?.shape(),
+                    );
+                }
+
+                self.layout = .packed_weights;
+                self.gate_up_proj = zml.Tensor.fromShape(gate_up_proj.shape());
+                self.gate_up_proj_scale = if (gate_up_proj_scale) |buffer| zml.Tensor.fromShape(buffer.shape()) else null;
+                self.down_proj = zml.Tensor.fromShape(down_proj.shape());
+                self.down_proj_scale = if (down_proj_scale) |buffer| zml.Tensor.fromShape(buffer.shape()) else null;
+
+                return .{
+                    .shared_expert = shared_expert,
+                    .shared_expert_gate = shared_expert_gate,
+                    .gate_up_proj = gate_up_proj,
+                    .gate_up_proj_scale = gate_up_proj_scale,
+                    .down_proj = down_proj,
+                    .down_proj_scale = down_proj_scale,
+                    .router = router,
+                };
+            },
+        }
     }
 
     pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
@@ -991,10 +1306,10 @@ pub const Moe = struct {
             x,
             topk_ids,
             routing_scores,
-            self.gate_up_proj.?,
+            self.gate_up_proj,
             null,
             null,
-            self.down_proj.?,
+            self.down_proj,
             null,
             null,
             moe_metadata,
@@ -1016,10 +1331,10 @@ pub const Moe = struct {
             x,
             topk_ids,
             routing_scores,
-            self.gate_up_proj.?,
+            self.gate_up_proj,
             self.gate_up_proj_scale,
             null,
-            self.down_proj.?,
+            self.down_proj,
             self.down_proj_scale,
             null,
             moe_metadata,
@@ -1036,22 +1351,11 @@ pub const Moe = struct {
         Mlp.unloadBuffers(&self.shared_expert);
         self.shared_expert_gate.weight.deinit();
         if (self.shared_expert_gate.bias) |*bias| bias.deinit();
-        if (self.gate_up_proj) |*gate_up_proj| gate_up_proj.deinit();
+        self.gate_up_proj.deinit();
         if (self.gate_up_proj_scale) |*gate_up_proj_scale| gate_up_proj_scale.deinit();
-        for (self.slice_gate_proj) |*tensor| tensor.deinit();
-        allocator.free(self.slice_gate_proj);
-        for (self.slice_gate_proj_scale) |*tensor| tensor.deinit();
-        allocator.free(self.slice_gate_proj_scale);
-        for (self.slice_up_proj) |*tensor| tensor.deinit();
-        allocator.free(self.slice_up_proj);
-        for (self.slice_up_proj_scale) |*tensor| tensor.deinit();
-        allocator.free(self.slice_up_proj_scale);
-        if (self.down_proj) |*down_proj| down_proj.deinit();
+        self.down_proj.deinit();
         if (self.down_proj_scale) |*down_proj_scale| down_proj_scale.deinit();
-        for (self.slice_down_proj) |*tensor| tensor.deinit();
-        allocator.free(self.slice_down_proj);
-        for (self.slice_down_proj_scale) |*tensor| tensor.deinit();
-        allocator.free(self.slice_down_proj_scale);
+        _ = allocator;
         Router.unloadBuffers(&self.router);
     }
 };
@@ -1244,6 +1548,55 @@ pub const GatedDeltaNet = struct {
         RmsNormGated.unloadBuffers(&self.norm);
     }
 
+    pub fn loadBuffers(
+        self: *GatedDeltaNet,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(GatedDeltaNet) {
+        var in_proj_qkv = try ctx.loadLinearBuf(&self.in_proj_qkv, progress);
+        errdefer in_proj_qkv.weight.deinit();
+        var in_proj_z = try ctx.loadLinearBuf(&self.in_proj_z, progress);
+        errdefer in_proj_z.weight.deinit();
+        var in_proj_b = try ctx.loadLinearBuf(&self.in_proj_b, progress);
+        errdefer in_proj_b.weight.deinit();
+        var in_proj_a = try ctx.loadLinearBuf(&self.in_proj_a, progress);
+        errdefer in_proj_a.weight.deinit();
+        var out_proj = try ctx.loadLinearBuf(&self.out_proj, progress);
+        errdefer out_proj.weight.deinit();
+
+        var in_proj_qkv_scale = try ctx.loadOptionalBuf(self.in_proj_qkv_scale, progress);
+        errdefer if (in_proj_qkv_scale) |*scale| scale.deinit();
+        var in_proj_z_scale = try ctx.loadOptionalBuf(self.in_proj_z_scale, progress);
+        errdefer if (in_proj_z_scale) |*scale| scale.deinit();
+        var out_proj_scale = try ctx.loadOptionalBuf(self.out_proj_scale, progress);
+        errdefer if (out_proj_scale) |*scale| scale.deinit();
+
+        var conv1d_weight = try ctx.loadBuf(&self.conv1d_weight, progress);
+        errdefer conv1d_weight.deinit();
+        var dt_bias = try ctx.loadBuf(&self.dt_bias, progress);
+        errdefer dt_bias.deinit();
+        var aLog = try ctx.loadBuf(&self.aLog, progress);
+        errdefer aLog.deinit();
+        var norm = try self.norm.loadBuffers(ctx, store.withPrefix("norm"), progress);
+        errdefer RmsNormGated.unloadBuffers(&norm);
+
+        return .{
+            .in_proj_qkv = in_proj_qkv,
+            .in_proj_qkv_scale = in_proj_qkv_scale,
+            .in_proj_z = in_proj_z,
+            .in_proj_z_scale = in_proj_z_scale,
+            .in_proj_b = in_proj_b,
+            .in_proj_a = in_proj_a,
+            .out_proj = out_proj,
+            .out_proj_scale = out_proj_scale,
+            .conv1d_weight = conv1d_weight,
+            .dt_bias = dt_bias,
+            .aLog = aLog,
+            .norm = norm,
+        };
+    }
+
     fn recurrent_gated_delta_rule(query: zml.Tensor, key: zml.Tensor, value: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, initial_state: ?zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(query.dim(.khd))));
         const query_norm = zml.nn.normalizeL2(query.rename(.{ .kh = .vh }), 1e-6);
@@ -1400,6 +1753,18 @@ pub const RmsNorm = struct {
         self.weight.deinit();
     }
 
+    pub fn loadBuffers(
+        self: *RmsNorm,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(RmsNorm) {
+        _ = store;
+        return .{
+            .weight = try ctx.loadBuf(&self.weight, progress),
+        };
+    }
+
     pub fn forward(self: RmsNorm, x: zml.Tensor) zml.Tensor {
         const x_f32 = x.convert(.f32);
         const weight_f32 = self.weight.convert(.f32);
@@ -1419,6 +1784,18 @@ pub const RmsNormGated = struct {
 
     pub fn unloadBuffers(self: *zml.Bufferized(RmsNormGated)) void {
         self.weight.deinit();
+    }
+
+    pub fn loadBuffers(
+        self: *RmsNormGated,
+        ctx: *LoadCtx,
+        store: zml.io.TensorStore.View,
+        progress: *std.Progress.Node,
+    ) !zml.Bufferized(RmsNormGated) {
+        _ = store;
+        return .{
+            .weight = try ctx.loadBuf(&self.weight, progress),
+        };
     }
 
     pub fn forward(self: RmsNormGated, x: zml.Tensor, gate: zml.Tensor) zml.Tensor {
