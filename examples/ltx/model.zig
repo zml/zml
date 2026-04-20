@@ -1444,6 +1444,10 @@ pub const GuiderCombineResult = struct {
     guided_a: Tensor,
 };
 
+/// Default token count for sigma-shift when no latent tensor is available.
+/// Matches Python's `default_number_of_tokens = MAX_SHIFT_ANCHOR` in schedulers.py.
+pub const MAX_SHIFT_ANCHOR: usize = 4096;
+
 /// LTX2Scheduler sigma schedule — host-side computation (not a compiled graph op).
 ///
 /// Reimplements `LTX2Scheduler.execute(steps, ...)` from ltx_core:
@@ -1462,9 +1466,6 @@ pub fn computeSigmaSchedule(
 ) [max_steps + 1]f32 {
     std.debug.assert(num_steps <= max_steps);
 
-    const BASE_SHIFT_ANCHOR: f32 = 1024.0;
-    const MAX_SHIFT_ANCHOR: f32 = 4096.0;
-
     // 1. linspace(1.0, 0.0, num_steps + 1)
     var sigmas: [max_steps + 1]f32 = undefined;
     const n: f32 = @floatFromInt(num_steps);
@@ -1474,8 +1475,10 @@ pub fn computeSigmaSchedule(
     }
 
     // 2. Compute sigma_shift from token count
-    const mm = (max_shift - base_shift) / (MAX_SHIFT_ANCHOR - BASE_SHIFT_ANCHOR);
-    const b = base_shift - mm * BASE_SHIFT_ANCHOR;
+    const x1: f32 = 1024.0; // BASE_SHIFT_ANCHOR
+    const x2: f32 = 4096.0; // MAX_SHIFT_ANCHOR
+    const mm = (max_shift - base_shift) / (x2 - x1);
+    const b = base_shift - mm * x1;
     const tokens_f: f32 = @floatFromInt(num_tokens);
     const sigma_shift = tokens_f * mm + b;
     const exp_shift = std.math.exp(sigma_shift);
@@ -1517,8 +1520,6 @@ pub const stage1_default_schedule = struct {
     pub const max_shift: f32 = 2.05;
     pub const base_shift: f32 = 0.95;
     pub const terminal: f32 = 0.1;
-    /// MAX_SHIFT_ANCHOR — used when no latent tensor is provided.
-    pub const default_num_tokens: usize = 4096;
 };
 
 /// Combines 4 guidance passes (cond, neg/CFG, perturbed/STG, isolated/modality)

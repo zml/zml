@@ -854,7 +854,7 @@ fn runStage1(
     const sigmas = model.computeSigmaSchedule(
         NUM_STAGE1_STEPS,
         NUM_STAGE1_STEPS,
-        model.stage1_default_schedule.default_num_tokens,
+        model.MAX_SHIFT_ANCHOR, // In python reference implementation, the number of tokens used for computing the sigma shift when no latent tensor is available, is the same regardless of the resolution.
         model.stage1_default_schedule.max_shift,
         model.stage1_default_schedule.base_shift,
         model.stage1_default_schedule.terminal,
