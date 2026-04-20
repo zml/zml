@@ -2737,17 +2737,22 @@ fn computeTextEmbeddings(
     const proc_params = proc_init.params;
 
     // ---- Open pos hidden states to get shapes for compilation ----
-    var pos_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, pos_path) catch |err| {
-        std.log.err("Failed to open pos hidden states: {s}", .{pos_path});
-        return err;
-    };
-    defer pos_reg.deinit();
-    var pos_store: zml.io.TensorStore = .fromRegistry(allocator, &pos_reg);
-    defer pos_store.deinit();
+    var pos_hs_buf: zml.Buffer = undefined;
+    var pos_mask_buf: zml.Buffer = undefined;
+    {
+        var pos_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, pos_path) catch |err| {
+            std.log.err("Failed to open pos hidden states: {s}", .{pos_path});
+            return err;
+        };
+        defer pos_reg.deinit();
+        var pos_store: zml.io.TensorStore = .fromRegistry(allocator, &pos_reg);
+        defer pos_store.deinit();
 
-    var pos_hs_buf = try loadBuf(allocator, io, platform, &pos_store, "stacked_hidden_states", sharding);
+        pos_hs_buf = try loadBuf(allocator, io, platform, &pos_store, "stacked_hidden_states", sharding);
+        errdefer pos_hs_buf.deinit();
+        pos_mask_buf = try loadBuf(allocator, io, platform, &pos_store, "attention_mask", sharding);
+    }
     defer pos_hs_buf.deinit();
-    var pos_mask_buf = try loadBuf(allocator, io, platform, &pos_store, "attention_mask", sharding);
     defer pos_mask_buf.deinit();
 
     std.log.info("  pos stacked_hidden_states: {s} {any}", .{ @tagName(pos_hs_buf.shape().dtype()), pos_hs_buf.shape().dims() });
@@ -2806,18 +2811,23 @@ fn computeTextEmbeddings(
     std.log.info("  a_context_pos: {s} {any}", .{ @tagName(a_context_pos.shape().dtype()), a_context_pos.shape().dims() });
 
     // ---- Run on negative hidden states ----
-    std.log.info("Running text embeddings on negative prompt...", .{});
-    var neg_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, neg_path) catch |err| {
-        std.log.err("Failed to open neg hidden states: {s}", .{neg_path});
-        return err;
-    };
-    defer neg_reg.deinit();
-    var neg_store: zml.io.TensorStore = .fromRegistry(allocator, &neg_reg);
-    defer neg_store.deinit();
+    var neg_hs_buf: zml.Buffer = undefined;
+    var neg_mask_buf: zml.Buffer = undefined;
+    {
+        std.log.info("Running text embeddings on negative prompt...", .{});
+        var neg_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, neg_path) catch |err| {
+            std.log.err("Failed to open neg hidden states: {s}", .{neg_path});
+            return err;
+        };
+        defer neg_reg.deinit();
+        var neg_store: zml.io.TensorStore = .fromRegistry(allocator, &neg_reg);
+        defer neg_store.deinit();
 
-    var neg_hs_buf = try loadBuf(allocator, io, platform, &neg_store, "stacked_hidden_states", sharding);
+        neg_hs_buf = try loadBuf(allocator, io, platform, &neg_store, "stacked_hidden_states", sharding);
+        errdefer neg_hs_buf.deinit();
+        neg_mask_buf = try loadBuf(allocator, io, platform, &neg_store, "attention_mask", sharding);
+    }
     defer neg_hs_buf.deinit();
-    var neg_mask_buf = try loadBuf(allocator, io, platform, &neg_store, "attention_mask", sharding);
     defer neg_mask_buf.deinit();
 
     // Reuse the same compiled exe — validate that neg shapes match pos (both must be S=1024).
