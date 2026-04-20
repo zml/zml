@@ -128,13 +128,18 @@ pub const Buffer = struct {
                     },
                 },
             };
+
+            const host_buffer_semantics: pjrt.HostBufferSemantics = switch (platform.target) {
+                .tt => .ImmutableOnlyDuringCall,
+                else => .ImmutableUntilTransferCompletes,
+            };
             const args: pjrt.Client.BufferFromHostBufferArgs = .{
                 .data = sub_slice.constData().ptr,
                 .buffer_type = buffer_type,
                 .dims = shard.shape.dims(),
                 .byte_strides = sub_slice.byte_strides.constSlice(),
                 .layout = layout,
-                .host_buffer_semantics = .ImmutableUntilTransferCompletes,
+                .host_buffer_semantics = host_buffer_semantics,
                 .dst = .{ .memory = shard.memory(platform, opts.memory).pjrt_memory },
             };
 

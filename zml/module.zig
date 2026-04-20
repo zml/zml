@@ -605,6 +605,10 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // This is what AMD recommendeds in the meantime.
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_command_buffer", "CUBLAS,CUBLASLT,CUSTOM_CALL,CUDNN,DYNAMIC_SLICE_FUSION", upb_arena);
             },
+            .tt => {
+                try setXlaOverrideFlag(overrides_map, "math_fidelity", "hifi3", upb_arena);
+                try setXlaOverrideFlag(overrides_map, "fp32_dest_acc_en", true, upb_arena);
+            },
             else => {},
         }
 
