@@ -898,45 +898,57 @@ fn runStage1(
     std.log.info("Computing Stage 1 initial state (T_v={d}, T_a={d})...", .{ T_v1, T_a });
 
     // Video positions: [1, 3, T_v1, 2] bf16
-    const video_pos_bytes = try computeVideoPositions(allocator, F, H_s1, W_s1, fps);
-    defer allocator.free(video_pos_bytes);
-    const video_pos_shape = zml.Shape.init(.{ 1, 3, T_v1, 2 }, .bf16);
-    var v_positions_buf = try zml.Buffer.fromBytes(io, platform, video_pos_shape, sharding, video_pos_bytes);
+    var v_positions_buf = blk: {
+        const video_pos_bytes = try computeVideoPositions(allocator, F, H_s1, W_s1, fps);
+        defer allocator.free(video_pos_bytes);
+        const video_pos_shape = zml.Shape.init(.{ 1, 3, T_v1, 2 }, .bf16);
+        break :blk try zml.Buffer.fromBytes(io, platform, video_pos_shape, sharding, video_pos_bytes);
+    };
     defer v_positions_buf.deinit();
 
     // Audio positions: [1, 1, T_a, 2] f32
-    const audio_pos_bytes = try computeAudioPositions(allocator, T_a);
-    defer allocator.free(audio_pos_bytes);
-    const audio_pos_shape = zml.Shape.init(.{ 1, 1, T_a, 2 }, .f32);
-    var a_positions_buf = try zml.Buffer.fromBytes(io, platform, audio_pos_shape, sharding, audio_pos_bytes);
+    var a_positions_buf = blk: {
+        const audio_pos_bytes = try computeAudioPositions(allocator, T_a);
+        defer allocator.free(audio_pos_bytes);
+        const audio_pos_shape = zml.Shape.init(.{ 1, 1, T_a, 2 }, .f32);
+        break :blk try zml.Buffer.fromBytes(io, platform, audio_pos_shape, sharding, audio_pos_bytes);
+    };
     defer a_positions_buf.deinit();
 
     // Denoise masks: all ones [1, T, 1] f32
-    const v_mask_shape = zml.Shape.init(.{ 1, T_v1, 1 }, .f32);
-    const a_mask_shape = zml.Shape.init(.{ 1, T_a, 1 }, .f32);
-    const v_mask_host = try allocator.alloc(u8, v_mask_shape.byteSize());
-    defer allocator.free(v_mask_host);
-    const a_mask_host = try allocator.alloc(u8, a_mask_shape.byteSize());
-    defer allocator.free(a_mask_host);
-    fillOnesF32(v_mask_host);
-    fillOnesF32(a_mask_host);
-    var v_mask_buf = try zml.Buffer.fromBytes(io, platform, v_mask_shape, sharding, v_mask_host);
+    var v_mask_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_v1, 1 }, .f32);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        fillOnesF32(host);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
     defer v_mask_buf.deinit();
-    var a_mask_buf = try zml.Buffer.fromBytes(io, platform, a_mask_shape, sharding, a_mask_host);
+    var a_mask_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_a, 1 }, .f32);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        fillOnesF32(host);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
     defer a_mask_buf.deinit();
 
     // Clean latents: all zeros [1, T, 128] bf16
-    const v_clean_shape = zml.Shape.init(.{ 1, T_v1, C }, .bf16);
-    const a_clean_shape = zml.Shape.init(.{ 1, T_a, C }, .bf16);
-    const v_clean_host = try allocator.alloc(u8, v_clean_shape.byteSize());
-    defer allocator.free(v_clean_host);
-    const a_clean_host = try allocator.alloc(u8, a_clean_shape.byteSize());
-    defer allocator.free(a_clean_host);
-    @memset(v_clean_host, 0);
-    @memset(a_clean_host, 0);
-    var v_clean_buf = try zml.Buffer.fromBytes(io, platform, v_clean_shape, sharding, v_clean_host);
+    var v_clean_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_v1, C }, .bf16);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        @memset(host, 0);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
     defer v_clean_buf.deinit();
-    var a_clean_buf = try zml.Buffer.fromBytes(io, platform, a_clean_shape, sharding, a_clean_host);
+    var a_clean_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_a, C }, .bf16);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        @memset(host, 0);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
     defer a_clean_buf.deinit();
 
     std.log.info("  video_positions:   {any}", .{v_positions_buf.shape().dims()});
@@ -2036,29 +2048,37 @@ fn runBridge(
     // Step 5: Compute positions and masks on host
     // ========================================================================
     std.log.info("Computing video positions...", .{});
-    const video_pos_bytes = try computeVideoPositions(allocator, F, H_s2, W_s2, fps);
-    defer allocator.free(video_pos_bytes);
-    const video_pos_shape = zml.Shape.init(.{ 1, 3, T_v2, 2 }, .bf16);
-    const video_pos_buf = try zml.Buffer.fromBytes(io, platform, video_pos_shape, sharding, video_pos_bytes);
+    const video_pos_buf = blk: {
+        const bytes = try computeVideoPositions(allocator, F, H_s2, W_s2, fps);
+        defer allocator.free(bytes);
+        const shape = zml.Shape.init(.{ 1, 3, T_v2, 2 }, .bf16);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, bytes);
+    };
 
     std.log.info("Computing audio positions...", .{});
-    const audio_pos_bytes = try computeAudioPositions(allocator, T_a);
-    defer allocator.free(audio_pos_bytes);
-    const audio_pos_shape = zml.Shape.init(.{ 1, 1, T_a, 2 }, .f32);
-    const audio_pos_buf = try zml.Buffer.fromBytes(io, platform, audio_pos_shape, sharding, audio_pos_bytes);
+    const audio_pos_buf = blk: {
+        const bytes = try computeAudioPositions(allocator, T_a);
+        defer allocator.free(bytes);
+        const shape = zml.Shape.init(.{ 1, 1, T_a, 2 }, .f32);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, bytes);
+    };
 
     // Denoise masks: all ones
     std.log.info("Creating denoise masks...", .{});
-    const v_mask_shape = zml.Shape.init(.{ 1, T_v2, 1 }, .f32);
-    const a_mask_shape = zml.Shape.init(.{ 1, T_a, 1 }, .f32);
-    const v_mask_host = try allocator.alloc(u8, v_mask_shape.byteSize());
-    defer allocator.free(v_mask_host);
-    const a_mask_host = try allocator.alloc(u8, a_mask_shape.byteSize());
-    defer allocator.free(a_mask_host);
-    fillOnesF32(v_mask_host);
-    fillOnesF32(a_mask_host);
-    var v_mask_buf = try zml.Buffer.fromBytes(io, platform, v_mask_shape, sharding, v_mask_host);
-    var a_mask_buf = try zml.Buffer.fromBytes(io, platform, a_mask_shape, sharding, a_mask_host);
+    var v_mask_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_v2, 1 }, .f32);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        fillOnesF32(host);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
+    var a_mask_buf = blk: {
+        const shape = zml.Shape.init(.{ 1, T_a, 1 }, .f32);
+        const host = try allocator.alloc(u8, shape.byteSize());
+        defer allocator.free(host);
+        fillOnesF32(host);
+        break :blk try zml.Buffer.fromBytes(io, platform, shape, sharding, host);
+    };
 
     // ========================================================================
     // Step 6: Generate or load noise, then run noise init
@@ -3810,10 +3830,10 @@ fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) Pipel
 
 fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, fps: f64) ![]u8 {
     const T_v: usize = @intCast(F * H * W);
-    const num_vals = 3 * T_v * 2;
+    const num_vals = 3 * T_v * 2; // 3 axes (frame, height, width) × 2 values (start, end) per axis
     const out = try allocator.alloc(u8, num_vals * 2);
 
-    const scale_factors = [3]f32{ 8.0, 32.0, 32.0 };
+    const scale_factors = [3]f32{ 8.0, 32.0, 32.0 }; // 1 latent unit = 8 frames temporally, 32x32 pixels spatially
     const fps_f32: f32 = @floatCast(fps);
     const Fi: usize = @intCast(F);
     const Hi: usize = @intCast(H);
@@ -3822,7 +3842,7 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
     for (0..Fi) |f| {
         for (0..Hi) |h| {
             for (0..Wi) |w| {
-                const patch_idx = f * Hi * Wi + h * Wi + w;
+                const patch_idx = f * Hi * Wi + h * Wi + w; // 3 dimensions tiled in order (frame, height, width)
 
                 const coords = [3][2]f32{
                     .{ @floatFromInt(f), @floatFromInt(f + 1) },
@@ -3831,17 +3851,20 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
                 };
 
                 for (0..3) |axis| {
+                    // Compute start and end positions for this axis, scaled to the **latent space**
                     var start = coords[axis][0] * scale_factors[axis];
                     var end = coords[axis][1] * scale_factors[axis];
 
+                    // Temporal axis: adjust for causal-conv offset (first latent covers 1 frame, not 8), then convert from frame indices to seconds.
                     if (axis == 0) {
                         start = @max(start + 1.0 - scale_factors[0], 0.0);
                         end = @max(end + 1.0 - scale_factors[0], 0.0);
+
                         start /= fps_f32;
                         end /= fps_f32;
                     }
 
-                    const base = (axis * T_v * 2 + patch_idx * 2) * 2;
+                    const base = (axis * T_v * 2 + patch_idx * 2) * 2; // 2 values (start, end) per axis, 2 bytes per bf16
                     storeBf16(out[base..], start);
                     storeBf16(out[base + 2 ..], end);
                 }
