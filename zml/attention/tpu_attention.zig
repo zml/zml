@@ -129,9 +129,9 @@ pub const mosaic_tpu = struct {
     const PreparedInputs = struct {
         q: zml.Tensor,
         kv_pages: zml.Tensor,
-        kv_lens: zml.Tensor,
-        page_indices: zml.Tensor,
-        cu_seqlens_q: zml.Tensor,
+        seq_lens: zml.Tensor,
+        block_table: zml.Tensor,
+        query_start_len: zml.Tensor,
         num_seqs: zml.Tensor,
     };
 
@@ -157,16 +157,16 @@ pub const mosaic_tpu = struct {
 
     pub const Parameters = struct {
         opts: Options,
-        cu_seqlens_q: zml.Tensor,
-        page_indices: zml.Tensor,
-        kv_lens: zml.Tensor,
+        block_table: zml.Tensor,
+        seq_lens: zml.Tensor,
+        query_start_len: zml.Tensor,
 
         pub fn init(opts: Options) Parameters {
             return .{
                 .opts = opts,
-                .cu_seqlens_q = zml.Tensor.init(.{ .n = opts.batch_size + 1 }, .i32),
-                .page_indices = zml.Tensor.init(.{ opts.batch_size, opts.max_num_pages }, .i32),
-                .kv_lens = zml.Tensor.init(.{opts.batch_size}, .i32),
+                .block_table = zml.Tensor.init(.{ opts.batch_size, opts.max_num_pages }, .i32),
+                .seq_lens = zml.Tensor.init(.{opts.batch_size}, .i32),
+                .query_start_len = zml.Tensor.init(.{ .n = opts.batch_size + 1 }, .i32),
             };
         }
 
@@ -176,9 +176,9 @@ pub const mosaic_tpu = struct {
 
         pub fn allocationSize(self: Parameters) usize {
             var allocation_size: usize = 0;
-            allocation_size += self.cu_seqlens_q.byteSize();
-            allocation_size += self.page_indices.byteSize();
-            allocation_size += self.kv_lens.byteSize();
+            allocation_size += self.block_table.byteSize();
+            allocation_size += self.seq_lens.byteSize();
+            allocation_size += self.query_start_len.byteSize();
             return allocation_size;
         }
     };
@@ -192,9 +192,9 @@ pub const mosaic_tpu = struct {
     fn raggedPagedKernelCall(
         q: zml.Tensor,
         kv_pages: zml.Tensor,
-        kv_lens: zml.Tensor,
-        page_indices: zml.Tensor,
-        cu_q_lens: zml.Tensor,
+        seq_lens: zml.Tensor,
+        block_table: zml.Tensor,
+        query_start_len: zml.Tensor,
         num_seqs: zml.Tensor,
         backend_config: []const u8,
     ) zml.Tensor {
@@ -204,9 +204,9 @@ pub const mosaic_tpu = struct {
         const op = dialects.stablehlo.custom_call(
             comp_ctx.mlir_ctx,
             &.{
-                kv_lens.value(),
-                page_indices.value(),
-                cu_q_lens.value(),
+                seq_lens.value(),
+                block_table.value(),
+                query_start_len.value(),
                 seq_buf_idx.value(),
                 num_seqs.value(),
                 q.value(),
@@ -227,9 +227,9 @@ pub const mosaic_tpu = struct {
         return zml.Tensor._result(q.shape(), op.result(0));
     }
 
-    fn activeSequenceCount(cu_seqlens_q: zml.Tensor) zml.Tensor {
-        const start = cu_seqlens_q.slice1d(0, .{ .end = cu_seqlens_q.dim(0) - 1 });
-        const end = cu_seqlens_q.slice1d(0, .{ .start = 1 });
+    fn activeSequenceCount(query_start_len: zml.Tensor) zml.Tensor {
+        const start = query_start_len.slice1d(0, .{ .end = query_start_len.dim(0) - 1 });
+        const end = query_start_len.slice1d(0, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
             .cmp(.GT, zml.Tensor.constant(query_lens.dtype().zero()).broad(query_lens.shape()))
@@ -286,17 +286,17 @@ pub const mosaic_tpu = struct {
         // Note :
         // In a future PR, we'll have to change the pagedAttention API a bit so that we don't have to fuse keys and values
         const kv_pages = fuseKvPages(k_cache, v_cache).withPartitioning(.{ .hkv = .model });
-        const cu_seqlens_q = parameters.cu_seqlens_q.withPartitioning(.{ .n = .replicated });
+        const query_start_len = parameters.query_start_len.withPartitioning(.{ .n = .replicated });
 
         // Note
         // activeSequenceCount could probably be computed when preparing the inputs and injected through Parameters, but we'll keep that for later.
         return .{
             .q = q_ragged,
             .kv_pages = kv_pages,
-            .kv_lens = parameters.kv_lens.withPartitioning(.{ ._0 = .replicated }),
-            .page_indices = parameters.page_indices.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
-            .cu_seqlens_q = cu_seqlens_q,
-            .num_seqs = activeSequenceCount(cu_seqlens_q).withPartitioning(.{ ._0 = .replicated }),
+            .seq_lens = parameters.seq_lens.withPartitioning(.{ ._0 = .replicated }),
+            .block_table = parameters.block_table.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
+            .query_start_len = query_start_len,
+            .num_seqs = activeSequenceCount(query_start_len).withPartitioning(.{ ._0 = .replicated }),
         };
     }
 
@@ -308,10 +308,10 @@ pub const mosaic_tpu = struct {
     fn buildRequest(prepared_inputs: PreparedInputs, parameters: Parameters, opts: AttentionOptions) RaggedPagedRequest {
         const q_shape = prepared_inputs.q.shape();
         const kv_pages_shape = prepared_inputs.kv_pages.shape();
-        const page_indices_shape = prepared_inputs.page_indices.shape();
+        const block_table_shape = prepared_inputs.block_table.shape();
 
         const q_token_count = if (q_shape.hasTag(.q) != null) q_shape.dim(.q) else q_shape.dim(.b);
-        const max_num_seqs = page_indices_shape.dim(0);
+        const max_num_seqs = block_table_shape.dim(0);
         const num_q_heads = q_shape.dim(.h);
         stdx.debug.assert(@mod(kv_pages_shape.dim(.hkv), 2) == 0, "Expected fused KV pages .hkv dimension to be even, got {}", .{kv_pages_shape.dim(.hkv)});
         const num_kv_heads = std.math.divExact(i64, kv_pages_shape.dim(.hkv), 2) catch |err| switch (err) {
@@ -365,9 +365,9 @@ pub const mosaic_tpu = struct {
             .{
                 prepared.q,
                 prepared.kv_pages,
-                prepared.kv_lens,
-                prepared.page_indices,
-                prepared.cu_seqlens_q,
+                prepared.seq_lens,
+                prepared.block_table,
+                prepared.query_start_len,
                 prepared.num_seqs,
             },
             prepared.q.shape(),
@@ -383,9 +383,9 @@ pub const mosaic_tpu = struct {
                     const prepared_inputs: PreparedInputs = .{
                         .q = sharded_inputs[0],
                         .kv_pages = sharded_inputs[1],
-                        .kv_lens = sharded_inputs[2],
-                        .page_indices = sharded_inputs[3],
-                        .cu_seqlens_q = sharded_inputs[4],
+                        .seq_lens = sharded_inputs[2],
+                        .block_table = sharded_inputs[3],
+                        .query_start_len = sharded_inputs[4],
                         .num_seqs = sharded_inputs[5],
                     };
 
@@ -393,9 +393,9 @@ pub const mosaic_tpu = struct {
                     const q_out = raggedPagedKernelCall(
                         prepared_inputs.q,
                         prepared_inputs.kv_pages,
-                        prepared_inputs.kv_lens,
-                        prepared_inputs.page_indices,
-                        prepared_inputs.cu_seqlens_q,
+                        prepared_inputs.seq_lens,
+                        prepared_inputs.block_table,
+                        prepared_inputs.query_start_len,
                         prepared_inputs.num_seqs,
                         backend_config,
                     );
