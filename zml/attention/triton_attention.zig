@@ -116,6 +116,135 @@ fn select3dConfig(options: paged.PagedAttentionOptions) Config3D {
     };
 }
 
+pub const KernelKind = enum {
+    kernel_unified_attention_2d_ptr,
+    kernel_unified_attention_3d_ptr,
+    reduce_segments_ptr,
+};
+
+pub const GenerationConfig2D = struct {
+    pub const Dimensions = struct {
+        num_tokens: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        num_blocks: usize,
+        block_size: usize,
+        batch_size: usize,
+        num_blocks_per_seq: usize,
+        num_qq_tokens: ?usize = null,
+        max_seqlen_q: usize,
+    };
+
+    pub const FeatureFlags = struct {
+        use_alibi_slopes: bool,
+        use_softcap: bool,
+        use_sinks: bool,
+        sliding_window: usize,
+        use_fp8: bool,
+        all_decode: bool,
+    };
+
+    dimensions: Dimensions,
+    config: Config2D,
+    feature_flags: FeatureFlags,
+};
+
+pub const GenerationConfig3D = struct {
+    pub const Dimensions = struct {
+        num_tokens: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        num_blocks: usize,
+        block_size: usize,
+        batch_size: usize,
+        num_blocks_per_seq: usize,
+        num_qq_tokens: ?usize = null,
+        cu_count: usize,
+    };
+
+    pub const FeatureFlags = struct {
+        use_alibi_slopes: bool,
+        use_softcap: bool,
+        use_sinks: bool,
+        sliding_window: usize,
+        all_decode: bool,
+    };
+
+    dimensions: Dimensions,
+    config: Config3D.AttentionConfig,
+    feature_flags: FeatureFlags,
+};
+
+pub const GenerationConfigReduce = struct {
+    pub const Dimensions = struct {
+        num_tokens: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        block_size: usize,
+        batch_size: usize,
+        num_blocks_per_seq: usize,
+        cu_count: usize,
+    };
+
+    pub const FeatureFlags = struct {
+        use_fp8: bool,
+    };
+
+    dimensions: Dimensions,
+    config: Config3D.ReduceConfig,
+    feature_flags: FeatureFlags,
+};
+
+pub const GenerationConfig = union(KernelKind) {
+    kernel_unified_attention_2d_ptr: GenerationConfig2D,
+    kernel_unified_attention_3d_ptr: GenerationConfig3D,
+    reduce_segments_ptr: GenerationConfigReduce,
+};
+
+fn generateTtir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    backend: []const u8,
+    kernel: []const u8,
+    config: anytype,
+) ![:0]const u8 {
+    var arena: std.heap.ArenaAllocator = .init(allocator);
+    defer arena.deinit();
+    const writer_buffer = try arena.allocator().alloc(u8, 4096);
+    const reader_buffer = try arena.allocator().alloc(u8, 4096);
+
+    const compilation_context = zml.module.CompilationContext.current();
+    const platform = compilation_context.platform;
+    const triton_runtime = platform.triton_runtime.?;
+
+    var allocating: std.Io.Writer.Allocating = .init(arena.allocator());
+    {
+        try triton_runtime.process_mutex.lock(compilation_context.io);
+        defer triton_runtime.process_mutex.unlock(compilation_context.io);
+
+        var writer = triton_runtime.process.stdin.?.writer(io, writer_buffer);
+        try writer.interface.print("{f}\n", .{std.json.fmt(.{
+            .backend = backend,
+            .kernel = kernel,
+            .config = config,
+        }, .{ .emit_null_optional_fields = false })});
+        try writer.interface.flush();
+
+        var reader = triton_runtime.process.stdout.?.reader(io, reader_buffer);
+        _ = try reader.interface.streamDelimiter(&allocating.writer, '\n');
+        _ = try reader.interface.discardShort(1);
+    }
+
+    const response: std.json.Value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), allocating.written(), .{});
+    return if (response.object.get("ok").?.bool)
+        try allocator.dupeZ(u8, response.object.get("result").?.string)
+    else
+        error.GenerationFailed;
+}
+
 fn getCuCount() usize {
     const platform = zml.module.CompilationContext.current().platform;
 
@@ -292,28 +421,37 @@ pub const paged = struct {
         _ = context;
         _ = opts;
         const config = select2dConfig(paged_attention_opts);
-
-        const kernel_config: kernels.KernelUnifiedAttention2dPtr.Config = .{
-            .q_dtype = toDType(q.dtype()),
-            .kv_dtype = toDType(k_cache.dtype()),
-            .o_dtype = toDType(q.dtype()),
-            .num_query_heads = @intCast(paged_attention_opts.num_heads),
-            .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
-            .block_size = @intCast(paged_attention_opts.block_size),
-            .tile_size = @intCast(config.tile_size),
-            .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim)),
-            .use_alibi_slopes = false,
-            .use_qq_bias = false,
-            .use_softcap = false,
-            .use_sinks = false,
-            .sliding_window = @intCast(paged_attention_opts.sliding_window),
-            .block_q = @intCast(config.block_q),
-            .block_m = @intCast(config.block_m),
-            .use_fp8 = false,
-            .all_decode = paged_attention_opts.all_decode,
+        const generation_config: GenerationConfig = .{
+            .kernel_unified_attention_2d_ptr = .{
+                .dimensions = .{
+                    .batch_size = paged_attention_opts.batch_size,
+                    .block_size = paged_attention_opts.block_size,
+                    .head_dim = paged_attention_opts.head_dim,
+                    .num_blocks = paged_attention_opts.num_blocks,
+                    .num_blocks_per_seq = paged_attention_opts.max_num_block_per_seq,
+                    .num_heads = paged_attention_opts.num_heads,
+                    .num_kv_heads = paged_attention_opts.num_kv_heads,
+                    .num_tokens = paged_attention_opts.num_tokens,
+                    .max_seqlen_q = parameters.options_.max_seqlen_q,
+                },
+                .config = config,
+                .feature_flags = .{
+                    .all_decode = paged_attention_opts.all_decode,
+                    .sliding_window = paged_attention_opts.sliding_window,
+                    .use_alibi_slopes = false,
+                    .use_fp8 = false,
+                    .use_sinks = false,
+                    .use_softcap = false,
+                },
+            },
         };
-        log.debug("pagedAttention2d config: {any}", .{kernel_config});
+
+        log.debug("pagedAttention2d config: {any}", .{generation_config});
+
+        const io = zml.module.CompilationContext.current().io;
+        const allocator = zml.module.CompilationContext.current().allocator;
+        const ttir = generateTtir(allocator, io, "attention", "kernel_unified_attention_2d_ptr", generation_config.kernel_unified_attention_2d_ptr) catch unreachable;
+        defer allocator.free(ttir);
 
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
         const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
@@ -381,27 +519,36 @@ pub const paged = struct {
 
         const config = select3dConfig(paged_attention_opts);
 
-        const head_size_padded: i64 = @intCast(std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim));
-        const attn_kernel_config: kernels.KernelUnifiedAttention3dPtr.Config = .{
-            .q_dtype = toDType(q.dtype()),
-            .kv_dtype = toDType(k_cache.dtype()),
-            .num_query_heads = @intCast(paged_attention_opts.num_heads),
-            .num_queries_per_kv = @intCast(paged_attention_opts.numQueriesPerKv()),
-            .block_size = @intCast(paged_attention_opts.block_size),
-            .tile_size = @intCast(config.attention.tile_size),
-            .head_size = @intCast(paged_attention_opts.head_dim),
-            .head_size_padded = head_size_padded,
-            .use_alibi_slopes = false,
-            .use_qq_bias = false,
-            .use_softcap = false,
-            .use_sinks = false,
-            .sliding_window = @intCast(paged_attention_opts.sliding_window),
-            .block_q = @intCast(config.attention.block_q),
-            .block_m = @intCast(config.attention.block_m),
-            .num_segments_per_seq = @intCast(config.attention.num_segments_per_seq),
-            .all_decode = paged_attention_opts.all_decode,
+        const attn_generation_config: GenerationConfig = .{
+            .kernel_unified_attention_3d_ptr = .{
+                .dimensions = .{
+                    .batch_size = paged_attention_opts.batch_size,
+                    .block_size = paged_attention_opts.block_size,
+                    .head_dim = paged_attention_opts.head_dim,
+                    .num_blocks = paged_attention_opts.num_blocks,
+                    .num_blocks_per_seq = paged_attention_opts.max_num_block_per_seq,
+                    .num_heads = paged_attention_opts.num_heads,
+                    .num_kv_heads = paged_attention_opts.num_kv_heads,
+                    .num_tokens = paged_attention_opts.num_tokens,
+                    .cu_count = paged_attention_opts.cu_count,
+                },
+                .config = config.attention,
+                .feature_flags = .{
+                    .all_decode = paged_attention_opts.all_decode,
+                    .sliding_window = paged_attention_opts.sliding_window,
+                    .use_alibi_slopes = false,
+                    .use_sinks = false,
+                    .use_softcap = false,
+                },
+            },
         };
-        log.debug("pagedAttention3d attention config: {any}", .{attn_kernel_config});
+
+        log.debug("pagedAttention3d attention config: {any}", .{attn_generation_config});
+
+        const io = zml.module.CompilationContext.current().io;
+        const allocator = zml.module.CompilationContext.current().allocator;
+        const attn_ttir = generateTtir(allocator, io, "attention", "kernel_unified_attention_3d_ptr", attn_generation_config.kernel_unified_attention_3d_ptr) catch unreachable;
+        defer allocator.free(attn_ttir);
 
         const reduce_kernel_config: kernels.ReduceSegmentsPtr.Config = .{
             .o_dtype = toDType(q.dtype()),
@@ -413,7 +560,9 @@ pub const paged = struct {
             .num_segments_per_seq = @intCast(config.reduce.num_segments_per_seq),
             .use_fp8 = false,
         };
-        log.debug("pagedAttention3d reduce config: {any}", .{reduce_kernel_config});
+        log.debug("pagedAttention3d reduce config: {any}", .{reduce_generation_config});
+        const reduce_ttir = generateTtir(std.heap.c_allocator, io, "attention", "reduce_segments_ptr", reduce_generation_config.reduce_segments_ptr) catch unreachable;
+        defer std.heap.c_allocator.free(reduce_ttir);
 
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
         const block_table_strides = parameters.block_table.shape().computeElementStrides().constSlice();
@@ -475,28 +624,28 @@ pub const paged = struct {
             },
         );
 
-        const output = kernels.ReduceSegmentsPtr.Kernel.call(
-            .{
-                .segm_output_ptr = attn_output.segm_output,
-                .segm_max_ptr = attn_output.segm_max,
-                .segm_expsum_ptr = attn_output.segm_expsum,
-                .seq_lens_ptr = parameters.seq_lens,
-                .num_seqs_ptr = num_seqs_ptr,
-                .out_scale_inv_ptr = dummy,
-                .output_stride_0_ptr = q_strides_0_ptr,
-                .output_stride_1_ptr = q_strides_1_ptr,
-                .block_table_stride_ptr = block_table_strides_ptr,
-                .query_start_len_ptr = parameters.query_start_len,
-            },
-            .{ .output = q.shape() },
-            .{
-                .cfg = reduce_kernel_config,
-                .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
-                .num_stages = @intCast(config.reduce.num_stages),
-                .num_warps = @intCast(config.reduce.num_warps),
-            },
-        );
+        const output = zml.ops.triton(.{
+            attn_output[0],
+            attn_output[1],
+            attn_output[2],
+            parameters.seq_lens,
+            num_seqs_ptr,
+            dummy, // out_scale_inv_ptr
+            q_strides_0_ptr,
+            q_strides_1_ptr,
+            block_table_strides_ptr,
+            parameters.query_start_len,
+        }, .{
+            q.shape(),
+        }, .{
+            .debug = false,
+            .name = "reduce_segments_ptr",
+            .ir = reduce_ttir,
+            .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
+            .num_stages = @intCast(config.reduce.num_stages),
+            .num_warps = @intCast(config.reduce.num_warps),
+        });
 
-        return output.output;
+        return output[0];
     }
 };

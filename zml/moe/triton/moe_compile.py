@@ -1,14 +1,6 @@
-import argparse
-import json
-
 import triton
-import triton.backends as triton_backends
 import triton.language as tl
-from triton.backends import Backend as BackendRegistration
-from triton.runtime.driver import driver as runtime_driver
 
-from fake_plugin.compiler import Backend as FakeCompilerBackend
-from fake_plugin.driver import Driver as FakeDriver
 from triton_kernels.moe import (
     per_token_group_quant_fp8,
     fused_moe_kernel,
@@ -57,14 +49,6 @@ def triton_dtype(dtype: str):
     if dtype not in mapping:
         raise ValueError(f"Unsupported Triton compute dtype: {dtype}")
     return mapping[dtype]
-
-
-def register_fake_backend() -> None:
-    triton_backends.backends["mybackend_runtime"] = BackendRegistration(
-        compiler=FakeCompilerBackend,
-        driver=FakeDriver,
-    )
-    runtime_driver.set_active(FakeDriver())
 
 
 def compile_fused_moe_kernel(cfg: dict) -> str:
@@ -261,22 +245,15 @@ def compile_activation_quant_fp8_kernel(cfg: dict) -> str:
     return kernel.asm["ttir"]
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Generate TTIR for wrapped MoE Triton kernels")
-    parser.add_argument("--config", required=True, help="Raw JSON string")
-    args = parser.parse_args()
-
-    cfg = json.loads(args.config)
-
-    register_fake_backend()
-    if cfg.get("kernel_family") == "align_block_size":
-        ttir = compile_align_block_size_kernel(cfg)
-    elif cfg.get("kernel_family") == "activation_quant_fp8":
-        ttir = compile_activation_quant_fp8_kernel(cfg)
+def compile_moe(kernel: str, cfg: dict) -> str:
+    if kernel == "matmul_config":
+        payload = cfg.get("matmul_config", cfg)
+        return compile_fused_moe_kernel(payload)
+    elif kernel == "align_block":
+        payload = cfg.get("align_block", cfg)
+        return compile_align_block_size_kernel(payload)
+    elif kernel == "quant_config":
+        payload = cfg.get("quant_config", cfg)
+        return compile_activation_quant_fp8_kernel(payload)
     else:
-        ttir = compile_fused_moe_kernel(cfg)
-    print(ttir)
-
-
-if __name__ == "__main__":
-    main()
+        raise ValueError(f"Unsupported moe kernel: {kernel}")

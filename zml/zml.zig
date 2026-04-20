@@ -49,6 +49,7 @@ pub const tracer = @import("tracer.zig");
 pub const kernel = @import("kernel.zig");
 pub const triton_moe = @import("moe/triton.zig");
 pub const moe = @import("moe.zig");
+pub const triton = @import("triton/runtime.zig");
 
 test "zml" {
     std.testing.refAllDecls(@This());

@@ -1,0 +1,128 @@
+load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("@rules_python//python:py_library.bzl", "py_library")
+load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+uv_lock(
+    name = "requirements",
+    srcs = ["requirements.in"],
+    out = "requirements.lock.txt",
+    args = [
+        "--emit-index-url",
+        "--emit-find-links",
+        "--index-strategy=unsafe-best-match",
+        "--upgrade",
+        "--python-platform=x86_64-manylinux_2_37",
+    ],
+    python_version = "3.12",
+    tags = ["manual"],
+)
+
+py_library(
+    name = "fake_plugin",
+    srcs = [
+        "fake_plugin/__init__.py",
+        "fake_plugin/compiler.py",
+        "fake_plugin/driver.py",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@triton_py_deps//triton"],
+)
+
+cc_library(
+    name = "libpython",
+    hdrs = ["libpython.h"],
+    deps = [
+        "@python_3_12//:libpython",
+        "@python_3_12//:python_headers",
+    ],
+)
+
+py_binary(
+    name = "generate_py",
+    srcs = ["generate.py"],
+    main = "generate.py",
+    python_version = "3.12",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml/attention/triton:attention_compile",
+        "//zml/moe/triton:moe_compile",
+        ":fake_plugin",
+        "@triton_py_deps//triton",
+    ],
+)
+
+zig_binary(
+    name = "generate",
+    data = [":fake_plugin"],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
+    main = "generate.zig",
+    tags = ["manual"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = [":libpython"],
+)
+
+runfiles_to_default(
+    name = "generate_files",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = [
+        ":generate",
+        ":generate_py",
+    ],
+)
+
+copy_to_directory(
+    name = "sandbox",
+    srcs = [
+        ":generate_files",
+        "@zlib1g",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    add_directory_to_runfiles = False,
+    allow_overwrites = True,
+    exclude_srcs_patterns = [
+        "**/include/**",
+        "**/_solib_*/**",
+    ],
+    hardlink = "auto",
+    include_external_repositories = ["**"],
+    include_srcs_patterns = [
+        "generate",
+        "generate.py",
+        "zml/triton/generation/generate.py",
+        "fake_plugin/*",
+        "zml/triton/generation/fake_plugin/*",
+        "attention_compile.py",
+        "moe_compile.py",
+        "zml/attention/triton/attention_compile.py",
+        "zml/moe/triton/moe_compile.py",
+        "triton_kernels/*",
+        "zml/attention/triton/triton_kernels/*",
+        "zml/moe/triton/triton_kernels/*",
+        "**/lib**",
+        "lib/python*/**",
+        "site-packages/**",
+    ],
+    replace_prefixes = {
+        "zml/triton/generation/generate.py": "site-packages/generate.py",
+        "generate.py": "site-packages/generate.py",
+        "fake_plugin": "site-packages/fake_plugin",
+        "zml/triton/generation/fake_plugin": "site-packages/fake_plugin",
+        "attention_compile.py": "site-packages/attention_compile.py",
+        "moe_compile.py": "site-packages/moe_compile.py",
+        "zml/attention/triton/attention_compile.py": "site-packages/attention_compile.py",
+        "zml/moe/triton/moe_compile.py": "site-packages/moe_compile.py",
+        "triton_kernels": "site-packages/triton_kernels",
+        "zml/attention/triton/triton_kernels": "site-packages/triton_kernels",
+        "zml/moe/triton/triton_kernels": "site-packages/triton_kernels",
+        "generate": "bin/generate",
+        "lib/x86_64-linux-gnu": "lib",
+    },
+    visibility = ["//visibility:public"],
+)

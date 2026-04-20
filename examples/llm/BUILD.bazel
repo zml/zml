@@ -9,10 +9,6 @@ zig_binary(
     name = "llm",
     srcs = glob(["**/*.zig"]),
     main = "main.zig",
-    data = [
-        "//zml/moe/triton:sandbox",
-        "//zml/moe/triton:triton_kernels/config.json",
-    ],
     visibility = ["//visibility:public"],
     deps = ["//zml", "@linenoise"],
 )
