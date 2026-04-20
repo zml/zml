@@ -2469,6 +2469,22 @@ pub const Tensor = struct {
             }
         }
 
+        // XLA optimizes that aways but TT doesn't
+        full_slice: {
+            if (self_batch_axes.len != 0 or indices_batch_axes.len != 0) {
+                break :full_slice;
+            }
+
+            for (start_index_map.constSlice()) |ax| {
+                const a: u3 = @intCast(ax);
+                if (slice_dims.get(a) != self._shape.dim(a)) {
+                    break :full_slice;
+                }
+            }
+
+            return _result(res_shape, self.value());
+        }
+
         const gather_op = dialects.stablehlo.gather(
             mlirCtx(),
             self.value(),
