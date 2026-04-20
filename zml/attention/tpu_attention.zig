@@ -279,20 +279,16 @@ pub const mosaic_tpu = struct {
             .merge(.{ .hkv = .{ .hkv, .kv } });
     }
 
-    inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor) PreparedInputs {
-        stdx.debug.assert(k_cache.shape().eqlWithTags(v_cache.shape()), "Expected paged K/V cache shapes to match, got {f} and {f}", .{ k_cache.shape(), v_cache.shape() });
-
+    inline fn prepareDenseInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
         const q_ragged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
-        // Note :
-        // In a future PR, we'll have to change the pagedAttention API a bit so that we don't have to fuse keys and values
-        const kv_pages = fuseKvPages(k_cache, v_cache).withPartitioning(.{ .hkv = .model });
+        const kv_pages_partitioned = kv_pages.withPartitioning(.{ .hkv = .model });
         const query_start_len = parameters.query_start_len.withPartitioning(.{ .n = .replicated });
 
         // Note
         // activeSequenceCount could probably be computed when preparing the inputs and injected through Parameters, but we'll keep that for later.
         return .{
             .q = q_ragged,
-            .kv_pages = kv_pages,
+            .kv_pages = kv_pages_partitioned,
             .seq_lens = parameters.seq_lens.withPartitioning(.{ ._0 = .replicated }),
             .block_table = parameters.block_table.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
             .query_start_len = query_start_len,
@@ -351,12 +347,8 @@ pub const mosaic_tpu = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
-        _ = k;
-        _ = v;
+    fn runPreparedAttention(parameters: Parameters, context: Context, q: zml.Tensor, prepared: PreparedInputs, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
-
-        const prepared = prepareInputs(parameters, q, k_cache, v_cache);
 
         // Keep sharding intent on the `manualComputation` boundary only. The
         // TPU smoke compile regressed when the body restated
@@ -408,5 +400,15 @@ pub const mosaic_tpu = struct {
         const restored = restoreQueryHeads(q, q_out);
         stdx.debug.assert(restored.shape().eql(q.shape()), "mosaic_tpu ragged paged attention output shape mismatch, got {f}, expected {f}", .{ restored.shape(), q.shape() });
         return restored;
+    }
+
+    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        _ = k;
+        _ = v;
+        return runPreparedAttention(parameters, context, q, prepareDenseInputs(parameters, q, fuseKvPages(k_cache, v_cache)), opts);
+    }
+
+    pub fn pagedAttentionDense(parameters: Parameters, context: Context, q: zml.Tensor, kv_pages: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+        return runPreparedAttention(parameters, context, q, prepareDenseInputs(parameters, q, kv_pages), opts);
     }
 };
