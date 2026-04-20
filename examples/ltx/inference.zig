@@ -593,7 +593,7 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    std.log.info("LTX-2.3 Unified Pipeline (Stage 1 → Bridge → Stage 2)", .{});
+    std.log.info("LTX-2.3 Pipeline (Stage 1 → Bridge → Stage 2)", .{});
 
     var it = init.minimal.args.iterate();
     const args = try parseArgs(&it);
@@ -667,7 +667,22 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 1: Stage 1 — {d}-step guided denoising ===", .{NUM_STAGE1_STEPS});
 
-    const s1 = try runStage1(allocator, io, platform, sharding, args.stage1_ckpt, args.bf16_attn_stage1, args.image, pipe_meta, args.dump_intermediates, args.output_dir, args.seed, args.gemma_hidden_states_pos, args.gemma_hidden_states_neg, &timer_s1);
+    const s1 = try runStage1(
+        allocator,
+        io,
+        platform,
+        sharding,
+        args.stage1_ckpt,
+        args.bf16_attn_stage1,
+        args.image,
+        pipe_meta,
+        args.dump_intermediates,
+        args.output_dir,
+        args.seed,
+        args.gemma_hidden_states_pos,
+        args.gemma_hidden_states_neg,
+        &timer_s1,
+    );
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -3752,6 +3767,8 @@ fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) Pipel
     const h_lat_s1: i64 = @divTrunc(h_lat_s2 + 1, 2);
     const w_lat_s1: i64 = @divTrunc(w_lat_s2 + 1, 2);
     // Audio tokens: round(num_frames / fps * 25)
+    // Main vocoder produces 16kHz audio (BWE then upsamples it at 48kHz), with hop_length=160 (step size for the sliding window) and downsample_factor=4
+    // Explanation for 25 tokens/second:
     // Constants: sample_rate=16000, hop_length=160, downsample_factor=4
     // → latents_per_second = 16000 / (160 * 4) = 25
     const duration: f64 = @as(f64, @floatFromInt(num_frames)) / fps;
