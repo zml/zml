@@ -1026,7 +1026,7 @@
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
         "bzlTransitiveDigest": "twSeB3VPTVkayY0uwqEzDzal5MbnZX45iC6jdheZQRo=",
-        "usagesDigest": "V0dQbNX+eB3aThhopTuYblOol9rtleO/RA16gC5Zn+Y=",
+        "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1065,7 +1065,7 @@
             "attributes": {
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platform": "linux/amd64",
@@ -1079,7 +1079,7 @@
               "target_name": "debian_12",
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platforms": {
@@ -1417,7 +1417,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "r7tCqbjlVKc7XEXV8Hiak2ElFfkjvDdMf8Ym+7zxukU=",
+        "bzlTransitiveDigest": "xx2lb1ba6RcnnXdfUyaxI5j2wFLM03GTQfTv2UUie3Q=",
         "usagesDigest": "3YLtfwSfkXudL3+Coim7hrTFktQHln4CiUbszoYuRzE=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",

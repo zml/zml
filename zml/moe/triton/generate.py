@@ -263,18 +263,22 @@ def compile_activation_quant_fp8_kernel(cfg: dict) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Generate TTIR for wrapped MoE Triton kernels")
+    parser.add_argument("--kernel", required=True, help="Tagged Config kernel")
     parser.add_argument("--config", required=True, help="Raw JSON string")
     args = parser.parse_args()
 
     cfg = json.loads(args.config)
+    kernel = args.kernel
 
     register_fake_backend()
-    if cfg.get("kernel_family") == "align_block_size":
+    if kernel == "align_block":
         ttir = compile_align_block_size_kernel(cfg)
-    elif cfg.get("kernel_family") == "activation_quant_fp8":
+    elif kernel == "quant_config":
         ttir = compile_activation_quant_fp8_kernel(cfg)
-    else:
+    elif kernel == "matmul_config":
         ttir = compile_fused_moe_kernel(cfg)
+    else:
+        raise ValueError(f"Unsupported TTIR config kernel: {kernel}")
     print(ttir)
 
 
