@@ -201,7 +201,13 @@ pub const GenerationConfig = union(KernelKind) {
     reduce_segments_ptr: GenerationConfigReduce,
 };
 
-fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConfig) ![:0]const u8 {
+fn generateTtir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    backend: []const u8,
+    kernel: []const u8,
+    config: anytype,
+) ![:0]const u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
     const writer_buffer = try arena.allocator().alloc(u8, 4096);
@@ -217,7 +223,11 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
         defer triton_runtime.process_mutex.unlock(compilation_context.io);
 
         var writer = triton_runtime.process.stdin.?.writer(io, writer_buffer);
-        try writer.interface.print("{f}\n", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+        try writer.interface.print("{f}\n", .{std.json.fmt(.{
+            .backend = backend,
+            .kernel = kernel,
+            .config = config,
+        }, .{ .emit_null_optional_fields = false })});
         try writer.interface.flush();
 
         var reader = triton_runtime.process.stdout.?.reader(io, reader_buffer);
@@ -437,7 +447,7 @@ pub const paged = struct {
 
         const io = zml.module.CompilationContext.current().io;
         const allocator = zml.module.CompilationContext.current().allocator;
-        const ttir = generateTtir(allocator, io, generation_config) catch unreachable;
+        const ttir = generateTtir(allocator, io, "attention", "kernel_unified_attention_2d_ptr", generation_config.kernel_unified_attention_2d_ptr) catch unreachable;
         defer allocator.free(ttir);
 
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
@@ -532,7 +542,7 @@ pub const paged = struct {
 
         const io = zml.module.CompilationContext.current().io;
         const allocator = zml.module.CompilationContext.current().allocator;
-        const attn_ttir = generateTtir(allocator, io, attn_generation_config) catch unreachable;
+        const attn_ttir = generateTtir(allocator, io, "attention", "kernel_unified_attention_3d_ptr", attn_generation_config.kernel_unified_attention_3d_ptr) catch unreachable;
         defer allocator.free(attn_ttir);
 
         const reduce_generation_config: GenerationConfig = .{
@@ -554,7 +564,7 @@ pub const paged = struct {
             },
         };
         log.debug("pagedAttention3d reduce config: {any}", .{reduce_generation_config});
-        const reduce_ttir = generateTtir(std.heap.c_allocator, io, reduce_generation_config) catch unreachable;
+        const reduce_ttir = generateTtir(std.heap.c_allocator, io, "attention", "reduce_segments_ptr", reduce_generation_config.reduce_segments_ptr) catch unreachable;
         defer std.heap.c_allocator.free(reduce_ttir);
 
         const dummy = zml.Tensor.constant(zml.DataType.i8.zero());
@@ -638,44 +648,5 @@ pub const paged = struct {
         });
 
         return output[0];
-    }
-};
-
-pub const Runtime = struct {
-    process: std.process.Child,
-    process_mutex: *std.Io.Mutex,
-
-    pub fn init(allocator: std.mem.Allocator, io: std.Io) !Runtime {
-        var arena: std.heap.ArenaAllocator = .init(allocator);
-        defer arena.deinit();
-
-        const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
-        const sandbox_path = runfiles.rlocationAlloc(arena.allocator(), "zml/zml/attention/triton/sandbox") catch unreachable;
-
-        var map: std.process.Environ.Map = .init(arena.allocator());
-        try map.put("LD_LIBRARY_PATH", std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "lib" }) catch unreachable);
-
-        const process_mutex = try allocator.create(std.Io.Mutex);
-        errdefer allocator.destroy(process_mutex);
-        process_mutex.* = .init;
-
-        const process = try std.process.spawn(io, .{
-            .argv = &.{std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "bin", "generate" }) catch unreachable},
-            .stdin = .pipe,
-            .stdout = .pipe,
-            .environ_map = &map,
-        });
-
-        return .{
-            .process = process,
-            .process_mutex = process_mutex,
-        };
-    }
-
-    pub fn deinit(self: *Runtime, allocator: std.mem.Allocator, io: std.Io) void {
-        allocator.destroy(self.process_mutex);
-        // NOTE(Corendos): This is not portable, but I couldn't find a better way with the current std.Io.
-        _ = std.c.kill(self.process.id.?, .INT);
-        _ = self.process.wait(io) catch unreachable;
     }
 };

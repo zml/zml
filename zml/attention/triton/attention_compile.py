@@ -1,15 +1,6 @@
-import signal
-import sys
-import json
 import math
 import triton
 
-import triton.backends as triton_backends
-from triton.backends import Backend as BackendRegistration
-from triton.runtime.driver import driver as runtime_driver
-
-from fake_plugin.compiler import Backend as FakeCompilerBackend
-from fake_plugin.driver import Driver as FakeDriver
 from triton_kernels.unified_attention import (
     kernel_unified_attention_2d_ptr,
     kernel_unified_attention_3d_ptr,
@@ -76,14 +67,6 @@ def select_3d_config(
         "num_stages": 1,
     }
     return attn_config, reduce_config
-
-
-def register_fake_backend() -> None:
-    triton_backends.backends["mybackend_runtime"] = BackendRegistration(
-        compiler=FakeCompilerBackend,
-        driver=FakeDriver,
-    )
-    runtime_driver.set_active(FakeDriver())
 
 
 def compile_2d_ptr(cfg: dict) -> str:
@@ -291,7 +274,6 @@ def compile_reduce_ptr(cfg: dict) -> str:
     # unused
     max_seqlen_k = 0
 
-
     reduce_cfg = cfg["config"]
     num_segments_per_seq = reduce_cfg["num_segments_per_seq"]
     tile_size = reduce_cfg["tile_size"]
@@ -333,33 +315,16 @@ def compile_reduce_ptr(cfg: dict) -> str:
     return kernel.asm["ttir"]
 
 
-def handle_sigint(signum, frame):
-    sys.exit(0)
-
-
-def main() -> None:
-    register_fake_backend()
-    signal.signal(signal.SIGINT, handle_sigint)
-
-    for raw_line in sys.stdin:
-        line = raw_line.strip()
-        if not line:
-            continue
-
-        try:
-            cfg = json.loads(line)
-            if not isinstance(cfg, dict):
-                raise ValueError("request must be a JSON object")
-
-            if "kernel_unified_attention_2d_ptr" in cfg:
-                ttir = compile_2d_ptr(cfg["kernel_unified_attention_2d_ptr"])
-            elif "kernel_unified_attention_3d_ptr" in cfg:
-                ttir = compile_3d_ptr(cfg["kernel_unified_attention_3d_ptr"])
-            elif "reduce_segments_ptr" in cfg:
-                ttir = compile_reduce_ptr(cfg["reduce_segments_ptr"])
-
-            response = {"ok": True, "result": ttir}
-        except Exception as exc:
-            response = {"ok": False, "error": str(exc)}
-
-        print(json.dumps(response), flush=True)
+def compile_attention(kernel: str, cfg: dict) -> str:
+    """Public entrypoint for unified dispatcher."""
+    if kernel == "kernel_unified_attention_2d_ptr":
+        payload = cfg.get("kernel_unified_attention_2d_ptr", cfg)
+        return compile_2d_ptr(payload)
+    elif kernel == "kernel_unified_attention_3d_ptr":
+        payload = cfg.get("kernel_unified_attention_3d_ptr", cfg)
+        return compile_3d_ptr(payload)
+    elif kernel == "reduce_segments_ptr":
+        payload = cfg.get("reduce_segments_ptr", cfg)
+        return compile_reduce_ptr(payload)
+    else:
+        raise ValueError(f"Unsupported attention kernel: {kernel}")

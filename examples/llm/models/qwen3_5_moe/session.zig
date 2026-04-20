@@ -291,6 +291,9 @@ pub const Session = struct {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
+        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
+        defer self.allocator.free(out_tokens_buffer);
+
         const hidden_size = self.compiled_model.loaded_model.inner.config.text_config.hidden_size;
         const model_dtype = self.compiled_model.loaded_model.inner.text_model.embed_tokens.weight.dtype();
 
@@ -333,7 +336,7 @@ pub const Session = struct {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            const token = try decoder.feed_one(token_id);
+            const token = try decoder.feedOne(token_id, out_tokens_buffer);
             if (self.think_start) |think_start| if (token_id == think_start) {
                 try stdout.writeAll("\x1b[2m");
             };
@@ -407,6 +410,9 @@ pub const Session = struct {
 
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
+
+        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
+        try stdout.flush();
     }
 };
 
@@ -420,17 +426,29 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len + 32);
     if (!is_first_turn) {
         try tokens.append(allocator, im_end);
-        try encoder.encodeAppend(allocator, &tokens, "\n");
+        const newline = try encoder.encodeAlloc(allocator, "\n");
+        try tokens.appendSlice(allocator, newline);
+        allocator.free(newline);
     }
 
     try tokens.append(allocator, im_start);
-    try encoder.encodeAppend(allocator, &tokens, "user\n");
-    try encoder.encodeAppend(allocator, &tokens, prompt);
+    const user = try encoder.encodeAlloc(allocator, "user\n");
+    try tokens.appendSlice(allocator, user);
+    allocator.free(user);
+    const prompt_encoded = try encoder.encodeAlloc(allocator, prompt);
+    try tokens.appendSlice(allocator, prompt_encoded);
+    allocator.free(prompt_encoded);
     try tokens.append(allocator, im_end);
-    try encoder.encodeAppend(allocator, &tokens, "\n");
+    const newline = try encoder.encodeAlloc(allocator, "\n");
+    try tokens.appendSlice(allocator, newline);
+    allocator.free(newline);
     try tokens.append(allocator, im_start);
-    try encoder.encodeAppend(allocator, &tokens, "assistant\n");
-    try encoder.encodeAppend(allocator, &tokens, "<think>\n");
+    const assistant = try encoder.encodeAlloc(allocator, "assistant\n");
+    try tokens.appendSlice(allocator, assistant);
+    allocator.free(assistant);
+    const think = try encoder.encodeAlloc(allocator, "<think>\n");
+    try tokens.appendSlice(allocator, think);
+    allocator.free(think);
 
     return tokens.toOwnedSlice(allocator);
 }

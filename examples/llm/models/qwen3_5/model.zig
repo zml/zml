@@ -127,7 +127,7 @@ pub const LoadedModel = struct {
         self: *const LoadedModel,
         allocator: std.mem.Allocator,
         io: std.Io,
-        platform: *const zml.Platform,
+        platform: *zml.Platform,
         backend: zml.attention.attention.Backend,
         shardings: common.Shardings,
         seqlen: usize,
