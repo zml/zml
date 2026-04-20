@@ -2896,14 +2896,14 @@ pub const Tensor = struct {
             const left_gt_right = values.left.cmp(.GT, values.right);
             const is_nan = values.left.cmp(.NE, values.left);
             const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-            // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(values.left, values.right);
 
             // If values.left == values.right: keep the smallest idx.
             const is_same = values.left.cmp(.EQ, values.right);
             const is_first = indices.left.cmp(.LT, indices.right);
             const is_same_but_first = is_same.logical(.AND, is_first);
             const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
+            // we are bubbling up Nan.
+            const max_val = left_gt_or_nan.select(values.left, values.right);
             const max_idx = keep_left_idx.select(indices.left, indices.right);
 
             return .{ max_val, max_idx };
