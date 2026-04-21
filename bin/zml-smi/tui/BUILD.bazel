@@ -1,4 +1,4 @@
-load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
 
 zig_library(
     name = "tui",
@@ -49,4 +49,9 @@ zig_library(
         "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
         "//conditions:default": ["//bin/zml-smi/platforms/linux"],
     }),
+)
+
+zig_test(
+    name = "test",
+    deps = [":tui"],
 )
