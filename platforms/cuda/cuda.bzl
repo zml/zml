@@ -65,6 +65,11 @@ CUDA_PACKAGES = {
         srcs = ["lib/libcupti.so.13"],
     ),
     "cuda_nvtx": "\n".join([
+        packages.cc_library_hdrs_glob(
+            name = "headers",
+            hdrs_glob = ["include/nvtx3/**"],
+            includes = ["include"],
+        ),
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
@@ -283,7 +288,7 @@ def _cuda_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = ["cuda_nvml_dev", "libpjrt_cuda"],
+        root_module_direct_deps = ["cuda_nvtx", "cuda_nvml_dev", "libpjrt_cuda"],
         root_module_direct_dev_deps = [],
     )
 

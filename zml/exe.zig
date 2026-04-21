@@ -6,6 +6,7 @@ const stdx = @import("stdx");
 const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
+const tracer = @import("profiling/tracer.zig");
 const Shape = @import("shape.zig").Shape;
 const Sharding = @import("sharding.zig").Sharding;
 
@@ -289,10 +290,22 @@ pub const Exe = struct {
     };
 
     pub fn callOpts(self: *const Exe, io: std.Io, arguments: Arguments, results_: *Results, opts: CallOpts) void {
+        var trace = tracer.scope("zml.exe.call", .{
+            .wait = opts.wait,
+            .arg_count = arguments.expected_shapes.len,
+            .result_count = results_.expected_shapes.len,
+        }) catch unreachable;
+        defer trace.end();
         return self.internalCall(io, arguments, results_, opts);
     }
 
     pub fn call(self: *const Exe, arguments: Arguments, results_: *Results) void {
+        var trace = tracer.scope("zml.exe.call", .{
+            .wait = false,
+            .arg_count = arguments.expected_shapes.len,
+            .result_count = results_.expected_shapes.len,
+        }) catch unreachable;
+        defer trace.end();
         return self.internalCall(null, arguments, results_, .{});
     }
 };

@@ -20,6 +20,7 @@ single_version_override(
 
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
+bazel_dep(name = "snappy", version = "1.2.2.bcr.3")
 bazel_dep(name = "rules_cc", version = "0.2.16")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
@@ -37,7 +38,6 @@ git_override(
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.1")
-bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
 
@@ -171,10 +171,10 @@ cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "cuda_nvml_dev", "libpjrt_cuda")
+use_repo(cuda, "cuda_nvml_dev", "cuda_nvtx", "libpjrt_cuda")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
-use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")
+use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas", "rocprofiler-sdk", "rocprofiler-sdk-roctx")
 
 tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
@@ -197,6 +197,7 @@ use_repo(
     "eigen_archive",
     "farmhash_archive",
     "farmhash_gpu_archive",
+    "hwloc",
     "llvm-raw",
     "local_config_cuda",
     "local_config_remote_execution",
