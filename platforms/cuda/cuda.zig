@@ -37,8 +37,8 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
         .argv = &[_][]const u8{nvidia_compat_path},
         .cwd = .{ .path = sandbox_path },
         .stdin = .ignore,
-        .stdout = .ignore,
-        .stderr = .ignore,
+        .stdout = .inherit,
+        .stderr = .inherit,
     });
     defer child.kill(io);
 
@@ -50,6 +50,7 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
 
     return switch (result) {
         .Success => true,
+        .SystemDriverMismatch,
         .CompatNotSupportedOnDevice => false,
         .UnexpectedError => blk: {
             log.err("CUDA compatibility probe returned unexpected error code", .{});
