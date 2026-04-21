@@ -186,6 +186,14 @@ fn setOuterCustomNativeKernelIoAttributes(
     input_names: []const []const u8,
     output_names: []const []const u8,
 ) void {
+    const root_instruction = findInstructionById(instructions, c.xla_HloComputationProto_root_id(comp)) orelse return;
+    const root_opcode = upb.slice(c.xla_HloInstructionProto_opcode(root_instruction)) orelse return;
+    if (!std.mem.eql(u8, root_opcode, "tuple")) return;
+
+    var root_operand_count: usize = 0;
+    const root_operand_ids = c.xla_HloInstructionProto_operand_ids(root_instruction, &root_operand_count)[0..root_operand_count];
+    if (root_operand_ids.len != 1 or root_operand_ids[0] != c.xla_HloInstructionProto_id(instruction)) return;
+
     var operand_count: usize = 0;
     const operand_ids = c.xla_HloInstructionProto_operand_ids(instruction, &operand_count)[0..operand_count];
     for (operand_ids, 0..) |operand_id, i| {
@@ -197,7 +205,6 @@ fn setOuterCustomNativeKernelIoAttributes(
         hlo_neff.setInstructionFrontendAttribute(upb_arena, operand, neff_input_name_attr, input_names[i]);
     }
 
-    const root_instruction = findInstructionById(instructions, c.xla_HloComputationProto_root_id(comp)) orelse return;
     if (output_names.len == 1) {
         hlo_neff.setInstructionFrontendAttribute(upb_arena, root_instruction, neff_output_names_attr, output_names[0]);
     }
@@ -298,9 +305,21 @@ fn compileNkiKernel(
             .cwd = .{ .path = tmp_dir },
         });
         const term = try child.wait(io);
-        if (term.exited != 0) {
-            log.err("nki-cc exited with code {}", .{term.exited});
-            return error.NkiCcFailed;
+        switch (term) {
+            .exited => |code| {
+                if (code != 0) {
+                    log.err("nki-cc exited with code {}", .{code});
+                    return error.NkiCcFailed;
+                }
+            },
+            .signal => |sig| {
+                log.err("nki-cc terminated by signal {}", .{sig});
+                return error.NkiCcFailed;
+            },
+            else => |status| {
+                log.err("nki-cc terminated unexpectedly: {}", .{status});
+                return error.NkiCcFailed;
+            },
         }
     }
 

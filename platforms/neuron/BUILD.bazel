@@ -38,6 +38,15 @@ zig_binary(
 zig_binary(
     name = "nki-cc",
     target_compatible_with = ["@platforms//os:linux"],
+    data = [
+        # `zml_nki_compiler.py` imports `nki` directly, while kernels like
+        # `zml.attention` import `nkilib.*`. Current Neuron SDK releases ship
+        # `nkilib` inside the `neuronx-cc` wheel, so make both wheels explicit
+        # runfiles for the isolated Python interpreter rather than relying on
+        # other sandbox contents to pull them in indirectly.
+        "@neuron_py_deps//neuronx_cc",
+        "@neuron_py_deps//nki",
+    ],
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "nki-cc.zig",
     tags = ["manual"],

@@ -223,7 +223,7 @@ pub fn compile(
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
 
-    log.warn("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
+    log.debug("\n******** ZML generated MLIR ********\n{f}", .{compilation_context.module.operation()});
     const loaded_executable = compileModuleToPjrtExecutable(arena.allocator(), st_io.io(), platform, compilation_context.module, compilation_context.partitioning, opts) catch unreachable;
 
     const exe = try Exe.init(

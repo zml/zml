@@ -76,6 +76,56 @@ pub fn PyBytes_AsStringAndSize(object: *c.PyObject) []u8 {
     return buf[0..@intCast(len)];
 }
 
+fn pyStringArgSlice(object: *c.PyObject) ?[]const u8 {
+    if (c.PyBytes_Check(object) != 0) {
+        return PyBytes_AsStringAndSize(object);
+    }
+    if (c.PyUnicode_Check(object) != 0) {
+        var len: c.Py_ssize_t = undefined;
+        const ptr = c.PyUnicode_AsUTF8AndSize(object, &len) orelse return null;
+        return ptr[0..@intCast(len)];
+    }
+    return null;
+}
+
+fn isSupportedNeuronTarget(target: []const u8) bool {
+    return std.mem.eql(u8, target, "inf1") or
+        std.mem.eql(u8, target, "inf2") or
+        std.mem.eql(u8, target, "trn1") or
+        std.mem.eql(u8, target, "trn2");
+}
+
+fn resolveNeuronTarget(platform_version: []const u8, maybe_target: ?[]const u8) ![]const u8 {
+    if (std.c.getenv("ZML_NEURON_TARGET")) |target_override| {
+        const override = std.mem.span(target_override);
+        if (isSupportedNeuronTarget(override)) return override;
+        log.err("Unsupported ZML_NEURON_TARGET override: {s}\n", .{override});
+        return error.UnknownPlatformVersion;
+    }
+    if (std.c.getenv("NEURON_PLATFORM_TARGET_OVERRIDE")) |target_override| {
+        const override = std.mem.span(target_override);
+        if (isSupportedNeuronTarget(override)) return override;
+        log.err("Unsupported NEURON_PLATFORM_TARGET_OVERRIDE override: {s}\n", .{override});
+        return error.UnknownPlatformVersion;
+    }
+    if (maybe_target) |target| {
+        if (isSupportedNeuronTarget(target)) return target;
+    }
+    return std.StaticStringMap([]const u8).initComptime(.{
+        .{ "1.0", "inf1" },
+        .{ "2.0", "trn1" },
+        .{ "3.0", "trn2" },
+    }).get(platform_version) orelse {
+        log.err("Unknown platform version: {s}\n", .{platform_version});
+        return error.UnknownPlatformVersion;
+    };
+}
+
+fn getenvOrDefault(name: [:0]const u8, default: []const u8) []const u8 {
+    if (std.c.getenv(name)) |value| return std.mem.span(value);
+    return default;
+}
+
 fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) !?*c.PyObject {
     const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(self)));
     const io = state.threaded.io();
@@ -87,15 +137,8 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     const code = PyBytes_AsStringAndSize(args[0]);
     const platform_version = PyBytes_AsStringAndSize(args[2]);
-
-    const target = std.StaticStringMap([]const u8).initComptime(.{
-        .{ "1.0", "inf1" },
-        .{ "2.0", "trn1" },
-        .{ "3.0", "trn2" },
-    }).get(platform_version) orelse {
-        log.err("Unknown platform version: {s}\n", .{platform_version});
-        return error.UnknownPlatformVersion;
-    };
+    const target_hint = if (args.len > 1) pyStringArgSlice(args[1]) else null;
+    const target = try resolveNeuronTarget(platform_version, target_hint);
 
     var tmp_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tmp_dir = try makeTempDir(io, &tmp_dir_buf, "zml-neuronxcc-");
@@ -134,6 +177,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         const gil_state = c.PyEval_SaveThread();
         defer c.PyEval_RestoreThread(gil_state);
 
+        const cc_verbose = getenvOrDefault("ZML_NEURON_CC_VERBOSE", "debug");
+        const cc_logfile_verbose = getenvOrDefault("ZML_NEURON_CC_LOGFILE_VERBOSE", cc_verbose);
+
         var child = try std.process.spawn(io, .{
             .argv = &.{
                 neuronx_cc_path,
@@ -141,7 +187,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
                 "--framework=XLA",
                 "--target",
                 target,
-                "--verbose=35",
+                try std.fmt.allocPrint(arena.allocator(), "--verbose={s}", .{cc_verbose}),
                 "--enable-internal-neff-wrapper",
                 "--output",
                 neff_file,
@@ -151,6 +197,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
                 // disable it, we do our own
                 "--auto-cast=none",
                 "--enable-fast-loading-neuron-binaries",
+                "--logfile",
+                try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "log-neuron-cc.txt" }),
+                try std.fmt.allocPrint(arena.allocator(), "--logfile-verbose={s}", .{cc_logfile_verbose}),
                 code_file,
             },
             .stdin = .ignore,
@@ -159,9 +208,21 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
             .cwd = .{ .path = tmp_dir },
         });
         const term = try child.wait(io);
-        if (term.exited != 0) {
-            log.err("neuronx-cc exited with code {}", .{term.exited});
-            return error.NeuronxCcFailed;
+        switch (term) {
+            .exited => |exit_code| {
+                if (exit_code != 0) {
+                    log.err("neuronx-cc exited with code {}", .{exit_code});
+                    return error.NeuronxCcFailed;
+                }
+            },
+            .signal => |sig| {
+                log.err("neuronx-cc terminated by signal {}", .{sig});
+                return error.NeuronxCcFailed;
+            },
+            else => |status| {
+                log.err("neuronx-cc terminated unexpectedly: {}", .{status});
+                return error.NeuronxCcFailed;
+            },
         }
     }
 
