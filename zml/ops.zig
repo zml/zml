@@ -513,6 +513,118 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     return outputs_;
 }
 
+pub const NeuronNkiOps = struct {
+    name: []const u8,
+    entrypoint: []const u8,
+    source: []const u8,
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
+/// Generate an MLIR call for a Neuron NKI kernel.
+///
+/// The Neuron compile hook consumes the opaque backend_config string, compiles the
+/// kernel source to integration-mode BIR, and rewrites the custom call to
+/// `AwsNeuronCustomNativeKernel`.
+pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs.len]Tensor {
+    const mlir_ctx = CompilationContext.current().mlir_ctx;
+    var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
+    defer arena.deinit();
+
+    const allocator = arena.allocator();
+
+    var values: [inputs.len]*const mlir.Value = undefined;
+    var input_tensors: [inputs.len]Tensor = undefined;
+    inline for (0..inputs.len) |i| {
+        input_tensors[i] = inputs[i];
+        values[i] = inputs[i].value();
+    }
+
+    var output_shapes: [outputs.len]Shape = undefined;
+    var res_types: [outputs.len]*const mlir.Type = undefined;
+    inline for (outputs, 0..) |output, i| {
+        output_shapes[i] = output;
+        res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(mlir_ctx, output.dtype()));
+    }
+
+    const backend_encoder = std.base64.standard.Encoder;
+
+    const backend_config = blk: {
+        var configuration: std.Io.Writer.Allocating = .init(allocator);
+
+        const name = blk_name: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.name.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.name);
+            break :blk_name encoded;
+        };
+
+        const entrypoint = blk_entrypoint: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.entrypoint.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.entrypoint);
+            break :blk_entrypoint encoded;
+        };
+
+        const source = blk_source: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.source.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.source);
+            break :blk_source encoded;
+        };
+
+        configuration.writer.print("name={s}\n", .{name}) catch unreachable;
+        configuration.writer.print("entrypoint={s}\n", .{entrypoint}) catch unreachable;
+        configuration.writer.print("source={s}\n", .{source}) catch unreachable;
+        inline for (inputs, 0..) |input, i| {
+            appendNeuronNkiShapeSignature(&configuration.writer, "input", i, input.shape()) catch unreachable;
+        }
+        inline for (outputs, 0..) |output, i| {
+            appendNeuronNkiShapeSignature(&configuration.writer, "output", i, output) catch unreachable;
+        }
+
+        break :blk configuration.written();
+    };
+
+    var operands_layouts: [inputs.len][]const usize = undefined;
+    inline for (inputs, 0..) |input, i| {
+        operands_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+    }
+
+    var results_layouts: [outputs.len][]const usize = undefined;
+    inline for (outputs, 0..) |output, i| {
+        results_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+    }
+
+    const op = dialects.stablehlo.custom_call(
+        mlir_ctx,
+        &values,
+        &res_types,
+        .{
+            .call_target_name = "zml$neuron$nki",
+            .api_version = .original,
+            .backend_config = .{ .original = backend_config },
+            .has_side_effect = false,
+            .operand_layouts = &operands_layouts,
+            .result_layouts = &results_layouts,
+            .output_operand_aliases = opts.output_operand_aliases,
+        },
+        .unknown(mlir_ctx),
+    ).appendTo(CompilationContext.current().currentScope().block);
+
+    var outputs_: [outputs.len]Tensor = undefined;
+    inline for (outputs, 0..) |output, i| {
+        outputs_[i] = Tensor._result(output, op.result(i));
+    }
+
+    return outputs_;
+}
+
+fn appendNeuronNkiShapeSignature(writer: *std.Io.Writer, prefix: []const u8, index: usize, shape: Shape) !void {
+    try writer.print("{s}{d}={s}|", .{ prefix, index, @tagName(shape.dtype()) });
+    for (shape.dims(), 0..) |dim, i| {
+        if (i != 0) try writer.writeByte(',');
+        try writer.print("{d}", .{dim});
+    }
+    try writer.writeByte('\n');
+}
+
 test "triton" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
