@@ -280,7 +280,7 @@ pub const Tokenizer = struct {
                 )) catch |e| switch (e) {
                     error.ResourceExhausted => {
                         out.advance(produced * @sizeOf(u32));
-                        min_tokens -= produced;
+                        min_tokens = @max(32, min_tokens -| produced);
                         remaining = remaining[consumed..];
                         produced = 0;
                         consumed = 0;
@@ -295,7 +295,7 @@ pub const Tokenizer = struct {
                 }
 
                 out.advance(produced * @sizeOf(u32));
-                min_tokens -= produced;
+                min_tokens = @max(32, min_tokens -| produced);
                 remaining = remaining[consumed..];
             }
         }
@@ -405,7 +405,7 @@ pub const Tokenizer = struct {
         }
 
         pub fn decode(self: *Decoder, token_ids: []const u32, out: *std.Io.Writer) !void {
-            var min_output: usize = @max(token_ids.len * 4, 32);
+            var min_output: usize = @max(token_ids.len * 4, 128);
             var remaining = token_ids;
             while (remaining.len > 0) {
                 var consumed: usize = 0;
@@ -420,7 +420,7 @@ pub const Tokenizer = struct {
                 )) catch |e| switch (e) {
                     error.ResourceExhausted => {
                         out.advance(produced);
-                        min_output -= produced;
+                        min_output = @max(128, min_output -| produced);
                         remaining = remaining[consumed..];
                         produced = 0;
                         consumed = 0;
@@ -436,7 +436,7 @@ pub const Tokenizer = struct {
                 }
 
                 out.advance(produced);
-                min_output -= produced;
+                min_output = @max(128, min_output -| produced);
                 remaining = remaining[consumed..];
             }
 
