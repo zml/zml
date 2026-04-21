@@ -28,22 +28,12 @@ bazel_dep(name = "rules_proto", version = "7.1.0")
 bazel_dep(name = "rules_python", version = "1.9.0")
 bazel_dep(name = "rules_rs", version = "0.0.44")
 bazel_dep(name = "rules_shell", version = "0.6.1")
-bazel_dep(name = "cuda_toolkit", version = "0.0.0")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
     commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
     remote = "https://github.com/zml/rules_zig.git",
 )
-git_override(
-    module_name = "cuda_toolkit",
-    commit = "0b65c6614343d391bdd65725dc446f053cd32b28",
-    remote = "https://github.com/hermeticbuild/cuda-toolkit.git",
-)
-# local_path_override(
-#     module_name = "cuda_toolkit",
-#     path = "../cuda-toolkit",
-# )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.1")
@@ -179,15 +169,6 @@ use_repo(pip, "tpu_py_deps")
 
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
-
-cuda_toolkit_ext = use_extension("@cuda_toolkit//extensions:cuda.bzl", "cuda")
-cuda_toolkit_ext.redist(
-    name = "cuda_13_1_1",
-    version = "13.1.1",
-    cudnn_version = "9.20.0",
-    nvshmem_version = "3.5.19",
-)
-use_repo(cuda_toolkit_ext, "cuda", "cuda_13_1_1")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
 use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64")
