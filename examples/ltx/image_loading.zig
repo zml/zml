@@ -29,7 +29,7 @@ pub fn loadAndPreprocess(
     var src_channels: c_int = 0;
 
     // stbi_load requires a null-terminated string.
-    const c_path = try allocator.dupeZ(u8, path);
+    const c_path = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(c_path);
 
     const raw_ptr: ?[*]u8 = c.stbi_load(c_path.ptr, &src_w, &src_h, &src_channels, 3);
