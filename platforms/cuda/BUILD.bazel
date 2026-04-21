@@ -25,22 +25,30 @@ cc_library(
 )
 
 cc_library(
+    name = "libpjrt_cuda_repo",
+    deps = select({
+        "@llvm//platforms/config:linux_x86_64": ["@libpjrt_cuda_linux_amd64//:libpjrt_cuda"],
+        "@llvm//platforms/config:linux_aarch64": ["@libpjrt_cuda_linux_arm64//:libpjrt_cuda"],
+    }),
+)
+
+cc_library(
     name = "libpjrt_cuda",
     tags = ["manual"],
     hdrs = ["libpjrt_cuda.h"],
     defines = ["ZML_RUNTIME_CUDA"],
-    deps = ["@libpjrt_cuda"],
+    deps = [":libpjrt_cuda_repo"],
 )
 
 zig_library(
     name = "cuda",
     tags = ["manual"],
-    data = select({
-        "//platforms:cuda.enabled": [
-            "@flashattn//:libflashattn",
-        ],
-        "//conditions:default": [":empty"],
-    }),
+    # data = select({
+    #     "//platforms:cuda.enabled": [
+    #         "@flashattn//:libflashattn",
+    #     ],
+    #     "//conditions:default": [":empty"],
+    # }),
     srcs = ["compat_probe.zig"],
     import_name = "platforms/cuda",
     main = "cuda.zig",

@@ -100,7 +100,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !void {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var buffer: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const library = (try r.rlocation("flashattn/flashattn/lib/libflashattn.so", &buffer)) orelse return error.NotFound;
+    const library = (try r.rlocation("flashattn_linux_arm64/lib/libflashattn.so", &buffer)) orelse return error.NotFound;
     var lib = std.DynLib.open(library) catch |err| {
         std.log.err("Failed to open libflashattn.so: {any}", .{err});
         return err;

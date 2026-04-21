@@ -13,6 +13,18 @@ const nvidiaLibsPath = "/cuda/";
 
 const log = std.log.scoped(.@"zml/platforms/cuda");
 
+fn findCudaSandbox(
+    r: anytype,
+    buffer: *[std.Io.Dir.max_path_bytes]u8,
+) !?[]const u8 {
+    const candidate = switch (builtin.cpu.arch) {
+        .aarch64 => "libpjrt_cuda_linux_arm64/sandbox",
+        .x86_64 => "libpjrt_cuda_linux_amd64/sandbox",
+        else => return null,
+    };
+    return try r.rlocation(candidate, buffer);
+}
+
 pub fn isEnabled() bool {
     return @hasDecl(c, "ZML_RUNTIME_CUDA");
 }
@@ -85,7 +97,7 @@ pub fn load(allocator: std.mem.Allocator, io: std.Io) !*const pjrt.Api {
     const r = try bazel.runfiles(bazel_builtin.current_repository);
 
     var path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = try r.rlocation("libpjrt_cuda/sandbox", &path_buf) orelse {
+    const sandbox_path = try findCudaSandbox(r, &path_buf) orelse {
         log.err("Failed to find sandbox path for CUDA runtime", .{});
         return error.FileNotFound;
     };

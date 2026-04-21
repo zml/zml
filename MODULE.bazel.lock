@@ -96,6 +96,8 @@
     "https://bcr.bazel.build/modules/cel-spec/0.15.0/source.json": "ab7dccdf21ea2261c0f809b5a5221a4d7f8b580309f285fdf1444baaca75d44a",
     "https://bcr.bazel.build/modules/civetweb/1.16/MODULE.bazel": "46a38f9daeb57392e3827fce7d40926be0c802bd23cdd6bfd3a96c804de42fae",
     "https://bcr.bazel.build/modules/civetweb/1.16/source.json": "ba8b9585adb8355cb51b999d57172fd05e7a762c56b8d4bac6db42c99de3beb7",
+    "https://bcr.bazel.build/modules/cuda_toolchain_types/0.0.1/MODULE.bazel": "9f2159902e57aa5ec59b57be6847ca50425cdb434dcb03e6653accc65ba0b96e",
+    "https://bcr.bazel.build/modules/cuda_toolchain_types/0.0.1/source.json": "8b0494638900f28ed24709f48cc151f421df9f75fa2c7625e8693d7cfdcff860",
     "https://bcr.bazel.build/modules/curl/8.4.0/MODULE.bazel": "0bc250aa1cb69590049383df7a9537c809591fcf876c620f5f097c58fdc9bc10",
     "https://bcr.bazel.build/modules/curl/8.7.1/MODULE.bazel": "088221c35a2939c555e6e47cb31a81c15f8b59f4daa8009b1e9271a502d33485",
     "https://bcr.bazel.build/modules/curl/8.8.0/MODULE.bazel": "7da3b3e79b0b4ee8f8c95d640bc6ad7b430ce66ef6e9c9d2bc29b3b5ef85f6fe",
@@ -1026,7 +1028,7 @@
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
         "bzlTransitiveDigest": "twSeB3VPTVkayY0uwqEzDzal5MbnZX45iC6jdheZQRo=",
-        "usagesDigest": "V0dQbNX+eB3aThhopTuYblOol9rtleO/RA16gC5Zn+Y=",
+        "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1065,7 +1067,7 @@
             "attributes": {
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platform": "linux/amd64",
@@ -1079,7 +1081,7 @@
               "target_name": "debian_12",
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platforms": {
@@ -1417,7 +1419,7 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "r7tCqbjlVKc7XEXV8Hiak2ElFfkjvDdMf8Ym+7zxukU=",
+        "bzlTransitiveDigest": "xx2lb1ba6RcnnXdfUyaxI5j2wFLM03GTQfTv2UUie3Q=",
         "usagesDigest": "3YLtfwSfkXudL3+Coim7hrTFktQHln4CiUbszoYuRzE=",
         "recordedFileInputs": {
           "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
