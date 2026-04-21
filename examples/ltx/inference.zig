@@ -983,52 +983,58 @@ fn runStage1(
     // ---- Generate noise and run noise init ----
     std.log.info("Generating Stage 1 noise (seed={d})...", .{seed});
 
-    var noise_gen_v_exe = try platform.compileFn(
-        allocator,
-        io,
-        model.forwardGenerateNoise,
-        .{
-            zml.Tensor.Rng.init(),
-            zml.Tensor.fromShape(v_clean_buf.shape()),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer noise_gen_v_exe.deinit();
-
-    var noise_gen_a_exe = try platform.compileFn(
-        allocator,
-        io,
-        model.forwardGenerateNoise,
-        .{
-            zml.Tensor.Rng.init(),
-            zml.Tensor.fromShape(a_clean_buf.shape()),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer noise_gen_a_exe.deinit();
-
     var rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, sharding);
 
     // Generate video noise (draw #1)
-    var gen_v_args = try noise_gen_v_exe.args(allocator);
-    defer gen_v_args.deinit(allocator);
-    var gen_v_results = try noise_gen_v_exe.results(allocator);
-    defer gen_v_results.deinit(allocator);
-    gen_v_args.set(.{ rng_buf, v_clean_buf });
-    noise_gen_v_exe.callOpts(io, gen_v_args, &gen_v_results, .{ .wait = true });
-    rng_buf._state.deinit();
-    rng_buf, var v_noise_buf = gen_v_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+    var v_noise_buf = blk: {
+        var exe = try platform.compileFn(
+            allocator,
+            io,
+            model.forwardGenerateNoise,
+            .{
+                zml.Tensor.Rng.init(),
+                zml.Tensor.fromShape(v_clean_buf.shape()),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer exe.deinit();
+
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        var results = try exe.results(allocator);
+        defer results.deinit(allocator);
+        args.set(.{ rng_buf, v_clean_buf });
+        exe.callOpts(io, args, &results, .{ .wait = true });
+        rng_buf._state.deinit();
+        rng_buf, const noise = results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+        break :blk noise;
+    };
     defer v_noise_buf.deinit();
 
     // Generate audio noise (draw #2)
-    var gen_a_args = try noise_gen_a_exe.args(allocator);
-    defer gen_a_args.deinit(allocator);
-    var gen_a_results = try noise_gen_a_exe.results(allocator);
-    defer gen_a_results.deinit(allocator);
-    gen_a_args.set(.{ rng_buf, a_clean_buf });
-    noise_gen_a_exe.callOpts(io, gen_a_args, &gen_a_results, .{ .wait = true });
-    rng_buf._state.deinit();
-    rng_buf, var a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+    var a_noise_buf = blk: {
+        var exe = try platform.compileFn(
+            allocator,
+            io,
+            model.forwardGenerateNoise,
+            .{
+                zml.Tensor.Rng.init(),
+                zml.Tensor.fromShape(a_clean_buf.shape()),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer exe.deinit();
+
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        var results = try exe.results(allocator);
+        defer results.deinit(allocator);
+        args.set(.{ rng_buf, a_clean_buf });
+        exe.callOpts(io, args, &results, .{ .wait = true });
+        rng_buf._state.deinit();
+        rng_buf, const noise = results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
+        break :blk noise;
+    };
     defer a_noise_buf.deinit();
 
     std.log.info("  video_noise: {any}", .{v_noise_buf.shape().dims()});
@@ -1042,34 +1048,6 @@ fn runStage1(
     // Compile noise init
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
 
-    var noise_init_v_exe = try platform.compileFn(
-        allocator,
-        io,
-        model.forwardNoiseInit,
-        .{
-            zml.Tensor.fromShape(v_clean_buf.shape()),
-            zml.Tensor.fromShape(v_noise_buf.shape()),
-            zml.Tensor.fromShape(v_mask_buf.shape()),
-            zml.Tensor.fromShape(sigma_scalar_shape),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer noise_init_v_exe.deinit();
-
-    var noise_init_a_exe = try platform.compileFn(
-        allocator,
-        io,
-        model.forwardNoiseInit,
-        .{
-            zml.Tensor.fromShape(a_clean_buf.shape()),
-            zml.Tensor.fromShape(a_noise_buf.shape()),
-            zml.Tensor.fromShape(a_mask_buf.shape()),
-            zml.Tensor.fromShape(sigma_scalar_shape),
-        },
-        .{ .shardings = &.{sharding} },
-    );
-    defer noise_init_a_exe.deinit();
-
     // Stage 1 noise_scale = 1.0 (pure noise for unconditioned, mask-weighted for image-conditioned)
     const noise_scale: f32 = 1.0;
     std.log.info("Running Stage 1 noise init (noise_scale={d:.6})...", .{noise_scale});
@@ -1077,22 +1055,54 @@ fn runStage1(
     defer noise_scale_buf.deinit();
 
     // Video noise init
-    var ni_v_args = try noise_init_v_exe.args(allocator);
-    defer ni_v_args.deinit(allocator);
-    var ni_v_results = try noise_init_v_exe.results(allocator);
-    defer ni_v_results.deinit(allocator);
-    ni_v_args.set(.{ v_clean_buf, v_noise_buf, v_mask_buf, noise_scale_buf });
-    noise_init_v_exe.callOpts(io, ni_v_args, &ni_v_results, .{ .wait = true });
-    var v_latent_buf = ni_v_results.get(zml.Buffer);
+    var v_latent_buf = blk: {
+        var exe = try platform.compileFn(
+            allocator,
+            io,
+            model.forwardNoiseInit,
+            .{
+                zml.Tensor.fromShape(v_clean_buf.shape()),
+                zml.Tensor.fromShape(v_noise_buf.shape()),
+                zml.Tensor.fromShape(v_mask_buf.shape()),
+                zml.Tensor.fromShape(sigma_scalar_shape),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer exe.deinit();
+
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        var results = try exe.results(allocator);
+        defer results.deinit(allocator);
+        args.set(.{ v_clean_buf, v_noise_buf, v_mask_buf, noise_scale_buf });
+        exe.callOpts(io, args, &results, .{ .wait = true });
+        break :blk results.get(zml.Buffer);
+    };
 
     // Audio noise init
-    var ni_a_args = try noise_init_a_exe.args(allocator);
-    defer ni_a_args.deinit(allocator);
-    var ni_a_results = try noise_init_a_exe.results(allocator);
-    defer ni_a_results.deinit(allocator);
-    ni_a_args.set(.{ a_clean_buf, a_noise_buf, a_mask_buf, noise_scale_buf });
-    noise_init_a_exe.callOpts(io, ni_a_args, &ni_a_results, .{ .wait = true });
-    var a_latent_buf = ni_a_results.get(zml.Buffer);
+    var a_latent_buf = blk: {
+        var exe = try platform.compileFn(
+            allocator,
+            io,
+            model.forwardNoiseInit,
+            .{
+                zml.Tensor.fromShape(a_clean_buf.shape()),
+                zml.Tensor.fromShape(a_noise_buf.shape()),
+                zml.Tensor.fromShape(a_mask_buf.shape()),
+                zml.Tensor.fromShape(sigma_scalar_shape),
+            },
+            .{ .shardings = &.{sharding} },
+        );
+        defer exe.deinit();
+
+        var args = try exe.args(allocator);
+        defer args.deinit(allocator);
+        var results = try exe.results(allocator);
+        defer results.deinit(allocator);
+        args.set(.{ a_clean_buf, a_noise_buf, a_mask_buf, noise_scale_buf });
+        exe.callOpts(io, args, &results, .{ .wait = true });
+        break :blk results.get(zml.Buffer);
+    };
 
     std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape().dims()});
     std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape().dims()});
