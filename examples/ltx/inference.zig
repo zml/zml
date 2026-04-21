@@ -1196,6 +1196,9 @@ fn runStage1(
     );
     defer model.PreprocessParams.unloadBuffers(&preprocess_bufs);
 
+    // Run preprocessing once to discover output shapes for block compilation.
+    // Shapes are config-deterministic, but we derive them from an actual run rather than
+    // duplicating the shape arithmetic, so they never drift if forwardPreprocess changes.
     std.log.info("Running initial preprocessing for shape discovery...", .{});
     var sigma_1d_init = try sigma1dBuffer(io, platform, sigmas[0], sharding);
     defer sigma_1d_init.deinit();
@@ -1441,10 +1444,10 @@ fn runStage1(
     timer.addCompile();
 
     // ---- Load weights ----
-    std.log.info("Loading 48 block weights...", .{});
-    var block_params_bufs = try allocator.create([48]zml.Bufferized(model.Block0FullParams));
+    std.log.info("Loading {d} block weights...", .{model.num_transformer_blocks});
+    var block_params_bufs = try allocator.create([model.num_transformer_blocks]zml.Bufferized(model.Block0FullParams));
     defer allocator.destroy(block_params_bufs);
-    for (0..48) |i| {
+    for (0..model.num_transformer_blocks) |i| {
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
@@ -1556,11 +1559,11 @@ fn runStage1(
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- Pass 1: Conditional (positive context, normal blocks) ----
-        std.log.info("  Pass 1 (conditional): 48-block chain...", .{});
+        std.log.info("  Pass 1 (conditional): {d}-block chain...", .{model.num_transformer_blocks});
         var cond_h_v = pre_out.vx;
         var cond_h_a = pre_out.ax;
 
-        for (0..48) |i| {
+        for (0..model.num_transformer_blocks) |i| {
             var blk_args = try block_normal_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_normal_exe.results(allocator);
@@ -1585,6 +1588,7 @@ fn runStage1(
             });
             block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
             const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+            // Deinit previous block's outputs to free memory, except for the first block where pre_out is still needed for the next pass.
             if (i > 0) {
                 cond_h_v.deinit();
                 cond_h_a.deinit();
@@ -1595,8 +1599,8 @@ fn runStage1(
 
         var cond_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
         var cond_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
-        cond_h_v.deinit();
-        cond_h_a.deinit();
+        cond_h_v.deinit(); // Free last block's hidden state after projection
+        cond_h_a.deinit(); // Free last block's hidden state after projection
 
         var cond_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, cond_v_vel, v_mask_buf, sigma_buf);
         var cond_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, cond_a_vel, a_mask_buf, sigma_buf);
@@ -1604,11 +1608,11 @@ fn runStage1(
         cond_a_vel.deinit();
 
         // ---- Pass 2: Negative/CFG (negative context, normal blocks) ----
-        std.log.info("  Pass 2 (negative/CFG): 48-block chain...", .{});
+        std.log.info("  Pass 2 (negative/CFG): {d}-block chain...", .{model.num_transformer_blocks});
         var neg_h_v = pre_out.vx;
         var neg_h_a = pre_out.ax;
 
-        for (0..48) |i| {
+        for (0..model.num_transformer_blocks) |i| {
             var blk_args = try block_normal_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_normal_exe.results(allocator);
@@ -1652,11 +1656,12 @@ fn runStage1(
         neg_a_vel.deinit();
 
         // ---- Pass 3: STG (positive context, V-passthrough at block 28) ----
-        std.log.info("  Pass 3 (STG): 48-block chain (STG at block {d})...", .{STG_BLOCK_IDX});
+        std.log.info("  Pass 3 (STG): {d}-block chain (STG at block {d})...", .{ model.num_transformer_blocks, STG_BLOCK_IDX });
         var ptb_h_v = pre_out.vx;
         var ptb_h_a = pre_out.ax;
 
-        for (0..48) |i| {
+        for (0..model.num_transformer_blocks) |i| {
+            // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
             if (i == STG_BLOCK_IDX) {
                 var blk_args = try block_stg_exe.args(allocator);
                 defer blk_args.deinit(allocator);
@@ -1733,11 +1738,11 @@ fn runStage1(
         ptb_a_vel.deinit();
 
         // ---- Pass 4: Isolated (positive context, zero AV masks) ----
-        std.log.info("  Pass 4 (isolated): 48-block chain...", .{});
+        std.log.info("  Pass 4 (isolated): {d}-block chain...", .{model.num_transformer_blocks});
         var iso_h_v = pre_out.vx;
         var iso_h_a = pre_out.ax;
 
-        for (0..48) |i| {
+        for (0..model.num_transformer_blocks) |i| {
             var blk_args = try block_iso_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_iso_exe.results(allocator);
@@ -2337,6 +2342,9 @@ fn runStage2(
     );
     defer model.PreprocessParams.unloadBuffers(&preprocess_bufs);
 
+    // Run preprocessing once to discover output shapes for block compilation.
+    // Shapes are config-deterministic, but we derive them from an actual run rather than
+    // duplicating the shape arithmetic, so they never drift if forwardPreprocess changes.
     std.log.info("Running initial preprocessing for shape discovery...", .{});
     var sigma_1d_init = try sigma1dBuffer(io, platform, stage2_sigmas[0], sharding);
     defer sigma_1d_init.deinit();
@@ -2476,10 +2484,10 @@ fn runStage2(
     timer.addCompile();
 
     // ---- Load weights ----
-    std.log.info("Loading 48 block weights...", .{});
-    var block_params_bufs = try allocator.create([48]zml.Bufferized(model.Block0FullParams));
+    std.log.info("Loading {d} block weights...", .{model.num_transformer_blocks});
+    var block_params_bufs = try allocator.create([model.num_transformer_blocks]zml.Bufferized(model.Block0FullParams));
     defer allocator.destroy(block_params_bufs);
-    for (0..48) |i| {
+    for (0..model.num_transformer_blocks) |i| {
         block_params_bufs[i] = try zml.io.load(
             model.Block0FullParams,
             &block_params_shape.blocks[i],
@@ -2569,12 +2577,12 @@ fn runStage2(
         preprocess_exe.callOpts(io, pre_args, &pre_results, .{ .wait = true });
         const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
-        // ---- 2. 48-block chain ----
-        std.log.info("  Running 48-block chain...", .{});
+        // ---- 2. Block chain ----
+        std.log.info("  Running {d}-block chain...", .{model.num_transformer_blocks});
         var h_v = pre_out.vx;
         var h_a = pre_out.ax;
 
-        for (0..48) |i| {
+        for (0..model.num_transformer_blocks) |i| {
             var blk_args = try block_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_exe.results(allocator);

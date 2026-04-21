@@ -2349,10 +2349,12 @@ fn precomputeFreqsCis(
 // Python ref: ltx_core/models/ltx_model.py — LTXModel._prepare_inputs()
 // ============================================================================
 
+pub const num_transformer_blocks = 48;
+
 /// Parameters for a full velocity_model forward pass (blocks + output projection).
 /// Adaln modules are NOT included — their outputs are provided as inputs (SharedInputs).
 pub const FullStepParams = struct {
-    blocks: [48]Block0FullParams,
+    blocks: [num_transformer_blocks]Block0FullParams,
     norm_proj_out: OutputProjection.Params,
     audio_norm_proj_out: OutputProjection.Params,
 };
@@ -2361,7 +2363,7 @@ pub fn initFullStepParams(store: zml.io.TensorStore.View) FullStepParams {
     var out: FullStepParams = undefined;
     const root = selectTransformerRoot(store);
     const blocks_store = root.withPrefix("transformer_blocks");
-    inline for (0..48) |i| {
+    inline for (0..num_transformer_blocks) |i| {
         out.blocks[i] = BasicAVTransformerBlock.initParams(blocks_store.withLayer(i));
     }
     out.norm_proj_out = .{
@@ -2384,14 +2386,14 @@ pub fn initFullStepParams(store: zml.io.TensorStore.View) FullStepParams {
 }
 
 pub fn unloadFullStepBuffers(params: *zml.Bufferized(FullStepParams)) void {
-    inline for (0..48) |i| {
+    inline for (0..num_transformer_blocks) |i| {
         unloadBlock0FullBuffers(&params.blocks[i]);
     }
     OutputProjection.Params.unloadBuffers(&params.norm_proj_out);
     OutputProjection.Params.unloadBuffers(&params.audio_norm_proj_out);
 }
 
-/// Parameters for the preprocessing stage (everything except the 48 transformer blocks
+/// Parameters for the preprocessing stage (everything except the transformer blocks
 /// and the output projections). This turns raw latent inputs + sigma into SharedInputs.
 pub const PreprocessParams = struct {
     video_patchify: Patchify.Params,
