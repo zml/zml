@@ -775,7 +775,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 5: Audio VAE Decode ===", .{});
 
-    var audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta, &timer_audio_vae);
+    const audio_mel = try runAudioVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.a_latent, pipe_meta, &timer_audio_vae);
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, audio_mel, args.output_dir, "audio_mel.bin");
@@ -789,7 +789,7 @@ pub fn main(init: std.process.Init) !void {
 
     var waveform_buf = try runVocoderWithBWE(allocator, io, platform, sharding, args.stage2_ckpt, audio_mel, &timer_vocoder);
     defer waveform_buf.deinit();
-    audio_mel.deinit();
+    // audio_mel ownership transferred to runVocoderWithBWE (freed inside after main vocoder runs).
 
     // s2.v_latent was already freed inside runVideoVaeDecode.
     // s2.a_latent was already freed inside runAudioVaeDecode.
@@ -3713,23 +3713,32 @@ fn runVocoderWithBWE(
     timer: *PhaseTimer,
 ) !zml.Buffer {
     timer.start();
+
+    // Take ownership of the input mel buffer (consistent with runVideoVaeDecode/runAudioVaeDecode).
+    var mel_input = audio_mel;
+    errdefer mel_input.deinit();
+
     // ---- Open checkpoint store ----
     std.log.info("Opening checkpoint for vocoder...", .{});
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
         return err;
     };
-    defer ckpt_reg.deinit();
+    errdefer ckpt_reg.deinit();
     var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
-    defer ckpt_store.deinit();
+    errdefer ckpt_store.deinit();
 
     // ---- Load vocoder weights (split: main 667, BWE pipeline 559) ----
+    // Heap-allocate param structs — too large for the stack
     std.log.info("Loading main vocoder weights...", .{});
-    var main_voc_params: vocoder.MainVocoderParams = undefined;
-    vocoder.initMainVocoderParams(&main_voc_params, ckpt_store.view().withPrefix("vocoder").withPrefix("vocoder"));
-    const main_voc_bufs = try zml.io.load(
+    const main_voc_params = try allocator.create(vocoder.MainVocoderParams);
+    defer allocator.destroy(main_voc_params);
+    vocoder.initMainVocoderParams(main_voc_params, ckpt_store.view().withPrefix("vocoder").withPrefix("vocoder"));
+    const main_voc_bufs = try allocator.create(zml.Bufferized(vocoder.MainVocoderParams));
+    defer allocator.destroy(main_voc_bufs);
+    main_voc_bufs.* = try zml.io.load(
         vocoder.MainVocoderParams,
-        &main_voc_params,
+        main_voc_params,
         allocator,
         io,
         platform,
@@ -3741,13 +3750,17 @@ fn runVocoderWithBWE(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    errdefer deinitBufferizedFields(main_voc_bufs);
 
     std.log.info("Loading BWE pipeline weights...", .{});
-    var bwe_params: vocoder.BWEPipelineParams = undefined;
-    vocoder.initBWEPipelineParams(&bwe_params, ckpt_store.view());
-    const bwe_bufs = try zml.io.load(
+    const bwe_params = try allocator.create(vocoder.BWEPipelineParams);
+    defer allocator.destroy(bwe_params);
+    vocoder.initBWEPipelineParams(bwe_params, ckpt_store.view());
+    const bwe_bufs = try allocator.create(zml.Bufferized(vocoder.BWEPipelineParams));
+    defer allocator.destroy(bwe_bufs);
+    bwe_bufs.* = try zml.io.load(
         vocoder.BWEPipelineParams,
-        &bwe_params,
+        bwe_params,
         allocator,
         io,
         platform,
@@ -3759,36 +3772,44 @@ fn runVocoderWithBWE(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    errdefer deinitBufferizedFields(bwe_bufs);
+
+    // Free checkpoint resources — no longer needed after weight loading.
+    ckpt_store.deinit();
+    ckpt_reg.deinit();
 
     // ---- Stage 1: Main vocoder — mel → 16kHz waveform ----
     timer.addLoad(); // main + BWE weights
-    std.log.info("Compiling main vocoder (input: {any})...", .{audio_mel.shape().dims()});
+    std.log.info("Compiling main vocoder (input: {any})...", .{mel_input.shape().dims()});
     var main_voc_exe = try platform.compileFn(
         allocator,
         io,
         vocoder.forwardMainVocoder,
-        .{ zml.Tensor.fromShape(audio_mel.shape()), &main_voc_params },
+        .{ zml.Tensor.fromShape(mel_input.shape()), main_voc_params },
         .{ .shardings = &.{sharding} },
     );
-    defer main_voc_exe.deinit();
+    errdefer main_voc_exe.deinit();
     timer.addCompile();
 
     std.log.info("Running main vocoder...", .{});
     var main_voc_args = try main_voc_exe.args(allocator);
-    defer main_voc_args.deinit(allocator);
+    errdefer main_voc_args.deinit(allocator);
     var main_voc_results = try main_voc_exe.results(allocator);
-    defer main_voc_results.deinit(allocator);
-    main_voc_args.set(.{ audio_mel, &main_voc_bufs });
+    main_voc_args.set(.{ mel_input, main_voc_bufs });
     main_voc_exe.callOpts(io, main_voc_args, &main_voc_results, .{ .wait = true });
+    mel_input.deinit(); // Free input mel — consumed by main vocoder
     var waveform_16k = main_voc_results.get(zml.Buffer);
+    errdefer waveform_16k.deinit();
     std.log.info("  16kHz waveform: {any}", .{waveform_16k.shape().dims()});
     timer.addExec();
 
+    // Free main vocoder exe, args, results — no longer needed.
+    main_voc_results.deinit(allocator);
+    main_voc_args.deinit(allocator);
+    main_voc_exe.deinit();
+
     // Free main vocoder weights — no longer needed, BWE uses separate weights.
-    {
-        var main_voc_bufs_mut = main_voc_bufs;
-        deinitBufferizedFields(&main_voc_bufs_mut);
-    }
+    deinitBufferizedFields(main_voc_bufs);
 
     // ---- Stage 2: BWE pipeline — 16kHz → 48kHz ----
     std.log.info("Compiling BWE pipeline (input: {any})...", .{waveform_16k.shape().dims()});
@@ -3796,7 +3817,7 @@ fn runVocoderWithBWE(
         allocator,
         io,
         vocoder.forwardBWEPipeline,
-        .{ zml.Tensor.fromShape(waveform_16k.shape()), &bwe_params },
+        .{ zml.Tensor.fromShape(waveform_16k.shape()), bwe_params },
         .{ .shardings = &.{sharding} },
     );
     defer bwe_exe.deinit();
@@ -3807,7 +3828,7 @@ fn runVocoderWithBWE(
     defer bwe_args.deinit(allocator);
     var bwe_results = try bwe_exe.results(allocator);
     defer bwe_results.deinit(allocator);
-    bwe_args.set(.{ waveform_16k, &bwe_bufs });
+    bwe_args.set(.{ waveform_16k, bwe_bufs });
     bwe_exe.callOpts(io, bwe_args, &bwe_results, .{ .wait = true });
     waveform_16k.deinit(); // Free intermediate 16kHz waveform
     const waveform = bwe_results.get(zml.Buffer);
@@ -3815,10 +3836,7 @@ fn runVocoderWithBWE(
     timer.addExec();
 
     // Free BWE weights — no longer needed.
-    {
-        var bwe_bufs_mut = bwe_bufs;
-        deinitBufferizedFields(&bwe_bufs_mut);
-    }
+    deinitBufferizedFields(bwe_bufs);
 
     return waveform;
 }
