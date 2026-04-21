@@ -4,6 +4,8 @@ load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
+exports_files(["zml_nki_compiler.py"])
+
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
 #
@@ -33,11 +35,27 @@ zig_binary(
     deps = [":libpython"],
 )
 
+zig_binary(
+    name = "nki-cc",
+    target_compatible_with = ["@platforms//os:linux"],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
+    main = "nki-cc.zig",
+    tags = ["manual"],
+    deps = [":libpython"],
+)
+
 runfiles_to_default(
     name = "neuronx-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
     deps = [":neuronx-cc"],
+)
+
+runfiles_to_default(
+    name = "nki-cc_files",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = [":nki-cc"],
 )
 
 cc_library(
@@ -85,6 +103,10 @@ upb_c_proto_library(
 zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
+    srcs = [
+        "hlo_neff.zig",
+        "nki_embed.zig",
+    ],
     shared_lib_name = "libneuronxla.so",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],

@@ -1,0 +1,15 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "neuron_nki",
+    data = ["add_one.py"],
+    main = "main.zig",
+    visibility = ["//visibility:public"],
+    deps = ["//zml"],
+)
+
+build_test(
+    name = "test",
+    targets = [":neuron_nki"],
+)

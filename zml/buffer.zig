@@ -5,6 +5,7 @@ const stdx = @import("stdx");
 
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
@@ -174,21 +175,34 @@ pub const Buffer = struct {
 
     pub fn await(self: Buffer, io: std.Io) !void {
         for (self._shards.constSlice()) |buffer| {
-            const ev = buffer.readyEvent(self._platform.pjrt_api);
-            defer ev.deinit(self._platform.pjrt_api);
-            try ev.await(self._platform.pjrt_api, io);
+            if (buffer.readyEvent(self._platform.pjrt_api)) |e| {
+                defer e.deinit(self._platform.pjrt_api);
+                try e.await(self._platform.pjrt_api, io);
+            }
         }
     }
 
     pub const UnitializedOptions = struct { memory: Memory.Kind = .default };
 
     pub fn uninitialized(
-        _: std.Io,
+        io: std.Io,
         platform: *const Platform,
         sh: Shape,
         sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
+        switch (platform.target) {
+            .neuron => {
+                const allocator = std.heap.smp_allocator;
+
+                const host = try allocator.alloc(u8, sh.byteSize());
+                defer allocator.free(host);
+
+                return try Buffer.from(io, platform, sh, sharding, host, .{ .wait = true, .memory = opts.memory });
+            },
+            .cpu, .cuda, .rocm, .tpu => {},
+        }
+
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,

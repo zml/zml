@@ -1,0 +1,13 @@
+
+
+
+
+
+
+
+
+
+bazel run --@zml//platforms:neuron=true --run_under="NEURON_RT_INSPECT_ENABLE=1 NEURON_RT_INSPECT_OUTPUT_DIR=/home/hugo/profiling NEURON_RT_INSPECT_SYSTEM_PROFILE=1 NEURON_FRAMEWORK_DEBUG=1 NEURON_RT_INSPECT_DEVICE_PROFILE=1 XLA_HLO_DEBUG=1 XLA_IR_DEBUG=1 neuron-explorer inspect -o /home/hugo/profiling/ -- " --@zml//platforms:cpu=false //examples/llm -- --model=/var/models/meta-llama/Llama-3.2-1B-Instruct --topk=1 --seqlen=256 --prompt="tell me a long story about a cat"
+
+
+>>>>>>>>> --profile

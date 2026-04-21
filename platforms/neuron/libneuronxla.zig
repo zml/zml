@@ -2,7 +2,9 @@ const std = @import("std");
 
 const c = @import("c");
 const stdx = @import("stdx");
-const upb = @import("upb");
+
+const hlo_neff = @import("hlo_neff.zig");
+const nki_embed = @import("nki_embed.zig");
 
 const log = std.log.scoped(.@"zml/platforms/neuron/libneuronxla");
 
@@ -74,87 +76,6 @@ pub fn PyBytes_AsStringAndSize(object: *c.PyObject) []u8 {
     return buf[0..@intCast(len)];
 }
 
-fn wrapNeffAsCustomCall(allocator: std.mem.Allocator, io: std.Io, hlo_code: []const u8, neff_file_path: []const u8) ![]const u8 {
-    var upb_alloc: upb.Allocator = .init(allocator);
-    const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
-
-    const hlo_module = try upb.parse(c.xla_HloModuleProto, upb_arena, hlo_code);
-
-    const entry = blk: {
-        var size: usize = undefined;
-        const computations = c.xla_HloModuleProto_mutable_computations(hlo_module, &size)[0..size];
-        for (computations) |comp| {
-            if (c.xla_HloComputationProto_id(comp) == c.xla_HloModuleProto_entry_computation_id(hlo_module)) {
-                break :blk comp;
-            }
-        } else return error.ComputationNotFound;
-    };
-
-    const entry_instructions = blk: {
-        var size: usize = undefined;
-        break :blk c.xla_HloComputationProto_instructions(entry, &size)[0..size];
-    };
-    c.xla_HloComputationProto_clear_instructions(entry);
-
-    const fused_root = blk: {
-        for (entry_instructions) |instruction| {
-            if (c.xla_HloInstructionProto_id(instruction) == c.xla_HloComputationProto_root_id(entry)) {
-                break :blk try upb.shallowClone(c.xla_HloInstructionProto, upb_arena, instruction);
-            }
-        } else return error.ComputationNotFound;
-    };
-
-    c.xla_HloInstructionProto_set_opcode(fused_root, upb.stringView("custom-call"));
-    c.xla_HloInstructionProto_set_custom_call_target(fused_root, upb.stringView("AwsNeuronNeff"));
-    c.xla_HloInstructionProto_set_backend_config(
-        fused_root,
-        upb.stringView(
-            try stdx.Io.Dir.readFileAlloc(.cwd(), io, neff_file_path, allocator, .unlimited),
-        ),
-    );
-
-    const parameters_len = blk: {
-        var size: usize = undefined;
-        _ = c.xla_ProgramShapeProto_parameters(
-            c.xla_HloComputationProto_program_shape(entry),
-            &size,
-        );
-        break :blk size;
-    };
-
-    {
-        var operand_ids: std.ArrayList(i64) = .initBuffer(c.xla_HloInstructionProto_resize_operand_ids(fused_root, parameters_len + 1, upb_arena)[0 .. parameters_len + 1]);
-        var new_instructions: std.ArrayList(*const c.xla_HloInstructionProto) = .initBuffer(@ptrCast(c.xla_HloComputationProto_resize_instructions(entry, parameters_len + 1, upb_arena)[0 .. parameters_len + 1]));
-        for (entry_instructions) |instruction| {
-            if (std.mem.eql(u8, upb.slice(c.xla_HloInstructionProto_opcode(instruction)) orelse continue, "parameter")) {
-                const id = c.xla_HloInstructionProto_id(instruction);
-                operand_ids.appendAssumeCapacity(id);
-                new_instructions.appendAssumeCapacity(instruction);
-            }
-        }
-        new_instructions.appendAssumeCapacity(fused_root);
-    }
-
-    {
-        const fa = c.xla_HloInstructionProto_mutable_frontend_attributes(fused_root, upb_arena);
-        const map = c._xla_FrontendAttributes_map_mutable_upb_map(fa, upb_arena);
-        _ = c.upb_Map_Set(
-            map,
-            .{ .str_val = upb.stringView("valid_inputs") },
-            .{ .str_val = blk: {
-                const valid_inputs_value = try allocator.alloc(u8, parameters_len * 2 - 1);
-                for (valid_inputs_value, 0..) |*char, i| {
-                    char.* = if (i % 2 == 0) '1' else ',';
-                }
-                break :blk upb.stringView(valid_inputs_value);
-            } },
-            upb_arena,
-        );
-    }
-
-    return try upb.serialize(hlo_module, upb_arena);
-}
-
 fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t) !?*c.PyObject {
     const state: *ModuleState = @ptrCast(@alignCast(c.PyModule_GetState(self)));
     const io = state.threaded.io();
@@ -178,13 +99,23 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     var tmp_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const tmp_dir = try makeTempDir(io, &tmp_dir_buf, "zml-neuronxcc-");
-    defer std.Io.Dir.deleteTree(.cwd(), io, tmp_dir) catch |err| {
-        log.err("Error deleting temporary directory {s}: {}\n", .{ tmp_dir, err });
+    var preserve_tmp = false;
+    const may_have_nki = std.mem.indexOf(u8, code, nki_embed.zml_neuron_nki_target) != null;
+    if (may_have_nki) {
+        preserve_tmp = true;
+    }
+    defer if (!preserve_tmp) {
+        std.Io.Dir.deleteTree(.cwd(), io, tmp_dir) catch |err| {
+            log.err("Error deleting temporary directory {s}: {}\n", .{ tmp_dir, err });
+        };
     };
+
+    const rewritten_hlo = try nki_embed.rewriteCustomCalls(arena.allocator(), io, code, tmp_dir, target);
+    const compile_hlo = rewritten_hlo orelse code;
 
     const code_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.code" });
     try std.Io.Dir.writeFile(.cwd(), io, .{
-        .data = code,
+        .data = compile_hlo,
         .sub_path = code_file,
         .flags = .{ .truncate = true },
     });
@@ -192,38 +123,55 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     const neff_file = try std.Io.Dir.path.join(arena.allocator(), &.{ tmp_dir, "file.neff" });
 
     var neuronx_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    var child = try std.process.spawn(io, .{
-        .argv = &.{
-            try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
-                stdx.process.selfSharedObjectDirPath(),
-                "..",
-                "bin",
-                "neuronx-cc",
-            }),
-            "compile",
-            "--framework=XLA",
-            "--target",
-            target,
-            "--verbose=35",
-            "--enable-internal-neff-wrapper",
-            "--output",
-            neff_file,
-            "--optlevel=1",
-            // generic is the default, but it fails on transformers, force it
-            "--model-type=transformer",
-            // disable it, we do our own
-            "--auto-cast=none",
-            "--enable-fast-loading-neuron-binaries",
-            code_file,
-        },
-        .stdin = .ignore,
-        .stdout = .inherit,
-        .stderr = .inherit,
-        .cwd = .{ .path = tmp_dir },
+    const neuronx_cc_path = try stdx.Io.Dir.path.bufJoin(&neuronx_cc_buf, &.{
+        stdx.process.selfSharedObjectDirPath(),
+        "..",
+        "bin",
+        "neuronx-cc",
     });
-    _ = try child.wait(io);
 
-    const neff_hlo_bytes = wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
+    {
+        const gil_state = c.PyEval_SaveThread();
+        defer c.PyEval_RestoreThread(gil_state);
+
+        var child = try std.process.spawn(io, .{
+            .argv = &.{
+                neuronx_cc_path,
+                "compile",
+                "--framework=XLA",
+                "--target",
+                target,
+                "--verbose=35",
+                "--enable-internal-neff-wrapper",
+                "--output",
+                neff_file,
+                "--optlevel=1",
+                // generic is the default, but it fails on transformers, force it
+                "--model-type=transformer",
+                // disable it, we do our own
+                "--auto-cast=none",
+                "--enable-fast-loading-neuron-binaries",
+                code_file,
+            },
+            .stdin = .ignore,
+            .stdout = .inherit,
+            .stderr = .inherit,
+            .cwd = .{ .path = tmp_dir },
+        });
+        const term = try child.wait(io);
+        if (term.exited != 0) {
+            log.err("neuronx-cc exited with code {}", .{term.exited});
+            return error.NeuronxCcFailed;
+        }
+    }
+
+    // neuronx-cc exits 0 even on compilation failure
+    std.Io.Dir.access(.cwd(), io, neff_file, .{}) catch |err| {
+        log.err("neuronx-cc did not produce output NEFF {s}: {}", .{ neff_file, err });
+        return error.NeuronxCcFailed;
+    };
+
+    const neff_hlo_bytes = hlo_neff.wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file) catch |err| {
         log.err("Error wrapping NEFF as custom call: {}\n", .{err});
         return err;
     };
