@@ -30,7 +30,10 @@ zig_binary(
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "neuronx-cc.zig",
     tags = ["manual"],
-    deps = [":libpython"],
+    deps = [
+        ":libpython",
+        ":python_launcher",
+    ],
 )
 
 runfiles_to_default(
@@ -40,10 +43,18 @@ runfiles_to_default(
     deps = [":neuronx-cc"],
 )
 
+runfiles_to_default(
+    name = "nki-cc_files",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = ["//platforms/neuron/nki:nki-cc"],
+)
+
 cc_library(
     name = "libpython",
     tags = ["manual"],
     hdrs = ["libpython.h"],
+    visibility = ["//platforms/neuron:__subpackages__"],
     deps = [
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
@@ -87,6 +98,15 @@ upb_c_proto_library(
     tags = ["manual"],
 )
 
+zig_library(
+    name = "python_launcher",
+    tags = ["manual"],
+    import_name = "platforms/neuron/python_launcher",
+    main = "python_launcher.zig",
+    visibility = ["//platforms/neuron:__subpackages__"],
+    deps = [":libpython"],
+)
+
 zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
@@ -101,6 +121,7 @@ zig_shared_library(
         ":hlo_proto_upb",
         ":libpython",
         ":xla_data_upb",
+        "//platforms/neuron/nki:nki",
         "//stdx",
         "//upb",
     ],
