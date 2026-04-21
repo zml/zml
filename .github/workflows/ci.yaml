@@ -65,7 +65,7 @@ jobs:
     steps:
       - uses: runs-on/action@v2.1.0
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Ensure self hosted cache permissions
         if: ${{ matrix.self_hosted }}
