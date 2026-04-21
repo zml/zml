@@ -15,6 +15,77 @@ platform, the tracing bridge also emits device-visible annotations:
 When backend profiling is enabled, ZML writes both the raw `XSpace` protobuf
 and a streamed Perfetto / trace-viewer JSON file.
 
+## Profiling architecture
+
+ZML profiling is split into four layers:
+
+1. `zml.tracer.scope(...)` in Zig marks lexical regions of interest
+2. `zml/profiling/traceme_lib.cc` bridges those scopes into platform-specific
+   tracing backends
+3. `zml.Platform.profiler(...)` manages a profiling session and collects profile
+   data from PJRT
+4. `tools/xspace_to_perfetto` converts the final `XSpace` protobuf into a
+   streamed trace-event JSON file
+
+The important architectural split is:
+
+- `zml.tracer.scope(...)` is for instrumentation inside your code
+- `zml.Platform.profiler(...)` is for session lifecycle and artifact generation
+
+You can use scopes without a profiler session, but you only get exported
+`profiling.xplane.pb` and `profiling.trace.json` when a profiler session is
+started.
+
+### Scope instrumentation path
+
+`zml.tracer.scope(...)` is the lowest-level API you use directly in Zig code.
+Each scope creates a `TraceMe` region, and the C bridge adds extra
+platform-visible annotations when supported:
+
+- CUDA/Linux: NVTX ranges
+- ROCm/Linux: ROCTx ranges
+- macOS: `os_signpost` intervals
+
+Metadata passed to `zml.tracer.scope(...)` is encoded into the `TraceMe` scope
+name. That is why the API only accepts small scalar or string-like fields: it is
+designed to produce compact trace labels rather than structured protobuf
+payloads.
+
+### Profiler session path
+
+`zml.Platform.profiler(...)` builds a `tensorflow.ProfileOptions` protobuf from
+`zml.Platform.ProfilerOptions` and asks the active PJRT backend for a profiler
+session.
+
+At `start()` time, ZML does two distinct things:
+
+- it tries to start the backend PJRT profiler session
+- it configures local host-side `TraceMeRecorder` capture when enabled
+
+At `stop()` time, ZML:
+
+1. stops the PJRT profiler session if one exists
+2. collects the backend `XSpace` protobuf
+3. merges locally recorded host `TraceMe` events into the host plane
+4. writes the final protobuf to disk
+5. streams trace JSON from that final protobuf
+
+This separation is important because host scopes and backend profiler output are
+not produced by the same subsystem. ZML joins them only at the end of the
+session.
+
+### Export path
+
+The final export path is intentionally one-way:
+
+- source data format: `XSpace` protobuf
+- derived export format: trace-event JSON for Perfetto / trace viewer
+
+ZML keeps `profiling.xplane.pb` as the source of truth and generates
+`profiling.trace.json` from it afterwards. The converter is implemented in Zig
+and streams JSON directly from the protobuf instead of materializing the whole
+JSON document in memory first.
+
 ## The generated artifacts
 
 By default, a profiling session is written under:
