@@ -35,15 +35,15 @@ CUDA_COMPAT_FILES = [
 ]
 
 CUDA_PACKAGES = {
-    "cuda_nvml_dev": "\n".join([
+    "cuda_nvml_dev": [
         packages.cc_library(
             name = "nvml",
             hdrs = ["include/nvml.h"],
             includes = ["include"],
             visibility = ["//visibility:public"],
         ),
-    ]),
-    "cuda_cudart": "\n".join([
+    ],
+    "cuda_cudart": [
         # Driver API only
         packages.cc_library(
             name = "cuda",
@@ -55,18 +55,20 @@ CUDA_PACKAGES = {
             name = "cuda_cudart",
             srcs = ["lib/libcudart.so.13"],
         ),
-    ]),
-    "cuda_cupti": packages.filegroup(
-        name = "cuda_cupti",
-        srcs = ["lib/libcupti.so.13"],
-    ),
-    "cuda_nvtx": "\n".join([
+    ],
+    "cuda_cupti": [
+        packages.filegroup(
+            name = "cuda_cupti",
+            srcs = ["lib/libcupti.so.13"],
+        ),
+    ],
+    "cuda_nvtx": [
         packages.filegroup(
             name = "cuda_nvtx",
             srcs = ["lib/libnvtx3interop.so"],
         ),
-    ]),
-    "cuda_compat": "\n".join([
+    ],
+    "cuda_compat": [
         packages.patchelf(
             name = "{}.patchelf".format(file),
             set_rpath = "$ORIGIN",
@@ -75,35 +77,45 @@ CUDA_PACKAGES = {
         )
         for file in CUDA_COMPAT_FILES
     ] + [
-        packages.filegroup(
+        """filegroup(
             name = "cuda_compat",
             srcs = [
                 "compat/libnvidia-gpucomp.so.590.48.01",
                 "compat/libnvidia-tileiras.so.590.48.01",
-                # "compat/libnvidia-pkcs11-openssl3.so.590.48.01",
-            ] + [
-                ":{}.patchelf".format(file)
-                for file in CUDA_COMPAT_FILES
-            ],
+            ] + {} + select({{
+                "@llvm//platforms/config:linux_x86_64": ["compat/libnvidia-pkcs11-openssl3.so.590.48.01"],
+                "@llvm//platforms/config:linux_aarch64": [],
+            }}),
+        )""".format(repr([
+            ":{}.patchelf".format(file)
+            for file in CUDA_COMPAT_FILES
+        ])),
+    ],
+    "libcufft": [
+        packages.filegroup(
+            name = "libcufft",
+            srcs = ["lib/libcufft.so.12"],
         ),
-    ]),
-    "libcufft": packages.filegroup(
-        name = "libcufft",
-        srcs = ["lib/libcufft.so.12"],
-    ),
-    "libcusolver": packages.filegroup(
-        name = "libcusolver",
-        srcs = ["lib/libcusolver.so.12"],
-    ),
-    "libcusparse": packages.filegroup(
-        name = "libcusparse",
-        srcs = ["lib/libcusparse.so.12"],
-    ),
-    "libnvjitlink": packages.filegroup(
-        name = "libnvjitlink",
-        srcs = ["lib/libnvJitLink.so.13"],
-    ),
-    "cuda_nvcc": "\n".join([
+    ],
+    "libcusolver": [
+        packages.filegroup(
+            name = "libcusolver",
+            srcs = ["lib/libcusolver.so.12"],
+        ),
+    ],
+    "libcusparse": [
+        packages.filegroup(
+            name = "libcusparse",
+            srcs = ["lib/libcusparse.so.12"],
+        ),
+    ],
+    "libnvjitlink": [
+        packages.filegroup(
+            name = "libnvjitlink",
+            srcs = ["lib/libnvJitLink.so.13"],
+        ),
+    ],
+    "cuda_nvcc": [
         packages.filegroup(
             name = "cuda_nvcc",
             srcs = [
@@ -115,8 +127,8 @@ CUDA_PACKAGES = {
             name = "nvptxcompiler",
             static_library = "lib/libnvptxcompiler_static.a",
         ),
-    ]),
-    "libnvvm": "\n".join([
+    ],
+    "libnvvm": [
         packages.filegroup(
             name = "libnvvm",
             srcs = [
@@ -124,8 +136,8 @@ CUDA_PACKAGES = {
                 "nvvm/libdevice/libdevice.10.bc",
             ],
         ),
-    ]),
-    "cuda_nvrtc": "\n".join([
+    ],
+    "cuda_nvrtc": [
         packages.filegroup(
             name = "cuda_nvrtc",
             srcs = [
@@ -133,8 +145,8 @@ CUDA_PACKAGES = {
                 "lib/libnvrtc-builtins.so.13.1",
             ],
         ),
-    ]),
-    "libcublas": "\n".join([
+    ],
+    "libcublas": [
         packages.filegroup(
             name = "libcublas",
             srcs = [
@@ -142,11 +154,11 @@ CUDA_PACKAGES = {
                 "lib/libcublas.so.13",
             ],
         ),
-    ]),
+    ],
 }
 
 CUDNN_PACKAGES = {
-    "cudnn": "\n".join([
+    "cudnn": [
         packages.filegroup(
             name = "cudnn",
             srcs = [
@@ -160,22 +172,32 @@ CUDNN_PACKAGES = {
                 "lib/libcudnn_heuristic.so.9",
             ],
         ),
-    ]),
+    ],
 }
 
 NVSHMEM_PACKAGES = {
-    "libnvshmem": packages.filegroup(
-        name = "libnvshmem",
-        srcs = [
-            "lib/libnvshmem_host.so.3",
-            "lib/nvshmem_bootstrap_uid.so.3",
-            "lib/nvshmem_transport_ibrc.so.4",
-        ],
-    ),
+    "libnvshmem": [
+        packages.filegroup(
+            name = "libnvshmem",
+            srcs = [
+                "lib/libnvshmem_host.so.3",
+                "lib/nvshmem_bootstrap_uid.so.3",
+                "lib/nvshmem_transport_ibrc.so.4",
+            ],
+        ),
+    ],
 }
 
 _UBUNTU_PACKAGES = {
-    "zlib1g": packages.filegroup(name = "zlib1g", srcs = ["lib/x86_64-linux-gnu/libz.so.1"]),
+    "zlib1g": [
+        """filegroup(
+            name = "zlib1g",
+            srcs = select({
+                "@llvm//platforms/config:linux_x86_64": ["lib/x86_64-linux-gnu/libz.so.1"],
+                "@llvm//platforms/config:linux_aarch64": ["lib/aarch64-linux-gnu/libz.so.1"],
+            }),
+        )""",
+    ],
 }
 
 PJRT_CUDA_RELEASE = "manual-2026-04-21T10-00-00Z"
@@ -248,7 +270,7 @@ def _cuda_impl(mctx):
             name = pkg_name,
             urls = pkg["urls"],
             sha256 = pkg["sha256"],
-            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
         )
 
     for pkg, build_file_content in CUDA_PACKAGES.items():
@@ -261,7 +283,7 @@ def _cuda_impl(mctx):
             arch_data = arch_data.get(CUDA_VARIANT, None) or arch_data
             http_archive(
                 name = pkg_repo_name,
-                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
                 url = CUDA_REDIST_PREFIX + arch_data["relative_path"],
                 sha256 = arch_data["sha256"],
                 strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
@@ -277,7 +299,7 @@ def _cuda_impl(mctx):
             arch_data = arch_data.get("cuda13", arch_data)
             http_archive(
                 name = pkg_repo_name,
-                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
                 url = CUDNN_REDIST_PREFIX + arch_data["relative_path"],
                 sha256 = arch_data["sha256"],
                 strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
@@ -293,7 +315,7 @@ def _cuda_impl(mctx):
             arch_data = arch_data.get("cuda13", arch_data)
             http_archive(
                 name = pkg_repo_name,
-                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
                 url = NVSHMEM_REDIST_PREFIX + arch_data["relative_path"],
                 sha256 = arch_data["sha256"],
                 strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),

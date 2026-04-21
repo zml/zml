@@ -59,6 +59,66 @@
 				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_amd64.deb"
 			],
 			"version": "12.2.0-14+deb12u1"
+		},
+		{
+			"arch": "arm64",
+			"dependencies": [
+				{
+					"key": "libc6_2.36-9-p-deb12u10_arm64",
+					"name": "libc6",
+					"version": "2.36-9+deb12u10"
+				},
+				{
+					"key": "libgcc-s1_12.2.0-14-p-deb12u1_arm64",
+					"name": "libgcc-s1",
+					"version": "12.2.0-14+deb12u1"
+				},
+				{
+					"key": "gcc-12-base_12.2.0-14-p-deb12u1_arm64",
+					"name": "gcc-12-base",
+					"version": "12.2.0-14+deb12u1"
+				}
+			],
+			"key": "zlib1g_1-1.2.13.dfsg-1_arm64",
+			"name": "zlib1g",
+			"sha256": "52b8b8a145bbe1956bba82034f77022cbef0c3d0885c9e32d9817a7932fe1913",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/z/zlib/zlib1g_1.2.13.dfsg-1_arm64.deb"
+			],
+			"version": "1:1.2.13.dfsg-1"
+		},
+		{
+			"arch": "arm64",
+			"dependencies": [],
+			"key": "libc6_2.36-9-p-deb12u10_arm64",
+			"name": "libc6",
+			"sha256": "9b25c7c2aaa9328b2cfd92b47cc48b24631bfdff0c61afe05cba937911fcf239",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/glibc/libc6_2.36-9+deb12u10_arm64.deb"
+			],
+			"version": "2.36-9+deb12u10"
+		},
+		{
+			"arch": "arm64",
+			"dependencies": [],
+			"key": "libgcc-s1_12.2.0-14-p-deb12u1_arm64",
+			"name": "libgcc-s1",
+			"sha256": "576926b283613db80168ddf76380a3bd877602778cf0d226caa7bfbfa71eacf3",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/libgcc-s1_12.2.0-14+deb12u1_arm64.deb"
+			],
+			"version": "12.2.0-14+deb12u1"
+		},
+		{
+			"arch": "arm64",
+			"dependencies": [],
+			"key": "gcc-12-base_12.2.0-14-p-deb12u1_arm64",
+			"name": "gcc-12-base",
+			"sha256": "674cf6cba6d432bd200c45fe866c1652c7a53523cc2e7a613e05bc4abf7b5440",
+			"urls": [
+				"https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z/pool/main/g/gcc-12/gcc-12-base_12.2.0-14+deb12u1_arm64.deb"
+			],
+			"version": "12.2.0-14+deb12u1"
 		}
 	],
 	"version": 1

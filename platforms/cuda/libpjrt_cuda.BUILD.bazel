@@ -23,6 +23,9 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":libpjrt_cuda_so",
+        "@zlib1g//:zlib1g",
+        "@zml//platforms/cuda:compat_probe",
+        "@zml//platforms/cuda:zmlxcuda",
     ] + select({
         "@llvm//platforms/config:linux_x86_64": [
             "@cuda_cudart_linux_x86_64//:cuda_cudart",
@@ -39,6 +42,7 @@ copy_to_directory(
             "@libcusolver_linux_x86_64//:libcusolver",
             "@libcusparse_linux_x86_64//:libcusparse",
             "@libnvjitlink_linux_x86_64//:libnvjitlink",
+            "@nccl_linux_amd64//:nccl",
         ],
         "@llvm//platforms/config:linux_aarch64": [
             "@cuda_cudart_linux_sbsa//:cuda_cudart",
@@ -55,26 +59,16 @@ copy_to_directory(
             "@libcusolver_linux_sbsa//:libcusolver",
             "@libcusparse_linux_sbsa//:libcusparse",
             "@libnvjitlink_linux_sbsa//:libnvjitlink",
-        ],
-    }) + select({
-        "@llvm//platforms/config:linux_x86_64": [
-            "@nccl_linux_amd64//:nccl",
-        ],
-        "@llvm//platforms/config:linux_aarch64": [
             "@nccl_linux_arm64//:nccl",
         ],
-    }) + [
-        "@zlib1g//:zlib1g",
-        "@zml//platforms/cuda:compat_probe",
-        "@zml//platforms/cuda:zmlxcuda",
-    ],
+    }),
     replace_prefixes = {
         "compat": "lib/compat",
         "nvidia/nccl/lib": "lib",
         "nvvm/lib64": "lib",
         "libpjrt_cuda_so": "lib",
-        #TODO(cerisier): select per arch
         "lib/x86_64-linux-gnu": "lib",
+        "lib/aarch64-linux-gnu": "lib",
         "platforms/cuda/compat_probe": "bin/compat_probe",
         "platforms/cuda/libzmlxcuda": "lib/libzmlxcuda",
     } | {

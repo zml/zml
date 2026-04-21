@@ -8,7 +8,8 @@ sources:
     url: https://snapshot-cloudflare.debian.org/archive/debian/20250711T030400Z
 
 archs:
-    - "amd64"
+  - "amd64"
+  - "arm64"
 
 packages:
-    - "zlib1g"
+  - "zlib1g"
