@@ -171,7 +171,7 @@ cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64")
+use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "cuda_nvml_dev_linux_x86_64", "cuda_nvml_dev_linux_sbsa" )
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")

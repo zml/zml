@@ -327,6 +327,8 @@ def _cuda_impl(mctx):
         root_module_direct_deps = [
             "libpjrt_cuda_linux_amd64",
             "libpjrt_cuda_linux_arm64",
+            "cuda_nvml_dev_linux_x86_64",
+            "cuda_nvml_dev_linux_sbsa",
         ],
         root_module_direct_dev_deps = [],
     )
