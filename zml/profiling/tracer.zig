@@ -28,7 +28,7 @@ pub const supportsDeviceAnnotations = switch (builtin.os.tag) {
     .linux => platforms.target == .cuda or platforms.target == .rocm,
     else => false,
 };
-const inlineScopeNameBufferSize = 1024;
+const inline_scope_name_buffer_size = 1024;
 
 pub fn enabled() bool {
     return c.zml_traceme_enabled();
@@ -44,11 +44,11 @@ pub fn scope(name: []const u8, metadata: anytype) !Scope {
         };
     }
 
-    var inline_buffer: [inlineScopeNameBufferSize]u8 = undefined;
-    var fixed_buffer_allocator = std.heap.FixedBufferAllocator.init(&inline_buffer);
+    var inline_buffer: [inline_scope_name_buffer_size]u8 = undefined;
+    var fixed_buffer_allocator: std.heap.FixedBufferAllocator = .init(&inline_buffer);
     const fixed_allocator = fixed_buffer_allocator.allocator();
 
-    var encoded = std.ArrayList(u8).empty;
+    var encoded: std.ArrayList(u8) = .empty;
     defer encoded.deinit(fixed_allocator);
 
     try appendEncodedName(&encoded, fixed_allocator, name, metadata);
