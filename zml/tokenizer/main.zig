@@ -33,14 +33,14 @@ pub fn main(init: std.process.Init) !void {
     var decoder = try tokenizer.decoder();
     defer decoder.deinit();
 
-    var prompt_tok = try encoder.encodeAlloc(allocator, args.prompt);
-    defer prompt_tok.deinit(allocator);
+    const prompt_tok = try encoder.encodeAlloc(allocator, args.prompt);
+    defer allocator.free(prompt_tok);
 
-    log.info("Input: {s}\nOutput: {any}", .{ args.prompt, prompt_tok.items });
+    log.info("Input: {s}\nOutput: {any}", .{ args.prompt, prompt_tok });
 
     var errors: u8 = 0;
     {
-        var reconstructed = try decoder.decodeAlloc(allocator, prompt_tok.items);
+        var reconstructed = try decoder.decodeAlloc(allocator, prompt_tok);
         defer reconstructed.deinit(allocator);
         if (!std.mem.eql(u8, args.prompt, reconstructed.items)) {
             log.err("Reconstructed string from tokens doesn't match source: {s}", .{reconstructed.items});
@@ -55,7 +55,7 @@ pub fn main(init: std.process.Init) !void {
             const tok = try std.fmt.parseInt(u32, int_token, 10);
             try expected.append(allocator, tok);
         }
-        if (!std.mem.eql(u32, expected.items, prompt_tok.items)) {
+        if (!std.mem.eql(u32, expected.items, prompt_tok)) {
             log.err("Doesn't match expected: {any}", .{expected.items});
             errors += 1;
         }

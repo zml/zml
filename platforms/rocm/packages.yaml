@@ -5,7 +5,7 @@ version: 1
 
 sources:
   - channel: jammy main
-    url: https://repo.radeon.com/rocm/apt/7.2.1
+    url: https://repo.radeon.com/rocm/apt/7.2.2
   - channel: jammy main
     url: https://repo.radeon.com/graphics/7.2.1/ubuntu
   - channel: jammy main

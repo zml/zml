@@ -72,11 +72,17 @@ pub const Session = struct {
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
         try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header });
-        try encoder.encodeAppend(allocator, &tokens, "user");
+        const user_tokens = try encoder.encodeAlloc(allocator, "user");
+        defer allocator.free(user_tokens);
+        try tokens.appendSlice(allocator, user_tokens);
         try tokens.appendSlice(allocator, &.{ end_header, newline });
-        try encoder.encodeAppend(allocator, &tokens, prompt);
+        const prompt_tokens = try encoder.encodeAlloc(allocator, prompt);
+        defer allocator.free(prompt_tokens);
+        try tokens.appendSlice(allocator, prompt_tokens);
         try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        try encoder.encodeAppend(allocator, &tokens, "assistant");
+        const assistant_tokens = try encoder.encodeAlloc(allocator, "assistant");
+        defer allocator.free(assistant_tokens);
+        try tokens.appendSlice(allocator, assistant_tokens);
         try tokens.appendSlice(allocator, &.{ end_header, newline });
         return tokens.toOwnedSlice(allocator);
     }
@@ -92,11 +98,17 @@ pub const Session = struct {
 
         var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
         try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        try encoder.encodeAppend(allocator, &tokens, "user");
+        const user_tokens = try encoder.encodeAlloc(allocator, "user");
+        defer allocator.free(user_tokens);
+        try tokens.appendSlice(allocator, user_tokens);
         try tokens.appendSlice(allocator, &.{ end_header, newline });
-        try encoder.encodeAppend(allocator, &tokens, prompt);
+        const prompt_tokens = try encoder.encodeAlloc(allocator, prompt);
+        defer allocator.free(prompt_tokens);
+        try tokens.appendSlice(allocator, prompt_tokens);
         try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        try encoder.encodeAppend(allocator, &tokens, "assistant");
+        const assistant_tokens = try encoder.encodeAlloc(allocator, "assistant");
+        defer allocator.free(assistant_tokens);
+        try tokens.appendSlice(allocator, assistant_tokens);
         try tokens.appendSlice(allocator, &.{ end_header, newline });
         return tokens.toOwnedSlice(allocator);
     }
@@ -151,12 +163,14 @@ pub const Session = struct {
         var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
         defer current_token_buffer.deinit();
 
+        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
+        defer self.allocator.free(out_tokens_buffer);
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
 
             if (isEosToken(self.config, token_id)) break :generation;
 
-            const token = try decoder.feedOne(token_id);
+            const token = try decoder.feedOne(token_id, out_tokens_buffer);
             try stdout.writeAll(token);
             try stdout.flush();
 
@@ -181,7 +195,7 @@ pub const Session = struct {
             try current_token_buffer.toSlice(self.io, self.generated_token_slice);
         }
 
-        try stdout.writeAll(try decoder.finalize());
+        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
         try stdout.flush();
     }
 };
