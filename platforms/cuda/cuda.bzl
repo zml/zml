@@ -184,14 +184,21 @@ _PJRT_CUDA_ASSETS = {
     "amd64": {
         "sha256": "8e34f4ead657b697e1c670cb35acb562bee9f5ff31948411d1b8ad11416df417",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
-        "nccl_url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_x86_64.whl",
-        "nccl_sha256": "2a321629f49490e4e0122ecb578a4b4a6f89e72740dd988e04dfa4758fab7fc3",
     },
     "arm64": {
         "sha256": "54da63a8342f848e42fb26ea1f854db5211b55f9abc753e93ad06ae2964bcb44",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
-        "nccl_url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_aarch64.whl",
-        "nccl_sha256": "eab9f5c565ab3326906f1d1b5be5773a174c2a1b47002faed76f9e957392f713",
+    },
+}
+
+_NCCL_ASSETS = {
+    "amd64": {
+        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_x86_64.whl",
+        "sha256": "2a321629f49490e4e0122ecb578a4b4a6f89e72740dd988e04dfa4758fab7fc3",
+    },
+    "arm64": {
+        "url": "https://pypi.nvidia.com/nvidia-nccl-cu13/nvidia_nccl_cu13-2.29.3-py3-none-manylinux_2_18_aarch64.whl",
+        "sha256": "eab9f5c565ab3326906f1d1b5be5773a174c2a1b47002faed76f9e957392f713",
     },
 }
 
@@ -292,12 +299,12 @@ def _cuda_impl(mctx):
                 strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
             )
 
-    for arch, arch_config in _PJRT_CUDA_ASSETS.items():
+    for arch, arch_config in _NCCL_ASSETS.items():
         http_archive(
             name = _repo_name("nccl", arch),
-            urls = [arch_config["nccl_url"]],
+            urls = [arch_config["url"]],
             type = "zip",
-            sha256 = arch_config["nccl_sha256"],
+            sha256 = arch_config["sha256"],
             build_file_content = "\n".join([
                 _BUILD_FILE_DEFAULT_VISIBILITY,
                 packages.filegroup(
@@ -307,6 +314,7 @@ def _cuda_impl(mctx):
             ]),
         )
 
+    for arch, arch_config in _PJRT_CUDA_ASSETS.items():
         http_archive(
             name = _repo_name("libpjrt_cuda", arch),
             build_file = "libpjrt_cuda.BUILD.bazel",
