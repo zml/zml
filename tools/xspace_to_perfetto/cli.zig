@@ -4,9 +4,7 @@ const stdx = @import("stdx");
 const xspace_to_perfetto = @import("tools/xspace_to_perfetto");
 
 pub fn main(init: std.process.Init) !void {
-    var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    const allocator = init.gpa;
 
     var threaded: std.Io.Threaded = .init(allocator, .{});
     defer threaded.deinit();
