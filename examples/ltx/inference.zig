@@ -3006,6 +3006,11 @@ fn runVideoVaeDecode(
     timer: *PhaseTimer,
 ) !VideoFrames {
     timer.start();
+
+    // Ensure the patchified input is freed on error paths.
+    var patchified_input = v_latent_patchified;
+    errdefer patchified_input.deinit();
+
     const s2 = pipe_meta.stage2;
     const F = s2.f_lat;
     const H = s2.h_lat;
@@ -3019,9 +3024,9 @@ fn runVideoVaeDecode(
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
         return err;
     };
-    defer ckpt_reg.deinit();
+    errdefer ckpt_reg.deinit();
     var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
-    defer ckpt_store.deinit();
+    errdefer ckpt_store.deinit();
 
     // ========================================================================
     // Step 1: Unpatchify latent — [1, T_v, 128] → [1, 128, F, H, W]
@@ -3040,22 +3045,25 @@ fn runVideoVaeDecode(
         },
         .{ .shardings = &.{sharding} },
     );
-    defer unpatch_exe.deinit();
+    errdefer unpatch_exe.deinit();
     timer.addCompile();
 
     std.log.info("Running unpatchify...", .{});
     var unpatch_args = try unpatch_exe.args(allocator);
-    defer unpatch_args.deinit(allocator);
+    errdefer unpatch_args.deinit(allocator);
     var unpatch_results = try unpatch_exe.results(allocator);
-    defer unpatch_results.deinit(allocator);
     unpatch_args.set(.{v_latent_patchified});
     unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
     var v_latent_5d = unpatch_results.get(zml.Buffer);
     std.log.info("  Unpatchified: {any}", .{v_latent_5d.shape().dims()});
     timer.addExec();
 
+    // Free unpatchify resources — exe, args, results no longer needed.
+    unpatch_args.deinit(allocator);
+    unpatch_results.deinit(allocator);
+    unpatch_exe.deinit();
+
     // Free the patchified input — no longer needed after unpatchify.
-    var patchified_input = v_latent_patchified;
     patchified_input.deinit();
 
     // ========================================================================
@@ -3097,6 +3105,10 @@ fn runVideoVaeDecode(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    defer {
+        var vae_bufs_mut = vae_bufs;
+        deinitBufferizedFields(&vae_bufs_mut);
+    }
 
     std.log.info("Loading per-channel statistics...", .{});
     var stats_shape = conv_ops.initPerChannelStats(ckpt_store.view());
@@ -3114,20 +3126,21 @@ fn runVideoVaeDecode(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    defer {
+        var stats_bufs_mut = stats_bufs;
+        deinitBufferizedFields(&stats_bufs_mut);
+    }
 
     timer.addLoad(); // VAE + stats weights
+
+    // Free checkpoint resources — no longer needed after weight loading.
+    ckpt_store.deinit();
+    ckpt_reg.deinit();
 
     // ========================================================================
     // Step 4: Dispatch to tiled or single-shot decode
     // ========================================================================
     if (use_tiling) {
-        defer {
-            // Free VAE weights after tiled decode completes.
-            var vae_bufs_mut = vae_bufs;
-            deinitBufferizedFields(&vae_bufs_mut);
-            var stats_bufs_mut = stats_bufs;
-            deinitBufferizedFields(&stats_bufs_mut);
-        }
         return runVideoVaeDecodeTiled(
             allocator,
             io,
@@ -3175,14 +3188,6 @@ fn runVideoVaeDecode(
     var decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
     timer.addExec();
-
-    // Free VAE weights — no longer needed after decode.
-    {
-        var vae_bufs_mut = vae_bufs;
-        deinitBufferizedFields(&vae_bufs_mut);
-        var stats_bufs_mut = stats_bufs;
-        deinitBufferizedFields(&stats_bufs_mut);
-    }
 
     defer decoded_video.deinit(); // Free GPU buffer after download to host
     return postProcessDecodedVideo(allocator, io, decoded_video);
@@ -3252,6 +3257,15 @@ fn runVideoVaeDecodeTiled(
     const tile_lat_frames_usize: usize = @intCast(config.tile_latent_frames);
     const tile_byte_size: usize = @intCast(1 * C * config.tile_latent_frames * H * W * 2); // bf16=2 bytes
 
+    // Pre-allocate tile buffer, args, and results outside the loop (same shape every tile).
+    const tile_buf = try allocator.alloc(u8, tile_byte_size);
+    defer allocator.free(tile_buf);
+
+    var vae_args = try vae_exe.args(allocator);
+    defer vae_args.deinit(allocator);
+    var vae_results = try vae_exe.results(allocator);
+    defer vae_results.deinit(allocator);
+
     for (0..tile_plan.count) |tile_idx| {
         const tile = tile_plan.tiles[tile_idx];
         const actual_lat_frames: usize = @intCast(tile.lat_actual_end - tile.lat_start);
@@ -3268,8 +3282,6 @@ fn runVideoVaeDecodeTiled(
 
         // Create tile latent on host: [1, 128, tile_latent_frames, H, W] bf16
         // Copy actual frames, zero-pad if last tile is shorter.
-        const tile_buf = try allocator.alloc(u8, tile_byte_size);
-        defer allocator.free(tile_buf);
         @memset(tile_buf, 0); // zero-fill (handles padding for short last tile)
 
         // Copy frame data. Layout is [B=1, C=128, F, H, W] contiguous.
@@ -3299,10 +3311,6 @@ fn runVideoVaeDecodeTiled(
         var tile_gpu = try zml.Buffer.fromSlice(io, platform, tile_slice, sharding);
 
         // Run VAE decoder
-        var vae_args = try vae_exe.args(allocator);
-        defer vae_args.deinit(allocator);
-        var vae_results = try vae_exe.results(allocator);
-        defer vae_results.deinit(allocator);
         vae_args.set(.{ tile_gpu, stats_bufs, vae_bufs });
         vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
         var decoded_tile = vae_results.get(zml.Buffer); // [1, 3, F_tile_px, H_px, W_px] bf16
