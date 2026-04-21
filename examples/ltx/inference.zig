@@ -1556,151 +1556,22 @@ fn runStage1(
             preprocess_bufs,
         });
         preprocess_exe.callOpts(io, pre_args, &pre_results, .{ .wait = true });
-        const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
+        var pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- Pass 1: Conditional (positive context, normal blocks) ----
         std.log.info("  Pass 1 (conditional): {d}-block chain...", .{model.num_transformer_blocks});
         var cond_h_v = pre_out.vx;
         var cond_h_a = pre_out.ax;
 
-        for (0..model.num_transformer_blocks) |i| {
+        {
             var blk_args = try block_normal_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_normal_exe.results(allocator);
             defer blk_results.deinit(allocator);
 
-            blk_args.set(.{
-                cond_h_v,                     cond_h_a,
-                pre_out.video_timesteps,      pre_out.audio_timesteps,
-                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                block_params_bufs[i],
-            });
-            block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
-            const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            // Deinit previous block's outputs to free memory, except for the first block where pre_out is still needed for the next pass.
-            if (i > 0) {
-                cond_h_v.deinit();
-                cond_h_a.deinit();
-            }
-            cond_h_v = out.vx_out;
-            cond_h_a = out.ax_out;
-        }
-
-        var cond_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var cond_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
-        cond_h_v.deinit(); // Free last block's hidden state after projection
-        cond_h_a.deinit(); // Free last block's hidden state after projection
-
-        var cond_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, cond_v_vel, v_mask_buf, sigma_buf);
-        var cond_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, cond_a_vel, a_mask_buf, sigma_buf);
-        cond_v_vel.deinit();
-        cond_a_vel.deinit();
-
-        // ---- Pass 2: Negative/CFG (negative context, normal blocks) ----
-        std.log.info("  Pass 2 (negative/CFG): {d}-block chain...", .{model.num_transformer_blocks});
-        var neg_h_v = pre_out.vx;
-        var neg_h_a = pre_out.ax;
-
-        for (0..model.num_transformer_blocks) |i| {
-            var blk_args = try block_normal_exe.args(allocator);
-            defer blk_args.deinit(allocator);
-            var blk_results = try block_normal_exe.results(allocator);
-            defer blk_results.deinit(allocator);
-
-            blk_args.set(.{
-                neg_h_v,                      neg_h_a,
-                pre_out.video_timesteps,      pre_out.audio_timesteps,
-                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                v_context_neg_buf,            a_context_neg_buf,
-                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                block_params_bufs[i],
-            });
-            block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
-            const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) {
-                neg_h_v.deinit();
-                neg_h_a.deinit();
-            }
-            neg_h_v = out.vx_out;
-            neg_h_a = out.ax_out;
-        }
-
-        var neg_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
-        var neg_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, neg_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
-        neg_h_v.deinit();
-        neg_h_a.deinit();
-
-        var neg_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, neg_v_vel, v_mask_buf, sigma_buf);
-        var neg_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, neg_a_vel, a_mask_buf, sigma_buf);
-        neg_v_vel.deinit();
-        neg_a_vel.deinit();
-
-        // ---- Pass 3: STG (positive context, V-passthrough at block 28) ----
-        std.log.info("  Pass 3 (STG): {d}-block chain (STG at block {d})...", .{ model.num_transformer_blocks, STG_BLOCK_IDX });
-        var ptb_h_v = pre_out.vx;
-        var ptb_h_a = pre_out.ax;
-
-        for (0..model.num_transformer_blocks) |i| {
-            // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
-            if (i == STG_BLOCK_IDX) {
-                var blk_args = try block_stg_exe.args(allocator);
-                defer blk_args.deinit(allocator);
-                var blk_results = try block_stg_exe.results(allocator);
-                defer blk_results.deinit(allocator);
-
+            for (0..model.num_transformer_blocks) |i| {
                 blk_args.set(.{
-                    ptb_h_v,                      ptb_h_a,
-                    pre_out.video_timesteps,      pre_out.audio_timesteps,
-                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                    block_params_bufs[i],
-                });
-                block_stg_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
-                const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-                if (i > 0) {
-                    ptb_h_v.deinit();
-                    ptb_h_a.deinit();
-                }
-                ptb_h_v = out.vx_out;
-                ptb_h_a = out.ax_out;
-            } else {
-                var blk_args = try block_normal_exe.args(allocator);
-                defer blk_args.deinit(allocator);
-                var blk_results = try block_normal_exe.results(allocator);
-                defer blk_results.deinit(allocator);
-
-                blk_args.set(.{
-                    ptb_h_v,                      ptb_h_a,
+                    cond_h_v,                     cond_h_a,
                     pre_out.video_timesteps,      pre_out.audio_timesteps,
                     pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
                     pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
@@ -1719,11 +1590,144 @@ fn runStage1(
                 block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
-                    ptb_h_v.deinit();
-                    ptb_h_a.deinit();
+                    cond_h_v.deinit();
+                    cond_h_a.deinit();
                 }
-                ptb_h_v = out.vx_out;
-                ptb_h_a = out.ax_out;
+                cond_h_v = out.vx_out;
+                cond_h_a = out.ax_out;
+            }
+        }
+
+        var cond_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var cond_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        cond_h_v.deinit(); // Free last block's hidden state after projection
+        cond_h_a.deinit(); // Free last block's hidden state after projection
+
+        var cond_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, cond_v_vel, v_mask_buf, sigma_buf);
+        var cond_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, cond_a_vel, a_mask_buf, sigma_buf);
+        cond_v_vel.deinit();
+        cond_a_vel.deinit();
+
+        // ---- Pass 2: Negative/CFG (negative context, normal blocks) ----
+        std.log.info("  Pass 2 (negative/CFG): {d}-block chain...", .{model.num_transformer_blocks});
+        var neg_h_v = pre_out.vx;
+        var neg_h_a = pre_out.ax;
+
+        {
+            var blk_args = try block_normal_exe.args(allocator);
+            defer blk_args.deinit(allocator);
+            var blk_results = try block_normal_exe.results(allocator);
+            defer blk_results.deinit(allocator);
+
+            for (0..model.num_transformer_blocks) |i| {
+                blk_args.set(.{
+                    neg_h_v,                      neg_h_a,
+                    pre_out.video_timesteps,      pre_out.audio_timesteps,
+                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                    v_context_neg_buf,            a_context_neg_buf,
+                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                    block_params_bufs[i],
+                });
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+                if (i > 0) {
+                    neg_h_v.deinit();
+                    neg_h_a.deinit();
+                }
+                neg_h_v = out.vx_out;
+                neg_h_a = out.ax_out;
+            }
+        }
+
+        var neg_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
+        var neg_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, neg_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
+        neg_h_v.deinit();
+        neg_h_a.deinit();
+
+        var neg_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, neg_v_vel, v_mask_buf, sigma_buf);
+        var neg_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, neg_a_vel, a_mask_buf, sigma_buf);
+        neg_v_vel.deinit();
+        neg_a_vel.deinit();
+
+        // ---- Pass 3: STG (positive context, V-passthrough at block 28) ----
+        std.log.info("  Pass 3 (STG): {d}-block chain (STG at block {d})...", .{ model.num_transformer_blocks, STG_BLOCK_IDX });
+        var ptb_h_v = pre_out.vx;
+        var ptb_h_a = pre_out.ax;
+
+        {
+            var blk_normal_args = try block_normal_exe.args(allocator);
+            defer blk_normal_args.deinit(allocator);
+            var blk_normal_results = try block_normal_exe.results(allocator);
+            defer blk_normal_results.deinit(allocator);
+            var blk_stg_args = try block_stg_exe.args(allocator);
+            defer blk_stg_args.deinit(allocator);
+            var blk_stg_results = try block_stg_exe.results(allocator);
+            defer blk_stg_results.deinit(allocator);
+
+            for (0..model.num_transformer_blocks) |i| {
+                // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
+                if (i == STG_BLOCK_IDX) {
+                    blk_stg_args.set(.{
+                        ptb_h_v,                      ptb_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        block_params_bufs[i],
+                    });
+                    block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = true });
+                    const out = blk_stg_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+                    if (i > 0) {
+                        ptb_h_v.deinit();
+                        ptb_h_a.deinit();
+                    }
+                    ptb_h_v = out.vx_out;
+                    ptb_h_a = out.ax_out;
+                } else {
+                    blk_normal_args.set(.{
+                        ptb_h_v,                      ptb_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        block_params_bufs[i],
+                    });
+                    block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = true });
+                    const out = blk_normal_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+                    if (i > 0) {
+                        ptb_h_v.deinit();
+                        ptb_h_a.deinit();
+                    }
+                    ptb_h_v = out.vx_out;
+                    ptb_h_a = out.ax_out;
+                }
             }
         }
 
@@ -1742,44 +1746,80 @@ fn runStage1(
         var iso_h_v = pre_out.vx;
         var iso_h_a = pre_out.ax;
 
-        for (0..model.num_transformer_blocks) |i| {
+        {
             var blk_args = try block_iso_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_iso_exe.results(allocator);
             defer blk_results.deinit(allocator);
 
-            blk_args.set(.{
-                iso_h_v,                      iso_h_a,
-                pre_out.video_timesteps,      pre_out.audio_timesteps,
-                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                zero_mask_buf,                pre_out.v2a_pe_cos,
-                pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
-                pre_out.v2a_k_pe_sin,         zero_mask_buf,
-                block_params_bufs[i],
-            });
-            block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
-            const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) {
-                iso_h_v.deinit();
-                iso_h_a.deinit();
+            for (0..model.num_transformer_blocks) |i| {
+                blk_args.set(.{
+                    iso_h_v,                      iso_h_a,
+                    pre_out.video_timesteps,      pre_out.audio_timesteps,
+                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                    zero_mask_buf,                pre_out.v2a_pe_cos,
+                    pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
+                    pre_out.v2a_k_pe_sin,         zero_mask_buf,
+                    block_params_bufs[i],
+                });
+                block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+                if (i > 0) {
+                    iso_h_v.deinit();
+                    iso_h_a.deinit();
+                }
+                iso_h_v = out.vx_out;
+                iso_h_a = out.ax_out;
             }
-            iso_h_v = out.vx_out;
-            iso_h_a = out.ax_out;
         }
+
+        // Free block-chain-only preprocessing outputs early — only v/a_embedded_timestep
+        // are still needed for output projection. This reduces peak GPU memory.
+        pre_out.vx.deinit();
+        pre_out.ax.deinit();
+        pre_out.video_timesteps.deinit();
+        pre_out.audio_timesteps.deinit();
+        pre_out.video_timesteps_zero.deinit();
+        pre_out.audio_timesteps_zero.deinit();
+        pre_out.v_denoise_mask.deinit();
+        pre_out.a_denoise_mask.deinit();
+        pre_out.v_prompt_timestep.deinit();
+        pre_out.a_prompt_timestep.deinit();
+        pre_out.v_pe_cos.deinit();
+        pre_out.v_pe_sin.deinit();
+        pre_out.a_pe_cos.deinit();
+        pre_out.a_pe_sin.deinit();
+        pre_out.v_text_ctx.deinit();
+        pre_out.a_text_ctx.deinit();
+        pre_out.v_cross_ss_ts.deinit();
+        pre_out.v_cross_gate_ts.deinit();
+        pre_out.a_cross_ss_ts.deinit();
+        pre_out.a_cross_gate_ts.deinit();
+        pre_out.a2v_pe_cos.deinit();
+        pre_out.a2v_pe_sin.deinit();
+        pre_out.a2v_k_pe_cos.deinit();
+        pre_out.a2v_k_pe_sin.deinit();
+        pre_out.v2a_pe_cos.deinit();
+        pre_out.v2a_pe_sin.deinit();
+        pre_out.v2a_k_pe_cos.deinit();
+        pre_out.v2a_k_pe_sin.deinit();
 
         var iso_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, iso_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
         var iso_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, iso_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
         iso_h_v.deinit();
         iso_h_a.deinit();
+        // Free remaining preprocessing outputs (embedded timesteps).
+        pre_out.v_embedded_timestep.deinit();
+        pre_out.a_embedded_timestep.deinit();
 
         var iso_v_x0 = try runToDenoised(allocator, io, &to_denoised_v_exe, v_latent_buf, iso_v_vel, v_mask_buf, sigma_buf);
         var iso_a_x0 = try runToDenoised(allocator, io, &to_denoised_a_exe, a_latent_buf, iso_a_vel, a_mask_buf, sigma_buf);
@@ -1835,10 +1875,6 @@ fn runStage1(
 
         guided_v_x0.deinit();
         guided_a_x0.deinit();
-
-        // Free preprocessing outputs — they are recreated each step.
-        var pre_out_mut = pre_out;
-        deinitBufferizedFields(&pre_out_mut);
 
         v_latent_buf.deinit();
         a_latent_buf.deinit();
@@ -1896,7 +1932,7 @@ fn runBridge(
     const H_s2 = s2.h_lat;
     const W_s2 = s2.w_lat;
     const T_a: i64 = s1.t_audio;
-    const C: i64 = 128;
+    const C: i64 = 128; // Both stage 1 and stage 2 use the same latent channel dimension.
     const T_v1 = F * H_s1 * W_s1;
     const T_v2 = F * H_s2 * W_s2;
 
@@ -1947,7 +1983,6 @@ fn runBridge(
     unpatch_args.set(.{s1_video});
     unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
     var video_5d_buf = unpatch_results.get(zml.Buffer);
-    defer video_5d_buf.deinit();
     var s1_video_mut = s1_video;
     s1_video_mut.deinit();
     std.log.info("  Unpatchified: {any}", .{video_5d_buf.shape().dims()});
@@ -2023,7 +2058,7 @@ fn runBridge(
         deinitBufferizedFields(&stats_bufs_mut);
     }
     var upsampled_buf = up_results.get(zml.Buffer);
-    defer upsampled_buf.deinit();
+    video_5d_buf.deinit(); // Free early — no longer needed after upsample
     std.log.info("  Upsampled: {any}", .{upsampled_buf.shape().dims()});
     timer.addExec();
 
@@ -2051,6 +2086,7 @@ fn runBridge(
     patch_args.set(.{upsampled_buf});
     patchify_exe.callOpts(io, patch_args, &patch_results, .{ .wait = true });
     var video_clean_buf = patch_results.get(zml.Buffer);
+    upsampled_buf.deinit(); // Free early — no longer needed after patchify
     std.log.info("  Re-patchified video: {any}", .{video_clean_buf.shape().dims()});
     timer.addExec();
 
@@ -2100,7 +2136,6 @@ fn runBridge(
     // ========================================================================
     var v_noise_buf: zml.Buffer = undefined;
     var a_noise_buf: zml.Buffer = undefined;
-
     {
         // Generate noise from RNG state
         std.log.info("Generating Stage 2 noise from RNG...", .{});
@@ -2152,8 +2187,7 @@ fn runBridge(
         final_rng, a_noise_buf = gen_a_results.get(struct { zml.Bufferized(zml.Tensor.Rng), zml.Buffer });
         final_rng._state.deinit(); // Free final RNG state — not needed after bridge
     }
-    defer v_noise_buf.deinit();
-    defer a_noise_buf.deinit();
+    // v_noise_buf and a_noise_buf freed explicitly after noise init below
 
     std.log.info("  video_noise: {any}", .{v_noise_buf.shape().dims()});
     std.log.info("  audio_noise: {any}", .{a_noise_buf.shape().dims()});
@@ -2216,6 +2250,10 @@ fn runBridge(
     ni_a_args.set(.{ audio_clean_buf, a_noise_buf, a_mask_buf, sigma0_buf });
     noise_init_a_exe.callOpts(io, ni_a_args, &ni_a_results, .{ .wait = true });
     const a_latent_buf = ni_a_results.get(zml.Buffer);
+
+    // Free noise buffers — no longer needed after noise init
+    v_noise_buf.deinit();
+    a_noise_buf.deinit();
 
     std.log.info("  video_latent (noised)", .{});
     std.log.info("  audio_latent (noised)", .{});
@@ -2575,46 +2613,79 @@ fn runStage2(
             preprocess_bufs,
         });
         preprocess_exe.callOpts(io, pre_args, &pre_results, .{ .wait = true });
-        const pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
+        var pre_out = pre_results.get(zml.Bufferized(model.PreprocessOutput));
 
         // ---- 2. Block chain ----
         std.log.info("  Running {d}-block chain...", .{model.num_transformer_blocks});
         var h_v = pre_out.vx;
         var h_a = pre_out.ax;
 
-        for (0..model.num_transformer_blocks) |i| {
+        {
             var blk_args = try block_exe.args(allocator);
             defer blk_args.deinit(allocator);
             var blk_results = try block_exe.results(allocator);
             defer blk_results.deinit(allocator);
 
-            blk_args.set(.{
-                h_v,                          h_a,
-                pre_out.video_timesteps,      pre_out.audio_timesteps,
-                pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                block_params_bufs[i],
-            });
-            block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+            for (0..model.num_transformer_blocks) |i| {
+                blk_args.set(.{
+                    h_v,                          h_a,
+                    pre_out.video_timesteps,      pre_out.audio_timesteps,
+                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                    block_params_bufs[i],
+                });
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
 
-            const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
-            if (i > 0) {
-                h_v.deinit();
-                h_a.deinit();
+                const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
+                if (i > 0) {
+                    h_v.deinit();
+                    h_a.deinit();
+                }
+                h_v = out.vx_out;
+                h_a = out.ax_out;
             }
-            h_v = out.vx_out;
-            h_a = out.ax_out;
         }
+
+        // Free block-chain-only preprocessing outputs early — only v/a_embedded_timestep
+        // are still needed for output projection. This reduces peak GPU memory.
+        pre_out.vx.deinit();
+        pre_out.ax.deinit();
+        pre_out.video_timesteps.deinit();
+        pre_out.audio_timesteps.deinit();
+        pre_out.video_timesteps_zero.deinit();
+        pre_out.audio_timesteps_zero.deinit();
+        pre_out.v_denoise_mask.deinit();
+        pre_out.a_denoise_mask.deinit();
+        pre_out.v_prompt_timestep.deinit();
+        pre_out.a_prompt_timestep.deinit();
+        pre_out.v_pe_cos.deinit();
+        pre_out.v_pe_sin.deinit();
+        pre_out.a_pe_cos.deinit();
+        pre_out.a_pe_sin.deinit();
+        pre_out.v_text_ctx.deinit();
+        pre_out.a_text_ctx.deinit();
+        pre_out.v_cross_ss_ts.deinit();
+        pre_out.v_cross_gate_ts.deinit();
+        pre_out.a_cross_ss_ts.deinit();
+        pre_out.a_cross_gate_ts.deinit();
+        pre_out.a2v_pe_cos.deinit();
+        pre_out.a2v_pe_sin.deinit();
+        pre_out.a2v_k_pe_cos.deinit();
+        pre_out.a2v_k_pe_sin.deinit();
+        pre_out.v2a_pe_cos.deinit();
+        pre_out.v2a_pe_sin.deinit();
+        pre_out.v2a_k_pe_cos.deinit();
+        pre_out.v2a_k_pe_sin.deinit();
 
         // ---- 3. Output projection ----
         std.log.info("  Running output projection...", .{});
@@ -2637,6 +2708,9 @@ fn runStage2(
 
         h_v.deinit();
         h_a.deinit();
+        // Free remaining preprocessing outputs (embedded timesteps).
+        pre_out.v_embedded_timestep.deinit();
+        pre_out.a_embedded_timestep.deinit();
 
         // ---- 4. Denoising step ----
         std.log.info("  Running denoising step...", .{});
@@ -2659,10 +2733,6 @@ fn runStage2(
 
         video_vel.deinit();
         audio_vel.deinit();
-
-        // Free preprocessing outputs — they are recreated each step.
-        var pre_out_mut = pre_out;
-        deinitBufferizedFields(&pre_out_mut);
 
         v_latent_buf.deinit();
         a_latent_buf.deinit();
