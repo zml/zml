@@ -116,6 +116,10 @@ fn compileModel(
     var prefill_future_awaited = false;
     errdefer if (!prefill_future_awaited) if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
+    const prefill_exe = try prefill_future.await(io);
+    prefill_future_awaited = true;
+    errdefer prefill_exe.deinit();
+
     var decode_future = try io.concurrent(struct {
         fn call(
             allocator_: std.mem.Allocator,
@@ -149,10 +153,6 @@ fn compileModel(
     }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
     var decode_future_awaited = false;
     errdefer if (!decode_future_awaited) if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
-
-    const prefill_exe = try prefill_future.await(io);
-    prefill_future_awaited = true;
-    errdefer prefill_exe.deinit();
 
     const decode_exe = try decode_future.await(io);
     decode_future_awaited = true;
