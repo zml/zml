@@ -70,7 +70,7 @@ def _neuron_impl(mctx):
     )
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
+        pkg = loaded_packages[pkg_name]["amd64"]
         http_deb_archive(
             name = pkg_name,
             urls = pkg["urls"],
@@ -79,7 +79,7 @@ def _neuron_impl(mctx):
         )
 
     for pkg_name, build_file_content in _NEURON_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
+        pkg = loaded_packages[pkg_name]["amd64"]
         http_deb_archive(
             name = pkg_name,
             urls = pkg["urls"],
@@ -90,7 +90,12 @@ def _neuron_impl(mctx):
 
     return mctx.extension_metadata(
         reproducible = True,
-        root_module_direct_deps = "all",
+        root_module_direct_deps = [
+            "aws-neuronx-collectives",
+            "aws-neuronx-runtime-lib",
+            "libgomp1",
+            "libpjrt_neuron",
+        ],
         root_module_direct_dev_deps = [],
     )
 

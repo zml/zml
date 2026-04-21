@@ -23,7 +23,6 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":libpjrt_cuda_so",
-        "@zlib1g//:zlib1g",
         "@zml//platforms/cuda:compat_probe",
         "@zml//platforms/cuda:zmlxcuda",
     ] + select({
@@ -43,6 +42,7 @@ copy_to_directory(
             "@libcusparse_linux_x86_64//:libcusparse",
             "@libnvjitlink_linux_x86_64//:libnvjitlink",
             "@nccl_linux_amd64//:nccl",
+            "@zlib1g_linux_amd64//:zlib1g",
         ],
         "@llvm//platforms/config:linux_aarch64": [
             "@cuda_cudart_linux_sbsa//:cuda_cudart",
@@ -60,6 +60,7 @@ copy_to_directory(
             "@libcusparse_linux_sbsa//:libcusparse",
             "@libnvjitlink_linux_sbsa//:libnvjitlink",
             "@nccl_linux_arm64//:nccl",
+            "@zlib1g_linux_arm64//:zlib1g",
         ],
     }),
     replace_prefixes = {
@@ -82,9 +83,14 @@ copy_to_directory(
 cc_library(
     name = "libpjrt_cuda",
     data = [":sandbox"],
-    deps = [
-        "@cuda_cudart_linux_sbsa//:cuda",
-    ],
+    deps = select({
+        "@llvm//platforms/config:linux_x86_64": [
+            "@cuda_cudart_linux_x86_64//:cuda",
+        ],
+        "@llvm//platforms/config:linux_aarch64": [
+            "@cuda_cudart_linux_sbsa//:cuda",
+        ],
+    }),
     linkopts = [
         # Defer function call resolution until the function is called
         # (lazy loading) rather than at load time.

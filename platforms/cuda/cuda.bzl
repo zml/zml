@@ -265,13 +265,14 @@ def _cuda_impl(mctx):
 
     #TODO(cerisier): for each architecture
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
-        http_deb_archive(
-            name = pkg_name,
-            urls = pkg["urls"],
-            sha256 = pkg["sha256"],
-            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
-        )
+        pkgs = loaded_packages[pkg_name]
+        for arch, pkg in pkgs.items():
+            http_deb_archive(
+                name = _repo_name(pkg_name, arch),
+                urls = pkg["urls"],
+                sha256 = pkg["sha256"],
+                build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + "\n".join(build_file_content),
+            )
 
     for pkg, build_file_content in CUDA_PACKAGES.items():
         pkg_data = CUDA_REDIST[pkg]
@@ -351,6 +352,8 @@ def _cuda_impl(mctx):
             "libpjrt_cuda_linux_arm64",
             "cuda_nvml_dev_linux_x86_64",
             "cuda_nvml_dev_linux_sbsa",
+            "zlib1g_linux_arm64",
+            "zlib1g_linux_amd64",
         ],
         root_module_direct_dev_deps = [],
     )
