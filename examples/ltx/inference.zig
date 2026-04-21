@@ -3474,6 +3474,8 @@ fn encodeOutputMp4(
         try wr.interface.writeAll(audio_interleaved);
         try wr.interface.flush();
     }
+    // Clean up temp audio file on all exit paths (success and error).
+    defer std.Io.Dir.deleteFile(.cwd(), io, audio_path) catch {};
 
     var size_buf: [32]u8 = undefined;
     const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ video.width, video.height }) catch unreachable;
@@ -3511,6 +3513,14 @@ fn encodeOutputMp4(
         .stdout = .inherit,
         .stderr = .inherit,
     });
+    errdefer {
+        // Ensure ffmpeg is not orphaned on error: close stdin so it gets EOF, then reap.
+        if (child.stdin) |s| {
+            s.close(io);
+            child.stdin = null;
+        }
+        _ = child.wait(io) catch {};
+    }
 
     // Write all frame data to ffmpeg's stdin
     const stdin_file = child.stdin.?;
@@ -3537,9 +3547,6 @@ fn encodeOutputMp4(
     }
 
     std.log.info("  Wrote {s}", .{output_path});
-
-    // Clean up temp audio file
-    try std.Io.Dir.deleteFile(.cwd(), io, audio_path);
 }
 
 // Phase 5: Audio VAE Decode
