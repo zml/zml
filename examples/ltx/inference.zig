@@ -732,7 +732,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 3: Stage 2 — {d}-step distilled denoising ===", .{stage2_sigmas.len - 1});
 
-    var s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2);
+    const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2);
 
     // Free bridge-only buffers (positions, masks, clean latents, contexts).
     // The noised latents (v_latent, a_latent) were consumed by Stage 2's loop
@@ -791,8 +791,8 @@ pub fn main(init: std.process.Init) !void {
     defer waveform_buf.deinit();
     audio_mel.deinit();
 
-    // s2.v_latent was already freed inside runVideoVaeDecode; only free a_latent.
-    s2.a_latent.deinit();
+    // s2.v_latent was already freed inside runVideoVaeDecode.
+    // s2.a_latent was already freed inside runAudioVaeDecode.
 
     // ========================================================================
     // Final: Encode video + audio → output.mp4
@@ -3556,6 +3556,11 @@ fn runAudioVaeDecode(
     timer: *PhaseTimer,
 ) !zml.Buffer {
     timer.start();
+
+    // Ensure the patchified input is freed on error paths.
+    var patchified_input = a_latent_patchified;
+    errdefer patchified_input.deinit();
+
     const T_aud = pipe_meta.stage2.t_audio;
 
     // ---- Open checkpoint store ----
@@ -3564,9 +3569,9 @@ fn runAudioVaeDecode(
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
         return err;
     };
-    defer ckpt_reg.deinit();
+    errdefer ckpt_reg.deinit();
     var ckpt_store: zml.io.TensorStore = .fromRegistry(allocator, &ckpt_reg);
-    defer ckpt_store.deinit();
+    errdefer ckpt_store.deinit();
 
     // ========================================================================
     // Step 1: Unpatchify audio latent — [1, T_aud, 128] → [1, 8, T_aud, 16]
@@ -3583,19 +3588,25 @@ fn runAudioVaeDecode(
         },
         .{ .shardings = &.{sharding} },
     );
-    defer unpatch_exe.deinit();
+    errdefer unpatch_exe.deinit();
     timer.addCompile();
 
     std.log.info("Running audio unpatchify...", .{});
     var unpatch_args = try unpatch_exe.args(allocator);
-    defer unpatch_args.deinit(allocator);
+    errdefer unpatch_args.deinit(allocator);
     var unpatch_results = try unpatch_exe.results(allocator);
-    defer unpatch_results.deinit(allocator);
-    unpatch_args.set(.{a_latent_patchified});
+    unpatch_args.set(.{patchified_input});
     unpatch_exe.callOpts(io, unpatch_args, &unpatch_results, .{ .wait = true });
+    patchified_input.deinit(); // Free patchified input — consumed by unpatchify
     var a_latent_4d = unpatch_results.get(zml.Buffer);
+    errdefer a_latent_4d.deinit();
     std.log.info("  Unpatchified audio: {any}", .{a_latent_4d.shape().dims()});
     timer.addExec();
+
+    // Free unpatchify resources — exe, args, results no longer needed.
+    unpatch_results.deinit(allocator);
+    unpatch_args.deinit(allocator);
+    unpatch_exe.deinit();
 
     // ========================================================================
     // Step 2: Load audio VAE decoder weights + per-channel stats
@@ -3616,6 +3627,10 @@ fn runAudioVaeDecode(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    errdefer {
+        var audio_vae_bufs_mut = audio_vae_bufs;
+        deinitBufferizedFields(&audio_vae_bufs_mut);
+    }
 
     std.log.info("Loading audio per-channel statistics...", .{});
     var audio_stats_shape = audio_vae.initAudioPerChannelStats(ckpt_store.view());
@@ -3633,6 +3648,14 @@ fn runAudioVaeDecode(
             .dma_chunk_size = 16 * 1024 * 1024,
         },
     );
+    errdefer {
+        var audio_stats_bufs_mut = audio_stats_bufs;
+        deinitBufferizedFields(&audio_stats_bufs_mut);
+    }
+
+    // Free checkpoint resources — no longer needed after weight loading.
+    ckpt_store.deinit();
+    ckpt_reg.deinit();
 
     // ========================================================================
     // Step 3: Compile and run the audio VAE decoder
