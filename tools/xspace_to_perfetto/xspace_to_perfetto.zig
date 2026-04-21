@@ -69,7 +69,7 @@ const JsonArrayWriter = struct {
 };
 
 const EventScratch = struct {
-    args: std.ArrayListUnmanaged(Arg) = .{},
+    args: std.ArrayListUnmanaged(Arg) = .empty,
 
     fn reset(self: *EventScratch) void {
         self.args.clearRetainingCapacity();
@@ -251,7 +251,7 @@ fn collectSelectedPlanes(
 ) !std.ArrayListUnmanaged(PlaneContext) {
     // Plane selection intentionally follows:
     // ../../xla/xla/tsl/profiler/convert/xplane_to_trace_events.cc
-    var result: std.ArrayListUnmanaged(PlaneContext) = .{};
+    var result: std.ArrayListUnmanaged(PlaneContext) = .empty;
     errdefer {
         for (result.items) |*plane| {
             plane.deinit(allocator);
