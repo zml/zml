@@ -234,6 +234,16 @@ def _cuda_impl(mctx):
         sha256 = CUDNN_REDIST_JSON_SHA256,
     )
 
+    #TODO(cerisier): for each architecture
+    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
+        pkg = loaded_packages[pkg_name]
+        http_deb_archive(
+            name = pkg_name,
+            urls = pkg["urls"],
+            sha256 = pkg["sha256"],
+            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
+        )
+
     for pkg, build_file_content in CUDA_PACKAGES.items():
         pkg_data = CUDA_REDIST[pkg]
         for arch in ARCHS:
@@ -281,16 +291,6 @@ def _cuda_impl(mctx):
                 sha256 = arch_data["sha256"],
                 strip_prefix = paths.basename(arch_data["relative_path"]).replace(".tar.xz", ""),
             )
-
-    #TODO(cerisier): for each architecture
-    for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
-        http_deb_archive(
-            name = pkg_name,
-            urls = pkg["urls"],
-            sha256 = pkg["sha256"],
-            build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
-        )
 
     for arch, arch_config in _PJRT_CUDA_ASSETS.items():
         http_archive(
