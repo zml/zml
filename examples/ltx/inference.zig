@@ -227,6 +227,15 @@ const CliArgs = struct {
     width: u32,
     num_frames: u32,
     fps: f64,
+    // Guidance parameters for Stage 1 denoising
+    cfg_v: f32,
+    stg_v: f32,
+    mod_v: f32,
+    rescale_v: f32,
+    cfg_a: f32,
+    stg_a: f32,
+    mod_a: f32,
+    rescale_a: f32,
 };
 
 fn parseArgs(it: anytype) !CliArgs {
@@ -248,6 +257,14 @@ fn parseArgs(it: anytype) !CliArgs {
         .width = 1536,
         .num_frames = 121,
         .fps = 24.0,
+        .cfg_v = 3.0,
+        .stg_v = 1.0,
+        .mod_v = 3.0,
+        .rescale_v = 0.7,
+        .cfg_a = 7.0,
+        .stg_a = 1.0,
+        .mod_a = 3.0,
+        .rescale_a = 0.7,
     };
     var have = [_]bool{false} ** 6;
 
@@ -304,6 +321,30 @@ fn parseArgs(it: anytype) !CliArgs {
         } else if (std.mem.eql(u8, arg, "--fps")) {
             const val = it.next() orelse return error.InvalidArgs;
             args.fps = std.fmt.parseFloat(f64, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--cfg-v")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.cfg_v = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--stg-v")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.stg_v = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--mod-v")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.mod_v = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--rescale-v")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.rescale_v = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--cfg-a")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.cfg_a = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--stg-a")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.stg_a = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--mod-a")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.mod_a = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--rescale-a")) {
+            const val = it.next() orelse return error.InvalidArgs;
+            args.rescale_a = std.fmt.parseFloat(f32, val) catch return error.InvalidArgs;
         }
     }
 
@@ -315,7 +356,9 @@ fn parseArgs(it: anytype) !CliArgs {
                     "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
                     "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
                     "[--num-inference-steps <int>] [--meta <path>] [--seed <int>] [--image <path>] " ++
-                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates]",
+                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates] " ++
+                    "[--cfg-v <float>] [--stg-v <float>] [--mod-v <float>] [--rescale-v <float>] " ++
+                    "[--cfg-a <float>] [--stg-a <float>] [--mod-a <float>] [--rescale-a <float>]",
                 .{},
             );
             return error.InvalidArgs;
@@ -692,6 +735,14 @@ pub fn main(init: std.process.Init) !void {
         args.gemma_hidden_states_pos,
         args.gemma_hidden_states_neg,
         args.num_inference_steps,
+        args.cfg_v,
+        args.stg_v,
+        args.mod_v,
+        args.rescale_v,
+        args.cfg_a,
+        args.stg_a,
+        args.mod_a,
+        args.rescale_a,
         &timer_s1,
     );
 
@@ -858,6 +909,14 @@ fn runStage1(
     gemma_hs_pos_path: []const u8,
     gemma_hs_neg_path: []const u8,
     num_stage1_steps: usize,
+    cfg_v: f32,
+    stg_v: f32,
+    mod_v: f32,
+    rescale_v: f32,
+    cfg_a: f32,
+    stg_a: f32,
+    mod_a: f32,
+    rescale_a: f32,
     timer: *PhaseTimer,
 ) !Stage1Result {
     timer.start();
@@ -1503,21 +1562,21 @@ fn runStage1(
     // ---- Guidance scalars ----
     var zero_mask_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.0), .bf16, sharding);
     defer zero_mask_buf.deinit();
-    var cfg_v_buf = try zml.Buffer.scalar(io, platform, @as(f32, 3.0), .f32, sharding);
+    var cfg_v_buf = try zml.Buffer.scalar(io, platform, cfg_v, .f32, sharding);
     defer cfg_v_buf.deinit();
-    var stg_v_buf = try zml.Buffer.scalar(io, platform, @as(f32, 1.0), .f32, sharding);
+    var stg_v_buf = try zml.Buffer.scalar(io, platform, stg_v, .f32, sharding);
     defer stg_v_buf.deinit();
-    var mod_v_buf = try zml.Buffer.scalar(io, platform, @as(f32, 3.0), .f32, sharding);
+    var mod_v_buf = try zml.Buffer.scalar(io, platform, mod_v, .f32, sharding);
     defer mod_v_buf.deinit();
-    var rescale_v_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.7), .f32, sharding);
+    var rescale_v_buf = try zml.Buffer.scalar(io, platform, rescale_v, .f32, sharding);
     defer rescale_v_buf.deinit();
-    var cfg_a_buf = try zml.Buffer.scalar(io, platform, @as(f32, 7.0), .f32, sharding);
+    var cfg_a_buf = try zml.Buffer.scalar(io, platform, cfg_a, .f32, sharding);
     defer cfg_a_buf.deinit();
-    var stg_a_buf = try zml.Buffer.scalar(io, platform, @as(f32, 1.0), .f32, sharding);
+    var stg_a_buf = try zml.Buffer.scalar(io, platform, stg_a, .f32, sharding);
     defer stg_a_buf.deinit();
-    var mod_a_buf = try zml.Buffer.scalar(io, platform, @as(f32, 3.0), .f32, sharding);
+    var mod_a_buf = try zml.Buffer.scalar(io, platform, mod_a, .f32, sharding);
     defer mod_a_buf.deinit();
-    var rescale_a_buf = try zml.Buffer.scalar(io, platform, @as(f32, 0.7), .f32, sharding);
+    var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32, sharding);
     defer rescale_a_buf.deinit();
 
     // ---- Denoising loop ----
