@@ -341,10 +341,10 @@ pub const mosaic_tpu = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, layout: paged_attention.KVCache, opts: AttentionOptions) zml.Tensor {
+    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
 
-        const prepared = prepareInputs(parameters, q, layout.dense);
+        const prepared = prepareInputs(parameters, q, kv_cache);
 
         // Keep sharding intent on the `manualComputation` boundary only. The
         // TPU smoke compile regressed when the body restated

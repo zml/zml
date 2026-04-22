@@ -223,7 +223,7 @@ pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k
             .split => |split| triton.paged.pagedAttention(triton_parameters, context.triton, q, split.k, split.v, opts),
             .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
-        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, kv_cache, opts),
+        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, kv_cache.dense, opts),
     };
 }
 
