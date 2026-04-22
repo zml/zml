@@ -199,12 +199,23 @@ pub const AttentionOptions = struct {
     scale: ?f32 = null,
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, k_cache: zml.Tensor, v_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
+pub const Layout = tpu.mosaic_tpu.Layout;
+
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, layout: Layout, opts: AttentionOptions) zml.Tensor {
     return switch (parameters) {
-        .cuda_fa2 => |cuda_fa2_parameters| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, k_cache, v_cache, opts),
-        .cuda_fa3 => |cuda_fa3_parameters| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, k_cache, v_cache, opts),
-        .triton => |triton_parameters| triton.paged.pagedAttention(triton_parameters, context.triton, q, k_cache, v_cache, opts),
-        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, k, v, k_cache, v_cache, opts),
+        .cuda_fa2 => |cuda_fa2_parameters| switch (layout) {
+            .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, split.k, split.v, opts),
+            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .cuda_fa3 => |cuda_fa3_parameters| switch (layout) {
+            .split => |split| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, split.k, split.v, opts),
+            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .triton => |triton_parameters| switch (layout) {
+            .split => |split| triton.paged.pagedAttention(triton_parameters, context.triton, q, split.k, split.v, opts),
+            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+        },
+        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, k, v, layout, opts),
     };
 }
 
