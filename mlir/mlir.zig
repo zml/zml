@@ -1400,6 +1400,7 @@ pub const RankedTensorType = opaque {
         return get(
             dims.constSlice(),
             other.elementType(),
+            null,
         );
     }
 
