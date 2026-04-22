@@ -9,6 +9,7 @@ const stdx = @import("stdx");
 const CompilationContext = @import("../module.zig").CompilationContext;
 const zml = @import("../zml.zig");
 const AttentionOptions = @import("paged_attention.zig").AttentionOptions;
+const paged_attention = @import("paged_attention.zig");
 
 const log = std.log.scoped(.tpu_attention);
 
@@ -133,14 +134,6 @@ pub const mosaic_tpu = struct {
         block_table: zml.Tensor,
         query_start_len: zml.Tensor,
         num_seqs: zml.Tensor,
-    };
-
-    pub const Layout = union(enum) {
-        split: struct {
-            k: zml.Tensor,
-            v: zml.Tensor,
-        },
-        pages: zml.Tensor,
     };
 
     pub const Options = struct {
@@ -280,18 +273,6 @@ pub const mosaic_tpu = struct {
         return q_out.splitAxis(.h, .{ .hkv = q_template.dim(.hkv), .hg = q_template.dim(.hg) });
     }
 
-    inline fn cachePages(layout: Layout) zml.Tensor {
-        return switch (layout) {
-            .pages => |pages| pages,
-            .split => |split| b: {
-                const k_pages = split.k.insertAxes(.hd, .{.kv});
-                const v_pages = split.v.insertAxes(.hd, .{.kv});
-                break :b zml.Tensor.concatenate(&.{ k_pages, v_pages }, .kv)
-                    .merge(.{ .hkv = .{ .hkv, .kv } });
-            },
-        };
-    }
-
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
         const q_ragged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
         const kv_pages_partitioned = kv_pages.withPartitioning(.{ .hkv = .model });
@@ -360,12 +341,10 @@ pub const mosaic_tpu = struct {
         }
     };
 
-    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, layout: Layout, opts: AttentionOptions) zml.Tensor {
-        _ = k;
-        _ = v;
+    pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, layout: paged_attention.KVCache, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
 
-        const prepared = prepareInputs(parameters, q, cachePages(layout));
+        const prepared = prepareInputs(parameters, q, layout.dense);
 
         // Keep sharding intent on the `manualComputation` boundary only. The
         // TPU smoke compile regressed when the body restated

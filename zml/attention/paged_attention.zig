@@ -199,23 +199,31 @@ pub const AttentionOptions = struct {
     scale: ?f32 = null,
 };
 
-pub const Layout = tpu.mosaic_tpu.Layout;
+pub const KVCache = union(enum) {
+    split: struct {
+        k: zml.Tensor,
+        v: zml.Tensor,
+    },
+    dense: zml.Tensor,
+};
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, layout: Layout, opts: AttentionOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KVCache, opts: AttentionOptions) zml.Tensor {
+    _ = k;
+    _ = v;
     return switch (parameters) {
-        .cuda_fa2 => |cuda_fa2_parameters| switch (layout) {
+        .cuda_fa2 => |cuda_fa2_parameters| switch (kv_cache) {
             .split => |split| flashattn.paged_fa2.pagedAttention(cuda_fa2_parameters, context.cuda_fa2, q, split.k, split.v, opts),
-            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
-        .cuda_fa3 => |cuda_fa3_parameters| switch (layout) {
+        .cuda_fa3 => |cuda_fa3_parameters| switch (kv_cache) {
             .split => |split| flashattn.paged_fa3.pagedAttention(cuda_fa3_parameters, context.cuda_fa3, q, split.k, split.v, opts),
-            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
-        .triton => |triton_parameters| switch (layout) {
+        .triton => |triton_parameters| switch (kv_cache) {
             .split => |split| triton.paged.pagedAttention(triton_parameters, context.triton, q, split.k, split.v, opts),
-            .pages => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
+            .dense => std.debug.panic("fused KV pages are only supported with the mosaic_tpu backend", .{}),
         },
-        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, k, v, layout, opts),
+        .mosaic_tpu => |mosaic_tpu_parameters| tpu.mosaic_tpu.pagedAttention(mosaic_tpu_parameters, context.mosaic_tpu, q, kv_cache, opts),
     };
 }
 
