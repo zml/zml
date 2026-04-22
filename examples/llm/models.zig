@@ -131,11 +131,9 @@ pub const CompiledModel = struct {
     inner: Inner,
     seqlen: u32,
 
-    pub fn deinit(self: *CompiledModel) void {
+    pub fn deinit(self: CompiledModel) void {
         switch (self.inner) {
-            .lfm2 => |*b| b.deinit(),
-            .llama => |*b| b.deinit(),
-            .qwen3_5 => |*b| b.deinit(),
+            inline else => |b| b.deinit(),
         }
     }
 

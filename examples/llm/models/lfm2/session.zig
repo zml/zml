@@ -40,7 +40,7 @@ pub const Session = struct {
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = compiled_model.params.seqlen,
-            .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.replicated),
+            .cache_buffers = try compiled_model.params.cache.initBuffers(allocator, io, platform, compiled_model.params.shardings.model),
             .attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, compiled_model.params.shardings.model),
             .rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, compiled_model.params.shardings.replicated),
             .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .batch = 1, .seq = 1 }, .u32)),

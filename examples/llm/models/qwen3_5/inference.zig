@@ -57,7 +57,7 @@ pub const CompiledModel = struct {
         return .{ .loaded_model = loaded_model, .prefill_exe = compile_result.prefill_exe.?, .decode_exe = compile_result.decode_exe.?, .params = parameters };
     }
 
-    pub fn deinit(self: *CompiledModel) void {
+    pub fn deinit(self: CompiledModel) void {
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
     }

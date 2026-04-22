@@ -22,14 +22,15 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
+        const kv_shape = zml.Shape.init(.{
+            .layer = mdl.num_attention_layers,
+            .batch = 1,
+            .k = seqlen,
+            .h = config.num_key_value_heads,
+            .hd = config.hidden_size / config.num_attention_heads,
+        }, mdl.embed_tokens.weight.dtype()).withPartitioning(.{ .h = .model });
         const cache: model.Cache = .{
-            .kv = .init(.init(.{
-                .layer = mdl.num_attention_layers,
-                .batch = 1,
-                .k = seqlen,
-                .h = config.num_key_value_heads,
-                .hd = config.hidden_size / config.num_attention_heads,
-            }, mdl.embed_tokens.weight.dtype())),
+            .kv = .init(kv_shape),
             .conv = .init(.init(.{
                 .layer = mdl.num_conv_layers,
                 .batch = 1,
@@ -105,7 +106,7 @@ pub const CompiledModel = struct {
         }
     }
 
-    pub fn deinit(self: *CompiledModel) void {
+    pub fn deinit(self: CompiledModel) void {
         self.prefill.deinit();
         self.decode.deinit();
     }
@@ -332,6 +333,7 @@ fn compileComposedKernelExe(
     const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
     const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
     const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, shardings);
+
     return .{
         .embed_tokens = embed_tokens_exe,
         .conv_layer = conv_layer_exe,
