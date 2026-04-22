@@ -6,6 +6,7 @@ const stdx = zml.stdx;
 
 const acellm_ = @import("acellm.zig");
 const aceemb_ = @import("aceemb.zig");
+const aceenc_ = @import("aceenc.zig");
 const acedit_ = @import("acedit.zig");
 //const acevae_ = @import("acevae.zig");
 const inference = @import("inference.zig");
@@ -97,16 +98,36 @@ pub fn main(init: std.process.Init) !void {
     aceemb.unloadBuffers();
     
     // ------------------------------------------------
+    // Encoding phase : prepare input latents and
+    // encoded conditions for diffusion
+    // ------------------------------------------------
+    
+    const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
+    defer zml_handler.allocator.free(int_codes);
+    
+    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(), audio_codes.len());
+    defer aceenc.deinit(zml_handler.allocator);
+
+    // Test model activations
+    //try aceenc.testModel(zml_handler);
+    
+    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes);
+    defer diffuse_args.deinit(zml_handler.allocator);
+    
+    //try diffuse_args.print(zml_handler.io);
+    aceenc.unloadBuffers();
+    
+    // ------------------------------------------------
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, full_emb, partial_emb, audio_codes.len());
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, 5 * audio_codes.len(), diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acedit.testModel(zml_handler);
 
-    const diffused_latents = try inference.runDiffusion(zml_handler, &acedit, text_emb, audio_codes);
+    const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
     defer diffused_latents.deinit(zml_handler.allocator);
 
     try diffused_latents.print(zml_handler.io);

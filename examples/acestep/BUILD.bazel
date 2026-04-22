@@ -18,6 +18,7 @@ zig_binary(
         "acellm.zig",
         "inference.zig",
         "aceemb.zig",
+        "aceenc.zig",
         "acedit.zig",
     ],
     visibility = ["//visibility:public"],

@@ -1270,6 +1270,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
         self.norm_out = Qwen3RMSNorm(inner_dim, eps=config.rms_norm_eps)
         self.proj_out = nn.Sequential(
             Lambda(lambda x: x.transpose(1, 2)),  # [B, T//patch_size, inner_dim] -> [B, inner_dim, T//patch_size]
+            # begin
             nn.ConvTranspose1d(
                 in_channels=inner_dim,
                 out_channels=config.audio_acoustic_hidden_dim,
@@ -1277,6 +1278,7 @@ class AceStepDiTModel(AceStepPreTrainedModel):
                 stride=patch_size,
                 padding=0,
             ),
+            # end
             Lambda(lambda x: x.transpose(1, 2)),  # [B, out_channels, T] -> [B, T, out_channels]
         )
         # Scale-shift table for adaptive output normalization (2 values: shift, scale)
