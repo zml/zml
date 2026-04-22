@@ -94,18 +94,8 @@ pub const CompiledModel = struct {
                 .params = opts,
             };
         } else {
-            const prefill_exe, const decode_exe = b: {
-                var prefill_future = io.async(compileComposedKernelExe, .{ allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings });
-                defer if (prefill_future.cancel(io)) |e| e.deinit() else |_| {};
-
-                var decode_future = io.async(compileComposedKernelExe, .{ allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings });
-                defer if (decode_future.cancel(io)) |e| e.deinit() else |_| {};
-
-                break :b .{
-                    try prefill_future.await(io),
-                    try decode_future.await(io),
-                };
-            };
+            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
+            const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
 
             return .{
                 .loaded_model = loaded_model,
@@ -339,26 +329,10 @@ fn compileComposedKernelExe(
     progress: *std.Progress.Node,
     shardings: common.Shardings,
 ) !ComposedKernelExe {
-    const embed_tokens_exe, const conv_layer_exe, const attn_layer_exe, const lm_head_exe = b: {
-        var embed_future = io.async(compileEmbedTokens, .{ allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings });
-        errdefer if (embed_future.cancel(io)) |e| e.deinit() else |_| {};
-
-        var conv_future = io.async(compileConvLayer, .{ allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings });
-        errdefer if (conv_future.cancel(io)) |e| e.deinit() else |_| {};
-
-        var attn_future = io.async(compileAttnLayer, .{ allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings });
-        errdefer if (attn_future.cancel(io)) |e| e.deinit() else |_| {};
-
-        var lm_head_future = io.async(compileLmHead, .{ allocator, io, platform, mdl, opts, seqlen, progress, shardings });
-        errdefer if (lm_head_future.cancel(io)) |e| e.deinit() else |_| {};
-
-        break :b .{
-            try embed_future.await(io),
-            try conv_future.await(io),
-            try attn_future.await(io),
-            try lm_head_future.await(io),
-        };
-    };
+    const embed_tokens_exe = try compileEmbedTokens(allocator, io, platform, mdl.embed_tokens, opts, seqlen, progress, shardings);
+    const conv_layer_exe = try compileConvLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
+    const attn_layer_exe = try compileAttnLayer(allocator, io, platform, mdl, opts, seqlen, is_prefill, progress, shardings);
+    const lm_head_exe = try compileLmHead(allocator, io, platform, mdl, opts, seqlen, progress, shardings);
 
     return .{
         .embed_tokens = embed_tokens_exe,
