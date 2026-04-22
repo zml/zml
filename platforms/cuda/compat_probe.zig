@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !u8 {
         else => |v| blk: {
             var err_str_ptr: [*c]const u8 = undefined;
             if (cuGetErrorString(v, &err_str_ptr) == CUDA_SUCCESS) {
-                std.log.err("cuInit returned unexpected error code: {d}: {s}", .{v, err_str_ptr});
+                std.log.err("cuInit returned unexpected error code: {d}: {s}", .{ v, err_str_ptr });
             } else {
                 std.log.err("cuInit returned unexpected error code: {d}", .{v});
             }

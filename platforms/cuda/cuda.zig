@@ -50,8 +50,7 @@ pub fn needsCudaCompat(io: std.Io, sandbox_path: []const u8) !bool {
 
     return switch (result) {
         .Success => true,
-        .SystemDriverMismatch,
-        .CompatNotSupportedOnDevice => false,
+        .SystemDriverMismatch, .CompatNotSupportedOnDevice => false,
         .UnexpectedError => blk: {
             log.err("CUDA compatibility probe returned unexpected error code", .{});
             break :blk false;
