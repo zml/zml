@@ -81,7 +81,6 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":generate_files",
-        "@zlib1g",
     ],
     target_compatible_with = ["@platforms//os:linux"],
     add_directory_to_runfiles = False,
