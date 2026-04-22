@@ -20,6 +20,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
     single: bool = false,
+    profile: bool = false,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -32,8 +33,9 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
+        \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
 };
@@ -162,7 +164,9 @@ pub fn main(init: std.process.Init) !void {
     if (interactive) {
         try llm_chat.runInteractive(prompt);
     } else {
-        try llm_chat.runOnce(prompt);
+        try llm_chat.runOnce(prompt, .{
+            .profile = args.profile,
+        });
     }
 }
 
