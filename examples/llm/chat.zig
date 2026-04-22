@@ -69,7 +69,6 @@ pub const Chat = struct {
         defer self.allocator.free(prompt_tokens);
 
         var stdout = std.Io.File.stdout().writer(self.io, &.{});
-        var stderr = std.Io.File.stderr().writer(self.io, &.{});
         var profiler: ?zml.Platform.Profiler = null;
         defer if (profiler) |*p| p.deinit();
 
@@ -87,18 +86,14 @@ pub const Chat = struct {
         }
 
         try self.runPrefill(prompt_tokens, &stdout.interface);
-        const decode_stats = try self.runDecodeTurn(&stdout.interface);
+        try self.runDecodeTurn(&stdout.interface);
         const profile = if (profiler) |*p| try p.stop() else null;
 
-        try stdout.interface.writeAll("\n\n");
-        try stderr.interface.print("\x1b[2m{:.1} toks/s\x1b[0m\n\n", .{
-            tokensPerSecond(decode_stats.duration, decode_stats.tokens),
-        });
         if (opts.profile) {
             if (profile) |trace| {
-                try stderr.interface.print("\x1b[2mprofile: perfetto: {s} protobuf: {s})\x1b[0m\n\n", .{ trace.perfetto_path, trace.protobuf_path });
+                try stdout.interface.print("\x1b[2mprofile: perfetto: {s} protobuf: {s})\x1b[0m\n\n", .{ trace.perfetto_path, trace.protobuf_path });
             } else {
-                try stderr.interface.writeAll("\x1b[2mprofile: unavailable on this PJRT plugin\x1b[0m\n\n");
+                try stdout.interface.writeAll("\x1b[2mprofile: unavailable on this PJRT plugin\x1b[0m\n\n");
             }
         }
         try stdout.interface.flush();
@@ -112,8 +107,7 @@ pub const Chat = struct {
 
         while (self.tokens.items.len <= self.session.maxTokens()) {
             try self.runPrefill(turn_tokens, &stdout.interface);
-            const decode_stats = try self.runDecodeTurn(&stdout.interface);
-            try self.printDecodeStats(&stdout.interface, decode_stats);
+            try self.runDecodeTurn(&stdout.interface);
 
             turn_tokens = if (self.tokens.items.len >= self.session.maxTokens()) b: {
                 self.allocator.free(turn_tokens);
@@ -144,31 +138,19 @@ pub const Chat = struct {
         try stdout.flush();
     }
 
-    const DecodeStats = struct {
-        duration: std.Io.Duration,
-        tokens: u64,
-    };
-
-    fn runDecodeTurn(self: *Chat, stdout: *std.Io.Writer) !DecodeStats {
+    fn runDecodeTurn(self: *Chat, stdout: *std.Io.Writer) !void {
         const decode_start: std.Io.Timestamp = .now(self.io, .awake);
         const decode_pos_before = self.tokens.items.len;
         try self.session.runDecode(&self.tokens, stdout);
         const decode_duration = decode_start.untilNow(self.io, .awake);
         const decode_tokens: u64 = self.tokens.items.len - decode_pos_before;
 
-        return .{
-            .duration = decode_duration,
-            .tokens = decode_tokens,
-        };
-    }
-
-    fn printDecodeStats(self: *Chat, stdout: *std.Io.Writer, decode_stats: DecodeStats) !void {
-        _ = self;
         try stdout.writeAll("\n\n");
-        try stdout.print("\x1b[36mdecode\x1b[0m \x1b[2m{f} · {:.1}toks/s\x1b[0m\n\n\n", .{
-            decode_stats.duration,
-            tokensPerSecond(decode_stats.duration, decode_stats.tokens),
+        try stdout.print("\x1b[36mdecode\x1b[0m \x1b[2m{f} · {:.1}tok/s\x1b[0m\n\n\n", .{
+            decode_duration,
+            tokensPerSecond(decode_duration, decode_tokens),
         });
+
         try stdout.flush();
     }
 
