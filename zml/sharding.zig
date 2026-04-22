@@ -11,13 +11,6 @@ const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 
-const NeuronPlacement = struct {
-    device: PlatformDevice,
-    nc_id: usize,
-    chip: usize,
-    core: usize,
-};
-
 pub const Partitioning = struct {
     pub const Partitioner = union(enum) {
         shardy,
@@ -936,53 +929,12 @@ pub const PhysicalMesh = struct {
         return CoordsTopology.buildMeshNode(allocator, indexed, axis_sizes[0..rank], axis_tags[0..rank], axis_strides[0..rank], 0, 0);
     }
 
-    fn buildNeuronNode(
-        allocator: std.mem.Allocator,
-        placements: []const NeuronPlacement,
-        axis_tags: []const PhysicalAxisTag,
-        axis_sizes: []const usize,
-        axis_geometries: []const AxisGeometry,
-        depth: usize,
-        coords_buf: *[Shape.MAX_RANK]usize,
-        next_device: *usize,
-    ) !PhysicalNode {
-        if (depth == axis_tags.len) {
-            const placement = placements[next_device.*];
-            next_device.* += 1;
-
-            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
-            for (coords_buf[0..axis_tags.len]) |coord| coords.appendAssumeCapacity(coord);
-
-            return .{
-                .leaf = .{
-                    .id = placement.nc_id,
-                    .coords = coords,
-                    .pjrt_device = placement.device.pjrt_device,
-                },
-            };
-        }
-
-        const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
-        var built: usize = 0;
-        errdefer {
-            for (children[0..built]) |child| freeNode(allocator, child);
-            allocator.free(children);
-        }
-
-        for (children, 0..) |*child, i| {
-            coords_buf[depth] = i;
-            child.* = try buildNeuronNode(allocator, placements, axis_tags, axis_sizes, axis_geometries, depth + 1, coords_buf, next_device);
-            built += 1;
-        }
-
-        return .{
-            .branch = .{
-                .tag = axis_tags[depth],
-                .geometry = axis_geometries[depth],
-                .children = children,
-            },
-        };
-    }
+    const NeuronPlacement = struct {
+        device: PlatformDevice,
+        nc_id: usize,
+        chip: usize,
+        core: usize,
+    };
 
     pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
         if (comptime @hasDecl(c, "ZML_RUNTIME_NEURON")) {
@@ -1082,6 +1034,54 @@ pub const PhysicalMesh = struct {
         }
 
         return error.Unavailable;
+    }
+
+    fn buildNeuronNode(
+        allocator: std.mem.Allocator,
+        placements: []const NeuronPlacement,
+        axis_tags: []const PhysicalAxisTag,
+        axis_sizes: []const usize,
+        axis_geometries: []const AxisGeometry,
+        depth: usize,
+        coords_buf: *[Shape.MAX_RANK]usize,
+        next_device: *usize,
+    ) !PhysicalNode {
+        if (depth == axis_tags.len) {
+            const placement = placements[next_device.*];
+            next_device.* += 1;
+
+            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
+            for (coords_buf[0..axis_tags.len]) |coord| coords.appendAssumeCapacity(coord);
+
+            return .{
+                .leaf = .{
+                    .id = placement.nc_id,
+                    .coords = coords,
+                    .pjrt_device = placement.device.pjrt_device,
+                },
+            };
+        }
+
+        const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
+        var built: usize = 0;
+        errdefer {
+            for (children[0..built]) |child| freeNode(allocator, child);
+            allocator.free(children);
+        }
+
+        for (children, 0..) |*child, i| {
+            coords_buf[depth] = i;
+            child.* = try buildNeuronNode(allocator, placements, axis_tags, axis_sizes, axis_geometries, depth + 1, coords_buf, next_device);
+            built += 1;
+        }
+
+        return .{
+            .branch = .{
+                .tag = axis_tags[depth],
+                .geometry = axis_geometries[depth],
+                .children = children,
+            },
+        };
     }
 };
 
