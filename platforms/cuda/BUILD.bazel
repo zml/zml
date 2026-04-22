@@ -4,14 +4,14 @@ load("@rules_zig//zig:defs.bzl", "zig_library", "zig_shared_library", "zig_binar
 zig_binary(
     name = "compat_probe",
     main = "compat_probe.zig",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
+    visibility = ["//visibility:public"],
 )
 
 zig_shared_library(
     name = "zmlxcuda",
     main = "zmlxcuda.zig",
     shared_lib_name = "libzmlxcuda.so.0",
-    visibility = ["@libpjrt_cuda//:__subpackages__"],
+    visibility = ["//visibility:public"],
     # Use Clang's compiler-rt, but disable stack checking
     # to avoid requiring on the _zig_probe_stack symbol.
     zigopts = ["-fno-stack-check"],
@@ -25,22 +25,24 @@ cc_library(
 )
 
 cc_library(
+    name = "libpjrt_cuda_repo",
+    deps = select({
+        "@llvm//platforms/config:linux_x86_64": ["@libpjrt_cuda_linux_amd64//:libpjrt_cuda"],
+        "@llvm//platforms/config:linux_aarch64": ["@libpjrt_cuda_linux_arm64//:libpjrt_cuda"],
+    }),
+)
+
+cc_library(
     name = "libpjrt_cuda",
     tags = ["manual"],
     hdrs = ["libpjrt_cuda.h"],
     defines = ["ZML_RUNTIME_CUDA"],
-    deps = ["@libpjrt_cuda"],
+    deps = [":libpjrt_cuda_repo"],
 )
 
 zig_library(
     name = "cuda",
     tags = ["manual"],
-    data = select({
-        "//platforms:cuda.enabled": [
-            "@flashattn//:libflashattn",
-        ],
-        "//conditions:default": [":empty"],
-    }),
     srcs = ["compat_probe.zig"],
     import_name = "platforms/cuda",
     main = "cuda.zig",

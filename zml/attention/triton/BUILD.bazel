@@ -14,7 +14,6 @@ uv_lock(
         "--emit-find-links",
         "--index-strategy=unsafe-best-match",
         "--upgrade",
-        "--python-platform=x86_64-manylinux_2_37",
     ],
     python_version = "3.12",
     tags = ["manual"],
@@ -87,8 +86,14 @@ copy_to_directory(
     name = "sandbox",
     srcs = [
         ":generate_files",
-        "@zlib1g",
-    ],
+    ] + select({
+        "@llvm//platforms/config:linux_x86_64": [
+            "@zlib1g_linux_amd64//:zlib1g",
+        ],
+        "@llvm//platforms/config:linux_aarch64": [
+            "@zlib1g_linux_arm64//:zlib1g",
+        ],
+    }),
     target_compatible_with = ["@platforms//os:linux"],
     add_directory_to_runfiles = False,
     allow_overwrites = True,
@@ -113,6 +118,7 @@ copy_to_directory(
         "generate.py": "site-packages/generate.py",
         "generate": "bin/generate",
         "lib/x86_64-linux-gnu": "lib",
+        "lib/aarch64-linux-gnu": "lib",
     },
     visibility = ["//visibility:public"],
 )
