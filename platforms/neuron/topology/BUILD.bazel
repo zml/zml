@@ -1,0 +1,37 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+load("@zml//bazel:cc_import.bzl", "cc_import")
+load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
+
+cc_import(
+    name = "neuron_ncfw",
+    tags = ["manual"],
+    shared_library = "@aws-neuronx-runtime-lib//:libncfw.patchelf",
+)
+
+cc_import(
+    name = "neuron_nrt",
+    tags = ["manual"],
+    shared_library = "@aws-neuronx-runtime-lib//:libnrt.patchelf",
+    deps = [":neuron_ncfw"],
+)
+
+runfiles_to_default(
+    name = "sandbox",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@libpjrt_neuron//:libpjrt_neuron"],
+)
+
+zig_library(
+    name = "topology",
+    tags = ["manual"],
+    import_name = "platforms/neuron/topology",
+    main = "topology.zig",
+    visibility = ["//visibility:public"],
+    data = [":sandbox"],
+    deps = [
+        ":neuron_nrt",
+        "//platforms/neuron:libnrt_headers",
+        "//platforms/neuron:zmlxneuron",
+    ],
+)

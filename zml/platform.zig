@@ -156,7 +156,7 @@ pub const Device = struct {
     }
 
     pub fn localHardwareId(self: Device) i32 {
-        return self.device.localHardwareId(self.platform.pjrt_api);
+        return @intCast(self.pjrt_device.localHardwareId(self.platform.pjrt_api));
     }
 
     pub fn kind(self: Device) []const u8 {

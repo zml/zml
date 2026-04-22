@@ -1,5 +1,6 @@
 const std = @import("std");
 
+const c = @import("c");
 const pjrt = @import("pjrt");
 const stdx = @import("stdx");
 
@@ -10,7 +11,12 @@ const Shape = @import("shape.zig").Shape;
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 
-const log = std.log.scoped(.@"zml/sharding");
+const NeuronPlacement = struct {
+    device: PlatformDevice,
+    nc_id: usize,
+    chip: usize,
+    core: usize,
+};
 
 pub const Partitioning = struct {
     pub const Partitioner = union(enum) {
@@ -216,7 +222,7 @@ pub const Devices = stdx.BoundedArray(Device, Platform.MAX_NUM_DEVICES);
 
 /// Physical axis tags represent hardware interconnect tiers.
 pub const PhysicalAxisTag = enum {
-    link, // 1D Interconnect (Inf1, Inf2 Islands)
+    link, // Intra-device / island-local 1D interconnect
     link_x, // Torus/Mesh Dim X (TPU, Trainium)
     link_y, // Torus/Mesh Dim Y (TPU, Trainium)
     link_z, // Torus/Mesh Dim Z (TPU v3/v4/v5)
@@ -618,7 +624,7 @@ pub const PhysicalMesh = struct {
     pub fn shardableAxes(self: PhysicalMesh) []const PhysicalAxisTag {
         return switch (self.target) {
             .tpu => &.{ .link_x, .link_y, .link_z },
-            .neuron => &.{ .link_x, .link_y, .link_z, .link },
+            .neuron => &.{ .link, .link_x, .link_y, .link_z },
             .cuda, .rocm => &.{.link},
             .cpu => &.{.bus},
         };
@@ -916,18 +922,152 @@ pub const PhysicalMesh = struct {
         return CoordsTopology.buildMeshNode(allocator, indexed, axis_sizes[0..rank], axis_tags[0..rank], axis_strides[0..rank], 0, 0);
     }
 
-    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
-        const nodes = try allocator.alloc(PhysicalNode, platform_devices.len);
+    fn buildNeuronNode(
+        allocator: std.mem.Allocator,
+        placements: []const NeuronPlacement,
+        axis_tags: []const PhysicalAxisTag,
+        axis_sizes: []const usize,
+        axis_geometries: []const AxisGeometry,
+        depth: usize,
+        coords_buf: *[Shape.MAX_RANK]usize,
+        next_device: *usize,
+    ) !PhysicalNode {
+        if (depth == axis_tags.len) {
+            const placement = placements[next_device.*];
+            next_device.* += 1;
 
-        for (nodes, platform_devices) |*n, d| n.* = .device(d);
+            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
+            for (coords_buf[0..axis_tags.len]) |coord| coords.appendAssumeCapacity(coord);
+
+            return .{
+                .leaf = .{
+                    .id = placement.nc_id,
+                    .coords = coords,
+                    .pjrt_device = placement.device.pjrt_device,
+                },
+            };
+        }
+
+        const children = try allocator.alloc(PhysicalNode, axis_sizes[depth]);
+        var built: usize = 0;
+        errdefer {
+            for (children[0..built]) |child| freeNode(allocator, child);
+            allocator.free(children);
+        }
+
+        for (children, 0..) |*child, i| {
+            coords_buf[depth] = i;
+            child.* = try buildNeuronNode(allocator, placements, axis_tags, axis_sizes, axis_geometries, depth + 1, coords_buf, next_device);
+            built += 1;
+        }
 
         return .{
             .branch = .{
-                .tag = .link,
-                .geometry = .{ .ring = .closed_ring },
-                .children = nodes,
+                .tag = axis_tags[depth],
+                .geometry = axis_geometries[depth],
+                .children = children,
             },
         };
+    }
+
+    pub fn neuron(allocator: std.mem.Allocator, platform_devices: []const PlatformDevice) !Tree {
+        if (comptime @hasDecl(c, "ZML_RUNTIME_NEURON")) {
+            const neuron_topology = @import("platforms/neuron/topology");
+
+            const instance = try neuron_topology.instanceInfo();
+            const physical_cores_per_chip = try neuron_topology.coresPerChip(instance.family);
+            const placements = try allocator.alloc(NeuronPlacement, platform_devices.len);
+            defer allocator.free(placements);
+
+            for (platform_devices, placements) |device, *placement| {
+                const nc_id: usize = @intCast(device.localHardwareId());
+                placement.* = .{
+                    .device = device,
+                    .nc_id = nc_id,
+                    .chip = @divFloor(nc_id, physical_cores_per_chip),
+                    .core = @mod(nc_id, physical_cores_per_chip),
+                };
+            }
+
+            const Sort = struct {
+                fn lessThan(_: void, a: NeuronPlacement, b: NeuronPlacement) bool {
+                    return if (a.chip == b.chip) a.core < b.core else a.chip < b.chip;
+                }
+            };
+            std.mem.sort(NeuronPlacement, placements, {}, Sort.lessThan);
+
+            const visible_nc_ids = try allocator.alloc(usize, placements.len);
+            defer allocator.free(visible_nc_ids);
+            for (placements, visible_nc_ids) |placement, *nc_id| nc_id.* = placement.nc_id;
+
+            const topology = try neuron_topology.topologyFromSortedNcIds(visible_nc_ids);
+            var axis_tags: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
+            var axis_sizes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
+            var axis_geometries: stdx.BoundedArray(AxisGeometry, Shape.MAX_RANK) = .empty;
+
+            switch (topology.chip_topology) {
+                .none => {},
+                .linear => |size| {
+                    axis_tags.appendAssumeCapacity(.link_x);
+                    axis_sizes.appendAssumeCapacity(size);
+                    axis_geometries.appendAssumeCapacity(.{ .ring = .linear });
+                },
+                .ring => |size| {
+                    axis_tags.appendAssumeCapacity(.link_x);
+                    axis_sizes.appendAssumeCapacity(size);
+                    axis_geometries.appendAssumeCapacity(.{ .ring = .closed_ring });
+                },
+                .torus2d => |dims| {
+                    axis_tags.appendAssumeCapacity(.link_x);
+                    axis_sizes.appendAssumeCapacity(dims.x);
+                    axis_geometries.appendAssumeCapacity(.{ .mesh = .torus });
+
+                    axis_tags.appendAssumeCapacity(.link_y);
+                    axis_sizes.appendAssumeCapacity(dims.y);
+                    axis_geometries.appendAssumeCapacity(.{ .mesh = .torus });
+                },
+                .torus2d_ring => |dims| {
+                    axis_tags.appendAssumeCapacity(.link_x);
+                    axis_sizes.appendAssumeCapacity(dims.x);
+                    axis_geometries.appendAssumeCapacity(.{ .mesh = .torus });
+
+                    axis_tags.appendAssumeCapacity(.link_y);
+                    axis_sizes.appendAssumeCapacity(dims.y);
+                    axis_geometries.appendAssumeCapacity(.{ .mesh = .torus });
+
+                    axis_tags.appendAssumeCapacity(.link_z);
+                    axis_sizes.appendAssumeCapacity(dims.z);
+                    axis_geometries.appendAssumeCapacity(.{ .ring = .closed_ring });
+                },
+                .point_to_point => |size| {
+                    axis_tags.appendAssumeCapacity(.link_x);
+                    axis_sizes.appendAssumeCapacity(size);
+                    axis_geometries.appendAssumeCapacity(.point_to_point);
+                },
+            }
+
+            // `chip_topology` only describes inter-chip links, so add a local core axis when needed.
+            if (topology.cores_per_chip > 1 or axis_tags.len == 0) {
+                axis_tags.appendAssumeCapacity(.link);
+                axis_sizes.appendAssumeCapacity(topology.cores_per_chip);
+                axis_geometries.appendAssumeCapacity(.point_to_point);
+            }
+
+            var coords_buf: [Shape.MAX_RANK]usize = [_]usize{0} ** Shape.MAX_RANK;
+            var next_device: usize = 0;
+            return buildNeuronNode(
+                allocator,
+                placements,
+                axis_tags.constSlice(),
+                axis_sizes.constSlice(),
+                axis_geometries.constSlice(),
+                0,
+                &coords_buf,
+                &next_device,
+            );
+        }
+
+        return error.Unavailable;
     }
 };
 
@@ -1610,7 +1750,11 @@ pub const Placement = struct {
 
         pub fn platformDeviceIndex(self: *const Shard, platform: *const Platform) ?usize {
             for (platform.devices, 0..) |d, device_index| {
-                if (d.id() == self.device_id) return device_index;
+                const device_id = switch (platform.target) {
+                    .neuron => @as(usize, @intCast(d.localHardwareId())),
+                    .cuda, .rocm, .tpu, .cpu => d.id(),
+                };
+                if (device_id == self.device_id) return device_index;
             }
 
             return null;
@@ -1672,8 +1816,8 @@ pub const Placement = struct {
 
         pub fn linearIndex(self: AxisSplit) i64 {
             var linear: i64 = 0;
-            for (self.counts.constSlice(), self.indices.constSlice()) |c, iidx| {
-                linear = linear * c + iidx;
+            for (self.counts.constSlice(), self.indices.constSlice()) |c_, iidx| {
+                linear = linear * c_ + iidx;
             }
             return linear;
         }
