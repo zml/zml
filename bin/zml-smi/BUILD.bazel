@@ -48,7 +48,7 @@ copy_to_directory(
             "@amd-smi-lib//:libamd_smi",
             "@libdrm-amdgpu-amdgpu1",
             "@libdrm2-amdgpu//:libdrm2-amdgpu",
-            "@libpjrt_rocm//:amdgpu_ids",
+            "//platforms/rocm:amdgpu_ids",
         ],
         "@llvm//platforms/config:linux_aarch64": [],
     }),
