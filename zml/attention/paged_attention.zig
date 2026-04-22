@@ -199,7 +199,7 @@ pub const AttentionOptions = struct {
     scale: ?f32 = null,
 };
 
-pub const KVCache = union(enum) {
+pub const KvCache = union(enum) {
     split: struct {
         k: zml.Tensor,
         v: zml.Tensor,
@@ -207,7 +207,7 @@ pub const KVCache = union(enum) {
     dense: zml.Tensor,
 };
 
-pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KVCache, opts: AttentionOptions) zml.Tensor {
+pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, kv_cache: KvCache, opts: AttentionOptions) zml.Tensor {
     _ = k;
     _ = v;
     return switch (parameters) {
