@@ -249,7 +249,6 @@ pub fn main(init: std.process.Init) !void {
     exe.call(exe_args, &exe_results);
     var out = exe_results.get(zml.Buffer);
     defer out.deinit();
-    _ = try out.await(io);
 
     const out_slice = try out.toSliceAlloc(allocator, io);
     defer out_slice.free(allocator);
