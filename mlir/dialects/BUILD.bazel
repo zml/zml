@@ -4,7 +4,11 @@ zig_library(
     name = "dialects",
     tags = ["manual"],
     srcs = [
+        "arith.zig",
+        "cf.zig",
         "func.zig",
+        "math.zig",
+        "scf.zig",
     ],
     import_name = "mlir/dialects",
     main = "dialects.zig",
@@ -12,6 +16,7 @@ zig_library(
     deps = [
         "//mlir",
         "//mlir/dialects/stablehlo",
+        "//mlir/dialects/ttir",
         "//stdx",
         "@shardy//shardy/integrations/c:sdy_capi",
     ],

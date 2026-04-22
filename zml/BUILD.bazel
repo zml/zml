@@ -36,6 +36,10 @@ zig_library(
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton.zig",
+        "attention/triton_kernels.zig",
+        "moe.zig",
+        "moe/triton.zig",
+        "moe/triton_kernels.zig",
         "buffer.zig",
         "constants.zig",
         "dtype.zig",
@@ -58,6 +62,7 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "tracer.zig",
+        "triton.zig",
         "zml.zig",
     ],
     data = select({
@@ -86,6 +91,7 @@ zig_library(
         "//upb",
         "//zml/io",
         "//zml/tokenizer",
+        "//zml/triton",
         "@rules_zig//zig/runfiles",
     ] + select({
         "//platforms:cuda.enabled": [

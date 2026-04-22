@@ -1739,9 +1739,10 @@ pub const Tensor = struct {
     /// Concatenates the input Tensors along the given axis.
     pub fn concatenate(tensors: []const Tensor, axis_: anytype) Tensor {
         if (tensors.len == 1) return tensors[0];
-        stdx.debug.assert(tensors.len <= 32, "concatenate only supports up to 32 tensors, got {}", .{tensors.len});
-        var buffer: [32]*const mlir.Value = undefined;
-        std.debug.assert(tensors.len <= buffer.len);
+
+        const allocator = CompilationContext.current().arena.allocator();
+        var buffer = allocator.alloc(*const mlir.Value, tensors.len) catch std.debug.panic("concatenate failed to allocate buffer for mlir values", .{});
+
         std.debug.assert(tensors.len > 0);
         const a = tensors[0].axis(axis_);
         // TODO(Corendos): Check that tensor axes match.

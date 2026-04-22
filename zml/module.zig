@@ -33,7 +33,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         mlir.registerPasses("Transforms");
 
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo", "sdy" }) |d| {
+        inline for (.{ "func", "stablehlo", "sdy", "arith", "scf", "math", "tt" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         mlir.registerFuncExtensions(mlir_registry);
@@ -52,6 +52,11 @@ pub const CompilationOptions = struct {
     xla_dump_to: ?[]const u8 = null,
     xla_dump_fusion_visualization: bool = false,
     xla_dump_hlo_pass_re: ?[]const u8 = null,
+    /// Regex matched against MLIR pass-manager names registered via
+    /// `EnableIRPrintingIfRequested`. Setting this to e.g. `"triton-to-llvm"`
+    /// makes XLA dump the IR before/after every pass in the Triton compilation
+    /// pipeline (TTIR → TTGIR → LLIR) into `xla_dump_to`.
+    xla_dump_emitter_re: ?[]const u8 = null,
 };
 
 const AttributeList = stdx.BoundedArray(mlir.NamedAttribute, 3);
@@ -608,6 +613,9 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
             }
             if (opts.xla_dump_hlo_pass_re) |re| {
                 try setXlaOverrideFlag(overrides_map, "xla_dump_hlo_pass_re", re, upb_arena);
+            }
+            if (opts.xla_dump_emitter_re) |re| {
+                try setXlaOverrideFlag(overrides_map, "xla_dump_emitter_re", re, upb_arena);
             }
         }
 
