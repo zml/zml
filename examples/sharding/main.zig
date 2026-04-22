@@ -3,6 +3,7 @@ const std = @import("std");
 const zml = @import("zml");
 
 const log = std.log.scoped(.sharding);
+
 pub const std_options: std.Options = .{
     .log_level = .info,
     .log_scope_levels = &.{

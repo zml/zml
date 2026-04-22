@@ -88,6 +88,11 @@ zig_library(
         "//zml/tokenizer",
         "@rules_zig//zig/runfiles",
     ] + select({
+        "//platforms:neuron.enabled": [
+            "//platforms/neuron/topology",
+        ],
+        "//conditions:default": [],
+    }) + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda/flashattn",
         ],
