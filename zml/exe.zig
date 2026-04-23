@@ -56,6 +56,7 @@ pub const Exe = struct {
             .num_devices = num_devices,
             .num_partitions = num_partitions,
             .arena = arena,
+            .context = platform.execution_context,
         };
     }
 

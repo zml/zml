@@ -28,19 +28,19 @@ pub const Parameters = struct {
         model_id: ModelId,
         head_dim: u32,
         num_attention_heads: u32,
-        num_kv_heads: u32,
+        num_kv_heads: u8,
         mtu: u32,
     };
 
     pub fn init(args: Init) Parameters {
-        const num_q_per_head = @divExact(args.num_attention_heads, args.num_kv_heads);
+        const num_q_per_head: u8 = @intCast(@divExact(args.num_attention_heads, args.num_kv_heads));
         const head_bytes = args.head_dim * @sizeOf(u16); // TODO: Here we assume bf16 or equivalent.
         const kv_bytes = 2 * head_bytes;
 
-        var max_q_per_packet = std.math.divFloor(u32, args.mtu - @sizeOf(Header) - kv_bytes, head_bytes) catch unreachable;
+        var max_q_per_packet: u8 = @intCast(std.math.divFloor(u32, args.mtu - @sizeOf(Header) - kv_bytes, head_bytes) catch unreachable);
         max_q_per_packet = @min(max_q_per_packet, num_q_per_head);
 
-        const num_packets_per_head = std.math.divCeil(u32, num_q_per_head, max_q_per_packet) catch unreachable;
+        const num_packets_per_head: u8 = @intCast(std.math.divCeil(u32, num_q_per_head, max_q_per_packet) catch unreachable);
         const num_q_per_packet = @divExact(num_q_per_head, num_packets_per_head);
         if (num_q_per_packet < num_q_per_head) {
             log.warn("Will split attnd requests in {d} packets of {d} queries", .{ num_packets_per_head, max_q_per_packet });
@@ -87,7 +87,10 @@ pub fn register(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
     if (context_type_id) |_| {
         @panic("Cannot configure the attnd context twice.");
     }
-    context_type_id = try platform.registerData("attnd", ctx);
+
+    context_type_id = try platform.registerData("attnd", ctx, &.{
+        .deleter = deleter,
+    });
 
     switch (platform.target) {
         .cpu => {
@@ -95,6 +98,12 @@ pub fn register(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
         },
         else => @panic("Not supported yet"),
     }
+}
+
+fn deleter(object: ?*anyopaque) callconv(.c) void {
+    const ptr = object.?;
+    const ctx: *Context = @ptrCast(@alignCast(ptr));
+    ctx.client.deinit(ctx.io);
 }
 
 pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_pos: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
@@ -144,6 +153,8 @@ fn cpuCall(
     const ctx: *Context = @ptrCast(@alignCast(try call_frame.ctx.getContext(context_type_id.?, call_frame.api)));
 
     var buffer: []u8 = try ctx.allocator.alloc(u8, @sizeOf(Header) + parameters.num_kv_heads * (2 + parameters.num_q_per_head) * parameters.head_dim * @sizeOf(u16));
+    defer ctx.allocator.free(buffer);
+
     const req: Request = b: {
         const header: *align(1) Header = std.mem.bytesAsValue(Header, buffer[0..@sizeOf(Header)]);
         const payload: []u8 = buffer[@sizeOf(Header)..buffer.len];
@@ -207,7 +218,10 @@ fn cpuCall(
     var recv_q: usize = 0;
 
     while (recv_q < parameters.num_kv_heads * parameters.num_q_per_head) {
-        const resp = try ctx.client.receive(ctx.io, buffer);
+        const resp = ctx.client.receive(ctx.io, buffer) catch |err| {
+            log.err("Failed to receveive response: {any}", .{err});
+            return err;
+        };
 
         std.debug.assert(resp.header.num_queries <= parameters.num_q_per_head);
         std.debug.assert(resp.payload.len == resp.header.num_queries * parameters.head_bytes);
@@ -376,4 +390,5 @@ const ModelId = enum(u8) {
     @"llama-3.2-1B" = 1,
     @"qwen3-14B" = 2,
     @"qwen3-32B" = 3,
+    @"lfm2.5-1.2B" = 4,
 };
