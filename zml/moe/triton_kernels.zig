@@ -385,7 +385,7 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(kk.constI32(0), kk.constI32(fc.max_padded), kk.constI32(@intCast(fc.block)), &.{}, body, fc);
+            _ = kk.forLoop(0, fc.max_padded, @as(i32, @intCast(fc.block)), &.{}, body, fc);
             return &.{};
         }
     }.call;
@@ -417,7 +417,7 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return out;
                 }
             }.b;
-            const counts_results = kk.forLoop(kk.constI32(0), kk.constI32(c.numel), kk.constI32(@intCast(c.hist_block)), &.{counts_init}, hist_body, hctx);
+            const counts_results = kk.forLoop(0, c.numel, @as(i32, @intCast(c.hist_block)), &.{counts_init}, hist_body, hctx);
             const counts = counts_results[0];
 
             // padded_counts = where(expert_mask, cdiv(counts, BLOCK_SIZE_M)*BLOCK_SIZE_M, 0)
@@ -461,13 +461,13 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                             return out;
                         }
                     }.eb;
-                    const exp_results = kkk.forLoop(kkk.constI32(0), kkk.constI32(ac.num_experts), kkk.constI32(1), &.{init}, exp_body, ec);
+                    const exp_results = kkk.forLoop(0, ac.num_experts, 1, &.{init}, exp_body, ec);
                     const block_expert = exp_results[0];
                     kkk.store(ac.expert_ids.splatTo(&.{ac.hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask.inner });
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(kk.constI32(0), kk.constI32(@intCast(c.max_num_m_blocks)), kk.constI32(@intCast(c.hist_block)), &.{}, assign_body, actx);
+            _ = kk.forLoop(0, @as(i32, @intCast(c.max_num_m_blocks)), @as(i32, @intCast(c.hist_block)), &.{}, assign_body, actx);
             return &.{};
         }
     }.call;
@@ -857,7 +857,7 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
         }
     }.b;
 
-    const loop_results = k.forLoop(k.constI32(0), num_k_iters, k.constI32(1), &.{ acc_init, a_ptrs_init, b_ptrs_init }, k_body, kctx);
+    const loop_results = k.forLoop(0, num_k_iters, 1, &.{ acc_init, a_ptrs_init, b_ptrs_init }, k_body, kctx);
     var acc_final = loop_results[0];
 
     if (ac.mul_routed) {

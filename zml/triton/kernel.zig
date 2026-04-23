@@ -351,11 +351,20 @@ pub const ArgSpec = struct {
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
-/// Key for the entry-block constant cache: DSL dtype + scalar value (either
-/// an `i64` int or `f64` float, which together cover every supported DType).
+/// Key for the entry-block constant cache: DSL dtype + raw 64-bit payload
+/// (int value as i64, float value as `@bitCast(f64)`). Every supported DType
+/// fits in 64 bits of data, so this stays trivially `AutoHashMap`-friendly.
 const ConstKey = struct {
     dtype: DType,
-    value: union(enum) { int: i64, float: f64 },
+    bits: u64,
+
+    fn fromInt(dtype: DType, value: i64) ConstKey {
+        return .{ .dtype = dtype, .bits = @bitCast(value) };
+    }
+
+    fn fromFloat(dtype: DType, value: f64) ConstKey {
+        return .{ .dtype = dtype, .bits = @bitCast(value) };
+    }
 };
 
 /// The main DSL builder. Create with `init`, populate the body with helpers,
@@ -545,7 +554,7 @@ pub const Kernel = struct {
     }
 
     fn cachedInt(self: *Kernel, dtype: DType, value: i64) Value {
-        const key: ConstKey = .{ .dtype = dtype, .value = .{ .int = value } };
+        const key: ConstKey = .fromInt(dtype, value);
         if (self.cacheLookup(key)) |v| return v;
         const ty = dtype.toMlir(self.ctx);
         const v = self.emit(arith.constant_int(self.ctx, value, ty, self.loc()));
@@ -554,7 +563,7 @@ pub const Kernel = struct {
     }
 
     fn cachedFloat(self: *Kernel, dtype: DType, value: f64) Value {
-        const key: ConstKey = .{ .dtype = dtype, .value = .{ .float = value } };
+        const key: ConstKey = .fromFloat(dtype, value);
         if (self.cacheLookup(key)) |v| return v;
         const v = switch (dtype) {
             .f32 => self.emit(arith.constant_float(self.ctx, value, .f32, self.loc())),
@@ -608,8 +617,8 @@ pub const Kernel = struct {
     /// Lift a comptime int/float (or pass-through Value) to a scalar DSL Value.
     /// For runtime ints, the target DSL dtype follows the source's bitwidth
     /// (i8/i16/i32 → `i32`, i64 → `i64`). Comptime ints default to `i32`.
-    /// Floats always lift to `f32`. To target a specific dtype, use
-    /// `constInt(dt, v)` / `constFloat(dt, v)`.
+    /// Floats always lift to `f32`. To target a specific dtype, call
+    /// `constMatching(value, dtype.toMlir(k.ctx))` instead.
     pub fn lift(self: *Kernel, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
@@ -671,27 +680,15 @@ pub const Kernel = struct {
         @panic("constMatching: element type not a recognized DSL DType");
     }
 
-    /// `arith.constant` of the given DSL dtype. Cached at the entry block.
-    pub fn constInt(self: *Kernel, dtype: DType, value: i64) Value {
-        return self.cachedInt(dtype, value);
-    }
-
-    /// `arith.constant` of the given DSL float dtype. Cached at the entry block.
-    /// For sub-f32 targets (f16/bf16/f8…), emits an f32 constant first and
-    /// then `tt.fp_to_fp` with `rtne` rounding.
-    pub fn constFloat(self: *Kernel, dtype: DType, value: f64) Value {
-        return self.cachedFloat(dtype, value);
-    }
-
     /// Zero-valued tensor of the given shape and dtype.
     pub fn zeros(self: *Kernel, shape: []const i64, dtype: DType) Value {
-        const scalar = if (isFloatDtype(dtype)) self.constFloat(dtype, 0.0) else self.constInt(dtype, 0);
+        const scalar = if (isFloatDtype(dtype)) self.cachedFloat(dtype, 0.0) else self.cachedInt(dtype, 0);
         return self.splat(scalar, shape);
     }
 
     /// One-valued tensor of the given shape and dtype.
     pub fn ones(self: *Kernel, shape: []const i64, dtype: DType) Value {
-        const scalar = if (isFloatDtype(dtype)) self.constFloat(dtype, 1.0) else self.constInt(dtype, 1);
+        const scalar = if (isFloatDtype(dtype)) self.cachedFloat(dtype, 1.0) else self.cachedInt(dtype, 1);
         return self.splat(scalar, shape);
     }
 
@@ -1472,20 +1469,29 @@ pub const Kernel = struct {
     ///   fn(kernel: *Kernel, iv: Value, iter_vals: []const Value, ctx: @TypeOf(body_ctx)) []const Value
     /// and must return the values to yield. The returned slice's lifetime only
     /// needs to cover the call (they're copied into scf.yield's operand list).
+    ///
+    /// `lower`, `upper`, and `step` can be existing `Value`s or any Zig
+    /// numeric. Comptime ints adopt `lower`'s element type (so
+    /// `forLoop(0, N, 1, …)` with `N: Value` of type i32 lifts the literals to
+    /// i32); runtime ints lift per their Zig width (see `Kernel.lift`).
     pub fn forLoop(
         self: *Kernel,
-        lower: Value,
-        upper: Value,
-        step: Value,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
         iter_args: []const Value,
         comptime body_fn: anytype,
         body_ctx: anytype,
     ) []Value {
         std.debug.assert(iter_args.len <= 31);
 
+        const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.lift(lower);
+        const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constMatching(upper, lb_v.type_());
+        const step_v: Value = if (@TypeOf(step) == Value) step else self.constMatching(step, lb_v.type_());
+
         var block_types: stdx.BoundedArray(*const mlir.Type, 32) = .{};
         var block_locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
-        block_types.appendAssumeCapacity(lower.type_());
+        block_types.appendAssumeCapacity(lb_v.type_());
         block_locs.appendAssumeCapacity(self.loc());
         for (iter_args) |ia| {
             block_types.appendAssumeCapacity(ia.type_());
@@ -1517,9 +1523,9 @@ pub const Kernel = struct {
 
         const for_op = scf.for_(
             self.ctx,
-            lower.inner,
-            upper.inner,
-            step.inner,
+            lb_v.inner,
+            ub_v.inner,
+            step_v.inner,
             init_values.constSlice(),
             body,
             .{},

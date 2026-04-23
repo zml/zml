@@ -50,7 +50,7 @@ pub fn myKernelTtir(allocator: std.mem.Allocator) ![:0]const u8 {
     const n = k.arg(2);
 
     const pid = k.programId(.x);
-    const offs = k.arange(64, .i32).add(pid.mul(@as(i32, 64)));
+    const offs = k.arange(0, 64, .i32).add(pid.mul(@as(i32, 64)));
     const mask = offs.lt(n);
 
     const x = k.loadMasked(x_ptr.splatTo(&.{64}).addPtr(offs), &.{64}, .f32, mask);
@@ -237,7 +237,7 @@ const offs = k.arange(BLOCK, .i64);
 
 | Helper                                 | Effect                                           |
 |----------------------------------------|--------------------------------------------------|
-| `k.arange(end, dtype)`                 | `tl.arange(0, end).to(dtype)`; defaults to i32.  |
+| `k.arange(start, end, dtype)`          | `tl.arange(start, end).to(dtype)`. Pass `.i32` for no-op cast. |
 | `k.zeros(shape, dtype)`                | `tl.zeros(shape, dtype=dtype)`.                  |
 | `k.ones(shape, dtype)`                 | Ones tensor.                                     |
 | `k.splat(value, shape)`                | `tl.splat`; accepts Value or comptime scalar.    |
@@ -295,8 +295,11 @@ Rules of thumb:
 - Return `&.{}` if the body has no yielded values. Otherwise, allocate via
   `kk.arena.allocator().alloc(Value, N)` and fill it — lifetime only needs to
   cover the call.
-- For simple bounded loops, prefer passing `k.constI32(0)` / `k.constI32(N)` /
-  `k.constI32(step)` rather than building constants elsewhere.
+- `forLoop`'s `lower` / `upper` / `step` are `anytype`: pass Values, comptime
+  ints, or runtime Zig ints directly. Comptime literals lift to match the
+  first operand's type (so `forLoop(0, N, 1, …)` with `N: Value` of type i32
+  yields i32 bounds). To force a specific width on a Zig-side scalar, cast it
+  at the call site (e.g. `@as(i32, @intCast(config.block))`).
 
 Example — histogram loop:
 
@@ -304,7 +307,7 @@ Example — histogram loop:
 const HistCtx = struct { topk_ids: Value, numel: i32, hist_block: i64, padded: i64 };
 const body = struct {
     fn b(kk: *Kernel, iv: Value, iter: []const Value, hc: HistCtx) []const Value {
-        const offs  = iv.splatTo(&.{hc.hist_block}).add(kk.arange(@intCast(hc.hist_block), .i32));
+        const offs  = iv.splatTo(&.{hc.hist_block}).add(kk.arange(0, @intCast(hc.hist_block), .i32));
         const mask  = offs.lt(hc.numel);
         const expert_vals = kk.loadMasked(
             hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs),
@@ -316,7 +319,7 @@ const body = struct {
         return out;
     }
 }.b;
-_ = k.forLoop(k.constI32(0), k.constI32(numel), k.constI32(hist_block), &.{counts_init}, body, .{ ... });
+_ = k.forLoop(0, numel, @as(i32, @intCast(hist_block)), &.{counts_init}, body, .{ ... });
 ```
 
 ---
@@ -347,7 +350,7 @@ is the manual form.
 |-----------------------------------------------|--------------------------------------------------------------------|
 | `tl.program_id(0)`                            | `k.programId(.x)`                                                  |
 | `tl.num_programs(0)`                          | `k.numPrograms(.x)`                                                |
-| `tl.arange(0, N)`                             | `k.arange(N, .i32)`                                                |
+| `tl.arange(0, N)`                             | `k.arange(0, N, .i32)`                                             |
 | `x.to(tl.int64)`                              | `x.to(.i64)`                                                       |
 | `a + b`, `a * b`, `a // b`                    | `a.add(b)`, `a.mul(b)`, `a.div(b)`                                 |
 | `a < b`                                       | `a.lt(b)`                                                          |
@@ -365,7 +368,7 @@ is the manual form.
 | `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0, false)`                                           |
 | `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty, .{ .input_precision = .ieee })`       |
 | `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmw(.add, p, v, .{ .mask = m.inner, .sem = .relaxed, ... })` |
-| `for i in range(0, N, S): ...`                | `_ = k.forLoop(k.constI32(0), k.constI32(N), k.constI32(S), inits, body_fn, body_ctx);` |
+| `for i in range(0, N, S): ...`                | `_ = k.forLoop(0, N, S, inits, body_fn, body_ctx);` (literals lift to match types)         |
 | `while cond: ...`                             | `k.whileLoop(inits, types, before_fn, after_fn, body_ctx)`         |
 | `if cond: ... else: ...`                      | `k.ifThenElse(cond, result_types, then_fn, else_fn, body_ctx)`     |
 
@@ -390,10 +393,12 @@ is the manual form.
    the back-pointer populated — or just stick with the explicit `Kernel.*`
    helpers for that one op.
 
-5. **Don't re-emit constants.** Each call to `k.constI32(42)` creates a fresh
-   `arith.constant`. Hoist them out of loop bodies if they don't depend on the
-   loop state. Triton's canonicalizer will typically clean up anyway, but it's
-   easier to read when you bind each constant once.
+5. **Constant caching — scope matters.** `k.constI32(42)` (and every other
+   `const*` / `constMatching` / lifted comptime literal) is deduplicated
+   automatically *when emitted at the entry block*. Calls inside a `forLoop` /
+   `ifThenElse` / reduce combiner emit a fresh constant each time so the
+   defining op still dominates its uses. If you need a shared constant across
+   sibling nested regions, hoist it out of the body explicitly.
 
 6. **`finish(results, allocator)` verifies before serializing.** A verifier
    failure here almost always means an operand-type mismatch (see #1) or a
