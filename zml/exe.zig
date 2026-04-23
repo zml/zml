@@ -74,9 +74,10 @@ pub const Exe = struct {
 
     pub const FlatBuffers = struct {
         buffers: []const [*]*pjrt.Buffer,
-        raw_buffers: []const *pjrt.Buffer,
+        raw_buffers: []*pjrt.Buffer,
 
-        num_devices: usize,
+        num_devices: u32,
+        buffer_count: u32,
 
         pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
             const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
@@ -92,7 +93,8 @@ pub const Exe = struct {
             return .{
                 .buffers = buffers,
                 .raw_buffers = raw_buffers,
-                .num_devices = num_devices,
+                .num_devices = @intCast(num_devices),
+                .buffer_count = @intCast(count),
             };
         }
 

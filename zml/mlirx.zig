@@ -8,6 +8,10 @@ const Shape = @import("shape.zig").Shape;
 const mlirx = @This();
 
 pub const Type = struct {
+    pub fn fromShape(ctx: *mlir.Context, shape: Shape) *const mlir.Type {
+        return mlir.rankedTensorType(shape.dims(), fromDType(ctx, shape._dtype));
+    }
+
     pub fn fromDType(ctx: *mlir.Context, dt: dtype.DataType) *const mlir.Type {
         return switch (dt) {
             .bool => mlir.integerType(ctx, .i1),

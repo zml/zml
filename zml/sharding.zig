@@ -1905,6 +1905,7 @@ const ShardingTest = struct {
         return .{
             .arena_state = .{},
             .target = mesh.target,
+            .execution_context = undefined,
             .pjrt_api = undefined,
             .pjrt_client = undefined,
             .devices = &.{},

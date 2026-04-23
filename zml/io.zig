@@ -7,6 +7,7 @@ pub const VFS = @import("io").VFS;
 const Buffer = @import("buffer.zig").Buffer;
 const Bufferized = @import("zml.zig").Bufferized;
 const CreateOptions = @import("platform.zig").CreateOptions;
+const Exe = @import("exe.zig").Exe;
 const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
@@ -1191,6 +1192,127 @@ pub fn load(
     walk_ctx.group.await(io) catch unreachable;
 
     return bufferized;
+}
+
+pub fn loadSoA(
+    comptime ModelType: type,
+    model: *const ModelType,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *const Platform,
+    store: *const TensorStore,
+    opts: LoadOpts,
+    flat_buffers: Exe.FlatBuffers,
+) !usize {
+    const pool_count = platform.devices.len;
+    const dma_allocators = try allocator.alloc(mem.DmaAllocator, pool_count);
+    defer allocator.free(dma_allocators);
+    for (platform.devices, 0..) |*device, i| {
+        dma_allocators[i] = .init(allocator, device);
+    }
+
+    const buffer_pools = try allocator.alloc(mem.DynamicBufferPool, pool_count);
+    defer allocator.free(buffer_pools);
+    for (buffer_pools) |*pool_| {
+        pool_.* = .init(opts.dma_chunks, opts.dma_chunk_size);
+    }
+    defer for (buffer_pools, 0..) |*pool_, i| {
+        pool_.deinit(dma_allocators[i].allocator());
+    };
+
+    const replicated_sharding = try sharding_.replicatedSharding(platform);
+
+    const Ctx = struct {
+        allocator: std.mem.Allocator,
+        dma_allocators: []const mem.DmaAllocator,
+        pinned_buffer_pools: []mem.DynamicBufferPool,
+        io: std.Io,
+        platform: *const Platform,
+        flat_buffers: Exe.FlatBuffers,
+        shardings: []const Sharding,
+        replicated_sharding: Sharding,
+        store: *const TensorStore,
+        group: stdx.Io.LimitedGroup,
+        total: std.atomic.Value(usize) = .init(0),
+        progress: ?*std.Progress.Node,
+        visited: usize = 0,
+    };
+    var walk_ctx: Ctx = .{
+        .platform = platform,
+        .store = store,
+        .allocator = allocator,
+        .flat_buffers = flat_buffers,
+        .dma_allocators = dma_allocators,
+        .pinned_buffer_pools = buffer_pools,
+        .io = io,
+        .shardings = opts.shardings,
+        .replicated_sharding = replicated_sharding,
+        .progress = opts.progress,
+        .group = .init(opts.parallelism),
+    };
+
+    defer if (opts.total_bytes) |total_bytes_ptr| {
+        total_bytes_ptr.* = walk_ctx.total.load(.monotonic);
+    };
+
+    meta.visit(struct {
+        fn call(ctx: *Ctx, tensor: *const Tensor) void {
+            const i = ctx.visited;
+            ctx.visited += 1;
+
+            ctx.group.concurrent(ctx.io, struct {
+                fn call(i_: usize, tensor_: *const Tensor, ctx_: *Ctx) !void {
+                    var reader = ctx_.store.getReaderById(tensor_.id, ctx_.io, &.{}) catch unreachable;
+                    defer reader.deinit();
+
+                    const shape = reader.tensor.shape;
+                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
+                    const sharding = if (select_sharding) |s| s else blk: {
+                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
+                        break :blk ctx_.replicated_sharding;
+                    };
+
+                    var buffer: Buffer = undefined;
+
+                    var writer = MemoryWriter.init(
+                        ctx_.allocator,
+                        ctx_.io,
+                        ctx_.platform,
+                        ctx_.pinned_buffer_pools,
+                        ctx_.dma_allocators,
+                        shape,
+                        sharding,
+                        &buffer,
+                    ) catch unreachable;
+                    defer {
+                        for (ctx_.flat_buffers.buffers, buffer._shards.slice()) |device_buffers, shard| {
+                            device_buffers[i_] = shard;
+                        }
+                        writer.deinit(ctx_.allocator);
+                    }
+
+                    const scale = 1024;
+
+                    if (ctx_.progress) |progress| {
+                        var node = progress.start(reader.tensor.name, reader.tensor.shape.byteSize() / scale);
+                        defer node.end();
+                        writer.setProgress(&node);
+                        defer writer.setProgress(null);
+                        var progress_writer: ProgressWriter = .init(writer.interface(), &node, .{ .scale = scale });
+                        const total = reader.interface.streamRemaining(&progress_writer.interface) catch unreachable;
+                        progress_writer.interface.flush() catch unreachable;
+                        _ = ctx_.total.fetchAdd(total, .monotonic);
+                    } else {
+                        const total = reader.interface.streamRemaining(writer.interface()) catch unreachable;
+                        writer.interface().flush() catch unreachable;
+                        _ = ctx_.total.fetchAdd(total, .monotonic);
+                    }
+                }
+            }.call, .{ i, tensor, ctx }) catch unreachable;
+        }
+    }.call, &walk_ctx, model);
+    walk_ctx.group.await(io) catch unreachable;
+    return walk_ctx.visited;
 }
 
 fn buildMesh2x2(

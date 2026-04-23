@@ -475,6 +475,20 @@ pub const Platform = struct {
         return zml.module.compile(allocator, io, func, args, self, opts);
     }
 
+    pub fn Compiler(comptime func: anytype) type {
+        return struct {
+            pub fn compile(
+                allocator: std.mem.Allocator,
+                io: std.Io,
+                platform: *const Platform,
+                opts: zml.module.CompilationOptions,
+                args: std.meta.ArgsTuple(@TypeOf(func)),
+            ) !Exe {
+                return zml.module.compile(allocator, io, func, args, platform, opts);
+            }
+        };
+    }
+
     pub fn format(self: *const Platform, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{s} {{ ", .{@tagName(self.target)});
         for (self.devices(), 0..) |device, i| {
