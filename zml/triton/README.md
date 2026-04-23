@@ -278,13 +278,13 @@ No `result_type` / `shape` / `dtype` arguments required.
 |-------------------------------------------------|-------------------------------------------|
 | `k.load(ptr)`                                   | `tl.load(ptr)` — scalar or tensor.        |
 | `k.loadMasked(ptr, mask)`                       | `tl.load(ptrs, mask=mask, other=0)` — zero-of-dtype auto-built. |
-| `k.loadOpts(ptr, .{ .mask, .other, ... })`      | `tl.load(ptrs, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`. |
+| `k.loadOpts(ptr, .{ .mask, .other, ... })`      | `tl.load(ptrs, mask=..., other=..., cache_modifier=..., eviction_policy=..., volatile=...)`. |
 | `k.store(ptr, value)`                           | `tl.store(ptr, value)`.                   |
 | `k.storeOpts(ptr, value, .{ .mask, ... })`      | `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`. |
 
-`LoadOpts` / `StoreOpts` fields (`.mask`, `.other`, `.cache`, `.eviction`,
-`.is_volatile`) still take raw `*const mlir.Value` pointers — access them via
-`v.inner`.
+`LoadOpts` / `StoreOpts` fields (`.mask`, `.other`, `.cache_modifier`,
+`.eviction_policy`, `.@"volatile"`) take DSL-level `Value`s / enum literals —
+no raw MLIR types needed.
 
 ### Result-type inference
 
@@ -311,7 +311,7 @@ never asks you to restate information it can read off a `Value`.
 
 `k.scalarTy(dtype)` / `k.tensorTy(shape, dtype)` are still available but only
 needed by `whileLoop.after_types` (where block-arg types can be arbitrary) and
-by the raw `externElementwise` / `elementwiseInlineAsm` escape hatches.
+by the raw `externElementwise` / `inlineAsmElementwise` escape hatches.
 
 ### `fn X / fn XOpts` pattern
 
@@ -324,29 +324,40 @@ arguments comes in two flavours:
   as a typed Zig struct literal with field defaults matching Triton.
 
 Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
-`dot` / `dotOpts`, `reshape` / `reshapeOpts`, `gather` / `gatherOpts`,
+`dot` / `dotOpts`, `reshape` / `reshapeOpts`,
 `atomicRmw` / `atomicRmwOpts`, `atomicCas` / `atomicCasOpts`,
 `fpToFp` / `fpToFpOpts`, `clampf` / `clampfOpts`,
+`cast` / `castOpts`, `cat` / `catOpts`,
 `convertf` / `convertfOpts`, `scalingTruncf` / `scalingTruncfOpts`,
 `dotScaled` / `dotScaledOpts`,
-`elementwiseInlineAsm` / `elementwiseInlineAsmOpts`,
+`inlineAsmElementwise` / `inlineAsmElementwiseOpts`,
 `externElementwise` / `externElementwiseOpts`,
 `descriptorLoad` / `descriptorLoadOpts`, `histogram` / `histogramOpts`,
-`print` / `printOpts`, `reduceSum` / `reduceSumOpts`,
-`reduceMax` / `reduceMaxOpts`, `scanSum` / `scanSumOpts`.
+`devicePrint` / `devicePrintOpts`,
+`deviceAssert` / `deviceAssertOpts`,
+`maximum` / `maximumOpts`, `minimum` / `minimumOpts`,
+`sum` / `sumOpts`, `max` / `maxOpts`, `min` / `minOpts`,
+`cumsum` / `cumsumOpts`, `cumprod` / `cumprodOpts`.
+
+Ops with no kwargs in Python (pure positional): `gather(src, indices, axis)`,
+`trans(src, order)`, `permute(src, order)`, `cat(lhs, rhs)` (dim=0 default),
+`split(src)`, `join(lhs, rhs)`, `item(src)`, `broadcast(a, b)` (symmetric),
+`broadcastTo(value, shape)`, `where(cond, x, y)`, `zeros(shape, dtype)`,
+`full(shape, value, dtype)`.
 
 ---
 
 ## Reductions and scans
 
 ```zig
-const absmax = k.reduceMax(abs_y, 0);            // tl.max(abs_y, axis=0)
-const total  = k.reduceSum(padded_counts, 0);    // tl.sum(padded_counts, axis=0)
-const cumul  = k.scanSum(x, 0);                  // tl.cumsum(x, axis=0)
+const absmax = k.max(abs_y);                   // tl.max(abs_y) — axis=None (all dims)
+const total  = k.sum(padded_counts);           // tl.sum(padded_counts)
+const cumul  = k.cumsum(x);                    // tl.cumsum(x, axis=0)
 
 // Keyword arguments → the *Opts variant with a typed struct literal.
-const absmax_kd = k.reduceMaxOpts(abs_y, 0, .{ .keep_dims = true });  // tl.max(x, 0, keep_dims=True)
-const rev_cum   = k.scanSumOpts(x, 0, .{ .reverse = true });          // tl.cumsum(x, 0, reverse=True)
+const axis0_max = k.maxOpts(abs_y, .{ .axis = 0 });                // tl.max(x, axis=0)
+const absmax_kd = k.maxOpts(abs_y, .{ .axis = 0, .keep_dims = true }); // tl.max(x, 0, keep_dims=True)
+const rev_cum   = k.cumsumOpts(x, .{ .reverse = true });            // tl.cumsum(x, 0, reverse=True)
 ```
 
 Under the hood these build the required `tt.reduce` / `tt.scan` region with a
@@ -454,7 +465,7 @@ is the manual form.
 | `a + b`, `a * b`, `a // b`                    | `a.add(b)`, `a.mul(b)`, `a.div(b)`                                 |
 | `a < b`                                       | `a.lt(b)`                                                          |
 | `mask & other`                                | `mask.bitAnd(other)`                                               |
-| `tl.where(c, a, b)`                           | `k.select(c, a, b)`                                                |
+| `tl.where(c, a, b)`                           | `k.where(c, a, b)` (alias of `k.select`)                           |
 | `vec[:, None]`                                | `vec.broadcast2d(1, m, n)`                                         |
 | `vec[None, :]`                                | `vec.broadcast2d(0, m, n)`                                         |
 | `m[:, None] & (c[None, :] < N)`               | `k.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
@@ -465,11 +476,15 @@ is the manual form.
 | `tl.store(ptr, v)`                            | `k.store(ptr, v)`                                                  |
 | `tl.store(ptr, v, mask=mask)`                 | `k.storeOpts(ptr, v, .{ .mask = mask })`                           |
 | `tl.zeros((M, N), dtype=tl.float32)`          | `k.zeros(&.{ M, N }, .f32)`                                        |
-| `tl.sum(x, axis=0)`                           | `k.reduceSum(x, 0)`                                                |
-| `tl.sum(x, axis=0, keep_dims=True)`           | `k.reduceSumOpts(x, 0, .{ .keep_dims = true })`                    |
-| `tl.max(x, axis=0)`                           | `k.reduceMax(x, 0)`                                                |
-| `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0)`                                                  |
-| `tl.cumsum(x, axis=0, reverse=True)`          | `k.scanSumOpts(x, 0, .{ .reverse = true })`                        |
+| `tl.full((M, N), 3, tl.int32)`                | `k.full(&.{ M, N }, 3, .i32)`                                      |
+| `tl.sum(x)`                                   | `k.sum(x)` — axis=None default                                     |
+| `tl.sum(x, axis=0)`                           | `k.sumOpts(x, .{ .axis = 0 })`                                     |
+| `tl.sum(x, axis=0, keep_dims=True)`           | `k.sumOpts(x, .{ .axis = 0, .keep_dims = true })`                  |
+| `tl.max(x)` / `tl.min(x)`                     | `k.max(x)` / `k.min(x)`                                            |
+| `tl.max(x, axis=0)`                           | `k.maxOpts(x, .{ .axis = 0 })`                                     |
+| `tl.maximum(a, b)` / `tl.minimum(a, b)`       | `a.maximum(b)` / `a.minimum(b)` or `k.maximum(a, b)`               |
+| `tl.cumsum(x)` / `tl.cumprod(x)`              | `k.cumsum(x)` / `k.cumprod(x)`                                     |
+| `tl.cumsum(x, axis=0, reverse=True)`          | `k.cumsumOpts(x, .{ .reverse = true })`                            |
 | `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc)`                                                 |
 | `tl.dot(a, b, acc, input_precision="ieee")`   | `k.dotOpts(a, b, acc, .{ .input_precision = .ieee })`              |
 | `tl.clamp(x, mn, mx)`                         | `k.clampf(x, mn, mx)`                                              |
@@ -479,9 +494,25 @@ is the manual form.
 | `tl.histogram(x, num_bins)`                   | `k.histogram(x, num_bins)`                                         |
 | `tl.histogram(x, num_bins, mask=m)`           | `k.histogramOpts(x, num_bins, .{ .mask = m })`                     |
 | `tl.reshape(x, shape)`                        | `k.reshape(x, &.{ ...shape })`                                     |
-| `tl.reshape(x, shape, can_reorder=True)`      | `k.reshapeOpts(x, &.{ ...shape }, .{ .allow_reorder = true })`     |
-| `tl.cast(x, tl.bfloat16)`                     | `k.fpToFp(x, .bf16)` (or fluent `x.to(.bf16)`)                     |
+| `tl.reshape(x, shape, can_reorder=True)`      | `k.reshapeOpts(x, &.{ ...shape }, .{ .can_reorder = true })`       |
+| `tl.cast(x, tl.bfloat16)`                     | `k.cast(x, .bf16)` (or fluent `x.to(.bf16)`)                       |
+| `tl.cast(x, tl.bf16, fp_downcast_rounding="rtne")` | `k.castOpts(x, .bf16, .{ .fp_downcast_rounding = .rtne })`     |
+| `tl.cast(x, tl.int32, bitcast=True)`          | `k.castOpts(x, .i32, .{ .bitcast = true })`                        |
 | `src[indices]` (gather)                       | `k.gather(src, indices, axis)`                                     |
+| `tl.trans(x, dims)` / `tl.permute(x, dims)`   | `k.trans(x, order)` / `k.permute(x, order)`                        |
+| `tl.cat(a, b)`                                | `k.cat(a, b)` (dim=0 default)                                      |
+| `tl.cat(a, b, can_reorder=True)`              | `k.catOpts(a, b, .{ .can_reorder = true })`                        |
+| `tl.join(a, b)` / `tl.split(x)`               | `k.join(a, b)` / `k.split(x)`                                      |
+| `tl.item(x)`                                  | `k.item(x)`                                                        |
+| `tl.abs(x)`                                   | `k.abs(x)` (auto-dispatch) or fluent `x.abs()`                     |
+| `tl.broadcast(a, b)` (symmetric)              | `k.broadcast(a, b)` → `.{ Value, Value }`                          |
+| `tl.broadcast_to(v, shape)`                   | `k.broadcastTo(v, &.{ ...shape })`                                 |
+| `tl.umulhi(a, b)`                             | `k.umulhi(a, b)`                                                   |
+| `tl.sqrt_rn(x)` / `tl.div_rn(x, y)`           | `k.sqrtRn(x)` / `k.divRn(x, y)`                                    |
+| `tl.device_print("dbg", args...)`             | `k.devicePrint("dbg", args, is_signed)`                            |
+| `tl.device_assert(cond, "msg")`               | `k.deviceAssert(cond, "msg")`                                      |
+| `tl.inline_asm_elementwise(...)`              | `k.inlineAsmElementwise(...)`                                      |
+| `tl.extern_elementwise(...)`                  | `k.externElementwise(srcs, shape, dtype, lib, path, sym)`          |
 | `for i in range(0, N, S): ...`                | `k.forLoop(ctx, 0, N, S, .{ .inits=..., .body=... })`                                       |
 | `while cond: ...`                             | `k.whileLoop(ctx, .{ .inits=..., .after_types=..., .before=..., .after=... })`              |
 | `if cond: ... else: ...`                      | `k.ifThenElse(ctx, .{ .cond=..., .results=..., .then_=..., .else_=... })`                   |

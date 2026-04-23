@@ -219,7 +219,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
         .after = after,
     });
 
-    return kernel.finish(&.{}, allocator) catch |err| {
+    return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize count_and_sort_expert_tokens_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -276,7 +276,7 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
 
     // _absmax = max(reduce_max(abs(y)), eps)
     const abs_y = k.absf(y_f32);
-    const absmax_raw = k.reduceMax(abs_y, 0);
+    const absmax_raw = k.max(abs_y);
     const absmax = k.maximumf(absmax_raw, eps);
 
     // scale_raw = absmax / fp8_max
@@ -297,7 +297,7 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     k.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
     k.store(y_s_ptr_shifted, y_s_scalar.to(scale_dt));
 
-    return kernel.finish(&.{}, allocator) catch |err| {
+    return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize per_token_group_quant_fp8 TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -427,9 +427,9 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
             const padded_counts_full = counts.cdiv(block_size_m_v).mul(block_size_m_v);
             const padded_counts = kk.select(expert_mask, padded_counts_full, kk.zeros(&.{c.padded_num_experts}, .i32));
 
-            const padded_cumsum = kk.scanSum(padded_counts, 0);
+            const padded_cumsum = kk.cumsum(padded_counts);
             const starts = padded_cumsum.sub(padded_counts);
-            const total = kk.reduceSum(padded_counts, 0);
+            const total = kk.sum(padded_counts);
 
             // store(cumsum + expert_offs, starts, mask=expert_mask)
             kk.storeOpts(c.cumsum.splatTo(&.{c.padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
@@ -483,7 +483,7 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
         .else_ = compute_else,
     });
 
-    return kernel.finish(&.{}, allocator) catch |err| {
+    return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize moe_align_block_size_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -570,7 +570,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const num_pid_in_group = num_pid_n.mul(group_size_m);
     const group_id = pid.div(num_pid_in_group);
     const first_pid_m = group_id.mul(group_size_m);
-    const gsm_actual = num_pid_m.sub(first_pid_m).min(group_size_m);
+    const gsm_actual = num_pid_m.sub(first_pid_m).minimum(group_size_m);
     const pid_mod_in_group = pid.rem(num_pid_in_group);
     const pid_m = first_pid_m.add(pid_mod_in_group.rem(gsm_actual));
     const pid_n = pid_mod_in_group.div(gsm_actual);
@@ -651,7 +651,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         .then_ = compute,
     });
 
-    return kernel.finish(&.{}, allocator) catch |err| {
+    return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize fused_moe_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
