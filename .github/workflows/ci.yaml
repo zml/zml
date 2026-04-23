@@ -71,23 +71,39 @@ jobs:
         if: ${{ matrix.self_hosted }}
         run: mkdir -p /tmp/zig-cache && mkdir -p /tmp/zml && sudo chmod -R 777 /tmp/zig-cache && sudo chmod -R 777 /tmp/zml
 
-      - name: Setup Bazel
-        uses: bazel-contrib/setup-bazel@0.19.0
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        if: ${{ matrix.self_hosted }}
         with:
           bazelisk-version: 1.28.1
-          bazelisk-cache: ${{ !matrix.self_hosted }}
-          repository-cache: ${{ !matrix.self_hosted }}
-          external-cache: ${{ !matrix.self_hosted }}
+          bazelisk-cache: false
+          repository-cache: false
+          external-cache: false
           bazelrc: |
             common --verbose_failures
             common --keep_going
             common --test_output=streamed
             common --color=yes
             common --show_timestamps
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
-            ${{ !matrix.self_hosted && secrets.BUILDBUDDY_CI_API_KEY != '' && 'common:remote --remote_download_outputs=minimal' || '' }}
-            ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
+            common --disk_cache=/home/actions/.cache/bazel-disk
+
+      - uses: bazel-contrib/setup-bazel@0.19.0
+        if: ${{ !matrix.self_hosted }}
+        with:
+          bazelisk-version: 1.28.1
+          bazelisk-cache: true
+          repository-cache: true
+          # By default setup-bazel groups the manifest by the original job name, so just `ci` no `ci-cuda`.
+          external-cache: |
+            name: ${{ github.workflow }}-${{ github.job }}-${{ matrix.target }}
+            manifest: {}
+          bazelrc: |
+            common --verbose_failures
+            common --keep_going
+            common --test_output=streamed
+            common --color=yes
+            common --show_timestamps
+            ${{ secrets.BUILDBUDDY_CI_API_KEY != '' && 'common --config=remote' || '' }}
+            ${{ secrets.BUILDBUDDY_CI_API_KEY != '' && format('common:remote --remote_header=x-buildbuddy-api-key={0}', secrets.BUILDBUDDY_CI_API_KEY) || '' }}
 
       - run: bazel mod graph
       - run: bazel query --output=graph ${{ matrix.bazel_opts }} //...
