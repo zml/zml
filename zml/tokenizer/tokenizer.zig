@@ -108,21 +108,13 @@ pub const Tokenizer = union(Tokenizers) {
     pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
         if (bytes.len == 0) return error.InvalidArgument;
 
-        var trimmed = bytes;
-        // Strip UTF-8 BOM if present
-        if (trimmed.len >= 3 and std.mem.eql(u8, trimmed[0..3], "\xEF\xBB\xBF")) {
-            trimmed = trimmed[3..];
-        }
-        // Strip leading whitespace
-        var start: usize = 0;
-        while (start < trimmed.len and std.ascii.isWhitespace(trimmed[start])) : (start += 1) {}
-        trimmed = trimmed[start..];
+        const trimmed = trimBomAndLeadingWhitespace(bytes);
         if (trimmed.len == 0) return error.InvalidArgument;
 
         if (trimmed[0] == '{') {
             return .{ .iree = try .fromBytes(allocator, trimmed) };
         }
-        return .{ .sentencepiece = try .fromBytes(trimmed) };
+        return .{ .sentencepiece = try .fromBytes(bytes) };
     }
 
     pub fn deinit(self: *Tokenizer) void {
@@ -149,6 +141,48 @@ pub const Tokenizer = union(Tokenizers) {
         };
     }
 };
+
+fn trimBomAndLeadingWhitespace(bytes: []const u8) []const u8 {
+    var trimmed = bytes;
+    if (trimmed.len >= 3 and std.mem.eql(u8, trimmed[0..3], "\xEF\xBB\xBF")) {
+        trimmed = trimmed[3..];
+    }
+
+    var start: usize = 0;
+    while (start < trimmed.len and std.ascii.isWhitespace(trimmed[start])) : (start += 1) {}
+    return trimmed[start..];
+}
+
+test "fromBytes accepts huggingface tokenizer json with leading whitespace" {
+    const json =
+        \\ 
+        \\  {
+        \\    "version": "1.0",
+        \\    "truncation": null,
+        \\    "padding": null,
+        \\    "added_tokens": [],
+        \\    "normalizer": null,
+        \\    "pre_tokenizer": null,
+        \\    "post_processor": null,
+        \\    "decoder": null,
+        \\    "model": {
+        \\      "type": "WordLevel",
+        \\      "vocab": { "hello": 0 },
+        \\      "unk_token": "[UNK]"
+        \\    }
+        \\  }
+    ;
+
+    var tokenizer = try Tokenizer.fromBytes(std.testing.allocator, json);
+    defer tokenizer.deinit();
+}
+
+test "fromBytes accepts huggingface tokenizer json with utf8 bom" {
+    const json = "\xEF\xBB\xBF{\"version\":\"1.0\",\"truncation\":null,\"padding\":null,\"added_tokens\":[],\"normalizer\":null,\"pre_tokenizer\":null,\"post_processor\":null,\"decoder\":null,\"model\":{\"type\":\"WordLevel\",\"vocab\":{\"hello\":0},\"unk_token\":\"[UNK]\"}}";
+
+    var tokenizer = try Tokenizer.fromBytes(std.testing.allocator, json);
+    defer tokenizer.deinit();
+}
 
 test {
     std.testing.refAllDecls(@This());
