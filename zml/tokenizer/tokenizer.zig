@@ -99,7 +99,13 @@ pub const Tokenizer = union(Tokenizers) {
             return .{ .sentencepiece = try .fromFile(model) };
         }
         if (std.mem.endsWith(u8, model, ".json")) {
-            return .{ .iree = try .fromFile(allocator, io, model) };
+            return .{ .iree = iree.Tokenizer.fromFile(allocator, io, model) catch |err| switch (err) {
+                error.InvalidArgument => {
+                    log.warn("IREE tokenizer rejected JSON tokenizer file; falling back to HF tokenizer backend", .{});
+                    return .{ .hftokenizers = try hftokenizers.HFTokenizer.fromFile(model) };
+                },
+                else => return err,
+            } };
         }
 
         return error.InvalidArgument;
@@ -112,7 +118,13 @@ pub const Tokenizer = union(Tokenizers) {
         if (trimmed.len == 0) return error.InvalidArgument;
 
         if (trimmed[0] == '{') {
-            return .{ .iree = try .fromBytes(allocator, trimmed) };
+            return .{ .iree = iree.Tokenizer.fromBytes(allocator, trimmed) catch |err| switch (err) {
+                error.InvalidArgument => {
+                    log.warn("IREE tokenizer rejected JSON tokenizer bytes; falling back to HF tokenizer backend", .{});
+                    return .{ .hftokenizers = try hftokenizers.HFTokenizer.fromBytes(trimmed) };
+                },
+                else => return err,
+            } };
         }
         return .{ .sentencepiece = try .fromBytes(bytes) };
     }
