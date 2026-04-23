@@ -12,6 +12,22 @@ const neff_input_name_attr = "neff_input_name";
 const neff_input_names_attr = "neff_input_names";
 const neff_output_names_attr = "neff_output_names";
 
+// This file owns the embedded-kernel lowering boundary, not the whole-program
+// Neuron compile flow.
+//
+// Input contract:
+// - ZML emits synthetic `zml$neuron$nki` custom-calls in StableHLO.
+// - Their backend_config carries the inline Python source, entrypoint, and
+//   tensor signatures encoded in the ZML-specific text format parsed below.
+//
+// Output contract:
+// - those synthetic calls are rewritten into `AwsNeuronCustomNativeKernel`
+//   custom-calls that `neuronx-cc` understands
+// - the rewritten backend_config payload is produced by `nki-cc` through a
+//   single request/result JSON contract
+// - frontend attributes are updated so outer parameter/root names match the
+//   compiled NKI kernel IO names
+
 const TensorSignature = struct {
     name: ?[]const u8 = null,
     dtype: []const u8,
@@ -73,6 +89,9 @@ fn parseTensorSignature(allocator: std.mem.Allocator, value: []const u8) !Tensor
 }
 
 fn parseNkiKernelConfig(allocator: std.mem.Allocator, backend_config: []const u8) !NkiKernelConfig {
+    // Parse the ZML-side textual backend_config attached to the synthetic
+    // `zml$neuron$nki` custom-call. This is intentionally separate from the
+    // request/result JSON contract used by `nki-cc`.
     var inputs: std.ArrayList(TensorSignature) = .empty;
     var outputs: std.ArrayList(TensorSignature) = .empty;
 
@@ -124,6 +143,8 @@ fn writeNkiCompilerRequest(
     file: std.Io.File,
     request: NkiCompilerRequest,
 ) !void {
+    // The Zig/Python boundary is intentionally a single structured request
+    // file. Python owns all compiler scratch layout behind that boundary.
     const request_json = try std.fmt.allocPrint(
         allocator,
         "{f}",
@@ -229,6 +250,8 @@ fn readNkiCompilerResponse(
     io: std.Io,
     file: std.Io.File,
 ) !NkiCompiledKernel {
+    // `backend_config_b64` stays base64 text because `AwsNeuronCustomNativeKernel`
+    // expects that exact payload format in the rewritten HLO backend_config.
     const data = try readFileAlloc(allocator, io, file);
     const response = try std.json.parseFromSliceLeaky(NkiCompilerResponse, allocator, data, .{
         .ignore_unknown_fields = true,
@@ -250,6 +273,9 @@ fn compileNkiKernel(
 ) !NkiCompiledKernel {
     if (std.mem.eql(u8, target, "inf1")) return error.UnsupportedNkiTarget;
 
+    // Keep the outer tmp_dir ownership in Zig so the whole Neuron compile
+    // workspace, including NKI scratch artifacts referenced by the compiled
+    // backend_config, shares one lifecycle.
     const stem = try std.fmt.allocPrint(allocator, "kernel-{d}", .{kernel_index});
     const request_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.request.json", .{stem}), .{
         .read = true,
@@ -333,6 +359,9 @@ pub fn rewriteCustomCalls(
     hlo_code: []const u8,
     target: []const u8,
 ) !?[]const u8 {
+    // This pass is intentionally narrow: only rewrite synthetic ZML NKI
+    // custom-calls. If none are present, the caller should compile the original
+    // StableHLO module unchanged.
     var upb_alloc: upb.Allocator = .init(allocator);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
 

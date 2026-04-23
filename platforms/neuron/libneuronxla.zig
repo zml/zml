@@ -8,6 +8,17 @@ const upb = @import("upb");
 const log = std.log.scoped(.@"zml/platforms/neuron/libneuronxla");
 const aws_neuron_neff_target = "AwsNeuronNeff";
 
+// `libneuronxla` is the whole-program Neuron compile hook loaded by the
+// upstream Neuron Python bridge. Its responsibilities stop at the outer
+// StableHLO program boundary:
+// - accept the bridge callback arguments
+// - let `platforms/neuron/nki` materialize embedded custom kernels, if any
+// - invoke `neuronx-cc` on the resulting StableHLO module
+// - wrap the produced NEFF back into a single `AwsNeuronNeff` custom-call
+//
+// Embedded-kernel lowering lives under `platforms/neuron/nki`; this file owns
+// only the top-level program compile path.
+
 const ModuleState = struct {
     threaded: std.Io.Threaded,
 };
@@ -82,8 +93,10 @@ fn wrapNeffAsCustomCall(
     hlo_code: []const u8,
     neff_file: std.Io.File,
 ) ![]const u8 {
-    // Rebuild the entry computation so the runtime sees a single
-    // `AwsNeuronNeff` custom-call with the original parameters preserved.
+    // Replace the original entry computation with a single top-level
+    // `AwsNeuronNeff` custom-call while preserving the original parameters.
+    // This is the whole-program handoff back to the Neuron runtime after the
+    // StableHLO module has already been compiled to a NEFF.
     var upb_alloc: upb.Allocator = .init(allocator);
     const upb_arena = c.upb_Arena_Init(null, 0, upb_alloc.inner());
 
@@ -177,6 +190,8 @@ fn compileHloToNeff(
     hlo_code: []const u8,
     target: []const u8,
 ) !std.Io.File {
+    // `neuronx-cc` consumes a StableHLO file and produces a NEFF file in the
+    // temporary compilation workspace owned by this hook.
     const code_file = try tmp_dir.createFile(io, "file.code", .{});
     try code_file.writePositionalAll(io, hlo_code, 0);
 
@@ -271,6 +286,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     const code = PyBytes_AsStringAndSize(args[0]);
     const platform_version = PyBytes_AsStringAndSize(args[2]);
 
+    // The Neuron bridge passes a platform version string rather than an NKI
+    // target name on this callback path, so this hook still has to translate
+    // that upstream contract into a `neuronx-cc` target.
     // https://github.com/aws-neuron/nkipy/blob/878aa45c8729de3cab79c691d6c605db55e261b2/nkipy/src/nkipy/core/compile.py#L53
     const target = std.StaticStringMap([]const u8).initComptime(.{
         .{ "1.0", "inf1" },
@@ -302,8 +320,9 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         };
     }
 
-    // Embedded NKI kernels are lowered into AwsNeuronCustomNativeKernel
-    // custom-calls before the whole StableHLO program is compiled by neuronx-cc.
+    // Lower any embedded NKI kernels in-place first. If the module contains no
+    // synthetic ZML NKI custom-calls, the original StableHLO bytes are passed
+    // through unchanged.
     const compile_hlo = (try neuron_nki.hlo_rewriter.rewriteCustomCalls(
         arena.allocator(),
         io,
