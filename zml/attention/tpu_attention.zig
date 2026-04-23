@@ -273,9 +273,31 @@ pub const mosaic_tpu = struct {
         return q_out.splitAxis(.h, .{ .hkv = q_template.dim(.hkv), .hg = q_template.dim(.hg) });
     }
 
-    inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const q_ragged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
-        const kv_pages_partitioned = kv_pages.withPartitioning(.{ .hkv = .model });
+    fn alignedKernelHeadDim(head_dim: i64) i64 {
+        const alignment = 128;
+        stdx.debug.assert(head_dim > 0, "mosaic_tpu ragged paged attention expects positive head_dim, got {}", .{head_dim});
+        const alignment_multiple = std.math.divCeil(i64, head_dim, alignment) catch unreachable;
+        return alignment_multiple * alignment;
+    }
+
+    inline fn alignHeadDimForKernel(tensor: zml.Tensor, kernel_head_dim: i64) zml.Tensor {
+        const padding = kernel_head_dim - tensor.dim(.hd);
+        stdx.debug.assert(padding >= 0, "mosaic_tpu ragged paged attention kernel_head_dim {} is smaller than tensor head_dim {}", .{ kernel_head_dim, tensor.dim(.hd) });
+        if (padding == 0) return tensor;
+
+        const padded_shape = tensor.shape().set(.hd, padding);
+        const zeros = zml.Tensor.constant(tensor.dtype().zero()).broad(padded_shape);
+        return zml.Tensor.concatenate(&.{ tensor, zeros }, .hd);
+    }
+
+    inline fn trimHeadDim(tensor: zml.Tensor, head_dim: i64) zml.Tensor {
+        stdx.debug.assert(head_dim > 0, "mosaic_tpu ragged paged attention expects positive head_dim, got {}", .{head_dim});
+        return if (tensor.dim(.hd) == head_dim) tensor else tensor.slice1d(.hd, .{ .end = head_dim });
+    }
+
+    inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor, kernel_head_dim: i64) PreparedInputs {
+        const q_ragged = alignHeadDimForKernel(q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model }), kernel_head_dim);
+        const kv_pages_partitioned = alignHeadDimForKernel(kv_pages.withPartitioning(.{ .hkv = .model }), kernel_head_dim);
         const query_start_len = parameters.query_start_len.withPartitioning(.{ .n = .replicated });
 
         // Note
@@ -295,7 +317,7 @@ pub const mosaic_tpu = struct {
         return @intCast(value);
     }
 
-    fn buildRequest(prepared_inputs: PreparedInputs, parameters: Parameters, opts: AttentionOptions) RaggedPagedRequest {
+    fn buildRequest(prepared_inputs: PreparedInputs, original_head_dim: i64, parameters: Parameters, opts: AttentionOptions) RaggedPagedRequest {
         const q_shape = prepared_inputs.q.shape();
         const kv_pages_shape = prepared_inputs.kv_pages.shape();
         const block_table_shape = prepared_inputs.block_table.shape();
@@ -310,7 +332,6 @@ pub const mosaic_tpu = struct {
             error.Overflow => stdx.debug.panic("KV pages .hkv dimension is too large to fit in i64: {}", .{kv_pages_shape.dim(.hkv)}),
         };
         const num_queries_per_block = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
-        const sm_scale: f32 = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q_shape.dim(.hd)))));
 
         return .{
             .num_q_tokens = q_token_count,
@@ -323,7 +344,7 @@ pub const mosaic_tpu = struct {
             .pages_per_seq = @intCast(parameters.opts.max_num_pages),
             .total_num_pages = kv_pages_shape.dim(.page),
             .page_size = kv_pages_shape.dim(.k_chunk),
-            .sm_scale = sm_scale,
+            .sm_scale = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(original_head_dim)))),
             .sliding_window = if (opts.sliding_window < 0) null else @intCast(opts.sliding_window),
             .num_kv_pages_per_block = checkedU32(parameters.opts.pages_per_compute_block, "num_kv_pages_per_block"),
             .num_queries_per_block = checkedU32(@intCast(num_queries_per_block), "num_queries_per_block"),
@@ -344,7 +365,8 @@ pub const mosaic_tpu = struct {
     pub fn pagedAttention(parameters: Parameters, context: Context, q: zml.Tensor, kv_cache: zml.Tensor, opts: AttentionOptions) zml.Tensor {
         stdx.debug.assert(opts.is_causal, "mosaic_tpu ragged paged attention currently only supports causal attention", .{});
 
-        const prepared = prepareInputs(parameters, q, kv_cache);
+        const original_head_dim = q.dim(.hd);
+        const prepared = prepareInputs(parameters, q, kv_cache, alignedKernelHeadDim(original_head_dim));
 
         // Keep sharding intent on the `manualComputation` boundary only. The
         // TPU smoke compile regressed when the body restated
@@ -363,6 +385,7 @@ pub const mosaic_tpu = struct {
                 .opts = opts,
                 .parameters = parameters,
                 .context = context,
+                .original_head_dim = original_head_dim,
             },
             (struct {
                 fn body(body_context: anytype, allocator: std.mem.Allocator, sharded_inputs: []const zml.Tensor, output: zml.Shape) zml.Tensor {
@@ -377,7 +400,7 @@ pub const mosaic_tpu = struct {
                         .num_seqs = sharded_inputs[5],
                     };
 
-                    const backend_config = renderBackendConfig(allocator, CompilationContext.current().io, buildRequest(prepared_inputs, body_context.parameters, body_context.opts));
+                    const backend_config = renderBackendConfig(allocator, CompilationContext.current().io, buildRequest(prepared_inputs, body_context.original_head_dim, body_context.parameters, body_context.opts));
                     const q_out = raggedPagedKernelCall(
                         prepared_inputs.q,
                         prepared_inputs.kv_pages,
@@ -394,7 +417,14 @@ pub const mosaic_tpu = struct {
         );
 
         const restored = restoreQueryHeads(q, q_out);
-        stdx.debug.assert(restored.shape().eql(q.shape()), "mosaic_tpu ragged paged attention output shape mismatch, got {f}, expected {f}", .{ restored.shape(), q.shape() });
-        return restored;
+        const trimmed = trimHeadDim(restored, original_head_dim);
+        stdx.debug.assert(trimmed.shape().eql(q.shape()), "mosaic_tpu ragged paged attention output shape mismatch, got {f}, expected {f}", .{ trimmed.shape(), q.shape() });
+        return trimmed;
     }
 };
+
+test "mosaic_tpu ragged kernel head dim aligns to 128" {
+    try std.testing.expectEqual(@as(i64, 128), mosaic_tpu.alignedKernelHeadDim(64));
+    try std.testing.expectEqual(@as(i64, 128), mosaic_tpu.alignedKernelHeadDim(128));
+    try std.testing.expectEqual(@as(i64, 256), mosaic_tpu.alignedKernelHeadDim(129));
+}
