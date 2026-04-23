@@ -235,7 +235,13 @@ pub const GCS = struct {
         if (applicationDefaultCredentials(inner_io, environ_map)) |f| {
             defer f.close(inner_io);
             var reader = f.reader(inner_io, &jsonBuffer);
-            return .init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } });
+            return GCS.init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } }) catch |err| switch (err) {
+                InitError.InvalidCredentialJson => {
+                    log.warn("Invalid GCS credential JSON", .{});
+                    return .init(allocator, inner_io, http_client, .{});
+                },
+                else => return err,
+            };
         }
 
         if (isOnGCP(inner_io) catch false) {
