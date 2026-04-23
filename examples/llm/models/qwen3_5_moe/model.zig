@@ -49,6 +49,24 @@ pub const RopeParameters = struct {
     rope_theta: f32,
 };
 
+fn kvHeadsAreReplicated(axis_size: i64, model_partitions: i64) bool {
+    return axis_size > 0 and axis_size < model_partitions and @rem(model_partitions, axis_size) == 0;
+}
+
+fn partitionProjectedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+    return if (replicate_kv_heads)
+        tensor.withPartitioning(.{ .s = .replicated, .h = .replicated, .hd = .replicated })
+    else
+        tensor.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+}
+
+fn partitionCachedKv(tensor: zml.Tensor, replicate_kv_heads: bool) zml.Tensor {
+    return if (replicate_kv_heads)
+        tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .replicated, .hd = .replicated })
+    else
+        tensor.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+}
+
 pub const LoadedModel = struct {
     inner: Model,
     parsed_config: std.json.Parsed(Config),
@@ -552,14 +570,16 @@ pub const SelfAttn = struct {
         token_index: zml.Tensor,
         kv_cache: KvCache.SelfAttnCache,
     ) struct { zml.Tensor, KvCache.SelfAttnCache } {
+        const model_partitions = zml.module.CompilationContext.current().partitioning.numPartitionsForLogicalAxis(self.q_proj.weight.shape(), .model) catch unreachable;
+        const replicate_kv_heads = kvHeadsAreReplicated(self.num_kv_heads, model_partitions);
         const x_qkv = x.withPartitioning(.{ .d = .replicated });
 
         var q, var gate = self.projectQAndGate(x_qkv);
         var k, var v = self.projectKV(x_qkv);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
         gate = gate.withPartitioning(.{ .s = .replicated, .d_out_proj = .model });
-        k = k.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        k = partitionProjectedKv(k, replicate_kv_heads);
+        v = partitionProjectedKv(v, replicate_kv_heads);
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
 
@@ -572,15 +592,15 @@ pub const SelfAttn = struct {
         q = self.rotary_embed.applyRope(q, cos, sin);
         k = self.rotary_embed.applyRope(k, cos, sin);
         q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        k = partitionProjectedKv(k, replicate_kv_heads);
+        v = partitionProjectedKv(v, replicate_kv_heads);
 
         const new_kv_cache = kv_cache.update(k, v, token_index.convert(.u32));
         k = new_kv_cache.keys().convert(dtype);
         v = new_kv_cache.values().convert(dtype);
         q = q.rename(.{ .s = .q }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = k.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        v = v.rename(.{ .s = .k }).withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
+        k = partitionCachedKv(k, replicate_kv_heads);
+        v = partitionCachedKv(v, replicate_kv_heads);
 
         const attn_output = zml.attention.attention.attention(
             q,
@@ -592,8 +612,7 @@ pub const SelfAttn = struct {
         ).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated }).rename(.{ .q = .s }).merge(.{ .d_out_proj = .{ .h, .hd } });
 
         const gated_output = attn_output.mul(gate.sigmoid());
-        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d }))
-            .rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
+        const projected_output = self.o_proj.forward(gated_output.rename(.{ .d_out_proj = .d })).rename(.{ .dout = .d }).withPartitioning(.{ .d = .replicated });
 
         return .{ projected_output, new_kv_cache };
     }
@@ -705,10 +724,6 @@ pub const Moe = struct {
     }
 
     pub fn forward(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
-        return self.forwardUnquantized(x, moe_metadata, moe_parameters);
-    }
-
-    pub fn forwardUnquantized(self: Moe, x: zml.Tensor, moe_metadata: zml.moe.Metadata, moe_parameters: zml.moe.Parameters) zml.Tensor {
         const routing_scores, const topk_ids = self.router.forward(x);
 
         const moe_output = zml.moe.forwardMoe(

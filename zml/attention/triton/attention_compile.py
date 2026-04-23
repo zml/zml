@@ -7,28 +7,10 @@ from triton_kernels.unified_attention import (
     reduce_segments_ptr,
 )
 
-
-class FakeTensor:
-    def __init__(self, dtype: str, shape, strides=None):
-        self.dtype = dtype
-        self.shape = tuple(shape)
-        self._strides = tuple(strides) if strides is not None else contiguous_strides(self.shape)
-
-    def stride(self, dim: int) -> int:
-        return self._strides[dim]
-
-    @staticmethod
-    def data_ptr() -> int:
-        return 0
-
-
-def contiguous_strides(shape: tuple[int, ...]) -> tuple[int, ...]:
-    stride = 1
-    out = []
-    for size in reversed(shape):
-        out.append(stride)
-        stride *= int(size)
-    return tuple(reversed(out))
+from kernels_utils import (
+    FakeTensor,
+    contiguous_strides,
+)
 
 
 def next_power_of_2(x: int) -> int:

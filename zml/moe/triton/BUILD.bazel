@@ -21,6 +21,7 @@ py_library(
     deps = [
         ":triton_kernels",
         "@triton_py_deps//triton",
+        "//zml/triton/generation:kernels_utils",
     ],
 )
 

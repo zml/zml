@@ -51,11 +51,9 @@ pub fn fusedExpertsImpl(
     else
         num_assignments + num_experts * (block_size_m - 1);
 
-    var threaded_io: std.Io.Threaded = .init_single_threaded;
-    threaded_io.allocator = std.heap.c_allocator;
-    defer threaded_io.deinit();
-
-    const io = threaded_io.io();
+    const compilation_context = zml.module.CompilationContext.current();
+    const io = compilation_context.io;
+    const allocator = compilation_context.allocator;
 
     const sorted_token_ids, const expert_ids, const num_tokens_post_padded = if (naive_block_assignment) blk: {
         // In the naive path each M-block corresponds to exactly one (token, topk) assignment.
@@ -64,14 +62,14 @@ pub fn fusedExpertsImpl(
         const naive_expert_ids = ids.reshape(.{ .g = num_assignments });
         const naive_num_tokens_post_padded = Tensor.constant(.{ .i32 = @as(i32, @intCast(max_num_tokens_padded)) }).reshape(.{1});
         break :blk .{ naive_sorted_ids, naive_expert_ids, naive_num_tokens_post_padded };
-    } else try alignBlockSize(std.heap.c_allocator, io, ids, num_experts, block_size_m);
+    } else try alignBlockSize(allocator, io, ids, num_experts, block_size_m);
 
     var hidden_quant = hidden;
     var a_scale = opts.a1_scale orelse Tensor.scalar(1.0, .f32);
 
     // If fp8 quantized model, quantize activations to fp8 with per-token-group quantization
     if (gate_up.dtype() == .f8e4m3fn) {
-        hidden_quant, a_scale = try quantizePerTokenGroupFp8(std.heap.c_allocator, io, hidden, fp8ActivationGroupSize(hidden));
+        hidden_quant, a_scale = try quantizePerTokenGroupFp8(allocator, io, hidden, fp8ActivationGroupSize(hidden));
     }
 
     // Build the moe matmul kernels configs
@@ -88,12 +86,12 @@ pub fn fusedExpertsImpl(
         .bf16,
     );
 
-    const ttir_first_matmul = generateTtir(std.heap.c_allocator, io, "moe", "matmul_config", .{ .matmul_config = first_generation_config }) catch |err| {
+    const ttir_first_matmul = generateTtir(allocator, io, "moe", "matmul_config", .{ .matmul_config = first_generation_config }) catch |err| {
         log.err("Failed to generate TTIR for first MoE matmul: {}", .{err});
         return err;
     };
 
-    defer std.heap.c_allocator.free(ttir_first_matmul);
+    defer allocator.free(ttir_first_matmul);
     var b_bias = opts.w1_bias orelse metadata.w1_zero_bias.?;
     var b_scale = opts.w1_scale orelse Tensor.scalar(1.0, .f32);
 
@@ -120,7 +118,7 @@ pub fn fusedExpertsImpl(
     var activated_quant = activated;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
     if (down.dtype() == .f8e4m3fn) {
-        activated_quant, a_scale = try quantizePerTokenGroupFp8(std.heap.c_allocator, io, activated, fp8ActivationGroupSize(activated));
+        activated_quant, a_scale = try quantizePerTokenGroupFp8(allocator, io, activated, fp8ActivationGroupSize(activated));
     }
 
     const second_generation_config = makeGenerationConfig(
@@ -135,11 +133,11 @@ pub fn fusedExpertsImpl(
         false,
         .bf16,
     );
-    const ttir_second_matmul = generateTtir(std.heap.c_allocator, io, "moe", "matmul_config", .{ .matmul_config = second_generation_config }) catch |err| {
+    const ttir_second_matmul = generateTtir(allocator, io, "moe", "matmul_config", .{ .matmul_config = second_generation_config }) catch |err| {
         log.err("Failed to generate TTIR for second MoE matmul: {}", .{err});
         return err;
     };
-    defer std.heap.c_allocator.free(ttir_second_matmul);
+    defer allocator.free(ttir_second_matmul);
     b_bias = opts.w2_bias orelse metadata.w2_zero_bias.?;
     b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
 
@@ -722,15 +720,10 @@ fn applyJsonTokenConfig(opts: Options, num_tokens: i64) !Options {
     var out = opts;
     if (!opts.dynamic_launch_by_num_tokens) return out;
 
-    var threaded_io: std.Io.Threaded = .init_single_threaded;
-    threaded_io.allocator = std.heap.c_allocator;
-    defer threaded_io.deinit();
-    const io = threaded_io.io();
+    const compilation_context = zml.module.CompilationContext.current();
+    const io = compilation_context.io;
+    const allocator = compilation_context.arena.allocator();
 
-    var arena: std.heap.ArenaAllocator = .init(std.heap.c_allocator);
-    defer arena.deinit();
-
-    const allocator = arena.allocator();
     const config_path = try getLaunchConfigJsonPath(allocator);
     const cwd = std.Io.Dir.cwd();
     var file = try cwd.openFile(io, config_path, .{ .mode = .read_only });
