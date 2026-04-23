@@ -238,11 +238,14 @@ pub const GCS = struct {
             const creds = GCS.init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } }) catch |err| switch (err) {
                 InitError.InvalidCredentialJson => {
                     var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const file_path_size: usize = try f.realPath(inner_io, &real_path_buf);
+                    const file_path_size: usize = f.realPath(inner_io, &real_path_buf) catch |real_path_err| {
+                        log.warn("Invalid GCS credential JSON (failed to resolve credential path: {!})", .{real_path_err});
+                        return .init(allocator, inner_io, http_client, .{});
+                    };
                     log.warn("Invalid GCS credential JSON at {s}", .{real_path_buf[0..file_path_size]});
                     return .init(allocator, inner_io, http_client, .{});
                 },
-                else => err,
+                else => return err,
             };
             return creds;
         }
