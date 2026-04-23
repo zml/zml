@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const c = @import("c");
-const neuron_nki = @import("platforms/neuron/nki");
+const nki_hlo_rewriter = @import("platforms/neuron/nki/hlo_rewriter");
 const stdx = @import("stdx");
 const upb = @import("upb");
 
@@ -323,7 +323,7 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
     // Lower any embedded NKI kernels in-place first. If the module contains no
     // synthetic ZML NKI custom-calls, the original StableHLO bytes are passed
     // through unchanged.
-    const compile_hlo = (try neuron_nki.hlo_rewriter.rewriteCustomCalls(
+    const compile_hlo = (try nki_hlo_rewriter.rewriteCustomCalls(
         arena.allocator(),
         io,
         tmp_dir,

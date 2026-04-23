@@ -4,6 +4,8 @@ load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
+exports_files(["nki/zml_compiler.py"])
+
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
 #
@@ -47,7 +49,7 @@ runfiles_to_default(
     name = "nki-cc_files",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
-    deps = ["//platforms/neuron/nki:nki-cc"],
+    deps = [":nki-cc"],
 )
 
 cc_library(
@@ -107,6 +109,42 @@ zig_library(
     deps = [":libpython"],
 )
 
+zig_binary(
+    name = "nki-cc",
+    target_compatible_with = ["@platforms//os:linux"],
+    data = [
+        "nki/zml_compiler.py",
+        # `zml_compiler.py` imports `nki` directly, while kernels like
+        # `zml.attention` import `nkilib.*`. Current Neuron SDK releases ship
+        # `nkilib` inside the `neuronx-cc` wheel, so make both wheels explicit
+        # runfiles for the isolated Python interpreter rather than relying on
+        # other sandbox contents to pull them in indirectly.
+        "@neuron_py_deps//neuronx_cc",
+        "@neuron_py_deps//nki",
+    ],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
+    main = "nki/cc.zig",
+    tags = ["manual"],
+    visibility = ["//platforms/neuron:__pkg__"],
+    deps = [
+        ":libpython",
+        ":python_launcher",
+    ],
+)
+
+zig_library(
+    name = "nki_hlo_rewriter",
+    tags = ["manual"],
+    import_name = "platforms/neuron/nki/hlo_rewriter",
+    main = "nki/hlo_rewriter.zig",
+    visibility = ["//platforms/neuron:__pkg__"],
+    deps = [
+        ":libpython",
+        "//stdx",
+        "//upb",
+    ],
+)
+
 zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
@@ -120,8 +158,8 @@ zig_shared_library(
     deps = [
         ":hlo_proto_upb",
         ":libpython",
+        ":nki_hlo_rewriter",
         ":xla_data_upb",
-        "//platforms/neuron/nki:nki",
         "//stdx",
         "//upb",
     ],
