@@ -302,9 +302,15 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
         };
     }
 
-    // Embedded NKI kernels are materialized into AwsNeuronCustomNativeKernel
+    // Embedded NKI kernels are lowered into AwsNeuronCustomNativeKernel
     // custom-calls before the whole StableHLO program is compiled by neuronx-cc.
-    const compile_hlo = try neuron_nki.materializeEmbeddedKernels(arena.allocator(), io, tmp_dir, code, target);
+    const compile_hlo = (try neuron_nki.hlo_rewriter.rewriteCustomCalls(
+        arena.allocator(),
+        io,
+        tmp_dir,
+        code,
+        target,
+    )) orelse code;
     const neff_file = try compileHloToNeff(arena.allocator(), io, tmp_dir, compile_hlo, target);
     const neff_hlo_bytes = try wrapNeffAsCustomCall(arena.allocator(), io, code, neff_file);
 
