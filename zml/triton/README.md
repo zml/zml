@@ -195,9 +195,11 @@ The lift rule:
 - `comptime_int` / `comptime_float` → a constant whose element type matches the
   LHS operand, via `constMatching`. `v_i64.mul(16)` lifts `16` to i64,
   `v_f32.add(1.0)` lifts `1.0` to f32, and so on.
-- Runtime `i8/i16/i32`, `i64`, `f32`, `f64`, etc. → a constant that preserves
+- Runtime `i8/i16/i32`, `i64`, `f16/f32/f64`, etc. → a constant that preserves
   the source Zig width. i8/i16/i32 (signed or unsigned) → i32 const; i64/u64 →
-  i64 const; f16/f32 → f32 const (f16 round-trips via f32); f64 → f64 const.
+  i64 const; f16 → f16; f32 → f32; f64 → f64. Unsigned ints are bit-cast
+  (bit pattern preserved), so `@as(u32, 0xFFFF_FFFF)` becomes an i32 with the
+  same all-ones bit pattern.
 
 This is why the common Python idiom `offs < 64` works in Zig as
 `offs.lt(64)` without any wrapper — as long as the comptime scalar can be

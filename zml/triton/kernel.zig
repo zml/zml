@@ -559,16 +559,18 @@ pub const Kernel = struct {
     }
 
     /// Lift a Zig scalar (or pass-through Value) to a scalar DSL constant.
-    /// The resulting DSL dtype is picked from the source type:
-    /// - `comptime_int`: `i32` if it fits, else `i64`; larger → `@compileError`.
-    /// - Runtime int (`i8/i16/i32`, `u8/…/u32`): `i32`.
-    /// - Runtime int `i64/u64` (bits > 32): `i64`. `@intCast` will panic at
-    ///   runtime if a `u32/u64` value doesn't fit in the signed target.
+    /// MLIR integers are signless; unsigned sources are bit-cast so the MLIR
+    /// constant carries the same bit pattern (e.g. `u32(0xFFFF_FFFF)` → i32
+    /// with bit pattern `-1`). The resulting DSL dtype follows the source:
+    /// - `comptime_int`: `i32` if it fits in i32; else `i64` for values up to
+    ///   the full u64 bit range; larger → `@compileError`.
+    /// - Runtime int `i8/i16/i32`, `u8/…/u32`: `i32` (signed preserved, unsigned
+    ///   bit-cast).
+    /// - Runtime int `i64/u64`: `i64` (signed preserved, unsigned bit-cast).
     /// - `comptime_float`: `f32` (Triton's common default).
-    /// - Runtime `f16/f32` → `f32`, `f64` → `f64`.
+    /// - Runtime `f16` → `f16`; `f32` → `f32`; `f64` → `f64`.
     ///
-    /// To target a specific dtype regardless of source, call
-    /// `constMatching(value, dtype.toMlir(k.ctx))` instead.
+    /// To target a specific dtype regardless of source, call `liftAs(value, dtype)`.
     pub fn lift(self: *Kernel, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
@@ -578,11 +580,26 @@ pub const Kernel = struct {
                     break :blk self.emitInt(.i32, value);
                 if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
                     break :blk self.emitInt(.i64, value);
-                @compileError("Kernel.lift: integer literal out of i64 range");
+                if (value >= 0 and value <= std.math.maxInt(u64))
+                    break :blk self.emitInt(.i64, @bitCast(@as(u64, value)));
+                @compileError("Kernel.lift: integer literal out of 64-bit range");
             },
-            .int => |info| if (info.bits > 32) self.emitInt(.i64, @intCast(value)) else self.emitInt(.i32, @intCast(value)),
+            .int => |info| blk: {
+                const signed = info.signedness == .signed;
+                if (info.bits > 32) {
+                    const v: i64 = if (signed) @intCast(value) else @bitCast(@as(u64, @intCast(value)));
+                    break :blk self.emitInt(.i64, v);
+                }
+                const v32: i32 = if (signed) @intCast(value) else @bitCast(@as(u32, @intCast(value)));
+                break :blk self.emitInt(.i32, v32);
+            },
             .comptime_float => self.emitFloat(.f32, @floatCast(value)),
-            .float => |info| if (info.bits > 32) self.emitFloat(.f64, value) else self.emitFloat(.f32, @floatCast(value)),
+            .float => |info| switch (info.bits) {
+                16 => self.emitFloat(.f16, @floatCast(value)),
+                32 => self.emitFloat(.f32, @floatCast(value)),
+                64 => self.emitFloat(.f64, value),
+                else => @compileError("Kernel.lift: unsupported float bitwidth"),
+            },
             else => @compileError("Kernel.lift: unsupported type " ++ @typeName(T)),
         };
     }
@@ -614,6 +631,7 @@ pub const Kernel = struct {
 
     /// Lift a Zig scalar to a DSL constant of the given `DType`. Unlike
     /// `lift`, the target dtype is explicit, so source-width is ignored.
+    /// Unsigned ints are bit-cast (bit pattern preserved, not value).
     /// Float→int casts via `@intFromFloat`, int→float via `@floatFromInt`.
     pub fn liftAs(self: *Kernel, value: anytype, dtype: DType) Value {
         const T = @TypeOf(value);
@@ -627,7 +645,14 @@ pub const Kernel = struct {
             return self.emitFloat(dtype, v_f64);
         }
         const v_i64: i64 = switch (@typeInfo(T)) {
-            .comptime_int, .int => @intCast(value),
+            .comptime_int => blk: {
+                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
+                    break :blk @intCast(value);
+                if (value >= 0 and value <= std.math.maxInt(u64))
+                    break :blk @bitCast(@as(u64, value));
+                @compileError("Kernel.liftAs: integer literal out of 64-bit range");
+            },
+            .int => |info| if (info.signedness == .signed) @intCast(value) else @bitCast(@as(u64, @intCast(value))),
             .comptime_float, .float => @intFromFloat(value),
             else => @compileError("Kernel.liftAs: unsupported scalar " ++ @typeName(T)),
         };
@@ -2341,4 +2366,75 @@ test "ops_mlir parity: tma_gather + tma_scatter" {
         defer module.deinit();
         try parityPrintAndVerify(ctx, module);
     }
+}
+
+test "lift handles large comptime_int and unsigned runtime bit patterns" {
+    const ctx = try setupTestContext();
+    defer ctx.deinit();
+
+    var k = try Kernel.init(std.testing.allocator, ctx, "lift_big_ints", &.{}, &.{});
+    defer k.deinit();
+
+    // comptime_int > i64 max, within u64 range → i64 with all-ones bit pattern.
+    const c1 = k.lift(0xFFFF_FFFF_FFFF_FFFF);
+    try std.testing.expectEqual(DType.i64, k.mlirElemToDType(c1.elemType()));
+
+    // runtime u64 at u64 max → i64 with all-ones bit pattern (no panic).
+    const v_u64: u64 = 0xFFFF_FFFF_FFFF_FFFF;
+    const c2 = k.lift(v_u64);
+    try std.testing.expectEqual(DType.i64, k.mlirElemToDType(c2.elemType()));
+
+    // runtime u32 at u32 max → i32 with all-ones bit pattern (no panic).
+    const v_u32: u32 = 0xFFFF_FFFF;
+    const c3 = k.lift(v_u32);
+    try std.testing.expectEqual(DType.i32, k.mlirElemToDType(c3.elemType()));
+
+    const ir = try k.finish(&.{}, std.testing.allocator);
+    defer std.testing.allocator.free(ir);
+}
+
+test "lift preserves f16 width through fluent ops" {
+    const ctx = try setupTestContext();
+    defer ctx.deinit();
+
+    var k = try Kernel.init(std.testing.allocator, ctx, "lift_f16", &.{
+        .{ .name = "a", .kind = .{ .scalar = .f16 } },
+    }, &.{});
+    defer k.deinit();
+
+    // Direct lift of f16 stays f16.
+    const f = k.lift(@as(f16, 1.5));
+    try std.testing.expectEqual(DType.f16, k.mlirElemToDType(f.elemType()));
+
+    // Fluent op on an f16 Value with an f16 rhs must verify cleanly
+    // (pre-fix this emitted an f32 constant and failed arith.addf verification).
+    const a = k.arg(0);
+    _ = a.add(@as(f16, 2.0));
+
+    const ir = try k.finish(&.{}, std.testing.allocator);
+    defer std.testing.allocator.free(ir);
+}
+
+test "forLoop accepts mixed-width runtime bounds" {
+    const ctx = try setupTestContext();
+    defer ctx.deinit();
+
+    var k = try Kernel.init(std.testing.allocator, ctx, "loop_mixed", &.{
+        .{ .name = "lb", .kind = .{ .scalar = .i32 } },
+    }, &.{});
+    defer k.deinit();
+
+    const lb = k.arg(0);
+    const ub: usize = 10;
+    const step: u8 = 1;
+
+    const Body = struct {
+        fn b(_: *Kernel, _: Value, _: []const Value, _: void) []const Value {
+            return &.{};
+        }
+    };
+    _ = k.forLoop(lb, ub, step, &.{}, Body.b, {});
+
+    const ir = try k.finish(&.{}, std.testing.allocator);
+    defer std.testing.allocator.free(ir);
 }
