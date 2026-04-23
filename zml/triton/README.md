@@ -53,9 +53,9 @@ pub fn myKernelTtir(allocator: std.mem.Allocator) ![:0]const u8 {
     const offs = k.arange(0, 64, .i32).add(pid.mul(@as(i32, 64)));
     const mask = offs.lt(n);
 
-    const x = k.loadMasked(x_ptr.splatTo(&.{64}).addPtr(offs), &.{64}, .f32, mask);
+    const x = k.loadMasked(x_ptr.splatTo(&.{64}).addPtr(offs), mask);
     const y = x.mul(@as(f32, 2.0));
-    k.store(y_ptr.splatTo(&.{64}).addPtr(offs), y, .{ .mask = mask.inner });
+    k.storeOpts(y_ptr.splatTo(&.{64}).addPtr(offs), y, .{ .mask = mask.inner });
 
     return kernel.finish(&.{}, allocator);
 }
@@ -192,9 +192,9 @@ Every fluent method's RHS (and every `k.splat` / `k.lift` input) is `anytype`.
 The lift rule:
 
 - `Value` → pass through.
-- `comptime_int` / `comptime_float` → a constant whose element type matches the
-  LHS operand, via `constMatching`. `v_i64.mul(16)` lifts `16` to i64,
-  `v_f32.add(1.0)` lifts `1.0` to f32, and so on.
+- `comptime_int` / `comptime_float` → a constant whose element type matches
+  the LHS operand. `v_i64.mul(16)` lifts `16` to i64, `v_f32.add(1.0)` lifts
+  `1.0` to f32, and so on.
 - Runtime `i8/i16/i32`, `i64`, `f16/f32/f64`, etc. → a constant that preserves
   the source Zig width. i8/i16/i32 (signed or unsigned) → i32 const; i64/u64 →
   i64 const; f16 → f16; f32 → f32; f64 → f64. Unsigned ints are bit-cast
@@ -247,24 +247,53 @@ const offs = k.arange(BLOCK, .i64);
 | `k.mask2d(cond_m, cond_n, m, n)`       | `cond_m[:, None] & cond_n[None, :]`. Replaces ~5 lines. |
 | `k.lift(value)`                        | Wrap a Zig scalar as a DSL Value; dtype inferred from source. |
 | `k.liftAs(value, dtype)`               | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
-| `k.constMatching(value, elem_type)`    | Same as `liftAs` but takes an MLIR `*const mlir.Type` (e.g. `ref.elemType()`). |
 
 ---
 
 ## Loads and stores
 
+Load helpers infer everything from the pointer's type — scalar `!tt.ptr<T>`
+loads a scalar `T`, `tensor<... x !tt.ptr<T>>` loads a `tensor<... x T>`.
+No `result_type` / `shape` / `dtype` arguments required.
+
 | Helper                                          | Python equivalent                         |
 |-------------------------------------------------|-------------------------------------------|
-| `k.loadScalar(ptr, dtype)`                      | `tl.load(ptr)` for a scalar pointer.      |
-| `k.loadMasked(ptr, shape, dtype, mask)`         | `tl.load(ptrs, mask=mask, other=0)` — the zero-of-dtype tensor is built for you. |
-| `k.load(ptr, result_type)`                      | `tl.load(ptrs)` with no mask/other.       |
-| `k.loadOpts(ptr, result_type, .{ .mask, .other, ... })` | `tl.load(ptrs, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`. |
+| `k.load(ptr)`                                   | `tl.load(ptr)` — scalar or tensor.        |
+| `k.loadMasked(ptr, mask)`                       | `tl.load(ptrs, mask=mask, other=0)` — zero-of-dtype auto-built. |
+| `k.loadOpts(ptr, .{ .mask, .other, ... })`      | `tl.load(ptrs, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`. |
 | `k.store(ptr, value)`                           | `tl.store(ptr, value)`.                   |
 | `k.storeOpts(ptr, value, .{ .mask, ... })`      | `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`. |
 
 `LoadOpts` / `StoreOpts` fields (`.mask`, `.other`, `.cache`, `.eviction`,
 `.is_volatile`) still take raw `*const mlir.Value` pointers — access them via
 `v.inner`.
+
+### Result-type inference
+
+Most helpers that produce a new Value infer their result type from the inputs,
+so user code never constructs `*const mlir.Type` manually:
+
+| Helper                                              | How the result type is derived              |
+|-----------------------------------------------------|---------------------------------------------|
+| `k.load(ptr)` / `k.loadOpts(ptr, opts)`             | From `ptr.type_()` (scalar or tensor of ptrs). |
+| `k.loadMasked(ptr, mask)`                           | From `ptr.type_()`; zero-of-dtype auto-built. |
+| `k.dot(a, b, acc)` / `k.dotOpts(a, b, acc, opts)`   | `acc.type_()`.                              |
+| `k.dotScaled(...)` / `k.dotScaledOpts(...)`         | `acc.type_()`.                              |
+| `k.reshape(src, new_shape)` / `k.reshapeOpts(...)`  | `new_shape` + `src` element type.           |
+| `k.gather(src, indices, axis)` / `k.gatherOpts(...)`| `indices` shape + `src` element type.       |
+| `k.histogram(src, num_bins)` / `k.histogramOpts(...)` | `tensor<num_bins x i32>`.                 |
+| `k.fpToFp(src, out_dtype)` / `k.fpToFpOpts(...)`    | `src` shape + `out_dtype`.                  |
+| `k.convertf(src, out_dtype)` / `k.convertfOpts(...)`| `src` shape + `out_dtype`.                  |
+| `k.scalingTruncf(src, scale, out_dtype)` / …Opts    | `src` shape + `out_dtype`.                  |
+| `k.descriptorLoad(desc, indices, shape, dtype)`     | `shape` + `dtype`.                          |
+
+Rule of thumb: you only supply things the op needs beyond what inputs carry —
+a `new_shape`, a `num_bins`, an `out_dtype`, a TMA tile descriptor. The DSL
+never asks you to restate information it can read off a `Value`.
+
+`k.scalarTy(dtype)` / `k.tensorTy(shape, dtype)` are still available but only
+needed by `whileLoop.after_types` (where block-arg types can be arbitrary) and
+by the raw `externElementwise` / `elementwiseInlineAsm` escape hatches.
 
 ### `fn X / fn XOpts` pattern
 
@@ -346,9 +375,9 @@ Rules of thumb:
 - Capture everything the body needs (Values, sizes, dtypes) in a local struct
   and pass it as the first positional arg (`ctx`). There are no implicit
   closures — context is the only way to smuggle state in.
-- Return `&.{}` if the body has no yielded values. Otherwise, allocate via
-  `kk.arena.allocator().alloc(Value, N)` and fill it — lifetime only needs to
-  cover the call.
+- Return `&.{}` if the body has no yielded values. Otherwise, return
+  `kk.yield(.{ v1, v2, ... })` — a tuple-of-Values helper that packs into the
+  arena-allocated slice `scf.yield` expects.
 - `forLoop`'s `lower` / `upper` / `step` are positional `anytype`: pass Values,
   comptime ints, or runtime Zig ints directly. Comptime literals lift to match
   the first operand's type (so `0, N, 1` with `N: Value` of type i32 yields
@@ -361,16 +390,14 @@ Example — histogram loop:
 const HistCtx = struct { topk_ids: Value, numel: i32, hist_block: i64, padded: i64 };
 const body = struct {
     fn b(kk: *Kernel, iv: Value, iter: []const Value, hc: HistCtx) []const Value {
-        const offs  = iv.splatTo(&.{hc.hist_block}).add(kk.arange(0, @intCast(hc.hist_block), .i32));
-        const mask  = offs.lt(hc.numel);
+        const offs = iv.splatTo(&.{hc.hist_block}).add(kk.arange(0, @intCast(hc.hist_block), .i32));
+        const mask = offs.lt(hc.numel);
         const expert_vals = kk.loadMasked(
             hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs),
-            &.{hc.hist_block}, .i32, mask,
+            mask,
         );
-        const h = kk.histogramOpts(expert_vals, kk.tensorTy(&.{hc.padded}, .i32), .{ .mask = mask });
-        const out = kk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
-        out[0] = iter[0].add(h);
-        return out;
+        const h = kk.histogramOpts(expert_vals, hc.padded, .{ .mask = mask });
+        return kk.yield(.{iter[0].add(h)});
     }
 }.b;
 _ = k.forLoop(hctx, 0, numel, @as(i32, @intCast(hist_block)), .{
@@ -417,9 +444,9 @@ is the manual form.
 | `vec[None, :]`                                | `vec.broadcast2d(0, m, n)`                                         |
 | `m[:, None] & (c[None, :] < N)`               | `k.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
 | `ptr + offs`                                  | `ptr.splatTo(&.{N}).addPtr(offs)` (tensor-of-ptrs)                 |
-| `tl.load(ptr, mask=mask, other=0)`            | `k.loadMasked(ptrs, &.{N}, dtype, mask)`                           |
-| `tl.load(ptr)`                                | `k.load(ptrs, result_ty)`                                          |
-| `tl.load(ptr, mask=m, other=o)`               | `k.loadOpts(ptrs, ty, .{ .mask = m.inner, .other = o.inner })`     |
+| `tl.load(ptr, mask=mask, other=0)`            | `k.loadMasked(ptrs, mask)`                                         |
+| `tl.load(ptr)`                                | `k.load(ptrs)`                                                     |
+| `tl.load(ptr, mask=m, other=o)`               | `k.loadOpts(ptrs, .{ .mask = m.inner, .other = o.inner })`         |
 | `tl.store(ptr, v)`                            | `k.store(ptr, v)`                                                  |
 | `tl.store(ptr, v, mask=mask)`                 | `k.storeOpts(ptr, v, .{ .mask = mask.inner })`                     |
 | `tl.zeros((M, N), dtype=tl.float32)`          | `k.zeros(&.{ M, N }, .f32)`                                        |
@@ -428,16 +455,18 @@ is the manual form.
 | `tl.max(x, axis=0)`                           | `k.reduceMax(x, 0)`                                                |
 | `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0)`                                                  |
 | `tl.cumsum(x, axis=0, reverse=True)`          | `k.scanSumOpts(x, 0, .{ .reverse = true })`                        |
-| `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty)`                                      |
-| `tl.dot(a, b, acc, input_precision="ieee")`   | `k.dotOpts(a, b, acc, result_ty, .{ .input_precision = .ieee })`   |
+| `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc)`                                                 |
+| `tl.dot(a, b, acc, input_precision="ieee")`   | `k.dotOpts(a, b, acc, .{ .input_precision = .ieee })`              |
 | `tl.clamp(x, mn, mx)`                         | `k.clampf(x, mn, mx)`                                              |
 | `tl.clamp(x, mn, mx, propagate_nan=NAN_ALL)`  | `k.clampfOpts(x, mn, mx, .{ .propagate_nan = .all })`              |
 | `tl.atomic_add(p, v)`                         | `k.atomicRmw(.add, p, v)`                                          |
 | `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmwOpts(.add, p, v, .{ .mask = m.inner, .sem = .relaxed })` |
-| `tl.histogram(x, num_bins)`                   | `k.histogram(x, result_ty)`                                        |
-| `tl.histogram(x, num_bins, mask=m)`           | `k.histogramOpts(x, result_ty, .{ .mask = m })`                    |
-| `tl.reshape(x, shape)`                        | `k.reshape(x, result_ty)`                                          |
-| `tl.reshape(x, shape, can_reorder=True)`      | `k.reshapeOpts(x, result_ty, .{ .allow_reorder = true })`          |
+| `tl.histogram(x, num_bins)`                   | `k.histogram(x, num_bins)`                                         |
+| `tl.histogram(x, num_bins, mask=m)`           | `k.histogramOpts(x, num_bins, .{ .mask = m })`                     |
+| `tl.reshape(x, shape)`                        | `k.reshape(x, &.{ ...shape })`                                     |
+| `tl.reshape(x, shape, can_reorder=True)`      | `k.reshapeOpts(x, &.{ ...shape }, .{ .allow_reorder = true })`     |
+| `tl.cast(x, tl.bfloat16)`                     | `k.fpToFp(x, .bf16)` (or fluent `x.to(.bf16)`)                     |
+| `src[indices]` (gather)                       | `k.gather(src, indices, axis)`                                     |
 | `for i in range(0, N, S): ...`                | `k.forLoop(ctx, 0, N, S, .{ .inits=..., .body=... })`                                       |
 | `while cond: ...`                             | `k.whileLoop(ctx, .{ .inits=..., .after_types=..., .before=..., .after=... })`              |
 | `if cond: ... else: ...`                      | `k.ifThenElse(ctx, .{ .cond=..., .results=..., .then_=..., .else_=... })`                   |
@@ -475,7 +504,8 @@ is the manual form.
    missing block terminator — a common one is forgetting that `scf.yield`
    operand count must match the loop's result types.
 
-7. **Arena allocations in bodies.** `kk.arena.allocator().alloc(Value, N)` is
-   the intended allocator for the tiny result slices you return from loop
-   bodies — it's cleared on `kernel.deinit()`. Don't use `std.heap.page`
-   allocator or you leak.
+7. **Yielding from loop / if bodies.** Use `kk.yield(.{ v1, v2 })` to return
+   a tuple of Values — the helper packs them into the kernel's per-frame
+   arena and hands back the `[]const Value` slice the DSL expects. The raw
+   escape hatch — `kk.arena.allocator().alloc(Value, N)` and fill — still
+   works and is freed on `kernel.deinit()`, but you shouldn't need it.

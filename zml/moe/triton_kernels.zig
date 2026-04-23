@@ -177,9 +177,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
     const before = struct {
         fn call(kk: *Kernel, a: []const Value, cc: Ctx) tri.WhileBefore {
             const ts = a[0];
-            const out = kk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
-            out[0] = ts;
-            return .{ .cond = ts.lt(cc.numel), .forwarded = out };
+            return .{ .cond = ts.lt(cc.numel), .forwarded = kk.yield(.{ts}) };
         }
     }.call;
 
@@ -193,7 +191,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
             // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
             const topk_ptrs = cc.topk_ids.splatTo(&.{cc.block}).addPtr(offs);
             const num_experts_splat = kk.splat(cc.num_experts, &.{cc.block});
-            const expert_vals = kk.loadOpts(topk_ptrs, kk.tensorTy(&.{cc.block}, .i32), .{
+            const expert_vals = kk.loadOpts(topk_ptrs, .{
                 .mask = mask.inner,
                 .other = num_experts_splat.inner,
             });
@@ -210,9 +208,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
             const sorted_ptrs = cc.sorted_token_ids.splatTo(&.{cc.block}).addPtr(rank);
             kk.storeOpts(sorted_ptrs, offs, .{ .mask = valid.inner });
 
-            const out = kk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
-            out[0] = ts.add(cc.step);
-            return out;
+            return kk.yield(.{ts.add(cc.step)});
         }
     }.call;
 
@@ -247,15 +243,14 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     defer kernel.deinit();
     const k = &kernel;
     const block: i64 = @intCast(config.block);
-    const in_dt = dsl(config.input_dtype);
     const out_dt = dsl(config.output_dtype);
     const scale_dt = dsl(config.scale_dtype);
 
     const y_ptr = k.arg(0);
-    const group_size = k.loadScalar(k.arg(1), .i64);
-    const y_num_columns = k.loadScalar(k.arg(2), .i64);
-    const y_row_stride = k.loadScalar(k.arg(3), .i64);
-    const eps = k.loadScalar(k.arg(4), .f32);
+    const group_size = k.load(k.arg(1));
+    const y_num_columns = k.load(k.arg(2));
+    const y_row_stride = k.load(k.arg(3));
+    const eps = k.load(k.arg(4));
     const y_q_ptr = k.arg(5);
     const y_s_ptr = k.arg(6);
 
@@ -276,7 +271,7 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
 
     // Masked load with zero — the DSL auto-creates the zero-other tensor.
     const y_load_ptrs = y_ptr_shifted.splatTo(&.{block}).addPtr(cols_i64);
-    const y_loaded = k.loadMasked(y_load_ptrs, &.{block}, in_dt, mask);
+    const y_loaded = k.loadMasked(y_load_ptrs, mask);
     const y_f32 = y_loaded.to(.f32);
 
     // _absmax = max(reduce_max(abs(y)), eps)
@@ -412,15 +407,13 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     const mask = offs.lt(hc.numel);
                     const topk_ptrs = hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs);
                     const num_experts_other = kkk.splat(hc.num_experts, &.{hc.hist_block});
-                    const expert_vals = kkk.loadOpts(topk_ptrs, kkk.tensorTy(&.{hc.hist_block}, .i32), .{
+                    const expert_vals = kkk.loadOpts(topk_ptrs, .{
                         .mask = mask.inner,
                         .other = num_experts_other.inner,
                     });
                     const valid = mask.bitAnd(expert_vals.lt(hc.num_experts));
-                    const h = kkk.histogramOpts(expert_vals, kkk.tensorTy(&.{hc.padded}, .i32), .{ .mask = valid });
-                    const out = kkk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
-                    out[0] = iter[0].add(h);
-                    return out;
+                    const h = kkk.histogramOpts(expert_vals, hc.padded, .{ .mask = valid });
+                    return kkk.yield(.{iter[0].add(h)});
                 }
             }.b;
             const counts_results = kk.forLoop(hctx, 0, c.numel, @as(i32, @intCast(c.hist_block)), .{
@@ -460,14 +453,12 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     const ec: ExpCtx = .{ .cumsum = ac.cumsum, .block_offsets = block_offsets, .block_mask = block_mask, .hist_block = ac.hist_block };
                     const exp_body = struct {
                         fn eb(kkkk: *Kernel, iv: Value, iter: []const Value, ee: ExpCtx) []const Value {
-                            const start_v = kkkk.loadScalar(ee.cumsum.addPtr(iv), .i32);
-                            const end_v = kkkk.loadScalar(ee.cumsum.addPtr(iv.add(1)), .i32);
+                            const start_v = kkkk.load(ee.cumsum.addPtr(iv));
+                            const end_v = kkkk.load(ee.cumsum.addPtr(iv.add(1)));
                             const in_range = ee.block_mask
                                 .bitAnd(ee.block_offsets.ge(start_v.splatTo(&.{ee.hist_block})))
                                 .bitAnd(ee.block_offsets.lt(end_v.splatTo(&.{ee.hist_block})));
-                            const out = kkkk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
-                            out[0] = kkkk.select(in_range, iv.splatTo(&.{ee.hist_block}), iter[0]);
-                            return out;
+                            return kkkk.yield(.{kkkk.select(in_range, iv.splatTo(&.{ee.hist_block}), iter[0])});
                         }
                     }.eb;
                     const exp_results = kkk.forLoop(ec, 0, ac.num_experts, 1, .{
@@ -560,14 +551,14 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
             return v.div(@as(i64, 16)).mul(@as(i64, 16));
         }
     }.f;
-    const n_block = block_floor(k.loadScalar(k.arg(9), .i64));
-    const k_block = block_floor(k.loadScalar(k.arg(10), .i64));
-    const em_block = block_floor(k.loadScalar(k.arg(11), .i64));
-    const num_valid_tokens = k.loadScalar(k.arg(12), .i64);
-    const stride_am_block = block_floor(k.loadScalar(k.arg(13), .i64));
-    const stride_be_block = block_floor(k.loadScalar(k.arg(14), .i64));
-    const stride_bn_block = block_floor(k.loadScalar(k.arg(15), .i64));
-    const stride_cm_block = block_floor(k.loadScalar(k.arg(16), .i64));
+    const n_block = block_floor(k.load(k.arg(9)));
+    const k_block = block_floor(k.load(k.arg(10)));
+    const em_block = block_floor(k.load(k.arg(11)));
+    const num_valid_tokens = k.load(k.arg(12));
+    const stride_am_block = block_floor(k.load(k.arg(13)));
+    const stride_be_block = block_floor(k.load(k.arg(14)));
+    const stride_bn_block = block_floor(k.load(k.arg(15)));
+    const stride_cm_block = block_floor(k.load(k.arg(16)));
     const stride_ak_block = k.lift(@as(i64, 1));
     const stride_bk_block = k.lift(@as(i64, 1));
     const stride_cn_block = k.lift(@as(i64, 1));
@@ -585,7 +576,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const pid_n = pid_mod_in_group.div(gsm_actual);
 
     // Early-return guard: only run when pid_m * BLOCK_M < num_tokens_post_padded.
-    const ntpp = k.loadScalar(num_tokens_post_padded_ptr, .i32).to(.i64);
+    const ntpp = k.load(num_tokens_post_padded_ptr).to(.i64);
     const in_range = pid_m.mul(block_m).lt(ntpp);
 
     const InRangeCtx = struct {
@@ -683,14 +674,14 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
         } else {
             // offs_token = load(sorted_token_ids_ptr + pid_m * BLOCK_M + offs)
             const ids_ptrs = ic.sorted_token_ids_ptr.splatTo(&.{block_m}).addPtr(ic.pid_m.mul(block_m).splatTo(&.{block_m}).add(offs));
-            const loaded = k.load(ids_ptrs, k.tensorTy(&.{block_m}, .i32));
+            const loaded = k.load(ids_ptrs);
             break :blk loaded.to(.i64);
         }
     };
     const token_mask = offs_token.lt(ic.num_valid_tokens);
 
     // off_experts = expert_ids[pid_m] (i32 → i64)
-    const off_experts = k.loadScalar(ic.expert_ids_ptr.addPtr(ic.pid_m.to(.i32)), .i32).to(.i64);
+    const off_experts = k.load(ic.expert_ids_ptr.addPtr(ic.pid_m.to(.i32))).to(.i64);
     const is_dead = off_experts.eq(@as(i64, -1));
 
     // offs_bn = (pid_n * BLOCK_N + arange(BLOCK_N).to(i64)) % n_block
@@ -854,25 +845,20 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
             // mask_a = token_mask[:, None] & (offs_k[None, :] < k_remaining)
             const offs_k_lt = kc.offs_k.lt(k_remaining);
             const mask_a = kk.mask2d(kc.token_mask, offs_k_lt, kc.block_m, kc.block_k);
-            const a_val = kk.loadMasked(a_ptrs, &.{ kc.block_m, kc.block_k }, kc.a_dtype, mask_a);
+            const a_val = kk.loadMasked(a_ptrs, mask_a);
 
             // mask_b = (offs_k[:, None] < k_remaining)   — broadcast along N axis.
             const mask_b = offs_k_lt.broadcast2d(1, kc.block_k, kc.block_n);
-            const b_val = kk.loadMasked(b_ptrs, &.{ kc.block_k, kc.block_n }, kc.b_dtype, mask_b);
+            const b_val = kk.loadMasked(b_ptrs, mask_b);
 
             // acc = tt.dot(a, b, acc)
-            const acc_ty = kk.tensorTy(&.{ kc.block_m, kc.block_n }, .f32);
-            const new_acc = kk.dotOpts(a_val, b_val, acc, acc_ty, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
+            const new_acc = kk.dotOpts(a_val, b_val, acc, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
 
             // Advance pointers along K.
             const new_a_ptrs = a_ptrs.addPtr(kc.stride_ak_block.mul(kc.block_k).splatTo(&.{ kc.block_m, kc.block_k }));
             const new_b_ptrs = b_ptrs.addPtr(kc.stride_bk_block.mul(kc.block_k).splatTo(&.{ kc.block_k, kc.block_n }));
 
-            const out = kk.arena.allocator().alloc(Value, 3) catch @panic("OOM");
-            out[0] = new_acc;
-            out[1] = new_a_ptrs;
-            out[2] = new_b_ptrs;
-            return out;
+            return kk.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
         }
     }.b;
 
@@ -884,7 +870,7 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
     if (ac.mul_routed) {
         const tw_ptrs = ac.topk_weights_ptr.splatTo(&.{block_m}).addPtr(ac.offs_token);
-        const tw = k.loadMasked(tw_ptrs, &.{block_m}, .f32, ac.token_mask);
+        const tw = k.loadMasked(tw_ptrs, ac.token_mask);
         acc_final = acc_final.mul(tw.broadcast2d(1, block_m, block_n));
     }
 
