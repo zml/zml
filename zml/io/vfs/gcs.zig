@@ -237,9 +237,7 @@ pub const GCS = struct {
             var reader = f.reader(inner_io, &jsonBuffer);
             return GCS.init(allocator, inner_io, http_client, .{ .credentials = .{ .json = &reader.interface } }) catch |err| switch (err) {
                 InitError.InvalidCredentialJson => {
-                    var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
-                    const file_path_size: usize = try f.realPath(inner_io, &real_path_buf);
-                    log.warn("Invalid GCS credential JSON at {s}", .{real_path_buf[0..file_path_size]});
+                    log.warn("Invalid GCS credential JSON", .{});
                     return .init(allocator, inner_io, http_client, .{});
                 },
                 else => return err,
