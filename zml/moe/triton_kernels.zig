@@ -287,8 +287,8 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     const y_div = y_f32.div(y_s_scalar.splatTo(&.{block}));
     const clamped = k.clampf(
         y_div,
-        k.splat(k.constF32(config.fp8_min), &.{block}),
-        k.splat(k.constF32(config.fp8_max), &.{block}),
+        k.splat(k.lift(@as(f32, config.fp8_min)), &.{block}),
+        k.splat(k.lift(@as(f32, config.fp8_max)), &.{block}),
         .none,
     );
     const y_q = clamped.to(out_dt);
@@ -550,9 +550,9 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const stride_be_block = block_floor(k.loadScalar(k.arg(14), .i64));
     const stride_bn_block = block_floor(k.loadScalar(k.arg(15), .i64));
     const stride_cm_block = block_floor(k.loadScalar(k.arg(16), .i64));
-    const stride_ak_block = k.constI64(1);
-    const stride_bk_block = k.constI64(1);
-    const stride_cn_block = k.constI64(1);
+    const stride_ak_block = k.lift(@as(i64, 1));
+    const stride_bk_block = k.lift(@as(i64, 1));
+    const stride_cn_block = k.lift(@as(i64, 1));
 
     // pid grouping (all in i64).
     const pid = k.programId(.x).to(.i64);

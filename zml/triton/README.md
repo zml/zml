@@ -393,12 +393,12 @@ is the manual form.
    the back-pointer populated — or just stick with the explicit `Kernel.*`
    helpers for that one op.
 
-5. **Constant caching — scope matters.** `k.constI32(42)` (and every other
-   `const*` / `constMatching` / lifted comptime literal) is deduplicated
-   automatically *when emitted at the entry block*. Calls inside a `forLoop` /
-   `ifThenElse` / reduce combiner emit a fresh constant each time so the
-   defining op still dominates its uses. If you need a shared constant across
-   sibling nested regions, hoist it out of the body explicitly.
+5. **Don't worry about duplicate constants.** Every lifted literal (from
+   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(0, N, 1, …)` bound,
+   etc.) emits a fresh `arith.constant`. This matches Python Triton's own
+   frontend — the MLIR canonicalizer + CSE pass collapses duplicates on the
+   way to PTX, so the generated code is identical whether you emit one
+   constant or a hundred. Optimize for readability at the builder level.
 
 6. **`finish(results, allocator)` verifies before serializing.** A verifier
    failure here almost always means an operand-type mismatch (see #1) or a

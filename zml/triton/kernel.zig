@@ -351,22 +351,6 @@ pub const ArgSpec = struct {
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
-/// Key for the entry-block constant cache: DSL dtype + raw 64-bit payload
-/// (int value as i64, float value as `@bitCast(f64)`). Every supported DType
-/// fits in 64 bits of data, so this stays trivially `AutoHashMap`-friendly.
-const ConstKey = struct {
-    dtype: DType,
-    bits: u64,
-
-    fn fromInt(dtype: DType, value: i64) ConstKey {
-        return .{ .dtype = dtype, .bits = @bitCast(value) };
-    }
-
-    fn fromFloat(dtype: DType, value: f64) ConstKey {
-        return .{ .dtype = dtype, .bits = @bitCast(value) };
-    }
-};
-
 /// The main DSL builder. Create with `init`, populate the body with helpers,
 /// then call `finish` to get the IR string.
 pub const Kernel = struct {
@@ -377,11 +361,6 @@ pub const Kernel = struct {
     func_op: *mlir.Operation,
     entry_block: *mlir.Block,
     block_stack: stdx.BoundedArray(*mlir.Block, 16) = .{},
-    /// Deduplication cache for constants emitted at the entry block. Constants
-    /// built inside nested regions (`forLoop` / `ifThenElse` bodies, reduce
-    /// combiners, …) bypass the cache so their defining op still dominates
-    /// their uses. Cleared on `deinit`.
-    const_cache: std.AutoHashMapUnmanaged(ConstKey, Value) = .{},
 
     /// Create a sub-module containing a single public `tt.func` of the given
     /// name, signature, and result types. The entry block is populated with
@@ -452,26 +431,8 @@ pub const Kernel = struct {
     }
 
     pub fn deinit(self: *Kernel) void {
-        self.const_cache.deinit(self.allocator);
         self.module.deinit();
         self.arena.deinit();
-    }
-
-    /// True when the next op will be appended to the entry block (no active
-    /// nested region). Constants built here dominate the whole function and
-    /// can safely be shared via `const_cache`.
-    fn atEntryBlock(self: *const Kernel) bool {
-        return self.block_stack.len == 0;
-    }
-
-    fn cacheLookup(self: *Kernel, key: ConstKey) ?Value {
-        if (!self.atEntryBlock()) return null;
-        return self.const_cache.get(key);
-    }
-
-    fn cacheInsert(self: *Kernel, key: ConstKey, v: Value) void {
-        if (!self.atEntryBlock()) return;
-        self.const_cache.put(self.allocator, key, v) catch {};
     }
 
     /// The i-th entry block argument (i.e. `%argN`).
@@ -536,45 +497,25 @@ pub const Kernel = struct {
     }
 
     // ==================== constants ====================
+    //
+    // The public surface is `lift(value)` (auto-typed) and `constMatching(value,
+    // elem_ty)` (target-typed). Binary ops, `splat`, `addPtr`, and `forLoop`
+    // all take `anytype` so in practice you rarely need to build a constant
+    // by hand.
 
-    pub fn constI32(self: *Kernel, value: i32) Value {
-        return self.cachedInt(.i32, value);
+    fn emitInt(self: *Kernel, dtype: DType, value: i64) Value {
+        return self.emit(arith.constant_int(self.ctx, value, dtype.toMlir(self.ctx), self.loc()));
     }
 
-    pub fn constI64(self: *Kernel, value: i64) Value {
-        return self.cachedInt(.i64, value);
-    }
-
-    pub fn constF32(self: *Kernel, value: f32) Value {
-        return self.cachedFloat(.f32, @floatCast(value));
-    }
-
-    pub fn constF64(self: *Kernel, value: f64) Value {
-        return self.cachedFloat(.f64, value);
-    }
-
-    fn cachedInt(self: *Kernel, dtype: DType, value: i64) Value {
-        const key: ConstKey = .fromInt(dtype, value);
-        if (self.cacheLookup(key)) |v| return v;
-        const ty = dtype.toMlir(self.ctx);
-        const v = self.emit(arith.constant_int(self.ctx, value, ty, self.loc()));
-        self.cacheInsert(key, v);
-        return v;
-    }
-
-    fn cachedFloat(self: *Kernel, dtype: DType, value: f64) Value {
-        const key: ConstKey = .fromFloat(dtype, value);
-        if (self.cacheLookup(key)) |v| return v;
-        const v = switch (dtype) {
+    fn emitFloat(self: *Kernel, dtype: DType, value: f64) Value {
+        return switch (dtype) {
             .f32 => self.emit(arith.constant_float(self.ctx, value, .f32, self.loc())),
             .f64 => self.emit(arith.constant_float(self.ctx, value, .f64, self.loc())),
             else => blk: {
-                const f32_scalar = self.cachedFloat(.f32, value);
+                const f32_scalar = self.emit(arith.constant_float(self.ctx, value, .f32, self.loc()));
                 break :blk self.fpToFp(f32_scalar, dtype.toMlir(self.ctx), .{ .rounding = .rtne });
             },
         };
-        self.cacheInsert(key, v);
-        return v;
     }
 
     // ==================== ranges and shape manipulation ====================
@@ -623,9 +564,9 @@ pub const Kernel = struct {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
-            .comptime_int => self.constI32(@intCast(value)),
-            .int => |info| if (info.bits > 32) self.constI64(@intCast(value)) else self.constI32(@intCast(value)),
-            .comptime_float, .float => self.constF32(@floatCast(value)),
+            .comptime_int => self.emitInt(.i32, @intCast(value)),
+            .int => |info| if (info.bits > 32) self.emitInt(.i64, @intCast(value)) else self.emitInt(.i32, @intCast(value)),
+            .comptime_float, .float => self.emitFloat(.f32, @floatCast(value)),
             else => @compileError("Kernel.lift: unsupported type " ++ @typeName(T)),
         };
     }
@@ -647,11 +588,9 @@ pub const Kernel = struct {
     }
 
     /// Build an arith.constant of the given MLIR element type from a Zig numeric.
-    /// Picks between integer/float codegen by inspecting the target type, and
-    /// re-uses a cached constant at the entry block when possible.
+    /// Picks between integer/float codegen by inspecting the target type.
     pub fn constMatching(self: *Kernel, value: anytype, elem: *const mlir.Type) Value {
         const T = @TypeOf(value);
-        // Target is integer? find matching DSL DType and delegate to cachedInt.
         inline for (std.meta.fields(DType)) |f| {
             const dt = @field(DType, f.name);
             if (!isFloatDtype(dt)) {
@@ -661,11 +600,10 @@ pub const Kernel = struct {
                         .comptime_float, .float => @intFromFloat(value),
                         else => @compileError("constMatching: unsupported scalar " ++ @typeName(T)),
                     };
-                    return self.cachedInt(dt, v64);
+                    return self.emitInt(dt, v64);
                 }
             }
         }
-        // Float target.
         const v_f64: f64 = switch (@typeInfo(T)) {
             .comptime_int, .int => @floatFromInt(value),
             .comptime_float, .float => @floatCast(value),
@@ -674,7 +612,7 @@ pub const Kernel = struct {
         inline for (std.meta.fields(DType)) |f| {
             const dt = @field(DType, f.name);
             if (isFloatDtype(dt)) {
-                if (elem.eql(dt.toMlir(self.ctx))) return self.cachedFloat(dt, v_f64);
+                if (elem.eql(dt.toMlir(self.ctx))) return self.emitFloat(dt, v_f64);
             }
         }
         @panic("constMatching: element type not a recognized DSL DType");
@@ -682,13 +620,13 @@ pub const Kernel = struct {
 
     /// Zero-valued tensor of the given shape and dtype.
     pub fn zeros(self: *Kernel, shape: []const i64, dtype: DType) Value {
-        const scalar = if (isFloatDtype(dtype)) self.cachedFloat(dtype, 0.0) else self.cachedInt(dtype, 0);
+        const scalar = if (isFloatDtype(dtype)) self.emitFloat(dtype, 0.0) else self.emitInt(dtype, 0);
         return self.splat(scalar, shape);
     }
 
     /// One-valued tensor of the given shape and dtype.
     pub fn ones(self: *Kernel, shape: []const i64, dtype: DType) Value {
-        const scalar = if (isFloatDtype(dtype)) self.cachedFloat(dtype, 1.0) else self.cachedInt(dtype, 1);
+        const scalar = if (isFloatDtype(dtype)) self.emitFloat(dtype, 1.0) else self.emitInt(dtype, 1);
         return self.splat(scalar, shape);
     }
 
@@ -1702,7 +1640,7 @@ test "Kernel builds a trivial tt.func round-trip" {
     const b_ptr = kernel.arg(1);
 
     const loaded = kernel.load(a_ptr, mlir.floatType(ctx, .f32), .{});
-    const one = kernel.constF32(1.0);
+    const one = kernel.lift(@as(f32, 1.0));
     const summed = kernel.addf(loaded, one);
     kernel.store(b_ptr, summed, .{});
 
@@ -1746,10 +1684,10 @@ test "Kernel with scf.for iter_args" {
     defer kernel.deinit();
 
     const base = kernel.arg(0);
-    const lb = kernel.constI32(0);
-    const ub = kernel.constI32(8);
-    const step = kernel.constI32(1);
-    const init_acc = kernel.constF32(0.0);
+    const lb = kernel.lift(@as(i32, 0));
+    const ub = kernel.lift(@as(i32, 8));
+    const step = kernel.lift(@as(i32, 1));
+    const init_acc = kernel.lift(@as(f32, 0.0));
 
     const Ctx = struct { base: Value };
     const body = struct {
@@ -1802,13 +1740,13 @@ test "Kernel with scf.if" {
     defer kernel.deinit();
 
     const a_ptr = kernel.arg(0);
-    const c1 = kernel.constI32(1);
-    const c2 = kernel.constI32(2);
+    const c1 = kernel.lift(@as(i32, 1));
+    const c2 = kernel.lift(@as(i32, 2));
     const eq = kernel.cmpi(.eq, c1, c2);
 
     const then_fn = struct {
         fn call(k: *Kernel, _: void) []const Value {
-            const one = k.constF32(1.0);
+            const one = k.lift(@as(f32, 1.0));
             const out = k.arena.allocator().alloc(Value, 1) catch unreachable;
             out[0] = one;
             return out;
@@ -1816,7 +1754,7 @@ test "Kernel with scf.if" {
     }.call;
     const else_fn = struct {
         fn call(k: *Kernel, _: void) []const Value {
-            const two = k.constF32(2.0);
+            const two = k.lift(@as(f32, 2.0));
             const out = k.arena.allocator().alloc(Value, 1) catch unreachable;
             out[0] = two;
             return out;
@@ -1935,7 +1873,7 @@ test "tt.atomic_rmw round-trip" {
     defer kernel.deinit();
 
     const counter = kernel.arg(0);
-    const one = kernel.constI32(1);
+    const one = kernel.lift(@as(i32, 1));
     _ = kernel.atomicRmw(.add, counter, one, .{});
 
     const ir = try kernel.finish(&.{}, std.testing.allocator);
@@ -2064,7 +2002,7 @@ test "ops_mlir parity: load_store_ops_scalar" {
     const mask = k.arg(1);
     const f32_ty = mlir.floatType(ctx, .f32);
 
-    const other = k.constF32(0.0);
+    const other = k.lift(@as(f32, 0.0));
 
     const a = k.load(ptr, f32_ty, .{});
     const b = k.load(ptr, f32_ty, .{ .mask = mask.inner });
@@ -2130,7 +2068,7 @@ test "ops_mlir parity: dot_ops_infer" {
 
     const v128x32 = k.splat(v, &.{ 128, 32 });
     const v32x128 = k.splat(v, &.{ 32, 128 });
-    const zero128 = k.constF32(0.0);
+    const zero128 = k.lift(@as(f32, 0.0));
     const z128x128 = k.splat(zero128, &.{ 128, 128 });
     const z32x32 = k.splat(zero128, &.{ 32, 32 });
 
