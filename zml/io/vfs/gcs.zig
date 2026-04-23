@@ -239,7 +239,6 @@ pub const GCS = struct {
                 InitError.InvalidCredentialJson => {
                     var real_path_buf: [std.fs.max_path_bytes]u8 = undefined;
                     const file_path_size: usize = try f.realPath(inner_io, &real_path_buf);
-
                     log.warn("Invalid GCS credential JSON at {s}", .{real_path_buf[0..file_path_size]});
                     return .init(allocator, inner_io, http_client, .{});
                 },
