@@ -355,10 +355,6 @@ def ragged_paged_attention_kernel(
     )
     return async_copy_kv
 
-  # TODO(jevinjiang): Add these to Mosaic:
-  # TODO Done by (neudinger)
-  # 1. Support arbitrary strided load/store for int4 and int8 dtype.
-  # 2. Support arbitrary strided load/store for any last dimension.
   def strided_load_kv(ref, start, step):
     packing = get_dtype_packing(ref.dtype)
     if packing == 1:
@@ -384,9 +380,6 @@ def ragged_paged_attention_kernel(
           [b_ref[b_start + i * b_step, :] for i in range(num_rows)], axis=0
       )
 
-    # TODO(chengjiyao): use the general strided loading logic for bf16 after
-    # TODO Done by (neudinger)
-    # fixing the issue in mosaic's infer vector layout pass
     if ref.dtype == jnp.bfloat16:
       bk = b << 16
       bv = b & jnp.uint32(0xFFFF0000)
