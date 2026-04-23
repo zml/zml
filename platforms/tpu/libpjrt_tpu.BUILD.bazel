@@ -12,6 +12,7 @@ copy_to_directory(
     srcs = [
         "lib/libpjrt_tpu.so",
         "@zml//platforms/tpu:gen_ir_files",
+        "@zml//platforms/tpu:sandbox_overrides",
     ],
     add_directory_to_runfiles = False,
     allow_overwrites = True,
@@ -24,6 +25,7 @@ copy_to_directory(
     include_srcs_patterns = [
         "platforms/tpu/gen_ir.py",
         "platforms/tpu/gen_ir_zig",
+        "platforms/tpu/overrides/**",
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",
@@ -31,6 +33,7 @@ copy_to_directory(
     replace_prefixes = {
         "platforms/tpu/gen_ir.py": "site-packages/gen_ir.py",
         "platforms/tpu/gen_ir_zig": "bin/gen_ir_zig",
+        "platforms/tpu/overrides": "site-packages",
         "lib/x86_64-linux-gnu": "lib",
     },
 )

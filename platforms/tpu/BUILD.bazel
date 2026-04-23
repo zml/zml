@@ -39,6 +39,16 @@ zig_library(
     }),
 )
 
+filegroup(
+    name = "sandbox_overrides",
+    srcs = glob(
+        ["overrides/**"],
+        exclude = ["**/__pycache__/**"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
 # bazel run //platforms/tpu:requirements.update
 uv_lock(
     name = "requirements",
