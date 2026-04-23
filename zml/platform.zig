@@ -421,8 +421,18 @@ pub const Platform = struct {
         return .{ .data = self };
     }
 
+    pub const DeinitOptions = struct {
+        destroy_pjrt_client: bool = true,
+    };
+
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
-        self.pjrt_client.deinit(self.pjrt_api);
+        self.deinitWithOptions(allocator, io, .{});
+    }
+
+    pub fn deinitWithOptions(self: *Platform, allocator: std.mem.Allocator, io: std.Io, options: DeinitOptions) void {
+        if (options.destroy_pjrt_client) {
+            self.pjrt_client.deinit(self.pjrt_api);
+        }
         if (self.tpu_ir_runtime) |*rt| rt.deinit(io);
         if (self.triton_runtime) |*rt| rt.deinit(allocator, io);
         self.arena_state.promote(allocator).deinit();

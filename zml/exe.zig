@@ -71,6 +71,26 @@ pub const Exe = struct {
         return Results.init(allocator, self.output_shapes, self.output_shardings, self.platform, self.num_devices);
     }
 
+    pub const CompiledMemorySummary = struct {
+        generated_code_size_in_bytes: u64,
+        temp_size_in_bytes: u64,
+
+        pub fn additionalDeviceMemoryBytes(self: CompiledMemorySummary) u64 {
+            return self.generated_code_size_in_bytes + self.temp_size_in_bytes;
+        }
+    };
+
+    pub fn compiledMemorySummary(self: *const Exe) ?CompiledMemorySummary {
+        const executable = self.exe.executable(self.platform.pjrt_api) catch return null;
+        defer executable.deinit(self.platform.pjrt_api);
+
+        const stats = executable.getCompiledMemoryStats(self.platform.pjrt_api) catch return null;
+        return .{
+            .generated_code_size_in_bytes = stats.generated_code_size_in_bytes,
+            .temp_size_in_bytes = stats.temp_size_in_bytes,
+        };
+    }
+
     pub const FlatBuffers = struct {
         buffers: []const [*]*pjrt.Buffer,
         raw_buffers: []const *pjrt.Buffer,
