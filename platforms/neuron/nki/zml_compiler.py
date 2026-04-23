@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import types
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -28,12 +29,19 @@ class KernelSignature:
 
 
 @dataclass(frozen=True)
-class CompilerPaths:
-    source: Path
-    signature: Path
-    backend_config_output: Path
-    io_names_output: Path
-    artifacts_dir: Path
+class CompileRequest:
+    entrypoint: str
+    source: str
+    target: str
+    tool_bin_dir: str
+    signature: KernelSignature
+
+
+@dataclass(frozen=True)
+class CompileResult:
+    backend_config_b64: str
+    input_names: tuple[str, ...]
+    output_names: tuple[str, ...]
 
 
 def dtype_from_name(name: str):
@@ -99,13 +107,28 @@ def parse_signature(raw_signature: dict) -> KernelSignature:
     def parse_tensor_spec(raw_spec: dict) -> TensorSpec:
         return TensorSpec(
             dtype=raw_spec["dtype"],
-            shape=tuple(raw_spec["shape"]),
+            shape=tuple(raw_spec.get("shape", raw_spec["dims"])),
             name=raw_spec.get("name"),
         )
 
     return KernelSignature(
         inputs=tuple(parse_tensor_spec(spec) for spec in raw_signature["inputs"]),
         outputs=tuple(parse_tensor_spec(spec) for spec in raw_signature["outputs"]),
+    )
+
+
+def parse_request(raw_request: dict) -> CompileRequest:
+    return CompileRequest(
+        entrypoint=raw_request["entrypoint"],
+        source=raw_request["source"],
+        target=raw_request["target"],
+        tool_bin_dir=raw_request["tool_bin_dir"],
+        signature=parse_signature(
+            {
+                "inputs": raw_request["inputs"],
+                "outputs": raw_request["outputs"],
+            }
+        ),
     )
 
 
@@ -126,16 +149,6 @@ def load_kernel(source_path: Path, source: str, entrypoint: str):
         raise KeyError(f"entrypoint {entrypoint!r} not found in {source_path}") from exc
 
 
-def write_io_names(
-    io_names_output: Path, input_names: list[str], output_names: list[str]
-) -> None:
-    with io_names_output.open("w", encoding="utf-8") as f:
-        for i, name in enumerate(input_names):
-            f.write(f"input{i}={name}\n")
-        for i, name in enumerate(output_names):
-            f.write(f"output{i}={name}\n")
-
-
 def make_inputs(signature: KernelSignature) -> list[np.ndarray]:
     """Create zero-filled specialization inputs matching the declared ZML signature."""
     inputs: list[np.ndarray] = []
@@ -151,7 +164,7 @@ def make_inputs(signature: KernelSignature) -> list[np.ndarray]:
 
 def build_backend_config(
     target: str, bir, result: object
-) -> tuple[bytes, list[str], list[str]]:
+) -> tuple[str, list[str], list[str]]:
     from nki.compiler.target import target_to_nc_version  # type: ignore
 
     aliases = result.input_output_aliases or {}
@@ -195,7 +208,7 @@ def build_backend_config(
         "mac_count": result.mac_count,
     }
     return (
-        base64.b64encode(json.dumps(backend_config).encode("utf-8")),
+        base64.b64encode(json.dumps(backend_config).encode("utf-8")).decode("ascii"),
         input_names,
         output_names,
     )
@@ -207,22 +220,15 @@ def configure_python_path(tool_bin_dir: str) -> None:
 
 
 def rewrite_source_for_compilation(
-    source_path: Path,
+    source: str,
     entrypoint: str,
     signature: KernelSignature,
 ) -> tuple[str, list[str]]:
-    source = source_path.read_text(encoding="utf-8")
     declared_input_names = [
         input_spec.name or default_input_names(len(signature.inputs))[i]
         for i, input_spec in enumerate(signature.inputs)
     ]
-    rewritten_source, input_names = rewrite_source_entrypoint(
-        source, entrypoint, declared_input_names
-    )
-    # Overwrite the temp source file so compiler diagnostics and preserved
-    # artifacts match the rewritten callable that compile_to_bir sees.
-    source_path.write_text(rewritten_source, encoding="utf-8")
-    return rewritten_source, input_names
+    return rewrite_source_entrypoint(source, entrypoint, declared_input_names)
 
 
 def compile_to_bir_with_signature(
@@ -255,50 +261,66 @@ def compile_to_bir_with_signature(
     )
 
 
+def compile_request(request: CompileRequest) -> CompileResult:
+    configure_python_path(request.tool_bin_dir)
+
+    # Leave the scratch directory under the outer Neuron sandbox. The backend
+    # config points at compiler artifacts produced inside this directory.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="zml-nki-", dir="."))
+    source_path = tmp_dir / "kernel.py"
+    artifacts_dir = tmp_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True, exist_ok=False)
+    rewritten_source, input_names = rewrite_source_for_compilation(
+        request.source,
+        request.entrypoint,
+        request.signature,
+    )
+    # Persist only the rewritten module. That keeps compiler diagnostics aligned
+    # with the callable surface that compile_to_bir actually sees.
+    source_path.write_text(rewritten_source, encoding="utf-8")
+    kernel = load_kernel(source_path, rewritten_source, request.entrypoint)
+    bir, result = compile_to_bir_with_signature(
+        kernel,
+        request.signature,
+        input_names,
+        request.target,
+        artifacts_dir,
+    )
+
+    backend_config_b64, compiled_input_names, compiled_output_names = build_backend_config(
+        request.target,
+        bir,
+        result,
+    )
+    return CompileResult(
+        backend_config_b64=backend_config_b64,
+        input_names=tuple(compiled_input_names),
+        output_names=tuple(compiled_output_names),
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Compile a ZML NKI kernel to a custom-native backend config"
     )
-    parser.add_argument("--source", required=True)
-    parser.add_argument("--entrypoint", required=True)
-    parser.add_argument("--signature", required=True)
-    parser.add_argument("--backend-config-output", required=True)
-    parser.add_argument("--io-names-output", required=True)
-    parser.add_argument("--artifacts-dir", required=True)
-    parser.add_argument("--bin-dir", required=True)
-    parser.add_argument("--target", required=True)
+    parser.add_argument("--request", required=True)
+    parser.add_argument("--result", required=True)
     args = parser.parse_args()
 
-    configure_python_path(args.bin_dir)
-
-    paths = CompilerPaths(
-        source=Path(args.source),
-        signature=Path(args.signature),
-        backend_config_output=Path(args.backend_config_output),
-        io_names_output=Path(args.io_names_output),
-        artifacts_dir=Path(args.artifacts_dir),
+    request_path = Path(args.request)
+    result_path = Path(args.result)
+    request = parse_request(json.loads(request_path.read_text(encoding="utf-8")))
+    result = compile_request(request)
+    result_path.write_text(
+        json.dumps(
+            {
+                "backend_config_b64": result.backend_config_b64,
+                "input_names": list(result.input_names),
+                "output_names": list(result.output_names),
+            }
+        ),
+        encoding="utf-8",
     )
-
-    signature = parse_signature(json.loads(paths.signature.read_text(encoding="utf-8")))
-    rewritten_source, input_names = rewrite_source_for_compilation(
-        paths.source, args.entrypoint, signature
-    )
-    kernel = load_kernel(paths.source, rewritten_source, args.entrypoint)
-    bir, result = compile_to_bir_with_signature(
-        kernel,
-        signature,
-        input_names,
-        args.target,
-        paths.artifacts_dir,
-    )
-
-    backend_config, compiled_input_names, compiled_output_names = build_backend_config(
-        args.target,
-        bir,
-        result,
-    )
-    paths.backend_config_output.write_bytes(backend_config)
-    write_io_names(paths.io_names_output, compiled_input_names, compiled_output_names)
 
 
 if __name__ == "__main__":

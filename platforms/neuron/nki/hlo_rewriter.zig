@@ -32,6 +32,21 @@ const NkiCompiledKernel = struct {
     output_names: [][]const u8,
 };
 
+const NkiCompilerRequest = struct {
+    entrypoint: []const u8,
+    source: []const u8,
+    target: []const u8,
+    tool_bin_dir: []const u8,
+    inputs: []const TensorSignature,
+    outputs: []const TensorSignature,
+};
+
+const NkiCompilerResponse = struct {
+    backend_config_b64: []const u8,
+    input_names: [][]const u8,
+    output_names: [][]const u8,
+};
+
 fn base64DecodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
     const decoder = std.base64.standard.Decoder;
     const decoded = try allocator.alloc(u8, try decoder.calcSizeForSlice(bytes));
@@ -95,35 +110,27 @@ fn parseNkiKernelConfig(allocator: std.mem.Allocator, backend_config: []const u8
     };
 }
 
-fn writeNkiSignatureJson(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File, config: NkiKernelConfig) !void {
-    var allocating: std.Io.Writer.Allocating = .init(allocator);
-    try allocating.writer.writeAll("{\"inputs\":[");
-    for (config.inputs, 0..) |input, i| {
-        if (i != 0) try allocating.writer.writeByte(',');
-        try allocating.writer.writeAll("{");
-        if (input.name) |name| {
-            try allocating.writer.print("\"name\":\"{s}\",", .{name});
-        }
-        try allocating.writer.print("\"dtype\":\"{s}\",\"shape\":[", .{input.dtype});
-        for (input.dims, 0..) |dim, dim_i| {
-            if (dim_i != 0) try allocating.writer.writeByte(',');
-            try allocating.writer.print("{d}", .{dim});
-        }
-        try allocating.writer.writeAll("]}");
-    }
-    try allocating.writer.writeAll("],\"outputs\":[");
-    for (config.outputs, 0..) |output, i| {
-        if (i != 0) try allocating.writer.writeByte(',');
-        try allocating.writer.print("{{\"dtype\":\"{s}\",\"shape\":[", .{output.dtype});
-        for (output.dims, 0..) |dim, dim_i| {
-            if (dim_i != 0) try allocating.writer.writeByte(',');
-            try allocating.writer.print("{d}", .{dim});
-        }
-        try allocating.writer.writeAll("]}");
-    }
-    try allocating.writer.writeAll("]}");
+fn readFileAlloc(allocator: std.mem.Allocator, io: std.Io, file: std.Io.File) ![]const u8 {
+    const stat = try file.stat(io);
+    const buf = try allocator.alloc(u8, stat.size);
+    errdefer allocator.free(buf);
+    _ = try file.readPositionalAll(io, buf, 0);
+    return buf;
+}
 
-    try file.writeStreamingAll(io, allocating.written());
+fn writeNkiCompilerRequest(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    file: std.Io.File,
+    request: NkiCompilerRequest,
+) !void {
+    const request_json = try std.fmt.allocPrint(
+        allocator,
+        "{f}",
+        .{std.json.fmt(request, .{ .emit_null_optional_fields = false })},
+    );
+    defer allocator.free(request_json);
+    try file.writePositionalAll(io, request_json, 0);
 }
 
 fn rewriteInstructionAsCustomNativeKernel(
@@ -217,41 +224,19 @@ fn setOuterCustomNativeKernelIoAttributes(
     setInstructionFrontendAttribute(upb_arena, root_instruction, neff_output_names_attr, output_names_value);
 }
 
-fn readNkiIoNamesFile(
+fn readNkiCompilerResponse(
     allocator: std.mem.Allocator,
     io: std.Io,
     file: std.Io.File,
-) !struct {
-    input_names: [][]const u8,
-    output_names: [][]const u8,
-} {
-    const data = blk: {
-        const stat = try file.stat(io);
-        const buf = try allocator.alloc(u8, stat.size);
-        errdefer allocator.free(buf);
-        _ = try file.readPositionalAll(io, buf, 0);
-        break :blk buf;
-    };
-    var input_names: std.ArrayList([]const u8) = .empty;
-    var output_names: std.ArrayList([]const u8) = .empty;
-
-    var lines = std.mem.tokenizeScalar(u8, data, '\n');
-    while (lines.next()) |line| {
-        if (line.len == 0) continue;
-        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-        const key = line[0..eq];
-        const value = try allocator.dupe(u8, line[eq + 1 ..]);
-
-        if (std.mem.startsWith(u8, key, "input")) {
-            try input_names.append(allocator, value);
-        } else if (std.mem.startsWith(u8, key, "output")) {
-            try output_names.append(allocator, value);
-        }
-    }
-
+) !NkiCompiledKernel {
+    const data = try readFileAlloc(allocator, io, file);
+    const response = try std.json.parseFromSliceLeaky(NkiCompilerResponse, allocator, data, .{
+        .ignore_unknown_fields = true,
+    });
     return .{
-        .input_names = try input_names.toOwnedSlice(allocator),
-        .output_names = try output_names.toOwnedSlice(allocator),
+        .backend_config_bytes = try allocator.dupe(u8, response.backend_config_b64),
+        .input_names = response.input_names,
+        .output_names = response.output_names,
     };
 }
 
@@ -266,32 +251,23 @@ fn compileNkiKernel(
     if (std.mem.eql(u8, target, "inf1")) return error.UnsupportedNkiTarget;
 
     const stem = try std.fmt.allocPrint(allocator, "kernel-{d}", .{kernel_index});
-    const source_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.py", .{stem}), .{ .read = true, .truncate = true });
-    const signature_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.json", .{stem}), .{ .read = true, .truncate = true });
-    const backend_config_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.backend_config", .{stem}), .{ .read = true, .truncate = true });
-    const io_names_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.ionames", .{stem}), .{ .read = true, .truncate = true });
-    const artifacts_dir = try tmp_dir.createDirPathOpen(io, try std.fmt.allocPrint(allocator, "{s}-artifacts", .{stem}), .{ .permissions = .fromMode(0o700) });
-
-    try source_file.writeStreamingAll(io, config.source);
-    try writeNkiSignatureJson(allocator, io, signature_file, config);
+    const request_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.request.json", .{stem}), .{
+        .read = true,
+        .truncate = true,
+    });
+    const result_file = try tmp_dir.createFile(io, try std.fmt.allocPrint(allocator, "{s}.result.json", .{stem}), .{
+        .read = true,
+        .truncate = true,
+    });
 
     var cwd_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const cwd = try tmp_dir.realPath(io, &cwd_buf);
 
-    var source_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const source_file_path = try source_file.realPath(io, &source_file_buf);
+    var request_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const request_file_path = try request_file.realPath(io, &request_file_buf);
 
-    var signature_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const signature_file_path = try signature_file.realPath(io, &signature_file_buf);
-
-    var backend_config_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const backend_config_file_path = try backend_config_file.realPath(io, &backend_config_file_buf);
-
-    var io_names_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const io_names_file_path = try io_names_file.realPath(io, &io_names_file_buf);
-
-    var artifacts_dir_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const artifacts_dir_path = try artifacts_dir.realPath(io, &artifacts_dir_buf);
+    var result_file_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
+    const result_file_path = try result_file.realPath(io, &result_file_buf);
 
     var nki_cc_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
     const nki_cc_path = try stdx.Io.Dir.path.bufJoin(&nki_cc_buf, &.{
@@ -302,6 +278,15 @@ fn compileNkiKernel(
     });
     const bin_dirpath = std.fs.path.dirname(nki_cc_path).?;
 
+    try writeNkiCompilerRequest(allocator, io, request_file, .{
+        .entrypoint = config.entrypoint,
+        .source = config.source,
+        .target = target,
+        .tool_bin_dir = bin_dirpath,
+        .inputs = config.inputs,
+        .outputs = config.outputs,
+    });
+
     {
         const gil_state = c.PyEval_SaveThread();
         defer c.PyEval_RestoreThread(gil_state);
@@ -309,22 +294,10 @@ fn compileNkiKernel(
         var child = try std.process.spawn(io, .{
             .argv = &.{
                 nki_cc_path,
-                "--source",
-                source_file_buf[0..source_file_path],
-                "--entrypoint",
-                config.entrypoint,
-                "--signature",
-                signature_file_buf[0..signature_file_path],
-                "--backend-config-output",
-                backend_config_file_buf[0..backend_config_file_path],
-                "--io-names-output",
-                io_names_file_buf[0..io_names_file_path],
-                "--artifacts-dir",
-                artifacts_dir_buf[0..artifacts_dir_path],
-                "--bin-dir",
-                bin_dirpath,
-                "--target",
-                target,
+                "--request",
+                request_file_buf[0..request_file_path],
+                "--result",
+                result_file_buf[0..result_file_path],
             },
             .stdin = .ignore,
             .stdout = .inherit,
@@ -350,19 +323,7 @@ fn compileNkiKernel(
         }
     }
 
-    const io_names = try readNkiIoNamesFile(allocator, io, io_names_file);
-
-    return .{
-        .backend_config_bytes = blk: {
-            const stat = try backend_config_file.stat(io);
-            const buf = try allocator.alloc(u8, stat.size);
-            errdefer allocator.free(buf);
-            _ = try backend_config_file.readPositionalAll(io, buf, 0);
-            break :blk buf;
-        },
-        .input_names = io_names.input_names,
-        .output_names = io_names.output_names,
-    };
+    return try readNkiCompilerResponse(allocator, io, result_file);
 }
 
 pub fn rewriteCustomCalls(
