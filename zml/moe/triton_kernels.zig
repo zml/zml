@@ -148,7 +148,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
 
     const pid = k.programId(.x);
     const num_progs = k.numPrograms(.x);
-    const token_offs = k.makeRange(0, @intCast(block));
+    const token_offs = k.makeRange(0, block);
     const block_i32: i32 = @intCast(block);
     const token_start_init = pid.mul(block_i32);
     const step = num_progs.mul(block_i32);
@@ -233,7 +233,7 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     const y_s_ptr_shifted = y_s_ptr.addPtr(g_id);
 
     // cols = arange(0, BLOCK) — in i64 for pointer offsets, in i32 for mask.
-    const cols_i32 = k.arange(0, @intCast(block), .i32);
+    const cols_i32 = k.arange(0, block, .i32);
     const cols_i64 = cols_i32.to(.i64);
     const mask = cols_i32.lt(group_size.to(.i32));
 
@@ -311,10 +311,10 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
     var i = k.openIfElse(pid.eq(1), .{});
     {
         // pid==1 branch: fill sorted_token_ids with NUMEL.
-        var fill_loop = k.openFor(0, max_num_tokens_padded, @as(i32, @intCast(hist_block)), .{});
+        var fill_loop = k.openFor(0, max_num_tokens_padded, hist_block, .{});
         {
             const iv = fill_loop.iv;
-            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, @intCast(hist_block), .i32));
+            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(max_num_tokens_padded);
             const sorted_ptrs = sorted_token_ids.splatTo(&.{hist_block}).addPtr(offs);
             k.storeOpts(sorted_ptrs, k.splat(numel, &.{hist_block}), .{ .mask = mask });
@@ -324,16 +324,16 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
     }
     {
         // pid==0 branch: histogram + cumsum + assignment.
-        const expert_offs = k.arange(0, @intCast(padded_num_experts), .i32);
+        const expert_offs = k.arange(0, padded_num_experts, .i32);
         const expert_mask = expert_offs.lt(num_experts);
         const counts_init = k.zeros(&.{padded_num_experts}, .i32);
 
         // Histogram loop over token chunks.
-        var hist_loop = k.openFor(0, numel, @as(i32, @intCast(hist_block)), .{counts_init});
+        var hist_loop = k.openFor(0, numel, hist_block, .{counts_init});
         {
             const iv = hist_loop.iv;
             const acc = hist_loop.carried[0];
-            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, @intCast(hist_block), .i32));
+            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(numel);
             const topk_ptrs = topk_ids.splatTo(&.{hist_block}).addPtr(offs);
             const num_experts_other = k.splat(num_experts, &.{hist_block});
@@ -363,10 +363,10 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
         k.store(num_tokens_post_pad, total);
 
         // Block-to-expert assignment.
-        var assign_loop = k.openFor(0, @as(i32, @intCast(max_num_m_blocks)), @as(i32, @intCast(hist_block)), .{});
+        var assign_loop = k.openFor(0, max_num_m_blocks, hist_block, .{});
         {
             const block_start = assign_loop.iv;
-            const block_offs = k.arange(0, @intCast(hist_block), .i32);
+            const block_offs = k.arange(0, hist_block, .i32);
             const block_ids = block_start.splatTo(&.{hist_block}).add(block_offs);
             const block_mask = block_ids.lt(@as(i32, @intCast(max_num_m_blocks)));
             const block_offsets = block_ids.mul(@as(i32, @intCast(block_size_m)));
@@ -568,7 +568,7 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
     const top_k = ic.top_k;
 
     // offs_token: depends on naive_block_assignment.
-    const offs = k.arange(0, @intCast(block_m), .i64);
+    const offs = k.arange(0, block_m, .i64);
     const offs_token = blk: {
         if (ic.naive) {
             // offs_token = where(offs == 0, pid_m, num_valid_tokens)
@@ -587,11 +587,11 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
     const is_dead = off_experts.eq(@as(i64, -1));
 
     // offs_bn = (pid_n * BLOCK_N + arange(BLOCK_N).to(i64)) % n_block
-    const arange_n = k.arange(0, @intCast(block_n), .i64);
+    const arange_n = k.arange(0, block_n, .i64);
     const offs_bn = ic.pid_n.mul(block_n).splatTo(&.{block_n}).add(arange_n).rem(ic.n_block.splatTo(&.{block_n}));
     // offs_cn = pid_n * BLOCK_N + arange_n (for c-ptr addressing; i64)
-    const offs_cn = ic.pid_n.to(.i32).mul(@as(i32, @intCast(block_n))).splatTo(&.{block_n}).add(k.arange(0, @intCast(block_n), .i32)).to(.i64);
-    const offs_k = k.arange(0, @intCast(block_k), .i64);
+    const offs_cn = ic.pid_n.to(.i32).mul(@as(i32, @intCast(block_n))).splatTo(&.{block_n}).add(k.arange(0, block_n, .i32)).to(.i64);
+    const offs_k = k.arange(0, block_k, .i64);
 
     const AliveCtx = struct {
         a_ptr: Value,

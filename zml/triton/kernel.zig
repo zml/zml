@@ -1006,17 +1006,22 @@ pub const Kernel = struct {
     // ==================== ranges and shape manipulation ====================
 
     /// `tt.make_range` — produces a 1D `tensor<Nxi32>` with values `[start, end)`.
-    pub fn makeRange(self: *Kernel, start: i32, end: i32) Value {
-        std.debug.assert(end >= start);
-        const len: i64 = @intCast(end - start);
+    /// `start`/`end` accept any integer type (comptime or runtime); they must
+    /// fit in i32 since `tt.make_range` bakes them as i32 attributes.
+    pub fn makeRange(self: *Kernel, start: anytype, end: anytype) Value {
+        const s: i32 = @intCast(start);
+        const e: i32 = @intCast(end);
+        std.debug.assert(e >= s);
+        const len: i64 = @intCast(e - s);
         const ty = mlir.rankedTensorType(&.{len}, mlir.integerType(self.ctx, .i32));
-        return self.emit(ttir.make_range(self.ctx, start, end, ty, self.loc()));
+        return self.emit(ttir.make_range(self.ctx, s, e, ty, self.loc()));
     }
 
     /// `tl.arange(start, end)` with optional dtype promotion — mirrors Python
     /// Triton's two-argument signature. Pass `.i32` for the native range type;
     /// any other dtype triggers an extsi/trunci/sitofp as appropriate.
-    pub fn arange(self: *Kernel, start: i32, end: i32, dtype: DType) Value {
+    /// `start`/`end` accept any integer type; they must fit in i32.
+    pub fn arange(self: *Kernel, start: anytype, end: anytype, dtype: DType) Value {
         const r = self.makeRange(start, end);
         if (dtype == .i32) return r;
         return switch (dtype) {
@@ -2356,9 +2361,8 @@ pub const Kernel = struct {
         block_locs[0] = self.loc();
         var inits_inner: [N]*const mlir.Value = undefined;
         inline for (fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("openFor: every init must be a Value");
-            const v: Value = @field(inits, f.name);
+            const raw = @field(inits, f.name);
+            const v: Value = if (f.type == Value) raw else self.lift(raw);
             block_types[i + 1] = v.type_();
             block_locs[i + 1] = self.loc();
             inits_inner[i] = v.inner;
