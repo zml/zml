@@ -191,23 +191,18 @@ pub const Value = struct {
         const cur_elem = self.elemType();
         if (cur_elem.eql(target_elem)) return self;
 
-        const out_ty: *const mlir.Type = if (self.isTensor())
-            mlir.rankedTensorType(self.shape().constSlice(), target_elem)
-        else
-            target_elem;
-
         const cur_is_float = self.isFloatElem();
         const tgt_is_float = isFloatDtype(dtype);
 
         if (cur_is_float and tgt_is_float) return k.fpToFp(self, dtype);
-        if (cur_is_float and !tgt_is_float) return k.fptosi(self, out_ty);
-        if (!cur_is_float and tgt_is_float) return k.sitofp(self, out_ty);
+        if (cur_is_float and !tgt_is_float) return k.fptosi(self, dtype);
+        if (!cur_is_float and tgt_is_float) return k.sitofp(self, dtype);
         // int → int: compare bit widths.
         const cur_bw = intElemBitwidth(k.ctx, cur_elem);
         const tgt_bw = dtypeBitwidth(dtype);
-        if (tgt_bw > cur_bw) return k.extsi(self, out_ty);
-        if (tgt_bw < cur_bw) return k.trunci(self, out_ty);
-        return k.arithBitcast(self, out_ty);
+        if (tgt_bw > cur_bw) return k.extsi(self, dtype);
+        if (tgt_bw < cur_bw) return k.trunci(self, dtype);
+        return k.arithBitcast(self, dtype);
     }
 
     // -------- shape manipulation --------
@@ -765,12 +760,10 @@ pub const Kernel = struct {
     pub fn arange(self: *Kernel, start: i32, end: i32, dtype: DType) Value {
         const r = self.makeRange(start, end);
         if (dtype == .i32) return r;
-        const len: i64 = @intCast(end - start);
-        const out_ty = self.tensorTy(&.{len}, dtype);
         return switch (dtype) {
-            .i64 => self.extsi(r, out_ty),
-            .i16, .i8 => self.trunci(r, out_ty),
-            .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => self.sitofp(r, out_ty),
+            .i64 => self.extsi(r, dtype),
+            .i16, .i8 => self.trunci(r, dtype),
+            .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => self.sitofp(r, dtype),
             else => @panic("Kernel.arange: unsupported dtype"),
         };
     }
@@ -1205,49 +1198,58 @@ pub const Kernel = struct {
         return self.emit(arith.negf(self.ctx, src.inner, self.loc()));
     }
 
-    // Casts
-    pub fn extsi(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.extsi(self.ctx, src.inner, result_type, self.loc()));
+    // Casts — each preserves the src shape and swaps the element type to `out_dtype`.
+    pub fn extsi(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.extsi(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn extui(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.extui(self.ctx, src.inner, result_type, self.loc()));
+    pub fn extui(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.extui(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn extf(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.extf(self.ctx, src.inner, result_type, self.loc()));
+    pub fn extf(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.extf(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn trunci(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.trunci(self.ctx, src.inner, result_type, self.loc()));
+    pub fn trunci(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.trunci(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn truncf(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.truncf(self.ctx, src.inner, result_type, self.loc()));
+    pub fn truncf(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.truncf(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn sitofp(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.sitofp(self.ctx, src.inner, result_type, self.loc()));
+    pub fn sitofp(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.sitofp(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn uitofp(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.uitofp(self.ctx, src.inner, result_type, self.loc()));
+    pub fn uitofp(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.uitofp(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn fptosi(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.fptosi(self.ctx, src.inner, result_type, self.loc()));
+    pub fn fptosi(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.fptosi(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn fptoui(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.fptoui(self.ctx, src.inner, result_type, self.loc()));
+    pub fn fptoui(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.fptoui(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn arithBitcast(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(arith.bitcast(self.ctx, src.inner, result_type, self.loc()));
+    pub fn arithBitcast(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(arith.bitcast(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
 
     // ==================== Triton-specific ops ====================
 
-    /// `tt.bitcast` — like arith.bitcast but works on ptrs too.
-    pub fn bitcast(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(ttir.bitcast(self.ctx, src.inner, result_type, self.loc()));
+    /// `tt.bitcast` — same-bitwidth cast. Shape preserved from `src`; elem → `out_dtype`.
+    /// For ptr ↔ ptr bitcasts use `bitcastTo` with an explicit pointer type.
+    pub fn bitcast(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(ttir.bitcast(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    pub fn intToPtr(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
+    /// `tt.int_to_ptr` — cast integer (scalar or tensor) to `!tt.ptr<pointee, address_space>`,
+    /// preserving shape.
+    pub fn intToPtr(self: *Kernel, src: Value, pointee: DType, address_space: i32) Value {
+        const ptr_elem = ttir.pointerType(pointee.toMlir(self.ctx), address_space);
+        const result_type: *const mlir.Type = if (src.isTensor())
+            mlir.rankedTensorType(src.shape().constSlice(), ptr_elem)
+        else
+            ptr_elem;
         return self.emit(ttir.int_to_ptr(self.ctx, src.inner, result_type, self.loc()));
     }
-    pub fn ptrToInt(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(ttir.ptr_to_int(self.ctx, src.inner, result_type, self.loc()));
+    /// `tt.ptr_to_int` — cast pointer (scalar or tensor) to integer, preserving shape.
+    pub fn ptrToInt(self: *Kernel, src: Value, out_dtype: DType) Value {
+        return self.emit(ttir.ptr_to_int(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
     /// `tt.fp_to_fp` with default IEEE downcast rounding (`rtne`). Shape is
     /// preserved from `src`; only the element type changes to `out_dtype`.
@@ -1310,25 +1312,49 @@ pub const Kernel = struct {
         return self.emit(ttir.reshape(self.ctx, src.inner, result_ty, opts.allow_reorder, opts.efficient_layout, self.loc()));
     }
 
-    /// `tt.trans` — permute dimensions according to `order`. Result type must
-    /// match the permuted shape.
-    pub fn trans(self: *Kernel, src: Value, order: []const i32, result_type: *const mlir.Type) Value {
+    /// `tt.trans` — permute dimensions according to `order`. Result shape is
+    /// `src.shape` permuted by `order`; element type preserved.
+    pub fn trans(self: *Kernel, src: Value, order: []const i32) Value {
+        const src_shape = src.shape();
+        std.debug.assert(order.len == src_shape.len);
+        var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
+        for (order) |i| out_shape.appendAssumeCapacity(src_shape.get(@intCast(i)));
+        const result_type = mlir.rankedTensorType(out_shape.constSlice(), src.elemType());
         return self.emit(ttir.trans(self.ctx, src.inner, order, result_type, self.loc()));
     }
 
-    /// `tt.cat` — concatenate two tensors; may reorder elements.
-    pub fn cat(self: *Kernel, lhs: Value, rhs: Value, result_type: *const mlir.Type) Value {
+    /// `tt.cat` — concatenate two tensors along dim 0. Both operands must
+    /// share rank, element type, and dims ≥ 1; result dim 0 = sum of the
+    /// operand dim 0s.
+    pub fn cat(self: *Kernel, lhs: Value, rhs: Value) Value {
+        const ls = lhs.shape();
+        const rs = rhs.shape();
+        std.debug.assert(ls.len == rs.len);
+        var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
+        out_shape.appendAssumeCapacity(ls.get(0) + rs.get(0));
+        for (1..ls.len) |i| out_shape.appendAssumeCapacity(ls.get(i));
+        const result_type = mlir.rankedTensorType(out_shape.constSlice(), lhs.elemType());
         return self.emit(ttir.cat(self.ctx, lhs.inner, rhs.inner, result_type, self.loc()));
     }
 
-    /// `tt.join` — join two equal-shape tensors along a new minor dim.
-    pub fn join(self: *Kernel, lhs: Value, rhs: Value, result_type: *const mlir.Type) Value {
+    /// `tt.join` — stack two equal-shape tensors along a new minor dim of size 2.
+    pub fn join(self: *Kernel, lhs: Value, rhs: Value) Value {
+        const ls = lhs.shape();
+        var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
+        for (0..ls.len) |i| out_shape.appendAssumeCapacity(ls.get(i));
+        out_shape.appendAssumeCapacity(2);
+        const result_type = mlir.rankedTensorType(out_shape.constSlice(), lhs.elemType());
         return self.emit(ttir.join(self.ctx, lhs.inner, rhs.inner, result_type, self.loc()));
     }
 
-    /// `tt.split` — split a tensor whose last dim is 2 into two equal halves.
-    /// Returns (lhs, rhs).
-    pub fn split(self: *Kernel, src: Value, result_type: *const mlir.Type) [2]Value {
+    /// `tt.split` — split a tensor whose last dim is 2 into two tensors with
+    /// that last dim dropped. Returns (lhs, rhs).
+    pub fn split(self: *Kernel, src: Value) [2]Value {
+        const ss = src.shape();
+        std.debug.assert(ss.len >= 1 and ss.get(ss.len - 1) == 2);
+        var out_shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
+        for (0..ss.len - 1) |i| out_shape.appendAssumeCapacity(ss.get(i));
+        const result_type = mlir.rankedTensorType(out_shape.constSlice(), src.elemType());
         const op = ttir.split(self.ctx, src.inner, result_type, self.loc());
         _ = op.appendTo(self.currentBlock());
         return .{
@@ -1337,9 +1363,9 @@ pub const Kernel = struct {
         };
     }
 
-    /// `tt.unsplat` — 1-element tensor → scalar.
-    pub fn unsplat(self: *Kernel, src: Value, result_type: *const mlir.Type) Value {
-        return self.emit(ttir.unsplat(self.ctx, src.inner, result_type, self.loc()));
+    /// `tt.unsplat` — 1-element tensor → scalar of the same element type.
+    pub fn unsplat(self: *Kernel, src: Value) Value {
+        return self.emit(ttir.unsplat(self.ctx, src.inner, src.elemType(), self.loc()));
     }
 
     /// `tt.gather` with default options — `src[indices]` along `axis`. Output
@@ -1459,22 +1485,26 @@ pub const Kernel = struct {
     /// `tt.extern_elementwise` — call a library symbol pointwise with default
     /// options. Use `externElementwiseOpts` for `pure` and the rest of the
     /// named-param set.
+    /// `tt.extern_elementwise` — result is `tensor<result_shape x result_dtype>`.
+    /// For a scalar result, pass `&.{}` as `result_shape`.
     pub fn externElementwise(
         self: *Kernel,
         srcs: []const Value,
-        result_type: *const mlir.Type,
+        result_shape: []const i64,
+        result_dtype: DType,
         libname: []const u8,
         libpath: []const u8,
         symbol: []const u8,
     ) Value {
-        return self.externElementwiseOpts(srcs, result_type, libname, libpath, symbol, .{});
+        return self.externElementwiseOpts(srcs, result_shape, result_dtype, libname, libpath, symbol, .{});
     }
 
     /// `tt.extern_elementwise` with the full named-param set.
     pub fn externElementwiseOpts(
         self: *Kernel,
         srcs: []const Value,
-        result_type: *const mlir.Type,
+        result_shape: []const i64,
+        result_dtype: DType,
         libname: []const u8,
         libpath: []const u8,
         symbol: []const u8,
@@ -1482,6 +1512,10 @@ pub const Kernel = struct {
     ) Value {
         var buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
         for (srcs) |s| buf.appendAssumeCapacity(s.inner);
+        const result_type: *const mlir.Type = if (result_shape.len == 0)
+            result_dtype.toMlir(self.ctx)
+        else
+            mlir.rankedTensorType(result_shape, result_dtype.toMlir(self.ctx));
         return self.emit(ttir.extern_elementwise(
             self.ctx,
             buf.constSlice(),
@@ -1522,18 +1556,22 @@ pub const Kernel = struct {
     }
 
     /// `tt.make_tensor_descriptor` — build a TMA descriptor.
+    /// `shape` / `strides` are runtime Values; `block_shape` / `dtype` describe
+    /// the compile-time tile shape baked into the descriptor type.
     pub fn makeTensorDescriptor(
         self: *Kernel,
         base: Value,
         shape: []const Value,
         strides: []const Value,
         padding: ttir.PaddingOption,
-        result_type: *const mlir.Type,
+        block_shape: []const i64,
+        dtype: DType,
     ) Value {
         var shape_buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
         for (shape) |s| shape_buf.appendAssumeCapacity(s.inner);
         var strides_buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
         for (strides) |s| strides_buf.appendAssumeCapacity(s.inner);
+        const result_type = ttir.tensorDescType(block_shape, dtype.toMlir(self.ctx), null);
         return self.emit(ttir.make_tensor_descriptor(
             self.ctx,
             base.inner,
@@ -2281,19 +2319,15 @@ test "tt.bitcast / tt.int_to_ptr / tt.fp_to_fp round-trip" {
     const fptr = kernel.arg(1);
     const half_ptr = kernel.arg(2);
 
-    const i64_ty = mlir.integerType(ctx, .i64);
-    const f32_ty = mlir.floatType(ctx, .f32);
-
     // Round-trip: i64 → ptr<f32> → int → ptr<f32>.
     const raw = kernel.load(iptr);
-    const f_ptr_ty = ttir.pointerType(f32_ty, 1);
-    const cast_ptr = kernel.intToPtr(raw, f_ptr_ty);
-    const back_int = kernel.ptrToInt(cast_ptr, i64_ty);
+    const cast_ptr = kernel.intToPtr(raw, .f32, 1);
+    const back_int = kernel.ptrToInt(cast_ptr, .i64);
     _ = back_int;
 
     // tt.bitcast f32 → i32 scalar.
     const fval = kernel.load(fptr);
-    const bits = kernel.bitcast(fval, mlir.integerType(ctx, .i32));
+    const bits = kernel.bitcast(fval, .i32);
     _ = bits;
 
     // fp_to_fp f32 → f16 with default rounding (rtne).
@@ -2407,41 +2441,26 @@ test "ops_mlir parity: cast_ops" {
     const sf = k.arg(1);
     const si = k.arg(2);
 
-    const f32_ty = mlir.floatType(ctx, .f32);
-    const f16_ty = mlir.floatType(ctx, .f16);
-    const i64_ty = mlir.integerType(ctx, .i64);
-    const ptr_f32 = ttir.pointerType(f32_ty, 1);
-
     // scalar ↔ scalar
-    _ = k.intToPtr(si, ptr_f32);
-    _ = k.ptrToInt(sp, i64_ty);
-    _ = k.truncf(sf, f16_ty);
+    _ = k.intToPtr(si, .f32, 1);
+    _ = k.ptrToInt(sp, .i64);
+    _ = k.truncf(sf, .f16);
 
     // 0D-tensor ↔ 0D-tensor
     const t_ptr_0d = k.splat(sp, &.{});
     const t_f32_0d = k.splat(sf, &.{});
     const t_i64_0d = k.splat(si, &.{});
-    const ptr_0d_ty = mlir.rankedTensorType(&.{}, ptr_f32);
-    const f32_0d_ty = mlir.rankedTensorType(&.{}, f32_ty);
-    const f16_0d_ty = mlir.rankedTensorType(&.{}, f16_ty);
-    const i64_0d_ty = mlir.rankedTensorType(&.{}, i64_ty);
-    _ = k.intToPtr(t_i64_0d, ptr_0d_ty);
-    _ = k.ptrToInt(t_ptr_0d, i64_0d_ty);
-    _ = k.truncf(t_f32_0d, f16_0d_ty);
-    _ = f32_0d_ty;
+    _ = k.intToPtr(t_i64_0d, .f32, 1);
+    _ = k.ptrToInt(t_ptr_0d, .i64);
+    _ = k.truncf(t_f32_0d, .f16);
 
     // 1D-tensor ↔ 1D-tensor
     const t_ptr_1d = k.splat(sp, &.{16});
     const t_f32_1d = k.splat(sf, &.{16});
     const t_i64_1d = k.splat(si, &.{16});
-    const ptr_1d_ty = mlir.rankedTensorType(&.{16}, ptr_f32);
-    const f32_1d_ty = mlir.rankedTensorType(&.{16}, f32_ty);
-    const f16_1d_ty = mlir.rankedTensorType(&.{16}, f16_ty);
-    const i64_1d_ty = mlir.rankedTensorType(&.{16}, i64_ty);
-    _ = k.intToPtr(t_i64_1d, ptr_1d_ty);
-    _ = k.ptrToInt(t_ptr_1d, i64_1d_ty);
-    _ = k.truncf(t_f32_1d, f16_1d_ty);
-    _ = f32_1d_ty;
+    _ = k.intToPtr(t_i64_1d, .f32, 1);
+    _ = k.ptrToInt(t_ptr_1d, .i64);
+    _ = k.truncf(t_f32_1d, .f16);
 
     const __ir = try k.finish(&.{}, std.testing.allocator); std.testing.allocator.free(__ir);
     // finish() also verifies; still round-trip the textual form.
@@ -2697,7 +2716,7 @@ test "ops_mlir parity: unsplat" {
     defer k.deinit();
 
     const x = k.arg(0);
-    const scalar = k.unsplat(x, mlir.floatType(ctx, .f32));
+    const scalar = k.unsplat(x);
 
     const __ir = try k.finish(&.{scalar}, std.testing.allocator); std.testing.allocator.free(__ir);
     try parityPrintAndVerify(ctx, k.module);
