@@ -132,22 +132,17 @@ zig_binary(
     ],
 )
 
-zig_library(
-    name = "nki_hlo_rewriter",
-    tags = ["manual"],
-    import_name = "platforms/neuron/nki/hlo_rewriter",
-    main = "nki/hlo_rewriter.zig",
-    visibility = ["//platforms/neuron:__pkg__"],
-    deps = [
-        ":libpython",
-        "//stdx",
-        "//upb",
-    ],
-)
-
 zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
+    srcs = [
+        "nki/custom_call_config.zig",
+        "nki/custom_call_mutator.zig",
+        "nki/embedded_kernel_rewriter.zig",
+        "nki/kernel_compiler.zig",
+        "target_resolution.zig",
+        "whole_program_compiler.zig",
+    ],
     shared_lib_name = "libneuronxla.so",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],
@@ -158,7 +153,6 @@ zig_shared_library(
     deps = [
         ":hlo_proto_upb",
         ":libpython",
-        ":nki_hlo_rewriter",
         ":xla_data_upb",
         "//stdx",
         "//upb",
