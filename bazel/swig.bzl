@@ -60,6 +60,7 @@ def _swig_cc_library_impl(ctx):
     ]
     args.add("-o", output_cpp)
     args.add("-w-305")
+    args.add("-w-524")
     args.add(ctx.file.interface)
 
     inputs = depset(ctx.attr.srcs, transitive = [
