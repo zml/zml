@@ -2,16 +2,7 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "acestep",
-    args = [
-        #"//var//models//acestep//acestep-5Hz-lm-0.6B//",
-        #"//var//models//acestep//acestep-5Hz-lm-0.6B//model.safetensors",
-        #"//var//models//acestep//acestep-5Hz-lm-0.6B//tokenizer.json",
-        #"//var//models//acestep//acestep-v15-turbo//model.safetensors",
-        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//",
-        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//model.safetensors",
-        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json",
-        "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//activations.safetensors",
-    ],
+    args = [],
     main = "main.zig",
     srcs = [
         "main.zig",
@@ -20,6 +11,7 @@ zig_binary(
         "aceemb.zig",
         "aceenc.zig",
         "acedit.zig",
+        "acevae.zig",
     ],
     visibility = ["//visibility:public"],
     deps = [
