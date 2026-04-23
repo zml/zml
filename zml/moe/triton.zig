@@ -1,11 +1,6 @@
-//! Triton MoE backend. Mirrors Louis's Python-driven version at
-//! `zml_louis-qwen3_5_moe/zml/moe/triton.zig`, but replaces the Python
-//! subprocess (which drove Triton's frontend to emit TTIR text) with our
-//! in-tree Zig Triton DSL in `zml/triton/kernel.zig`.
-//!
-//! Each `generate*Ttir` function constructs the kernel body op-by-op so the
-//! TTIR string handed to `zml.ops.triton(...)` is functionally equivalent to
-//! what the upstream Triton frontend produces from `triton_kernels/moe.py`.
+//! Triton MoE backend. Each `generate*Ttir` function constructs the kernel
+//! body op-by-op via the `zml/triton/kernel.zig` DSL and hands the resulting
+//! TTIR string to `zml.ops.triton(...)`.
 //!
 //! Scope: matches `validateOptions` below — bf16 weights, no per-channel
 //! quantization, no bias, no int8/int4. The fp8-quant path is wired so the
@@ -31,8 +26,7 @@ const DslArgSpec = kernel_dsl.ArgSpec;
 const log = std.log.scoped(.moe_triton);
 
 // =============================================================================
-// Public API — same shape as Louis's version so the rest of the model
-// (examples/llm/models/qwen3_5_moe/*) compiles unchanged.
+// Public API
 // =============================================================================
 
 pub const Options = struct {
@@ -117,8 +111,7 @@ fn initZeroBiasBuffer(io: std.Io, platform: *const zml.Platform, sharding: zml.s
 }
 
 // =============================================================================
-// Generation config — kept for parity with Louis's version (the legacy JSON
-// launch-config lookup still reads these field names).
+// Generation config
 // =============================================================================
 
 pub const GenerationConfig = struct {
@@ -1313,7 +1306,7 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
     _ = k.arg(23); // stride_bbn — unused (no bias)
     const c_ptr = k.arg(24);
 
-    // Load runtime scalars and clamp to multiples of 16 (matches Python).
+    // Load runtime scalars and clamp to multiples of 16.
     const sixteen = k.constI64(16);
     const block_floor = struct {
         fn f(kk: *Kernel, v: DslValue, sixteen_: DslValue) DslValue {
@@ -1337,7 +1330,7 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
     const stride_be_block = block_floor(k, stride_be_raw, sixteen);
     const stride_bn_block = block_floor(k, stride_bn_raw, sixteen);
     const stride_cm_block = block_floor(k, stride_cm_raw, sixteen);
-    // stride_ak / stride_bk / stride_cn are constexpr 1 in the original Python.
+    // stride_ak / stride_bk / stride_cn are constexpr 1.
     const stride_ak_block = k.constI64(1);
     const stride_bk_block = k.constI64(1);
     const stride_cn_block = k.constI64(1);
@@ -1366,8 +1359,8 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
     const pid_m_times_block = k.muli(pid_m, block_m_c);
     const out_of_range = k.cmpi(.sge, pid_m_times_block, ntpp);
 
-    // We model the Python `if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
-    // return` as `scf.if out_of_range { /* noop */ } else { compute }`.
+    // Early-exit guard modeled as `scf.if out_of_range { /* noop */ } else { compute }`
+    // because TTIR has no early return.
     const InRangeCtx = struct {
         a_ptr: DslValue,
         b_ptr: DslValue,
@@ -1457,8 +1450,7 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
 }
 
 /// Body of the fused_moe_kernel inside the `pid_m * BLOCK_M < ntpp` guard.
-/// Translates the bf16 / no-bias / no-quant path of `fused_moe_kernel` from
-/// `triton_kernels/moe.py` into TTIR ops.
+/// Bf16 / no-bias / no-quant path only.
 fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
     const i32_ty = k.scalarTy(.i32);
     const i64_ty = k.scalarTy(.i64);
@@ -1520,7 +1512,6 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
     const n_block_splat = k.splat(ic.n_block, &.{block_n});
     const offs_bn = k.remsi(offs_bn_pre, n_block_splat);
 
-    // offs_k = arange(0, BLOCK_K)  (kept i32 — matches Python which doesn't sext)
     const offs_k_i32 = k.makeRange(0, @intCast(block_k));
     const offs_k = k.extsi(offs_k_i32, k.tensorTy(&.{block_k}, .i64));
 
