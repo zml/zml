@@ -175,7 +175,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
     };
 
     const before = struct {
-        fn call(kk: *Kernel, a: []const Value, cc: Ctx) struct { cond: Value, forwarded: []const Value } {
+        fn call(kk: *Kernel, a: []const Value, cc: Ctx) tri.WhileBefore {
             const ts = a[0];
             const out = kk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
             out[0] = ts;
@@ -216,12 +216,11 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
         }
     }.call;
 
-    _ = k.whileLoop(.{
+    _ = k.whileLoop(c, .{
         .inits = &.{token_start_init},
         .after_types = &.{k.scalarTy(.i32)},
         .before = before,
         .after = after,
-        .ctx = c,
     });
 
     return kernel.finish(&.{}, allocator) catch |err| {
@@ -391,12 +390,8 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(.{
-                .lower = 0,
-                .upper = fc.max_padded,
-                .step = @as(i32, @intCast(fc.block)),
+            _ = kk.forLoop(fc, 0, fc.max_padded, @as(i32, @intCast(fc.block)), .{
                 .body = body,
-                .ctx = fc,
             });
             return &.{};
         }
@@ -429,13 +424,9 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return out;
                 }
             }.b;
-            const counts_results = kk.forLoop(.{
-                .lower = 0,
-                .upper = c.numel,
-                .step = @as(i32, @intCast(c.hist_block)),
+            const counts_results = kk.forLoop(hctx, 0, c.numel, @as(i32, @intCast(c.hist_block)), .{
                 .inits = &.{counts_init},
                 .body = hist_body,
-                .ctx = hctx,
             });
             const counts = counts_results[0];
 
@@ -480,34 +471,26 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                             return out;
                         }
                     }.eb;
-                    const exp_results = kkk.forLoop(.{
-                        .lower = 0,
-                        .upper = ac.num_experts,
+                    const exp_results = kkk.forLoop(ec, 0, ac.num_experts, 1, .{
                         .inits = &.{init},
                         .body = exp_body,
-                        .ctx = ec,
                     });
                     const block_expert = exp_results[0];
                     kkk.store(ac.expert_ids.splatTo(&.{ac.hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask.inner });
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(.{
-                .lower = 0,
-                .upper = @as(i32, @intCast(c.max_num_m_blocks)),
-                .step = @as(i32, @intCast(c.hist_block)),
+            _ = kk.forLoop(actx, 0, @as(i32, @intCast(c.max_num_m_blocks)), @as(i32, @intCast(c.hist_block)), .{
                 .body = assign_body,
-                .ctx = actx,
             });
             return &.{};
         }
     }.call;
 
-    _ = k.ifThenElse(.{
+    _ = k.ifThenElse(ax, .{
         .cond = pid.eq(1),
         .then_ = fill_then,
         .else_ = compute_else,
-        .ctx = ax,
     });
 
     return kernel.finish(&.{}, allocator) catch |err| {
@@ -602,9 +585,9 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const pid_m = first_pid_m.add(pid_mod_in_group.rem(gsm_actual));
     const pid_n = pid_mod_in_group.div(gsm_actual);
 
-    // Early-return guard: pid_m * BLOCK_M >= num_tokens_post_padded.
+    // Early-return guard: only run when pid_m * BLOCK_M < num_tokens_post_padded.
     const ntpp = k.loadScalar(num_tokens_post_padded_ptr, .i32).to(.i64);
-    const out_of_range = pid_m.mul(block_m).ge(ntpp);
+    const in_range = pid_m.mul(block_m).lt(ntpp);
 
     const InRangeCtx = struct {
         a_ptr: Value,
@@ -666,12 +649,6 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         .compute_dtype = dsl(config.compute_type),
     };
 
-    const noop = struct {
-        fn n(_: *Kernel, _: InRangeCtx) []const Value {
-            return &.{};
-        }
-    }.n;
-
     const compute = struct {
         fn cmp(kk: *Kernel, c: InRangeCtx) []const Value {
             buildFusedMain(kk, c);
@@ -679,11 +656,9 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         }
     }.cmp;
 
-    _ = k.ifThenElse(.{
-        .cond = out_of_range,
-        .then_ = noop,
-        .else_ = compute,
-        .ctx = ic,
+    _ = k.ifThenElse(ic, .{
+        .cond = in_range,
+        .then_ = compute,
     });
 
     return kernel.finish(&.{}, allocator) catch |err| {
@@ -800,11 +775,10 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
         }
     }.a;
 
-    _ = k.ifThenElse(.{
+    _ = k.ifThenElse(ac, .{
         .cond = is_dead,
         .then_ = zero_branch,
         .else_ = alive_branch,
-        .ctx = ac,
     });
 }
 
@@ -903,12 +877,9 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
         }
     }.b;
 
-    const loop_results = k.forLoop(.{
-        .lower = 0,
-        .upper = num_k_iters,
+    const loop_results = k.forLoop(kctx, 0, num_k_iters, 1, .{
         .inits = &.{ acc_init, a_ptrs_init, b_ptrs_init },
         .body = k_body,
-        .ctx = kctx,
     });
     var acc_final = loop_results[0];
 

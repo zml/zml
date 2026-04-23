@@ -351,6 +351,68 @@ pub const ArgSpec = struct {
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
+/// Typed arg struct for `Kernel.forLoop`. The ctx type is inferred from the
+/// caller-supplied `ctx` value at the call site, so fields like `body` can
+/// carry a concrete function-pointer type instead of `anytype`. `lower`,
+/// `upper`, and `step` are passed positionally to `forLoop` so they retain
+/// the polymorphic lift (Value / comptime int / runtime int).
+pub fn ForArgs(comptime CtxT: type) type {
+    return struct {
+        inits: []const Value = &.{},
+        body: *const fn (*Kernel, Value, []const Value, CtxT) []const Value,
+    };
+}
+
+/// Typed arg struct for `Kernel.ifThenElse`.
+pub fn IfArgs(comptime CtxT: type) type {
+    return struct {
+        cond: Value,
+        results: []const *const mlir.Type = &.{},
+        then_: *const fn (*Kernel, CtxT) []const Value,
+        else_: ?*const fn (*Kernel, CtxT) []const Value = null,
+    };
+}
+
+/// Return type for `whileLoop`'s `before` callback: the i1 loop condition plus
+/// the values forwarded to the `after` region via `scf.condition`.
+pub const WhileBefore = struct {
+    cond: Value,
+    forwarded: []const Value,
+};
+
+/// Typed arg struct for `Kernel.whileLoop`.
+pub fn WhileArgs(comptime CtxT: type) type {
+    return struct {
+        inits: []const Value,
+        after_types: []const *const mlir.Type,
+        before: *const fn (*Kernel, []const Value, CtxT) WhileBefore,
+        after: *const fn (*Kernel, []const Value, CtxT) []const Value,
+    };
+}
+
+/// Typed arg struct for `Kernel.reduce`.
+pub fn ReduceArgs(comptime CtxT: type) type {
+    return struct {
+        src: Value,
+        axis: i32,
+        elem: *const mlir.Type,
+        result: *const mlir.Type,
+        combine: *const fn (*Kernel, Value, Value, CtxT) Value,
+    };
+}
+
+/// Typed arg struct for `Kernel.scan`.
+pub fn ScanArgs(comptime CtxT: type) type {
+    return struct {
+        src: Value,
+        axis: i32,
+        reverse: bool = false,
+        elem: *const mlir.Type,
+        result: *const mlir.Type,
+        combine: *const fn (*Kernel, Value, Value, CtxT) Value,
+    };
+}
+
 /// The main DSL builder. Create with `init`, populate the body with helpers,
 /// then call `finish` to get the IR string.
 pub const Kernel = struct {
@@ -714,19 +776,18 @@ pub const Kernel = struct {
         const shape = src.shape();
         const result_ty: *const mlir.Type = computeReducedType(self.ctx, shape.constSlice(), axis, elem);
         const is_float = src.isFloatElem();
-        const Combiner = struct {
-            is_float: bool,
-            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
-                return if (ctx.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
+        const Ctx = struct { is_float: bool };
+        const combine = struct {
+            fn c(kk: *Kernel, lhs: Value, rhs: Value, cc: Ctx) Value {
+                return if (cc.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
             }
-        };
-        return self.reduce(.{
+        }.c;
+        return self.reduce(Ctx{ .is_float = is_float }, .{
             .src = src,
             .axis = axis,
             .elem = elem,
             .result = result_ty,
-            .combine = Combiner.combine,
-            .ctx = Combiner{ .is_float = is_float },
+            .combine = combine,
         });
     }
 
@@ -736,19 +797,18 @@ pub const Kernel = struct {
         const shape = src.shape();
         const result_ty: *const mlir.Type = computeReducedType(self.ctx, shape.constSlice(), axis, elem);
         const is_float = src.isFloatElem();
-        const Combiner = struct {
-            is_float: bool,
-            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
-                return if (ctx.is_float) kk.maximumf(lhs, rhs) else kk.maxsi(lhs, rhs);
+        const Ctx = struct { is_float: bool };
+        const combine = struct {
+            fn c(kk: *Kernel, lhs: Value, rhs: Value, cc: Ctx) Value {
+                return if (cc.is_float) kk.maximumf(lhs, rhs) else kk.maxsi(lhs, rhs);
             }
-        };
-        return self.reduce(.{
+        }.c;
+        return self.reduce(Ctx{ .is_float = is_float }, .{
             .src = src,
             .axis = axis,
             .elem = elem,
             .result = result_ty,
-            .combine = Combiner.combine,
-            .ctx = Combiner{ .is_float = is_float },
+            .combine = combine,
         });
     }
 
@@ -756,20 +816,19 @@ pub const Kernel = struct {
     pub fn scanSum(self: *Kernel, src: Value, axis: i32, reverse: bool) Value {
         const elem = src.elemType();
         const is_float = src.isFloatElem();
-        const Combiner = struct {
-            is_float: bool,
-            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
-                return if (ctx.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
+        const Ctx = struct { is_float: bool };
+        const combine = struct {
+            fn c(kk: *Kernel, lhs: Value, rhs: Value, cc: Ctx) Value {
+                return if (cc.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
             }
-        };
-        return self.scan(.{
+        }.c;
+        return self.scan(Ctx{ .is_float = is_float }, .{
             .src = src,
             .axis = axis,
             .reverse = reverse,
             .elem = elem,
             .result = src.type_(),
-            .combine = Combiner.combine,
-            .ctx = Combiner{ .is_float = is_float },
+            .combine = combine,
         });
     }
 
@@ -1418,90 +1477,55 @@ pub const Kernel = struct {
 
     // ==================== reduce / scan ====================
 
-    /// `tt.reduce` along `axis`, single-input. Takes a struct with fields:
-    ///
-    /// - `src: Value` — input tensor.
-    /// - `axis: i32` — axis to reduce over.
-    /// - `elem: *const mlir.Type` — element type of `src` (used for combine block args).
-    /// - `result: *const mlir.Type` — reduce op's result type (scalar or tensor-minus-axis).
-    /// - `combine: fn(kk, lhs, rhs, ctx) Value` — combiner; returns the value
-    ///   yielded via `tt.reduce.return`.
-    /// - `ctx: anytype` — passed verbatim to `combine`. Optional (defaults to `{}`).
-    pub fn reduce(self: *Kernel, args: anytype) Value {
-        const A = @TypeOf(args);
-        const src: Value = args.src;
-        const axis: i32 = args.axis;
-        const elem_ty: *const mlir.Type = args.elem;
-        const result_ty: *const mlir.Type = args.result;
-        const combine_fn = args.combine;
-        const body_ctx = if (@hasField(A, "ctx")) args.ctx else {};
-
-        const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
+    /// `tt.reduce` along `axis`, single-input. See `ReduceArgs` for fields.
+    /// `ctx` is separate from `args` so `ReduceArgs(@TypeOf(ctx))` can be
+    /// inferred.
+    pub fn reduce(self: *Kernel, ctx: anytype, args: ReduceArgs(@TypeOf(ctx))) Value {
+        const region = mlir.Block.init(&.{ args.elem, args.elem }, &.{ self.loc(), self.loc() });
 
         self.pushBlock(region);
         const lhs: Value = .{ .inner = region.argument(0), .kernel = self };
         const rhs: Value = .{ .inner = region.argument(1), .kernel = self };
-        const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
+        const combined: Value = args.combine(self, lhs, rhs, ctx);
         _ = ttir.reduce_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
         self.popBlock();
 
-        const op = ttir.reduce(self.ctx, &.{src.inner}, axis, region, &.{result_ty}, self.loc());
+        const op = ttir.reduce(self.ctx, &.{args.src.inner}, args.axis, region, &.{args.result}, self.loc());
         _ = op.appendTo(self.currentBlock());
         return .{ .inner = op.result(0), .kernel = self };
     }
 
-    /// `tt.scan` along `axis`, single-input. Takes a struct with fields:
-    ///
-    /// - `src`, `axis`, `elem`, `result`, `combine`, `ctx` — same meaning as `reduce`.
-    /// - `reverse: bool` — scan direction. Optional (defaults to `false`).
-    pub fn scan(self: *Kernel, args: anytype) Value {
-        const A = @TypeOf(args);
-        const src: Value = args.src;
-        const axis: i32 = args.axis;
-        const reverse: bool = if (@hasField(A, "reverse")) args.reverse else false;
-        const elem_ty: *const mlir.Type = args.elem;
-        const result_ty: *const mlir.Type = args.result;
-        const combine_fn = args.combine;
-        const body_ctx = if (@hasField(A, "ctx")) args.ctx else {};
-
-        const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
+    /// `tt.scan` along `axis`, single-input. See `ScanArgs` for fields.
+    pub fn scan(self: *Kernel, ctx: anytype, args: ScanArgs(@TypeOf(ctx))) Value {
+        const region = mlir.Block.init(&.{ args.elem, args.elem }, &.{ self.loc(), self.loc() });
 
         self.pushBlock(region);
         const lhs: Value = .{ .inner = region.argument(0), .kernel = self };
         const rhs: Value = .{ .inner = region.argument(1), .kernel = self };
-        const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
+        const combined: Value = args.combine(self, lhs, rhs, ctx);
         _ = ttir.scan_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
         self.popBlock();
 
-        const op = ttir.scan(self.ctx, &.{src.inner}, axis, reverse, region, &.{result_ty}, self.loc());
+        const op = ttir.scan(self.ctx, &.{args.src.inner}, args.axis, args.reverse, region, &.{args.result}, self.loc());
         _ = op.appendTo(self.currentBlock());
         return .{ .inner = op.result(0), .kernel = self };
     }
 
     // ==================== SCF regions ====================
 
-    /// `scf.for` with iter_args. Takes a struct with fields:
-    ///
-    /// - `lower`, `upper`, `step` — existing `Value`s or any Zig numeric.
-    ///   Comptime ints adopt `lower`'s element type (so `lower=0, upper=N, step=1`
-    ///   with `N: Value` of type i32 lifts the literals to i32); runtime ints
-    ///   lift per their Zig width (see `Kernel.lift`). `step` is optional
-    ///   (defaults to `1`).
-    /// - `inits: []const Value` — iter_args initializers. Optional (defaults to `&.{}`).
-    /// - `body: fn(k, iv, iters, ctx) []const Value` — returns values to yield.
-    ///   The returned slice only needs to live for the call.
-    /// - `ctx: anytype` — passed verbatim to `body`. Optional (defaults to `{}`).
-    ///
-    /// Returns the iter_args' post-loop values (same length as `inits`).
-    pub fn forLoop(self: *Kernel, args: anytype) []Value {
-        const A = @TypeOf(args);
-        const lower = args.lower;
-        const upper = args.upper;
-        const step = if (@hasField(A, "step")) args.step else 1;
-        const iter_args: []const Value = if (@hasField(A, "inits")) args.inits else &.{};
-        const body_fn = args.body;
-        const body_ctx = if (@hasField(A, "ctx")) args.ctx else {};
-
+    /// `scf.for` with iter_args. `lower`, `upper`, and `step` accept Values,
+    /// comptime ints, or runtime Zig ints (see `Kernel.lift` / comptime-adapt
+    /// rules). See `ForArgs` for the rest of the fields. Returns the iter_args'
+    /// post-loop values (same length as `args.inits`).
+    pub fn forLoop(
+        self: *Kernel,
+        ctx: anytype,
+        lower: anytype,
+        upper: anytype,
+        step: anytype,
+        args: ForArgs(@TypeOf(ctx)),
+    ) []Value {
+        const iter_args = args.inits;
         std.debug.assert(iter_args.len <= 31);
 
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.lift(lower);
@@ -1526,7 +1550,7 @@ pub const Kernel = struct {
             barg_buf.appendAssumeCapacity(.{ .inner = body.argument(i + 1), .kernel = self });
         }
 
-        const yielded: []const Value = body_fn(self, iv, barg_buf.constSlice(), body_ctx);
+        const yielded: []const Value = args.body(self, iv, barg_buf.constSlice(), ctx);
 
         var yield_values: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (yielded) |y| yield_values.appendAssumeCapacity(y.inner);
@@ -1557,25 +1581,14 @@ pub const Kernel = struct {
         return out;
     }
 
-    /// `scf.if` — build a conditional with optional results. Takes a struct:
-    ///
-    /// - `cond: Value` — the i1 condition.
-    /// - `results: []const *const mlir.Type` — result types. Optional
-    ///   (defaults to `&.{}` for a no-result if/else).
-    /// - `then_: fn(k, ctx) []const Value` — populates the then-block, returns
-    ///   values to yield (matching `results`).
-    /// - `else_: fn(k, ctx) []const Value` — populates the else-block.
-    /// - `ctx: anytype` — passed to both branches. Optional (defaults to `{}`).
-    pub fn ifThenElse(self: *Kernel, args: anytype) []Value {
-        const A = @TypeOf(args);
-        const cond: Value = args.cond;
-        const result_types: []const *const mlir.Type = if (@hasField(A, "results")) args.results else &.{};
-        const then_fn = args.then_;
-        const else_fn = args.else_;
-        const body_ctx = if (@hasField(A, "ctx")) args.ctx else {};
+    /// `scf.if` — build a conditional with optional results. See `IfArgs` for
+    /// fields. `else_` is optional; omitting it builds an empty else-block
+    /// (requires `results = &.{}`). To express "if not cond: do X", invert the
+    /// condition rather than providing an empty `then_`.
+    pub fn ifThenElse(self: *Kernel, ctx: anytype, args: IfArgs(@TypeOf(ctx))) []Value {
         const then_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
-        const then_vals: []const Value = then_fn(self, body_ctx);
+        const then_vals: []const Value = args.then_(self, ctx);
         var then_yield: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (then_vals) |v| then_yield.appendAssumeCapacity(v.inner);
         _ = scf.yield(self.ctx, then_yield.constSlice(), self.loc()).appendTo(then_block);
@@ -1583,46 +1596,37 @@ pub const Kernel = struct {
 
         const else_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(else_block);
-        const else_vals: []const Value = else_fn(self, body_ctx);
-        var else_yield: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (else_vals) |v| else_yield.appendAssumeCapacity(v.inner);
-        _ = scf.yield(self.ctx, else_yield.constSlice(), self.loc()).appendTo(else_block);
+        if (args.else_) |else_fn| {
+            const else_vals: []const Value = else_fn(self, ctx);
+            var else_yield: stdx.BoundedArray(*const mlir.Value, 32) = .{};
+            for (else_vals) |v| else_yield.appendAssumeCapacity(v.inner);
+            _ = scf.yield(self.ctx, else_yield.constSlice(), self.loc()).appendTo(else_block);
+        } else {
+            std.debug.assert(args.results.len == 0);
+            _ = scf.yield(self.ctx, &.{}, self.loc()).appendTo(else_block);
+        }
         self.popBlock();
 
         const if_op = scf.if_(
             self.ctx,
-            cond.inner,
-            result_types,
+            args.cond.inner,
+            args.results,
             then_block,
             else_block,
             self.loc(),
         );
         _ = if_op.appendTo(self.currentBlock());
 
-        const out = self.arena.allocator().alloc(Value, result_types.len) catch @panic("Kernel.ifThenElse OOM");
-        for (0..result_types.len) |i| out[i] = .{ .inner = if_op.result(i), .kernel = self };
+        const out = self.arena.allocator().alloc(Value, args.results.len) catch @panic("Kernel.ifThenElse OOM");
+        for (0..args.results.len) |i| out[i] = .{ .inner = if_op.result(i), .kernel = self };
         return out;
     }
 
     /// `scf.while` — generic while loop with separate "before" (cond) and
-    /// "after" (body) regions. Takes a struct with fields:
-    ///
-    /// - `inits: []const Value` — initial values; also the types of the "before"
-    ///   region's block args.
-    /// - `after_types: []const *const mlir.Type` — types of the "after" region's
-    ///   block args (also the op's result types).
-    /// - `before: fn(k, args, ctx) struct { cond: Value, forwarded: []const Value }`
-    ///   — evaluates the loop condition and produces the values passed to `after`.
-    /// - `after: fn(k, args, ctx) []const Value` — loop body; returns values
-    ///   to feed back to `before` on the next iteration.
-    /// - `ctx: anytype` — passed verbatim to both callbacks. Optional (defaults to `{}`).
-    pub fn whileLoop(self: *Kernel, args: anytype) []Value {
-        const A = @TypeOf(args);
-        const inits: []const Value = args.inits;
-        const arg_types_after: []const *const mlir.Type = args.after_types;
-        const before_fn = args.before;
-        const after_fn = args.after;
-        const body_ctx = if (@hasField(A, "ctx")) args.ctx else {};
+    /// "after" (body) regions. See `WhileArgs` / `WhileBefore` for fields.
+    pub fn whileLoop(self: *Kernel, ctx: anytype, args: WhileArgs(@TypeOf(ctx))) []Value {
+        const inits = args.inits;
+        const arg_types_after = args.after_types;
         // Before-region arg types == init types.
         var before_types: stdx.BoundedArray(*const mlir.Type, 32) = .{};
         var before_locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
@@ -1640,7 +1644,7 @@ pub const Kernel = struct {
         self.pushBlock(before_block);
         var before_args: stdx.BoundedArray(Value, 32) = .{};
         for (0..inits.len) |i| before_args.appendAssumeCapacity(.{ .inner = before_block.argument(i), .kernel = self });
-        const before_out = before_fn(self, before_args.constSlice(), body_ctx);
+        const before_out = args.before(self, before_args.constSlice(), ctx);
         // `before_out` is expected to be a struct { cond: Value, forwarded: []const Value }
         var cond_args: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (before_out.forwarded) |v| cond_args.appendAssumeCapacity(v.inner);
@@ -1651,7 +1655,7 @@ pub const Kernel = struct {
         self.pushBlock(after_block);
         var after_args: stdx.BoundedArray(Value, 32) = .{};
         for (0..arg_types_after.len) |i| after_args.appendAssumeCapacity(.{ .inner = after_block.argument(i), .kernel = self });
-        const after_out = after_fn(self, after_args.constSlice(), body_ctx);
+        const after_out = args.after(self, after_args.constSlice(), ctx);
         var yield_vals: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (after_out) |v| yield_vals.appendAssumeCapacity(v.inner);
         _ = scf.yield(self.ctx, yield_vals.constSlice(), self.loc()).appendTo(after_block);
@@ -1789,13 +1793,9 @@ test "Kernel with scf.for iter_args" {
         }
     }.call;
 
-    const loop_results = kernel.forLoop(.{
-        .lower = lb,
-        .upper = ub,
-        .step = step,
+    const loop_results = kernel.forLoop(Ctx{ .base = base }, lb, ub, step, .{
         .inits = &.{init_acc},
         .body = body,
-        .ctx = Ctx{ .base = base },
     });
     kernel.store(base, loop_results[0], .{});
 
@@ -1857,7 +1857,7 @@ test "Kernel with scf.if" {
     }.call;
 
     const f32_ty = mlir.floatType(ctx, .f32);
-    const results = kernel.ifThenElse(.{
+    const results = kernel.ifThenElse({}, .{
         .cond = eq,
         .results = &.{f32_ty},
         .then_ = then_fn,
@@ -2467,7 +2467,7 @@ test "lift preserves f16 width through fluent ops" {
     defer std.testing.allocator.free(ir);
 }
 
-test "forLoop accepts mixed-width runtime bounds" {
+test "forLoop with Value bounds and no ctx" {
     const ctx = try setupTestContext();
     defer ctx.deinit();
 
@@ -2477,15 +2477,14 @@ test "forLoop accepts mixed-width runtime bounds" {
     defer k.deinit();
 
     const lb = k.arg(0);
-    const ub: usize = 10;
-    const step: u8 = 1;
+    const ub = k.constMatching(@as(usize, 10), lb.type_());
 
     const Body = struct {
         fn b(_: *Kernel, _: Value, _: []const Value, _: void) []const Value {
             return &.{};
         }
-    };
-    _ = k.forLoop(.{ .lower = lb, .upper = ub, .step = step, .body = Body.b });
+    }.b;
+    _ = k.forLoop({}, lb, ub, 1, .{ .body = Body });
 
     const ir = try k.finish(&.{}, std.testing.allocator);
     defer std.testing.allocator.free(ir);

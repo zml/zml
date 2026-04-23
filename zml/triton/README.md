@@ -277,9 +277,9 @@ Under the hood these build the required `tt.reduce` / `tt.scan` region with a
 matching `arith.addf` / `arith.addi` / `maximumf` / `maxsi` combine function —
 no more hand-rolled combiner closures for the common cases.
 
-For custom combiners, use the low-level `k.reduce(.{ .src, .axis, .elem,
-.result, .combine, .ctx })` and `k.scan(.{ .src, .axis, .reverse, .elem,
-.result, .combine, .ctx })` — they take a `fn(k, lhs, rhs, ctx) Value`
+For custom combiners, use the low-level `k.reduce(ctx, .{ .src, .axis, .elem,
+.result, .combine })` and `k.scan(ctx, .{ .src, .axis, .elem, .result,
+.combine, .reverse })` — they take a `fn(*Kernel, Value, Value, CtxT) Value`
 closure for `combine` and give you full control.
 
 ---
@@ -291,30 +291,37 @@ closure for `combine` and give you full control.
 `*Kernel`, the loop IVs / block args as `[]const Value`, and a caller-supplied
 `ctx` struct.
 
-**All control-flow helpers take a single struct-literal argument** — no more
-remembering positional order. Fields:
+**Control-flow helpers take `ctx` as the first positional arg, then a typed
+struct literal for the rest.** `ctx` infers the concrete type of the
+callbacks (`.body` / `.then_` / `.combine` / …), so those fields are real
+function-pointer types — IDE autocomplete, signature-checked, real optional
+via `?*const fn = null` / default values.
 
-| Helper         | Required                                                 | Optional (default)               |
-|----------------|----------------------------------------------------------|----------------------------------|
-| `forLoop`      | `.lower`, `.upper`, `.body`                              | `.step = 1`, `.inits = &.{}`, `.ctx = {}` |
-| `ifThenElse`   | `.cond`, `.then_`, `.else_`                              | `.results = &.{}`, `.ctx = {}`  |
-| `whileLoop`    | `.inits`, `.after_types`, `.before`, `.after`            | `.ctx = {}`                      |
-| `reduce`       | `.src`, `.axis`, `.elem`, `.result`, `.combine`          | `.ctx = {}`                      |
-| `scan`         | `.src`, `.axis`, `.elem`, `.result`, `.combine`          | `.reverse = false`, `.ctx = {}` |
+| Helper         | Positional                                      | Struct fields                                              | Optional struct fields         |
+|----------------|-------------------------------------------------|------------------------------------------------------------|--------------------------------|
+| `forLoop`      | `ctx, lower, upper, step`                       | `.body`                                                    | `.inits = &.{}`                |
+| `ifThenElse`   | `ctx`                                           | `.cond`, `.then_`                                          | `.else_ = null`, `.results = &.{}` |
+| `whileLoop`    | `ctx`                                           | `.inits`, `.after_types`, `.before`, `.after`              | —                              |
+| `reduce`       | `ctx`                                           | `.src`, `.axis`, `.elem`, `.result`, `.combine`            | —                              |
+| `scan`         | `ctx`                                           | `.src`, `.axis`, `.elem`, `.result`, `.combine`            | `.reverse = false`             |
+
+For a callback with no context, pass `{}`: `k.ifThenElse({}, .{ ... })`.
+`forLoop`'s bounds remain polymorphic (`Value`, comptime int, or runtime
+Zig int) because they're positional `anytype` — no `k.lift(...)` noise.
 
 Rules of thumb:
 
 - Capture everything the body needs (Values, sizes, dtypes) in a local struct
-  and pass it as `.ctx`. There are no implicit closures — context is the only
-  way to smuggle state in.
+  and pass it as the first positional arg (`ctx`). There are no implicit
+  closures — context is the only way to smuggle state in.
 - Return `&.{}` if the body has no yielded values. Otherwise, allocate via
   `kk.arena.allocator().alloc(Value, N)` and fill it — lifetime only needs to
   cover the call.
-- `forLoop`'s `.lower` / `.upper` / `.step` are `anytype`: pass Values, comptime
-  ints, or runtime Zig ints directly. Comptime literals lift to match the first
-  operand's type (so `.lower=0, .upper=N, .step=1` with `N: Value` of type i32
-  yields i32 bounds). To force a specific width on a Zig-side scalar, cast it
-  at the call site (e.g. `@as(i32, @intCast(config.block))`).
+- `forLoop`'s `lower` / `upper` / `step` are positional `anytype`: pass Values,
+  comptime ints, or runtime Zig ints directly. Comptime literals lift to match
+  the first operand's type (so `0, N, 1` with `N: Value` of type i32 yields
+  i32 bounds). To force a specific width on a Zig-side scalar, cast it at the
+  call site (e.g. `@as(i32, @intCast(config.block))`).
 
 Example — histogram loop:
 
@@ -334,13 +341,9 @@ const body = struct {
         return out;
     }
 }.b;
-_ = k.forLoop(.{
-    .lower = 0,
-    .upper = numel,
-    .step = @as(i32, @intCast(hist_block)),
+_ = k.forLoop(hctx, 0, numel, @as(i32, @intCast(hist_block)), .{
     .inits = &.{counts_init},
     .body = body,
-    .ctx = .{ ... },
 });
 ```
 
@@ -390,9 +393,9 @@ is the manual form.
 | `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0, false)`                                           |
 | `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty, .{ .input_precision = .ieee })`       |
 | `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmw(.add, p, v, .{ .mask = m.inner, .sem = .relaxed, ... })` |
-| `for i in range(0, N, S): ...`                | `k.forLoop(.{ .lower=0, .upper=N, .step=S, .inits=..., .body=..., .ctx=... })`              |
-| `while cond: ...`                             | `k.whileLoop(.{ .inits=..., .after_types=..., .before=..., .after=..., .ctx=... })`         |
-| `if cond: ... else: ...`                      | `k.ifThenElse(.{ .cond=..., .results=..., .then_=..., .else_=..., .ctx=... })`              |
+| `for i in range(0, N, S): ...`                | `k.forLoop(ctx, 0, N, S, .{ .inits=..., .body=... })`                                       |
+| `while cond: ...`                             | `k.whileLoop(ctx, .{ .inits=..., .after_types=..., .before=..., .after=... })`              |
+| `if cond: ... else: ...`                      | `k.ifThenElse(ctx, .{ .cond=..., .results=..., .then_=..., .else_=... })`                   |
 
 ---
 
@@ -416,7 +419,7 @@ is the manual form.
    helpers for that one op.
 
 5. **Don't worry about duplicate constants.** Every lifted literal (from
-   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(.{ .lower=0, … })`
+   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(ctx, 0, N, 1, …)`
    bound, etc.) emits a fresh `arith.constant`. This matches Python Triton's
    own frontend — the MLIR canonicalizer + CSE pass collapses duplicates on the
    way to PTX, so the generated code is identical whether you emit one
