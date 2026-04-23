@@ -216,7 +216,13 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
         }
     }.call;
 
-    _ = k.whileLoop(&.{token_start_init}, &.{k.scalarTy(.i32)}, before, after, c);
+    _ = k.whileLoop(.{
+        .inits = &.{token_start_init},
+        .after_types = &.{k.scalarTy(.i32)},
+        .before = before,
+        .after = after,
+        .ctx = c,
+    });
 
     return kernel.finish(&.{}, allocator) catch |err| {
         log.err("failed to finalize count_and_sort_expert_tokens_kernel TTIR: {}", .{err});
@@ -385,7 +391,13 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(0, fc.max_padded, @as(i32, @intCast(fc.block)), &.{}, body, fc);
+            _ = kk.forLoop(.{
+                .lower = 0,
+                .upper = fc.max_padded,
+                .step = @as(i32, @intCast(fc.block)),
+                .body = body,
+                .ctx = fc,
+            });
             return &.{};
         }
     }.call;
@@ -417,7 +429,14 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                     return out;
                 }
             }.b;
-            const counts_results = kk.forLoop(0, c.numel, @as(i32, @intCast(c.hist_block)), &.{counts_init}, hist_body, hctx);
+            const counts_results = kk.forLoop(.{
+                .lower = 0,
+                .upper = c.numel,
+                .step = @as(i32, @intCast(c.hist_block)),
+                .inits = &.{counts_init},
+                .body = hist_body,
+                .ctx = hctx,
+            });
             const counts = counts_results[0];
 
             // padded_counts = where(expert_mask, cdiv(counts, BLOCK_SIZE_M)*BLOCK_SIZE_M, 0)
@@ -461,18 +480,35 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
                             return out;
                         }
                     }.eb;
-                    const exp_results = kkk.forLoop(0, ac.num_experts, 1, &.{init}, exp_body, ec);
+                    const exp_results = kkk.forLoop(.{
+                        .lower = 0,
+                        .upper = ac.num_experts,
+                        .inits = &.{init},
+                        .body = exp_body,
+                        .ctx = ec,
+                    });
                     const block_expert = exp_results[0];
                     kkk.store(ac.expert_ids.splatTo(&.{ac.hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask.inner });
                     return &.{};
                 }
             }.b;
-            _ = kk.forLoop(0, @as(i32, @intCast(c.max_num_m_blocks)), @as(i32, @intCast(c.hist_block)), &.{}, assign_body, actx);
+            _ = kk.forLoop(.{
+                .lower = 0,
+                .upper = @as(i32, @intCast(c.max_num_m_blocks)),
+                .step = @as(i32, @intCast(c.hist_block)),
+                .body = assign_body,
+                .ctx = actx,
+            });
             return &.{};
         }
     }.call;
 
-    _ = k.ifThenElse(pid.eq(1), &.{}, fill_then, compute_else, ax);
+    _ = k.ifThenElse(.{
+        .cond = pid.eq(1),
+        .then_ = fill_then,
+        .else_ = compute_else,
+        .ctx = ax,
+    });
 
     return kernel.finish(&.{}, allocator) catch |err| {
         log.err("failed to finalize moe_align_block_size_kernel TTIR: {}", .{err});
@@ -643,7 +679,12 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         }
     }.cmp;
 
-    _ = k.ifThenElse(out_of_range, &.{}, noop, compute, ic);
+    _ = k.ifThenElse(.{
+        .cond = out_of_range,
+        .then_ = noop,
+        .else_ = compute,
+        .ctx = ic,
+    });
 
     return kernel.finish(&.{}, allocator) catch |err| {
         log.err("failed to finalize fused_moe_kernel TTIR: {}", .{err});
@@ -759,7 +800,12 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
         }
     }.a;
 
-    _ = k.ifThenElse(is_dead, &.{}, zero_branch, alive_branch, ac);
+    _ = k.ifThenElse(.{
+        .cond = is_dead,
+        .then_ = zero_branch,
+        .else_ = alive_branch,
+        .ctx = ac,
+    });
 }
 
 /// Final `c_ptrs` + `c_mask` build + masked store. Shared by the zero-write
@@ -857,7 +903,13 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
         }
     }.b;
 
-    const loop_results = k.forLoop(0, num_k_iters, 1, &.{ acc_init, a_ptrs_init, b_ptrs_init }, k_body, kctx);
+    const loop_results = k.forLoop(.{
+        .lower = 0,
+        .upper = num_k_iters,
+        .inits = &.{ acc_init, a_ptrs_init, b_ptrs_init },
+        .body = k_body,
+        .ctx = kctx,
+    });
     var acc_final = loop_results[0];
 
     if (ac.mul_routed) {

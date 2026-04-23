@@ -277,9 +277,10 @@ Under the hood these build the required `tt.reduce` / `tt.scan` region with a
 matching `arith.addf` / `arith.addi` / `maximumf` / `maxsi` combine function —
 no more hand-rolled combiner closures for the common cases.
 
-For custom combiners, use the low-level `k.reduce(src, axis, elem_ty,
-result_ty, combine_fn, body_ctx)` and `k.scan(...)` — they take a `fn(k, lhs,
-rhs, ctx) Value` closure and give you full control.
+For custom combiners, use the low-level `k.reduce(.{ .src, .axis, .elem,
+.result, .combine, .ctx })` and `k.scan(.{ .src, .axis, .reverse, .elem,
+.result, .combine, .ctx })` — they take a `fn(k, lhs, rhs, ctx) Value`
+closure for `combine` and give you full control.
 
 ---
 
@@ -288,19 +289,30 @@ rhs, ctx) Value` closure and give you full control.
 `Kernel.forLoop`, `Kernel.ifThenElse`, `Kernel.whileLoop`, and
 `Kernel.parallel` build their SCF regions via Zig-style closures that receive a
 `*Kernel`, the loop IVs / block args as `[]const Value`, and a caller-supplied
-`body_ctx` struct.
+`ctx` struct.
+
+**All control-flow helpers take a single struct-literal argument** — no more
+remembering positional order. Fields:
+
+| Helper         | Required                                                 | Optional (default)               |
+|----------------|----------------------------------------------------------|----------------------------------|
+| `forLoop`      | `.lower`, `.upper`, `.body`                              | `.step = 1`, `.inits = &.{}`, `.ctx = {}` |
+| `ifThenElse`   | `.cond`, `.then_`, `.else_`                              | `.results = &.{}`, `.ctx = {}`  |
+| `whileLoop`    | `.inits`, `.after_types`, `.before`, `.after`            | `.ctx = {}`                      |
+| `reduce`       | `.src`, `.axis`, `.elem`, `.result`, `.combine`          | `.ctx = {}`                      |
+| `scan`         | `.src`, `.axis`, `.elem`, `.result`, `.combine`          | `.reverse = false`, `.ctx = {}` |
 
 Rules of thumb:
 
 - Capture everything the body needs (Values, sizes, dtypes) in a local struct
-  and pass it as the `body_ctx`. There are no implicit closures — context is
-  the only way to smuggle state in.
+  and pass it as `.ctx`. There are no implicit closures — context is the only
+  way to smuggle state in.
 - Return `&.{}` if the body has no yielded values. Otherwise, allocate via
   `kk.arena.allocator().alloc(Value, N)` and fill it — lifetime only needs to
   cover the call.
-- `forLoop`'s `lower` / `upper` / `step` are `anytype`: pass Values, comptime
-  ints, or runtime Zig ints directly. Comptime literals lift to match the
-  first operand's type (so `forLoop(0, N, 1, …)` with `N: Value` of type i32
+- `forLoop`'s `.lower` / `.upper` / `.step` are `anytype`: pass Values, comptime
+  ints, or runtime Zig ints directly. Comptime literals lift to match the first
+  operand's type (so `.lower=0, .upper=N, .step=1` with `N: Value` of type i32
   yields i32 bounds). To force a specific width on a Zig-side scalar, cast it
   at the call site (e.g. `@as(i32, @intCast(config.block))`).
 
@@ -322,7 +334,14 @@ const body = struct {
         return out;
     }
 }.b;
-_ = k.forLoop(0, numel, @as(i32, @intCast(hist_block)), &.{counts_init}, body, .{ ... });
+_ = k.forLoop(.{
+    .lower = 0,
+    .upper = numel,
+    .step = @as(i32, @intCast(hist_block)),
+    .inits = &.{counts_init},
+    .body = body,
+    .ctx = .{ ... },
+});
 ```
 
 ---
@@ -371,9 +390,9 @@ is the manual form.
 | `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0, false)`                                           |
 | `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty, .{ .input_precision = .ieee })`       |
 | `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmw(.add, p, v, .{ .mask = m.inner, .sem = .relaxed, ... })` |
-| `for i in range(0, N, S): ...`                | `_ = k.forLoop(0, N, S, inits, body_fn, body_ctx);` (literals lift to match types)         |
-| `while cond: ...`                             | `k.whileLoop(inits, types, before_fn, after_fn, body_ctx)`         |
-| `if cond: ... else: ...`                      | `k.ifThenElse(cond, result_types, then_fn, else_fn, body_ctx)`     |
+| `for i in range(0, N, S): ...`                | `k.forLoop(.{ .lower=0, .upper=N, .step=S, .inits=..., .body=..., .ctx=... })`              |
+| `while cond: ...`                             | `k.whileLoop(.{ .inits=..., .after_types=..., .before=..., .after=..., .ctx=... })`         |
+| `if cond: ... else: ...`                      | `k.ifThenElse(.{ .cond=..., .results=..., .then_=..., .else_=..., .ctx=... })`              |
 
 ---
 
@@ -387,9 +406,9 @@ is the manual form.
 2. **Tensor-of-pointers needs a splat.** `ptr` is a scalar `!tt.ptr<T>`. To get
    a tensor of pointers, splat first: `ptr.splatTo(&.{N}).addPtr(offs)`.
 
-3. **Closures can't capture — use `body_ctx`.** Zig has no lexical closures.
-   Anything a for/while/if body needs must come in through the `body_ctx`
-   struct.
+3. **Closures can't capture — use `.ctx`.** Zig has no lexical closures.
+   Anything a for/while/if body needs must come in through the `.ctx` field
+   on the control-flow helper's struct-literal argument.
 
 4. **`Value.kernel == null` panics fluent calls.** Only happens if you build a
    `Value` by hand via `.{ .inner = raw }`. Route through `k.emit(...)` to keep
@@ -397,9 +416,9 @@ is the manual form.
    helpers for that one op.
 
 5. **Don't worry about duplicate constants.** Every lifted literal (from
-   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(0, N, 1, …)` bound,
-   etc.) emits a fresh `arith.constant`. This matches Python Triton's own
-   frontend — the MLIR canonicalizer + CSE pass collapses duplicates on the
+   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(.{ .lower=0, … })`
+   bound, etc.) emits a fresh `arith.constant`. This matches Python Triton's
+   own frontend — the MLIR canonicalizer + CSE pass collapses duplicates on the
    way to PTX, so the generated code is identical whether you emit one
    constant or a hundred. Optimize for readability at the builder level.
 
