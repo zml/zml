@@ -454,52 +454,6 @@ pub const TritonOps = struct {
     output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
 };
 
-pub const NeuronNkiOps = struct {
-    name: []const u8,
-    entrypoint: []const u8,
-    source: []const u8,
-    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
-};
-
-fn base64EncodeAlloc(allocator: std.mem.Allocator, bytes: []const u8) ![]const u8 {
-    const encoder = std.base64.standard.Encoder;
-    const encoded = try allocator.alloc(u8, encoder.calcSize(bytes.len));
-    _ = encoder.encode(encoded, bytes);
-    return encoded;
-}
-
-fn appendNeuronNkiShapeSignature(writer: *std.Io.Writer, prefix: []const u8, index: usize, shape: Shape) !void {
-    try writer.print("{s}{d}={s}|", .{ prefix, index, @tagName(shape.dtype()) });
-    for (shape.dims(), 0..) |dim, i| {
-        if (i != 0) try writer.writeByte(',');
-        try writer.print("{d}", .{dim});
-    }
-    try writer.writeByte('\n');
-}
-
-fn neuronNkiBackendConfig(allocator: std.mem.Allocator, inputs: []const Tensor, outputs: []const Shape, opts: NeuronNkiOps) ![:0]const u8 {
-    var allocating: std.Io.Writer.Allocating = .init(allocator);
-
-    const name_b64 = try base64EncodeAlloc(allocator, opts.name);
-    const entrypoint_b64 = try base64EncodeAlloc(allocator, opts.entrypoint);
-    const source_b64 = try base64EncodeAlloc(allocator, opts.source);
-
-    try allocating.writer.print("version=1\n", .{});
-    try allocating.writer.print("name_b64={s}\n", .{name_b64});
-    try allocating.writer.print("entrypoint_b64={s}\n", .{entrypoint_b64});
-    try allocating.writer.print("source_b64={s}\n", .{source_b64});
-    try allocating.writer.print("num_inputs={d}\n", .{inputs.len});
-    for (inputs, 0..) |input, i| {
-        try appendNeuronNkiShapeSignature(&allocating.writer, "input", i, input.shape());
-    }
-    try allocating.writer.print("num_outputs={d}\n", .{outputs.len});
-    for (outputs, 0..) |output, i| {
-        try appendNeuronNkiShapeSignature(&allocating.writer, "output", i, output);
-    }
-
-    return try allocator.dupeZ(u8, allocating.written());
-}
-
 /// Generate an MLIR call to the given member function with the given tensors.
 pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]Tensor {
     const mlir_ctx = CompilationContext.current().mlir_ctx;
@@ -559,6 +513,13 @@ pub fn triton(inputs: anytype, outputs: anytype, opts: TritonOps) [outputs.len]T
     return outputs_;
 }
 
+pub const NeuronNkiOps = struct {
+    name: []const u8,
+    entrypoint: []const u8,
+    source: []const u8,
+    output_operand_aliases: []const dialects.stablehlo.CustomCallOpts.OutputOperandAlias = &.{},
+};
+
 /// Generate an MLIR call for a Neuron NKI kernel.
 ///
 /// The Neuron compile hook consumes the opaque backend_config string, compiles the
@@ -568,6 +529,8 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     const mlir_ctx = CompilationContext.current().mlir_ctx;
     var arena = std.heap.ArenaAllocator.init(CompilationContext.current().allocator);
     defer arena.deinit();
+
+    const allocator = arena.allocator();
 
     var values: [inputs.len]*const mlir.Value = undefined;
     var input_tensors: [inputs.len]Tensor = undefined;
@@ -583,16 +546,50 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
         res_types[i] = mlir.rankedTensorType(output.dims(), mlirx.Type.fromDType(mlir_ctx, output.dtype()));
     }
 
-    const backend_config = neuronNkiBackendConfig(arena.allocator(), input_tensors[0..], output_shapes[0..], opts) catch unreachable;
+    const backend_encoder = std.base64.standard.Encoder;
+
+    const backend_config = blk: {
+        var configuration: std.Io.Writer.Allocating = .init(allocator);
+
+        const name = blk_name: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.name.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.name);
+            break :blk_name encoded;
+        };
+
+        const entrypoint = blk_entrypoint: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.entrypoint.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.entrypoint);
+            break :blk_entrypoint encoded;
+        };
+
+        const source = blk_source: {
+            const encoded = allocator.alloc(u8, backend_encoder.calcSize(opts.source.len)) catch unreachable;
+            _ = backend_encoder.encode(encoded, opts.source);
+            break :blk_source encoded;
+        };
+
+        configuration.writer.print("name={s}\n", .{name}) catch unreachable;
+        configuration.writer.print("entrypoint={s}\n", .{entrypoint}) catch unreachable;
+        configuration.writer.print("source={s}\n", .{source}) catch unreachable;
+        inline for (inputs, 0..) |input, i| {
+            appendNeuronNkiShapeSignature(&configuration.writer, "input", i, input.shape()) catch unreachable;
+        }
+        inline for (outputs, 0..) |output, i| {
+            appendNeuronNkiShapeSignature(&configuration.writer, "output", i, output) catch unreachable;
+        }
+
+        break :blk configuration.written();
+    };
 
     var operands_layouts: [inputs.len][]const usize = undefined;
     inline for (inputs, 0..) |input, i| {
-        operands_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
+        operands_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(input.rank())).constSlice()) catch unreachable;
     }
 
     var results_layouts: [outputs.len][]const usize = undefined;
     inline for (outputs, 0..) |output, i| {
-        results_layouts[i] = arena.allocator().dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
+        results_layouts[i] = allocator.dupe(usize, toUsize(constants.minorToMajor(output.rank())).constSlice()) catch unreachable;
     }
 
     const op = dialects.stablehlo.custom_call(
@@ -617,6 +614,15 @@ pub fn neuronNki(inputs: anytype, outputs: anytype, opts: NeuronNkiOps) [outputs
     }
 
     return outputs_;
+}
+
+fn appendNeuronNkiShapeSignature(writer: *std.Io.Writer, prefix: []const u8, index: usize, shape: Shape) !void {
+    try writer.print("{s}{d}={s}|", .{ prefix, index, @tagName(shape.dtype()) });
+    for (shape.dims(), 0..) |dim, i| {
+        if (i != 0) try writer.writeByte(',');
+        try writer.print("{d}", .{dim});
+    }
+    try writer.writeByte('\n');
 }
 
 test "triton" {

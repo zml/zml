@@ -61,12 +61,9 @@ fn parseNkiKernelConfig(allocator: std.mem.Allocator, backend_config: []const u8
     var inputs: std.ArrayList(TensorSignature) = .empty;
     var outputs: std.ArrayList(TensorSignature) = .empty;
 
-    var version: ?usize = null;
     var name: ?[]const u8 = null;
     var entrypoint: ?[]const u8 = null;
     var source: ?[]const u8 = null;
-    var num_inputs: ?usize = null;
-    var num_outputs: ?usize = null;
 
     var lines = std.mem.tokenizeScalar(u8, backend_config, '\n');
     while (lines.next()) |line| {
@@ -76,32 +73,17 @@ fn parseNkiKernelConfig(allocator: std.mem.Allocator, backend_config: []const u8
         const key = line[0..eq];
         const value = line[eq + 1 ..];
 
-        if (std.mem.eql(u8, key, "version")) {
-            version = try std.fmt.parseInt(usize, value, 10);
-        } else if (std.mem.eql(u8, key, "name_b64")) {
+        if (std.mem.eql(u8, key, "name")) {
             name = try base64DecodeAlloc(allocator, value);
-        } else if (std.mem.eql(u8, key, "entrypoint_b64")) {
+        } else if (std.mem.eql(u8, key, "entrypoint")) {
             entrypoint = try base64DecodeAlloc(allocator, value);
-        } else if (std.mem.eql(u8, key, "source_b64")) {
+        } else if (std.mem.eql(u8, key, "source")) {
             source = try base64DecodeAlloc(allocator, value);
-        } else if (std.mem.eql(u8, key, "num_inputs")) {
-            num_inputs = try std.fmt.parseInt(usize, value, 10);
-        } else if (std.mem.eql(u8, key, "num_outputs")) {
-            num_outputs = try std.fmt.parseInt(usize, value, 10);
         } else if (std.mem.startsWith(u8, key, "input")) {
             try inputs.append(allocator, try parseTensorSignature(allocator, value));
         } else if (std.mem.startsWith(u8, key, "output")) {
             try outputs.append(allocator, try parseTensorSignature(allocator, value));
-        } else {
-            return error.InvalidNkiBackendConfig;
         }
-    }
-
-    if (version != 1 or name == null or entrypoint == null or source == null or num_inputs == null or num_outputs == null) {
-        return error.InvalidNkiBackendConfig;
-    }
-    if (inputs.items.len != num_inputs.? or outputs.items.len != num_outputs.?) {
-        return error.InvalidNkiBackendConfig;
     }
 
     return .{
