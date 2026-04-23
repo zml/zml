@@ -106,10 +106,23 @@ pub const Tokenizer = union(Tokenizers) {
     }
 
     pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
-        if (bytes[0] == '{') {
-            return .{ .iree = try .fromBytes(allocator, bytes) };
+        if (bytes.len == 0) return error.InvalidArgument;
+
+        var trimmed = bytes;
+        // Strip UTF-8 BOM if present
+        if (trimmed.len >= 3 and std.mem.eql(u8, trimmed[0..3], "\xEF\xBB\xBF")) {
+            trimmed = trimmed[3..];
         }
-        return .{ .sentencepiece = try .fromBytes(bytes) };
+        // Strip leading whitespace
+        var start: usize = 0;
+        while (start < trimmed.len and std.ascii.isWhitespace(trimmed[start])) : (start += 1) {}
+        trimmed = trimmed[start..];
+        if (trimmed.len == 0) return error.InvalidArgument;
+
+        if (trimmed[0] == '{') {
+            return .{ .iree = try .fromBytes(allocator, trimmed) };
+        }
+        return .{ .sentencepiece = try .fromBytes(trimmed) };
     }
 
     pub fn deinit(self: *Tokenizer) void {
