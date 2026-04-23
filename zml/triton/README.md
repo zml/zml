@@ -257,25 +257,57 @@ const offs = k.arange(BLOCK, .i64);
 |-------------------------------------------------|-------------------------------------------|
 | `k.loadScalar(ptr, dtype)`                      | `tl.load(ptr)` for a scalar pointer.      |
 | `k.loadMasked(ptr, shape, dtype, mask)`         | `tl.load(ptrs, mask=mask, other=0)` — the zero-of-dtype tensor is built for you. |
-| `k.load(ptr, result_type, .{ .mask, .other })`  | Raw `tt.load`; use when you need a non-zero `other` or unusual options. |
-| `k.store(ptr, value, .{ .mask })`               | `tl.store(ptr, value, mask=mask)`.        |
+| `k.load(ptr, result_type)`                      | `tl.load(ptrs)` with no mask/other.       |
+| `k.loadOpts(ptr, result_type, .{ .mask, .other, ... })` | `tl.load(ptrs, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`. |
+| `k.store(ptr, value)`                           | `tl.store(ptr, value)`.                   |
+| `k.storeOpts(ptr, value, .{ .mask, ... })`      | `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`. |
 
-`tt.load` options (`.mask`, `.other`, `.cache`, `.eviction`, `.is_volatile`)
-still take raw `*const mlir.Value` pointers — access them via `v.inner`.
+`LoadOpts` / `StoreOpts` fields (`.mask`, `.other`, `.cache`, `.eviction`,
+`.is_volatile`) still take raw `*const mlir.Value` pointers — access them via
+`v.inner`.
+
+### `fn X / fn XOpts` pattern
+
+Every Kernel method whose Python Triton counterpart has named keyword-only
+arguments comes in two flavours:
+
+- `k.X(non_named_args...)` — defaults applied; matches `tl.X(args...)` in
+  Python, which in Python would use the zero-arg defaults.
+- `k.XOpts(non_named_args..., struct { named... })` — full named-param set
+  as a typed Zig struct literal with field defaults matching Triton.
+
+Pairs in place today: `load` / `loadOpts`, `store` / `storeOpts`,
+`dot` / `dotOpts`, `reshape` / `reshapeOpts`, `gather` / `gatherOpts`,
+`atomicRmw` / `atomicRmwOpts`, `atomicCas` / `atomicCasOpts`,
+`fpToFp` / `fpToFpOpts`, `clampf` / `clampfOpts`,
+`convertf` / `convertfOpts`, `scalingTruncf` / `scalingTruncfOpts`,
+`dotScaled` / `dotScaledOpts`,
+`elementwiseInlineAsm` / `elementwiseInlineAsmOpts`,
+`externElementwise` / `externElementwiseOpts`,
+`descriptorLoad` / `descriptorLoadOpts`, `histogram` / `histogramOpts`,
+`print` / `printOpts`, `reduceSum` / `reduceSumOpts`,
+`reduceMax` / `reduceMaxOpts`, `scanSum` / `scanSumOpts`.
 
 ---
 
 ## Reductions and scans
 
 ```zig
-const absmax = k.reduceMax(abs_y, 0);           // tl.max(abs_y, axis=0)
-const total  = k.reduceSum(padded_counts, 0);   // tl.sum(padded_counts, axis=0)
-const cumul  = k.scanSum(x, 0, false);          // tl.cumsum(x, axis=0)
+const absmax = k.reduceMax(abs_y, 0);            // tl.max(abs_y, axis=0)
+const total  = k.reduceSum(padded_counts, 0);    // tl.sum(padded_counts, axis=0)
+const cumul  = k.scanSum(x, 0);                  // tl.cumsum(x, axis=0)
+
+// Keyword arguments → the *Opts variant with a typed struct literal.
+const absmax_kd = k.reduceMaxOpts(abs_y, 0, .{ .keep_dims = true });  // tl.max(x, 0, keep_dims=True)
+const rev_cum   = k.scanSumOpts(x, 0, .{ .reverse = true });          // tl.cumsum(x, 0, reverse=True)
 ```
 
 Under the hood these build the required `tt.reduce` / `tt.scan` region with a
 matching `arith.addf` / `arith.addi` / `maximumf` / `maxsi` combine function —
-no more hand-rolled combiner closures for the common cases.
+no more hand-rolled combiner closures for the common cases. When
+`.keep_dims = true`, the DSL inserts a trailing `tt.expand_dims` / `splat` so
+the result shape matches the input rank with a size-1 reduced axis (matching
+Python Triton).
 
 For custom combiners, use the low-level `k.reduce(ctx, .{ .src, .axis, .elem,
 .result, .combine })` and `k.scan(ctx, .{ .src, .axis, .elem, .result,
@@ -335,7 +367,7 @@ const body = struct {
             hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs),
             &.{hc.hist_block}, .i32, mask,
         );
-        const h = kk.histogram(expert_vals, mask, kk.tensorTy(&.{hc.padded}, .i32));
+        const h = kk.histogramOpts(expert_vals, kk.tensorTy(&.{hc.padded}, .i32), .{ .mask = mask });
         const out = kk.arena.allocator().alloc(Value, 1) catch @panic("OOM");
         out[0] = iter[0].add(h);
         return out;
@@ -386,13 +418,26 @@ is the manual form.
 | `m[:, None] & (c[None, :] < N)`               | `k.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
 | `ptr + offs`                                  | `ptr.splatTo(&.{N}).addPtr(offs)` (tensor-of-ptrs)                 |
 | `tl.load(ptr, mask=mask, other=0)`            | `k.loadMasked(ptrs, &.{N}, dtype, mask)`                           |
-| `tl.store(ptr, v, mask=mask)`                 | `k.store(ptr, v, .{ .mask = mask.inner })`                         |
+| `tl.load(ptr)`                                | `k.load(ptrs, result_ty)`                                          |
+| `tl.load(ptr, mask=m, other=o)`               | `k.loadOpts(ptrs, ty, .{ .mask = m.inner, .other = o.inner })`     |
+| `tl.store(ptr, v)`                            | `k.store(ptr, v)`                                                  |
+| `tl.store(ptr, v, mask=mask)`                 | `k.storeOpts(ptr, v, .{ .mask = mask.inner })`                     |
 | `tl.zeros((M, N), dtype=tl.float32)`          | `k.zeros(&.{ M, N }, .f32)`                                        |
 | `tl.sum(x, axis=0)`                           | `k.reduceSum(x, 0)`                                                |
+| `tl.sum(x, axis=0, keep_dims=True)`           | `k.reduceSumOpts(x, 0, .{ .keep_dims = true })`                    |
 | `tl.max(x, axis=0)`                           | `k.reduceMax(x, 0)`                                                |
-| `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0, false)`                                           |
-| `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty, .{ .input_precision = .ieee })`       |
-| `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmw(.add, p, v, .{ .mask = m.inner, .sem = .relaxed, ... })` |
+| `tl.cumsum(x, axis=0)`                        | `k.scanSum(x, 0)`                                                  |
+| `tl.cumsum(x, axis=0, reverse=True)`          | `k.scanSumOpts(x, 0, .{ .reverse = true })`                        |
+| `tl.dot(a, b, acc=acc)`                       | `k.dot(a, b, acc, result_ty)`                                      |
+| `tl.dot(a, b, acc, input_precision="ieee")`   | `k.dotOpts(a, b, acc, result_ty, .{ .input_precision = .ieee })`   |
+| `tl.clamp(x, mn, mx)`                         | `k.clampf(x, mn, mx)`                                              |
+| `tl.clamp(x, mn, mx, propagate_nan=NAN_ALL)`  | `k.clampfOpts(x, mn, mx, .{ .propagate_nan = .all })`              |
+| `tl.atomic_add(p, v)`                         | `k.atomicRmw(.add, p, v)`                                          |
+| `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmwOpts(.add, p, v, .{ .mask = m.inner, .sem = .relaxed })` |
+| `tl.histogram(x, num_bins)`                   | `k.histogram(x, result_ty)`                                        |
+| `tl.histogram(x, num_bins, mask=m)`           | `k.histogramOpts(x, result_ty, .{ .mask = m })`                    |
+| `tl.reshape(x, shape)`                        | `k.reshape(x, result_ty)`                                          |
+| `tl.reshape(x, shape, can_reorder=True)`      | `k.reshapeOpts(x, result_ty, .{ .allow_reorder = true })`          |
 | `for i in range(0, N, S): ...`                | `k.forLoop(ctx, 0, N, S, .{ .inits=..., .body=... })`                                       |
 | `while cond: ...`                             | `k.whileLoop(ctx, .{ .inits=..., .after_types=..., .before=..., .after=... })`              |
 | `if cond: ... else: ...`                      | `k.ifThenElse(ctx, .{ .cond=..., .results=..., .then_=..., .else_=... })`                   |
