@@ -53,9 +53,9 @@ pub fn myKernelTtir(allocator: std.mem.Allocator) ![:0]const u8 {
     const offs = k.arange(0, 64, .i32).add(pid.mul(@as(i32, 64)));
     const mask = offs.lt(n);
 
-    const x = k.loadMasked(x_ptr.splatTo(&.{64}).addPtr(offs), mask);
+    const x = k.loadMasked(x_ptr.addPtr(offs), mask);
     const y = x.mul(@as(f32, 2.0));
-    k.storeOpts(y_ptr.splatTo(&.{64}).addPtr(offs), y, .{ .mask = mask.inner });
+    k.storeOpts(y_ptr.addPtr(offs), y, .{ .mask = mask });
 
     return kernel.finish(&.{}, allocator);
 }
@@ -207,6 +207,24 @@ represented in `offs`'s element type.
 
 If you need to force a specific width for a runtime variable, cast at the call
 site: `pid.mul(@as(i32, @intCast(block_size)))`.
+
+### Scalar ↔ tensor auto-broadcast
+
+Fluent arithmetic and comparison ops (`.add`, `.sub`, `.mul`, `.div`, `.rem`,
+`.cdiv`, `.bitAnd`, `.bitOr`, `.min`, `.max`, `.lt`, `.le`, `.gt`, `.ge`,
+`.eq`, `.ne`) are symmetric: if one operand is a tensor and the other a
+scalar, the scalar is splatted to match. Either direction works:
+
+```zig
+const offs = iv.add(cols);   // scalar iv + tensor cols → tensor
+const offs = cols.add(iv);   // tensor cols + scalar iv → tensor
+```
+
+This mirrors Triton/NumPy's `i + cols`. Note: size-1 / rank-unification
+broadcasting (e.g. `[1,64] + [32,1]`) is **not** auto-inserted — use
+`.broadcast2d`, `k.expandDims`, or `k.broadcast` explicitly. `.addPtr` is
+also symmetric: a scalar `!tt.ptr<T>` is splatted when the offset is a
+tensor, so `x_ptr.addPtr(offs)` works without a manual `splatTo`.
 
 ---
 
@@ -390,12 +408,9 @@ Example — histogram loop:
 const HistCtx = struct { topk_ids: Value, numel: i32, hist_block: i64, padded: i64 };
 const body = struct {
     fn b(kk: *Kernel, iv: Value, iter: []const Value, hc: HistCtx) []const Value {
-        const offs = iv.splatTo(&.{hc.hist_block}).add(kk.arange(0, @intCast(hc.hist_block), .i32));
+        const offs = iv.add(kk.arange(0, @intCast(hc.hist_block), .i32));
         const mask = offs.lt(hc.numel);
-        const expert_vals = kk.loadMasked(
-            hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs),
-            mask,
-        );
+        const expert_vals = kk.loadMasked(hc.topk_ids.addPtr(offs), mask);
         const h = kk.histogramOpts(expert_vals, hc.padded, .{ .mask = mask });
         return kk.yield(.{iter[0].add(h)});
     }
@@ -443,12 +458,12 @@ is the manual form.
 | `vec[:, None]`                                | `vec.broadcast2d(1, m, n)`                                         |
 | `vec[None, :]`                                | `vec.broadcast2d(0, m, n)`                                         |
 | `m[:, None] & (c[None, :] < N)`               | `k.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
-| `ptr + offs`                                  | `ptr.splatTo(&.{N}).addPtr(offs)` (tensor-of-ptrs)                 |
+| `ptr + offs`                                  | `ptr.addPtr(offs)` (scalar ptr auto-splats to tensor-of-ptrs)      |
 | `tl.load(ptr, mask=mask, other=0)`            | `k.loadMasked(ptrs, mask)`                                         |
 | `tl.load(ptr)`                                | `k.load(ptrs)`                                                     |
-| `tl.load(ptr, mask=m, other=o)`               | `k.loadOpts(ptrs, .{ .mask = m.inner, .other = o.inner })`         |
+| `tl.load(ptr, mask=m, other=o)`               | `k.loadOpts(ptrs, .{ .mask = m, .other = o })`                     |
 | `tl.store(ptr, v)`                            | `k.store(ptr, v)`                                                  |
-| `tl.store(ptr, v, mask=mask)`                 | `k.storeOpts(ptr, v, .{ .mask = mask.inner })`                     |
+| `tl.store(ptr, v, mask=mask)`                 | `k.storeOpts(ptr, v, .{ .mask = mask })`                           |
 | `tl.zeros((M, N), dtype=tl.float32)`          | `k.zeros(&.{ M, N }, .f32)`                                        |
 | `tl.sum(x, axis=0)`                           | `k.reduceSum(x, 0)`                                                |
 | `tl.sum(x, axis=0, keep_dims=True)`           | `k.reduceSumOpts(x, 0, .{ .keep_dims = true })`                    |
@@ -460,7 +475,7 @@ is the manual form.
 | `tl.clamp(x, mn, mx)`                         | `k.clampf(x, mn, mx)`                                              |
 | `tl.clamp(x, mn, mx, propagate_nan=NAN_ALL)`  | `k.clampfOpts(x, mn, mx, .{ .propagate_nan = .all })`              |
 | `tl.atomic_add(p, v)`                         | `k.atomicRmw(.add, p, v)`                                          |
-| `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmwOpts(.add, p, v, .{ .mask = m.inner, .sem = .relaxed })` |
+| `tl.atomic_add(p, v, mask=m, sem="relaxed")`  | `k.atomicRmwOpts(.add, p, v, .{ .mask = m, .sem = .relaxed })`     |
 | `tl.histogram(x, num_bins)`                   | `k.histogram(x, num_bins)`                                         |
 | `tl.histogram(x, num_bins, mask=m)`           | `k.histogramOpts(x, num_bins, .{ .mask = m })`                     |
 | `tl.reshape(x, shape)`                        | `k.reshape(x, &.{ ...shape })`                                     |
@@ -480,8 +495,9 @@ is the manual form.
    `.to(...)` or reshape the kernel to stay within a single int width. Comptime
    literals adapt automatically — runtime values don't.
 
-2. **Tensor-of-pointers needs a splat.** `ptr` is a scalar `!tt.ptr<T>`. To get
-   a tensor of pointers, splat first: `ptr.splatTo(&.{N}).addPtr(offs)`.
+2. **Tensor-of-pointers via `.addPtr`.** `ptr` is a scalar `!tt.ptr<T>`; when
+   `offs` is a tensor, `ptr.addPtr(offs)` auto-splats the pointer to match
+   (no manual `.splatTo` needed).
 
 3. **Closures can't capture — use `.ctx`.** Zig has no lexical closures.
    Anything a for/while/if body needs must come in through the `.ctx` field

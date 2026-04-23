@@ -358,23 +358,19 @@ pub fn broadcast(
     });
 }
 
-pub const ReshapeOpts = struct {
-    allow_reorder: bool = false,
-    efficient_layout: bool = false,
-};
-
 pub fn reshape(
     ctx: *mlir.Context,
     src: *const mlir.Value,
     result_type: *const mlir.Type,
-    opts: ReshapeOpts,
+    allow_reorder: bool,
+    efficient_layout: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .{};
-    if (opts.allow_reorder) {
+    if (allow_reorder) {
         attrs.appendAssumeCapacity(.named(ctx, "allow_reorder", mlir.unitAttribute(ctx)));
     }
-    if (opts.efficient_layout) {
+    if (efficient_layout) {
         attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", mlir.unitAttribute(ctx)));
     }
     return mlir.Operation.make(ctx, "tt.reshape", .{
@@ -420,14 +416,6 @@ pub fn addptr(
     });
 }
 
-pub const LoadOpts = struct {
-    mask: ?*const mlir.Value = null,
-    other: ?*const mlir.Value = null,
-    cache: CacheModifier = .none,
-    evict: EvictionPolicy = .normal,
-    is_volatile: bool = false,
-};
-
 /// tt.load — AttrSizedOperandSegments: (ptr, [mask], [other]). Written as a
 /// flat operand list plus an explicit `operandSegmentSizes` attribute, because
 /// the `Operation.make` variadic coercion for mixed-length segments produces
@@ -437,16 +425,20 @@ pub fn load(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     result_type: *const mlir.Type,
-    opts: LoadOpts,
+    mask: ?*const mlir.Value,
+    other: ?*const mlir.Value,
+    cache: CacheModifier,
+    evict: EvictionPolicy,
+    is_volatile: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
     operands_buf.appendAssumeCapacity(ptr_val);
-    const mask_len: i32 = if (opts.mask) |m| blk: {
+    const mask_len: i32 = if (mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
         break :blk 1;
     } else 0;
-    const other_len: i32 = if (opts.other) |o| blk: {
+    const other_len: i32 = if (other) |o| blk: {
         operands_buf.appendAssumeCapacity(o);
         break :blk 1;
     } else 0;
@@ -457,19 +449,13 @@ pub fn load(
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
             .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
-            .named(ctx, "cache", cacheModifier(ctx, opts.cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, opts.evict)),
-            .named(ctx, "isVolatile", mlir.boolAttribute(ctx, opts.is_volatile)),
+            .named(ctx, "cache", cacheModifier(ctx, cache)),
+            .named(ctx, "evict", evictionPolicy(ctx, evict)),
+            .named(ctx, "isVolatile", mlir.boolAttribute(ctx, is_volatile)),
         },
         .location = location,
     });
 }
-
-pub const StoreOpts = struct {
-    mask: ?*const mlir.Value = null,
-    cache: CacheModifier = .none,
-    evict: EvictionPolicy = .normal,
-};
 
 /// tt.store — operands are (ptr, value, [mask]) — variadic mask only.
 /// Not AttrSizedOperandSegments on v1 scope; build with flat operand list.
@@ -477,17 +463,19 @@ pub fn store(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
     value: *const mlir.Value,
-    opts: StoreOpts,
+    mask: ?*const mlir.Value,
+    cache: CacheModifier,
+    evict: EvictionPolicy,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
     buf.appendSliceAssumeCapacity(&.{ ptr_val, value });
-    if (opts.mask) |m| buf.appendAssumeCapacity(m);
+    if (mask) |m| buf.appendAssumeCapacity(m);
     return mlir.Operation.make(ctx, "tt.store", .{
         .operands = .{ .flat = buf.constSlice() },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, opts.cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, opts.evict)),
+            .named(ctx, "cache", cacheModifier(ctx, cache)),
+            .named(ctx, "evict", evictionPolicy(ctx, evict)),
         },
         .location = location,
     });
@@ -497,26 +485,22 @@ pub fn store(
 // Compute
 // =============================================================================
 
-pub const DotOpts = struct {
-    input_precision: InputPrecision = .ieee,
-    max_num_imprecise_acc: i32 = 0,
-};
-
 pub fn dot(
     ctx: *mlir.Context,
     a: *const mlir.Value,
     b: *const mlir.Value,
     c_acc: *const mlir.Value,
     result_type: *const mlir.Type,
-    opts: DotOpts,
+    input_precision_: InputPrecision,
+    max_num_imprecise_acc: i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tt.dot", .{
         .operands = .{ .flat = &.{ a, b, c_acc } },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "inputPrecision", inputPrecision(ctx, opts.input_precision)),
-            .named(ctx, "maxNumImpreciseAcc", mlir.integerAttribute(ctx, .i32, opts.max_num_imprecise_acc)),
+            .named(ctx, "inputPrecision", inputPrecision(ctx, input_precision_)),
+            .named(ctx, "maxNumImpreciseAcc", mlir.integerAttribute(ctx, .i32, max_num_imprecise_acc)),
         },
         .location = location,
     });
@@ -602,21 +586,17 @@ pub fn bitcast(
     });
 }
 
-pub const FpToFpOpts = struct {
-    /// If null, no rounding-mode attribute is emitted.
-    rounding: ?RoundingMode = null,
-};
-
 /// tt.fp_to_fp — float to float cast, optionally with a rounding mode.
+/// Pass `rounding = null` to omit the rounding attribute.
 pub fn fp_to_fp(
     ctx: *mlir.Context,
     src: *const mlir.Value,
     result_type: *const mlir.Type,
-    opts: FpToFpOpts,
+    rounding: ?RoundingMode,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
-    if (opts.rounding) |rm| {
+    if (rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
     }
     return mlir.Operation.make(ctx, "tt.fp_to_fp", .{
@@ -757,10 +737,6 @@ pub fn split(
 // Gather / Histogram
 // =============================================================================
 
-pub const GatherOpts = struct {
-    efficient_layout: bool = false,
-};
-
 /// tt.gather — gather elements from `src` using `indices` along `axis`.
 /// Result shape matches `indices` shape.
 pub fn gather(
@@ -769,12 +745,12 @@ pub fn gather(
     indices: *const mlir.Value,
     axis: i32,
     result_type: *const mlir.Type,
-    opts: GatherOpts,
+    efficient_layout: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .{};
     attrs.appendAssumeCapacity(.named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)));
-    if (opts.efficient_layout) {
+    if (efficient_layout) {
         attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", mlir.unitAttribute(ctx)));
     }
     return mlir.Operation.make(ctx, "tt.gather", .{
@@ -846,12 +822,6 @@ pub fn scan_return(
 // Atomics
 // =============================================================================
 
-pub const AtomicRMWOpts = struct {
-    mask: ?*const mlir.Value = null,
-    sem: MemSemantic = .acq_rel,
-    scope: MemSyncScope = .gpu,
-};
-
 /// tt.atomic_rmw — (ptr, val, [mask]). No AttrSizedOperandSegments trait;
 /// trailing optional mask is disambiguated by operand count.
 /// Result type matches val's type.
@@ -860,29 +830,26 @@ pub fn atomic_rmw(
     rmw: RMWOp,
     ptr_val: *const mlir.Value,
     val: *const mlir.Value,
-    opts: AtomicRMWOpts,
+    mask: ?*const mlir.Value,
+    sem: MemSemantic,
+    scope: MemSyncScope,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
     operands_buf.appendSliceAssumeCapacity(&.{ ptr_val, val });
-    if (opts.mask) |m| operands_buf.appendAssumeCapacity(m);
+    if (mask) |m| operands_buf.appendAssumeCapacity(m);
 
     return mlir.Operation.make(ctx, "tt.atomic_rmw", .{
         .operands = .{ .flat = operands_buf.constSlice() },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
             .named(ctx, "atomic_rmw_op", rmwOp(ctx, rmw)),
-            .named(ctx, "sem", memSemantic(ctx, opts.sem)),
-            .named(ctx, "scope", memSyncScope(ctx, opts.scope)),
+            .named(ctx, "sem", memSemantic(ctx, sem)),
+            .named(ctx, "scope", memSyncScope(ctx, scope)),
         },
         .location = location,
     });
 }
-
-pub const AtomicCasOpts = struct {
-    sem: MemSemantic = .acq_rel,
-    scope: MemSyncScope = .gpu,
-};
 
 /// tt.atomic_cas — compare-and-swap. Result type matches val's type.
 pub fn atomic_cas(
@@ -890,15 +857,16 @@ pub fn atomic_cas(
     ptr_val: *const mlir.Value,
     cmp: *const mlir.Value,
     val: *const mlir.Value,
-    opts: AtomicCasOpts,
+    sem: MemSemantic,
+    scope: MemSyncScope,
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tt.atomic_cas", .{
         .operands = .{ .flat = &.{ ptr_val, cmp, val } },
         .results = .{ .flat = &.{val.type_()} },
         .attributes = &.{
-            .named(ctx, "sem", memSemantic(ctx, opts.sem)),
-            .named(ctx, "scope", memSyncScope(ctx, opts.scope)),
+            .named(ctx, "sem", memSemantic(ctx, sem)),
+            .named(ctx, "scope", memSyncScope(ctx, scope)),
         },
         .location = location,
     });
@@ -928,30 +896,24 @@ pub fn assert_(
 // Call
 // =============================================================================
 
-pub const CallOpts = struct {
-    /// Per-argument dictionary attrs, one entry per operand (e.g. to propagate
-    /// `tt.divisibility` hints through a call site). Must have the same length
-    /// as `operands` if provided.
-    arg_attrs: ?[]const *const mlir.Attribute = null,
-    /// Per-result dictionary attrs, one entry per result type if provided.
-    res_attrs: ?[]const *const mlir.Attribute = null,
-};
-
 /// tt.call — direct call to another tt.func in the same module.
+/// `arg_attrs` and `res_attrs` are per-operand / per-result dictionary attrs
+/// (e.g. to propagate `tt.divisibility` hints); pass `null` to omit.
 pub fn call(
     ctx: *mlir.Context,
     callee: []const u8,
     operands: []const *const mlir.Value,
     result_types: []const *const mlir.Type,
-    opts: CallOpts,
+    arg_attrs: ?[]const *const mlir.Attribute,
+    res_attrs: ?[]const *const mlir.Attribute,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .{};
     attrs.appendAssumeCapacity(.named(ctx, "callee", mlir.flatSymbolRefAttribute(ctx, callee)));
-    if (opts.arg_attrs) |aa| {
+    if (arg_attrs) |aa| {
         attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, aa)));
     }
-    if (opts.res_attrs) |ra| {
+    if (res_attrs) |ra| {
         attrs.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, ra)));
     }
     return mlir.Operation.make(ctx, "tt.call", .{
@@ -966,12 +928,6 @@ pub fn call(
 // Scaled dot (microscaling spec).
 // =============================================================================
 
-pub const DotScaledOpts = struct {
-    fast_math: bool = false,
-    lhs_k_pack: bool = true,
-    rhs_k_pack: bool = true,
-};
-
 /// tt.dot_scaled — like `dot` but with optional per-block scale factors.
 /// `a_scale`/`b_scale` may be null. AttrSizedOperandSegments over
 /// (a, b, c, [a_scale], [b_scale]).
@@ -985,7 +941,9 @@ pub fn dot_scaled(
     a_elem_type: ScaleDotElemType,
     b_elem_type: ScaleDotElemType,
     result_type: *const mlir.Type,
-    opts: DotScaledOpts,
+    fast_math: bool,
+    lhs_k_pack: bool,
+    rhs_k_pack: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 5) = .{};
@@ -1007,9 +965,9 @@ pub fn dot_scaled(
             .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
             .named(ctx, "a_elem_type", scaleDotElemType(ctx, a_elem_type)),
             .named(ctx, "b_elem_type", scaleDotElemType(ctx, b_elem_type)),
-            .named(ctx, "fastMath", mlir.boolAttribute(ctx, opts.fast_math)),
-            .named(ctx, "lhs_k_pack", mlir.boolAttribute(ctx, opts.lhs_k_pack)),
-            .named(ctx, "rhs_k_pack", mlir.boolAttribute(ctx, opts.rhs_k_pack)),
+            .named(ctx, "fastMath", mlir.boolAttribute(ctx, fast_math)),
+            .named(ctx, "lhs_k_pack", mlir.boolAttribute(ctx, lhs_k_pack)),
+            .named(ctx, "rhs_k_pack", mlir.boolAttribute(ctx, rhs_k_pack)),
         },
         .location = location,
     });
@@ -1019,10 +977,6 @@ pub fn dot_scaled(
 // Extern elementwise (call library function pointwise)
 // =============================================================================
 
-pub const ExternElementwiseOpts = struct {
-    pure: bool = true,
-};
-
 pub fn extern_elementwise(
     ctx: *mlir.Context,
     srcs: []const *const mlir.Value,
@@ -1030,7 +984,7 @@ pub fn extern_elementwise(
     libname: []const u8,
     libpath: []const u8,
     symbol: []const u8,
-    opts: ExternElementwiseOpts,
+    pure: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tt.extern_elementwise", .{
@@ -1040,7 +994,7 @@ pub fn extern_elementwise(
             .named(ctx, "libname", mlir.stringAttribute(ctx, libname)),
             .named(ctx, "libpath", mlir.stringAttribute(ctx, libpath)),
             .named(ctx, "symbol", mlir.stringAttribute(ctx, symbol)),
-            .named(ctx, "pure", mlir.boolAttribute(ctx, opts.pure)),
+            .named(ctx, "pure", mlir.boolAttribute(ctx, pure)),
         },
         .location = location,
     });
@@ -1103,17 +1057,13 @@ pub fn make_tensor_descriptor(
     });
 }
 
-pub const DescriptorLoadOpts = struct {
-    cache: CacheModifier = .none,
-    evict: EvictionPolicy = .normal,
-};
-
 pub fn descriptor_load(
     ctx: *mlir.Context,
     desc: *const mlir.Value,
     indices: []const *const mlir.Value,
     result_type: *const mlir.Type,
-    opts: DescriptorLoadOpts,
+    cache: CacheModifier,
+    evict: EvictionPolicy,
     location: *const mlir.Location,
 ) *mlir.Operation {
     var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
@@ -1123,8 +1073,8 @@ pub fn descriptor_load(
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },
         .attributes = &.{
-            .named(ctx, "cache", cacheModifier(ctx, opts.cache)),
-            .named(ctx, "evict", evictionPolicy(ctx, opts.evict)),
+            .named(ctx, "cache", cacheModifier(ctx, cache)),
+            .named(ctx, "evict", evictionPolicy(ctx, evict)),
         },
         .location = location,
     });
@@ -1237,11 +1187,6 @@ pub fn map_elementwise_return(
 // Inline assembly
 // =============================================================================
 
-pub const InlineAsmOpts = struct {
-    pure: bool = true,
-    packed_element: i32 = 1,
-};
-
 /// tt.elementwise_inline_asm — pointwise inline asm returning one or more
 /// tensors.
 pub fn elementwise_inline_asm(
@@ -1250,7 +1195,8 @@ pub fn elementwise_inline_asm(
     constraints: []const u8,
     args: []const *const mlir.Value,
     result_types: []const *const mlir.Type,
-    opts: InlineAsmOpts,
+    pure: bool,
+    packed_element: i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
     return mlir.Operation.make(ctx, "tt.elementwise_inline_asm", .{
@@ -1259,8 +1205,8 @@ pub fn elementwise_inline_asm(
         .attributes = &.{
             .named(ctx, "asm_string", mlir.stringAttribute(ctx, asm_string)),
             .named(ctx, "constraints", mlir.stringAttribute(ctx, constraints)),
-            .named(ctx, "pure", mlir.boolAttribute(ctx, opts.pure)),
-            .named(ctx, "packed_element", mlir.integerAttribute(ctx, .i32, opts.packed_element)),
+            .named(ctx, "pure", mlir.boolAttribute(ctx, pure)),
+            .named(ctx, "packed_element", mlir.integerAttribute(ctx, .i32, packed_element)),
         },
         .location = location,
     });
@@ -1309,7 +1255,7 @@ test "tt.func round-trip" {
     const arg1 = entry.argument(1);
 
     // %0 = tt.load %arg0 : !tt.ptr<f32>
-    const loaded = load(ctx, arg0, f32_ty, .{}, loc);
+    const loaded = load(ctx, arg0, f32_ty, null, null, .none, .normal, false, loc);
     _ = loaded.appendTo(entry);
 
     // %1 = arith.constant 1.0 : f32 — built with Operation.make to avoid cross-dialect import
@@ -1330,7 +1276,7 @@ test "tt.func round-trip" {
     _ = summed.appendTo(entry);
 
     // tt.store %arg1, %2
-    _ = store(ctx, arg1, summed.result(0), .{}, loc).appendTo(entry);
+    _ = store(ctx, arg1, summed.result(0), null, .none, .normal, loc).appendTo(entry);
 
     // tt.return
     _ = return_(ctx, &.{}, loc).appendTo(entry);

@@ -90,95 +90,95 @@ pub const Value = struct {
 
     pub fn add(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.addf(self, r) else k.addi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.addf(l, r) else k.addi(l, r);
     }
 
     pub fn sub(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.subf(self, r) else k.subi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.subf(l, r) else k.subi(l, r);
     }
 
     pub fn mul(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.mulf(self, r) else k.muli(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.mulf(l, r) else k.muli(l, r);
     }
 
     pub fn div(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.divf(self, r) else k.divsi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.divf(l, r) else k.divsi(l, r);
     }
 
     pub fn rem(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.remf(self, r) else k.remsi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.remf(l, r) else k.remsi(l, r);
     }
 
     pub fn cdiv(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return k.ceildivsi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return k.ceildivsi(l, r);
     }
 
     pub fn bitAnd(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return k.andi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return k.andi(l, r);
     }
 
     pub fn bitOr(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return k.ori(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return k.ori(l, r);
     }
 
     pub fn min(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.minimumf(self, r) else k.minsi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.minimumf(l, r) else k.minsi(l, r);
     }
 
     pub fn max(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.maximumf(self, r) else k.maxsi(self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.maximumf(l, r) else k.maxsi(l, r);
     }
 
     // -------- fluent comparisons (int predicates default; float uses cmpf) --------
 
     pub fn lt(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.olt, self, r) else k.cmpi(.slt, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.olt, l, r) else k.cmpi(.slt, l, r);
     }
     pub fn le(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.ole, self, r) else k.cmpi(.sle, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.ole, l, r) else k.cmpi(.sle, l, r);
     }
     pub fn gt(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.ogt, self, r) else k.cmpi(.sgt, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.ogt, l, r) else k.cmpi(.sgt, l, r);
     }
     pub fn ge(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.oge, self, r) else k.cmpi(.sge, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.oge, l, r) else k.cmpi(.sge, l, r);
     }
     pub fn eq(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.oeq, self, r) else k.cmpi(.eq, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.oeq, l, r) else k.cmpi(.eq, l, r);
     }
     pub fn ne(self: Value, rhs: anytype) Value {
         const k = self.kern();
-        const r = k.broadcastLike(rhs, self);
-        return if (self.isFloatElem()) k.cmpf(.one, self, r) else k.cmpi(.ne, self, r);
+        const l, const r = k.broadcastPair(self, rhs);
+        return if (l.isFloatElem()) k.cmpf(.one, l, r) else k.cmpi(.ne, l, r);
     }
 
     // -------- fluent casts (`to`) --------
@@ -230,11 +230,17 @@ pub const Value = struct {
     }
 
     /// `addptr(self, offset)` where offset can be a Value or comptime int.
+    /// If `self` is a scalar pointer and `offset` is a tensor, the pointer
+    /// is auto-splatted to match (Triton-style `x_ptr + offs`).
     pub fn addPtr(self: Value, offset: anytype) Value {
         const k = self.kern();
         const T = @TypeOf(offset);
         const off: Value = if (T == Value) offset else k.lift(offset);
-        return k.addptr(self, off);
+        const ptr = if (!self.isTensor() and off.isTensor())
+            k.splat(self, off.shape().constSlice())
+        else
+            self;
+        return k.addptr(ptr, off);
     }
 };
 
@@ -379,6 +385,89 @@ pub const ReduceOpts = struct {
 /// `tl.cumsum(src, axis, reverse=...)`.
 pub const ScanOpts = struct {
     reverse: bool = false,
+};
+
+/// Named-param struct for `Kernel.loadOpts` — mirrors
+/// `tl.load(ptr, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`.
+pub const LoadOpts = struct {
+    mask: ?Value = null,
+    other: ?Value = null,
+    cache: ttir.CacheModifier = .none,
+    evict: ttir.EvictionPolicy = .normal,
+    is_volatile: bool = false,
+};
+
+/// Named-param struct for `Kernel.storeOpts` — mirrors
+/// `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`.
+pub const StoreOpts = struct {
+    mask: ?Value = null,
+    cache: ttir.CacheModifier = .none,
+    evict: ttir.EvictionPolicy = .normal,
+};
+
+/// Named-param struct for `Kernel.reshapeOpts` —
+/// `tl.reshape(src, shape, can_reorder=...)` plus the `efficient_layout`
+/// escape hatch.
+pub const ReshapeOpts = struct {
+    allow_reorder: bool = false,
+    efficient_layout: bool = false,
+};
+
+/// Named-param struct for `Kernel.dotOpts` — mirrors
+/// `tl.dot(a, b, acc, input_precision=..., max_num_imprecise_acc=...)`.
+pub const DotOpts = struct {
+    input_precision: ttir.InputPrecision = .ieee,
+    max_num_imprecise_acc: i32 = 0,
+};
+
+/// Named-param struct for `Kernel.fpToFpOpts`. If `rounding` is null, no
+/// rounding-mode attribute is emitted.
+pub const FpToFpOpts = struct {
+    rounding: ?ttir.RoundingMode = null,
+};
+
+/// Named-param struct for `Kernel.gatherOpts`.
+pub const GatherOpts = struct {
+    efficient_layout: bool = false,
+};
+
+/// Named-param struct for `Kernel.atomicRmwOpts` — mirrors
+/// `tl.atomic_add(ptr, val, mask=..., sem=..., scope=...)`.
+pub const AtomicRMWOpts = struct {
+    mask: ?Value = null,
+    sem: ttir.MemSemantic = .acq_rel,
+    scope: ttir.MemSyncScope = .gpu,
+};
+
+/// Named-param struct for `Kernel.atomicCasOpts`.
+pub const AtomicCasOpts = struct {
+    sem: ttir.MemSemantic = .acq_rel,
+    scope: ttir.MemSyncScope = .gpu,
+};
+
+/// Named-param struct for `Kernel.dotScaledOpts`.
+pub const DotScaledOpts = struct {
+    fast_math: bool = false,
+    lhs_k_pack: bool = true,
+    rhs_k_pack: bool = true,
+};
+
+/// Named-param struct for `Kernel.externElementwiseOpts`.
+pub const ExternElementwiseOpts = struct {
+    pure: bool = true,
+};
+
+/// Named-param struct for `Kernel.descriptorLoadOpts`.
+pub const DescriptorLoadOpts = struct {
+    cache: ttir.CacheModifier = .none,
+    evict: ttir.EvictionPolicy = .normal,
+};
+
+/// Named-param struct for `Kernel.elementwiseInlineAsmOpts` — mirrors
+/// `tl.inline_asm_elementwise(asm, constraints, args, dtype, is_pure=..., pack=...)`.
+pub const InlineAsmOpts = struct {
+    pure: bool = true,
+    packed_element: i32 = 1,
 };
 
 /// Typed arg struct for `Kernel.forLoop`. The ctx type is inferred from the
@@ -759,6 +848,28 @@ pub const Kernel = struct {
         return self.splat(v, ref.shape().constSlice());
     }
 
+    /// Symmetric counterpart to `broadcastLike`: lifts both sides and splats
+    /// the scalar one to match the tensor's shape (whichever side is scalar).
+    /// Used by fluent ops (`.add`, `.lt`, etc.) so that either `tensor.op(s)`
+    /// or `s.op(tensor)` work — matching Triton/NumPy's scalar↔tensor
+    /// ergonomics. Does *not* do NumPy size-1 rank unification; both sides
+    /// must already have matching shapes if both are tensors.
+    pub fn broadcastPair(self: *Kernel, a: anytype, b: anytype) struct { Value, Value } {
+        const A = @TypeOf(a);
+        const B = @TypeOf(b);
+        const av: Value = if (A == Value) a else switch (@typeInfo(A)) {
+            .comptime_int, .comptime_float => if (B == Value) self.constMatching(a, b.elemType()) else self.lift(a),
+            else => self.lift(a),
+        };
+        const bv: Value = if (B == Value) b else switch (@typeInfo(B)) {
+            .comptime_int, .comptime_float => if (A == Value) self.constMatching(b, a.elemType()) else self.lift(b),
+            else => self.lift(b),
+        };
+        if (av.isTensor() and !bv.isTensor()) return .{ av, self.splat(bv, av.shape().constSlice()) };
+        if (!av.isTensor() and bv.isTensor()) return .{ self.splat(av, bv.shape().constSlice()), bv };
+        return .{ av, bv };
+    }
+
     /// Reverse lookup: scalar MLIR type → DSL `DType`.
     fn mlirElemToDType(self: *const Kernel, elem: *const mlir.Type) DType {
         inline for (std.meta.fields(DType)) |f| {
@@ -828,7 +939,7 @@ pub const Kernel = struct {
         var shape: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
         for (0..shaped.rank()) |i| shape.appendAssumeCapacity(shaped.dimension(i));
         const zero = self.zeros(shape.constSlice(), dtype);
-        return self.loadOpts(ptr, .{ .mask = mask.inner, .other = zero.inner });
+        return self.loadOpts(ptr, .{ .mask = mask, .other = zero });
     }
 
     /// 2D broadcast helper. Matches `vec[:, None]` (axis=1) and `vec[None, :]`
@@ -979,8 +1090,10 @@ pub const Kernel = struct {
 
     /// `tt.load` with the full named-param set — `tl.load(ptr, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`.
     /// Result type is inferred from `ptr` the same way `load` does.
-    pub fn loadOpts(self: *Kernel, ptr: Value, opts: ttir.LoadOpts) Value {
-        return self.emit(ttir.load(self.ctx, ptr.inner, self.loadResultType(ptr), opts, self.loc()));
+    pub fn loadOpts(self: *Kernel, ptr: Value, opts: LoadOpts) Value {
+        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
+        const other_inner: ?*const mlir.Value = if (opts.other) |o| o.inner else null;
+        return self.emit(ttir.load(self.ctx, ptr.inner, self.loadResultType(ptr), mask_inner, other_inner, opts.cache, opts.evict, opts.is_volatile, self.loc()));
     }
 
     /// `tt.store` with defaulted options — `tl.store(ptr, value)` in Python.
@@ -990,8 +1103,9 @@ pub const Kernel = struct {
     }
 
     /// `tt.store` with the full named-param set — `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`.
-    pub fn storeOpts(self: *Kernel, ptr: Value, value: Value, opts: ttir.StoreOpts) void {
-        _ = ttir.store(self.ctx, ptr.inner, value.inner, opts, self.loc()).appendTo(self.currentBlock());
+    pub fn storeOpts(self: *Kernel, ptr: Value, value: Value, opts: StoreOpts) void {
+        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
+        _ = ttir.store(self.ctx, ptr.inner, value.inner, mask_inner, opts.cache, opts.evict, self.loc()).appendTo(self.currentBlock());
     }
 
     // ==================== arith: binary ====================
@@ -1143,8 +1257,8 @@ pub const Kernel = struct {
     }
     /// `tt.fp_to_fp` with the full named-param set (currently just
     /// `rounding`). `tl.cast(x, dtype, fp_downcast_rounding=...)` in Python.
-    pub fn fpToFpOpts(self: *Kernel, src: Value, out_dtype: DType, opts: ttir.FpToFpOpts) Value {
-        return self.emit(ttir.fp_to_fp(self.ctx, src.inner, self.swapElem(src, out_dtype), opts, self.loc()));
+    pub fn fpToFpOpts(self: *Kernel, src: Value, out_dtype: DType, opts: FpToFpOpts) Value {
+        return self.emit(ttir.fp_to_fp(self.ctx, src.inner, self.swapElem(src, out_dtype), opts.rounding, self.loc()));
     }
     /// `tt.clampf` with default `propagate_nan = .none` — `tl.clamp(x, min, max)`.
     /// Use `clampfOpts` to override NaN propagation.
@@ -1177,8 +1291,8 @@ pub const Kernel = struct {
     /// `tt.dot` with the full named-param set — matches `tl.dot(a, b, acc,
     /// input_precision=..., max_num_imprecise_acc=..., out_dtype=...)`.
     /// Result type = `c_acc.type_()`.
-    pub fn dotOpts(self: *Kernel, a: Value, b: Value, c_acc: Value, opts: ttir.DotOpts) Value {
-        return self.emit(ttir.dot(self.ctx, a.inner, b.inner, c_acc.inner, c_acc.type_(), opts, self.loc()));
+    pub fn dotOpts(self: *Kernel, a: Value, b: Value, c_acc: Value, opts: DotOpts) Value {
+        return self.emit(ttir.dot(self.ctx, a.inner, b.inner, c_acc.inner, c_acc.type_(), opts.input_precision, opts.max_num_imprecise_acc, self.loc()));
     }
 
     /// `tt.reshape` with default options — `tl.reshape(src, shape)`. Element
@@ -1191,9 +1305,9 @@ pub const Kernel = struct {
     /// `tt.reshape` with the full named-param set —
     /// `tl.reshape(src, shape, can_reorder=...)` plus the `efficient_layout`
     /// escape hatch. Element type preserved from `src`.
-    pub fn reshapeOpts(self: *Kernel, src: Value, new_shape: []const i64, opts: ttir.ReshapeOpts) Value {
+    pub fn reshapeOpts(self: *Kernel, src: Value, new_shape: []const i64, opts: ReshapeOpts) Value {
         const result_ty = mlir.rankedTensorType(new_shape, src.elemType());
-        return self.emit(ttir.reshape(self.ctx, src.inner, result_ty, opts, self.loc()));
+        return self.emit(ttir.reshape(self.ctx, src.inner, result_ty, opts.allow_reorder, opts.efficient_layout, self.loc()));
     }
 
     /// `tt.trans` — permute dimensions according to `order`. Result type must
@@ -1237,9 +1351,9 @@ pub const Kernel = struct {
 
     /// `tt.gather` with the full named-param set. Output shape = `indices`'
     /// shape, element type = `src`' element type.
-    pub fn gatherOpts(self: *Kernel, src: Value, indices: Value, axis: i32, opts: ttir.GatherOpts) Value {
+    pub fn gatherOpts(self: *Kernel, src: Value, indices: Value, axis: i32, opts: GatherOpts) Value {
         const result_ty = mlir.rankedTensorType(indices.shape().constSlice(), src.elemType());
-        return self.emit(ttir.gather(self.ctx, src.inner, indices.inner, axis, result_ty, opts, self.loc()));
+        return self.emit(ttir.gather(self.ctx, src.inner, indices.inner, axis, result_ty, opts.efficient_layout, self.loc()));
     }
 
     /// `tt.histogram` without a mask — `tl.histogram(src, num_bins)` in Python.
@@ -1270,8 +1384,9 @@ pub const Kernel = struct {
 
     /// `tt.atomic_rmw` with the full named-param set —
     /// `tl.atomic_add(ptr, val, mask=..., sem=..., scope=...)`.
-    pub fn atomicRmwOpts(self: *Kernel, rmw: ttir.RMWOp, ptr: Value, val: Value, opts_arg: ttir.AtomicRMWOpts) Value {
-        return self.emit(ttir.atomic_rmw(self.ctx, rmw, ptr.inner, val.inner, opts_arg, self.loc()));
+    pub fn atomicRmwOpts(self: *Kernel, rmw: ttir.RMWOp, ptr: Value, val: Value, opts: AtomicRMWOpts) Value {
+        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
+        return self.emit(ttir.atomic_rmw(self.ctx, rmw, ptr.inner, val.inner, mask_inner, opts.sem, opts.scope, self.loc()));
     }
 
     /// `tt.atomic_cas` with default sem/scope — `tl.atomic_cas(ptr, cmp, val)`.
@@ -1282,15 +1397,15 @@ pub const Kernel = struct {
 
     /// `tt.atomic_cas` with the full named-param set —
     /// `tl.atomic_cas(ptr, cmp, val, sem=..., scope=...)`.
-    pub fn atomicCasOpts(self: *Kernel, ptr: Value, cmp: Value, val: Value, opts_arg: ttir.AtomicCasOpts) Value {
-        return self.emit(ttir.atomic_cas(self.ctx, ptr.inner, cmp.inner, val.inner, opts_arg, self.loc()));
+    pub fn atomicCasOpts(self: *Kernel, ptr: Value, cmp: Value, val: Value, opts: AtomicCasOpts) Value {
+        return self.emit(ttir.atomic_cas(self.ctx, ptr.inner, cmp.inner, val.inner, opts.sem, opts.scope, self.loc()));
     }
 
     /// `tt.call` — call another tt.func in this module by symbol name.
     pub fn call(self: *Kernel, callee: []const u8, operands: []const Value, result_types: []const *const mlir.Type) []Value {
         var buf: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (operands) |v| buf.appendAssumeCapacity(v.inner);
-        const op = ttir.call(self.ctx, callee, buf.constSlice(), result_types, .{}, self.loc());
+        const op = ttir.call(self.ctx, callee, buf.constSlice(), result_types, null, null, self.loc());
         return self.emitMulti(op, result_types.len);
     }
 
@@ -1320,7 +1435,7 @@ pub const Kernel = struct {
         b_scale: ?Value,
         a_elem_type: ttir.ScaleDotElemType,
         b_elem_type: ttir.ScaleDotElemType,
-        opts: ttir.DotScaledOpts,
+        opts: DotScaledOpts,
     ) Value {
         const a_s: ?*const mlir.Value = if (a_scale) |s| s.inner else null;
         const b_s: ?*const mlir.Value = if (b_scale) |s| s.inner else null;
@@ -1334,7 +1449,9 @@ pub const Kernel = struct {
             a_elem_type,
             b_elem_type,
             c_acc.type_(),
-            opts,
+            opts.fast_math,
+            opts.lhs_k_pack,
+            opts.rhs_k_pack,
             self.loc(),
         ));
     }
@@ -1361,7 +1478,7 @@ pub const Kernel = struct {
         libname: []const u8,
         libpath: []const u8,
         symbol: []const u8,
-        opts: ttir.ExternElementwiseOpts,
+        opts: ExternElementwiseOpts,
     ) Value {
         var buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
         for (srcs) |s| buf.appendAssumeCapacity(s.inner);
@@ -1372,7 +1489,7 @@ pub const Kernel = struct {
             libname,
             libpath,
             symbol,
-            opts,
+            opts.pure,
             self.loc(),
         ));
     }
@@ -1448,12 +1565,12 @@ pub const Kernel = struct {
         indices: []const Value,
         shape: []const i64,
         dtype: DType,
-        opts: ttir.DescriptorLoadOpts,
+        opts: DescriptorLoadOpts,
     ) Value {
         var idx_buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
         for (indices) |i| idx_buf.appendAssumeCapacity(i.inner);
         const result_ty = mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
-        return self.emit(ttir.descriptor_load(self.ctx, desc.inner, idx_buf.constSlice(), result_ty, opts, self.loc()));
+        return self.emit(ttir.descriptor_load(self.ctx, desc.inner, idx_buf.constSlice(), result_ty, opts.cache, opts.evict, self.loc()));
     }
 
     /// `tt.descriptor_store` — TMA store.
@@ -1663,11 +1780,11 @@ pub const Kernel = struct {
         constraints: []const u8,
         args: []const Value,
         result_types: []const *const mlir.Type,
-        opts: ttir.InlineAsmOpts,
+        opts: InlineAsmOpts,
     ) []Value {
         var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
         for (args) |a| buf.appendAssumeCapacity(a.inner);
-        const op = ttir.elementwise_inline_asm(self.ctx, asm_string, constraints, buf.constSlice(), result_types, opts, self.loc());
+        const op = ttir.elementwise_inline_asm(self.ctx, asm_string, constraints, buf.constSlice(), result_types, opts.pure, opts.packed_element, self.loc());
         return self.emitMulti(op, result_types.len);
     }
 
@@ -2375,12 +2492,12 @@ test "ops_mlir parity: load_store_ops_scalar" {
     const other = k.lift(@as(f32, 0.0));
 
     const a = k.load(ptr);
-    const b = k.loadOpts(ptr, .{ .mask = mask.inner });
-    const c = k.loadOpts(ptr, .{ .mask = mask.inner, .other = other.inner });
+    const b = k.loadOpts(ptr, .{ .mask = mask });
+    const c = k.loadOpts(ptr, .{ .mask = mask, .other = other });
 
     k.store(ptr, a);
-    k.storeOpts(ptr, b, .{ .mask = mask.inner });
-    k.storeOpts(ptr, c, .{ .mask = mask.inner });
+    k.storeOpts(ptr, b, .{ .mask = mask });
+    k.storeOpts(ptr, c, .{ .mask = mask });
 
     const __ir = try k.finish(&.{}, std.testing.allocator); std.testing.allocator.free(__ir);
     try parityPrintAndVerify(ctx, k.module);
@@ -2631,7 +2748,7 @@ test "ops_mlir parity: descriptor_load" {
             const r = mlir.rankedTensorType(&.{128}, f32_);
             const c0 = arith.constant_int(c, 0, i32_, l);
             _ = c0.appendTo(entry);
-            _ = ttir.descriptor_load(c, entry.argument(0), &.{c0.result(0)}, r, .{}, l).appendTo(entry);
+            _ = ttir.descriptor_load(c, entry.argument(0), &.{c0.result(0)}, r, .none, .normal, l).appendTo(entry);
         }
     };
 
