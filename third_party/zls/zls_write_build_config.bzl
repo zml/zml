@@ -55,7 +55,7 @@ zls_construct_zig_module_info = aspect(
 def format_main_file(main):
     prefix = "@@__BUILD_WORKSPACE_DIRECTORY__@@/"
     if (main.startswith("bazel-out/") or main.startswith("external/")):
-        prefix = "@@__BAZEL_EXECUTION_ROOT__@@/"
+        prefix = "@@__BUILD_EXECROOT__@@/"
     return prefix + main
 
 def _zls_write_build_config_impl(ctx):
