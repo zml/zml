@@ -165,9 +165,9 @@ pub const mosaic_tpu = struct {
         pub fn init(opts: Options) Parameters {
             return .{
                 .opts = opts,
-                .block_table = zml.Tensor.init(.{ opts.batch_size, opts.max_num_pages }, .i32),
-                .seq_lens = zml.Tensor.init(.{opts.batch_size}, .i32),
-                .query_start_len = zml.Tensor.init(.{ .n = opts.batch_size + 1 }, .i32),
+                .block_table = zml.Tensor.init(.{ .b = opts.batch_size, .p = opts.max_num_pages }, .i32),
+                .seq_lens = zml.Tensor.init(.{ .b = opts.batch_size }, .i32),
+                .query_start_len = zml.Tensor.init(.{ .b = opts.batch_size + 1 }, .i32),
             };
         }
 
@@ -229,13 +229,13 @@ pub const mosaic_tpu = struct {
     }
 
     fn activeSequenceCount(query_start_len: zml.Tensor) zml.Tensor {
-        const start = query_start_len.slice1d(0, .{ .end = query_start_len.dim(0) - 1 });
-        const end = query_start_len.slice1d(0, .{ .start = 1 });
+        const start = query_start_len.slice1d(.b, .{ .end = query_start_len.dim(.b) - 1 });
+        const end = query_start_len.slice1d(.b, .{ .start = 1 });
         const query_lens = end.sub(start);
         return query_lens
             .cmp(.GT, zml.Tensor.constant(query_lens.dtype().zero()).broad(query_lens.shape()))
             .convert(.i32)
-            .sum(0)
+            .sum(.b)
             .reshape(zml.Shape.init(.{1}, .i32));
     }
 
@@ -298,15 +298,15 @@ pub const mosaic_tpu = struct {
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor, kernel_head_dim: i64) PreparedInputs {
         const q_ragged = alignHeadDimForKernel(q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model }), kernel_head_dim);
         const kv_pages_partitioned = alignHeadDimForKernel(kv_pages.withPartitioning(.{ .hkv = .model }), kernel_head_dim);
-        const query_start_len = parameters.query_start_len.withPartitioning(.{ .n = .replicated });
+        const query_start_len = parameters.query_start_len.withPartitioning(.{ .b = .replicated });
 
         // Note
         // activeSequenceCount could probably be computed when preparing the inputs and injected through Parameters, but we'll keep that for later.
         return .{
             .q = q_ragged,
             .kv_pages = kv_pages_partitioned,
-            .seq_lens = parameters.seq_lens.withPartitioning(.{ ._0 = .replicated }),
-            .block_table = parameters.block_table.withPartitioning(.{ ._0 = .replicated, ._1 = .replicated }),
+            .seq_lens = parameters.seq_lens.withPartitioning(.{ .b = .replicated }),
+            .block_table = parameters.block_table.withPartitioning(.{ .b = .replicated, .p = .replicated }),
             .query_start_len = query_start_len,
             .num_seqs = activeSequenceCount(query_start_len).withPartitioning(.{ ._0 = .replicated }),
         };
@@ -323,7 +323,7 @@ pub const mosaic_tpu = struct {
         const block_table_shape = prepared_inputs.block_table.shape();
 
         const q_token_count = if (q_shape.hasTag(.q) != null) q_shape.dim(.q) else q_shape.dim(.b);
-        const max_num_seqs = block_table_shape.dim(0);
+        const max_num_seqs = block_table_shape.dim(.b);
         const num_q_heads = q_shape.dim(.h);
         stdx.debug.assert(@mod(kv_pages_shape.dim(.hkv), 2) == 0, "Expected fused KV pages .hkv dimension to be even, got {}", .{kv_pages_shape.dim(.hkv)});
         const num_kv_heads = std.math.divExact(i64, kv_pages_shape.dim(.hkv), 2) catch |err| switch (err) {
