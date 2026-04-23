@@ -21,15 +21,263 @@ const math = dialects.math;
 const scf = dialects.scf;
 const ttir = dialects.ttir;
 
-/// A handle to an MLIR value inside the kernel body. Thin wrapper around
-/// `*const mlir.Value` that carries a `type_()` helper for convenience.
+/// A handle to an MLIR value inside the kernel body. Carries an optional
+/// back-pointer to its owning `Kernel` so fluent methods (`a.add(b)`, `a.lt(b)`,
+/// `a.to(.f32)`, …) can emit new ops without a second argument. `kernel` is
+/// populated by `emit`/`emitMulti`/`arg`; values constructed by hand may leave
+/// it `null` and must use the explicit `Kernel.*` builders.
 pub const Value = struct {
     inner: *const mlir.Value,
+    kernel: ?*Kernel = null,
+
+    pub const Shape = stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK);
 
     pub fn type_(self: Value) *const mlir.Type {
         return self.inner.type_();
     }
+
+    fn kern(self: Value) *Kernel {
+        return self.kernel orelse @panic("Value has no owning kernel; use Kernel.* helpers instead");
+    }
+
+    /// Element type of a tensor value, or the value's own type if scalar.
+    pub fn elemType(self: Value) *const mlir.Type {
+        if (self.type_().isA(mlir.ShapedType)) |shaped| return shaped.elementType();
+        return self.type_();
+    }
+
+    /// True when this value is a ranked tensor (rank ≥ 0), false for scalars.
+    pub fn isTensor(self: Value) bool {
+        return self.type_().isA(mlir.ShapedType) != null;
+    }
+
+    /// Rank of this value. Scalars have rank 0.
+    pub fn rank(self: Value) usize {
+        if (self.type_().isA(mlir.ShapedType)) |shaped| return shaped.rank();
+        return 0;
+    }
+
+    /// `i`-th dim size of a tensor value; traps on scalar.
+    pub fn dim(self: Value, i: usize) i64 {
+        return self.type_().isA(mlir.ShapedType).?.dimension(i);
+    }
+
+    /// Shape as a stack-allocated BoundedArray. Use `.constSlice()` for `[]const i64`.
+    pub fn shape(self: Value) Shape {
+        var out: Shape = .{};
+        if (self.type_().isA(mlir.ShapedType)) |shaped| {
+            const r = shaped.rank();
+            for (0..r) |i| out.appendAssumeCapacity(shaped.dimension(i));
+        }
+        return out;
+    }
+
+    /// True if the element type is a floating-point type (f16/bf16/f32/f64/fp8/…).
+    pub fn isFloatElem(self: Value) bool {
+        const et = self.elemType();
+        inline for (std.meta.fields(mlir.FloatTypes)) |f| {
+            if (et.isA(mlir.FloatType(@field(mlir.FloatTypes, f.name))) != null) return true;
+        }
+        return false;
+    }
+
+    /// True if the element type is an integer type.
+    pub fn isIntElem(self: Value) bool {
+        return self.elemType().isA(mlir.IntegerType) != null;
+    }
+
+    // -------- fluent arithmetic (int/float auto-dispatch from elem type) --------
+
+    pub fn add(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.addf(self, r) else k.addi(self, r);
+    }
+
+    pub fn sub(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.subf(self, r) else k.subi(self, r);
+    }
+
+    pub fn mul(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.mulf(self, r) else k.muli(self, r);
+    }
+
+    pub fn div(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.divf(self, r) else k.divsi(self, r);
+    }
+
+    pub fn rem(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.remf(self, r) else k.remsi(self, r);
+    }
+
+    pub fn cdiv(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return k.ceildivsi(self, r);
+    }
+
+    pub fn bitAnd(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return k.andi(self, r);
+    }
+
+    pub fn bitOr(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return k.ori(self, r);
+    }
+
+    pub fn min(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.minimumf(self, r) else k.minsi(self, r);
+    }
+
+    pub fn max(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.maximumf(self, r) else k.maxsi(self, r);
+    }
+
+    // -------- fluent comparisons (int predicates default; float uses cmpf) --------
+
+    pub fn lt(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.olt, self, r) else k.cmpi(.slt, self, r);
+    }
+    pub fn le(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.ole, self, r) else k.cmpi(.sle, self, r);
+    }
+    pub fn gt(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.ogt, self, r) else k.cmpi(.sgt, self, r);
+    }
+    pub fn ge(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.oge, self, r) else k.cmpi(.sge, self, r);
+    }
+    pub fn eq(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.oeq, self, r) else k.cmpi(.eq, self, r);
+    }
+    pub fn ne(self: Value, rhs: anytype) Value {
+        const k = self.kern();
+        const r = k.broadcastLike(rhs, self);
+        return if (self.isFloatElem()) k.cmpf(.one, self, r) else k.cmpi(.ne, self, r);
+    }
+
+    // -------- fluent casts (`to`) --------
+
+    /// Cast to `dtype`, preserving shape. Auto-picks extsi/trunci/extf/truncf/
+    /// sitofp/fptosi/fpToFp based on the current and target kinds.
+    pub fn to(self: Value, dtype: DType) Value {
+        const k = self.kern();
+        const target_elem = dtype.toMlir(k.ctx);
+        const cur_elem = self.elemType();
+        if (cur_elem.eql(target_elem)) return self;
+
+        const out_ty: *const mlir.Type = if (self.isTensor())
+            mlir.rankedTensorType(self.shape().constSlice(), target_elem)
+        else
+            target_elem;
+
+        const cur_is_float = self.isFloatElem();
+        const tgt_is_float = isFloatDtype(dtype);
+
+        if (cur_is_float and tgt_is_float) return k.fpToFp(self, out_ty, .{ .rounding = .rtne });
+        if (cur_is_float and !tgt_is_float) return k.fptosi(self, out_ty);
+        if (!cur_is_float and tgt_is_float) return k.sitofp(self, out_ty);
+        // int → int: compare bit widths.
+        const cur_bw = intElemBitwidth(k.ctx, cur_elem);
+        const tgt_bw = dtypeBitwidth(dtype);
+        if (tgt_bw > cur_bw) return k.extsi(self, out_ty);
+        if (tgt_bw < cur_bw) return k.trunci(self, out_ty);
+        return k.arithBitcast(self, out_ty);
+    }
+
+    // -------- shape manipulation --------
+
+    /// Expand this 1-D vector to a 2-D `[m, n]` tensor by broadcasting along
+    /// the axis opposite to `axis`. `axis=0` keeps the value as a column
+    /// (replicates across rows); `axis=1` keeps it as a row. Matches Python's
+    /// `vec[:, None]` (axis=1) / `vec[None, :]` (axis=0) idioms.
+    pub fn broadcast2d(self: Value, axis: i32, m: i64, n: i64) Value {
+        const k = self.kern();
+        const expanded: [2]i64 = if (axis == 0) .{ 1, n } else .{ m, 1 };
+        const exp = k.expandDims(self, axis, &expanded);
+        const target: [2]i64 = .{ m, n };
+        return k.broadcast(exp, &target);
+    }
+
+    /// Splat this scalar value to a tensor of the given shape.
+    pub fn splatTo(self: Value, shape_: []const i64) Value {
+        return self.kern().splat(self, shape_);
+    }
+
+    /// `addptr(self, offset)` where offset can be a Value or comptime int.
+    pub fn addPtr(self: Value, offset: anytype) Value {
+        const k = self.kern();
+        const T = @TypeOf(offset);
+        const off: Value = if (T == Value) offset else k.lift(offset);
+        return k.addptr(self, off);
+    }
 };
+
+fn isFloatDtype(dt: DType) bool {
+    return switch (dt) {
+        .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => true,
+        else => false,
+    };
+}
+
+fn intElemBitwidth(ctx: *mlir.Context, ty: *const mlir.Type) usize {
+    inline for (std.meta.fields(mlir.IntegerTypes)) |f| {
+        const it = @field(mlir.IntegerTypes, f.name);
+        if (ty.eql(mlir.integerType(ctx, it))) return it.bitwidth();
+    }
+    return 0;
+}
+
+fn dtypeBitwidth(dt: DType) usize {
+    return switch (dt) {
+        .i1 => 1,
+        .i8 => 8,
+        .i16 => 16,
+        .i32 => 32,
+        .i64 => 64,
+        .f16, .bf16 => 16,
+        .f32 => 32,
+        .f64 => 64,
+        .f8e4m3fn, .f8e5m2 => 8,
+    };
+}
+
+/// Compute the result type of `reduce(src, axis)`: drop dim `axis` from `src_shape`.
+/// When the source is 1-D, the result is a scalar (element type only).
+fn computeReducedType(ctx: *mlir.Context, src_shape: []const i64, axis: i32, elem: *const mlir.Type) *const mlir.Type {
+    if (src_shape.len <= 1) return elem;
+    var out: stdx.BoundedArray(i64, mlir.ShapedType.MAX_RANK) = .{};
+    for (src_shape, 0..) |d, i| {
+        if (@as(i32, @intCast(i)) != axis) out.appendAssumeCapacity(d);
+    }
+    _ = ctx;
+    return mlir.rankedTensorType(out.constSlice(), elem);
+}
 
 /// Element type on a kernel parameter: integer, float, or an index-friendly int.
 pub const DType = enum {
@@ -84,9 +332,31 @@ pub const ArgSpec = struct {
             dtype: DType,
         },
     };
+
+    /// Terse constructor: `arg.ptr("a_ptr", .f32)` for a `!tt.ptr<f32>` arg.
+    pub fn ptr(name: []const u8, dtype: DType) ArgSpec {
+        return .{ .name = name, .kind = .{ .ptr = .{ .dtype = dtype } } };
+    }
+
+    /// Terse constructor: `arg.scalar("n", .i64)` for a plain scalar arg.
+    pub fn scalar(name: []const u8, dtype: DType) ArgSpec {
+        return .{ .name = name, .kind = .{ .scalar = dtype } };
+    }
+
+    /// Terse constructor: `arg.tensor("x", &.{512}, .f32)` for a ranked tensor arg.
+    pub fn tensor(name: []const u8, shape: []const i64, dtype: DType) ArgSpec {
+        return .{ .name = name, .kind = .{ .tensor = .{ .shape = shape, .dtype = dtype } } };
+    }
 };
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
+
+/// Key for the entry-block constant cache: DSL dtype + scalar value (either
+/// an `i64` int or `f64` float, which together cover every supported DType).
+const ConstKey = struct {
+    dtype: DType,
+    value: union(enum) { int: i64, float: f64 },
+};
 
 /// The main DSL builder. Create with `init`, populate the body with helpers,
 /// then call `finish` to get the IR string.
@@ -98,6 +368,11 @@ pub const Kernel = struct {
     func_op: *mlir.Operation,
     entry_block: *mlir.Block,
     block_stack: stdx.BoundedArray(*mlir.Block, 16) = .{},
+    /// Deduplication cache for constants emitted at the entry block. Constants
+    /// built inside nested regions (`forLoop` / `ifThenElse` bodies, reduce
+    /// combiners, …) bypass the cache so their defining op still dominates
+    /// their uses. Cleared on `deinit`.
+    const_cache: std.AutoHashMapUnmanaged(ConstKey, Value) = .{},
 
     /// Create a sub-module containing a single public `tt.func` of the given
     /// name, signature, and result types. The entry block is populated with
@@ -168,13 +443,31 @@ pub const Kernel = struct {
     }
 
     pub fn deinit(self: *Kernel) void {
+        self.const_cache.deinit(self.allocator);
         self.module.deinit();
         self.arena.deinit();
     }
 
+    /// True when the next op will be appended to the entry block (no active
+    /// nested region). Constants built here dominate the whole function and
+    /// can safely be shared via `const_cache`.
+    fn atEntryBlock(self: *const Kernel) bool {
+        return self.block_stack.len == 0;
+    }
+
+    fn cacheLookup(self: *Kernel, key: ConstKey) ?Value {
+        if (!self.atEntryBlock()) return null;
+        return self.const_cache.get(key);
+    }
+
+    fn cacheInsert(self: *Kernel, key: ConstKey, v: Value) void {
+        if (!self.atEntryBlock()) return;
+        self.const_cache.put(self.allocator, key, v) catch {};
+    }
+
     /// The i-th entry block argument (i.e. `%argN`).
-    pub fn arg(self: *const Kernel, i: usize) Value {
-        return .{ .inner = self.entry_block.argument(i) };
+    pub fn arg(self: *Kernel, i: usize) Value {
+        return .{ .inner = self.entry_block.argument(i), .kernel = self };
     }
 
     pub fn pushBlock(self: *Kernel, b: *mlir.Block) void {
@@ -195,7 +488,7 @@ pub const Kernel = struct {
     /// Emit `op` into the current block and return its first result as a Value.
     pub fn emit(self: *Kernel, op: *mlir.Operation) Value {
         _ = op.appendTo(self.currentBlock());
-        return .{ .inner = op.result(0) };
+        return .{ .inner = op.result(0), .kernel = self };
     }
 
     /// Emit `op` and return the first `n` results. Allocated in the kernel's
@@ -203,7 +496,7 @@ pub const Kernel = struct {
     pub fn emitMulti(self: *Kernel, op: *mlir.Operation, n: usize) []Value {
         _ = op.appendTo(self.currentBlock());
         const out = self.arena.allocator().alloc(Value, n) catch @panic("Kernel.emitMulti OOM");
-        for (0..n) |i| out[i] = .{ .inner = op.result(i) };
+        for (0..n) |i| out[i] = .{ .inner = op.result(i), .kernel = self };
         return out;
     }
 
@@ -236,21 +529,43 @@ pub const Kernel = struct {
     // ==================== constants ====================
 
     pub fn constI32(self: *Kernel, value: i32) Value {
-        const ty = mlir.integerType(self.ctx, .i32);
-        return self.emit(arith.constant_int(self.ctx, value, ty, self.loc()));
+        return self.cachedInt(.i32, value);
     }
 
     pub fn constI64(self: *Kernel, value: i64) Value {
-        const ty = mlir.integerType(self.ctx, .i64);
-        return self.emit(arith.constant_int(self.ctx, value, ty, self.loc()));
+        return self.cachedInt(.i64, value);
     }
 
     pub fn constF32(self: *Kernel, value: f32) Value {
-        return self.emit(arith.constant_float(self.ctx, @floatCast(value), .f32, self.loc()));
+        return self.cachedFloat(.f32, @floatCast(value));
     }
 
     pub fn constF64(self: *Kernel, value: f64) Value {
-        return self.emit(arith.constant_float(self.ctx, value, .f64, self.loc()));
+        return self.cachedFloat(.f64, value);
+    }
+
+    fn cachedInt(self: *Kernel, dtype: DType, value: i64) Value {
+        const key: ConstKey = .{ .dtype = dtype, .value = .{ .int = value } };
+        if (self.cacheLookup(key)) |v| return v;
+        const ty = dtype.toMlir(self.ctx);
+        const v = self.emit(arith.constant_int(self.ctx, value, ty, self.loc()));
+        self.cacheInsert(key, v);
+        return v;
+    }
+
+    fn cachedFloat(self: *Kernel, dtype: DType, value: f64) Value {
+        const key: ConstKey = .{ .dtype = dtype, .value = .{ .float = value } };
+        if (self.cacheLookup(key)) |v| return v;
+        const v = switch (dtype) {
+            .f32 => self.emit(arith.constant_float(self.ctx, value, .f32, self.loc())),
+            .f64 => self.emit(arith.constant_float(self.ctx, value, .f64, self.loc())),
+            else => blk: {
+                const f32_scalar = self.cachedFloat(.f32, value);
+                break :blk self.fpToFp(f32_scalar, dtype.toMlir(self.ctx), .{ .rounding = .rtne });
+            },
+        };
+        self.cacheInsert(key, v);
+        return v;
     }
 
     // ==================== ranges and shape manipulation ====================
@@ -263,12 +578,194 @@ pub const Kernel = struct {
         return self.emit(ttir.make_range(self.ctx, start, end, ty, self.loc()));
     }
 
-    /// `tt.splat` — broadcast a scalar to a tensor of the given shape. Element
-    /// type is taken from the input value.
-    pub fn splat(self: *Kernel, value: Value, shape: []const i64) Value {
-        const elem = value.type_();
+    /// `tl.arange(start, end)` with optional dtype promotion — mirrors Python
+    /// Triton's two-argument signature. Pass `.i32` for the native range type;
+    /// any other dtype triggers an extsi/trunci/sitofp as appropriate.
+    pub fn arange(self: *Kernel, start: i32, end: i32, dtype: DType) Value {
+        const r = self.makeRange(start, end);
+        if (dtype == .i32) return r;
+        const len: i64 = @intCast(end - start);
+        const out_ty = self.tensorTy(&.{len}, dtype);
+        return switch (dtype) {
+            .i64 => self.extsi(r, out_ty),
+            .i16, .i8 => self.trunci(r, out_ty),
+            .f16, .bf16, .f32, .f64, .f8e4m3fn, .f8e5m2 => self.sitofp(r, out_ty),
+            else => @panic("Kernel.arange: unsupported dtype"),
+        };
+    }
+
+    /// `tt.splat` with polymorphic input: accepts a Value, a `comptime_int`, or
+    /// a `comptime_float`. Comptime scalars are auto-lifted to a constant of
+    /// the matching dtype (i32 for int, f32 for float) before splatting.
+    pub fn splat(self: *Kernel, value: anytype, shape: []const i64) Value {
+        const T = @TypeOf(value);
+        const v: Value = if (T == Value) value else self.lift(value);
+        const elem = v.type_();
         const ty = mlir.rankedTensorType(shape, elem);
-        return self.emit(ttir.splat(self.ctx, value.inner, ty, self.loc()));
+        return self.emit(ttir.splat(self.ctx, v.inner, ty, self.loc()));
+    }
+
+    /// Lift a comptime int/float (or pass-through Value) to a scalar DSL Value.
+    /// For runtime ints, the target DSL dtype follows the source's bitwidth
+    /// (i8/i16/i32 → `i32`, i64 → `i64`). Comptime ints default to `i32`.
+    /// Floats always lift to `f32`. To target a specific dtype, use
+    /// `constInt(dt, v)` / `constFloat(dt, v)`.
+    pub fn lift(self: *Kernel, value: anytype) Value {
+        const T = @TypeOf(value);
+        if (T == Value) return value;
+        return switch (@typeInfo(T)) {
+            .comptime_int => self.constI32(@intCast(value)),
+            .int => |info| if (info.bits > 32) self.constI64(@intCast(value)) else self.constI32(@intCast(value)),
+            .comptime_float, .float => self.constF32(@floatCast(value)),
+            else => @compileError("Kernel.lift: unsupported type " ++ @typeName(T)),
+        };
+    }
+
+    /// Lift `value` to a Value and — if `ref` is a tensor — splat it to match
+    /// `ref`'s shape. For *comptime* scalars, the lifted constant's element
+    /// type follows `ref`'s element type (so `v.mul(16)` matches whatever int/
+    /// float kind `v` is). For runtime Zig scalars, the source width is
+    /// preserved — pass `@as(i32, x)` vs `@as(i64, x)` to control the lift.
+    pub fn broadcastLike(self: *Kernel, value: anytype, ref: Value) Value {
+        const T = @TypeOf(value);
+        const v: Value = if (T == Value) value else switch (@typeInfo(T)) {
+            .comptime_int, .comptime_float => self.constMatching(value, ref.elemType()),
+            else => self.lift(value),
+        };
+        if (!ref.isTensor()) return v;
+        if (v.isTensor()) return v;
+        return self.splat(v, ref.shape().constSlice());
+    }
+
+    /// Build an arith.constant of the given MLIR element type from a Zig numeric.
+    /// Picks between integer/float codegen by inspecting the target type, and
+    /// re-uses a cached constant at the entry block when possible.
+    pub fn constMatching(self: *Kernel, value: anytype, elem: *const mlir.Type) Value {
+        const T = @TypeOf(value);
+        // Target is integer? find matching DSL DType and delegate to cachedInt.
+        inline for (std.meta.fields(DType)) |f| {
+            const dt = @field(DType, f.name);
+            if (!isFloatDtype(dt)) {
+                if (elem.eql(dt.toMlir(self.ctx))) {
+                    const v64: i64 = switch (@typeInfo(T)) {
+                        .comptime_int, .int => @intCast(value),
+                        .comptime_float, .float => @intFromFloat(value),
+                        else => @compileError("constMatching: unsupported scalar " ++ @typeName(T)),
+                    };
+                    return self.cachedInt(dt, v64);
+                }
+            }
+        }
+        // Float target.
+        const v_f64: f64 = switch (@typeInfo(T)) {
+            .comptime_int, .int => @floatFromInt(value),
+            .comptime_float, .float => @floatCast(value),
+            else => @compileError("constMatching: unsupported scalar " ++ @typeName(T)),
+        };
+        inline for (std.meta.fields(DType)) |f| {
+            const dt = @field(DType, f.name);
+            if (isFloatDtype(dt)) {
+                if (elem.eql(dt.toMlir(self.ctx))) return self.cachedFloat(dt, v_f64);
+            }
+        }
+        @panic("constMatching: element type not a recognized DSL DType");
+    }
+
+    /// `arith.constant` of the given DSL dtype. Cached at the entry block.
+    pub fn constInt(self: *Kernel, dtype: DType, value: i64) Value {
+        return self.cachedInt(dtype, value);
+    }
+
+    /// `arith.constant` of the given DSL float dtype. Cached at the entry block.
+    /// For sub-f32 targets (f16/bf16/f8…), emits an f32 constant first and
+    /// then `tt.fp_to_fp` with `rtne` rounding.
+    pub fn constFloat(self: *Kernel, dtype: DType, value: f64) Value {
+        return self.cachedFloat(dtype, value);
+    }
+
+    /// Zero-valued tensor of the given shape and dtype.
+    pub fn zeros(self: *Kernel, shape: []const i64, dtype: DType) Value {
+        const scalar = if (isFloatDtype(dtype)) self.constFloat(dtype, 0.0) else self.constInt(dtype, 0);
+        return self.splat(scalar, shape);
+    }
+
+    /// One-valued tensor of the given shape and dtype.
+    pub fn ones(self: *Kernel, shape: []const i64, dtype: DType) Value {
+        const scalar = if (isFloatDtype(dtype)) self.constFloat(dtype, 1.0) else self.constInt(dtype, 1);
+        return self.splat(scalar, shape);
+    }
+
+    /// `tt.load` of a single scalar from a `!tt.ptr<T>`. Convenience wrapper
+    /// around `load(ptr, scalarTy(dt), .{})`.
+    pub fn loadScalar(self: *Kernel, ptr: Value, dtype: DType) Value {
+        return self.load(ptr, self.scalarTy(dtype), .{});
+    }
+
+    /// `tt.load` of a tensor, with a mask and an implicit zero "other". The
+    /// "other" is auto-created in the right dtype and splat to `shape`.
+    /// Matches Python `tl.load(ptr, mask=mask, other=0)`.
+    pub fn loadMasked(self: *Kernel, ptr: Value, shape: []const i64, dtype: DType, mask: Value) Value {
+        const ty = self.tensorTy(shape, dtype);
+        const zero = self.zeros(shape, dtype);
+        return self.load(ptr, ty, .{ .mask = mask.inner, .other = zero.inner });
+    }
+
+    /// 2D broadcast helper. Matches `vec[:, None]` (axis=1) and `vec[None, :]`
+    /// (axis=0) Python idioms. Grows a 1-D vector into a `[m, n]` tensor.
+    pub fn broadcast2d(_: *Kernel, vec: Value, axis: i32, m: i64, n: i64) Value {
+        return vec.broadcast2d(axis, m, n);
+    }
+
+    /// 2-D mask from two 1-D conditions. Equivalent to
+    /// `cond_m[:, None] & cond_n[None, :]` in Python. `cond_m` has length `m`,
+    /// `cond_n` has length `n`; result is `[m, n] x i1`.
+    pub fn mask2d(self: *Kernel, cond_m: Value, cond_n: Value, m: i64, n: i64) Value {
+        const cm2 = cond_m.broadcast2d(1, m, n);
+        const cn2 = cond_n.broadcast2d(0, m, n);
+        return self.andi(cm2, cn2);
+    }
+
+    /// `reduce` with an internal adder — `tl.sum(src, axis)`.
+    pub fn reduceSum(self: *Kernel, src: Value, axis: i32) Value {
+        const elem = src.elemType();
+        const shape = src.shape();
+        const result_ty: *const mlir.Type = computeReducedType(self.ctx, shape.constSlice(), axis, elem);
+        const is_float = src.isFloatElem();
+        const Combiner = struct {
+            is_float: bool,
+            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
+                return if (ctx.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
+            }
+        };
+        return self.reduce(src, axis, elem, result_ty, Combiner.combine, Combiner{ .is_float = is_float });
+    }
+
+    /// `reduce` with an internal maximum — `tl.max(src, axis)`.
+    pub fn reduceMax(self: *Kernel, src: Value, axis: i32) Value {
+        const elem = src.elemType();
+        const shape = src.shape();
+        const result_ty: *const mlir.Type = computeReducedType(self.ctx, shape.constSlice(), axis, elem);
+        const is_float = src.isFloatElem();
+        const Combiner = struct {
+            is_float: bool,
+            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
+                return if (ctx.is_float) kk.maximumf(lhs, rhs) else kk.maxsi(lhs, rhs);
+            }
+        };
+        return self.reduce(src, axis, elem, result_ty, Combiner.combine, Combiner{ .is_float = is_float });
+    }
+
+    /// `scan` with addition — `tl.cumsum(src, axis)`.
+    pub fn scanSum(self: *Kernel, src: Value, axis: i32, reverse: bool) Value {
+        const elem = src.elemType();
+        const is_float = src.isFloatElem();
+        const Combiner = struct {
+            is_float: bool,
+            fn combine(kk: *Kernel, lhs: Value, rhs: Value, ctx: anytype) Value {
+                return if (ctx.is_float) kk.addf(lhs, rhs) else kk.addi(lhs, rhs);
+            }
+        };
+        return self.scan(src, axis, reverse, elem, src.type_(), Combiner.combine, Combiner{ .is_float = is_float });
     }
 
     /// `tt.expand_dims` — insert a size-1 axis at `axis`.
@@ -493,8 +990,8 @@ pub const Kernel = struct {
         const op = ttir.split(self.ctx, src.inner, result_type, self.loc());
         _ = op.appendTo(self.currentBlock());
         return .{
-            .{ .inner = op.result(0) },
-            .{ .inner = op.result(1) },
+            .{ .inner = op.result(0), .kernel = self },
+            .{ .inner = op.result(1), .kernel = self },
         };
     }
 
@@ -738,7 +1235,7 @@ pub const Kernel = struct {
     pub fn sincos(self: *Kernel, x: Value) [2]Value {
         const op = math.sincos(self.ctx, x.inner, self.loc());
         _ = op.appendTo(self.currentBlock());
-        return .{ .{ .inner = op.result(0) }, .{ .inner = op.result(1) } };
+        return .{ .{ .inner = op.result(0), .kernel = self }, .{ .inner = op.result(1), .kernel = self } };
     }
     /// `math.fpowi` — float base, integer exponent.
     pub fn fpowi(self: *Kernel, base: Value, power: Value) Value {
@@ -792,7 +1289,7 @@ pub const Kernel = struct {
 
         self.pushBlock(body_block);
         var block_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..scalar_arg_types.len) |i| block_args.appendAssumeCapacity(.{ .inner = body_block.argument(i) });
+        for (0..scalar_arg_types.len) |i| block_args.appendAssumeCapacity(.{ .inner = body_block.argument(i), .kernel = self });
         const out_vals: []const Value = body_fn(self, block_args.constSlice(), body_ctx);
         var ret_vals: stdx.BoundedArray(*const mlir.Value, 16) = .{};
         for (out_vals) |v| ret_vals.appendAssumeCapacity(v.inner);
@@ -863,7 +1360,7 @@ pub const Kernel = struct {
 
         self.pushBlock(body_block);
         var iv_args: stdx.BoundedArray(Value, 16) = .{};
-        for (0..lbs.len) |i| iv_args.appendAssumeCapacity(.{ .inner = body_block.argument(i) });
+        for (0..lbs.len) |i| iv_args.appendAssumeCapacity(.{ .inner = body_block.argument(i), .kernel = self });
         const reduce_operands: []const Value = body_fn(self, iv_args.constSlice(), body_ctx);
         std.debug.assert(reduce_operands.len == reduction_result_types.len);
 
@@ -877,8 +1374,8 @@ pub const Kernel = struct {
             const arg_locs: [2]*const mlir.Location = .{ self.loc(), self.loc() };
             const red_block = mlir.Block.init(&.{ arg_ty, arg_ty }, &arg_locs);
             self.pushBlock(red_block);
-            const lhs_v: Value = .{ .inner = red_block.argument(0) };
-            const rhs_v: Value = .{ .inner = red_block.argument(1) };
+            const lhs_v: Value = .{ .inner = red_block.argument(0), .kernel = self };
+            const rhs_v: Value = .{ .inner = red_block.argument(1), .kernel = self };
             const combined: Value = comb(self, lhs_v, rhs_v, body_ctx);
             _ = scf.reduce_return(self.ctx, combined.inner, self.loc()).appendTo(red_block);
             self.popBlock();
@@ -910,7 +1407,7 @@ pub const Kernel = struct {
         _ = op.appendTo(self.currentBlock());
 
         const out = self.arena.allocator().alloc(Value, reduction_result_types.len) catch @panic("Kernel.parallel OOM");
-        for (0..reduction_result_types.len) |i| out[i] = .{ .inner = op.result(i) };
+        for (0..reduction_result_types.len) |i| out[i] = .{ .inner = op.result(i), .kernel = self };
         return out;
     }
 
@@ -932,15 +1429,15 @@ pub const Kernel = struct {
         const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
 
         self.pushBlock(region);
-        const lhs: Value = .{ .inner = region.argument(0) };
-        const rhs: Value = .{ .inner = region.argument(1) };
+        const lhs: Value = .{ .inner = region.argument(0), .kernel = self };
+        const rhs: Value = .{ .inner = region.argument(1), .kernel = self };
         const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
         _ = ttir.reduce_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
         self.popBlock();
 
         const op = ttir.reduce(self.ctx, &.{src.inner}, axis, region, &.{result_ty}, self.loc());
         _ = op.appendTo(self.currentBlock());
-        return .{ .inner = op.result(0) };
+        return .{ .inner = op.result(0), .kernel = self };
     }
 
     /// `tt.scan` along `axis`, single-input. `combine_fn(k, lhs, rhs, body_ctx)`
@@ -958,15 +1455,15 @@ pub const Kernel = struct {
         const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
 
         self.pushBlock(region);
-        const lhs: Value = .{ .inner = region.argument(0) };
-        const rhs: Value = .{ .inner = region.argument(1) };
+        const lhs: Value = .{ .inner = region.argument(0), .kernel = self };
+        const rhs: Value = .{ .inner = region.argument(1), .kernel = self };
         const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
         _ = ttir.scan_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
         self.popBlock();
 
         const op = ttir.scan(self.ctx, &.{src.inner}, axis, reverse, region, &.{result_ty}, self.loc());
         _ = op.appendTo(self.currentBlock());
-        return .{ .inner = op.result(0) };
+        return .{ .inner = op.result(0), .kernel = self };
     }
 
     // ==================== SCF regions ====================
@@ -998,10 +1495,10 @@ pub const Kernel = struct {
         const body = mlir.Block.init(block_types.constSlice(), block_locs.constSlice());
 
         self.pushBlock(body);
-        const iv: Value = .{ .inner = body.argument(0) };
+        const iv: Value = .{ .inner = body.argument(0), .kernel = self };
         var barg_buf: stdx.BoundedArray(Value, 32) = .{};
         for (0..iter_args.len) |i| {
-            barg_buf.appendAssumeCapacity(.{ .inner = body.argument(i + 1) });
+            barg_buf.appendAssumeCapacity(.{ .inner = body.argument(i + 1), .kernel = self });
         }
 
         const yielded: []const Value = body_fn(self, iv, barg_buf.constSlice(), body_ctx);
@@ -1031,7 +1528,7 @@ pub const Kernel = struct {
         _ = for_op.appendTo(self.currentBlock());
 
         const out = self.arena.allocator().alloc(Value, iter_args.len) catch @panic("Kernel.forLoop OOM");
-        for (0..iter_args.len) |i| out[i] = .{ .inner = for_op.result(i) };
+        for (0..iter_args.len) |i| out[i] = .{ .inner = for_op.result(i), .kernel = self };
         return out;
     }
 
@@ -1074,7 +1571,7 @@ pub const Kernel = struct {
         _ = if_op.appendTo(self.currentBlock());
 
         const out = self.arena.allocator().alloc(Value, result_types.len) catch @panic("Kernel.ifThenElse OOM");
-        for (0..result_types.len) |i| out[i] = .{ .inner = if_op.result(i) };
+        for (0..result_types.len) |i| out[i] = .{ .inner = if_op.result(i), .kernel = self };
         return out;
     }
 
@@ -1110,7 +1607,7 @@ pub const Kernel = struct {
         // Populate "before".
         self.pushBlock(before_block);
         var before_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..inits.len) |i| before_args.appendAssumeCapacity(.{ .inner = before_block.argument(i) });
+        for (0..inits.len) |i| before_args.appendAssumeCapacity(.{ .inner = before_block.argument(i), .kernel = self });
         const before_out = before_fn(self, before_args.constSlice(), body_ctx);
         // `before_out` is expected to be a struct { cond: Value, forwarded: []const Value }
         var cond_args: stdx.BoundedArray(*const mlir.Value, 32) = .{};
@@ -1121,7 +1618,7 @@ pub const Kernel = struct {
         // Populate "after".
         self.pushBlock(after_block);
         var after_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..arg_types_after.len) |i| after_args.appendAssumeCapacity(.{ .inner = after_block.argument(i) });
+        for (0..arg_types_after.len) |i| after_args.appendAssumeCapacity(.{ .inner = after_block.argument(i), .kernel = self });
         const after_out = after_fn(self, after_args.constSlice(), body_ctx);
         var yield_vals: stdx.BoundedArray(*const mlir.Value, 32) = .{};
         for (after_out) |v| yield_vals.appendAssumeCapacity(v.inner);
@@ -1142,7 +1639,7 @@ pub const Kernel = struct {
         _ = w.appendTo(self.currentBlock());
 
         const out = self.arena.allocator().alloc(Value, arg_types_after.len) catch @panic("Kernel.whileLoop OOM");
-        for (0..arg_types_after.len) |i| out[i] = .{ .inner = w.result(i) };
+        for (0..arg_types_after.len) |i| out[i] = .{ .inner = w.result(i), .kernel = self };
         return out;
     }
 
