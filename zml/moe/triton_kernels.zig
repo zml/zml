@@ -153,71 +153,39 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
     const token_start_init = pid.mul(block_i32);
     const step = num_progs.mul(block_i32);
 
-    const Ctx = struct {
-        topk_ids: Value,
-        sorted_token_ids: Value,
-        cumsum: Value,
-        token_offs: Value,
-        numel: i32,
-        num_experts: i32,
-        step: Value,
-        block: i64,
-    };
-    const c: Ctx = .{
-        .topk_ids = topk_ids,
-        .sorted_token_ids = sorted_token_ids,
-        .cumsum = cumsum,
-        .token_offs = token_offs,
-        .numel = numel,
-        .num_experts = num_experts,
-        .step = step,
-        .block = block,
-    };
+    var w = k.openWhile(.{token_start_init}, .{k.scalarTy(.i32)});
+    {
+        const ts = w.before_carried[0];
+        w.yieldBefore(ts.lt(numel), .{ts});
+    }
+    {
+        const ts = w.after_carried[0];
+        // offs = ts + token_offs  (broadcast)
+        const offs = ts.splatTo(&.{block}).add(token_offs);
+        // mask = offs < NUMEL
+        const mask = offs.lt(numel);
+        // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
+        const topk_ptrs = topk_ids.splatTo(&.{block}).addPtr(offs);
+        const num_experts_splat = k.splat(num_experts, &.{block});
+        const expert_vals = k.loadOpts(topk_ptrs, .{
+            .mask = mask,
+            .other = num_experts_splat,
+        });
+        // valid = mask & (expert_vals < NUM_EXPERTS)
+        const valid = mask.bitAnd(expert_vals.lt(num_experts));
+        // rank = atomic_add(cumsum + expert_vals, 1, mask=valid)
+        const cumsum_ptrs = cumsum.splatTo(&.{block}).addPtr(expert_vals);
+        const rank = k.atomicRmwOpts(.add, cumsum_ptrs, k.ones(&.{block}, .i32), .{
+            .mask = valid,
+            .sem = .relaxed,
+            .scope = .gpu,
+        });
+        // store(sorted_token_ids + rank, offs, mask=valid)
+        const sorted_ptrs = sorted_token_ids.splatTo(&.{block}).addPtr(rank);
+        k.storeOpts(sorted_ptrs, offs, .{ .mask = valid });
 
-    const before = struct {
-        fn call(kk: *Kernel, a: []const Value, cc: Ctx) tri.WhileBefore {
-            const ts = a[0];
-            return .{ .cond = ts.lt(cc.numel), .forwarded = kk.yield(.{ts}) };
-        }
-    }.call;
-
-    const after = struct {
-        fn call(kk: *Kernel, a: []const Value, cc: Ctx) []const Value {
-            const ts = a[0];
-            // offs = ts + token_offs  (broadcast)
-            const offs = ts.splatTo(&.{cc.block}).add(cc.token_offs);
-            // mask = offs < NUMEL
-            const mask = offs.lt(cc.numel);
-            // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
-            const topk_ptrs = cc.topk_ids.splatTo(&.{cc.block}).addPtr(offs);
-            const num_experts_splat = kk.splat(cc.num_experts, &.{cc.block});
-            const expert_vals = kk.loadOpts(topk_ptrs, .{
-                .mask = mask,
-                .other = num_experts_splat,
-            });
-            // valid = mask & (expert_vals < NUM_EXPERTS)
-            const valid = mask.bitAnd(expert_vals.lt(cc.num_experts));
-            // rank = atomic_add(cumsum + expert_vals, 1, mask=valid)
-            const cumsum_ptrs = cc.cumsum.splatTo(&.{cc.block}).addPtr(expert_vals);
-            const rank = kk.atomicRmwOpts(.add, cumsum_ptrs, kk.ones(&.{cc.block}, .i32), .{
-                .mask = valid,
-                .sem = .relaxed,
-                .scope = .gpu,
-            });
-            // store(sorted_token_ids + rank, offs, mask=valid)
-            const sorted_ptrs = cc.sorted_token_ids.splatTo(&.{cc.block}).addPtr(rank);
-            kk.storeOpts(sorted_ptrs, offs, .{ .mask = valid });
-
-            return kk.yield(.{ts.add(cc.step)});
-        }
-    }.call;
-
-    _ = k.whileLoop(c, .{
-        .inits = &.{token_start_init},
-        .after_types = &.{k.scalarTy(.i32)},
-        .before = before,
-        .after = after,
-    });
+        w.yieldAfter(.{ts.add(step)});
+    }
 
     return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize count_and_sort_expert_tokens_kernel TTIR: {}", .{err});
@@ -340,148 +308,88 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
 
     const pid = k.programId(.x);
 
-    const AlignCtx = struct {
-        topk_ids: Value,
-        sorted_token_ids: Value,
-        expert_ids: Value,
-        num_tokens_post_pad: Value,
-        cumsum: Value,
-        block_size_m: i64,
-        numel: i32,
-        num_experts: i32,
-        padded_num_experts: i64,
-        max_num_tokens_padded: i32,
-        max_num_m_blocks: i64,
-        hist_block: i64,
-    };
-
-    const ax: AlignCtx = .{
-        .topk_ids = topk_ids,
-        .sorted_token_ids = sorted_token_ids,
-        .expert_ids = expert_ids,
-        .num_tokens_post_pad = num_tokens_post_pad,
-        .cumsum = cumsum,
-        .block_size_m = block_size_m,
-        .numel = numel,
-        .num_experts = num_experts,
-        .padded_num_experts = padded_num_experts,
-        .max_num_tokens_padded = max_num_tokens_padded,
-        .max_num_m_blocks = max_num_m_blocks,
-        .hist_block = hist_block,
-    };
-
-    // pid==1 branch: fill sorted_token_ids with NUMEL.
-    const fill_then = struct {
-        fn call(kk: *Kernel, c: AlignCtx) []const Value {
-            const FillCtx = struct { sorted: Value, block: i64, numel: i32, max_padded: i32 };
-            const fc: FillCtx = .{ .sorted = c.sorted_token_ids, .block = c.hist_block, .numel = c.numel, .max_padded = c.max_num_tokens_padded };
-            const body = struct {
-                fn b(kkk: *Kernel, iv: Value, _: []const Value, ic: FillCtx) []const Value {
-                    const offs = iv.splatTo(&.{ic.block}).add(kkk.arange(0, @intCast(ic.block), .i32));
-                    const mask = offs.lt(ic.max_padded);
-                    const sorted_ptrs = ic.sorted.splatTo(&.{ic.block}).addPtr(offs);
-                    kkk.storeOpts(sorted_ptrs, kkk.splat(ic.numel, &.{ic.block}), .{ .mask = mask });
-                    return &.{};
-                }
-            }.b;
-            _ = kk.forLoop(fc, 0, fc.max_padded, @as(i32, @intCast(fc.block)), .{
-                .body = body,
-            });
-            return &.{};
+    var i = k.openIfElse(pid.eq(1), .{});
+    {
+        // pid==1 branch: fill sorted_token_ids with NUMEL.
+        var fill_loop = k.openFor(0, max_num_tokens_padded, @as(i32, @intCast(hist_block)), .{});
+        {
+            const iv = fill_loop.iv;
+            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, @intCast(hist_block), .i32));
+            const mask = offs.lt(max_num_tokens_padded);
+            const sorted_ptrs = sorted_token_ids.splatTo(&.{hist_block}).addPtr(offs);
+            k.storeOpts(sorted_ptrs, k.splat(numel, &.{hist_block}), .{ .mask = mask });
+            fill_loop.yield(.{});
         }
-    }.call;
+        i.yieldThen(.{});
+    }
+    {
+        // pid==0 branch: histogram + cumsum + assignment.
+        const expert_offs = k.arange(0, @intCast(padded_num_experts), .i32);
+        const expert_mask = expert_offs.lt(num_experts);
+        const counts_init = k.zeros(&.{padded_num_experts}, .i32);
 
-    // pid==0 branch: histogram + cumsum + assignment.
-    const compute_else = struct {
-        fn call(kk: *Kernel, c: AlignCtx) []const Value {
-            const expert_offs = kk.arange(0, @intCast(c.padded_num_experts), .i32);
-            const expert_mask = expert_offs.lt(c.num_experts);
-            const counts_init = kk.zeros(&.{c.padded_num_experts}, .i32);
-
-            // Histogram loop over token chunks.
-            const HistCtx = struct { topk_ids: Value, numel: i32, num_experts: i32, hist_block: i64, padded: i64 };
-            const hctx: HistCtx = .{ .topk_ids = c.topk_ids, .numel = c.numel, .num_experts = c.num_experts, .hist_block = c.hist_block, .padded = c.padded_num_experts };
-            const hist_body = struct {
-                fn b(kkk: *Kernel, iv: Value, iter: []const Value, hc: HistCtx) []const Value {
-                    const offs = iv.splatTo(&.{hc.hist_block}).add(kkk.arange(0, @intCast(hc.hist_block), .i32));
-                    const mask = offs.lt(hc.numel);
-                    const topk_ptrs = hc.topk_ids.splatTo(&.{hc.hist_block}).addPtr(offs);
-                    const num_experts_other = kkk.splat(hc.num_experts, &.{hc.hist_block});
-                    const expert_vals = kkk.loadOpts(topk_ptrs, .{
-                        .mask = mask,
-                        .other = num_experts_other,
-                    });
-                    const valid = mask.bitAnd(expert_vals.lt(hc.num_experts));
-                    const h = kkk.histogramOpts(expert_vals, hc.padded, .{ .mask = valid });
-                    return kkk.yield(.{iter[0].add(h)});
-                }
-            }.b;
-            const counts_results = kk.forLoop(hctx, 0, c.numel, @as(i32, @intCast(c.hist_block)), .{
-                .inits = &.{counts_init},
-                .body = hist_body,
+        // Histogram loop over token chunks.
+        var hist_loop = k.openFor(0, numel, @as(i32, @intCast(hist_block)), .{counts_init});
+        {
+            const iv = hist_loop.iv;
+            const acc = hist_loop.carried[0];
+            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, @intCast(hist_block), .i32));
+            const mask = offs.lt(numel);
+            const topk_ptrs = topk_ids.splatTo(&.{hist_block}).addPtr(offs);
+            const num_experts_other = k.splat(num_experts, &.{hist_block});
+            const expert_vals = k.loadOpts(topk_ptrs, .{
+                .mask = mask,
+                .other = num_experts_other,
             });
-            const counts = counts_results[0];
-
-            // padded_counts = where(expert_mask, cdiv(counts, BLOCK_SIZE_M)*BLOCK_SIZE_M, 0)
-            const block_size_m_v = kk.splat(@as(i32, @intCast(c.block_size_m)), &.{c.padded_num_experts});
-            const padded_counts_full = counts.cdiv(block_size_m_v).mul(block_size_m_v);
-            const padded_counts = kk.select(expert_mask, padded_counts_full, kk.zeros(&.{c.padded_num_experts}, .i32));
-
-            const padded_cumsum = kk.cumsum(padded_counts);
-            const starts = padded_cumsum.sub(padded_counts);
-            const total = kk.sum(padded_counts);
-
-            // store(cumsum + expert_offs, starts, mask=expert_mask)
-            kk.storeOpts(c.cumsum.splatTo(&.{c.padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
-            // store(cumsum + NUM_EXPERTS, total)
-            kk.store(c.cumsum.addPtr(c.num_experts), total);
-            kk.store(c.num_tokens_post_pad, total);
-
-            // Block-to-expert assignment.
-            const AssignCtx = struct { cumsum: Value, expert_ids: Value, block_size_m: i64, num_experts: i32, hist_block: i64, max_num_m_blocks: i64 };
-            const actx: AssignCtx = .{ .cumsum = c.cumsum, .expert_ids = c.expert_ids, .block_size_m = c.block_size_m, .num_experts = c.num_experts, .hist_block = c.hist_block, .max_num_m_blocks = c.max_num_m_blocks };
-            const assign_body = struct {
-                fn b(kkk: *Kernel, block_start: Value, _: []const Value, ac: AssignCtx) []const Value {
-                    const block_offs = kkk.arange(0, @intCast(ac.hist_block), .i32);
-                    const block_ids = block_start.splatTo(&.{ac.hist_block}).add(block_offs);
-                    const block_mask = block_ids.lt(@as(i32, @intCast(ac.max_num_m_blocks)));
-                    const block_offsets = block_ids.mul(@as(i32, @intCast(ac.block_size_m)));
-                    const init = kkk.splat(@as(i32, -1), &.{ac.hist_block});
-
-                    // Inner loop over experts.
-                    const ExpCtx = struct { cumsum: Value, block_offsets: Value, block_mask: Value, hist_block: i64 };
-                    const ec: ExpCtx = .{ .cumsum = ac.cumsum, .block_offsets = block_offsets, .block_mask = block_mask, .hist_block = ac.hist_block };
-                    const exp_body = struct {
-                        fn eb(kkkk: *Kernel, iv: Value, iter: []const Value, ee: ExpCtx) []const Value {
-                            const start_v = kkkk.load(ee.cumsum.addPtr(iv));
-                            const end_v = kkkk.load(ee.cumsum.addPtr(iv.add(1)));
-                            const in_range = ee.block_mask
-                                .bitAnd(ee.block_offsets.ge(start_v.splatTo(&.{ee.hist_block})))
-                                .bitAnd(ee.block_offsets.lt(end_v.splatTo(&.{ee.hist_block})));
-                            return kkkk.yield(.{kkkk.select(in_range, iv.splatTo(&.{ee.hist_block}), iter[0])});
-                        }
-                    }.eb;
-                    const exp_results = kkk.forLoop(ec, 0, ac.num_experts, 1, .{
-                        .inits = &.{init},
-                        .body = exp_body,
-                    });
-                    const block_expert = exp_results[0];
-                    kkk.storeOpts(ac.expert_ids.splatTo(&.{ac.hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask });
-                    return &.{};
-                }
-            }.b;
-            _ = kk.forLoop(actx, 0, @as(i32, @intCast(c.max_num_m_blocks)), @as(i32, @intCast(c.hist_block)), .{
-                .body = assign_body,
-            });
-            return &.{};
+            const valid = mask.bitAnd(expert_vals.lt(num_experts));
+            const h = k.histogramOpts(expert_vals, padded_num_experts, .{ .mask = valid });
+            hist_loop.yield(.{acc.add(h)});
         }
-    }.call;
+        const counts = hist_loop.results[0];
 
-    _ = k.ifThenElse(ax, .{
-        .cond = pid.eq(1),
-        .then_ = fill_then,
-        .else_ = compute_else,
-    });
+        // padded_counts = where(expert_mask, cdiv(counts, BLOCK_SIZE_M)*BLOCK_SIZE_M, 0)
+        const block_size_m_v = k.splat(@as(i32, @intCast(block_size_m)), &.{padded_num_experts});
+        const padded_counts_full = counts.cdiv(block_size_m_v).mul(block_size_m_v);
+        const padded_counts = k.select(expert_mask, padded_counts_full, k.zeros(&.{padded_num_experts}, .i32));
+
+        const padded_cumsum = k.cumsum(padded_counts);
+        const starts = padded_cumsum.sub(padded_counts);
+        const total = k.sum(padded_counts);
+
+        // store(cumsum + expert_offs, starts, mask=expert_mask)
+        k.storeOpts(cumsum.splatTo(&.{padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
+        // store(cumsum + NUM_EXPERTS, total)
+        k.store(cumsum.addPtr(num_experts), total);
+        k.store(num_tokens_post_pad, total);
+
+        // Block-to-expert assignment.
+        var assign_loop = k.openFor(0, @as(i32, @intCast(max_num_m_blocks)), @as(i32, @intCast(hist_block)), .{});
+        {
+            const block_start = assign_loop.iv;
+            const block_offs = k.arange(0, @intCast(hist_block), .i32);
+            const block_ids = block_start.splatTo(&.{hist_block}).add(block_offs);
+            const block_mask = block_ids.lt(@as(i32, @intCast(max_num_m_blocks)));
+            const block_offsets = block_ids.mul(@as(i32, @intCast(block_size_m)));
+            const init = k.splat(@as(i32, -1), &.{hist_block});
+
+            // Inner loop over experts.
+            var exp_loop = k.openFor(0, num_experts, 1, .{init});
+            {
+                const e_iv = exp_loop.iv;
+                const e_acc = exp_loop.carried[0];
+                const start_v = k.load(cumsum.addPtr(e_iv));
+                const end_v = k.load(cumsum.addPtr(e_iv.add(1)));
+                const in_range = block_mask
+                    .bitAnd(block_offsets.ge(start_v.splatTo(&.{hist_block})))
+                    .bitAnd(block_offsets.lt(end_v.splatTo(&.{hist_block})));
+                exp_loop.yield(.{k.select(in_range, e_iv.splatTo(&.{hist_block}), e_acc)});
+            }
+            const block_expert = exp_loop.results[0];
+            k.storeOpts(expert_ids.splatTo(&.{hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask });
+            assign_loop.yield(.{});
+        }
+        i.yieldElse(.{});
+    }
 
     return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize moe_align_block_size_kernel TTIR: {}", .{err});
@@ -639,17 +547,11 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         .compute_dtype = dsl(config.compute_type),
     };
 
-    const compute = struct {
-        fn cmp(kk: *Kernel, c: InRangeCtx) []const Value {
-            buildFusedMain(kk, c);
-            return &.{};
-        }
-    }.cmp;
-
-    _ = k.ifThenElse(ic, .{
-        .cond = in_range,
-        .then_ = compute,
-    });
+    var i = k.openIf(in_range);
+    {
+        buildFusedMain(k, ic);
+        i.yieldThen(.{});
+    }
 
     return kernel.finish(&.{}) catch |err| {
         log.err("failed to finalize fused_moe_kernel TTIR: {}", .{err});
@@ -750,26 +652,16 @@ fn buildFusedMain(k: *Kernel, ic: anytype) void {
         .compute_dtype = ic.compute_dtype,
     };
 
-    const zero_branch = struct {
-        fn z(kk: *Kernel, c: AliveCtx) []const Value {
-            const zero = kk.zeros(&.{ c.block_m, c.block_n }, c.compute_dtype);
-            writeBlockC(kk, c, zero);
-            return &.{};
-        }
-    }.z;
-
-    const alive_branch = struct {
-        fn a(kk: *Kernel, c: AliveCtx) []const Value {
-            buildAliveBody(kk, c);
-            return &.{};
-        }
-    }.a;
-
-    _ = k.ifThenElse(ac, .{
-        .cond = is_dead,
-        .then_ = zero_branch,
-        .else_ = alive_branch,
-    });
+    var i = k.openIfElse(is_dead, .{});
+    {
+        const zero = k.zeros(&.{ ac.block_m, ac.block_n }, ac.compute_dtype);
+        writeBlockC(k, ac, zero);
+        i.yieldThen(.{});
+    }
+    {
+        buildAliveBody(k, ac);
+        i.yieldElse(.{});
+    }
 }
 
 /// Final `c_ptrs` + `c_mask` build + masked store. Shared by the zero-write
@@ -808,65 +700,35 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
     const num_k_iters = ac.k_block.cdiv(block_k).to(.i32);
 
-    const KCtx = struct {
-        offs_k: Value,
-        token_mask: Value,
-        k_block: Value,
-        block_k: i64,
-        block_m: i64,
-        block_n: i64,
-        stride_ak_block: Value,
-        stride_bk_block: Value,
-        a_dtype: DType,
-        b_dtype: DType,
-    };
-    const kctx: KCtx = .{
-        .offs_k = ac.offs_k,
-        .token_mask = ac.token_mask,
-        .k_block = ac.k_block,
-        .block_k = block_k,
-        .block_m = block_m,
-        .block_n = block_n,
-        .stride_ak_block = ac.stride_ak_block,
-        .stride_bk_block = ac.stride_bk_block,
-        .a_dtype = ac.a_dtype,
-        .b_dtype = ac.b_dtype,
-    };
+    var loop = k.openFor(0, num_k_iters, 1, .{ acc_init, a_ptrs_init, b_ptrs_init });
+    {
+        const k_iter = loop.iv;
+        const acc = loop.carried[0];
+        const a_ptrs = loop.carried[1];
+        const b_ptrs = loop.carried[2];
 
-    const k_body = struct {
-        fn b(kk: *Kernel, k_iter: Value, iter: []const Value, kc: KCtx) []const Value {
-            const acc = iter[0];
-            const a_ptrs = iter[1];
-            const b_ptrs = iter[2];
+        // k_remaining = k_block - k_iter * BLOCK_K   (i64)
+        const k_remaining = ac.k_block.sub(k_iter.to(.i64).mul(block_k));
 
-            // k_remaining = k_block - k_iter * BLOCK_K   (i64)
-            const k_remaining = kc.k_block.sub(k_iter.to(.i64).mul(kc.block_k));
+        // mask_a = token_mask[:, None] & (offs_k[None, :] < k_remaining)
+        const offs_k_lt = ac.offs_k.lt(k_remaining);
+        const mask_a = k.mask2d(ac.token_mask, offs_k_lt, block_m, block_k);
+        const a_val = k.loadMasked(a_ptrs, mask_a);
 
-            // mask_a = token_mask[:, None] & (offs_k[None, :] < k_remaining)
-            const offs_k_lt = kc.offs_k.lt(k_remaining);
-            const mask_a = kk.mask2d(kc.token_mask, offs_k_lt, kc.block_m, kc.block_k);
-            const a_val = kk.loadMasked(a_ptrs, mask_a);
+        // mask_b = (offs_k[:, None] < k_remaining)   — broadcast along N axis.
+        const mask_b = offs_k_lt.broadcast2d(1, block_k, block_n);
+        const b_val = k.loadMasked(b_ptrs, mask_b);
 
-            // mask_b = (offs_k[:, None] < k_remaining)   — broadcast along N axis.
-            const mask_b = offs_k_lt.broadcast2d(1, kc.block_k, kc.block_n);
-            const b_val = kk.loadMasked(b_ptrs, mask_b);
+        // acc = tt.dot(a, b, acc)
+        const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
 
-            // acc = tt.dot(a, b, acc)
-            const new_acc = kk.dotOpts(a_val, b_val, acc, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
+        // Advance pointers along K.
+        const new_a_ptrs = a_ptrs.addPtr(ac.stride_ak_block.mul(block_k).splatTo(&.{ block_m, block_k }));
+        const new_b_ptrs = b_ptrs.addPtr(ac.stride_bk_block.mul(block_k).splatTo(&.{ block_k, block_n }));
 
-            // Advance pointers along K.
-            const new_a_ptrs = a_ptrs.addPtr(kc.stride_ak_block.mul(kc.block_k).splatTo(&.{ kc.block_m, kc.block_k }));
-            const new_b_ptrs = b_ptrs.addPtr(kc.stride_bk_block.mul(kc.block_k).splatTo(&.{ kc.block_k, kc.block_n }));
-
-            return kk.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
-        }
-    }.b;
-
-    const loop_results = k.forLoop(kctx, 0, num_k_iters, 1, .{
-        .inits = &.{ acc_init, a_ptrs_init, b_ptrs_init },
-        .body = k_body,
-    });
-    var acc_final = loop_results[0];
+        loop.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
+    }
+    var acc_final = loop.results[0];
 
     if (ac.mul_routed) {
         const tw_ptrs = ac.topk_weights_ptr.splatTo(&.{block_m}).addPtr(ac.offs_token);

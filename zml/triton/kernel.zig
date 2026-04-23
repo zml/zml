@@ -2,7 +2,7 @@
 //!
 //! A `Kernel` owns its own `mlir.Module` and `tt.func` entry block. Consumers
 //! build the body with typed `Value` handles via the `programId`/`makeRange`/
-//! `addptr`/`load`/`store`/`addi`/... helpers, plus `forLoop`/`ifThenElse`
+//! `addptr`/`load`/`store`/`addi`/... helpers, plus `openFor`/`openIf`/`openWhile`
 //! for SCF regions. Call `finish(...)` to terminate with `tt.return`, verify,
 //! and serialize the module to a TTIR string suitable for `zml.ops.triton(...)`.
 //!
@@ -526,42 +526,240 @@ pub const DeviceAssertOpts = struct {
     mask: ?Value = null,
 };
 
-/// Typed arg struct for `Kernel.forLoop`. The ctx type is inferred from the
-/// caller-supplied `ctx` value at the call site, so fields like `body` can
-/// carry a concrete function-pointer type instead of `anytype`. `lower`,
-/// `upper`, and `step` are passed positionally to `forLoop` so they retain
-/// the polymorphic lift (Value / comptime int / runtime int).
-pub fn ForArgs(comptime CtxT: type) type {
+// ==================== scope types for scf regions ====================
+//
+// `Kernel.openFor` / `openIf` / `openWhile` return one of these scope values.
+// Callers emit body ops into the current insertion block (pushed by `open*`),
+// then call `yield` / `yieldThen` / `yieldAfter` to terminate the region,
+// build the scf op, and populate the scope's `results` array.
+//
+// Tuple-based arity means `carried`, `results`, and `yield(...)` are all
+// fixed-size `[N]Value` — indexed with `loop.carried[0]` rather than
+// `BoundedArray.get(0)`.
+
+fn tupleArity(comptime T: type, comptime what: []const u8) comptime_int {
+    const info = @typeInfo(T);
+    if (info != .@"struct" or !info.@"struct".is_tuple)
+        @compileError(what ++ " must be a tuple literal like `.{ v1, v2 }`");
+    return info.@"struct".fields.len;
+}
+
+/// Emit scf.yield with the tuple of Values into `block`. Compile-time checks
+/// that `values` is a tuple of exactly `N` `Value`s.
+fn emitScfYield(
+    k: *Kernel,
+    block: *mlir.Block,
+    comptime N: usize,
+    values: anytype,
+    comptime what: []const u8,
+) void {
+    const info = @typeInfo(@TypeOf(values));
+    if (info != .@"struct" or !info.@"struct".is_tuple)
+        @compileError(what ++ " expects a tuple literal");
+    if (info.@"struct".fields.len != N)
+        @compileError(what ++ ": yield arity must match the scope's declared arity");
+    var buf: [N]*const mlir.Value = undefined;
+    inline for (info.@"struct".fields, 0..) |f, i| {
+        if (f.type != Value)
+            @compileError(what ++ ": every tuple element must be a Value");
+        buf[i] = @field(values, f.name).inner;
+    }
+    _ = scf.yield(k.ctx, &buf, k.loc()).appendTo(block);
+}
+
+/// Scope returned by `Kernel.openFor`. Pattern:
+///
+///     var loop = k.openFor(0, N, BLOCK, .{acc0});
+///     {
+///         const iv  = loop.iv;
+///         const acc = loop.carried[0];
+///         // ... body ops ...
+///         loop.yield(.{ acc.add(partial) });
+///     }
+///     const total = loop.results[0];
+pub fn ForScope(comptime N: usize) type {
     return struct {
-        inits: []const Value = &.{},
-        body: *const fn (*Kernel, Value, []const Value, CtxT) []const Value,
+        kernel: *Kernel,
+        body: *mlir.Block,
+        lb_inner: *const mlir.Value,
+        ub_inner: *const mlir.Value,
+        step_inner: *const mlir.Value,
+        inits_inner: [N]*const mlir.Value,
+        iv: Value,
+        carried: [N]Value,
+        results: [N]Value = undefined,
+
+        const Self = @This();
+
+        /// Emit scf.yield with `values` (tuple of arity N), build the scf.for,
+        /// and fill `self.results`. Must be the last thing in the loop body.
+        pub fn yield(self: *Self, values: anytype) void {
+            const k = self.kernel;
+            emitScfYield(k, self.body, N, values, "ForScope.yield");
+            k.popBlock();
+            const for_op = scf.for_(
+                k.ctx,
+                self.lb_inner,
+                self.ub_inner,
+                self.step_inner,
+                &self.inits_inner,
+                self.body,
+                .{},
+                k.loc(),
+            );
+            _ = for_op.appendTo(k.currentBlock());
+            for (0..N) |i| self.results[i] = .{ .inner = for_op.result(i), .kernel = k };
+        }
     };
 }
 
-/// Typed arg struct for `Kernel.ifThenElse`.
-pub fn IfArgs(comptime CtxT: type) type {
-    return struct {
-        cond: Value,
-        results: []const *const mlir.Type = &.{},
-        then_: *const fn (*Kernel, CtxT) []const Value,
-        else_: ?*const fn (*Kernel, CtxT) []const Value = null,
-    };
-}
+/// Scope returned by `Kernel.openIf` — no-else, no-results. `yieldThen` is
+/// the only terminator; it builds scf.if with an empty else block. Pattern:
+///
+///     var i = k.openIf(cond);
+///     {
+///         // then body
+///         i.yieldThen(.{});
+///     }
+pub const IfOnlyScope = struct {
+    kernel: *Kernel,
+    cond_inner: *const mlir.Value,
+    then_block: *mlir.Block,
 
-/// Return type for `whileLoop`'s `before` callback: the i1 loop condition plus
-/// the values forwarded to the `after` region via `scf.condition`.
-pub const WhileBefore = struct {
-    cond: Value,
-    forwarded: []const Value,
+    /// Terminate the then branch; build scf.if with an empty else block.
+    /// `values` must be `.{}` — scf.if with no results.
+    pub fn yieldThen(self: *IfOnlyScope, values: anytype) void {
+        const k = self.kernel;
+        emitScfYield(k, self.then_block, 0, values, "IfOnlyScope.yieldThen");
+        k.popBlock();
+        const empty: [0]*const mlir.Value = .{};
+        const else_block = mlir.Block.init(&.{}, &.{});
+        _ = scf.yield(k.ctx, &empty, k.loc()).appendTo(else_block);
+        const if_op = scf.if_(
+            k.ctx,
+            self.cond_inner,
+            &.{},
+            self.then_block,
+            else_block,
+            k.loc(),
+        );
+        _ = if_op.appendTo(k.currentBlock());
+    }
 };
 
-/// Typed arg struct for `Kernel.whileLoop`.
-pub fn WhileArgs(comptime CtxT: type) type {
+/// Scope returned by `Kernel.openIfElse`. Pattern:
+///
+///     var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });
+///     {
+///         // then body
+///         i.yieldThen(.{ some_value });
+///     }
+///     {
+///         // else body
+///         i.yieldElse(.{ other_value });
+///     }
+///     const r = i.results[0];
+pub fn IfScope(comptime N: usize) type {
     return struct {
-        inits: []const Value,
-        after_types: []const *const mlir.Type,
-        before: *const fn (*Kernel, []const Value, CtxT) WhileBefore,
-        after: *const fn (*Kernel, []const Value, CtxT) []const Value,
+        kernel: *Kernel,
+        cond_inner: *const mlir.Value,
+        then_block: *mlir.Block,
+        else_block: *mlir.Block,
+        result_types: [N]*const mlir.Type,
+        results: [N]Value = undefined,
+
+        const Self = @This();
+
+        /// Terminate the then branch; pop then, push else.
+        pub fn yieldThen(self: *Self, values: anytype) void {
+            const k = self.kernel;
+            emitScfYield(k, self.then_block, N, values, "IfScope.yieldThen");
+            k.popBlock();
+            k.pushBlock(self.else_block);
+        }
+
+        /// Terminate the else branch; build scf.if; fill `self.results`.
+        pub fn yieldElse(self: *Self, values: anytype) void {
+            const k = self.kernel;
+            emitScfYield(k, self.else_block, N, values, "IfScope.yieldElse");
+            k.popBlock();
+            const if_op = scf.if_(
+                k.ctx,
+                self.cond_inner,
+                &self.result_types,
+                self.then_block,
+                self.else_block,
+                k.loc(),
+            );
+            _ = if_op.appendTo(k.currentBlock());
+            for (0..N) |i| self.results[i] = .{ .inner = if_op.result(i), .kernel = k };
+        }
+    };
+}
+
+/// Scope returned by `Kernel.openWhile`. Pattern:
+///
+///     var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
+///     {
+///         const b = w.before_carried;
+///         const cond = b[0].lt(10);
+///         w.yieldBefore(cond, .{ b[0] });
+///     }
+///     {
+///         const a = w.after_carried;
+///         w.yieldAfter(.{ a[0].add(1) });
+///     }
+///     const r = w.results[0];
+pub fn WhileScope(comptime N: usize, comptime M: usize) type {
+    return struct {
+        kernel: *Kernel,
+        before_block: *mlir.Block,
+        after_block: *mlir.Block,
+        inits_inner: [N]*const mlir.Value,
+        after_types: [M]*const mlir.Type,
+        before_carried: [N]Value,
+        after_carried: [M]Value = undefined,
+        results: [M]Value = undefined,
+
+        const Self = @This();
+
+        /// Terminate the before region with `scf.condition(cond, forwarded...)`.
+        /// Pops before, pushes after, and populates `self.after_carried`.
+        pub fn yieldBefore(self: *Self, cond: Value, forwarded: anytype) void {
+            const info = @typeInfo(@TypeOf(forwarded));
+            if (info != .@"struct" or !info.@"struct".is_tuple)
+                @compileError("WhileScope.yieldBefore: forwarded must be a tuple literal");
+            if (info.@"struct".fields.len != M)
+                @compileError("WhileScope.yieldBefore: forwarded arity must match after_types arity");
+            const k = self.kernel;
+            var buf: [M]*const mlir.Value = undefined;
+            inline for (info.@"struct".fields, 0..) |f, i| {
+                if (f.type != Value)
+                    @compileError("WhileScope.yieldBefore: every forwarded element must be a Value");
+                buf[i] = @field(forwarded, f.name).inner;
+            }
+            _ = scf.condition(k.ctx, cond.inner, &buf, k.loc()).appendTo(self.before_block);
+            k.popBlock();
+            k.pushBlock(self.after_block);
+            for (0..M) |i| self.after_carried[i] = .{ .inner = self.after_block.argument(i), .kernel = k };
+        }
+
+        /// Terminate the after region; build scf.while; fill `self.results`.
+        pub fn yieldAfter(self: *Self, values: anytype) void {
+            const k = self.kernel;
+            emitScfYield(k, self.after_block, N, values, "WhileScope.yieldAfter");
+            k.popBlock();
+            const w = scf.while_(
+                k.ctx,
+                &self.inits_inner,
+                &self.after_types,
+                self.before_block,
+                self.after_block,
+                k.loc(),
+            );
+            _ = w.appendTo(k.currentBlock());
+            for (0..M) |i| self.results[i] = .{ .inner = w.result(i), .kernel = k };
+        }
     };
 }
 
@@ -735,9 +933,9 @@ pub const Kernel = struct {
     // ==================== type helpers ====================
 
     /// Scalar MLIR type for the given DSL element type. Public because
-    /// `whileLoop.after_types` and other advanced ops still accept raw MLIR
-    /// types; the common load / reshape / dot / etc. paths infer internally
-    /// and never expose this to users.
+    /// `openIf.result_types` / `openWhile.after_types` and other advanced ops
+    /// still accept raw MLIR types; the common load / reshape / dot / etc.
+    /// paths infer internally and never expose this to users.
     pub fn scalarTy(self: *const Kernel, dtype: DType) *const mlir.Type {
         return dtype.toMlir(self.ctx);
     }
@@ -787,8 +985,8 @@ pub const Kernel = struct {
     //   - `liftAs(value, dtype)`        — explicit DSL `DType`.
     //   - `constMatching(value, elem)`  — same as `liftAs` but takes an MLIR
     //                                     element type (e.g. `ref.elemType()`).
-    // Binary ops, `splat`, `addPtr`, and `forLoop` all take `anytype` so in
-    // practice you rarely need to build a constant by hand.
+    // Binary ops, `splat`, `addPtr`, and `openFor` bounds all take `anytype`
+    // so in practice you rarely need to build a constant by hand.
 
     fn emitInt(self: *Kernel, dtype: DType, value: i64) Value {
         return self.emit(arith.constant_int(self.ctx, value, dtype.toMlir(self.ctx), self.loc()));
@@ -957,7 +1155,7 @@ pub const Kernel = struct {
     }
 
     /// Build an arith.constant of the given MLIR element type from a Zig
-    /// numeric. Private — used by `broadcastLike`, `forLoop` bounds, and
+    /// numeric. Private — used by `broadcastLike`, `openFor` bounds, and
     /// `lift` when matching an existing Value's element type. Users should
     /// call `liftAs(value, dtype)` instead.
     fn constMatching(self: *Kernel, value: anytype, elem: *const mlir.Type) Value {
@@ -2134,170 +2332,152 @@ pub const Kernel = struct {
 
     // ==================== SCF regions ====================
 
-    /// `scf.for` with iter_args. `lower`, `upper`, and `step` accept Values,
-    /// comptime ints, or runtime Zig ints (see `Kernel.lift` / comptime-adapt
-    /// rules). See `ForArgs` for the rest of the fields. Returns the iter_args'
-    /// post-loop values (same length as `args.inits`).
-    pub fn forLoop(
+    /// Open a scoped `scf.for` builder. `lower`/`upper`/`step` accept Values,
+    /// comptime ints, or runtime Zig ints. `inits` is a tuple literal
+    /// `.{v1, v2, ...}`; its arity fixes the shape of `carried` and the
+    /// required `yield` arity. See `ForScope` for the usage pattern.
+    pub fn openFor(
         self: *Kernel,
-        ctx: anytype,
         lower: anytype,
         upper: anytype,
         step: anytype,
-        args: ForArgs(@TypeOf(ctx)),
-    ) []Value {
-        const iter_args = args.inits;
-        std.debug.assert(iter_args.len <= 31);
+        inits: anytype,
+    ) ForScope(tupleArity(@TypeOf(inits), "openFor: inits")) {
+        const N = comptime tupleArity(@TypeOf(inits), "openFor: inits");
+        const fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
 
         const lb_v: Value = if (@TypeOf(lower) == Value) lower else self.lift(lower);
         const ub_v: Value = if (@TypeOf(upper) == Value) upper else self.constMatching(upper, lb_v.type_());
         const step_v: Value = if (@TypeOf(step) == Value) step else self.constMatching(step, lb_v.type_());
 
-        var block_types: stdx.BoundedArray(*const mlir.Type, 32) = .{};
-        var block_locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
-        block_types.appendAssumeCapacity(lb_v.type_());
-        block_locs.appendAssumeCapacity(self.loc());
-        for (iter_args) |ia| {
-            block_types.appendAssumeCapacity(ia.type_());
-            block_locs.appendAssumeCapacity(self.loc());
+        var block_types: [N + 1]*const mlir.Type = undefined;
+        var block_locs: [N + 1]*const mlir.Location = undefined;
+        block_types[0] = lb_v.type_();
+        block_locs[0] = self.loc();
+        var inits_inner: [N]*const mlir.Value = undefined;
+        inline for (fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("openFor: every init must be a Value");
+            const v: Value = @field(inits, f.name);
+            block_types[i + 1] = v.type_();
+            block_locs[i + 1] = self.loc();
+            inits_inner[i] = v.inner;
         }
 
-        const body = mlir.Block.init(block_types.constSlice(), block_locs.constSlice());
-
+        const body = mlir.Block.init(&block_types, &block_locs);
         self.pushBlock(body);
-        const iv: Value = .{ .inner = body.argument(0), .kernel = self };
-        var barg_buf: stdx.BoundedArray(Value, 32) = .{};
-        for (0..iter_args.len) |i| {
-            barg_buf.appendAssumeCapacity(.{ .inner = body.argument(i + 1), .kernel = self });
-        }
 
-        const yielded: []const Value = args.body(self, iv, barg_buf.constSlice(), ctx);
+        var carried: [N]Value = undefined;
+        for (0..N) |i| carried[i] = .{ .inner = body.argument(i + 1), .kernel = self };
 
-        var yield_values: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (yielded) |y| yield_values.appendAssumeCapacity(y.inner);
-        _ = scf.yield(self.ctx, yield_values.constSlice(), self.loc()).appendTo(body);
-
-        // Pop BEFORE appending the scf.for — otherwise currentBlock()
-        // still returns the body we just built, and appending scf.for
-        // into its own body creates a cycle that hangs the IR printer.
-        self.popBlock();
-
-        var init_values: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (iter_args) |ia| init_values.appendAssumeCapacity(ia.inner);
-
-        const for_op = scf.for_(
-            self.ctx,
-            lb_v.inner,
-            ub_v.inner,
-            step_v.inner,
-            init_values.constSlice(),
-            body,
-            .{},
-            self.loc(),
-        );
-        _ = for_op.appendTo(self.currentBlock());
-
-        const out = self.arena.allocator().alloc(Value, iter_args.len) catch @panic("Kernel.forLoop OOM");
-        for (0..iter_args.len) |i| out[i] = .{ .inner = for_op.result(i), .kernel = self };
-        return out;
+        return .{
+            .kernel = self,
+            .body = body,
+            .lb_inner = lb_v.inner,
+            .ub_inner = ub_v.inner,
+            .step_inner = step_v.inner,
+            .inits_inner = inits_inner,
+            .iv = .{ .inner = body.argument(0), .kernel = self },
+            .carried = carried,
+        };
     }
 
-    /// `scf.if` — build a conditional with optional results. See `IfArgs` for
-    /// fields. `else_` is optional; omitting it builds an empty else-block
-    /// (requires `results = &.{}`). To express "if not cond: do X", invert the
-    /// condition rather than providing an empty `then_`.
-    pub fn ifThenElse(self: *Kernel, ctx: anytype, args: IfArgs(@TypeOf(ctx))) []Value {
+    /// Open a scoped `scf.if` with no else branch and no results — use this
+    /// for conditional side-effects. `yieldThen(.{})` closes the scope and
+    /// builds scf.if with an empty else block. See `IfOnlyScope`.
+    pub fn openIf(self: *Kernel, cond: Value) IfOnlyScope {
         const then_block = mlir.Block.init(&.{}, &.{});
         self.pushBlock(then_block);
-        const then_vals: []const Value = args.then_(self, ctx);
-        var then_yield: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (then_vals) |v| then_yield.appendAssumeCapacity(v.inner);
-        _ = scf.yield(self.ctx, then_yield.constSlice(), self.loc()).appendTo(then_block);
-        self.popBlock();
-
-        const else_block = mlir.Block.init(&.{}, &.{});
-        self.pushBlock(else_block);
-        if (args.else_) |else_fn| {
-            const else_vals: []const Value = else_fn(self, ctx);
-            var else_yield: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-            for (else_vals) |v| else_yield.appendAssumeCapacity(v.inner);
-            _ = scf.yield(self.ctx, else_yield.constSlice(), self.loc()).appendTo(else_block);
-        } else {
-            std.debug.assert(args.results.len == 0);
-            _ = scf.yield(self.ctx, &.{}, self.loc()).appendTo(else_block);
-        }
-        self.popBlock();
-
-        const if_op = scf.if_(
-            self.ctx,
-            args.cond.inner,
-            args.results,
-            then_block,
-            else_block,
-            self.loc(),
-        );
-        _ = if_op.appendTo(self.currentBlock());
-
-        const out = self.arena.allocator().alloc(Value, args.results.len) catch @panic("Kernel.ifThenElse OOM");
-        for (0..args.results.len) |i| out[i] = .{ .inner = if_op.result(i), .kernel = self };
-        return out;
+        return .{
+            .kernel = self,
+            .cond_inner = cond.inner,
+            .then_block = then_block,
+        };
     }
 
-    /// `scf.while` — generic while loop with separate "before" (cond) and
-    /// "after" (body) regions. See `WhileArgs` / `WhileBefore` for fields.
-    pub fn whileLoop(self: *Kernel, ctx: anytype, args: WhileArgs(@TypeOf(ctx))) []Value {
-        const inits = args.inits;
-        const arg_types_after = args.after_types;
-        // Before-region arg types == init types.
-        var before_types: stdx.BoundedArray(*const mlir.Type, 32) = .{};
-        var before_locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
-        for (inits) |v| {
-            before_types.appendAssumeCapacity(v.type_());
-            before_locs.appendAssumeCapacity(self.loc());
+    /// Open a scoped `scf.if` with an else branch. `result_types` is a tuple
+    /// of `*const mlir.Type` (use `k.scalarTy(.f32)` / `k.tensorTy(shape, .f32)`);
+    /// pass `.{}` for an if/else with no results. See `IfScope`.
+    pub fn openIfElse(
+        self: *Kernel,
+        cond: Value,
+        result_types: anytype,
+    ) IfScope(tupleArity(@TypeOf(result_types), "openIfElse: result_types")) {
+        const N = comptime tupleArity(@TypeOf(result_types), "openIfElse: result_types");
+        const fields = @typeInfo(@TypeOf(result_types)).@"struct".fields;
+
+        var types: [N]*const mlir.Type = undefined;
+        inline for (fields, 0..) |f, i| {
+            if (f.type != *const mlir.Type)
+                @compileError("openIfElse: every result_type must be *const mlir.Type (use k.scalarTy/tensorTy)");
+            types[i] = @field(result_types, f.name);
         }
-        const before_block = mlir.Block.init(before_types.constSlice(), before_locs.constSlice());
 
-        var after_locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
-        for (arg_types_after) |_| after_locs.appendAssumeCapacity(self.loc());
-        const after_block = mlir.Block.init(arg_types_after, after_locs.constSlice());
+        const then_block = mlir.Block.init(&.{}, &.{});
+        const else_block = mlir.Block.init(&.{}, &.{});
+        self.pushBlock(then_block);
 
-        // Populate "before".
+        return .{
+            .kernel = self,
+            .cond_inner = cond.inner,
+            .then_block = then_block,
+            .else_block = else_block,
+            .result_types = types,
+        };
+    }
+
+    /// Open a scoped `scf.while` builder. `inits` is a tuple of Values (before
+    /// region's block args take these types). `after_types` is a tuple of
+    /// `*const mlir.Type` (after region's block args and the scf.while's
+    /// result types). See `WhileScope` for the usage pattern.
+    pub fn openWhile(
+        self: *Kernel,
+        inits: anytype,
+        after_types: anytype,
+    ) WhileScope(
+        tupleArity(@TypeOf(inits), "openWhile: inits"),
+        tupleArity(@TypeOf(after_types), "openWhile: after_types"),
+    ) {
+        const N = comptime tupleArity(@TypeOf(inits), "openWhile: inits");
+        const M = comptime tupleArity(@TypeOf(after_types), "openWhile: after_types");
+        const init_fields = @typeInfo(@TypeOf(inits)).@"struct".fields;
+        const type_fields = @typeInfo(@TypeOf(after_types)).@"struct".fields;
+
+        var before_types: [N]*const mlir.Type = undefined;
+        var before_locs: [N]*const mlir.Location = undefined;
+        var inits_inner: [N]*const mlir.Value = undefined;
+        inline for (init_fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("openWhile: every init must be a Value");
+            const v: Value = @field(inits, f.name);
+            before_types[i] = v.type_();
+            before_locs[i] = self.loc();
+            inits_inner[i] = v.inner;
+        }
+        const before_block = mlir.Block.init(&before_types, &before_locs);
+
+        var after_tys: [M]*const mlir.Type = undefined;
+        var after_locs: [M]*const mlir.Location = undefined;
+        inline for (type_fields, 0..) |f, i| {
+            if (f.type != *const mlir.Type)
+                @compileError("openWhile: every after_type must be *const mlir.Type");
+            after_tys[i] = @field(after_types, f.name);
+            after_locs[i] = self.loc();
+        }
+        const after_block = mlir.Block.init(&after_tys, &after_locs);
+
         self.pushBlock(before_block);
-        var before_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..inits.len) |i| before_args.appendAssumeCapacity(.{ .inner = before_block.argument(i), .kernel = self });
-        const before_out = args.before(self, before_args.constSlice(), ctx);
-        // `before_out` is expected to be a struct { cond: Value, forwarded: []const Value }
-        var cond_args: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (before_out.forwarded) |v| cond_args.appendAssumeCapacity(v.inner);
-        _ = scf.condition(self.ctx, before_out.cond.inner, cond_args.constSlice(), self.loc()).appendTo(before_block);
-        self.popBlock();
+        var before_carried: [N]Value = undefined;
+        for (0..N) |i| before_carried[i] = .{ .inner = before_block.argument(i), .kernel = self };
 
-        // Populate "after".
-        self.pushBlock(after_block);
-        var after_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..arg_types_after.len) |i| after_args.appendAssumeCapacity(.{ .inner = after_block.argument(i), .kernel = self });
-        const after_out = args.after(self, after_args.constSlice(), ctx);
-        var yield_vals: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (after_out) |v| yield_vals.appendAssumeCapacity(v.inner);
-        _ = scf.yield(self.ctx, yield_vals.constSlice(), self.loc()).appendTo(after_block);
-        self.popBlock();
-
-        var init_values: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (inits) |v| init_values.appendAssumeCapacity(v.inner);
-
-        const w = scf.while_(
-            self.ctx,
-            init_values.constSlice(),
-            arg_types_after,
-            before_block,
-            after_block,
-            self.loc(),
-        );
-        _ = w.appendTo(self.currentBlock());
-
-        const out = self.arena.allocator().alloc(Value, arg_types_after.len) catch @panic("Kernel.whileLoop OOM");
-        for (0..arg_types_after.len) |i| out[i] = .{ .inner = w.result(i), .kernel = self };
-        return out;
+        return .{
+            .kernel = self,
+            .before_block = before_block,
+            .after_block = after_block,
+            .inits_inner = inits_inner,
+            .after_types = after_tys,
+            .before_carried = before_carried,
+        };
     }
 
     // ==================== finalization ====================
@@ -2399,20 +2579,12 @@ test "Kernel with scf.for iter_args" {
     const step = kernel.lift(@as(i32, 1));
     const init_acc = kernel.lift(@as(f32, 0.0));
 
-    const Ctx = struct { base: Value };
-    const body = struct {
-        fn call(k: *Kernel, iv: Value, iter: []const Value, c: Ctx) []const Value {
-            _ = iv;
-            const v = k.load(c.base);
-            return k.yield(.{k.addf(iter[0], v)});
-        }
-    }.call;
-
-    const loop_results = kernel.forLoop(Ctx{ .base = base }, lb, ub, step, .{
-        .inits = &.{init_acc},
-        .body = body,
-    });
-    kernel.store(base, loop_results[0]);
+    var loop = kernel.openFor(lb, ub, step, .{init_acc});
+    {
+        const v = kernel.load(base);
+        loop.yield(.{kernel.addf(loop.carried[0], v)});
+    }
+    kernel.store(base, loop.results[0]);
 
     const ir = try kernel.finish(&.{});
     defer std.testing.allocator.free(ir);
@@ -2454,25 +2626,15 @@ test "Kernel with scf.if" {
     const c2 = kernel.lift(@as(i32, 2));
     const eq = kernel.cmpi(.eq, c1, c2);
 
-    const then_fn = struct {
-        fn call(k: *Kernel, _: void) []const Value {
-            return k.yield(.{k.lift(@as(f32, 1.0))});
-        }
-    }.call;
-    const else_fn = struct {
-        fn call(k: *Kernel, _: void) []const Value {
-            return k.yield(.{k.lift(@as(f32, 2.0))});
-        }
-    }.call;
-
     const f32_ty = mlir.floatType(ctx, .f32);
-    const results = kernel.ifThenElse({}, .{
-        .cond = eq,
-        .results = &.{f32_ty},
-        .then_ = then_fn,
-        .else_ = else_fn,
-    });
-    kernel.store(a_ptr, results[0]);
+    var i = kernel.openIfElse(eq, .{f32_ty});
+    {
+        i.yieldThen(.{kernel.lift(@as(f32, 1.0))});
+    }
+    {
+        i.yieldElse(.{kernel.lift(@as(f32, 2.0))});
+    }
+    kernel.store(a_ptr, i.results[0]);
 
     const ir = try kernel.finish(&.{});
     defer std.testing.allocator.free(ir);
@@ -3044,7 +3206,7 @@ test "lift preserves f16 width through fluent ops" {
     defer std.testing.allocator.free(ir);
 }
 
-test "forLoop with Value bounds and no ctx" {
+test "openFor with Value bounds and no carried values" {
     const ctx = try setupTestContext();
     defer ctx.deinit();
 
@@ -3056,12 +3218,10 @@ test "forLoop with Value bounds and no ctx" {
     const lb = k.arg(0);
     const ub = k.liftAs(@as(usize, 10), .i32);
 
-    const Body = struct {
-        fn b(_: *Kernel, _: Value, _: []const Value, _: void) []const Value {
-            return &.{};
-        }
-    }.b;
-    _ = k.forLoop({}, lb, ub, 1, .{ .body = Body });
+    var loop = k.openFor(lb, ub, 1, .{});
+    {
+        loop.yield(.{});
+    }
 
     const ir = try k.finish(&.{});
     defer std.testing.allocator.free(ir);

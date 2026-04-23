@@ -310,8 +310,9 @@ a `new_shape`, a `num_bins`, an `out_dtype`, a TMA tile descriptor. The DSL
 never asks you to restate information it can read off a `Value`.
 
 `k.scalarTy(dtype)` / `k.tensorTy(shape, dtype)` are still available but only
-needed by `whileLoop.after_types` (where block-arg types can be arbitrary) and
-by the raw `externElementwise` / `inlineAsmElementwise` escape hatches.
+needed by `openIf.result_types` / `openWhile.after_types` (where block-arg
+types can be arbitrary) and by the raw `externElementwise` /
+`inlineAsmElementwise` escape hatches.
 
 ### `fn X / fn XOpts` pattern
 
@@ -376,61 +377,113 @@ closure for `combine` and give you full control.
 
 ## Control flow
 
-`Kernel.forLoop`, `Kernel.ifThenElse`, `Kernel.whileLoop`, and
-`Kernel.parallel` build their SCF regions via Zig-style closures that receive a
-`*Kernel`, the loop IVs / block args as `[]const Value`, and a caller-supplied
-`ctx` struct.
+SCF regions are built with **scope-based** builders — `k.openFor(...)`,
+`k.openIf(...)` / `k.openIfElse(...)`, `k.openWhile(...)` return a typed scope
+value. You emit body ops into a bare `{}` block, terminate with `yield` /
+`yieldThen` / `yieldAfter`, and read results from `scope.results` afterward.
+No `ctx` struct, no function literal, no `kk`/`k` split — lexical scope
+carries captures because everything runs in the same function.
 
-**Control-flow helpers take `ctx` as the first positional arg, then a typed
-struct literal for the rest.** `ctx` infers the concrete type of the
-callbacks (`.body` / `.then_` / `.combine` / …), so those fields are real
-function-pointer types — IDE autocomplete, signature-checked, real optional
-via `?*const fn = null` / default values.
-
-| Helper         | Positional                                      | Struct fields                                              | Optional struct fields         |
-|----------------|-------------------------------------------------|------------------------------------------------------------|--------------------------------|
-| `forLoop`      | `ctx, lower, upper, step`                       | `.body`                                                    | `.inits = &.{}`                |
-| `ifThenElse`   | `ctx`                                           | `.cond`, `.then_`                                          | `.else_ = null`, `.results = &.{}` |
-| `whileLoop`    | `ctx`                                           | `.inits`, `.after_types`, `.before`, `.after`              | —                              |
-| `reduce`       | `ctx`                                           | `.src`, `.axis`, `.elem`, `.result`, `.combine`            | —                              |
-| `scan`         | `ctx`                                           | `.src`, `.axis`, `.elem`, `.result`, `.combine`            | `.reverse = false`             |
-
-For a callback with no context, pass `{}`: `k.ifThenElse({}, .{ ... })`.
-`forLoop`'s bounds remain polymorphic (`Value`, comptime int, or runtime
-Zig int) because they're positional `anytype` — no `k.lift(...)` noise.
-
-Rules of thumb:
-
-- Capture everything the body needs (Values, sizes, dtypes) in a local struct
-  and pass it as the first positional arg (`ctx`). There are no implicit
-  closures — context is the only way to smuggle state in.
-- Return `&.{}` if the body has no yielded values. Otherwise, return
-  `kk.yield(.{ v1, v2, ... })` — a tuple-of-Values helper that packs into the
-  arena-allocated slice `scf.yield` expects.
-- `forLoop`'s `lower` / `upper` / `step` are positional `anytype`: pass Values,
-  comptime ints, or runtime Zig ints directly. Comptime literals lift to match
-  the first operand's type (so `0, N, 1` with `N: Value` of type i32 yields
-  i32 bounds). To force a specific width on a Zig-side scalar, cast it at the
-  call site (e.g. `@as(i32, @intCast(config.block))`).
-
-Example — histogram loop:
+### `openFor` — scf.for with iter_args
 
 ```zig
-const HistCtx = struct { topk_ids: Value, numel: i32, hist_block: i64, padded: i64 };
-const body = struct {
-    fn b(kk: *Kernel, iv: Value, iter: []const Value, hc: HistCtx) []const Value {
-        const offs = iv.add(kk.arange(0, @intCast(hc.hist_block), .i32));
-        const mask = offs.lt(hc.numel);
-        const expert_vals = kk.loadMasked(hc.topk_ids.addPtr(offs), mask);
-        const h = kk.histogramOpts(expert_vals, hc.padded, .{ .mask = mask });
-        return kk.yield(.{iter[0].add(h)});
-    }
-}.b;
-_ = k.forLoop(hctx, 0, numel, @as(i32, @intCast(hist_block)), .{
-    .inits = &.{counts_init},
-    .body = body,
-});
+var loop = k.openFor(0, N, BLOCK, .{acc0});
+{
+    const iv  = loop.iv;
+    const acc = loop.carried[0];
+    const offs    = iv.add(cols);
+    const tile    = k.loadMasked(x_ptr.addPtr(offs), offs.lt(N));
+    const partial = tile.sum();
+    loop.yield(.{ acc.add(partial) });
+}
+const total = loop.results[0];
 ```
+
+- `lower`/`upper`/`step` are `anytype`: pass Values, comptime ints, or runtime
+  Zig ints. Comptime literals adapt to the first operand's type; cast explicitly
+  to force a specific width (e.g. `@as(i32, @intCast(config.block))`).
+- `inits` is a tuple literal `.{v1, v2, ...}`. Arity is comptime — `carried`,
+  `results`, and the `yield(...)` call are all fixed-size arrays of the same
+  length.
+- Empty loops: `k.openFor(0, N, S, .{})` + `loop.yield(.{})` (no iter_args).
+
+### `openIf` — scf.if without else (side-effects only)
+
+```zig
+var i = k.openIf(cond);
+{
+    // then body
+    i.yieldThen(.{});   // closes scope, builds scf.if with empty else
+}
+```
+
+Use for conditional side-effects (no results). There is no `yieldElse` — the
+else block is auto-built empty.
+
+### `openIfElse` — scf.if with else and optional results
+
+```zig
+var i = k.openIfElse(cond, .{ k.scalarTy(.f32) });   // result types
+{
+    // then body
+    i.yieldThen(.{ x });
+}
+{
+    // else body
+    i.yieldElse(.{ y });
+}
+const r = i.results[0];
+```
+
+- `result_types` is a tuple of `*const mlir.Type` — use `k.scalarTy(dtype)` or
+  `k.tensorTy(shape, dtype)`. Pass `.{}` for an if/else with no results but
+  distinct then/else bodies.
+- `yieldThen` swaps to the else block; `yieldElse` builds the `scf.if` op.
+- Both branches must yield arity-matching tuples.
+
+### `openWhile` — scf.while
+
+```zig
+var w = k.openWhile(.{ i0 }, .{ k.scalarTy(.i32) });
+{
+    // before region (condition)
+    const s = w.before_carried[0];
+    w.yieldBefore(s.lt(10), .{ s });    // scf.condition: cond + values forwarded to after
+}
+{
+    // after region (body)
+    const s = w.after_carried[0];
+    w.yieldAfter(.{ s.add(1) });        // values forwarded back to before
+}
+const r = w.results[0];
+```
+
+- `inits` — tuple of `Value`s; before-region arg types = their types.
+- `after_types` — tuple of `*const mlir.Type`; after-region arg types + the
+  scf.while's result types.
+- `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
+- `yieldAfter(values)` — arity must match `inits`.
+
+### `reduce` / `scan` — custom combiners (still callback-based)
+
+```zig
+k.reduce(ctx, .{ .src, .axis, .elem, .result, .combine = fn (*Kernel, Value, Value, Ctx) Value });
+k.scan  (ctx, .{ .src, .axis, .reverse = false, .elem, .result, .combine });
+```
+
+These stay on the callback pattern because the combine fn is a tiny pure
+function (`(a, b) -> a ⊕ b`) where a `ctx` struct is a cleaner fit than a
+scoped builder. Reach for `k.sum` / `k.max` / `k.cumsum` / etc. first — the
+built-in reductions cover the common cases.
+
+### General tips
+
+- Scopes stack naturally: `openFor { openIf { openFor { ... } } }` all just
+  push/pop the kernel's current-block stack (same for `openIfElse` /
+  `openWhile`).
+- Empty yields are legal: `loop.yield(.{})`, `i.yieldThen(.{})`, etc.
+- After any `yield*`, the scope's `.results` field holds the scf op's results
+  as a `[N]Value`.
 
 ---
 
@@ -513,9 +566,10 @@ is the manual form.
 | `tl.device_assert(cond, "msg")`               | `k.deviceAssert(cond, "msg")`                                      |
 | `tl.inline_asm_elementwise(...)`              | `k.inlineAsmElementwise(...)`                                      |
 | `tl.extern_elementwise(...)`                  | `k.externElementwise(srcs, shape, dtype, lib, path, sym)`          |
-| `for i in range(0, N, S): ...`                | `k.forLoop(ctx, 0, N, S, .{ .inits=..., .body=... })`                                       |
-| `while cond: ...`                             | `k.whileLoop(ctx, .{ .inits=..., .after_types=..., .before=..., .after=... })`              |
-| `if cond: ... else: ...`                      | `k.ifThenElse(ctx, .{ .cond=..., .results=..., .then_=..., .else_=... })`                   |
+| `for i in range(0, N, S): ...`                | `var loop = k.openFor(0, N, S, .{inits...}); { ...; loop.yield(.{...}); }`                 |
+| `while cond: ...`                             | `var w = k.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
+| `if cond: ...` (side-effects, no else)        | `var i = k.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
+| `if cond: ... else: ...`                      | `var i = k.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
 
 ---
 
@@ -530,9 +584,11 @@ is the manual form.
    `offs` is a tensor, `ptr.addPtr(offs)` auto-splats the pointer to match
    (no manual `.splatTo` needed).
 
-3. **Closures can't capture — use `.ctx`.** Zig has no lexical closures.
-   Anything a for/while/if body needs must come in through the `.ctx` field
-   on the control-flow helper's struct-literal argument.
+3. **Scope-based control flow — no closures needed.** `openFor` / `openIf` /
+   `openIfElse` / `openWhile` push a block onto the kernel's insertion stack;
+   body ops emitted in the bare `{}` that follows go into that block. Captures
+   are plain lexical scope, so you can reference outer Values, sizes, etc.
+   directly — no `ctx` struct, no function literal.
 
 4. **`Value.kernel == null` panics fluent calls.** Only happens if you build a
    `Value` by hand via `.{ .inner = raw }`. Route through `k.emit(...)` to keep
@@ -540,7 +596,7 @@ is the manual form.
    helpers for that one op.
 
 5. **Don't worry about duplicate constants.** Every lifted literal (from
-   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, a `forLoop(ctx, 0, N, 1, …)`
+   `.add(42)`, `.lt(0)`, `k.splat(1.0, shape)`, an `openFor(0, N, 1, …)`
    bound, etc.) emits a fresh `arith.constant`. This matches Python Triton's
    own frontend — the MLIR canonicalizer + CSE pass collapses duplicates on the
    way to PTX, so the generated code is identical whether you emit one
@@ -551,8 +607,11 @@ is the manual form.
    missing block terminator — a common one is forgetting that `scf.yield`
    operand count must match the loop's result types.
 
-7. **Yielding from loop / if bodies.** Use `kk.yield(.{ v1, v2 })` to return
-   a tuple of Values — the helper packs them into the kernel's per-frame
-   arena and hands back the `[]const Value` slice the DSL expects. The raw
-   escape hatch — `kk.arena.allocator().alloc(Value, N)` and fill — still
-   works and is freed on `kernel.deinit()`, but you shouldn't need it.
+7. **Yielding from loop / if / while bodies.** Inside a scope (`openFor`,
+   `openIf`, `openIfElse`, `openWhile`), you *don't* return values — you call
+   `scope.yield(...)` (or `yieldThen` / `yieldElse` / `yieldBefore` /
+   `yieldAfter`) with a tuple of Values matching the scope's declared arity.
+   Scopes with results (`openFor`, `openIfElse`, `openWhile`) store the scf
+   op's results in `scope.results` as a fixed-size `[N]Value` array. `openIf`
+   has no results — `yieldThen(.{})` closes and builds scf.if with an empty
+   else block in one step.
