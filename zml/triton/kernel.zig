@@ -211,6 +211,18 @@ pub const Kernel = struct {
         return .unknown(self.ctx);
     }
 
+    // ==================== type helpers ====================
+
+    /// Scalar MLIR type for the given DSL element type.
+    pub fn scalarTy(self: *const Kernel, dtype: DType) *const mlir.Type {
+        return dtype.toMlir(self.ctx);
+    }
+
+    /// Ranked tensor MLIR type `tensor<shape x dtype>`.
+    pub fn tensorTy(self: *const Kernel, shape: []const i64, dtype: DType) *const mlir.Type {
+        return mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
+    }
+
     // ==================== SPMD ====================
 
     pub fn programId(self: *Kernel, dim: ttir.ProgramIDDim) Value {
@@ -900,6 +912,61 @@ pub const Kernel = struct {
         const out = self.arena.allocator().alloc(Value, reduction_result_types.len) catch @panic("Kernel.parallel OOM");
         for (0..reduction_result_types.len) |i| out[i] = .{ .inner = op.result(i) };
         return out;
+    }
+
+    // ==================== reduce / scan ====================
+
+    /// `tt.reduce` along `axis`, single-input. `combine_fn(k, lhs, rhs, body_ctx)`
+    /// returns the value fed to `tt.reduce.return`. `elem_ty` is the element
+    /// type of `src` (used for the combine region args); `result_ty` is the
+    /// reduce op's result type (scalar or tensor-minus-axis).
+    pub fn reduce(
+        self: *Kernel,
+        src: Value,
+        axis: i32,
+        elem_ty: *const mlir.Type,
+        result_ty: *const mlir.Type,
+        comptime combine_fn: anytype,
+        body_ctx: anytype,
+    ) Value {
+        const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
+
+        self.pushBlock(region);
+        const lhs: Value = .{ .inner = region.argument(0) };
+        const rhs: Value = .{ .inner = region.argument(1) };
+        const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
+        _ = ttir.reduce_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
+        self.popBlock();
+
+        const op = ttir.reduce(self.ctx, &.{src.inner}, axis, region, &.{result_ty}, self.loc());
+        _ = op.appendTo(self.currentBlock());
+        return .{ .inner = op.result(0) };
+    }
+
+    /// `tt.scan` along `axis`, single-input. `combine_fn(k, lhs, rhs, body_ctx)`
+    /// returns the value fed to `tt.scan.return`.
+    pub fn scan(
+        self: *Kernel,
+        src: Value,
+        axis: i32,
+        reverse: bool,
+        elem_ty: *const mlir.Type,
+        result_ty: *const mlir.Type,
+        comptime combine_fn: anytype,
+        body_ctx: anytype,
+    ) Value {
+        const region = mlir.Block.init(&.{ elem_ty, elem_ty }, &.{ self.loc(), self.loc() });
+
+        self.pushBlock(region);
+        const lhs: Value = .{ .inner = region.argument(0) };
+        const rhs: Value = .{ .inner = region.argument(1) };
+        const combined: Value = combine_fn(self, lhs, rhs, body_ctx);
+        _ = ttir.scan_return(self.ctx, &.{combined.inner}, self.loc()).appendTo(region);
+        self.popBlock();
+
+        const op = ttir.scan(self.ctx, &.{src.inner}, axis, reverse, region, &.{result_ty}, self.loc());
+        _ = op.appendTo(self.currentBlock());
+        return .{ .inner = op.result(0) };
     }
 
     // ==================== SCF regions ====================

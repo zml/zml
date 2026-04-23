@@ -15,7 +15,6 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
-const dialects = @import("mlir/dialects");
 const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
@@ -28,8 +27,6 @@ const kernel_dsl = @import("zml/triton");
 const Kernel = kernel_dsl.Kernel;
 const DslValue = kernel_dsl.Value;
 const DslArgSpec = kernel_dsl.ArgSpec;
-const arith = dialects.arith;
-const ttir = dialects.ttir;
 
 const log = std.log.scoped(.moe_triton);
 
@@ -609,7 +606,7 @@ inline fn splatI64(k: *Kernel, value: i64, shape: []const i64) DslValue {
     return k.splat(k.constI64(value), shape);
 }
 
-/// `arith.cmpi slt` between a tensor and a scalar (broadcast on rhs).
+/// Signed `<` between a tensor and a scalar (broadcast on rhs).
 inline fn cmpiTensorLtScalar(k: *Kernel, lhs: DslValue, scalar: DslValue, shape: []const i64) DslValue {
     return k.cmpi(.slt, lhs, k.splat(scalar, shape));
 }
@@ -626,15 +623,14 @@ inline fn broadcast2d(k: *Kernel, vec: DslValue, axis: i32, m: i64, n: i64) DslV
 
 /// Convenience: load an i64 scalar from a `!tt.ptr<i64>` arg.
 inline fn loadI64(k: *Kernel, ptr: DslValue) DslValue {
-    return k.load(ptr, mlir.integerType(k.ctx, .i64), .{});
+    return k.load(ptr, k.scalarTy(.i64), .{});
 }
 
 /// Convenience: load an i32 scalar from a `!tt.ptr<i32>` arg.
 inline fn loadI32(k: *Kernel, ptr: DslValue) DslValue {
-    return k.load(ptr, mlir.integerType(k.ctx, .i32), .{});
+    return k.load(ptr, k.scalarTy(.i32), .{});
 }
 
-/// Convenience: `arith.constant 0 : i32` etc.
 inline fn zeroI32(k: *Kernel) DslValue {
     return k.constI32(0);
 }
@@ -739,7 +735,7 @@ fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: AlignBlo
             // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS) (i32)
             const topk_ptrs = kk.addptr(kk.splat(ctx_.topk_ids, &.{ctx_.block_size}), offs);
             const num_experts_splat = kk.splat(ctx_.num_experts_c, &.{ctx_.block_size});
-            const i32_tensor_ty = mlir.rankedTensorType(&.{ctx_.block_size}, mlir.integerType(kk.ctx, .i32));
+            const i32_tensor_ty = kk.tensorTy(&.{ctx_.block_size}, .i32);
             const expert_vals = kk.load(topk_ptrs, i32_tensor_ty, .{
                 .mask = mask.inner,
                 .other = num_experts_splat.inner,
@@ -770,8 +766,7 @@ fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: AlignBlo
         }
     }.call;
 
-    const i32_ty = mlir.integerType(ctx, .i32);
-    _ = k.whileLoop(&.{token_start_init}, &.{i32_ty}, before, after, c);
+    _ = k.whileLoop(&.{token_start_init}, &.{k.scalarTy(.i32)}, before, after, c);
 
     return kernel.finish(&.{}, allocator) catch |err| {
         log.err("failed to finalize count_and_sort_expert_tokens_kernel TTIR: {}", .{err});
@@ -812,14 +807,14 @@ fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config:
     const group_size = loadI64(k, group_size_ptr);
     const y_num_columns = loadI64(k, y_num_columns_ptr);
     const y_row_stride = loadI64(k, y_row_stride_ptr);
-    const eps = k.load(eps_ptr, mlir.floatType(ctx, .f32), .{});
+    const eps = k.load(eps_ptr, k.scalarTy(.f32), .{});
 
     // groups_per_row = y_num_columns // group_size  (scalar i64)
     const groups_per_row = k.divsi(y_num_columns, group_size);
 
     // g_id = program_id (i32) → cast to i64 for offset math
     const g_id_i32 = k.programId(.x);
-    const g_id = k.extsi(g_id_i32, mlir.integerType(ctx, .i64));
+    const g_id = k.extsi(g_id_i32, k.scalarTy(.i64));
 
     // row = g_id // groups_per_row, row_g_id = g_id % groups_per_row
     const row = k.divsi(g_id, groups_per_row);
@@ -841,20 +836,20 @@ fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config:
     // cols = arange(0, BLOCK)  (tensor<BLOCK x i32>)
     const cols = k.makeRange(0, @intCast(block));
     // Promote cols → i64 for ptr offsets.
-    const cols_i64 = k.extsi(cols, mlir.rankedTensorType(&.{block}, mlir.integerType(ctx, .i64)));
+    const cols_i64 = k.extsi(cols, k.tensorTy(&.{block}, .i64));
 
     // mask = cols < group_size  (need group_size as i32 splat for cmp)
     // group_size is i64; truncate for comparison with cols (i32).
-    const group_size_i32 = k.trunci(group_size, mlir.integerType(ctx, .i32));
+    const group_size_i32 = k.trunci(group_size, k.scalarTy(.i32));
     const group_size_splat = k.splat(group_size_i32, &.{block});
     const mask = k.cmpi(.slt, cols, group_size_splat);
 
     // y_load_ptr = y_ptr_shifted + cols (tensor of ptrs), load tensor of input dtype.
     const y_load_ptrs = k.addptr(k.splat(y_ptr_shifted, &.{block}), cols_i64);
     const input_dt = dslDType(config.input_dtype);
-    const input_elem = input_dt.toMlir(ctx);
-    const input_tensor_ty = mlir.rankedTensorType(&.{block}, input_elem);
-    const f32_tensor_ty = mlir.rankedTensorType(&.{block}, mlir.floatType(ctx, .f32));
+    const input_elem = k.scalarTy(input_dt);
+    const input_tensor_ty = k.tensorTy(&.{block}, input_dt);
+    const f32_tensor_ty = k.tensorTy(&.{block}, .f32);
 
     // Zero "other" value, in input element type, splatted to the block tensor.
     const zero_f32_scalar = k.constF32(0.0);
@@ -877,20 +872,13 @@ fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config:
 
     // _absmax = max(reduce_max(abs(y)), eps)
     const abs_y = k.absf(y_f32);
-    // tt.reduce along axis 0 of a 1-D tensor → scalar f32.
-    const f32_ty = mlir.floatType(ctx, .f32);
-    const reduce_block = mlir.Block.init(&.{ f32_ty, f32_ty }, &.{ .unknown(ctx), .unknown(ctx) });
-    {
-        k.pushBlock(reduce_block);
-        const lhs: DslValue = .{ .inner = reduce_block.argument(0) };
-        const rhs: DslValue = .{ .inner = reduce_block.argument(1) };
-        const m = k.maximumf(lhs, rhs);
-        _ = ttir.reduce_return(ctx, &.{m.inner}, .unknown(ctx)).appendTo(reduce_block);
-        k.popBlock();
-    }
-    const reduce_op = ttir.reduce(ctx, &.{abs_y.inner}, 0, reduce_block, &.{f32_ty}, .unknown(ctx));
-    _ = reduce_op.appendTo(k.currentBlock());
-    const absmax_raw: DslValue = .{ .inner = reduce_op.result(0) };
+    const f32_ty = k.scalarTy(.f32);
+    const max_combine = struct {
+        fn combine(kk: *Kernel, lhs: DslValue, rhs: DslValue, _: void) DslValue {
+            return kk.maximumf(lhs, rhs);
+        }
+    }.combine;
+    const absmax_raw = k.reduce(abs_y, 0, f32_ty, f32_ty, max_combine, {});
     const absmax = k.maximumf(absmax_raw, eps);
 
     // scale_raw = absmax * (1.0 / fp8_max)
@@ -910,7 +898,7 @@ fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config:
     const fp8_max_splat = k.splat(k.constF32(config.fp8_max), &.{block});
     const y_clamped = k.clampf(y_div, fp8_min_splat, fp8_max_splat, .none);
     const out_dt = dslDType(config.output_dtype);
-    const out_tensor_ty = mlir.rankedTensorType(&.{block}, out_dt.toMlir(ctx));
+    const out_tensor_ty = k.tensorTy(&.{block}, out_dt);
     const y_q = k.fpToFp(y_clamped, out_tensor_ty, .{ .rounding = .rtne });
 
     // store(y_q_ptr_shifted + cols, y_q, mask)
@@ -922,7 +910,7 @@ fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config:
     const y_s_to_store = if (scale_dt == .f32)
         y_s_scalar
     else
-        k.fpToFp(y_s_scalar, scale_dt.toMlir(ctx), .{ .rounding = .rtne });
+        k.fpToFp(y_s_scalar, k.scalarTy(scale_dt), .{ .rounding = .rtne });
     k.store(y_s_ptr_shifted, y_s_to_store, .{});
 
     return kernel.finish(&.{}, allocator) catch |err| {
@@ -971,9 +959,6 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
     _ = k.arg(6);
     _ = k.arg(7);
     _ = k.arg(8);
-
-    const i32_ty = mlir.integerType(ctx, .i32);
-    const i1_ty = mlir.integerType(ctx, .i1);
 
     const pid = k.programId(.x);
     const c1 = k.constI32(1);
@@ -1060,8 +1045,7 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
 
     const compute_else = struct {
         fn call(kk: *Kernel, c: AlignCtx) []const DslValue {
-            const ctx_ = kk.ctx;
-            const i32_ty_ = mlir.integerType(ctx_, .i32);
+            const i32_ty_ = kk.scalarTy(.i32);
 
             // expert_offs = arange(0, PADDED_NUM_EXPERTS) (i32)
             const expert_offs = kk.makeRange(0, @intCast(c.padded_num_experts));
@@ -1104,7 +1088,7 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
                     const mask = kkk.cmpi(.slt, offs, kkk.splat(kkk.constI32(hc.numel), &.{hc.hist_block}));
                     const topk_ptrs = kkk.addptr(kkk.splat(hc.topk_ids, &.{hc.hist_block}), offs);
                     const num_experts_other = kkk.splat(kkk.constI32(hc.num_experts), &.{hc.hist_block});
-                    const i32_tensor = mlir.rankedTensorType(&.{hc.hist_block}, mlir.integerType(kkk.ctx, .i32));
+                    const i32_tensor = kkk.tensorTy(&.{hc.hist_block}, .i32);
                     const expert_vals = kkk.load(topk_ptrs, i32_tensor, .{
                         .mask = mask.inner,
                         .other = num_experts_other.inner,
@@ -1112,7 +1096,7 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
                     const lt = kkk.cmpi(.slt, expert_vals, num_experts_other);
                     const valid = kkk.andi(mask, lt);
                     // tt.histogram returns tensor<PADDED_NUM_EXPERTS x i32>.
-                    const hist_ty = mlir.rankedTensorType(&.{hc.padded_num_experts}, mlir.integerType(kkk.ctx, .i32));
+                    const hist_ty = kkk.tensorTy(&.{hc.padded_num_experts}, .i32);
                     const h = kkk.histogram(expert_vals, valid, hist_ty);
                     const new_counts = kkk.addi(counts, h);
                     const out = kkk.arena.allocator().alloc(DslValue, 1) catch @panic("OOM");
@@ -1132,36 +1116,19 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
             const padded_counts = kk.select(expert_mask, padded_counts_full, zero_tensor);
 
             // padded_cumsum = cumsum(padded_counts) via tt.scan add along axis 0
-            const scan_block = mlir.Block.init(&.{ i32_ty_, i32_ty_ }, &.{ .unknown(ctx_), .unknown(ctx_) });
-            {
-                kk.pushBlock(scan_block);
-                const lhs: DslValue = .{ .inner = scan_block.argument(0) };
-                const rhs: DslValue = .{ .inner = scan_block.argument(1) };
-                const sum = kk.addi(lhs, rhs);
-                _ = ttir.scan_return(ctx_, &.{sum.inner}, .unknown(ctx_)).appendTo(scan_block);
-                kk.popBlock();
-            }
-            const scan_result_ty = mlir.rankedTensorType(&.{c.padded_num_experts}, i32_ty_);
-            const scan_op = ttir.scan(ctx_, &.{padded_counts.inner}, 0, false, scan_block, &.{scan_result_ty}, .unknown(ctx_));
-            _ = scan_op.appendTo(kk.currentBlock());
-            const padded_cumsum: DslValue = .{ .inner = scan_op.result(0) };
+            const addi_combine = struct {
+                fn combine(kkk: *Kernel, lhs: DslValue, rhs: DslValue, _: void) DslValue {
+                    return kkk.addi(lhs, rhs);
+                }
+            }.combine;
+            const scan_result_ty = kk.tensorTy(&.{c.padded_num_experts}, .i32);
+            const padded_cumsum = kk.scan(padded_counts, 0, false, i32_ty_, scan_result_ty, addi_combine, {});
 
             // starts = padded_cumsum - padded_counts
             const starts = kk.subi(padded_cumsum, padded_counts);
 
             // total_tokens_post_pad = sum(padded_counts)
-            const sum_block = mlir.Block.init(&.{ i32_ty_, i32_ty_ }, &.{ .unknown(ctx_), .unknown(ctx_) });
-            {
-                kk.pushBlock(sum_block);
-                const lhs: DslValue = .{ .inner = sum_block.argument(0) };
-                const rhs: DslValue = .{ .inner = sum_block.argument(1) };
-                const sum = kk.addi(lhs, rhs);
-                _ = ttir.reduce_return(ctx_, &.{sum.inner}, .unknown(ctx_)).appendTo(sum_block);
-                kk.popBlock();
-            }
-            const reduce_op = ttir.reduce(ctx_, &.{padded_counts.inner}, 0, sum_block, &.{i32_ty_}, .unknown(ctx_));
-            _ = reduce_op.appendTo(kk.currentBlock());
-            const total: DslValue = .{ .inner = reduce_op.result(0) };
+            const total = kk.reduce(padded_counts, 0, i32_ty_, i32_ty_, addi_combine, {});
 
             // store(cumsum + expert_offs, starts, mask=expert_mask)
             const cumsum_ptrs = kk.addptr(kk.splat(c.cumsum, &.{c.padded_num_experts}), expert_offs);
@@ -1198,9 +1165,6 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
             };
             const assign_body = struct {
                 fn b(kkk: *Kernel, block_start: DslValue, _: []const DslValue, ac: AssignCtx) []const DslValue {
-                    const ctx2 = kkk.ctx;
-                    const i32t = mlir.integerType(ctx2, .i32);
-                    _ = i32t;
                     const block_ids = kkk.addi(kkk.splat(block_start, &.{ac.hist_block}), ac.block_offs);
                     const max_blocks_splat = kkk.splat(kkk.constI32(@intCast(ac.max_num_m_blocks)), &.{ac.hist_block});
                     const block_mask = kkk.cmpi(.slt, block_ids, max_blocks_splat);
@@ -1259,8 +1223,6 @@ fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignB
         }
     }.call;
 
-    _ = i1_ty;
-    _ = i32_ty;
     _ = k.ifThenElse(cond_pid_eq_1, &.{}, fill_then, compute_else, ax);
 
     return kernel.finish(&.{}, allocator) catch |err| {
@@ -1323,11 +1285,7 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
     const group_size_m: i64 = @intCast(config.group_size_m);
     const top_k: i64 = @intCast(config.top_k);
 
-    const i32_ty = mlir.integerType(ctx, .i32);
-    const i64_ty = mlir.integerType(ctx, .i64);
-    const f32_ty = mlir.floatType(ctx, .f32);
-    _ = i32_ty;
-    _ = f32_ty;
+    const i64_ty = k.scalarTy(.i64);
 
     const a_ptr = k.arg(0);
     const b_ptr = k.arg(1);
@@ -1502,10 +1460,8 @@ fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: GenerationCo
 /// Translates the bf16 / no-bias / no-quant path of `fused_moe_kernel` from
 /// `triton_kernels/moe.py` into TTIR ops.
 fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
-    const ctx = k.ctx;
-    const i32_ty = mlir.integerType(ctx, .i32);
-    const i64_ty = mlir.integerType(ctx, .i64);
-    const f32_ty = mlir.floatType(ctx, .f32);
+    const i32_ty = k.scalarTy(.i32);
+    const i64_ty = k.scalarTy(.i64);
 
     const block_m = ic.block_m;
     const block_n = ic.block_n;
@@ -1516,7 +1472,7 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
 
     // offs = arange(0, BLOCK_M).to(i64)
     const offs_i32 = k.makeRange(0, @intCast(block_m));
-    const offs_i64_ty = mlir.rankedTensorType(&.{block_m}, i64_ty);
+    const offs_i64_ty = k.tensorTy(&.{block_m}, .i64);
     const offs = k.extsi(offs_i32, offs_i64_ty);
 
     // offs_token: depends on naive_block_assignment.
@@ -1536,7 +1492,7 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
 
             // sorted_token_ids[offs_token_id] (i32 → sext to i64)
             const sorted_ptrs = k.addptr(k.splat(ic.sorted_token_ids_ptr, &.{block_m}), offs_token_id);
-            const i32_tensor = mlir.rankedTensorType(&.{block_m}, i32_ty);
+            const i32_tensor = k.tensorTy(&.{block_m}, .i32);
             const loaded = k.load(sorted_ptrs, i32_tensor, .{});
             break :blk k.extsi(loaded, offs_i64_ty);
         }
@@ -1557,7 +1513,7 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
 
     // Build offs_bn := (pid_n * BLOCK_N + arange(0, BLOCK_N).to(i64)) % n_block
     const arange_n_i32 = k.makeRange(0, @intCast(block_n));
-    const arange_n = k.extsi(arange_n_i32, mlir.rankedTensorType(&.{block_n}, i64_ty));
+    const arange_n = k.extsi(arange_n_i32, k.tensorTy(&.{block_n}, .i64));
     const pid_n_block = k.muli(ic.pid_n, ic.block_n_c);
     const pid_n_block_splat = k.splat(pid_n_block, &.{block_n});
     const offs_bn_pre = k.addi(pid_n_block_splat, arange_n);
@@ -1566,12 +1522,12 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
 
     // offs_k = arange(0, BLOCK_K)  (kept i32 — matches Python which doesn't sext)
     const offs_k_i32 = k.makeRange(0, @intCast(block_k));
-    const offs_k = k.extsi(offs_k_i32, mlir.rankedTensorType(&.{block_k}, i64_ty));
+    const offs_k = k.extsi(offs_k_i32, k.tensorTy(&.{block_k}, .i64));
 
     // c_ptrs: c_ptr + stride_cm_block * offs_token[:, None] + stride_cn_block * offs_cn[None, :]
     // offs_cn = pid_n * BLOCK_N + arange(0, BLOCK_N)  (i32, used only for c address)
     const offs_cn_i32 = k.addi(k.splat(k.trunci(pid_n_block, i32_ty), &.{block_n}), arange_n_i32);
-    const offs_cn = k.extsi(offs_cn_i32, mlir.rankedTensorType(&.{block_n}, i64_ty));
+    const offs_cn = k.extsi(offs_cn_i32, k.tensorTy(&.{block_n}, .i64));
 
     // Both branches share the same ctx type because `ifThenElse` only takes a
     // single `body_ctx`. AliveCtx carries every value either branch needs.
@@ -1669,14 +1625,9 @@ fn buildFusedKernelMain(k: *Kernel, ic: anytype) void {
     }.a;
 
     _ = k.ifThenElse(is_dead, &.{}, zero_branch, alive_branch, ac);
-    _ = f32_ty;
 }
 
 fn buildAliveBody(k: *Kernel, ac: anytype) void {
-    const ctx = k.ctx;
-    const i64_ty = mlir.integerType(ctx, .i64);
-    const f32_ty = mlir.floatType(ctx, .f32);
-
     const block_m = ac.block_m;
     const block_n = ac.block_n;
     const block_k = ac.block_k;
@@ -1714,7 +1665,7 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
     // Loop bounds: for k_iter in 0..cdiv(k_block, BLOCK_K).
     const num_k_iters = k.ceildivsi(ac.k_block, k.constI64(block_k));
-    const num_k_iters_i32 = k.trunci(num_k_iters, mlir.integerType(ctx, .i32));
+    const num_k_iters_i32 = k.trunci(num_k_iters, k.scalarTy(.i32));
     const lb = k.constI32(0);
     const step = k.constI32(1);
 
@@ -1749,15 +1700,12 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
     const k_body = struct {
         fn b(kk: *Kernel, k_iter: kernel_dsl.Value, iter: []const kernel_dsl.Value, kc: KCtx) []const kernel_dsl.Value {
-            const ctx2 = kk.ctx;
-            const i64t = mlir.integerType(ctx2, .i64);
-
             const acc = iter[0];
             const a_ptrs = iter[1];
             const b_ptrs = iter[2];
 
             // k_remaining = k_block - k_iter * BLOCK_K  (i64)
-            const k_iter_i64 = kk.extsi(k_iter, i64t);
+            const k_iter_i64 = kk.extsi(k_iter, kk.scalarTy(.i64));
             const k_iter_x_block = kk.muli(k_iter_i64, kk.constI64(kc.block_k));
             const k_remaining = kk.subi(kc.k_block, k_iter_x_block);
 
@@ -1769,8 +1717,8 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
             const mask_a = kk.andi(tm_2d, offs_k_lt_2d_a);
 
             // a = load(a_ptrs, mask=mask_a, other=0)
-            const a_elem = kc.a_dtype.toMlir(ctx2);
-            const a_tensor_ty = mlir.rankedTensorType(&.{ kc.block_m, kc.block_k }, a_elem);
+            const a_elem = kk.scalarTy(kc.a_dtype);
+            const a_tensor_ty = kk.tensorTy(&.{ kc.block_m, kc.block_k }, kc.a_dtype);
             const a_zero_scalar = kk.constF32(0.0);
             const a_zero_input = if (kc.a_dtype == .f32)
                 a_zero_scalar
@@ -1784,8 +1732,8 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
             // mask_b = (offs_k[:, None] < k_remaining)
             const offs_k_lt_2d_b = broadcast2d(kk, offs_k_lt, 1, kc.block_k, kc.block_n);
-            const b_elem = kc.b_dtype.toMlir(ctx2);
-            const b_tensor_ty = mlir.rankedTensorType(&.{ kc.block_k, kc.block_n }, b_elem);
+            const b_elem = kk.scalarTy(kc.b_dtype);
+            const b_tensor_ty = kk.tensorTy(&.{ kc.block_k, kc.block_n }, kc.b_dtype);
             const b_zero_scalar = kk.constF32(0.0);
             const b_zero_input = if (kc.b_dtype == .f32)
                 b_zero_scalar
@@ -1798,7 +1746,7 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
             });
 
             // accumulator = tt.dot(a, b, acc)
-            const acc_ty = mlir.rankedTensorType(&.{ kc.block_m, kc.block_n }, mlir.floatType(ctx2, .f32));
+            const acc_ty = kk.tensorTy(&.{ kc.block_m, kc.block_n }, .f32);
             const new_acc = kk.dot(a_val, b_val, acc, acc_ty, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
 
             // a_ptrs += BLOCK_K * stride_ak_block, b_ptrs += BLOCK_K * stride_bk_block
@@ -1825,7 +1773,7 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
         const tw_ptrs = k.addptr(k.splat(ac.topk_weights_ptr, &.{block_m}), ac.offs_token);
         const tw_zero = k.constF32(0.0);
         const tw_zero_splat = k.splat(tw_zero, &.{block_m});
-        const tw_loaded = k.load(tw_ptrs, mlir.rankedTensorType(&.{block_m}, f32_ty), .{
+        const tw_loaded = k.load(tw_ptrs, k.tensorTy(&.{block_m}, .f32), .{
             .mask = ac.token_mask.inner,
             .other = tw_zero_splat.inner,
         });
@@ -1835,11 +1783,10 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
 
     // Cast accumulator to compute_type and store.
     const compute_dt = ac.compute_dtype;
-    const compute_elem = compute_dt.toMlir(ctx);
     const acc_cast = if (compute_dt == .f32)
         acc_final
     else
-        k.fpToFp(acc_final, mlir.rankedTensorType(&.{ block_m, block_n }, compute_elem), .{ .rounding = .rtne });
+        k.fpToFp(acc_final, k.tensorTy(&.{ block_m, block_n }, compute_dt), .{ .rounding = .rtne });
 
     // c_ptrs = c_ptr + stride_cm * offs_token[:,None] + stride_cn * offs_cn[None,:]
     const cm_2d = broadcast2d(k, ac.offs_token, 1, block_m, block_n);
@@ -1856,8 +1803,6 @@ fn buildAliveBody(k: *Kernel, ac: anytype) void {
     const c_mask = k.andi(tm_2d_c, cn_lt_n_2d);
 
     k.store(c_ptrs, acc_cast, .{ .mask = c_mask.inner });
-
-    _ = i64_ty;
 }
 
 // =============================================================================
