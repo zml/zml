@@ -196,8 +196,8 @@ The lift rule:
   LHS operand, via `constMatching`. `v_i64.mul(16)` lifts `16` to i64,
   `v_f32.add(1.0)` lifts `1.0` to f32, and so on.
 - Runtime `i8/i16/i32`, `i64`, `f32`, `f64`, etc. → a constant that preserves
-  the source Zig width. i8/i16/i32 → i32 const; i64 → i64 const; f16/f32 → f32
-  const (because Zig f16 doesn't round-trip cleanly for free).
+  the source Zig width. i8/i16/i32 (signed or unsigned) → i32 const; i64/u64 →
+  i64 const; f16/f32 → f32 const (f16 round-trips via f32); f64 → f64 const.
 
 This is why the common Python idiom `offs < 64` works in Zig as
 `offs.lt(64)` without any wrapper — as long as the comptime scalar can be
@@ -243,8 +243,9 @@ const offs = k.arange(BLOCK, .i64);
 | `k.splat(value, shape)`                | `tl.splat`; accepts Value or comptime scalar.    |
 | `k.broadcast2d(vec, axis, m, n)`       | Same as `vec.broadcast2d(axis, m, n)`.           |
 | `k.mask2d(cond_m, cond_n, m, n)`       | `cond_m[:, None] & cond_n[None, :]`. Replaces ~5 lines. |
-| `k.lift(value)`                        | Wrap a Zig scalar as a DSL Value (no target type).|
-| `k.constMatching(value, elem_type)`    | Wrap a Zig scalar as a DSL Value of a specific elem type. |
+| `k.lift(value)`                        | Wrap a Zig scalar as a DSL Value; dtype inferred from source. |
+| `k.liftAs(value, dtype)`               | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
+| `k.constMatching(value, elem_type)`    | Same as `liftAs` but takes an MLIR `*const mlir.Type` (e.g. `ref.elemType()`). |
 
 ---
 

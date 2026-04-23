@@ -498,10 +498,13 @@ pub const Kernel = struct {
 
     // ==================== constants ====================
     //
-    // The public surface is `lift(value)` (auto-typed) and `constMatching(value,
-    // elem_ty)` (target-typed). Binary ops, `splat`, `addPtr`, and `forLoop`
-    // all take `anytype` so in practice you rarely need to build a constant
-    // by hand.
+    // Public surface:
+    //   - `lift(value)`                 — dtype inferred from source Zig type.
+    //   - `liftAs(value, dtype)`        — explicit DSL `DType`.
+    //   - `constMatching(value, elem)`  — same as `liftAs` but takes an MLIR
+    //                                     element type (e.g. `ref.elemType()`).
+    // Binary ops, `splat`, `addPtr`, and `forLoop` all take `anytype` so in
+    // practice you rarely need to build a constant by hand.
 
     fn emitInt(self: *Kernel, dtype: DType, value: i64) Value {
         return self.emit(arith.constant_int(self.ctx, value, dtype.toMlir(self.ctx), self.loc()));
@@ -555,18 +558,31 @@ pub const Kernel = struct {
         return self.emit(ttir.splat(self.ctx, v.inner, ty, self.loc()));
     }
 
-    /// Lift a comptime int/float (or pass-through Value) to a scalar DSL Value.
-    /// For runtime ints, the target DSL dtype follows the source's bitwidth
-    /// (i8/i16/i32 → `i32`, i64 → `i64`). Comptime ints default to `i32`.
-    /// Floats always lift to `f32`. To target a specific dtype, call
+    /// Lift a Zig scalar (or pass-through Value) to a scalar DSL constant.
+    /// The resulting DSL dtype is picked from the source type:
+    /// - `comptime_int`: `i32` if it fits, else `i64`; larger → `@compileError`.
+    /// - Runtime int (`i8/i16/i32`, `u8/…/u32`): `i32`.
+    /// - Runtime int `i64/u64` (bits > 32): `i64`. `@intCast` will panic at
+    ///   runtime if a `u32/u64` value doesn't fit in the signed target.
+    /// - `comptime_float`: `f32` (Triton's common default).
+    /// - Runtime `f16/f32` → `f32`, `f64` → `f64`.
+    ///
+    /// To target a specific dtype regardless of source, call
     /// `constMatching(value, dtype.toMlir(k.ctx))` instead.
     pub fn lift(self: *Kernel, value: anytype) Value {
         const T = @TypeOf(value);
         if (T == Value) return value;
         return switch (@typeInfo(T)) {
-            .comptime_int => self.emitInt(.i32, @intCast(value)),
+            .comptime_int => blk: {
+                if (value >= std.math.minInt(i32) and value <= std.math.maxInt(i32))
+                    break :blk self.emitInt(.i32, value);
+                if (value >= std.math.minInt(i64) and value <= std.math.maxInt(i64))
+                    break :blk self.emitInt(.i64, value);
+                @compileError("Kernel.lift: integer literal out of i64 range");
+            },
             .int => |info| if (info.bits > 32) self.emitInt(.i64, @intCast(value)) else self.emitInt(.i32, @intCast(value)),
-            .comptime_float, .float => self.emitFloat(.f32, @floatCast(value)),
+            .comptime_float => self.emitFloat(.f32, @floatCast(value)),
+            .float => |info| if (info.bits > 32) self.emitFloat(.f64, value) else self.emitFloat(.f32, @floatCast(value)),
             else => @compileError("Kernel.lift: unsupported type " ++ @typeName(T)),
         };
     }
@@ -587,35 +603,42 @@ pub const Kernel = struct {
         return self.splat(v, ref.shape().constSlice());
     }
 
-    /// Build an arith.constant of the given MLIR element type from a Zig numeric.
-    /// Picks between integer/float codegen by inspecting the target type.
-    pub fn constMatching(self: *Kernel, value: anytype, elem: *const mlir.Type) Value {
+    /// Reverse lookup: scalar MLIR type → DSL `DType`.
+    fn mlirElemToDType(self: *const Kernel, elem: *const mlir.Type) DType {
+        inline for (std.meta.fields(DType)) |f| {
+            const dt = @field(DType, f.name);
+            if (elem.eql(dt.toMlir(self.ctx))) return dt;
+        }
+        @panic("element type not a recognized DSL DType");
+    }
+
+    /// Lift a Zig scalar to a DSL constant of the given `DType`. Unlike
+    /// `lift`, the target dtype is explicit, so source-width is ignored.
+    /// Float→int casts via `@intFromFloat`, int→float via `@floatFromInt`.
+    pub fn liftAs(self: *Kernel, value: anytype, dtype: DType) Value {
         const T = @TypeOf(value);
-        inline for (std.meta.fields(DType)) |f| {
-            const dt = @field(DType, f.name);
-            if (!isFloatDtype(dt)) {
-                if (elem.eql(dt.toMlir(self.ctx))) {
-                    const v64: i64 = switch (@typeInfo(T)) {
-                        .comptime_int, .int => @intCast(value),
-                        .comptime_float, .float => @intFromFloat(value),
-                        else => @compileError("constMatching: unsupported scalar " ++ @typeName(T)),
-                    };
-                    return self.emitInt(dt, v64);
-                }
-            }
+        if (T == Value) return value;
+        if (isFloatDtype(dtype)) {
+            const v_f64: f64 = switch (@typeInfo(T)) {
+                .comptime_int, .int => @floatFromInt(value),
+                .comptime_float, .float => @floatCast(value),
+                else => @compileError("Kernel.liftAs: unsupported scalar " ++ @typeName(T)),
+            };
+            return self.emitFloat(dtype, v_f64);
         }
-        const v_f64: f64 = switch (@typeInfo(T)) {
-            .comptime_int, .int => @floatFromInt(value),
-            .comptime_float, .float => @floatCast(value),
-            else => @compileError("constMatching: unsupported scalar " ++ @typeName(T)),
+        const v_i64: i64 = switch (@typeInfo(T)) {
+            .comptime_int, .int => @intCast(value),
+            .comptime_float, .float => @intFromFloat(value),
+            else => @compileError("Kernel.liftAs: unsupported scalar " ++ @typeName(T)),
         };
-        inline for (std.meta.fields(DType)) |f| {
-            const dt = @field(DType, f.name);
-            if (isFloatDtype(dt)) {
-                if (elem.eql(dt.toMlir(self.ctx))) return self.emitFloat(dt, v_f64);
-            }
-        }
-        @panic("constMatching: element type not a recognized DSL DType");
+        return self.emitInt(dtype, v_i64);
+    }
+
+    /// Build an arith.constant of the given MLIR element type from a Zig
+    /// numeric. Thin wrapper over `liftAs` for callers that already have an
+    /// element type in hand (e.g. `ref.elemType()`).
+    pub fn constMatching(self: *Kernel, value: anytype, elem: *const mlir.Type) Value {
+        return self.liftAs(value, self.mlirElemToDType(elem));
     }
 
     /// Zero-valued tensor of the given shape and dtype.
