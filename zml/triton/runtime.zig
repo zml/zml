@@ -16,6 +16,7 @@ pub const Runtime = struct {
         var map: std.process.Environ.Map = .init(arena.allocator());
         try map.put("LD_LIBRARY_PATH", std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "lib" }) catch unreachable);
 
+        // Pointer on mutex is required to avoid copy and have a shared mutex
         const process_mutex = try allocator.create(std.Io.Mutex);
         errdefer allocator.destroy(process_mutex);
         process_mutex.* = .init;

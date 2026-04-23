@@ -32,6 +32,14 @@ py_library(
     deps = ["@triton_py_deps//triton"],
 )
 
+py_library(
+    name = "kernels_utils",
+    srcs = ["kernels_utils.py"],
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["//visibility:public"],
+    deps = ["@triton_py_deps//triton"],
+)
+
 cc_library(
     name = "libpython",
     hdrs = ["libpython.h"],
@@ -52,6 +60,7 @@ py_binary(
         "//zml/attention/triton:attention_compile",
         "//zml/moe/triton:moe_compile",
         ":fake_plugin",
+        ":kernels_utils",
         "@triton_py_deps//triton",
     ],
 )
@@ -95,6 +104,8 @@ copy_to_directory(
         "generate",
         "generate.py",
         "zml/triton/generation/generate.py",
+        "kernels_utils.py",
+        "zml/triton/generation/kernels_utils.py",
         "fake_plugin/*",
         "zml/triton/generation/fake_plugin/*",
         "attention_compile.py",
@@ -111,6 +122,8 @@ copy_to_directory(
     replace_prefixes = {
         "zml/triton/generation/generate.py": "site-packages/generate.py",
         "generate.py": "site-packages/generate.py",
+        "zml/triton/generation/kernels_utils.py": "site-packages/kernels_utils.py",
+        "kernels_utils.py": "site-packages/kernels_utils.py",
         "fake_plugin": "site-packages/fake_plugin",
         "zml/triton/generation/fake_plugin": "site-packages/fake_plugin",
         "attention_compile.py": "site-packages/attention_compile.py",
