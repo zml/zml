@@ -4,6 +4,8 @@ load("@rules_python//python/uv:lock.bzl", uv_lock = "lock")
 load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library", "zig_shared_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
+exports_files(["nki/zml_compiler.py"])
+
 # A proxy PJRT Plugin that loads the Neuron PJRT Plugin
 # and returns the instance from nested GetPjrtApi.
 #
@@ -30,7 +32,10 @@ zig_binary(
     linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
     main = "neuronx-cc.zig",
     tags = ["manual"],
-    deps = [":libpython"],
+    deps = [
+        ":libpython",
+        ":python_launcher",
+    ],
 )
 
 runfiles_to_default(
@@ -40,10 +45,18 @@ runfiles_to_default(
     deps = [":neuronx-cc"],
 )
 
+runfiles_to_default(
+    name = "nki-cc_files",
+    target_compatible_with = ["@platforms//os:linux"],
+    visibility = ["@libpjrt_neuron//:__subpackages__"],
+    deps = [":nki-cc"],
+)
+
 cc_library(
     name = "libpython",
     tags = ["manual"],
     hdrs = ["libpython.h"],
+    visibility = ["//platforms/neuron:__subpackages__"],
     deps = [
         "@rules_python//python/cc:current_py_cc_headers",
         "@rules_python//python/cc:current_py_cc_libs",
@@ -87,9 +100,49 @@ upb_c_proto_library(
     tags = ["manual"],
 )
 
+zig_library(
+    name = "python_launcher",
+    tags = ["manual"],
+    import_name = "platforms/neuron/python_launcher",
+    main = "python_launcher.zig",
+    visibility = ["//platforms/neuron:__subpackages__"],
+    deps = [":libpython"],
+)
+
+zig_binary(
+    name = "nki-cc",
+    target_compatible_with = ["@platforms//os:linux"],
+    data = [
+        "nki/zml_compiler.py",
+        # `zml_compiler.py` imports `nki` directly, while kernels like
+        # `zml.attention` import `nkilib.*`. Current Neuron SDK releases ship
+        # `nkilib` inside the `neuronx-cc` wheel, so make both wheels explicit
+        # runfiles for the isolated Python interpreter rather than relying on
+        # other sandbox contents to pull them in indirectly.
+        "@neuron_py_deps//neuronx_cc",
+        "@neuron_py_deps//nki",
+    ],
+    linkopts = ["-Wl,-rpath,$$ORIGIN/../lib"],
+    main = "nki/cc.zig",
+    tags = ["manual"],
+    visibility = ["//platforms/neuron:__pkg__"],
+    deps = [
+        ":libpython",
+        ":python_launcher",
+    ],
+)
+
 zig_shared_library(
     name = "libneuronxla",
     main = "libneuronxla.zig",
+    srcs = [
+        "nki/custom_call_config.zig",
+        "nki/custom_call_mutator.zig",
+        "nki/embedded_kernel_rewriter.zig",
+        "nki/kernel_compiler.zig",
+        "target_resolution.zig",
+        "whole_program_compiler.zig",
+    ],
     shared_lib_name = "libneuronxla.so",
     target_compatible_with = ["@platforms//os:linux"],
     visibility = ["@libpjrt_neuron//:__subpackages__"],

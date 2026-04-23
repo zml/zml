@@ -1,4 +1,8 @@
 --find-links https://mirror.zml.ai/pypi/aws-neuronx-runtime-discovery/index.html
 --extra-index-url=https://pip.repos.neuron.amazonaws.com
+# Keep Neuron-side Python packages in @neuron_py_deps so `nki-cc` and
+# `neuronx-cc` run under Bazel's isolated Python sandbox. On current SDK
+# releases `nkilib` is shipped inside the `neuronx-cc` wheel, so we do not pin
+# a separate `nki-library` wheel here unless the SDK packaging changes.
 libneuronxla>=2.2
 neuronx-cc>=2.22

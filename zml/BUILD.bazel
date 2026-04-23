@@ -33,6 +33,7 @@ zig_library(
         "attention.zig",
         "attention/attention.zig",
         "attention/flashattn.zig",
+        "attention/neuron_attention.zig",
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton.zig",

@@ -34,7 +34,9 @@ copy_to_directory(
         ":libneuronpjrt_so",
         ":libpjrt_neuron_so",
         "@zml//platforms/neuron:neuronx-cc_files",
+        "@zml//platforms/neuron:nki-cc_files",
         "@zml//platforms/neuron:libneuronxla",
+        "@zml//platforms/neuron:nki/zml_compiler.py",
         "@rules_python//python:current_py_toolchain",
         "@aws-neuronx-runtime-lib//:libnrt.patchelf",
         "@aws-neuronx-runtime-lib//:libncfw.patchelf",
@@ -45,7 +47,9 @@ copy_to_directory(
     ],
     replace_prefixes = {
         "platforms/neuron/neuronx-cc": "bin/neuronx-cc",
+        "platforms/neuron/nki-cc": "bin/nki-cc",
         "platforms/neuron/libneuronxla.so": "site-packages/libneuronxla.so",
+        "platforms/neuron/nki/zml_compiler.py": "site-packages/nki/zml_compiler.py",
         "libneuronpjrt_so": "lib",
         "libpjrt_neuron_so": "lib",
         "libnrt.patchelf": "lib",
@@ -62,6 +66,8 @@ copy_to_directory(
     ],
     include_srcs_patterns = [
         "platforms/neuron/neuronx-cc",
+        "platforms/neuron/nki-cc",
+        "platforms/neuron/nki/zml_compiler.py",
         "**/lib**",
         "lib/python*/**",
         "site-packages/**",
