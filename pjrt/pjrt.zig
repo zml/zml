@@ -147,6 +147,8 @@ pub const Api = struct {
     }
 
     fn PJRTFnArgWithDefault(comptime func: Funcs) type {
+        @setEvalBranchQuota(50000);
+
         const argT = PJRTFnArg(func);
         return switch (@typeInfo(argT)) {
             .@"struct" => meta.Struct(argT),

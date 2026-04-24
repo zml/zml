@@ -112,19 +112,14 @@ pub const Tokenizer = union(Tokenizers) {
     }
 
     pub fn fromBytes(allocator: std.mem.Allocator, bytes: []const u8) !Tokenizer {
+        _ = allocator; // Only needed for IREE tokenizer, but we want to trim leading whitespace and BOM before trying to parse as either IREE or HF tokenizer, so we need it here.
         if (bytes.len == 0) return error.InvalidArgument;
 
         const trimmed = trimBomAndLeadingWhitespace(bytes);
         if (trimmed.len == 0) return error.InvalidArgument;
 
         if (trimmed[0] == '{') {
-            return .{ .iree = iree.Tokenizer.fromBytes(allocator, trimmed) catch |err| switch (err) {
-                error.InvalidArgument => {
-                    log.warn("IREE tokenizer rejected JSON tokenizer bytes; falling back to HF tokenizer backend", .{});
-                    return .{ .hftokenizers = try hftokenizers.HFTokenizer.fromBytes(trimmed) };
-                },
-                else => return err,
-            } };
+            return .{ .hftokenizers = try hftokenizers.HFTokenizer.fromBytes(trimmed) };
         }
         return .{ .sentencepiece = try .fromBytes(bytes) };
     }
