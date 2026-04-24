@@ -28,7 +28,7 @@ pub fn main(init: std.process.Init) !void {
         .m = .low_bandwidth,
         .n = .high_bandwidth,
     });
-    const strategy: zml.sharding.Strategy = try .suggest(logical_mesh, platform.physical_mesh);
+    const strategy: zml.sharding.Strategy = .suggest(logical_mesh, platform.physical_mesh);
     const benchmark_sharding: zml.sharding.Sharding = try .initFromStrategy(platform, logical_mesh, strategy);
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);

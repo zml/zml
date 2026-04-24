@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
 
             const sharded_sharding: zml.sharding.Sharding = blk: {
                 const model_logical_mesh: zml.sharding.LogicalMesh = .init("playground_model", .{ .model = .high_bandwidth });
-                const model_strategy: zml.sharding.Strategy = try .suggest(model_logical_mesh, platform.physical_mesh);
+                const model_strategy: zml.sharding.Strategy = .suggest(model_logical_mesh, platform.physical_mesh);
                 break :blk try .initFromStrategy(platform, model_logical_mesh, model_strategy);
             };
 
@@ -230,7 +230,7 @@ const TreeCounts = struct {
 fn printTree(io: std.Io, writer: *std.Io.Writer, dir: std.Io.Dir, prefix: []const u8, max_depth: usize, counts: *TreeCounts) !void {
     if (max_depth == 0) return;
 
-    var entries: stdx.BoundedArray(std.Io.Dir.Entry, 1024) = .{};
+    var entries: stdx.BoundedArray(std.Io.Dir.Entry, 1024) = .empty;
     var it = dir.iterate();
     while (try it.next(io)) |entry| {
         entries.appendAssumeCapacity(entry);

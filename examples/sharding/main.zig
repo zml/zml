@@ -193,7 +193,7 @@ pub fn main(init: std.process.Init) !void {
         .data = .low_bandwidth,
         .model = .high_bandwidth,
     });
-    const strategy: zml.sharding.Strategy = try .suggest(mesh, physical_mesh);
+    const strategy: zml.sharding.Strategy = .suggest(mesh, physical_mesh);
     const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
 
     log.info("{f}", .{mesh});

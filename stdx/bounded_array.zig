@@ -295,7 +295,7 @@ pub fn BoundedArrayAligned(
 }
 
 test BoundedArray {
-    var a = try BoundedArray(u8, 64).init(32);
+    var a: BoundedArray(u8, 64) = .{ .buffer = undefined, .len = 32 };
 
     try testing.expectEqual(a.capacity(), 64);
     try testing.expectEqual(a.slice().len, 32);
@@ -400,7 +400,7 @@ test BoundedArray {
 }
 
 test "BoundedArrayAligned" {
-    var a = try BoundedArrayAligned(u8, .@"16", 4).init(0);
+    var a: BoundedArrayAligned(u8, .@"16", 4) = .empty;
     try a.append(0);
     try a.append(0);
     try a.append(255);

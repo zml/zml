@@ -1479,8 +1479,8 @@ pub const Sharding = struct {
 
 pub fn replicatedSharding(platform: *const Platform) !Sharding {
     const physical_mesh = platform.physical_mesh;
-    const logical_mesh: LogicalMesh = try .init("replicated", .{ .x = .high_bandwidth });
-    const strategy: Strategy = try .suggest(logical_mesh, physical_mesh);
+    const logical_mesh: LogicalMesh = .init("replicated", .{ .x = .high_bandwidth });
+    const strategy: Strategy = .suggest(logical_mesh, physical_mesh);
     return try .initFromStrategy(platform, logical_mesh, strategy);
 }
 
@@ -1885,7 +1885,6 @@ const ShardingTest = struct {
         return .{
             .arena_state = .{},
             .target = mesh.target,
-            .execution_context = undefined,
             .pjrt_api = undefined,
             .pjrt_client = undefined,
             .devices = &.{},

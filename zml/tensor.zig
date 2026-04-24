@@ -525,6 +525,7 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
+        // TODO(codex): swap the field around to match fromBytes signature: io, platform, sharding, seed
         pub fn initBuffer(platform: *const Platform, seed: u128, io: std.Io, sharding: Sharding) !Bufferized(Rng) {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
@@ -4038,7 +4039,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = stdx.BoundedArray(Tensor, constants.MAX_RANK).init(vectors.len) catch unreachable;
+        var out: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .{ .buffer = undefined, .len = vectors.len };
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
