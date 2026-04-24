@@ -1169,7 +1169,7 @@ pub const Operation = opaque {
         if (args.operands) |operands| switch (operands) {
             .flat => |v| state.addOperands(v),
             .variadic => |segments| {
-                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
+                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .empty;
                 for (segments) |segment_operands| {
                     state.addOperands(segment_operands);
                     sizes.appendAssumeCapacity(@intCast(segment_operands.len));
@@ -1182,7 +1182,7 @@ pub const Operation = opaque {
         if (args.results) |results| switch (results) {
             .flat => |v| state.addResults(v),
             .variadic => |segments| {
-                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .{};
+                var sizes: stdx.BoundedArray(i32, MAX_SEGMENTS) = .empty;
                 for (segments) |segment_results| {
                     state.addResults(segment_results);
                     sizes.appendAssumeCapacity(@intCast(segment_results.len));
@@ -1393,7 +1393,7 @@ pub const RankedTensorType = opaque {
     }
 
     pub fn fromShaped(other: *const ShapedType) *const RankedTensorType {
-        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
+        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .empty;
         for (0..other.rank()) |i| {
             dims.appendAssumeCapacity(other.dimension(i));
         }
@@ -1618,7 +1618,7 @@ pub const MemRefType = opaque {
     }
 
     pub fn fromShaped(other: *const ShapedType) *const MemRefType {
-        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .{};
+        var dims: stdx.BoundedArray(i64, ShapedType.MAX_RANK) = .empty;
         for (0..other.rank()) |i| {
             dims.appendAssumeCapacity(other.dimension(i));
         }

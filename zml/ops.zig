@@ -90,7 +90,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     // To that order, we initialize `result` to `inputs`, then we use stdx.meta.visit,
     // to find the correct mlir.Value, but we first broadcast before creating the final
     // Tensor struct.
-    var broadcasting_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    var broadcasting_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
     for (0..constants.MAX_RANK) |i| {
         if (std.mem.indexOfScalar(i64, axes_, @intCast(i)) == null) {
             broadcasting_axes.append(@intCast(i)) catch unreachable;
@@ -715,11 +715,11 @@ pub fn scatter(
 }
 
 const ScatterConfig = struct {
-    op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{},
-    up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{},
-    indices_batch_axes: Shape.DimsArray = .{},
-    scatter_to_operand_axes: Shape.DimsArray = .{},
-    updates_transpose: Shape.AxesArray = .{},
+    op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty,
+    up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty,
+    indices_batch_axes: Shape.DimsArray = .empty,
+    scatter_to_operand_axes: Shape.DimsArray = .empty,
+    updates_transpose: Shape.AxesArray = .empty,
 };
 
 const ScatterAxisKind = enum { batching, update_window, inserted_window, window_id };
@@ -730,11 +730,11 @@ fn scatterConfig(
     indices_per_axis: stdx.BoundedArray(Tensor, constants.MAX_RANK),
     indices_axes: Shape.TagsArray,
 ) ScatterConfig {
-    var op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{};
-    var up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{};
-    var indices_batch_axes: Shape.DimsArray = .{};
-    var scatter_to_operand_axes: Shape.DimsArray = .{};
-    var updates_transpose: Shape.AxesArray = .{};
+    var op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty;
+    var up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty;
+    var indices_batch_axes: Shape.DimsArray = .empty;
+    var scatter_to_operand_axes: Shape.DimsArray = .empty;
+    var updates_transpose: Shape.AxesArray = .empty;
 
     const tagged_api = indices_axes.len > 0;
     const indices = indices_per_axis.get(0).shape();
@@ -880,12 +880,12 @@ fn scatterPrepareIndices(
         cfg.up_kind.buffer[update.axis(batch_tag)] = .window_id;
         old_scatter_to_op_axes.appendAssumeCapacity(batch_ax);
     }
-    cfg.indices_batch_axes = .{};
+    cfg.indices_batch_axes = .empty;
 
     // Reorder the axes so that in indices_per_axis is ordered like in op if possible.
     // TODO: transpose updates if needed
-    var indices: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .{};
-    var scatter_to_op_axes: Shape.DimsArray = .{};
+    var indices: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .empty;
+    var scatter_to_op_axes: Shape.DimsArray = .empty;
 
     while (old_scatter_to_op_axes.len > 0) {
         const scatter_ax = std.sort.argMin(i64, old_scatter_to_op_axes.constSlice(), {}, std.sort.asc(i64)).?;
@@ -929,7 +929,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
         stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "gather indices can't be broadcasted together {any}", .{idx_per_axis});
     }
 
-    var idx_batch_axes: Shape.DimsArray = .{};
+    var idx_batch_axes: Shape.DimsArray = .empty;
 
     var self_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
@@ -952,7 +952,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 
     // compute res shape
     var res_shape = Shape.init(.{}, self.dtype());
-    var res_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{};
+    var res_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .empty;
     for (self_kind.slice(), 0..) |kind, ax_usize| {
         const ax: u3 = @intCast(ax_usize);
         if (ax == idx_axes[0]) {
@@ -982,7 +982,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
         return self.dynamicSlice1d(idx_axes[0], .{ .start = idx_per_axis[0].asScalar(), .len = 1 }).reshape(res_shape);
     }
 
-    var slice_dims: Shape.DimsArray = .{};
+    var slice_dims: Shape.DimsArray = .empty;
     for (self_kind.slice(), self.dims()) |k, d| {
         slice_dims.appendAssumeCapacity(switch (k) {
             .batching, .collapsed => 1,
@@ -1017,7 +1017,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 }
 
 pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, constants.MAX_RANK), value: T) stdx.BoundedArray(i64, constants.MAX_RANK) {
-    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
             res.appendAssumeCapacity(@intCast(ax));
@@ -2056,7 +2056,7 @@ test "CustomCallOutputOperandAliases maps named fields to indices" {
 }
 
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
-    var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .{};
+    var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .empty;
     for (values) |val| res.appendAssumeCapacity(@intCast(val));
     return res;
 }

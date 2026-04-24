@@ -40,14 +40,16 @@ pub fn BoundedArrayAligned(
 ) type {
     return struct {
         const Self = @This();
-        buffer: [buffer_capacity]T align(alignment.toByteUnits()) = undefined,
-        len: usize = 0,
+        buffer: [buffer_capacity]T align(alignment.toByteUnits()),
+        len: usize,
+
+        pub const empty: Self = .{ .buffer = undefined, .len = 0 };
 
         /// Set the actual length of the slice.
         /// Returns error.Overflow if it exceeds the length of the backing array.
         pub fn init(len: usize) error{Overflow}!Self {
             if (len > buffer_capacity) return error.Overflow;
-            return Self{ .len = len };
+            return Self{ .buffer = undefined, .len = len };
         }
 
         /// View the internal array as a slice whose size was previously set.

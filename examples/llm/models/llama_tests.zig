@@ -44,7 +44,7 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const tp_mesh: zml.sharding.LogicalMesh = try .init("tp_mesh", .{ .model = .high_bandwidth });
+    const tp_mesh: zml.sharding.LogicalMesh = .init("tp_mesh", .{ .model = .high_bandwidth });
     const tp_strategy: zml.sharding.Strategy = try .suggest(tp_mesh, platform.physical_mesh);
     const shardings: common.Shardings = .{
         .replicated = try zml.sharding.replicatedSharding(platform),

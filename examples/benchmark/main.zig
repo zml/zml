@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    const logical_mesh: zml.sharding.LogicalMesh = try .init("benchmark_mesh", .{
+    const logical_mesh: zml.sharding.LogicalMesh = .init("benchmark_mesh", .{
         .m = .low_bandwidth,
         .n = .high_bandwidth,
     });

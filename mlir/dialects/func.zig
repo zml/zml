@@ -22,10 +22,10 @@ const FuncOpArgs = struct {
 };
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
-    var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .{};
-    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .{};
+    var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .empty;
+    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
 
-    var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .{};
+    var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
         .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
         .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),

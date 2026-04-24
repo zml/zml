@@ -91,7 +91,7 @@ pub const CompilationContext = struct {
     platform: *const Platform,
     partitioning: Partitioning,
 
-    scopes: stdx.BoundedArray(Scope, 16) = .{},
+    scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
 
     threadlocal var _current: ?*CompilationContext = null;
@@ -429,7 +429,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     errdefer input_info.deinit(compilation_context.allocator);
 
     const input_attributes = try arena.allocator().alloc(AttributeList, input_info.shapes.len);
-    @memset(input_attributes, .{});
+    @memset(input_attributes, .empty);
 
     const output_info = b: {
         compilation_context.activate();
@@ -445,7 +445,7 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     errdefer output_info.deinit(compilation_context.allocator);
 
     const output_attributes = try arena.allocator().alloc(AttributeList, output_info.shapes.len);
-    @memset(output_attributes, .{});
+    @memset(output_attributes, .empty);
 
     for (output_info.donations, 0..) |donation, index| if (donation) |argument_index| {
         input_attributes[argument_index].appendAssumeCapacity(.named(compilation_context.mlir_ctx, "tf.aliasing_output", mlir.integerAttribute(compilation_context.mlir_ctx, .i32, index)));

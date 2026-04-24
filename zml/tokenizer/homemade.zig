@@ -442,8 +442,8 @@ pub const Decoder = struct {
     arena: std.heap.ArenaAllocator,
 
     current_string: ?[]const u8 = null,
-    last_string: StringBuffer = .{ .len = 0 },
-    last_token_ids: TokensIdsBuffer = .{ .len = 0 },
+    last_string: StringBuffer = .empty,
+    last_token_ids: TokensIdsBuffer = .empty,
 
     fn init(inner: *Tokenizer) !Decoder {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
