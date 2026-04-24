@@ -46,7 +46,7 @@ pub const Tokenizer = struct {
         errdefer arena_state.deinit();
         const arena = arena_state.allocator();
 
-        var token_lookup: std.StringHashMapUnmanaged(u32) = .{};
+        var token_lookup: std.StringHashMapUnmanaged(u32) = .empty;
         errdefer token_lookup.deinit(arena);
 
         try token_lookup.ensureTotalCapacity(arena, @intCast(vocab_size));
@@ -442,8 +442,8 @@ pub const Decoder = struct {
     arena: std.heap.ArenaAllocator,
 
     current_string: ?[]const u8 = null,
-    last_string: StringBuffer = .{ .len = 0 },
-    last_token_ids: TokensIdsBuffer = .{ .len = 0 },
+    last_string: StringBuffer = .empty,
+    last_token_ids: TokensIdsBuffer = .empty,
 
     fn init(inner: *Tokenizer) !Decoder {
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -566,7 +566,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = false;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: stdx.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .empty;
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -577,7 +577,7 @@ test CharTokenIterator {
     {
         tokenizer.byte_fallback = true;
         var it: CharTokenIterator = .{ .input = "ζℳL" };
-        var res: stdx.BoundedArray(u32, 8) = .{};
+        var res: stdx.BoundedArray(u32, 8) = .empty;
         while (try it.nextCodepointToken(&tokenizer)) |token| {
             res.appendAssumeCapacity(token);
         }
@@ -591,7 +591,7 @@ pub const Normalizer = struct {
     /// Space token used by sentencepiece derived tokenizer.
     pub const sentencepiece_space = "▁"; // \xe2\x96\x81
 
-    _whitespace: stdx.BoundedArray(u8, 8) = .{},
+    _whitespace: stdx.BoundedArray(u8, 8) = .empty,
 
     flags: packed struct {
         remove_extra_whitespaces: bool,

@@ -17,7 +17,7 @@ pub const Shardings = struct {
     model: zml.sharding.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
-        const model_mesh: zml.sharding.LogicalMesh = try .init("model", .{ .model = .high_bandwidth });
+        const model_mesh: zml.sharding.LogicalMesh = .init("model", .{ .model = .high_bandwidth });
         const model_sharding_strategy: zml.sharding.Strategy = try .suggest(model_mesh, platform.physical_mesh);
         return .{
             .replicated = try zml.sharding.replicatedSharding(platform),

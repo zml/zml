@@ -40,8 +40,8 @@ pub const Decoder = struct {
 
     inner: *HFTokenizer,
     current_string: ?[]const u8 = null,
-    last_string: StringBuffer = .{ .len = 0 },
-    last_token_ids: TokensIdsBuffer = .{ .len = 0 },
+    last_string: StringBuffer = .empty,
+    last_token_ids: TokensIdsBuffer = .empty,
 
     fn init(inner: *HFTokenizer) Decoder {
         return .{ .inner = inner };
