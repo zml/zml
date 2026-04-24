@@ -6,10 +6,8 @@
 const std = @import("std");
 
 const mlir = @import("mlir");
-const stdx = @import("stdx");
 
 const zml = @import("../zml.zig");
-const DataType = zml.DataType;
 const tri = @import("zml/triton");
 const Kernel = tri.Kernel;
 const Value = tri.Value;
@@ -22,13 +20,13 @@ const log = std.log.scoped(.moe_triton);
 // =============================================================================
 
 pub const GenerationConfig = struct {
-    a_dtype: DataType,
-    b_dtype: DataType,
-    c_dtype: DataType,
-    a_scale_dtype: ?DataType = null,
-    b_scale_dtype: ?DataType = null,
-    b_bias_dtype: ?DataType = null,
-    topk_weights_dtype: ?DataType = null,
+    a_dtype: DType,
+    b_dtype: DType,
+    c_dtype: DType,
+    a_scale_dtype: ?DType = null,
+    b_scale_dtype: ?DType = null,
+    b_bias_dtype: ?DType = null,
+    topk_weights_dtype: ?DType = null,
     num_tokens: usize,
     top_k: usize,
     num_experts: usize,
@@ -45,7 +43,7 @@ pub const GenerationConfig = struct {
     group_k: usize = 0,
     naive_block_assignment: bool = false,
     mul_routed_weight: bool = false,
-    compute_type: DataType = .bf16,
+    compute_type: DType = .bf16,
     use_fp8_w8a8: bool = false,
     use_int8_w8a8: bool = false,
     use_int8_w8a16: bool = false,
@@ -86,9 +84,9 @@ pub const QuantGenerationConfig = struct {
     num_columns: usize,
     group_size: usize,
     block: usize,
-    input_dtype: DataType,
-    output_dtype: DataType,
-    scale_dtype: DataType = .bf16,
+    input_dtype: DType,
+    output_dtype: DType,
+    scale_dtype: DType = .bf16,
     eps: f32 = 1e-6,
     fp8_min: f32,
     fp8_max: f32,
@@ -98,23 +96,6 @@ pub const QuantGenerationConfig = struct {
 // =============================================================================
 // Helpers
 // =============================================================================
-
-fn dsl(dt: DataType) DType {
-    return switch (dt) {
-        .bool => .i1,
-        .i8, .u8 => .i8,
-        .i16, .u16 => .i16,
-        .i32, .u32 => .i32,
-        .i64, .u64 => .i64,
-        .f16 => .f16,
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .f8e4m3fn, .f8e4m3b11fnuz, .f8e4m3fnuz => .f8e4m3fn,
-        .f8e5m2, .f8e5m2fnuz => .f8e5m2,
-        else => .i8,
-    };
-}
 
 fn ctx() *mlir.Context {
     return zml.module.CompilationContext.current().mlir_ctx;
@@ -193,21 +174,21 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
 
 pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config: QuantGenerationConfig) ![:0]const u8 {
     var spec = try Kernel.build(allocator, ctx(), "per_token_group_quant_fp8", .{
-        .y_ptr = .{ .ptr = dsl(config.input_dtype) },
+        .y_ptr = .{ .ptr = config.input_dtype },
         .group_size_ptr = .{ .ptr = .i64 },
         .y_num_columns_ptr = .{ .ptr = .i64 },
         .y_row_stride_ptr = .{ .ptr = .i64 },
         .eps_ptr = .{ .ptr = .f32 },
-        .y_q_ptr = .{ .ptr = dsl(config.output_dtype) },
-        .y_s_ptr = .{ .ptr = dsl(config.scale_dtype) },
+        .y_q_ptr = .{ .ptr = config.output_dtype },
+        .y_s_ptr = .{ .ptr = config.scale_dtype },
     }, &.{});
     defer spec.deinit();
     const k = &spec.kernel;
     const a = spec.args;
 
     const block: i64 = @intCast(config.block);
-    const out_dt = dsl(config.output_dtype);
-    const scale_dt = dsl(config.scale_dtype);
+    const out_dt = config.output_dtype;
+    const scale_dt = config.scale_dtype;
 
     const group_size = k.load(a.group_size_ptr);
     const y_num_columns = k.load(a.y_num_columns_ptr);
@@ -393,12 +374,12 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     }
 
     var spec = try Kernel.build(allocator, ctx(), "fused_moe_kernel", .{
-        .a_ptr = .{ .ptr = dsl(config.a_dtype) },
-        .b_ptr = .{ .ptr = dsl(config.b_dtype) },
-        .b_bias_ptr = .{ .ptr = dsl(config.b_bias_dtype orelse config.c_dtype) },
-        .a_scale_ptr = .{ .ptr = dsl(config.a_scale_dtype orelse .f32) },
-        .b_scale_ptr = .{ .ptr = dsl(config.b_scale_dtype orelse .f32) },
-        .topk_weights_ptr = .{ .ptr = dsl(config.topk_weights_dtype orelse .f32) },
+        .a_ptr = .{ .ptr = config.a_dtype },
+        .b_ptr = .{ .ptr = config.b_dtype },
+        .b_bias_ptr = .{ .ptr = config.b_bias_dtype orelse config.c_dtype },
+        .a_scale_ptr = .{ .ptr = config.a_scale_dtype orelse .f32 },
+        .b_scale_ptr = .{ .ptr = config.b_scale_dtype orelse .f32 },
+        .topk_weights_ptr = .{ .ptr = config.topk_weights_dtype orelse .f32 },
         .sorted_token_ids_ptr = .{ .ptr = .i32 },
         .expert_ids_ptr = .{ .ptr = .i32 },
         .num_tokens_post_padded_ptr = .{ .ptr = .i32 },
@@ -417,7 +398,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         .stride_bsn_ptr = .{ .ptr = .i64 },
         .stride_bbe_ptr = .{ .ptr = .i64 },
         .stride_bbn_ptr = .{ .ptr = .i64 },
-        .c_ptr = .{ .ptr = dsl(config.c_dtype) },
+        .c_ptr = .{ .ptr = config.c_dtype },
     }, &.{});
     defer spec.deinit();
     const k = &spec.kernel;
@@ -518,9 +499,9 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         .top_k = top_k,
         .naive = config.naive_block_assignment,
         .mul_routed = config.mul_routed_weight,
-        .a_dtype = dsl(config.a_dtype),
-        .b_dtype = dsl(config.b_dtype),
-        .compute_dtype = dsl(config.compute_type),
+        .a_dtype = config.a_dtype,
+        .b_dtype = config.b_dtype,
+        .compute_dtype = config.compute_type,
     };
 
     var i = k.openIf(in_range);

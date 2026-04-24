@@ -17,7 +17,30 @@ const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 const ops = zml.ops;
 
+const tri = @import("zml/triton");
+const DType = tri.DType;
+
 const kernels = @import("triton_kernels.zig");
+
+/// Map a zml `DataType` to the closest Triton DSL `DType`. The Triton set is
+/// narrower (e.g. several fp8 variants collapse to `.f8e4m3fn`), so this is
+/// intentionally lossy.
+fn toDType(dt: DataType) DType {
+    return switch (dt) {
+        .bool => .i1,
+        .i8, .u8 => .i8,
+        .i16, .u16 => .i16,
+        .i32, .u32 => .i32,
+        .i64, .u64 => .i64,
+        .f16 => .f16,
+        .bf16 => .bf16,
+        .f32 => .f32,
+        .f64 => .f64,
+        .f8e4m3fn, .f8e4m3b11fnuz, .f8e4m3fnuz => .f8e4m3fn,
+        .f8e5m2, .f8e5m2fnuz => .f8e5m2,
+        else => .i8,
+    };
+}
 
 const log = std.log.scoped(.moe_triton);
 
@@ -433,7 +456,7 @@ fn quantizePerTokenGroupFp8(
         .num_columns = @intCast(x.dim(1)),
         .group_size = @intCast(group_size),
         .block = @intCast(group_size),
-        .input_dtype = x.dtype(),
+        .input_dtype = toDType(x.dtype()),
         .output_dtype = .f8e4m3fn,
         .scale_dtype = .bf16,
         .eps = 1e-6,
@@ -488,9 +511,9 @@ fn makeGenerationConfig(
     var use_fp8 = opts.use_fp8_w8a8;
     if (b.dtype() == .f8e4m3fn) use_fp8 = true;
     return .{
-        .a_dtype = a.dtype(),
-        .b_dtype = b.dtype(),
-        .c_dtype = output_dtype,
+        .a_dtype = toDType(a.dtype()),
+        .b_dtype = toDType(b.dtype()),
+        .c_dtype = toDType(output_dtype),
         .num_tokens = @intCast(a.dim(0)),
         .top_k = @intCast(top_k),
         .num_experts = @intCast(b.dim(0)),
