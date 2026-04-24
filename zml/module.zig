@@ -20,6 +20,7 @@ const Sharding = sharding_.Sharding;
 const Partitioning = sharding_.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
+const _module = @This();
 const log = std.log.scoped(.@"zml/module");
 
 var mlir_global_init_mutex: std.Io.Mutex = .init;
@@ -240,6 +241,20 @@ pub fn compile(
     errdefer exe.deinit();
 
     return exe;
+}
+
+pub fn Compiler(comptime func: anytype) type {
+    return struct {
+        pub fn compile(
+            allocator: std.mem.Allocator,
+            io: std.Io,
+            platform: *const Platform,
+            opts: CompilationOptions,
+            args: std.meta.ArgsTuple(@TypeOf(func)),
+        ) !Exe {
+            return _module.compile(allocator, io, func, args, platform, opts);
+        }
+    };
 }
 
 fn addPartitionerOperations(compilation_context: *CompilationContext) !void {

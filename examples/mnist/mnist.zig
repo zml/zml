@@ -97,13 +97,12 @@ pub fn main(init: std.process.Init) !void {
 
     // // Compile model
     const input: zml.Tensor = .init(.{ 28, 28 }, .u8);
-    var exe = blk: {
+    var fut_exe = blk: {
         log.info("Compiling model....", .{});
         const start: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled model [{f}]", .{start.untilNow(io, .awake)});
-        break :blk try platform.compile(allocator, io, mnist_model, .forward, .{input}, .{ .shardings = &.{replicated_sharding} });
+        break :blk io.async(zml.module.Compiler(Mnist.forward).compile, .{ allocator, io, platform, .{ .shardings = &.{replicated_sharding} }, .{ mnist_model, input } });
     };
-    defer exe.deinit();
 
     // Load buffers
     var mnist_buffers = blk: {
@@ -116,6 +115,8 @@ pub fn main(init: std.process.Init) !void {
     };
     defer Mnist.unloadBuffers(&mnist_buffers);
 
+    const exe = try fut_exe.await(io);
+    defer exe.deinit();
     var args = try exe.args(allocator);
     defer args.deinit(allocator);
 
