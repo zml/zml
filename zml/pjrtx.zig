@@ -5,7 +5,9 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 
 pub const DataType = @import("dtype.zig").DataType;
+const meta = @import("meta.zig");
 const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
@@ -42,6 +44,14 @@ pub const Client = opaque {
         }));
     }
 };
+
+pub fn TensorToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
+}
 
 pub const CustomCallBuffer = struct {
     shape: Shape,

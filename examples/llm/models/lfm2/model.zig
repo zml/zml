@@ -357,7 +357,11 @@ pub const DecoderLayer = struct {
                     tokens_position_offset,
                     cache.kv,
                     kv_cache_index,
-                    attention_metadata,
+                    .{ .attnd = .{
+                        .conversation_id = attention_metadata.attnd.conversation_id,
+                        .layer_id = kv_cache_index.convert(.u16),
+                        .num_tokens = attention_metadata.attnd.num_tokens,
+                    } },
                     attention_parameters,
                 );
                 cache.kv = updated_kv_cache;

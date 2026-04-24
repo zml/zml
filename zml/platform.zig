@@ -198,6 +198,7 @@ pub const Platform = struct {
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
+    execution_context: *pjrt.ExecuteContext,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
@@ -241,12 +242,14 @@ pub const Platform = struct {
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
         const memories = try arena.allocator().alloc(Memory, pjrt_memories.len);
+        const execution_context = try api.createExecuteContext();
 
         const platform = try arena.allocator().create(Platform);
         platform.* = .{
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
+            .execution_context = execution_context,
             .devices = devices,
             .memories = memories,
             .physical_mesh = undefined,
@@ -422,6 +425,7 @@ pub const Platform = struct {
     }
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
+        self.execution_context.deinit(self.pjrt_api);
         self.pjrt_client.deinit(self.pjrt_api);
         if (self.tpu_ir_runtime) |*rt| rt.deinit(io);
         if (self.triton_runtime) |*rt| rt.deinit(allocator, io);
@@ -503,6 +507,13 @@ pub const Platform = struct {
         } else {
             log.warn("PJRT FFI extension not available for {s}", .{@tagName(self.target)});
         }
+    }
+
+    pub fn registerData(self: *const zml.Platform, name: []const u8, ptr: *anyopaque, type_info: ?*const pjrt.Ffi.TypeInfo) !pjrt.ffi.TypeId {
+        const ffi = self.pjrt_api.ffi() orelse return error.NoFfi;
+        const type_id = try ffi.registerTypeId(self.pjrt_api, name, type_info);
+        try ffi.addUserData(self.pjrt_api, self.execution_context, .{ .type_id = type_id.type_id, .user_data = ptr });
+        return type_id;
     }
 
     pub const Profiler = profiler_.Profiler;

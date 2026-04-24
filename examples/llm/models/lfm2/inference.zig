@@ -21,6 +21,7 @@ pub const CompilationParameters = struct {
     shardings: common.Shardings,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
+        _ = backend; // autofix
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const cache: model.Cache = .{
             .kv = .init(.init(.{
@@ -44,8 +45,16 @@ pub const CompilationParameters = struct {
             .batch_dim = 1,
             .rng = .init(),
             .cache = cache,
-            .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
-            .attention_parameters = .init(.fromBackend(backend)),
+            .attention_metadata = .{ .attnd = .init() },
+            .attention_parameters = .{
+                .attnd = .init(.{
+                    .model_id = .@"lfm2.5-1.2B",
+                    .head_dim = 128,
+                    .num_attention_heads = 32,
+                    .num_kv_heads = 8,
+                    .mtu = 9000,
+                }),
+            },
             .seqlen = seqlen,
             .shardings = shardings,
         };
