@@ -261,8 +261,9 @@ fn kernelUnifiedAttention2d(
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     // Python: if q_block_local_idx * BLOCK_Q >= cur_batch_query_len: return
-    const proceed = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).lt(cur_batch_query_len);
-    var outer = k.openIf(proceed);
+    const out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
+    k.returnIf(out_of_range, .{});
+
     {
         const offs_m = k.arange(0, BLOCK_M, .i32);
         const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
@@ -512,7 +513,6 @@ fn kernelUnifiedAttention2d(
             .{ .mask = store_mask },
         );
 
-        outer.yieldThen(.{});
     }
 }
 
@@ -578,15 +578,17 @@ fn kernelUnifiedAttention3d(
     const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(@as(i32, 1))));
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
-    const proceed_q = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).lt(cur_batch_query_len);
-    var outer_q = k.openIf(proceed_q);
-    {
-        const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
-        const tiles_per_segment = cdivFn(seq_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
+    const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
+    k.returnIf(q_out_of_range, .{});
 
-        const segm_lo = segm_idx.mul(tiles_per_segment).mul(@as(i32, @intCast(TILE_SIZE)));
-        const proceed_segm = segm_lo.lt(seq_len);
-        var outer_s = k.openIf(proceed_segm);
+    const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
+    const tiles_per_segment = cdivFn(seq_len, @as(i32, @intCast(NUM_SEGMENTS_PER_SEQ * TILE_SIZE)));
+
+    const segm_lo = segm_idx.mul(tiles_per_segment).mul(@as(i32, @intCast(TILE_SIZE)));
+    const segm_out_of_range = segm_lo.ge(seq_len);
+    k.returnIf(segm_out_of_range, .{});
+
+    {
         {
             const offs_m = k.arange(0, BLOCK_M, .i32);
             const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
@@ -815,9 +817,7 @@ fn kernelUnifiedAttention3d(
             k.storeOpts(segm_max_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
             k.storeOpts(segm_expsum_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
 
-            outer_s.yieldThen(.{});
         }
-        outer_q.yieldThen(.{});
     }
 }
 
