@@ -12,7 +12,7 @@ Two files define the surface:
 ## Table of contents
 
 1. [Skeleton of a kernel](#skeleton-of-a-kernel)
-2. [`Kernel.init` and argument specs](#kernelinit-and-argument-specs)
+2. [`Kernel.build` and argument specs](#kernelbuild-and-argument-specs)
 3. [The `Value` type](#the-value-type)
 4. [Fluent methods on `Value`](#fluent-methods-on-value)
 5. [Polymorphic scalars](#polymorphic-scalars)
@@ -33,65 +33,81 @@ Two files define the surface:
 const tri = @import("zml/triton");
 const Kernel = tri.Kernel;
 const Value = tri.Value;
-const Arg = tri.ArgSpec;
 
 pub fn myKernelTtir(allocator: std.mem.Allocator) ![:0]const u8 {
-    const args = [_]Arg{
-        Arg.ptr("x_ptr", .f32),
-        Arg.ptr("y_ptr", .f32),
-        Arg.scalar("n", .i32),
-    };
-    var kernel = try Kernel.init(allocator, ctx(), "my_kernel", &args, &.{});
-    defer kernel.deinit();
-    const k = &kernel;
-
-    const x_ptr = k.arg(0);
-    const y_ptr = k.arg(1);
-    const n = k.arg(2);
+    var spec = try Kernel.build(allocator, ctx(), "my_kernel", .{
+        .x_ptr = .{ .ptr = .f32 },
+        .y_ptr = .{ .ptr = .f32 },
+        .n = .{ .scalar = .i32 },
+    }, &.{});
+    defer spec.deinit();
+    const k = &spec.kernel;
+    const a = spec.args;
 
     const pid = k.programId(.x);
     const offs = k.arange(0, 64, .i32).add(pid.mul(@as(i32, 64)));
-    const mask = offs.lt(n);
+    const mask = offs.lt(a.n);
 
-    const x = k.loadMasked(x_ptr.addPtr(offs), mask);
+    const x = k.loadMasked(a.x_ptr.addPtr(offs), mask);
     const y = x.mul(@as(f32, 2.0));
-    k.storeOpts(y_ptr.addPtr(offs), y, .{ .mask = mask });
+    k.storeOpts(a.y_ptr.addPtr(offs), y, .{ .mask = mask });
 
-    return kernel.finish(&.{}, allocator);
+    return k.finish(&.{});
 }
 ```
 
 Four structural pieces, always in this order:
 
-1. Describe the function signature with an `ArgSpec` array.
-2. Build a `Kernel`, grab argument handles with `k.arg(i)`.
-3. Build the body with fluent `Value` methods and `k.*` helpers.
-4. Call `kernel.finish(results, allocator)` to terminate + verify + serialize.
+1. Describe the function signature with a named-field struct literal passed to `Kernel.build`.
+2. Grab the `Kernel` pointer (`&spec.kernel`) and the named-args struct (`spec.args`).
+3. Build the body with fluent `Value` methods and `k.*` helpers; reach block args via `a.<field_name>`.
+4. Call `k.finish(results)` to terminate + verify + serialize.
 
 ---
 
-## `Kernel.init` and argument specs
+## `Kernel.build` and argument specs
 
-An `ArgSpec` is a name + kind. The three kinds mirror what TTIR's `tt.func` can
-carry:
+`Kernel.build(allocator, ctx, name, spec, result_types)` takes a named-field
+struct literal where each field value is an `ArgSpec.Kind` tagged-union literal.
+Field names become MLIR arg names, and `spec.args` exposes the corresponding
+`Value` for each field.
 
-| Constructor                     | MLIR type                       | Use case                           |
-|---------------------------------|---------------------------------|------------------------------------|
-| `Arg.ptr(name, dtype)`          | `!tt.ptr<dtype>`                | Input/output pointers (default)    |
-| `Arg.scalar(name, dtype)`       | plain `dtype`                   | Strides, sizes, flags              |
-| `Arg.tensor(name, shape, dtype)`| `tensor<shape x dtype>`         | Pre-built tensor input (rare)      |
+The four arg kinds mirror what TTIR's `tt.func` can carry:
 
-Pointer args get a default `tt.divisibility = 32` hint. Override by building the
-full `ArgSpec` literal:
+| Kind literal                                            | MLIR type                | Use case                        |
+|---------------------------------------------------------|--------------------------|---------------------------------|
+| `.{ .ptr = .f32 }`                                      | `!tt.ptr<f32>`           | Pointers (default divisibility) |
+| `.{ .scalar = .i32 }`                                   | plain `i32`              | Strides, sizes, flags           |
+| `.{ .tensor = .{ &.{64, 128}, .f32 } }`                 | `tensor<64x128 x f32>`   | Pre-built tensor input (rare)   |
+| `.{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } }` | `!tt.ptr<f32>` with override | Custom `address_space`/divisibility |
+
+`.ptr` gets a default `tt.divisibility = 32` hint. Use `.ptr_opts` to change
+that (or set `divisibility = null` to suppress). Runtime dtypes work by
+substituting the enum literal: `.a_ptr = .{ .ptr = dsl(config.a_dtype) }`.
+
+`Kernel.build` returns a heap-allocated `*Built(Spec)`:
 
 ```zig
-.{ .name = "ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = 16 } } }
-// or suppress entirely:
-.{ .name = "ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = null } } }
+pub fn Built(comptime Spec: type) type {
+    return struct {
+        kernel: Kernel,
+        args: NamedArgs(Spec), // struct mirroring Spec, each field a Value
+        allocator: std.mem.Allocator,
+        pub fn deinit(self: *@This()) void { ... }
+    };
+}
 ```
 
-`Kernel.init`'s last argument is the list of `tt.func` result types — pass
-`&.{}` for kernels that don't return values (almost always the case).
+The heap allocation keeps `&spec.kernel` at a stable address so the back-pointers
+carried by `Value` stay valid. The last argument is the list of `tt.func` result
+types — pass `&.{}` for kernels that don't return values (almost always).
+
+### Legacy API — `Kernel.init`
+
+`Kernel.init(allocator, ctx, name, args: []const ArgSpec, result_types)` remains
+available for dynamic arg counts or when you're constructing the spec at runtime.
+It returns a plain `Kernel` and you grab block args with `k.arg(i)`. Prefer
+`Kernel.build` for the common named-spec case.
 
 ---
 

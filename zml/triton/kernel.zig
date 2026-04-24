@@ -353,38 +353,52 @@ pub const ArgSpec = struct {
     kind: Kind,
 
     pub const Kind = union(enum) {
-        /// `!tt.ptr<T, addr_space>` — a pointer to a scalar. Optional
-        /// `tt.divisibility` arg-attr hint (default 32, used by Triton to
-        /// enable vectorized loads).
-        ptr: struct {
-            dtype: DType,
-            address_space: i32 = 1,
-            divisibility: ?u32 = 32,
-        },
-        /// Plain scalar argument (e.g. strides, sizes).
+        /// `!tt.ptr<T, addr_space = 1>` with default `tt.divisibility = 32`.
+        /// Terse form: `.{ .ptr = .f32 }`.
+        ptr: DType,
+        /// Plain scalar argument (e.g. strides, sizes). `.{ .scalar = .i64 }`.
         scalar: DType,
-        /// Ranked tensor argument (rare in TTIR kernels, but supported).
-        tensor: struct {
-            shape: []const i64,
-            dtype: DType,
-        },
+        /// Ranked tensor argument — `(shape, dtype)` tuple.
+        /// `.{ .tensor = .{ &.{64, 128}, .f32 } }`.
+        tensor: struct { []const i64, DType },
+        /// Pointer arg with overrides (address space / divisibility).
+        /// `.{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } }`.
+        ptr_opts: PtrOpts,
     };
 
-    /// Terse constructor: `arg.ptr("a_ptr", .f32)` for a `!tt.ptr<f32>` arg.
-    pub fn ptr(name: []const u8, dtype: DType) ArgSpec {
-        return .{ .name = name, .kind = .{ .ptr = .{ .dtype = dtype } } };
-    }
-
-    /// Terse constructor: `arg.scalar("n", .i64)` for a plain scalar arg.
-    pub fn scalar(name: []const u8, dtype: DType) ArgSpec {
-        return .{ .name = name, .kind = .{ .scalar = dtype } };
-    }
-
-    /// Terse constructor: `arg.tensor("x", &.{512}, .f32)` for a ranked tensor arg.
-    pub fn tensor(name: []const u8, shape: []const i64, dtype: DType) ArgSpec {
-        return .{ .name = name, .kind = .{ .tensor = .{ .shape = shape, .dtype = dtype } } };
-    }
+    /// Overrides for pointer args when the defaults (`address_space = 1`,
+    /// `divisibility = 32`) aren't what you want.
+    pub const PtrOpts = struct {
+        dtype: DType,
+        address_space: i32 = 1,
+        divisibility: ?u32 = 32,
+    };
 };
+
+/// Struct type mirroring `Spec`, with each field retyped to `Value`. Populated
+/// by `Kernel.build` and reached via the returned `Built(Spec).args` field.
+pub fn NamedArgs(comptime Spec: type) type {
+    const in = @typeInfo(Spec).@"struct".fields;
+    comptime var names: [in.len][]const u8 = undefined;
+    for (in, 0..) |f, i| names[i] = f.name;
+    return @Struct(.auto, null, &names, &@splat(Value), &@splat(.{}));
+}
+
+/// Heap-allocated bundle returned by `Kernel.build`. Owns an inner `Kernel`
+/// (stable address → safe `Value` back-pointers) and a pre-computed
+/// `NamedArgs(Spec)` for named block-argument access.
+pub fn Built(comptime Spec: type) type {
+    return struct {
+        kernel: Kernel,
+        args: NamedArgs(Spec),
+        allocator: std.mem.Allocator,
+
+        pub fn deinit(self: *@This()) void {
+            self.kernel.deinit();
+            self.allocator.destroy(self);
+        }
+    };
+}
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
@@ -816,9 +830,10 @@ pub const Kernel = struct {
         var arg_locs: stdx.BoundedArray(*const mlir.Location, 64) = .{};
         for (args) |a| {
             arg_types.appendAssumeCapacity(switch (a.kind) {
-                .ptr => |p| ttir.pointerType(p.dtype.toMlir(ctx), p.address_space),
+                .ptr => |dt| ttir.pointerType(dt.toMlir(ctx), 1),
+                .ptr_opts => |p| ttir.pointerType(p.dtype.toMlir(ctx), p.address_space),
                 .scalar => |dt| dt.toMlir(ctx),
-                .tensor => |t| mlir.rankedTensorType(t.shape, t.dtype.toMlir(ctx)),
+                .tensor => |t| mlir.rankedTensorType(t[0], t[1].toMlir(ctx)),
             });
             arg_locs.appendAssumeCapacity(unknown_loc);
         }
@@ -830,7 +845,14 @@ pub const Kernel = struct {
         for (args) |a| {
             const empty_dict: *const mlir.Attribute = mlir.dictionaryAttribute(ctx, &.{});
             switch (a.kind) {
-                .ptr => |p| {
+                .ptr => {
+                    const div_attr = mlir.dictionaryAttribute(ctx, &.{
+                        .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, 32)),
+                    });
+                    arg_attrs.appendAssumeCapacity(div_attr);
+                    any_arg_attr = true;
+                },
+                .ptr_opts => |p| {
                     if (p.divisibility) |v| {
                         const div_attr = mlir.dictionaryAttribute(ctx, &.{
                             .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, v)),
@@ -863,6 +885,53 @@ pub const Kernel = struct {
             .func_op = func_op,
             .entry_block = entry,
         };
+    }
+
+    /// Build a kernel from a named-field spec literal and return a heap-allocated
+    /// `Built(Spec)` whose stable address lets `Value` back-pointers stay valid.
+    /// Field names become MLIR arg names; field values are `ArgSpec.Kind` — write
+    /// them as tagged-union literals:
+    ///
+    /// ```
+    ///     .x_ptr  = .{ .ptr = .f32 },                                    // pointer
+    ///     .n      = .{ .scalar = .i32 },                                 // scalar
+    ///     .tiles  = .{ .tensor = .{ &.{64, 128}, .f32 } },               // tensor (shape, dtype)
+    ///     .custom = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } }, // ptr with overrides
+    /// ```
+    ///
+    /// Runtime dtypes work by substituting the enum literal with a `DType`
+    /// value: `.a_ptr = .{ .ptr = dsl(config.a_dtype) }`.
+    pub fn build(
+        allocator: std.mem.Allocator,
+        ctx: *mlir.Context,
+        name: []const u8,
+        spec: anytype,
+        result_types: []const *const mlir.Type,
+    ) !*Built(@TypeOf(spec)) {
+        const Spec = @TypeOf(spec);
+        const fields = @typeInfo(Spec).@"struct".fields;
+
+        var arg_specs: [fields.len]ArgSpec = undefined;
+        inline for (fields, 0..) |f, i| {
+            const raw = @field(spec, f.name);
+            const kind: ArgSpec.Kind = if (@TypeOf(raw) == ArgSpec.Kind) raw else blk: {
+                const variant = @typeInfo(@TypeOf(raw)).@"struct".fields[0].name;
+                break :blk @unionInit(ArgSpec.Kind, variant, @field(raw, variant));
+            };
+            arg_specs[i] = .{ .name = f.name, .kind = kind };
+        }
+
+        const b = try allocator.create(Built(Spec));
+        errdefer allocator.destroy(b);
+
+        b.allocator = allocator;
+        b.kernel = try Kernel.init(allocator, ctx, name, &arg_specs, result_types);
+        errdefer b.kernel.deinit();
+
+        inline for (fields, 0..) |f, i| {
+            @field(b.args, f.name) = b.kernel.arg(i);
+        }
+        return b;
     }
 
     pub fn deinit(self: *Kernel) void {
@@ -2525,8 +2594,8 @@ test "Kernel builds a trivial tt.func round-trip" {
     defer ctx.deinit();
 
     var kernel = try Kernel.init(std.testing.allocator, ctx, "add_one", &.{
-        .{ .name = "a_ptr", .kind = .{ .ptr = .{ .dtype = .f32 } } },
-        .{ .name = "b_ptr", .kind = .{ .ptr = .{ .dtype = .f32 } } },
+        .{ .name = "a_ptr", .kind = .{ .ptr = .f32 } },
+        .{ .name = "b_ptr", .kind = .{ .ptr = .f32 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2573,7 +2642,7 @@ test "Kernel with scf.for iter_args" {
     //   tt.return
     // }
     var kernel = try Kernel.init(std.testing.allocator, ctx, "sum_range", &.{
-        .{ .name = "base", .kind = .{ .ptr = .{ .dtype = .f32 } } },
+        .{ .name = "base", .kind = .{ .ptr = .f32 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2621,7 +2690,7 @@ test "Kernel with scf.if" {
     //   tt.return
     // }
     var kernel = try Kernel.init(std.testing.allocator, ctx, "branch", &.{
-        .{ .name = "a", .kind = .{ .ptr = .{ .dtype = .f32 } } },
+        .{ .name = "a", .kind = .{ .ptr = .f32 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2656,9 +2725,9 @@ test "tt.bitcast / tt.int_to_ptr / tt.fp_to_fp round-trip" {
     defer ctx.deinit();
 
     var kernel = try Kernel.init(std.testing.allocator, ctx, "cast_kernel", &.{
-        .{ .name = "iptr", .kind = .{ .ptr = .{ .dtype = .i64 } } },
-        .{ .name = "fptr", .kind = .{ .ptr = .{ .dtype = .f32 } } },
-        .{ .name = "half_ptr", .kind = .{ .ptr = .{ .dtype = .f16 } } },
+        .{ .name = "iptr", .kind = .{ .ptr = .i64 } },
+        .{ .name = "fptr", .kind = .{ .ptr = .f32 } },
+        .{ .name = "half_ptr", .kind = .{ .ptr = .f16 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2700,8 +2769,8 @@ test "math dialect round-trip (softmax-like bits)" {
     defer ctx.deinit();
 
     var kernel = try Kernel.init(std.testing.allocator, ctx, "softmax_bits", &.{
-        .{ .name = "x_ptr", .kind = .{ .ptr = .{ .dtype = .f32 } } },
-        .{ .name = "out_ptr", .kind = .{ .ptr = .{ .dtype = .f32 } } },
+        .{ .name = "x_ptr", .kind = .{ .ptr = .f32 } },
+        .{ .name = "out_ptr", .kind = .{ .ptr = .f32 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2737,7 +2806,7 @@ test "tt.atomic_rmw round-trip" {
     defer ctx.deinit();
 
     var kernel = try Kernel.init(std.testing.allocator, ctx, "atomic_incr", &.{
-        .{ .name = "counter", .kind = .{ .ptr = .{ .dtype = .i32 } } },
+        .{ .name = "counter", .kind = .{ .ptr = .i32 } },
     }, &.{});
     defer kernel.deinit();
 
@@ -2778,7 +2847,7 @@ test "ops_mlir parity: cast_ops" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "cast_ops", &.{
-        .{ .name = "scalar_ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = null } } },
+        .{ .name = "scalar_ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
         .{ .name = "scalar_f32", .kind = .{ .scalar = .f32 } },
         .{ .name = "scalar_i64", .kind = .{ .scalar = .i64 } },
     }, &.{});
@@ -2819,7 +2888,7 @@ test "ops_mlir parity: addptr_ops" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "addptr_ops", &.{
-        .{ .name = "scalar_ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = null } } },
+        .{ .name = "scalar_ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
         .{ .name = "scalar_i32", .kind = .{ .scalar = .i32 } },
     }, &.{});
     defer k.deinit();
@@ -2847,7 +2916,7 @@ test "ops_mlir parity: load_store_ops_scalar" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "load_store_ops_scalar", &.{
-        .{ .name = "ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = 16 } } },
+        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } } },
         .{ .name = "mask", .kind = .{ .scalar = .i1 } },
     }, &.{});
     defer k.deinit();
@@ -2874,8 +2943,8 @@ test "ops_mlir parity: reduce_ops_infer" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "reduce_ops_infer", &.{
-        .{ .name = "ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = null } } },
-        .{ .name = "v", .kind = .{ .tensor = .{ .shape = &.{ 1, 2, 4 }, .dtype = .f32 } } },
+        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
+        .{ .name = "v", .kind = .{ .tensor = .{ &.{ 1, 2, 4 }, .f32 } } },
     }, &.{});
     defer k.deinit();
 
@@ -2911,7 +2980,7 @@ test "ops_mlir parity: dot_ops_infer" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "dot_ops_infer", &.{
-        .{ .name = "ptr", .kind = .{ .ptr = .{ .dtype = .f32, .divisibility = null } } },
+        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
         .{ .name = "v", .kind = .{ .scalar = .f32 } },
     }, &.{});
     defer k.deinit();
@@ -2936,7 +3005,7 @@ test "ops_mlir parity: scan_op" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "scan_op", &.{
-        .{ .name = "v", .kind = .{ .tensor = .{ .shape = &.{ 1, 2, 4 }, .dtype = .f32 } } },
+        .{ .name = "v", .kind = .{ .tensor = .{ &.{ 1, 2, 4 }, .f32 } } },
     }, &.{});
     defer k.deinit();
 
@@ -2962,7 +3031,7 @@ test "ops_mlir parity: inline_asm tensor + scalar" {
 
     // tensor form: tensor<512xi8> -> tensor<512xi8>, packed_element=4
     var kt = try Kernel.init(std.testing.allocator, ctx, "inline_asm", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ .shape = &.{512}, .dtype = .i8 } } },
+        .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i8 } } },
     }, &.{});
     defer kt.deinit();
     const x = kt.arg(0);
@@ -2988,7 +3057,7 @@ test "ops_mlir parity: reshape variants" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "reshape_fn", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ .shape = &.{512}, .dtype = .i32 } } },
+        .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
     }, &.{});
     defer k.deinit();
 
@@ -3016,7 +3085,7 @@ test "ops_mlir parity: histogram + masked_histogram" {
 
     {
         var k = try Kernel.init(std.testing.allocator, ctx, "histogram", &.{
-            .{ .name = "x", .kind = .{ .tensor = .{ .shape = &.{512}, .dtype = .i32 } } },
+            .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
         }, &.{});
         defer k.deinit();
         _ = k.histogram(k.arg(0), 16);
@@ -3025,8 +3094,8 @@ test "ops_mlir parity: histogram + masked_histogram" {
     }
     {
         var k = try Kernel.init(std.testing.allocator, ctx, "masked_histogram", &.{
-            .{ .name = "x", .kind = .{ .tensor = .{ .shape = &.{512}, .dtype = .i32 } } },
-            .{ .name = "m", .kind = .{ .tensor = .{ .shape = &.{512}, .dtype = .i1 } } },
+            .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
+            .{ .name = "m", .kind = .{ .tensor = .{ &.{512}, .i1 } } },
         }, &.{});
         defer k.deinit();
         _ = k.histogramOpts(k.arg(0), 16, .{ .mask = k.arg(1) });
@@ -3040,8 +3109,8 @@ test "ops_mlir parity: gather" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "gather_op", &.{
-        .{ .name = "src", .kind = .{ .tensor = .{ .shape = &.{ 128, 16 }, .dtype = .f32 } } },
-        .{ .name = "idx", .kind = .{ .tensor = .{ .shape = &.{ 512, 16 }, .dtype = .i32 } } },
+        .{ .name = "src", .kind = .{ .tensor = .{ &.{ 128, 16 }, .f32 } } },
+        .{ .name = "idx", .kind = .{ .tensor = .{ &.{ 512, 16 }, .i32 } } },
     }, &.{mlir.rankedTensorType(&.{ 512, 16 }, mlir.floatType(ctx, .f32))});
     defer k.deinit();
 
@@ -3058,7 +3127,7 @@ test "ops_mlir parity: item (unsplat)" {
     defer ctx.deinit();
 
     var k = try Kernel.init(std.testing.allocator, ctx, "item_fn", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ .shape = &.{ 1, 1 }, .dtype = .f32 } } },
+        .{ .name = "x", .kind = .{ .tensor = .{ &.{ 1, 1 }, .f32 } } },
     }, &.{mlir.floatType(ctx, .f32)});
     defer k.deinit();
 

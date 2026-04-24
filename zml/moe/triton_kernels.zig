@@ -14,7 +14,6 @@ const tri = @import("zml/triton");
 const Kernel = tri.Kernel;
 const Value = tri.Value;
 const DType = tri.DType;
-const Arg = tri.ArgSpec;
 
 const log = std.log.scoped(.moe_triton);
 
@@ -126,25 +125,20 @@ fn ctx() *mlir.Context {
 // =============================================================================
 
 pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: AlignBlockSizeGenerationConfig) ![:0]const u8 {
-    const args = [_]Arg{
-        Arg.ptr("topk_ids_ptr", .i32),
-        Arg.ptr("sorted_token_ids_ptr", .i32),
-        Arg.ptr("cumsum_ptr", .i32),
-        Arg.ptr("out0_ptr", .i32),
-        Arg.ptr("out1_ptr", .i32),
-    };
-
-    var kernel = try Kernel.init(allocator, ctx(), "count_and_sort_expert_tokens_kernel", &args, &.{});
-    defer kernel.deinit();
-    const k = &kernel;
+    var spec = try Kernel.build(allocator, ctx(), "count_and_sort_expert_tokens_kernel", .{
+        .topk_ids_ptr = .{ .ptr = .i32 },
+        .sorted_token_ids_ptr = .{ .ptr = .i32 },
+        .cumsum_ptr = .{ .ptr = .i32 },
+        .out0_ptr = .{ .ptr = .i32 },
+        .out1_ptr = .{ .ptr = .i32 },
+    }, &.{});
+    defer spec.deinit();
+    const k = &spec.kernel;
+    const a = spec.args;
 
     const block: i64 = @intCast(config.sort_block_size);
     const numel: i32 = @intCast(config.numel);
     const num_experts: i32 = @intCast(config.num_experts);
-
-    const topk_ids = k.arg(0);
-    const sorted_token_ids = k.arg(1);
-    const cumsum = k.arg(2);
 
     const pid = k.programId(.x);
     const num_progs = k.numPrograms(.x);
@@ -165,7 +159,7 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
         // mask = offs < NUMEL
         const mask = offs.lt(numel);
         // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
-        const topk_ptrs = topk_ids.splatTo(&.{block}).addPtr(offs);
+        const topk_ptrs = a.topk_ids_ptr.splatTo(&.{block}).addPtr(offs);
         const num_experts_splat = k.splat(num_experts, &.{block});
         const expert_vals = k.loadOpts(topk_ptrs, .{
             .mask = mask,
@@ -174,20 +168,20 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
         // valid = mask & (expert_vals < NUM_EXPERTS)
         const valid = mask.bitAnd(expert_vals.lt(num_experts));
         // rank = atomic_add(cumsum + expert_vals, 1, mask=valid)
-        const cumsum_ptrs = cumsum.splatTo(&.{block}).addPtr(expert_vals);
+        const cumsum_ptrs = a.cumsum_ptr.splatTo(&.{block}).addPtr(expert_vals);
         const rank = k.atomicRmwOpts(.add, cumsum_ptrs, k.ones(&.{block}, .i32), .{
             .mask = valid,
             .sem = .relaxed,
             .scope = .gpu,
         });
         // store(sorted_token_ids + rank, offs, mask=valid)
-        const sorted_ptrs = sorted_token_ids.splatTo(&.{block}).addPtr(rank);
+        const sorted_ptrs = a.sorted_token_ids_ptr.splatTo(&.{block}).addPtr(rank);
         k.storeOpts(sorted_ptrs, offs, .{ .mask = valid });
 
         w.yieldAfter(.{ts.add(step)});
     }
 
-    return kernel.finish(&.{}) catch |err| {
+    return k.finish(&.{}) catch |err| {
         log.err("failed to finalize count_and_sort_expert_tokens_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -198,29 +192,27 @@ pub fn generateCountAndSortKernelTtir(allocator: std.mem.Allocator, config: Alig
 // =============================================================================
 
 pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, config: QuantGenerationConfig) ![:0]const u8 {
-    const args = [_]Arg{
-        Arg.ptr("y_ptr", dsl(config.input_dtype)),
-        Arg.ptr("group_size_ptr", .i64),
-        Arg.ptr("y_num_columns_ptr", .i64),
-        Arg.ptr("y_row_stride_ptr", .i64),
-        Arg.ptr("eps_ptr", .f32),
-        Arg.ptr("y_q_ptr", dsl(config.output_dtype)),
-        Arg.ptr("y_s_ptr", dsl(config.scale_dtype)),
-    };
-    var kernel = try Kernel.init(allocator, ctx(), "per_token_group_quant_fp8", &args, &.{});
-    defer kernel.deinit();
-    const k = &kernel;
+    var spec = try Kernel.build(allocator, ctx(), "per_token_group_quant_fp8", .{
+        .y_ptr = .{ .ptr = dsl(config.input_dtype) },
+        .group_size_ptr = .{ .ptr = .i64 },
+        .y_num_columns_ptr = .{ .ptr = .i64 },
+        .y_row_stride_ptr = .{ .ptr = .i64 },
+        .eps_ptr = .{ .ptr = .f32 },
+        .y_q_ptr = .{ .ptr = dsl(config.output_dtype) },
+        .y_s_ptr = .{ .ptr = dsl(config.scale_dtype) },
+    }, &.{});
+    defer spec.deinit();
+    const k = &spec.kernel;
+    const a = spec.args;
+
     const block: i64 = @intCast(config.block);
     const out_dt = dsl(config.output_dtype);
     const scale_dt = dsl(config.scale_dtype);
 
-    const y_ptr = k.arg(0);
-    const group_size = k.load(k.arg(1));
-    const y_num_columns = k.load(k.arg(2));
-    const y_row_stride = k.load(k.arg(3));
-    const eps = k.load(k.arg(4));
-    const y_q_ptr = k.arg(5);
-    const y_s_ptr = k.arg(6);
+    const group_size = k.load(a.group_size_ptr);
+    const y_num_columns = k.load(a.y_num_columns_ptr);
+    const y_row_stride = k.load(a.y_row_stride_ptr);
+    const eps = k.load(a.eps_ptr);
 
     const groups_per_row = y_num_columns.div(group_size);
     const g_id = k.programId(.x).to(.i64);
@@ -228,9 +220,9 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     // y_ptr += (g_id // groups_per_row) * y_row_stride + (g_id % groups_per_row) * group_size
     const row_off = g_id.div(groups_per_row).mul(y_row_stride);
     const grp_off = g_id.rem(groups_per_row).mul(group_size);
-    const y_ptr_shifted = y_ptr.addPtr(row_off.add(grp_off));
-    const y_q_ptr_shifted = y_q_ptr.addPtr(g_id.mul(group_size));
-    const y_s_ptr_shifted = y_s_ptr.addPtr(g_id);
+    const y_ptr_shifted = a.y_ptr.addPtr(row_off.add(grp_off));
+    const y_q_ptr_shifted = a.y_q_ptr.addPtr(g_id.mul(group_size));
+    const y_s_ptr_shifted = a.y_s_ptr.addPtr(g_id);
 
     // cols = arange(0, BLOCK) — in i64 for pointer offsets, in i32 for mask.
     const cols_i32 = k.arange(0, block, .i32);
@@ -265,7 +257,7 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
     k.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
     k.store(y_s_ptr_shifted, y_s_scalar.to(scale_dt));
 
-    return kernel.finish(&.{}) catch |err| {
+    return k.finish(&.{}) catch |err| {
         log.err("failed to finalize per_token_group_quant_fp8 TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -276,21 +268,20 @@ pub fn generatePerTokenGroupQuantFp8KernelTtir(allocator: std.mem.Allocator, con
 // =============================================================================
 
 pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: AlignBlockSizeGenerationConfig) ![:0]const u8 {
-    const args = [_]Arg{
-        Arg.ptr("topk_ids_ptr", .i32),
-        Arg.ptr("sorted_token_ids_ptr", .i32),
-        Arg.ptr("expert_ids_ptr", .i32),
-        Arg.ptr("num_tokens_post_pad_ptr", .i32),
-        Arg.ptr("cumsum_ptr", .i32),
-        Arg.ptr("out0_ptr", .i32),
-        Arg.ptr("out1_ptr", .i32),
-        Arg.ptr("out2_ptr", .i32),
-        Arg.ptr("out3_ptr", .i32),
-    };
-
-    var kernel = try Kernel.init(allocator, ctx(), "moe_align_block_size_kernel", &args, &.{});
-    defer kernel.deinit();
-    const k = &kernel;
+    var spec = try Kernel.build(allocator, ctx(), "moe_align_block_size_kernel", .{
+        .topk_ids_ptr = .{ .ptr = .i32 },
+        .sorted_token_ids_ptr = .{ .ptr = .i32 },
+        .expert_ids_ptr = .{ .ptr = .i32 },
+        .num_tokens_post_pad_ptr = .{ .ptr = .i32 },
+        .cumsum_ptr = .{ .ptr = .i32 },
+        .out0_ptr = .{ .ptr = .i32 },
+        .out1_ptr = .{ .ptr = .i32 },
+        .out2_ptr = .{ .ptr = .i32 },
+        .out3_ptr = .{ .ptr = .i32 },
+    }, &.{});
+    defer spec.deinit();
+    const k = &spec.kernel;
+    const a = spec.args;
 
     const block_size_m: i64 = @intCast(config.block_size_m);
     const numel: i32 = @intCast(config.numel);
@@ -299,12 +290,6 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
     const max_num_tokens_padded: i32 = @intCast(config.max_num_tokens_padded);
     const max_num_m_blocks: i64 = @intCast(config.max_num_m_blocks);
     const hist_block: i64 = @intCast(config.hist_block);
-
-    const topk_ids = k.arg(0);
-    const sorted_token_ids = k.arg(1);
-    const expert_ids = k.arg(2);
-    const num_tokens_post_pad = k.arg(3);
-    const cumsum = k.arg(4);
 
     const pid = k.programId(.x);
 
@@ -316,7 +301,7 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
             const iv = fill_loop.iv;
             const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(max_num_tokens_padded);
-            const sorted_ptrs = sorted_token_ids.splatTo(&.{hist_block}).addPtr(offs);
+            const sorted_ptrs = a.sorted_token_ids_ptr.splatTo(&.{hist_block}).addPtr(offs);
             k.storeOpts(sorted_ptrs, k.splat(numel, &.{hist_block}), .{ .mask = mask });
             fill_loop.yield(.{});
         }
@@ -335,7 +320,7 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
             const acc = hist_loop.carried[0];
             const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(numel);
-            const topk_ptrs = topk_ids.splatTo(&.{hist_block}).addPtr(offs);
+            const topk_ptrs = a.topk_ids_ptr.splatTo(&.{hist_block}).addPtr(offs);
             const num_experts_other = k.splat(num_experts, &.{hist_block});
             const expert_vals = k.loadOpts(topk_ptrs, .{
                 .mask = mask,
@@ -357,10 +342,10 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
         const total = k.sum(padded_counts);
 
         // store(cumsum + expert_offs, starts, mask=expert_mask)
-        k.storeOpts(cumsum.splatTo(&.{padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
+        k.storeOpts(a.cumsum_ptr.splatTo(&.{padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
         // store(cumsum + NUM_EXPERTS, total)
-        k.store(cumsum.addPtr(num_experts), total);
-        k.store(num_tokens_post_pad, total);
+        k.store(a.cumsum_ptr.addPtr(num_experts), total);
+        k.store(a.num_tokens_post_pad_ptr, total);
 
         // Block-to-expert assignment.
         var assign_loop = k.openFor(0, max_num_m_blocks, hist_block, .{});
@@ -377,21 +362,21 @@ pub fn generateAlignBlockSizeKernelTtir(allocator: std.mem.Allocator, config: Al
             {
                 const e_iv = exp_loop.iv;
                 const e_acc = exp_loop.carried[0];
-                const start_v = k.load(cumsum.addPtr(e_iv));
-                const end_v = k.load(cumsum.addPtr(e_iv.add(1)));
+                const start_v = k.load(a.cumsum_ptr.addPtr(e_iv));
+                const end_v = k.load(a.cumsum_ptr.addPtr(e_iv.add(1)));
                 const in_range = block_mask
                     .bitAnd(block_offsets.ge(start_v.splatTo(&.{hist_block})))
                     .bitAnd(block_offsets.lt(end_v.splatTo(&.{hist_block})));
                 exp_loop.yield(.{k.select(in_range, e_iv.splatTo(&.{hist_block}), e_acc)});
             }
             const block_expert = exp_loop.results[0];
-            k.storeOpts(expert_ids.splatTo(&.{hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask });
+            k.storeOpts(a.expert_ids_ptr.splatTo(&.{hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask });
             assign_loop.yield(.{});
         }
         i.yieldElse(.{});
     }
 
-    return kernel.finish(&.{}) catch |err| {
+    return k.finish(&.{}) catch |err| {
         log.err("failed to finalize moe_align_block_size_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
@@ -407,37 +392,36 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         return error.TritonTtirGenerationFailed;
     }
 
-    const args = [_]Arg{
-        Arg.ptr("a_ptr", dsl(config.a_dtype)),
-        Arg.ptr("b_ptr", dsl(config.b_dtype)),
-        Arg.ptr("b_bias_ptr", dsl(config.b_bias_dtype orelse config.c_dtype)),
-        Arg.ptr("a_scale_ptr", dsl(config.a_scale_dtype orelse .f32)),
-        Arg.ptr("b_scale_ptr", dsl(config.b_scale_dtype orelse .f32)),
-        Arg.ptr("topk_weights_ptr", dsl(config.topk_weights_dtype orelse .f32)),
-        Arg.ptr("sorted_token_ids_ptr", .i32),
-        Arg.ptr("expert_ids_ptr", .i32),
-        Arg.ptr("num_tokens_post_padded_ptr", .i32),
-        Arg.ptr("N_ptr", .i64),
-        Arg.ptr("K_ptr", .i64),
-        Arg.ptr("EM_ptr", .i64),
-        Arg.ptr("num_valid_tokens_ptr", .i64),
-        Arg.ptr("stride_am_ptr", .i64),
-        Arg.ptr("stride_be_ptr", .i64),
-        Arg.ptr("stride_bn_ptr", .i64),
-        Arg.ptr("stride_cm_ptr", .i64),
-        Arg.ptr("stride_asm_ptr", .i64),
-        Arg.ptr("stride_ask_ptr", .i64),
-        Arg.ptr("stride_bse_ptr", .i64),
-        Arg.ptr("stride_bsk_ptr", .i64),
-        Arg.ptr("stride_bsn_ptr", .i64),
-        Arg.ptr("stride_bbe_ptr", .i64),
-        Arg.ptr("stride_bbn_ptr", .i64),
-        Arg.ptr("c_ptr", dsl(config.c_dtype)),
-    };
-
-    var kernel = try Kernel.init(allocator, ctx(), "fused_moe_kernel", &args, &.{});
-    defer kernel.deinit();
-    const k = &kernel;
+    var spec = try Kernel.build(allocator, ctx(), "fused_moe_kernel", .{
+        .a_ptr = .{ .ptr = dsl(config.a_dtype) },
+        .b_ptr = .{ .ptr = dsl(config.b_dtype) },
+        .b_bias_ptr = .{ .ptr = dsl(config.b_bias_dtype orelse config.c_dtype) },
+        .a_scale_ptr = .{ .ptr = dsl(config.a_scale_dtype orelse .f32) },
+        .b_scale_ptr = .{ .ptr = dsl(config.b_scale_dtype orelse .f32) },
+        .topk_weights_ptr = .{ .ptr = dsl(config.topk_weights_dtype orelse .f32) },
+        .sorted_token_ids_ptr = .{ .ptr = .i32 },
+        .expert_ids_ptr = .{ .ptr = .i32 },
+        .num_tokens_post_padded_ptr = .{ .ptr = .i32 },
+        .N_ptr = .{ .ptr = .i64 },
+        .K_ptr = .{ .ptr = .i64 },
+        .EM_ptr = .{ .ptr = .i64 },
+        .num_valid_tokens_ptr = .{ .ptr = .i64 },
+        .stride_am_ptr = .{ .ptr = .i64 },
+        .stride_be_ptr = .{ .ptr = .i64 },
+        .stride_bn_ptr = .{ .ptr = .i64 },
+        .stride_cm_ptr = .{ .ptr = .i64 },
+        .stride_asm_ptr = .{ .ptr = .i64 },
+        .stride_ask_ptr = .{ .ptr = .i64 },
+        .stride_bse_ptr = .{ .ptr = .i64 },
+        .stride_bsk_ptr = .{ .ptr = .i64 },
+        .stride_bsn_ptr = .{ .ptr = .i64 },
+        .stride_bbe_ptr = .{ .ptr = .i64 },
+        .stride_bbn_ptr = .{ .ptr = .i64 },
+        .c_ptr = .{ .ptr = dsl(config.c_dtype) },
+    }, &.{});
+    defer spec.deinit();
+    const k = &spec.kernel;
+    const a = spec.args;
 
     const block_m: i64 = @intCast(config.block_size_m);
     const block_n: i64 = @intCast(config.block_size_n);
@@ -445,28 +429,20 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const group_size_m: i64 = @intCast(config.group_size_m);
     const top_k: i64 = @intCast(config.top_k);
 
-    const a_ptr = k.arg(0);
-    const b_ptr = k.arg(1);
-    const topk_weights_ptr = k.arg(5);
-    const sorted_token_ids_ptr = k.arg(6);
-    const expert_ids_ptr = k.arg(7);
-    const num_tokens_post_padded_ptr = k.arg(8);
-    const c_ptr = k.arg(24);
-
     // Runtime scalars, each clamped to a multiple of 16.
     const block_floor = struct {
         fn f(v: Value) Value {
             return v.div(@as(i64, 16)).mul(@as(i64, 16));
         }
     }.f;
-    const n_block = block_floor(k.load(k.arg(9)));
-    const k_block = block_floor(k.load(k.arg(10)));
-    const em_block = block_floor(k.load(k.arg(11)));
-    const num_valid_tokens = k.load(k.arg(12));
-    const stride_am_block = block_floor(k.load(k.arg(13)));
-    const stride_be_block = block_floor(k.load(k.arg(14)));
-    const stride_bn_block = block_floor(k.load(k.arg(15)));
-    const stride_cm_block = block_floor(k.load(k.arg(16)));
+    const n_block = block_floor(k.load(a.N_ptr));
+    const k_block = block_floor(k.load(a.K_ptr));
+    const em_block = block_floor(k.load(a.EM_ptr));
+    const num_valid_tokens = k.load(a.num_valid_tokens_ptr);
+    const stride_am_block = block_floor(k.load(a.stride_am_ptr));
+    const stride_be_block = block_floor(k.load(a.stride_be_ptr));
+    const stride_bn_block = block_floor(k.load(a.stride_bn_ptr));
+    const stride_cm_block = block_floor(k.load(a.stride_cm_ptr));
     const stride_ak_block = k.lift(@as(i64, 1));
     const stride_bk_block = k.lift(@as(i64, 1));
     const stride_cn_block = k.lift(@as(i64, 1));
@@ -484,7 +460,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     const pid_n = pid_mod_in_group.div(gsm_actual);
 
     // Early-return guard: only run when pid_m * BLOCK_M < num_tokens_post_padded.
-    const ntpp = k.load(num_tokens_post_padded_ptr).to(.i64);
+    const ntpp = k.load(a.num_tokens_post_padded_ptr).to(.i64);
     const in_range = pid_m.mul(block_m).lt(ntpp);
 
     const InRangeCtx = struct {
@@ -518,12 +494,12 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
     };
 
     const ic: InRangeCtx = .{
-        .a_ptr = a_ptr,
-        .b_ptr = b_ptr,
-        .c_ptr = c_ptr,
-        .topk_weights_ptr = topk_weights_ptr,
-        .sorted_token_ids_ptr = sorted_token_ids_ptr,
-        .expert_ids_ptr = expert_ids_ptr,
+        .a_ptr = a.a_ptr,
+        .b_ptr = a.b_ptr,
+        .c_ptr = a.c_ptr,
+        .topk_weights_ptr = a.topk_weights_ptr,
+        .sorted_token_ids_ptr = a.sorted_token_ids_ptr,
+        .expert_ids_ptr = a.expert_ids_ptr,
         .num_valid_tokens = num_valid_tokens,
         .n_block = n_block,
         .k_block = k_block,
@@ -553,7 +529,7 @@ pub fn generateFusedMoeKernelTtir(allocator: std.mem.Allocator, config: Generati
         i.yieldThen(.{});
     }
 
-    return kernel.finish(&.{}) catch |err| {
+    return k.finish(&.{}) catch |err| {
         log.err("failed to finalize fused_moe_kernel TTIR: {}", .{err});
         return error.TritonTtirGenerationFailed;
     };
