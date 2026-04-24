@@ -58,7 +58,7 @@ uv_lock(
 
 py_binary(
     name = "gen_ir",
-    srcs = ["gen_ir.py"],
+    srcs = ["gen_ir.py", "kernel.py"],
     main = "gen_ir.py",
     python_version = "3.12",
     tags = ["manual"],

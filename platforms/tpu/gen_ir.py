@@ -16,7 +16,7 @@ from jax._src.pallas import pallas_call
 from jax.experimental import pallas as pallas_mod
 from jax.experimental.pallas.ops.tpu.flash_attention import BlockSizes, flash_attention
 from jax.experimental.pallas.ops.tpu.paged_attention import paged_attention
-from jax.experimental.pallas.ops.tpu.ragged_paged_attention import ragged_paged_attention
+from kernel import ragged_paged_attention
 
 RAGGED_KERNEL_ENV = "ZML_TPU_RAGGED_KERNEL"
 _TPU_INFERENCE_RAGGED_PATCHED = False
