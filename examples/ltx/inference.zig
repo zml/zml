@@ -153,6 +153,25 @@ fn printTimingSummary(timers: []const *const PhaseTimer) void {
     std.log.info("=============================================================", .{});
 }
 
+fn completeAsyncPass(
+    io: std.Io,
+    name: []const u8,
+    started_at: std.Io.Timestamp,
+    final_v: zml.Buffer,
+    final_a: zml.Buffer,
+    stale_v: []zml.Buffer,
+    stale_a: []zml.Buffer,
+) !void {
+    try final_v.await(io);
+    try final_a.await(io);
+
+    for (stale_v) |*buf| buf.deinit();
+    for (stale_a) |*buf| buf.deinit();
+
+    const elapsed_ns = started_at.untilNow(io, .awake).nanoseconds;
+    std.log.info("  {s} complete ({d:.1}s).", .{ name, PhaseTimer.fmtSecs(elapsed_ns) });
+}
+
 // ============================================================================
 // Bufferized struct helpers
 // ============================================================================
@@ -1621,6 +1640,10 @@ fn runStage1(
         std.log.info("  Pass 1 (conditional): {d}-block chain...", .{model.num_transformer_blocks});
         var cond_h_v = pre_out.vx;
         var cond_h_a = pre_out.ax;
+        const cond_pass_start: std.Io.Timestamp = .now(io, .awake);
+        var cond_stale_v: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var cond_stale_a: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var cond_stale_count: usize = 0;
 
         {
             var blk_args = try block_normal_exe.args(allocator);
@@ -1646,16 +1669,27 @@ fn runStage1(
                     pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
-                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
-                    cond_h_v.deinit();
-                    cond_h_a.deinit();
+                    cond_stale_v[cond_stale_count] = cond_h_v;
+                    cond_stale_a[cond_stale_count] = cond_h_a;
+                    cond_stale_count += 1;
                 }
                 cond_h_v = out.vx_out;
                 cond_h_a = out.ax_out;
             }
         }
+
+        try completeAsyncPass(
+            io,
+            "Pass 1 block chain",
+            cond_pass_start,
+            cond_h_v,
+            cond_h_a,
+            cond_stale_v[0..cond_stale_count],
+            cond_stale_a[0..cond_stale_count],
+        );
 
         var cond_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, cond_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
         var cond_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, cond_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
@@ -1671,6 +1705,10 @@ fn runStage1(
         std.log.info("  Pass 2 (negative/CFG): {d}-block chain...", .{model.num_transformer_blocks});
         var neg_h_v = pre_out.vx;
         var neg_h_a = pre_out.ax;
+        const neg_pass_start: std.Io.Timestamp = .now(io, .awake);
+        var neg_stale_v: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var neg_stale_a: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var neg_stale_count: usize = 0;
 
         {
             var blk_args = try block_normal_exe.args(allocator);
@@ -1696,16 +1734,27 @@ fn runStage1(
                     pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
-                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
-                    neg_h_v.deinit();
-                    neg_h_a.deinit();
+                    neg_stale_v[neg_stale_count] = neg_h_v;
+                    neg_stale_a[neg_stale_count] = neg_h_a;
+                    neg_stale_count += 1;
                 }
                 neg_h_v = out.vx_out;
                 neg_h_a = out.ax_out;
             }
         }
+
+        try completeAsyncPass(
+            io,
+            "Pass 2 block chain",
+            neg_pass_start,
+            neg_h_v,
+            neg_h_a,
+            neg_stale_v[0..neg_stale_count],
+            neg_stale_a[0..neg_stale_count],
+        );
 
         var neg_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, neg_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
         var neg_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, neg_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
@@ -1721,6 +1770,10 @@ fn runStage1(
         std.log.info("  Pass 3 (STG): {d}-block chain (STG at block {d})...", .{ model.num_transformer_blocks, STG_BLOCK_IDX });
         var ptb_h_v = pre_out.vx;
         var ptb_h_a = pre_out.ax;
+        const ptb_pass_start: std.Io.Timestamp = .now(io, .awake);
+        var ptb_stale_v: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var ptb_stale_a: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var ptb_stale_count: usize = 0;
 
         {
             var blk_normal_args = try block_normal_exe.args(allocator);
@@ -1752,11 +1805,12 @@ fn runStage1(
                         pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                         block_params_bufs[i],
                     });
-                    block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = true });
+                    block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = false });
                     const out = blk_stg_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
-                        ptb_h_v.deinit();
-                        ptb_h_a.deinit();
+                        ptb_stale_v[ptb_stale_count] = ptb_h_v;
+                        ptb_stale_a[ptb_stale_count] = ptb_h_a;
+                        ptb_stale_count += 1;
                     }
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
@@ -1778,17 +1832,28 @@ fn runStage1(
                         pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                         block_params_bufs[i],
                     });
-                    block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = true });
+                    block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = false });
                     const out = blk_normal_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
-                        ptb_h_v.deinit();
-                        ptb_h_a.deinit();
+                        ptb_stale_v[ptb_stale_count] = ptb_h_v;
+                        ptb_stale_a[ptb_stale_count] = ptb_h_a;
+                        ptb_stale_count += 1;
                     }
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
                 }
             }
         }
+
+        try completeAsyncPass(
+            io,
+            "Pass 3 block chain",
+            ptb_pass_start,
+            ptb_h_v,
+            ptb_h_a,
+            ptb_stale_v[0..ptb_stale_count],
+            ptb_stale_a[0..ptb_stale_count],
+        );
 
         var ptb_v_vel = try runOutputProjection(allocator, io, &proj_v_exe, ptb_h_v, pre_out.v_embedded_timestep, proj_v_bufs);
         var ptb_a_vel = try runOutputProjection(allocator, io, &proj_a_exe, ptb_h_a, pre_out.a_embedded_timestep, proj_a_bufs);
@@ -1804,6 +1869,10 @@ fn runStage1(
         std.log.info("  Pass 4 (isolated): {d}-block chain...", .{model.num_transformer_blocks});
         var iso_h_v = pre_out.vx;
         var iso_h_a = pre_out.ax;
+        const iso_pass_start: std.Io.Timestamp = .now(io, .awake);
+        var iso_stale_v: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var iso_stale_a: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var iso_stale_count: usize = 0;
 
         {
             var blk_args = try block_iso_exe.args(allocator);
@@ -1830,16 +1899,27 @@ fn runStage1(
                     pre_out.v2a_k_pe_sin,         zero_mask_buf,
                     block_params_bufs[i],
                 });
-                block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
-                    iso_h_v.deinit();
-                    iso_h_a.deinit();
+                    iso_stale_v[iso_stale_count] = iso_h_v;
+                    iso_stale_a[iso_stale_count] = iso_h_a;
+                    iso_stale_count += 1;
                 }
                 iso_h_v = out.vx_out;
                 iso_h_a = out.ax_out;
             }
         }
+
+        try completeAsyncPass(
+            io,
+            "Pass 4 block chain",
+            iso_pass_start,
+            iso_h_v,
+            iso_h_a,
+            iso_stale_v[0..iso_stale_count],
+            iso_stale_a[0..iso_stale_count],
+        );
 
         // Free block-chain-only preprocessing outputs early — only v/a_embedded_timestep
         // are still needed for output projection. This reduces peak GPU memory.
@@ -2678,6 +2758,10 @@ fn runStage2(
         std.log.info("  Running {d}-block chain...", .{model.num_transformer_blocks});
         var h_v = pre_out.vx;
         var h_a = pre_out.ax;
+        const block_chain_start: std.Io.Timestamp = .now(io, .awake);
+        var stale_h_v: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var stale_h_a: [model.num_transformer_blocks - 1]zml.Buffer = undefined;
+        var stale_h_count: usize = 0;
 
         {
             var blk_args = try block_exe.args(allocator);
@@ -2703,17 +2787,28 @@ fn runStage2(
                     pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
                     block_params_bufs[i],
                 });
-                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
-                    h_v.deinit();
-                    h_a.deinit();
+                    stale_h_v[stale_h_count] = h_v;
+                    stale_h_a[stale_h_count] = h_a;
+                    stale_h_count += 1;
                 }
                 h_v = out.vx_out;
                 h_a = out.ax_out;
             }
         }
+
+        try completeAsyncPass(
+            io,
+            "Stage 2 block chain",
+            block_chain_start,
+            h_v,
+            h_a,
+            stale_h_v[0..stale_h_count],
+            stale_h_a[0..stale_h_count],
+        );
 
         // Free block-chain-only preprocessing outputs early — only v/a_embedded_timestep
         // are still needed for output projection. This reduces peak GPU memory.
