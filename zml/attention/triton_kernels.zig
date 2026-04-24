@@ -277,10 +277,8 @@ fn kernelUnifiedAttention2d(
         .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
 
     // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
-    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_0);
+    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_1);
     const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
     const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
 
@@ -297,7 +295,7 @@ fn kernelUnifiedAttention2d(
     const q_mask = q_mask_ab.bitAnd(q_mask_c);
     const q_cache_mod: ttir.CacheModifier =
         if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none;
-    const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
+    const Q = k.loadOpts(query_ptr.addPtr(query_offset), .{
         .mask = q_mask,
         .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
         .cache_modifier = q_cache_mod,
@@ -307,7 +305,7 @@ fn kernelUnifiedAttention2d(
 
     // M init — sinks or -inf.
     const m_init: Value = if (config.use_sinks) mb: {
-        const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+        const loaded = k.loadOpts(sink_ptr.addPtr(query_offset_1), .{
             .mask = query_mask_1,
             .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
         });
@@ -321,15 +319,18 @@ fn kernelUnifiedAttention2d(
     const context_len = seq_len.sub(cur_batch_query_len);
 
     const alibi_slope: Value = if (config.use_alibi_slopes)
-        k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+        k.loadOpts(alibi_slopes_ptr.addPtr(query_offset_1), .{
             .mask = query_mask_1,
             .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
         })
     else
         k.zeros(&.{BLOCK_M}, config.scale_dtype);
 
+    // In the `use_qq_bias = true` branch, the tensor offset auto-splats the
+    // scalar ptr via addPtr. In the else branch there is no offset, so we
+    // need an explicit splatTo to give broadcast2d a tensor to work on.
     const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
-        qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
+        qq_bias_ptr.addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
@@ -372,35 +373,30 @@ fn kernelUnifiedAttention2d(
             seq_offset.lt(max_seq_prefix_len);
 
         const physical_block_idx = k.load(
-            block_tables_ptr.splatTo(&.{TILE_SIZE})
-                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
+            block_tables_ptr.addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
         ).to(.i64);
 
-        const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
+        const seq_in_block = seq_offset.to(.i64).rem(BLOCK_SIZE);
 
         // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED)
-        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
+        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_0);
+        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2);
         const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
             .mul(config.stride_v_cache_3);
-        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_1);
         const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
 
         // k_offset : (HEAD_SIZE_PADDED, TILE_SIZE)
-        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
+        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_0);
+        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2);
         const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
             .mul(config.stride_k_cache_3);
-        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_1);
         const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
 
         // K : (HEAD_SIZE_PADDED, TILE_SIZE)
         const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
-        const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
+        const K_load = k.loadOpts(key_cache_ptr.addPtr(k_offset), .{
             .mask = k_mask,
             .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
@@ -409,7 +405,7 @@ fn kernelUnifiedAttention2d(
 
         // V : (TILE_SIZE, HEAD_SIZE_PADDED)
         const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
-        const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
+        const V_load = k.loadOpts(value_cache_ptr.addPtr(v_offset), .{
             .mask = v_mask,
             .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
@@ -428,7 +424,7 @@ fn kernelUnifiedAttention2d(
         // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
         const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
         const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(1);
+        const rhs = ql_2d_i32.add(context_len).add(1);
         const seq_mask = so_2d.lt(rhs);
 
         // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
@@ -438,7 +434,7 @@ fn kernelUnifiedAttention2d(
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
         if (SLIDING_WINDOW > 0) {
-            const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
+            const diff = ql_2d_i32.add(context_len).sub(so_2d);
             const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
             S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
         }
@@ -498,16 +494,14 @@ fn kernelUnifiedAttention2d(
         );
     }
 
-    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(output_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(output_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_0);
+    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_1);
     const output_offset = oo0_2d.add(oo1_2d).add(offs_d_2d);
 
     const store_mask = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
         .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
     k.storeOpts(
-        output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(output_offset),
+        output_ptr.addPtr(output_offset),
         acc_final.to(config.o_dtype),
         .{ .mask = store_mask },
     );
@@ -596,10 +590,8 @@ fn kernelUnifiedAttention3d(
     const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
         .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
 
-    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_0);
+    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_1);
     const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
     const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
 
@@ -612,7 +604,7 @@ fn kernelUnifiedAttention3d(
 
     const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
     const q_mask = q_mask_ab.bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-    const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
+    const Q = k.loadOpts(query_ptr.addPtr(query_offset), .{
         .mask = q_mask,
         .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
     });
@@ -624,7 +616,7 @@ fn kernelUnifiedAttention3d(
     const m_init: Value = if (config.use_sinks) mb: {
         var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
         {
-            const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+            const loaded = k.loadOpts(sink_ptr.addPtr(query_offset_1), .{
                 .mask = query_mask_1,
                 .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
             });
@@ -642,15 +634,17 @@ fn kernelUnifiedAttention3d(
     const context_len = seq_len.sub(cur_batch_query_len);
 
     const alibi_slope: Value = if (config.use_alibi_slopes)
-        k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+        k.loadOpts(alibi_slopes_ptr.addPtr(query_offset_1), .{
             .mask = query_mask_1,
             .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
         })
     else
         k.zeros(&.{BLOCK_M}, config.scale_dtype);
 
+    // See 2d-body note on qq_bias_row_ptrs: else branch needs an explicit splatTo
+    // (no sibling offset to auto-broadcast against).
     const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
-        qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
+        qq_bias_ptr.addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
     else
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
@@ -679,32 +673,27 @@ fn kernelUnifiedAttention3d(
             seq_offset.lt(max_seq_prefix_len);
 
         const physical_block_idx = k.load(
-            block_tables_ptr.splatTo(&.{TILE_SIZE})
-                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
+            block_tables_ptr.addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
         ).to(.i64);
 
         const seq_in_block = seq_offset.to(.i64).rem(BLOCK_SIZE);
 
-        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
+        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_0);
+        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2);
         const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
             .mul(config.stride_v_cache_3);
-        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_1);
         const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
 
-        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
+        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_0);
+        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2);
         const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
             .mul(config.stride_k_cache_3);
-        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_1);
         const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
 
         const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
-        const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
+        const K_load = k.loadOpts(key_cache_ptr.addPtr(k_offset), .{
             .mask = k_mask,
             .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
@@ -712,7 +701,7 @@ fn kernelUnifiedAttention3d(
         const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
 
         const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
-        const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
+        const V_load = k.loadOpts(value_cache_ptr.addPtr(v_offset), .{
             .mask = v_mask,
             .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
@@ -729,7 +718,7 @@ fn kernelUnifiedAttention3d(
 
         const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
         const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(1);
+        const rhs = ql_2d_i32.add(context_len).add(1);
         const seq_mask = so_2d.lt(rhs);
 
         const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
@@ -738,7 +727,7 @@ fn kernelUnifiedAttention3d(
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
         if (SLIDING_WINDOW > 0) {
-            const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
+            const diff = ql_2d_i32.add(context_len).sub(so_2d);
             const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
             S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
         }
@@ -791,14 +780,13 @@ fn kernelUnifiedAttention3d(
         .mul(segm_out_token_stride);
     const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
         .mul(segm_out_head_stride);
-    const seg_term = segm_idx.to(.i64).mul(HEAD_SIZE_PADDED)
-        .splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED });
+    const seg_term = segm_idx.to(.i64).mul(HEAD_SIZE_PADDED);
     const segm_output_offset = oo0_2d.add(oo1_2d).add(seg_term).add(offs_d_2d);
 
     const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
         .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
     k.storeOpts(
-        segm_output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(segm_output_offset),
+        segm_output_ptr.addPtr(segm_output_offset),
         acc_final,
         .{ .mask = store_mask_2d },
     );
@@ -807,10 +795,10 @@ fn kernelUnifiedAttention3d(
     const segm_token_stride: i64 = NUM_QUERY_HEADS * segm_head_stride;
     const segm_offset = query_offset_0.mul(segm_token_stride)
         .add(query_offset_1.mul(segm_head_stride))
-        .add(segm_idx.to(.i64).splatTo(&.{BLOCK_M}));
+        .add(segm_idx.to(.i64));
     const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
-    k.storeOpts(segm_max_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
-    k.storeOpts(segm_expsum_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
+    k.storeOpts(segm_max_ptr.addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
+    k.storeOpts(segm_expsum_ptr.addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
 }
 
 // ============================================================================
@@ -866,13 +854,13 @@ fn reduceSegments(
         .add(query_head_idx.to(.i64).mul(head_stride))
         .add(seg_range.to(.i64));
 
-    const segm_max = k.loadOpts(segm_max_ptr.splatTo(&.{NUM_SEGMENTS_PER_SEQ}).addPtr(segm_offset), .{
+    const segm_max = k.loadOpts(segm_max_ptr.addPtr(segm_offset), .{
         .mask = segm_mask,
         .other = k.full(&.{NUM_SEGMENTS_PER_SEQ}, -std.math.inf(f32), .f32),
     });
     const overall_max = k.max(segm_max);
 
-    var segm_expsum = k.loadOpts(segm_expsum_ptr.splatTo(&.{NUM_SEGMENTS_PER_SEQ}).addPtr(segm_offset), .{
+    var segm_expsum = k.loadOpts(segm_expsum_ptr.addPtr(segm_offset), .{
         .mask = segm_mask,
         .other = k.zeros(&.{NUM_SEGMENTS_PER_SEQ}, .f32),
     });
@@ -887,11 +875,10 @@ fn reduceSegments(
     const dim_off_2d = offs_d.to(.i64).broadcast2d(0, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED);
     const base = query_token_idx.to(.i64).mul(out_tok_stride)
         .add(query_head_idx.to(.i64).mul(out_head_stride));
-    const segm_output_offset = base.splatTo(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED })
-        .add(seg_off_2d).add(dim_off_2d);
+    const segm_output_offset = base.add(seg_off_2d).add(dim_off_2d);
 
     var segm_output = k.loadOpts(
-        segm_output_ptr.splatTo(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED }).addPtr(segm_output_offset),
+        segm_output_ptr.addPtr(segm_output_offset),
         .{
             .mask = k.mask2d(segm_mask, dim_mask, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED),
             .other = k.zeros(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED }, .f32),
@@ -918,10 +905,9 @@ fn reduceSegments(
 
     const output_offset = query_token_idx.to(.i64).mul(output_stride_0)
         .add(query_head_idx.to(.i64).mul(output_stride_1))
-        .splatTo(&.{HEAD_SIZE_PADDED})
         .add(offs_d.to(.i64));
     k.storeOpts(
-        output_ptr.splatTo(&.{HEAD_SIZE_PADDED}).addPtr(output_offset),
+        output_ptr.addPtr(output_offset),
         acc.to(config.o_dtype),
         .{ .mask = dim_mask },
     );

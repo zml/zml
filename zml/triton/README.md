@@ -46,11 +46,11 @@ pub fn myKernelTtir(allocator: std.mem.Allocator) ![:0]const u8 {
     const a = spec.args;
 
     const pid = k.programId(.x);
-    const offs = k.arange(0, 64, .i32).add(pid.mul(@as(i32, 64)));
+    const offs = k.arange(0, 64, .i32).add(pid.mul(64));
     const mask = offs.lt(a.n);
 
     const x = k.loadMasked(a.x_ptr.addPtr(offs), mask);
-    const y = x.mul(@as(f32, 2.0));
+    const y = x.mul(2.0);
     k.storeOpts(a.y_ptr.addPtr(offs), y, .{ .mask = mask });
 
     return k.finish(&.{});
@@ -226,6 +226,54 @@ represented in `offs`'s element type.
 If you need to force a specific width for a runtime variable, cast at the call
 site: `pid.mul(@as(i32, @intCast(block_size)))`.
 
+### When is `@as` actually needed? (Rule of thumb)
+
+Auto-lift covers most cases. `@as(...)` around a binop rhs is **redundant**
+in all of these — drop it:
+
+| Pattern                                  | Auto-lifts to…                        |
+|------------------------------------------|---------------------------------------|
+| `v_i64.eq(0)` / `.div(16)` / `.add(-1)`  | comptime_int → match lhs elem type    |
+| `v_f32.mul(1.0 / config.fp8_max)`        | already-f32 expression → f32 const    |
+| `v_i64.lt(NUM_QUERY_HEADS)` (Zig i64)    | runtime i64 → i64 const               |
+| `v_i32.add(pad_term)` (Zig i32)          | runtime i32 → i32 const               |
+| `k.splat(-1, shape)` / `k.openFor(0, N, 1, ...)` | comptime → matches elem / lower |
+| `k.liftAs(0, .i32)`                      | liftAs takes anytype — wrap nothing   |
+
+`@as(...)` **is** required exactly when you're narrowing a runtime Zig int
+to a smaller width that `lift` won't pick on its own. The idiom is
+`@as(i32, @intCast(X_i64))` — you need the `@as` because `@intCast` has no
+target type to infer, and without the narrowing `lift` would emit an i64
+constant that mismatches the i32 lhs:
+
+```zig
+// BLOCK_Q is a Zig i64 (from config). lhs is i32. Must narrow.
+q_start_raw.div(@as(i32, @intCast(BLOCK_Q))).add(seq_idx)
+```
+
+The alternative — `q_start_raw.to(.i64).div(BLOCK_Q).to(.i32)` — mirrors
+Python's `.to(tl.int64)` style but costs two extra Value-level casts; prefer
+the narrowing `@as` or a pre-declared `const FOO_I32: i32 = @intCast(FOO);`
+when the same width cast recurs.
+
+### When do you need `k.lift` / `k.liftAs`?
+
+Almost never. The DSL auto-lifts rhs for every fluent binop, `k.splat`,
+`k.full`, `k.openFor` bounds, `.addPtr` offsets, etc. Reach for `k.lift` /
+`k.liftAs` **only** when the DSL surface demands an existing `Value` and
+there's no binop sibling to match against — typically:
+
+- Loop seeds for `openWhile(.{inits}, ...)` where you start with a raw
+  comptime literal: `const left_init = k.liftAs(0, .i32);`.
+- Mutable `var x: Value = k.liftAs(0, .i32);` that a later branch may
+  reassign — the var needs an initial Value even if the comptime path would
+  work on its own.
+
+If the constant is about to flow through any `.add` / `.mul` / `.splatTo`
+etc., skip the lift and let auto-lift do it. And if a stride is hardcoded
+to 1, **delete it**: `x.mul(1)` is a no-op, the DSL isn't Python `constexpr`
+where such names are required.
+
 ### Scalar ↔ tensor auto-broadcast
 
 Fluent arithmetic and comparison ops (`.add`, `.sub`, `.mul`, `.div`, `.rem`,
@@ -240,9 +288,33 @@ const offs = cols.add(iv);   // tensor cols + scalar iv → tensor
 
 This mirrors Triton/NumPy's `i + cols`. Note: size-1 / rank-unification
 broadcasting (e.g. `[1,64] + [32,1]`) is **not** auto-inserted — use
-`.broadcast2d`, `k.expandDims`, or `k.broadcast` explicitly. `.addPtr` is
-also symmetric: a scalar `!tt.ptr<T>` is splatted when the offset is a
-tensor, so `x_ptr.addPtr(offs)` works without a manual `splatTo`.
+`.broadcast2d`, `k.expandDims`, or `k.broadcast` explicitly.
+
+`.addPtr` is **asymmetric**: it auto-splats a scalar *pointer* when the
+offset is a tensor (`x_ptr.addPtr(tensor_offs)` works without `splatTo`),
+but it does **not** splat a scalar offset against a tensor pointer. So
+`tensor_of_ptrs.addPtr(scalar)` will hit `tt.addptr op requires the same
+shape for all operands and results` at verify time — splat the offset
+explicitly: `tensor_of_ptrs.addPtr(k.splat(scalar, shape))`. The common
+loop-stride case `a_ptrs = a_ptrs.addPtr(BLOCK_K)` falls into this trap.
+
+### When is `scalar.splatTo(shape)` redundant?
+
+Because fluent binops (`.add` / `.mul` / …) already auto-splat scalars
+against tensor siblings, and `.addPtr` auto-splats a scalar pointer against
+a tensor offset, a pre-emptive `scalar.splatTo(shape)` is usually noise:
+
+```zig
+// redundant
+pid_n.mul(N).splatTo(shape).add(k.arange(0, N, .i64)).rem(n_block.splatTo(shape))
+// equivalent — scalars auto-splat against the tensor sibling
+pid_n.mul(N).add(k.arange(0, N, .i64)).rem(n_block)
+```
+
+Keep the explicit `splatTo` only when there is no binop (or `addPtr` scalar
+side) for the scalar to ride along with — e.g. `k.select(cond, t, f)`,
+which has no auto-broadcast, or when you need a tensor input for
+`.broadcast2d` downstream with no intermediate binop.
 
 ---
 

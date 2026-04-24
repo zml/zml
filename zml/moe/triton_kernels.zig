@@ -152,7 +152,7 @@ pub fn perTokenGroupQuantFp8(allocator: std.mem.Allocator, config: QuantGenerati
     const cols_i64 = cols_i32.to(.i64);
     const mask = cols_i32.lt(group_size.to(.i32));
 
-    const y_load_ptrs = y_ptr_shifted.splatTo(&.{block}).addPtr(cols_i64);
+    const y_load_ptrs = y_ptr_shifted.addPtr(cols_i64);
     const y = k.loadMasked(y_load_ptrs, mask).to(.f32);
 
     // _absmax = max(tl.max(tl.abs(y)), eps)
@@ -163,7 +163,7 @@ pub fn perTokenGroupQuantFp8(allocator: std.mem.Allocator, config: QuantGenerati
     const y_s = if (config.use_ue8m0) k.exp2(k.ceil(k.log2(scale_raw))) else scale_raw;
 
     // y_q = clamp(y / y_s, fp8_min, fp8_max).to(output_dtype)
-    const y_div = y.div(y_s.splatTo(&.{block}));
+    const y_div = y.div(y_s);
     const clamped = k.clampf(
         y_div,
         k.splat(config.fp8_min, &.{block}),
@@ -171,7 +171,7 @@ pub fn perTokenGroupQuantFp8(allocator: std.mem.Allocator, config: QuantGenerati
     );
     const y_q = clamped.to(out_dt);
 
-    const y_q_ptrs = y_q_ptr_shifted.splatTo(&.{block}).addPtr(cols_i64);
+    const y_q_ptrs = y_q_ptr_shifted.addPtr(cols_i64);
     k.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
     k.store(y_s_ptr_shifted, y_s.to(scale_dt));
 
@@ -202,14 +202,13 @@ fn writeZerosToOutput(
     compute_type: DType,
 ) void {
     const accumulator = k.zeros(&.{ block_size_m, block_size_n }, compute_type);
-    const offs_cn = pid_n.to(.i32)
-        .mul(@as(i32, @intCast(block_size_n))).splatTo(&.{block_size_n})
+    const offs_cn = pid_n.to(.i32).mul(@as(i32, @intCast(block_size_n)))
         .add(k.arange(0, block_size_n, .i32))
         .to(.i64);
     const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
-        .mul(stride_cm.splatTo(&.{ block_size_m, block_size_n }));
+        .mul(stride_cm);
     const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n);
-    const c_ptrs = c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
+    const c_ptrs = c_ptr.addPtr(cm_off.add(cn_off));
     const c_mask = k.mask2d(token_mask, offs_cn.lt(n), block_size_m, block_size_n);
     k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
 }
@@ -302,8 +301,8 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
             num_valid_tokens.splatTo(&.{block_size_m}),
         )
     else off: {
-        const ids_ptrs = a.sorted_token_ids_ptr.splatTo(&.{block_size_m})
-            .addPtr(pid_m.mul(block_size_m).splatTo(&.{block_size_m}).add(offs));
+        const ids_ptrs = a.sorted_token_ids_ptr
+            .addPtr(pid_m.mul(block_size_m).add(offs));
         break :off k.load(ids_ptrs).to(.i64);
     };
     const token_mask = offs_token.lt(num_valid_tokens);
@@ -333,25 +332,25 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
     // Alive body — inlined from Python fused_moe_kernel (bf16 path).
 
     // offs_bn = (pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N).to(i64)) % n_block
-    const offs_bn = pid_n.mul(block_size_n).splatTo(&.{block_size_n})
+    const offs_bn = pid_n.mul(block_size_n)
         .add(k.arange(0, block_size_n, .i64))
-        .rem(n_block.splatTo(&.{block_size_n}));
+        .rem(n_block);
     const offs_k = k.arange(0, block_size_k, .i64);
 
     // a_ptrs = a_ptr + (offs_token // top_k) * stride_am + offs_k   [m,k]
     // (stride_ak = 1 → `offs_k * stride_ak` simplifies to `offs_k`.)
     const am_term = offs_token.div(top_k).broadcast2d(1, block_size_m, block_size_k)
-        .mul(stride_am_block.splatTo(&.{ block_size_m, block_size_k }));
+        .mul(stride_am_block);
     const ak_term = offs_k.broadcast2d(0, block_size_m, block_size_k);
-    const a_ptrs_init = a.a_ptr.splatTo(&.{ block_size_m, block_size_k }).addPtr(am_term.add(ak_term));
+    const a_ptrs_init = a.a_ptr.addPtr(am_term.add(ak_term));
 
     // b_ptrs = b_ptr + off_experts*stride_be + offs_k[:,None] + offs_bn[None,:]*stride_bn   [k,n]
     // (stride_bk = 1 → `offs_k * stride_bk` simplifies to `offs_k`.)
-    const be_term = off_experts.mul(stride_be_block).splatTo(&.{ block_size_k, block_size_n });
+    const be_term = off_experts.mul(stride_be_block);
     const bk_term = offs_k.broadcast2d(1, block_size_k, block_size_n);
     const bn_term = offs_bn.broadcast2d(0, block_size_k, block_size_n)
-        .mul(stride_bn_block.splatTo(&.{ block_size_k, block_size_n }));
-    const b_ptrs_init = a.b_ptr.splatTo(&.{ block_size_k, block_size_n }).addPtr(be_term.add(bk_term.add(bn_term)));
+        .mul(stride_bn_block);
+    const b_ptrs_init = a.b_ptr.addPtr(be_term.add(bk_term.add(bn_term)));
 
     // accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
     const acc_init = k.zeros(&.{ block_size_m, block_size_n }, .f32);
@@ -381,6 +380,8 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
         const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .tf32, .max_num_imprecise_acc = 0 });
 
         // a_ptrs += BLOCK_SIZE_K; b_ptrs += BLOCK_SIZE_K   (stride_ak = stride_bk = 1)
+        // a_ptrs/b_ptrs are tensor-of-ptrs, so we splat the scalar offset to
+        // match — .addPtr only auto-splats the *pointer* side.
         const new_a_ptrs = a_ptrs.addPtr(k.splat(block_size_k, &.{ block_size_m, block_size_k }));
         const new_b_ptrs = b_ptrs.addPtr(k.splat(block_size_k, &.{ block_size_k, block_size_n }));
 
@@ -390,7 +391,7 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
 
     // if MUL_ROUTED_WEIGHT: accumulator *= topk_weights[offs_token][:, None]
     if (config.mul_routed_weight) {
-        const tw_ptrs = a.topk_weights_ptr.splatTo(&.{block_size_m}).addPtr(offs_token);
+        const tw_ptrs = a.topk_weights_ptr.addPtr(offs_token);
         const tw = k.loadMasked(tw_ptrs, token_mask);
         accumulator = accumulator.mul(tw.broadcast2d(1, block_size_m, block_size_n));
     }
@@ -400,17 +401,15 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
 
     // Write back:
     //   offs_cn = pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N)   (i32 → i64 for ptr math)
-    //   c_ptrs  = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    //   c_ptrs  = c_ptr + stride_cm * offs_token[:, None] + offs_cn[None, :]   (stride_cn = 1)
     //   c_mask  = token_mask[:, None] & (offs_cn[None, :] < n_block)
-    const offs_cn = pid_n.to(.i32)
-        .mul(@as(i32, @intCast(block_size_n))).splatTo(&.{block_size_n})
+    const offs_cn = pid_n.to(.i32).mul(@as(i32, @intCast(block_size_n)))
         .add(k.arange(0, block_size_n, .i32))
         .to(.i64);
-    // stride_cn = 1 → cn_off is just the broadcast of offs_cn.
     const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
-        .mul(stride_cm_block.splatTo(&.{ block_size_m, block_size_n }));
+        .mul(stride_cm_block);
     const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n);
-    const c_ptrs = a.c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
+    const c_ptrs = a.c_ptr.addPtr(cm_off.add(cn_off));
     const c_mask = k.mask2d(token_mask, offs_cn.lt(n_block), block_size_m, block_size_n);
     k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
 
@@ -459,9 +458,9 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
         var fill_loop = k.openFor(0, max_num_tokens_padded, hist_block, .{});
         {
             const iv = fill_loop.iv;
-            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
+            const offs = iv.add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(max_num_tokens_padded);
-            const sorted_ptrs = a.sorted_token_ids_ptr.splatTo(&.{hist_block}).addPtr(offs);
+            const sorted_ptrs = a.sorted_token_ids_ptr.addPtr(offs);
             k.storeOpts(sorted_ptrs, k.splat(numel, &.{hist_block}), .{ .mask = mask });
             fill_loop.yield(.{});
         }
@@ -478,9 +477,9 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
         {
             const iv = hist_loop.iv;
             const acc = hist_loop.carried[0];
-            const offs = iv.splatTo(&.{hist_block}).add(k.arange(0, hist_block, .i32));
+            const offs = iv.add(k.arange(0, hist_block, .i32));
             const mask = offs.lt(numel);
-            const topk_ptrs = a.topk_ids_ptr.splatTo(&.{hist_block}).addPtr(offs);
+            const topk_ptrs = a.topk_ids_ptr.addPtr(offs);
             const expert_vals = k.loadOpts(topk_ptrs, .{
                 .mask = mask,
                 .other = k.splat(num_experts, &.{hist_block}),
@@ -501,7 +500,7 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
         const total = k.sum(padded_counts);
 
         // tl.store(cumsum + expert_offs, starts, mask=expert_mask)
-        k.storeOpts(a.cumsum_ptr.splatTo(&.{padded_num_experts}).addPtr(expert_offs), starts, .{ .mask = expert_mask });
+        k.storeOpts(a.cumsum_ptr.addPtr(expert_offs), starts, .{ .mask = expert_mask });
         // tl.store(cumsum + NUM_EXPERTS, total); tl.store(num_tokens_post_pad_ptr, total)
         k.store(a.cumsum_ptr.addPtr(num_experts), total);
         k.store(a.num_tokens_post_pad_ptr, total);
@@ -511,7 +510,7 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
         {
             const block_start = assign_loop.iv;
             const block_offs = k.arange(0, hist_block, .i32);
-            const block_ids = block_start.splatTo(&.{hist_block}).add(block_offs);
+            const block_ids = block_start.add(block_offs);
             const block_mask = block_ids.lt(@as(i32, @intCast(max_num_m_blocks)));
             const block_offsets = block_ids.mul(@as(i32, @intCast(block_size_m)));
             const init = k.splat(-1, &.{hist_block});
@@ -523,12 +522,13 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
                 const start_v = k.load(a.cumsum_ptr.addPtr(e_iv));
                 const end_v = k.load(a.cumsum_ptr.addPtr(e_iv.add(1)));
                 const in_range = block_mask
-                    .bitAnd(block_offsets.ge(start_v.splatTo(&.{hist_block})))
-                    .bitAnd(block_offsets.lt(end_v.splatTo(&.{hist_block})));
+                    .bitAnd(block_offsets.ge(start_v))
+                    .bitAnd(block_offsets.lt(end_v));
+                // select needs all-tensor operands — splat the scalar e_iv.
                 exp_loop.yield(.{k.select(in_range, e_iv.splatTo(&.{hist_block}), e_acc)});
             }
             const block_expert = exp_loop.results[0];
-            k.storeOpts(a.expert_ids_ptr.splatTo(&.{hist_block}).addPtr(block_ids), block_expert, .{ .mask = block_mask });
+            k.storeOpts(a.expert_ids_ptr.addPtr(block_ids), block_expert, .{ .mask = block_mask });
             assign_loop.yield(.{});
         }
         pid_if.yieldElse(.{});
@@ -581,11 +581,11 @@ pub fn countAndSortExpertTokensKernel(allocator: std.mem.Allocator, config: Alig
         const ts = w.after_carried[0];
 
         // offs = ts + token_offs; mask = offs < NUMEL
-        const offs = ts.splatTo(&.{block}).add(token_offs);
+        const offs = ts.add(token_offs);
         const mask = offs.lt(numel);
 
         // expert_vals = load(topk_ids + offs, mask=mask, other=NUM_EXPERTS)
-        const topk_ptrs = a.topk_ids_ptr.splatTo(&.{block}).addPtr(offs);
+        const topk_ptrs = a.topk_ids_ptr.addPtr(offs);
         const expert_vals = k.loadOpts(topk_ptrs, .{
             .mask = mask,
             .other = k.splat(num_experts, &.{block}),
@@ -593,7 +593,7 @@ pub fn countAndSortExpertTokensKernel(allocator: std.mem.Allocator, config: Alig
         const valid = mask.bitAnd(expert_vals.lt(num_experts));
 
         // rank = atomic_add(cumsum + expert_vals, 1, mask=valid, sem="relaxed")
-        const cumsum_ptrs = a.cumsum_ptr.splatTo(&.{block}).addPtr(expert_vals);
+        const cumsum_ptrs = a.cumsum_ptr.addPtr(expert_vals);
         const rank = k.atomicRmwOpts(.add, cumsum_ptrs, k.ones(&.{block}, .i32), .{
             .mask = valid,
             .sem = .relaxed,
@@ -601,7 +601,7 @@ pub fn countAndSortExpertTokensKernel(allocator: std.mem.Allocator, config: Alig
         });
 
         // store(sorted_token_ids + rank, offs, mask=valid)
-        const sorted_ptrs = a.sorted_token_ids_ptr.splatTo(&.{block}).addPtr(rank);
+        const sorted_ptrs = a.sorted_token_ids_ptr.addPtr(rank);
         k.storeOpts(sorted_ptrs, offs, .{ .mask = valid });
 
         w.yieldAfter(.{ts.add(step)});
