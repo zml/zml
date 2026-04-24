@@ -314,14 +314,7 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
     const is_dead = off_experts.eq(@as(i64, -1));
 
     // Python: if off_experts == -1: write_zeros_to_output(...); return
-    //
-    // The write-zeros helper runs *before* the return, so we can't use a
-    // plain `returnIf` — we need a then-branch with side-effects that then
-    // returns. Model this as: skip the gemm path with an `scf.if` on
-    // `!is_dead`, but inline the write-zeros in the dead branch and emit
-    // `returnIf(is_dead)` after it. Simpler: predicate the rest of the
-    // kernel on `!is_dead` after side-effecting on `is_dead`.
-    var dead_if = k.openIf(is_dead);
+    var dead_ret = k.openReturnIf(is_dead);
     {
         writeZerosToOutput(
             k,
@@ -336,9 +329,8 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
             block_size_n,
             compute_type,
         );
-        dead_if.yieldThen(.{});
+        dead_ret.yieldReturn(.{});
     }
-    k.returnIf(is_dead, .{});
 
     // Alive body — inlined from Python fused_moe_kernel (bf16 path).
 

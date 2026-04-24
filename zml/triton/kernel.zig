@@ -628,6 +628,48 @@ pub fn ForScope(comptime N: usize) type {
     };
 }
 
+/// Scope returned by `Kernel.openReturnIf`. `yieldReturn(.{values})` closes
+/// the taken branch with `tt.return values` and makes the fall-through block
+/// the new insertion point. Pattern:
+///
+///     var scope = k.openReturnIf(cond);
+///     {
+///         // ops here emit into ^ret
+///         k.store(ptr, x);
+///         scope.yieldReturn(.{});
+///     }
+///     // subsequent ops emit into ^cont
+pub const ReturnIfScope = struct {
+    kernel: *Kernel,
+    ret_block: *mlir.Block,
+    cont_block: *mlir.Block,
+
+    /// Close the taken branch with `tt.return <values>` and swap the
+    /// insertion point to the fall-through block. `values` is a tuple of
+    /// `Value`s matching the enclosing `tt.func`'s result types.
+    pub fn yieldReturn(self: *ReturnIfScope, values: anytype) void {
+        const k = self.kernel;
+        const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
+        var ret_operands: [fields.len]*const mlir.Value = undefined;
+        inline for (fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
+            ret_operands[i] = @field(values, f.name).inner;
+        }
+        _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(self.ret_block);
+        k.popBlock();
+
+        // Mirror `returnIf`'s swap-or-push protocol: make `^cont` the new
+        // insertion point so subsequent ops and the trailing `tt.return`
+        // from `finish` land there.
+        if (k.block_stack.items.len == 0) {
+            k.pushBlock(self.cont_block);
+        } else {
+            k.block_stack.items[k.block_stack.items.len - 1] = self.cont_block;
+        }
+    }
+};
+
 /// Scope returned by `Kernel.openIf` — no-else, no-results. `yieldThen` is
 /// the only terminator; it builds scf.if with an empty else block. Pattern:
 ///
@@ -1338,8 +1380,11 @@ pub const Kernel = struct {
 
     fn reduceDispatch(self: *Kernel, src: Value, opts: ReduceOpts, comptime kind: enum { sum, max, min }) Value {
         const src_shape = src.shape();
-        // axis=null ⇒ flatten to 1-D, then reduce axis 0.
+        // axis=null ⇒ flatten to 1-D, then reduce axis 0. Skip the reshape
+        // when `src` is already 1-D — otherwise we emit an identity
+        // `tt.reshape` that diffs noisily against Triton's IR.
         const input: Value, const axis: i32 = if (opts.axis) |a| .{ src, a } else blk: {
+            if (src_shape.len == 1) break :blk .{ src, 0 };
             var total: i64 = 1;
             for (0..src_shape.len) |i| total *= src_shape.get(i);
             break :blk .{ self.reshape(src, &.{total}), 0 };
@@ -2492,6 +2537,52 @@ pub const Kernel = struct {
         } else {
             self.block_stack.items[self.block_stack.items.len - 1] = cont_block;
         }
+    }
+
+    /// Open a scoped early-return — the `returnIf` counterpart for when the
+    /// taken branch needs side-effects. `yieldReturn(.{values})` closes the
+    /// `^ret` block with `tt.return` and makes the fresh `^cont` block the
+    /// new insertion point. See `ReturnIfScope`.
+    ///
+    ///     var scope = k.openReturnIf(cond);
+    ///     {
+    ///         // ops here emit into ^ret
+    ///         k.store(...);
+    ///         scope.yieldReturn(.{});
+    ///     }
+    ///     // subsequent ops emit into ^cont
+    ///
+    /// Equivalent to `openIf(cond){body}yieldThen; returnIf(cond,values)` but
+    /// emits a single `cf.cond_br` instead of duplicating the predicate.
+    /// Works only at the `tt.func` body level — same restrictions as
+    /// `returnIf`.
+    pub fn openReturnIf(self: *Kernel, cond: Value) ReturnIfScope {
+        const current = self.currentBlock();
+        const region = current.parentRegion();
+
+        const ret_block = mlir.Block.init(&.{}, &.{});
+        const cont_block = mlir.Block.init(&.{}, &.{});
+        region.appendOwnedBlock(ret_block);
+        region.appendOwnedBlock(cont_block);
+
+        _ = cf.cond_br(
+            self.ctx,
+            cond.inner,
+            ret_block,
+            &.{},
+            cont_block,
+            &.{},
+            null,
+            self.loc(),
+        ).appendTo(current);
+
+        self.pushBlock(ret_block);
+
+        return .{
+            .kernel = self,
+            .ret_block = ret_block,
+            .cont_block = cont_block,
+        };
     }
 
     /// Open a scoped `scf.if` with no else branch and no results — use this

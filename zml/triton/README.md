@@ -514,11 +514,33 @@ cf.cond_br %out_of_range, ^ret, ^cont
   `scf.if` for structured loops and value-carrying branches; our DSL does
   the same.
 
-### When to use `cf` (returnIf) vs `scf` (openIf / openIfElse / openFor)
+### `openReturnIf` — early `tt.return` with side-effects in the taken branch
+
+```zig
+// Python: if off_experts == -1: write_zeros_to_output(...); return
+var scope = k.openReturnIf(is_dead);
+{
+    writeZerosToOutput(k, c_ptr, ...);   // ops here emit into ^ret
+    scope.yieldReturn(.{});              // closes ^ret with tt.return
+}
+// ... ops here emit into ^cont (fall-through) ...
+```
+
+Lowers to the same `cf.cond_br ^ret, ^cont` shape as `returnIf`, but the
+taken branch can carry arbitrary side-effects between the `cf.cond_br` and
+the `tt.return`. Use this instead of the
+`openIf(cond){body}yieldThen; returnIf(cond, values)` pair — that pattern
+duplicates the predicate (emits both `scf.if` and `cf.cond_br` on the same
+boolean) and drifts from Triton's reference IR.
+
+Same restrictions as `returnIf`: top-level `tt.func` body only.
+
+### When to use `cf` (returnIf / openReturnIf) vs `scf` (openIf / openIfElse / openFor)
 
 | Python source                          | Emits | DSL builder                     |
 |----------------------------------------|-------|---------------------------------|
 | `if cond: return`                      | `cf`  | `k.returnIf(cond, .{})`         |
+| `if cond: <side-effects>; return`      | `cf`  | `var s = k.openReturnIf(cond); {...; s.yieldReturn(.{})}` |
 | `if cond: <side-effects>`              | `scf` | `k.openIf(cond) {...; yieldThen(.{})}` |
 | `if cond: x=A else: x=B` (value-carrying) | `scf` | `k.openIfElse(cond, .{ty}) {...; yieldThen(.{a})} {...; yieldElse(.{b})}` |
 | `for i in range(...)`                  | `scf` | `k.openFor(lo, hi, step, .{inits})` |
@@ -636,6 +658,7 @@ is the manual form.
 | `if cond: ...` (side-effects, no else)        | `var i = k.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
 | `if cond: ... else: ...`                      | `var i = k.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
 | `if cond: return` (early exit)                | `k.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block  |
+| `if cond: <stores>; return` (early exit, with side-effects) | `var s = k.openReturnIf(cond); { ...; s.yieldReturn(.{}); }` — single `cf.cond_br`; body emits into `^ret` before the `tt.return` |
 
 ---
 
