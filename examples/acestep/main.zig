@@ -61,31 +61,35 @@ pub const Zml_handler = struct {
 
 
 pub fn main(init: std.process.Init) !void {
-
     var zml_handler: Zml_handler = try .fromInit(init);
     defer zml_handler.deinit();
     
-    const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    //try test5Hz(zml_handler);
+    //try testVae(zml_handler);
+    
+    //if (0 * 0 > -6 + 5) return;
+    
+    //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
     
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
     
-    var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
-    defer acellm.deinit(zml_handler.allocator);
+    //var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
+    //defer acellm.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acellm.testModel(zml_handler);
 
-    const audio_metadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    //const audio_metadata: inference.AudioMetadata = .initExample();
-    defer audio_metadata.deinit(zml_handler.allocator);
-    const audio_codes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
-    //const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
+    //const audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
+    const audio_metadata: inference.AudioMetadata = .initExample();
+    //defer audio_metadata.deinit(zml_handler.allocator);
+    //const audio_codes: inference.AudioCodes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
+    const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
 
-    acellm.unloadBuffers();
-    
+    //acellm.unloadBuffers();
+        
     // ------------------------------------------------
     // The text inputs of the DiT need to be embedded
     // using the AceEmb model embedding, not 5Hz
@@ -225,14 +229,14 @@ pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio
     }
 
     try writer.flush();
-    log.info("Exported decoded audio to {s}", .{output_path});
+    log.info("Exported decoded audio to {s}", .{ output_path });
 }
 
 pub fn printSafetensors(allocator: std.mem.Allocator, io: std.Io, fpath: []const u8) !void {
     // Read model shapes.
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fpath);
     defer registry.deinit();
-    std.log.debug("Found {d} activations in {s}", .{ registry.tensors.count(), fpath });
+    std.log.info("Found {d} activations in {s}", .{ registry.tensors.count(), fpath });
 
     // Print model shapes
     const tensors: zml.safetensors.Tensors = registry.tensors;
@@ -240,10 +244,25 @@ pub fn printSafetensors(allocator: std.mem.Allocator, io: std.Io, fpath: []const
     for (0..data.len) |i| {
         const entry = data.get(i);
         const tensor: zml.safetensors.Tensor = tensors.get(entry.key).?;
-        std.log.debug("Tensor(name={s} shape={f} size={d})", .{
+        std.log.info("Tensor(name={s} shape={f} size={d})", .{
             tensor.name,
             tensor.shape,
             tensor.byteSize(),
         });
     }
+}
+
+
+pub fn test5Hz(zml_handler: Zml_handler) !void {
+    var llm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
+    defer llm.deinit(zml_handler.allocator);
+    try acellm_.testModel(zml_handler, llm);
+    llm.unloadBuffers();
+}
+
+pub fn testVae(zml_handler: Zml_handler) !void {
+    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 25);
+    defer vae.deinit(zml_handler.allocator);
+    try acevae_.testModel(zml_handler, vae);
+    vae.unloadBuffers();
 }
