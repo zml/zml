@@ -168,8 +168,8 @@ pub const Shape = struct {
         }
 
         if (comptime stdx.meta.isSliceOfAny(T, stdx.meta.isInteger)) {
-            var dims_ = DimsArray.init(0) catch unreachable;
-            var tags_ = TagsArray.init(0) catch unreachable;
+            var dims_: DimsArray = .empty;
+            var tags_: TagsArray = .empty;
             for (v) |d| {
                 dims_.appendAssumeCapacity(@intCast(d));
                 tags_.appendAssumeCapacity(TagUnknown);
@@ -217,8 +217,8 @@ pub const Shape = struct {
             return self.parseAxes(self.tags());
         }
 
-        var axes_ = AxesArray.init(0) catch unreachable;
-        var tags_ = TagsArray.init(0) catch unreachable;
+        var axes_: AxesArray = .empty;
+        var tags_: TagsArray = .empty;
 
         if (comptime stdx.meta.isSliceOfAny(T, isAxisConvertible)) {
             for (v) |d| {
@@ -242,7 +242,7 @@ pub const Shape = struct {
     pub fn parseTags(v: anytype) TagsArray {
         const T = @TypeOf(v);
         stdx.debug.assertComptime(stdx.meta.isTupleOf(T, @EnumLiteral()), "Wrong type, got {}. Expected .{{ .a, .b }}", .{T});
-        var tags_ = TagsArray.init(0) catch unreachable;
+        var tags_: TagsArray = .empty;
         inline for (v) |field| {
             tags_.appendAssumeCapacity(toTag(field));
         }
@@ -407,7 +407,7 @@ pub const Shape = struct {
             return self.axes(axes_.tags());
         }
 
-        var res = AxesArray.init(0) catch unreachable;
+        var res: AxesArray = .empty;
 
         if (comptime stdx.meta.isSliceOfAny(T, stdx.meta.isInteger) or stdx.meta.isSliceOf(T, Tag)) {
             for (axes_) |ax| {
@@ -1269,7 +1269,7 @@ pub const Shape = struct {
     /// so that the given axes are contiguous.
     pub fn contiguousPerm(self: Shape, axes_: anytype) AxesArray {
         const axes__, _ = self.parseAxes(axes_);
-        var perms = AxesArray.init(0) catch unreachable;
+        var perms: AxesArray = .empty;
         for (0..self.rank()) |i| {
             if (std.mem.indexOfScalar(u3, axes__.constSlice(), @intCast(i))) |_| {
                 continue;
@@ -1493,7 +1493,7 @@ pub const Shape = struct {
     }
 
     fn intersectTags(a: []const Tag, b: []const Tag) TagsArray {
-        var res = TagsArray.init(0) catch unreachable;
+        var res: TagsArray = .empty;
         for (a) |tag_| {
             if (std.mem.indexOfScalar(Tag, b, tag_)) {
                 res.appendAssumeCapacity(tag_);

@@ -324,8 +324,8 @@ pub const PhysicalMesh = struct {
         depth_by_tag: DepthByTag,
 
         /// Build axis order and depth mapping from a topology tree.
-        pub fn init(root: PhysicalNode) !AxisTraversal {
-            var order: Order = try .init(0);
+        pub fn init(root: PhysicalNode) AxisTraversal {
+            var order: Order = .empty;
             axisOrderNode(root, &order);
 
             var depth_by_tag: DepthByTag = .initFill(null);
@@ -415,17 +415,16 @@ pub const PhysicalMesh = struct {
     }
 
     fn fromOwnedTree(target: Target, root: PhysicalNode) !PhysicalMesh {
+        try validateGeometry(root);
+
         var owned_root = root;
-
-        try validateGeometry(owned_root);
-
-        var path = [_]usize{0} ** Shape.MAX_RANK;
-        try assignCoords(&owned_root, &path, 0);
+        var path: [Shape.MAX_RANK]usize = @splat(0);
+        assignCoords(&owned_root, &path, 0);
 
         return .{
             .target = target,
             .root = owned_root,
-            .axis_traversal = try .init(owned_root),
+            .axis_traversal = .init(owned_root),
         };
     }
 
@@ -513,20 +512,18 @@ pub const PhysicalMesh = struct {
     /// coords:
     ///   (0,0) (0,1)
     ///   (1,0) (1,1)
-    fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]usize, depth: usize) !void {
+    fn assignCoords(node: *PhysicalNode, path: *[Shape.MAX_RANK]usize, depth: usize) void {
         switch (node.*) {
             .leaf => |*d| {
                 // Coords can already been set by caller
                 if (d.coords.len > 0) return;
 
-                var coords = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
-                for (path[0..depth]) |c| coords.appendAssumeCapacity(c);
-                d.coords = coords;
+                d.coords = stdx.BoundedArray(usize, Shape.MAX_RANK).fromSlice(path[0..depth]) catch unreachable;
             },
             .branch => |*b| {
                 for (b.children, 0..) |*child, i| {
                     path[depth] = i;
-                    try assignCoords(child, path, depth + 1);
+                    assignCoords(child, path, depth + 1);
                 }
             },
         }
@@ -536,25 +533,18 @@ pub const PhysicalMesh = struct {
         return self.root.countDevices();
     }
 
-    pub fn devices(self: PhysicalMesh, allocator: std.mem.Allocator) ![]Device {
-        var list: Devices = .init(0) catch unreachable;
-        try self.devicesInto(&list);
-
-        const out = try allocator.alloc(Device, list.len);
-        @memcpy(out, list.constSlice());
-        return out;
+    pub fn devices(self: PhysicalMesh) Devices {
+        var list: Devices = .empty;
+        devicesNodeInto(self.root, &list);
+        return list;
     }
 
-    pub fn devicesInto(self: PhysicalMesh, out: *Devices) !void {
-        try devicesNodeInto(self.root, out);
-    }
-
-    fn devicesNodeInto(node: PhysicalNode, out: *Devices) !void {
+    fn devicesNodeInto(node: PhysicalNode, out: *Devices) void {
         switch (node) {
             .leaf => |d| out.appendAssumeCapacity(d),
             .branch => |b| {
                 for (b.children) |child| {
-                    try devicesNodeInto(child, out);
+                    devicesNodeInto(child, out);
                 }
             },
         }
@@ -692,8 +682,7 @@ pub const PhysicalMesh = struct {
         fn parseDevice(device: PlatformDevice) !CoordPlacement {
             const api = device.platform.pjrt_api;
             const coords_attr = device.pjrt_desc.attribute(api, "coords") orelse return error.MissingDeviceCoords;
-            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
-
+            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
             switch (coords_attr) {
                 .int64list => |values| {
                     if (values.len == 0 or values.len > Shape.MAX_RANK) return error.InvalidDeviceCoords;
@@ -782,20 +771,17 @@ pub const PhysicalMesh = struct {
         }
 
         pub fn leaf(placement: *const CoordPlacement, coords_slice: []const usize) !PhysicalNode {
-            var coords: stdx.BoundedArray(usize, Shape.MAX_RANK) = try .init(0);
-            for (coords_slice) |coord| coords.appendAssumeCapacity(coord);
-
             return .{
                 .leaf = .{
                     .id = placement.device_id,
-                    .coords = coords,
+                    .coords = try .fromSlice(coords_slice),
                     .pjrt_device = placement.pjrt_device,
                 },
             };
         }
 
         pub fn axisStrides(axis_sizes: []const usize) ![Shape.MAX_RANK]usize {
-            var strides = [_]usize{0} ** Shape.MAX_RANK;
+            var strides: [Shape.MAX_RANK]usize = @splat(0);
             var stride: usize = 1;
 
             var i = axis_sizes.len;
@@ -1090,6 +1076,15 @@ pub const Sharding = struct {
         return null;
     }
 
+    pub fn replicated(platform: *const Platform) Sharding {
+        const physical_mesh = platform.physical_mesh;
+        const logical_mesh: LogicalMesh = .init("replicated", .{ .x = .high_bandwidth });
+        const strategy: Strategy = .suggest(logical_mesh, physical_mesh);
+        // initFromStrategy only fails on invalid input. Since we created everything,
+        // it's a ZML bug to fail here, not a user error.
+        return initFromStrategy(platform, logical_mesh, strategy) catch @panic("ZML bug");
+    }
+
     pub fn initFromStrategy(
         platform: *const Platform,
         logical: LogicalMesh,
@@ -1099,16 +1094,12 @@ pub const Sharding = struct {
         const axis_order = physical.axisOrder().constSlice();
         if (axis_order.len == 0) return error.InvalidPhysicalMesh;
 
-        var bindings: Bindings = try .init(0);
+        var bindings: Bindings = .empty;
         for (strategy.bindings.constSlice()) |bind| {
-            var list: AxisList = try .init(0);
-            for (bind.physical.constSlice()) |p_tag| {
-                list.appendAssumeCapacity(p_tag);
-            }
-            bindings.appendAssumeCapacity(.{ .logical = bind.logical, .physical = list });
+            bindings.appendAssumeCapacity(.{ .logical = bind.logical, .physical = bind.physical });
         }
 
-        var folds: Folds = try .init(0);
+        var folds: Folds = .empty;
         var folds_consumed: std.EnumSet(PhysicalAxisTag) = .empty;
         for (strategy.folding.constSlice()) |entry| {
             for (entry.sources.constSlice()) |src| {
@@ -1137,7 +1128,7 @@ pub const Sharding = struct {
     pub fn physicalView(self: Sharding) PhysicalView {
         const physical = self.platform.physical_mesh;
         var view: PhysicalView = .{
-            .axes = stdx.BoundedArray(Axis, Shape.MAX_RANK).init(0) catch unreachable,
+            .axes = .empty,
             .total_devices = 1,
         };
 
@@ -1147,7 +1138,7 @@ pub const Sharding = struct {
             if (!physical.hasAxis(tag)) continue;
             if (self.folds_consumed.contains(tag) and self.foldSources(tag) == null) continue;
 
-            var folded = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
+            var folded: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
             var size: i64 = 1;
 
             if (self.foldSources(tag)) |sources| {
@@ -1240,12 +1231,12 @@ pub const Sharding = struct {
     /// Common logic to map tensor dimensions to physical mesh indices.
     fn getDimMapping(self: *const Sharding, shape: Shape) DimMapping {
         const view = self.physicalView();
-        var axes_per_dim = stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK).init(0) catch unreachable;
-        var used_mask = [_]bool{false} ** Shape.MAX_RANK;
+        var axes_per_dim: stdx.BoundedArray(stdx.BoundedArray(usize, Shape.MAX_RANK), Shape.MAX_RANK) = .empty;
+        var used_mask: [Shape.MAX_RANK]bool = @splat(false);
         var globally_used: std.EnumSet(PhysicalAxisTag) = .empty;
 
         for (0..shape.rank()) |ax| {
-            var dim_axes = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
+            var dim_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
             const spec = shape.partition(ax);
 
             if (spec == .axis) {
@@ -1265,7 +1256,7 @@ pub const Sharding = struct {
             axes_per_dim.appendAssumeCapacity(dim_axes);
         }
 
-        var replicated_axes = stdx.BoundedArray(usize, Shape.MAX_RANK).init(0) catch unreachable;
+        var replicated_axes: stdx.BoundedArray(usize, Shape.MAX_RANK) = .empty;
         for (0..view.axes.len) |i| {
             if (!used_mask[i]) replicated_axes.appendAssumeCapacity(i);
         }
@@ -1349,7 +1340,7 @@ pub const Sharding = struct {
         if (!has_sharding) return try allocator.dupe(u8, "{replicated}");
 
         const mapping = self.getDimMapping(shape);
-        var tile_shape = stdx.BoundedArray(i64, Shape.MAX_RANK + 1).init(0) catch unreachable;
+        var tile_shape: stdx.BoundedArray(i64, Shape.MAX_RANK + 1) = .empty;
 
         //  Calculate tile sizes per tensor dimension
         for (mapping.axes_per_dim.constSlice()) |dim_axes| {
@@ -1409,7 +1400,7 @@ pub const Sharding = struct {
         var ids = try allocator.alloc(usize, count);
         @memset(ids, std.math.maxInt(usize));
 
-        const ordered_devices = try self.devicesInCanonicalOrder();
+        const ordered_devices = self.devicesInCanonicalOrder();
         for (ordered_devices.constSlice()) |d| {
             const coords = d.coordsSlice() orelse return error.MissingDeviceCoords;
             const idx = self.platform.physical_mesh.linearIndexFromCoords(coords);
@@ -1423,10 +1414,9 @@ pub const Sharding = struct {
         return ids;
     }
 
-    fn devicesInCanonicalOrder(self: Sharding) !Devices {
+    fn devicesInCanonicalOrder(self: Sharding) Devices {
         const physical = self.platform.physical_mesh;
-        var devices: Devices = try .init(0);
-        try physical.devicesInto(&devices);
+        var devices: Devices = physical.devices();
 
         const Order = struct {
             mesh: PhysicalMesh,
@@ -1496,13 +1486,6 @@ pub const Sharding = struct {
     }
 };
 
-pub fn replicatedSharding(platform: *const Platform) !Sharding {
-    const physical_mesh = platform.physical_mesh;
-    const logical_mesh: LogicalMesh = .init("replicated", .{ .x = .high_bandwidth });
-    const strategy: Strategy = try .suggest(logical_mesh, physical_mesh);
-    return try .initFromStrategy(platform, logical_mesh, strategy);
-}
-
 pub const Strategy = struct {
     pub const PhysicalList = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK);
     pub const Binding = struct {
@@ -1524,7 +1507,7 @@ pub const Strategy = struct {
         .folding = .empty,
     };
 
-    pub fn addBinding(self: *Strategy, logical: anytype, physical: PhysicalAxisTag) !void {
+    pub fn addBinding(self: *Strategy, logical: anytype, physical: PhysicalAxisTag) void {
         const raw_tag = Shape.toTag(logical);
         const logical_tag: []const u8 = std.mem.span(raw_tag);
 
@@ -1535,15 +1518,15 @@ pub const Strategy = struct {
             }
         }
 
-        var list: PhysicalList = try .init(0);
+        var list: PhysicalList = .empty;
         list.appendAssumeCapacity(physical);
         self.bindings.appendAssumeCapacity(.{ .logical = raw_tag, .physical = list });
     }
 
     /// Explicitly fold axes: `target` is the kept axis, `sources` define order.
     /// If `target` is missing from `sources`, it is prepended.
-    pub fn addFold(self: *Strategy, target: PhysicalAxisTag, sources: []const PhysicalAxisTag) !void {
-        var list: PhysicalList = try .init(0);
+    pub fn addFold(self: *Strategy, target: PhysicalAxisTag, sources: []const PhysicalAxisTag) void {
+        var list: PhysicalList = .empty;
 
         var has_target = false;
         for (sources) |s| {
@@ -1567,11 +1550,11 @@ pub const Strategy = struct {
     }
 
     /// suggest builds a Strategy from logical intents.
-    pub fn suggest(logical: LogicalMesh, physical: PhysicalMesh) !Strategy {
+    pub fn suggest(logical: LogicalMesh, physical: PhysicalMesh) Strategy {
         var strategy: Strategy = .init;
 
         const base_order = physical.shardableAxes();
-        var available = stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK).init(0) catch unreachable;
+        var available: stdx.BoundedArray(PhysicalAxisTag, Shape.MAX_RANK) = .empty;
         for (base_order) |tag| {
             if (physical.hasAxis(tag)) available.appendAssumeCapacity(tag);
         }
@@ -1594,7 +1577,7 @@ pub const Strategy = struct {
                     .low_bandwidth => avail[avail.len - 1 - (i % avail.len)],
                 };
 
-                try strategy.addBinding(l_tag, p_tag);
+                strategy.addBinding(l_tag, p_tag);
                 counters.set(target_intent, i + 1);
             }
         }
@@ -1667,12 +1650,16 @@ pub const Placement = struct {
         counts: stdx.BoundedArray(i64, Shape.MAX_RANK),
         indices: stdx.BoundedArray(i64, Shape.MAX_RANK),
 
-        pub fn init() !AxisSplit {
-            return .{
-                .product = 1,
-                .counts = try .init(0),
-                .indices = try .init(0),
-            };
+        pub const empty: AxisSplit = .{
+            .product = 1,
+            .counts = .empty,
+            .indices = .empty,
+        };
+
+        pub fn add(split: *AxisSplit, size: i64, coord: usize) void {
+            split.counts.appendAssumeCapacity(size);
+            split.indices.appendAssumeCapacity(@intCast(coord));
+            split.product *= size;
         }
 
         pub fn linearIndex(self: AxisSplit) i64 {
@@ -1692,9 +1679,8 @@ pub const Placement = struct {
         sharding: Sharding,
         shape: Shape,
     ) !Placement {
-        const ordered_devices = try sharding.devicesInCanonicalOrder();
-
-        var shards: Shards = try .init(0);
+        const ordered_devices = sharding.devicesInCanonicalOrder();
+        var shards: Shards = .empty;
 
         for (ordered_devices.constSlice()) |d| {
             if (d.coords.len == 0) return error.MissingDeviceCoords;
@@ -1704,7 +1690,7 @@ pub const Placement = struct {
                 .device_coords = d.coords,
                 .shape = undefined, // Calculated below
                 .global_shape = shape,
-                .slices = try .init(0),
+                .slices = .empty,
             });
         }
 
@@ -1771,20 +1757,20 @@ pub const Placement = struct {
         device_coords: []const usize,
         used_axes: *std.EnumSet(PhysicalAxisTag),
     ) !AxisSplit {
-        var plan: AxisSplit = try .init();
+        var plan: AxisSplit = .empty;
 
         for (binding) |p_tag| {
             // Expand the physical tag: check if it's a target for folded source axes
             if (self.sharding.foldSources(p_tag)) |sources| {
                 for (sources) |src| {
                     if (used_axes.contains(src)) continue;
-                    try self.addPhysicalToSplit(&plan, src, device_coords);
+                    self.addPhysicalToSplit(&plan, src, device_coords);
                     used_axes.insert(src);
                 }
             } else {
                 // Standard case: directly bound, not part of an explicit fold
                 if (used_axes.contains(p_tag)) continue;
-                try self.addPhysicalToSplit(&plan, p_tag, device_coords);
+                self.addPhysicalToSplit(&plan, p_tag, device_coords);
                 used_axes.insert(p_tag);
             }
         }
@@ -1797,15 +1783,13 @@ pub const Placement = struct {
     }
 
     /// Extract coordinate data from the physical mesh for a specific axis.
-    fn addPhysicalToSplit(self: *Placement, plan: *AxisSplit, tag: PhysicalAxisTag, device_coords: []const usize) !void {
+    fn addPhysicalToSplit(self: *Placement, plan: *AxisSplit, tag: PhysicalAxisTag, device_coords: []const usize) void {
         const physical = self.sharding.platform.physical_mesh;
         const info = physical.axisInfo(tag) orelse return;
         const depth = physical.axis_traversal.depth(tag) orelse return;
         const coord = device_coords[depth];
 
-        plan.counts.appendAssumeCapacity(@intCast(info.size));
-        plan.indices.appendAssumeCapacity(@intCast(coord));
-        plan.product *= info.size;
+        plan.add(info.size, coord);
     }
 
     pub fn format(self: Placement, writer: *std.Io.Writer) !void {
@@ -1872,17 +1856,15 @@ const ShardingTest = struct {
     /// Creates a 1D-3D PhysicalMesh from simple dimensions.
     pub fn physical(self: ShardingTest, dims: anytype, geometry: AxisGeometry) !PhysicalMesh {
         const info = @typeInfo(@TypeOf(dims)).@"struct";
-        var tags = try stdx.BoundedArray(PhysicalAxisTag, 3).init(0);
-        var sizes = try stdx.BoundedArray(usize, 3).init(0);
-
-        const tag_names = [_]PhysicalAxisTag{ .link_x, .link_y, .link_z };
-        inline for (info.fields, 0..) |field, i| {
-            tags.appendAssumeCapacity(tag_names[i]);
-            sizes.appendAssumeCapacity(@intCast(@field(dims, field.name)));
+        const N = info.fields.len;
+        var sizes: [N]usize = undefined;
+        inline for (info.fields, sizes[0..]) |field, *s| {
+            s.* = @intCast(@field(dims, field.name));
         }
 
+        const tags: [3]PhysicalAxisTag = .{ .link_x, .link_y, .link_z };
         var next_id: usize = 0;
-        const root = try self.buildNode(tags.constSlice(), sizes.constSlice(), 0, &next_id, geometry);
+        const root = try self.buildNode(tags[0..N], sizes[0..N], 0, &next_id, geometry);
         return try .fromTree(self.allocator, .tpu, root);
     }
 
@@ -1956,7 +1938,7 @@ test "sharding: unknown partitioning implies replication" {
     const logical: LogicalMesh = .init("folded_mesh", .{ .batch = .low_bandwidth });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.batch, .link_x);
+    strategy.addBinding(.batch, .link_x);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -1986,7 +1968,7 @@ test "sharding: suggest strategy realization" {
         .model = .high_bandwidth,
     });
 
-    const strategy: Strategy = try .suggest(logical, physical);
+    const strategy: Strategy = .suggest(logical, physical);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2021,7 +2003,7 @@ test "sharding: suggest folds logical axes with same intent" {
         .experts = .high_bandwidth,
     });
 
-    const strategy: Strategy = try .suggest(logical, physical);
+    const strategy: Strategy = .suggest(logical, physical);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2049,8 +2031,8 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
     const logical: LogicalMesh = .init("folded_mesh", .{ .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.model, .link_x);
-    try strategy.addBinding(.model, .link_y);
+    strategy.addBinding(.model, .link_x);
+    strategy.addBinding(.model, .link_y);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2077,8 +2059,8 @@ test "sharding: explicit strategy folding" {
     const logical: LogicalMesh = .init("strategy_fold", .{ .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.model, .link_x);
-    try strategy.addFold(.link_x, &.{ .link_x, .link_z });
+    strategy.addBinding(.model, .link_x);
+    strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2109,8 +2091,8 @@ test "sharding: open and replicated dimension mix" {
     const logical: LogicalMesh = .init("mix_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.batch, .link_x);
-    try strategy.addBinding(.model, .link_y);
+    strategy.addBinding(.batch, .link_x);
+    strategy.addBinding(.model, .link_y);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2137,9 +2119,9 @@ test "sharding: full 3D cluster sharding" {
     const logical: LogicalMesh = .init("3d_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth, .context = .balanced });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.batch, .link_x);
-    try strategy.addBinding(.model, .link_y);
-    try strategy.addBinding(.context, .link_z);
+    strategy.addBinding(.batch, .link_x);
+    strategy.addBinding(.model, .link_y);
+    strategy.addBinding(.context, .link_z);
 
     const scenario: ShardingTest.Scenario = .{
         .platform = runner.platformForMesh(physical),
@@ -2174,8 +2156,8 @@ test "sharding: num partitions for logical axis" {
     });
 
     var strategy: Strategy = .init;
-    try strategy.addBinding(.model, .link_x);
-    try strategy.addFold(.link_x, &.{ .link_x, .link_z });
+    strategy.addBinding(.model, .link_x);
+    strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
     var platform = runner.platformForMesh(physical);
     const sharding: Sharding = try .initFromStrategy(&platform, logical, strategy);

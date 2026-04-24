@@ -30,7 +30,7 @@ pub fn physicalMesh() sharding.PhysicalMesh {
 
 pub fn replicatedSharding() sharding.Sharding {
     if (_replicated_sharding == null) {
-        _replicated_sharding = sharding.replicatedSharding(env()) catch unreachable;
+        _replicated_sharding = .replicated(env());
     }
     return _replicated_sharding.?;
 }
