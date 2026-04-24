@@ -264,256 +264,253 @@ fn kernelUnifiedAttention2d(
     const out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
     k.returnIf(out_of_range, .{});
 
-    {
-        const offs_m = k.arange(0, BLOCK_M, .i32);
-        const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
-        const offs_t = k.arange(0, TILE_SIZE, .i32);
+    const offs_m = k.arange(0, BLOCK_M, .i32);
+    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
+    const offs_t = k.arange(0, TILE_SIZE, .i32);
 
-        // query_pos = q_block_local_idx * BLOCK_Q + offs_m // NUM_QUERIES_PER_KV
-        const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
-        const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
+    // query_pos = q_block_local_idx * BLOCK_Q + offs_m // NUM_QUERIES_PER_KV
+    const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
+    const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
-        const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
-        const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
-            .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
+    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
+    const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
+        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
 
-        // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
-        const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-            .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-        const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-            .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-        const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
-        const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
+    // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
+    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
+    const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
 
-        const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
-            offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
-        else
-            k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
-        const query_mask_0 = query_pos.lt(cur_batch_query_len);
-        const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
+    const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+        offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
+    else
+        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
+    const query_mask_0 = query_pos.lt(cur_batch_query_len);
+    const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
 
-        // Q : (BLOCK_M, HEAD_SIZE_PADDED)
-        const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
-        const q_mask_c = query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
-        const q_mask = q_mask_ab.bitAnd(q_mask_c);
-        const q_cache_mod: ttir.CacheModifier =
-            if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none;
-        const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
-            .mask = q_mask,
-            .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
-            .cache_modifier = q_cache_mod,
+    // Q : (BLOCK_M, HEAD_SIZE_PADDED)
+    const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
+    const q_mask_c = query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+    const q_mask = q_mask_ab.bitAnd(q_mask_c);
+    const q_cache_mod: ttir.CacheModifier =
+        if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none;
+    const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
+        .mask = q_mask,
+        .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
+        .cache_modifier = q_cache_mod,
+    });
+
+    const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
+
+    // M init — sinks or -inf.
+    const m_init: Value = if (config.use_sinks) mb: {
+        const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+            .mask = query_mask_1,
+            .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
         });
+        break :mb loaded.to(.f32).mul(RCP_LN2);
+    } else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
 
-        const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
+    const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
+    const acc_init = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32);
 
-        // M init — sinks or -inf.
-        const m_init: Value = if (config.use_sinks) mb: {
-            const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
-                .mask = query_mask_1,
-                .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
-            });
-            break :mb loaded.to(.f32).mul(RCP_LN2);
-        } else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
+    const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
+    const context_len = seq_len.sub(cur_batch_query_len);
 
-        const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
-        const acc_init = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32);
+    const alibi_slope: Value = if (config.use_alibi_slopes)
+        k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+            .mask = query_mask_1,
+            .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
+        })
+    else
+        k.zeros(&.{BLOCK_M}, config.scale_dtype);
 
-        const seq_len = k.load(seq_lens_ptr.addPtr(seq_idx));
-        const context_len = seq_len.sub(cur_batch_query_len);
+    const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
+        qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
+    else
+        qq_bias_ptr.splatTo(&.{BLOCK_M});
 
-        const alibi_slope: Value = if (config.use_alibi_slopes)
-            k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
-                .mask = query_mask_1,
-                .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
-            })
-        else
-            k.zeros(&.{BLOCK_M}, config.scale_dtype);
+    // max_seq_prefix_len = context_len + q_block_local_idx*BLOCK_Q + (BLOCK_M-1)/NQ_PER_KV + 1
+    const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
+    const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
+    const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
 
-        const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
-            qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
-        else
-            qq_bias_ptr.splatTo(&.{BLOCK_M});
+    const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
-        // max_seq_prefix_len = context_len + q_block_local_idx*BLOCK_Q + (BLOCK_M-1)/NQ_PER_KV + 1
-        const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-        const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
-        const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
-
-        const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
-
-        // Sliding-window tile pruning — comptime branch.
-        var tile_start: Value = k.liftAs(@as(i32, 0), .i32);
-        var tile_end: Value = num_tiles;
-        if (SLIDING_WINDOW > 0) {
-            const qpos_lo = q_local_bq;
-            const qpos_hi_raw = qpos_lo.add(@as(i32, pad_term - 1));
-            const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(@as(i32, 1)));
-            const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
-            const last_allowed_key = context_len.add(qpos_hi);
-            tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(@as(i32, 0));
-            tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(@as(i32, 1)).minimum(num_tiles);
-        }
-
-        const kv_cache_mod: ttir.CacheModifier =
-            if (config.all_decode) .cg else .none;
-
-        // Iterate through tiles (loop carries M, L, acc).
-        var loop = k.openFor(tile_start, tile_end, @as(i32, 1), .{ m_init, l_init, acc_init });
-        {
-            const j = loop.iv;
-            const M = loop.carried[0];
-            const L = loop.carried[1];
-            const acc = loop.carried[2];
-
-            const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
-
-            const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
-                k.full(&.{TILE_SIZE}, 1, .i1)
-            else
-                seq_offset.lt(max_seq_prefix_len);
-
-            const physical_block_idx = k.load(
-                block_tables_ptr.splatTo(&.{TILE_SIZE})
-                    .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
-            ).to(.i64);
-
-            const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
-
-            // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED)
-            const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-                .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-            const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
-            const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-                .mul(@as(i64, config.stride_v_cache_3));
-            const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-                .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-            const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
-
-            // k_offset : (HEAD_SIZE_PADDED, TILE_SIZE)
-            const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-                .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-            const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
-            const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-                .mul(@as(i64, config.stride_k_cache_3));
-            const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-                .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-            const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
-
-            // K : (HEAD_SIZE_PADDED, TILE_SIZE)
-            const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
-            const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
-                .mask = k_mask,
-                .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
-                .cache_modifier = kv_cache_mod,
-            });
-            const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
-
-            // V : (TILE_SIZE, HEAD_SIZE_PADDED)
-            const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
-            const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
-                .mask = v_mask,
-                .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
-                .cache_modifier = kv_cache_mod,
-            });
-            const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
-
-            // S : (BLOCK_M, TILE_SIZE)
-            const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
-            const qk = k.dot(Q, K, acc_zero);
-            var S = qk_scale.mul(qk);
-
-            if (config.use_softcap) {
-                S = applySoftcap(k, S, softcap).mul(RCP_LN2);
-            }
-
-            // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
-            const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-            const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
-            const seq_mask = so_2d.lt(rhs);
-
-            // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
-            const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
-            S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
-
-            if (SLIDING_WINDOW > 0) {
-                const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
-                const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
-                S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
-            }
-
-            if (config.use_alibi_slopes) {
-                const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
-                S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
-            }
-
-            if (config.use_qq_bias) {
-                const key_rel_pos = seq_offset.sub(context_len);
-                const is_query_key = key_rel_pos.ge(@as(i32, 0))
-                    .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
-                const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
-                    .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
-                const qq_bias = k.loadOpts(qq_ptrs, .{
-                    .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
-                    .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
-                });
-                S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
-            }
-
-            // m_j = max(M, max(S, axis=1))
-            var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
-            m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
-
-            // P = exp2(S - m_j[:, None]); l_j = sum(P, axis=1); alpha = exp2(M - m_j)
-            const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const P = k.exp2(S.sub(mj_2d));
-            const l_j = k.sumOpts(P, .{ .axis = 1 });
-            const alpha = k.exp2(M.sub(m_j));
-
-            const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
-            const acc_scaled = acc.mul(alpha_2d);
-            const new_L = L.mul(alpha).add(l_j);
-            const new_M = m_j;
-
-            const P_cast = P.to(config.q_dtype);
-            const new_acc = k.dot(P_cast, V, acc_scaled);
-
-            loop.yield(.{ new_M, new_L, new_acc });
-        }
-        const L_final = loop.results[1];
-        var acc_final = loop.results[2];
-
-        // Epilogue: acc /= L (via 1/L for Newton-Raphson stability).
-        const one_over_L = k.full(&.{BLOCK_M}, 1.0, .f32).div(L_final);
-        acc_final = acc_final.mul(one_over_L.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-
-        if (config.use_fp8) {
-            acc_final = acc_final.mul(out_scale);
-            acc_final = k.clampf(
-                acc_final,
-                k.full(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.fp8_min, .f32),
-                k.full(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.fp8_max, .f32),
-            );
-        }
-
-        const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-            .mul(output_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-        const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-            .mul(output_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-        const output_offset = oo0_2d.add(oo1_2d).add(offs_d_2d);
-
-        const store_mask = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
-            .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-        k.storeOpts(
-            output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(output_offset),
-            acc_final.to(config.o_dtype),
-            .{ .mask = store_mask },
-        );
-
+    // Sliding-window tile pruning — comptime branch.
+    var tile_start: Value = k.liftAs(@as(i32, 0), .i32);
+    var tile_end: Value = num_tiles;
+    if (SLIDING_WINDOW > 0) {
+        const qpos_lo = q_local_bq;
+        const qpos_hi_raw = qpos_lo.add(@as(i32, pad_term - 1));
+        const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(@as(i32, 1)));
+        const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
+        const last_allowed_key = context_len.add(qpos_hi);
+        tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(@as(i32, 0));
+        tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(@as(i32, 1)).minimum(num_tiles);
     }
+
+    const kv_cache_mod: ttir.CacheModifier =
+        if (config.all_decode) .cg else .none;
+
+    // Iterate through tiles (loop carries M, L, acc).
+    var loop = k.openFor(tile_start, tile_end, @as(i32, 1), .{ m_init, l_init, acc_init });
+    {
+        const j = loop.iv;
+        const M = loop.carried[0];
+        const L = loop.carried[1];
+        const acc = loop.carried[2];
+
+        const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
+
+        const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
+            k.full(&.{TILE_SIZE}, 1, .i1)
+        else
+            seq_offset.lt(max_seq_prefix_len);
+
+        const physical_block_idx = k.load(
+            block_tables_ptr.splatTo(&.{TILE_SIZE})
+                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
+        ).to(.i64);
+
+        const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
+
+        // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED)
+        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
+        const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(@as(i64, config.stride_v_cache_3));
+        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
+
+        // k_offset : (HEAD_SIZE_PADDED, TILE_SIZE)
+        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
+        const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(@as(i64, config.stride_k_cache_3));
+        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
+
+        // K : (HEAD_SIZE_PADDED, TILE_SIZE)
+        const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
+        const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
+            .mask = k_mask,
+            .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
+            .cache_modifier = kv_cache_mod,
+        });
+        const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
+
+        // V : (TILE_SIZE, HEAD_SIZE_PADDED)
+        const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
+        const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
+            .mask = v_mask,
+            .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
+            .cache_modifier = kv_cache_mod,
+        });
+        const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
+
+        // S : (BLOCK_M, TILE_SIZE)
+        const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
+        const qk = k.dot(Q, K, acc_zero);
+        var S = qk_scale.mul(qk);
+
+        if (config.use_softcap) {
+            S = applySoftcap(k, S, softcap).mul(RCP_LN2);
+        }
+
+        // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
+        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
+        const seq_mask = so_2d.lt(rhs);
+
+        // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
+        const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
+        S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
+
+        if (SLIDING_WINDOW > 0) {
+            const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
+            const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
+            S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
+        }
+
+        if (config.use_alibi_slopes) {
+            const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
+            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
+            S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
+        }
+
+        if (config.use_qq_bias) {
+            const key_rel_pos = seq_offset.sub(context_len);
+            const is_query_key = key_rel_pos.ge(@as(i32, 0))
+                .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
+            const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
+                .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
+            const qq_bias = k.loadOpts(qq_ptrs, .{
+                .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
+                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
+            });
+            S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
+        }
+
+        // m_j = max(M, max(S, axis=1))
+        var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
+        m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
+
+        // P = exp2(S - m_j[:, None]); l_j = sum(P, axis=1); alpha = exp2(M - m_j)
+        const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const P = k.exp2(S.sub(mj_2d));
+        const l_j = k.sumOpts(P, .{ .axis = 1 });
+        const alpha = k.exp2(M.sub(m_j));
+
+        const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+        const acc_scaled = acc.mul(alpha_2d);
+        const new_L = L.mul(alpha).add(l_j);
+        const new_M = m_j;
+
+        const P_cast = P.to(config.q_dtype);
+        const new_acc = k.dot(P_cast, V, acc_scaled);
+
+        loop.yield(.{ new_M, new_L, new_acc });
+    }
+    const L_final = loop.results[1];
+    var acc_final = loop.results[2];
+
+    // Epilogue: acc /= L (via 1/L for Newton-Raphson stability).
+    const one_over_L = k.full(&.{BLOCK_M}, 1.0, .f32).div(L_final);
+    acc_final = acc_final.mul(one_over_L.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+
+    if (config.use_fp8) {
+        acc_final = acc_final.mul(out_scale);
+        acc_final = k.clampf(
+            acc_final,
+            k.full(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.fp8_min, .f32),
+            k.full(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.fp8_max, .f32),
+        );
+    }
+
+    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(output_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(output_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const output_offset = oo0_2d.add(oo1_2d).add(offs_d_2d);
+
+    const store_mask = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
+        .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+    k.storeOpts(
+        output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(output_offset),
+        acc_final.to(config.o_dtype),
+        .{ .mask = store_mask },
+    );
 }
 
 // ============================================================================
@@ -588,237 +585,232 @@ fn kernelUnifiedAttention3d(
     const segm_out_of_range = segm_lo.ge(seq_len);
     k.returnIf(segm_out_of_range, .{});
 
-    {
+    const offs_m = k.arange(0, BLOCK_M, .i32);
+    const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
+    const offs_t = k.arange(0, TILE_SIZE, .i32);
+
+    const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
+    const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
+
+    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
+    const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
+        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
+
+    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
+    const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
+    const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
+
+    const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+        offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
+    else
+        k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
+    const query_mask_0 = query_pos.lt(cur_batch_query_len);
+    const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
+
+    const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
+    const q_mask = q_mask_ab.bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+    const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
+        .mask = q_mask,
+        .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
+    });
+
+    const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
+
+    // M init: USE_SINKS + segm_idx==0 → loaded sinks; else -inf.
+    const segm_is_zero = segm_idx.eq(@as(i32, 0));
+    const m_init: Value = if (config.use_sinks) mb: {
+        var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
         {
-            const offs_m = k.arange(0, BLOCK_M, .i32);
-            const offs_d = k.arange(0, HEAD_SIZE_PADDED, .i32);
-            const offs_t = k.arange(0, TILE_SIZE, .i32);
-
-            const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
-            const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
-
-            const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
-            const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
-                .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
-
-            const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-                .mul(query_stride_0.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-            const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-                .mul(query_stride_1.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }));
-            const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
-            const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
-
-            const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
-                offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
-            else
-                k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
-            const query_mask_0 = query_pos.lt(cur_batch_query_len);
-            const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
-
-            const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
-            const q_mask = q_mask_ab.bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-            const Q = k.loadOpts(query_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(query_offset), .{
-                .mask = q_mask,
-                .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
+            const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+                .mask = query_mask_1,
+                .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
             });
-
-            const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
-
-            // M init: USE_SINKS + segm_idx==0 → loaded sinks; else -inf.
-            const segm_is_zero = segm_idx.eq(@as(i32, 0));
-            const m_init: Value = if (config.use_sinks) mb: {
-                var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
-                {
-                    const loaded = k.loadOpts(sink_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
-                        .mask = query_mask_1,
-                        .other = k.full(&.{BLOCK_M}, -std.math.inf(f32), config.scale_dtype),
-                    });
-                    mi.yieldThen(.{loaded.to(.f32).mul(RCP_LN2)});
-                }
-                {
-                    mi.yieldElse(.{k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32)});
-                }
-                break :mb mi.results[0];
-            } else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
-
-            const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
-            const acc_init = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32);
-
-            const context_len = seq_len.sub(cur_batch_query_len);
-
-            const alibi_slope: Value = if (config.use_alibi_slopes)
-                k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
-                    .mask = query_mask_1,
-                    .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
-                })
-            else
-                k.zeros(&.{BLOCK_M}, config.scale_dtype);
-
-            const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
-                qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
-            else
-                qq_bias_ptr.splatTo(&.{BLOCK_M});
-
-            const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-            const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
-            const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
-            const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
-
-            const segm_tile_lo = segm_idx.mul(tiles_per_segment);
-            const segm_tile_hi = segm_tile_lo.add(tiles_per_segment).minimum(num_tiles);
-
-            const kv_cache_mod: ttir.CacheModifier =
-                if (config.all_decode) .cg else .none;
-
-            var loop = k.openFor(segm_tile_lo, segm_tile_hi, @as(i32, 1), .{ m_init, l_init, acc_init });
-            {
-                const j = loop.iv;
-                const M = loop.carried[0];
-                const L = loop.carried[1];
-                const acc = loop.carried[2];
-
-                const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
-                const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
-                    k.full(&.{TILE_SIZE}, 1, .i1)
-                else
-                    seq_offset.lt(max_seq_prefix_len);
-
-                const physical_block_idx = k.load(
-                    block_tables_ptr.splatTo(&.{TILE_SIZE})
-                        .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
-                ).to(.i64);
-
-                const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
-
-                const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-                    .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-                const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
-                const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-                    .mul(@as(i64, config.stride_v_cache_3));
-                const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
-                    .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
-                const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
-
-                const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-                    .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-                const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
-                const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-                    .mul(@as(i64, config.stride_k_cache_3));
-                const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
-                    .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
-                const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
-
-                const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
-                const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
-                    .mask = k_mask,
-                    .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
-                    .cache_modifier = kv_cache_mod,
-                });
-                const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
-
-                const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
-                const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
-                    .mask = v_mask,
-                    .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
-                    .cache_modifier = kv_cache_mod,
-                });
-                const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
-
-                const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
-                const qk = k.dot(Q, K, acc_zero);
-                var S = qk_scale.mul(qk);
-
-                if (config.use_softcap) {
-                    S = applySoftcap(k, S, softcap).mul(RCP_LN2);
-                }
-
-                const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-                const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
-                const seq_mask = so_2d.lt(rhs);
-
-                const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
-                S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
-
-                if (SLIDING_WINDOW > 0) {
-                    const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
-                    const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
-                    S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
-                }
-
-                if (config.use_alibi_slopes) {
-                    const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                    const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
-                    S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
-                }
-
-                if (config.use_qq_bias) {
-                    const key_rel_pos = seq_offset.sub(context_len);
-                    const is_query_key = key_rel_pos.ge(@as(i32, 0))
-                        .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
-                    const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
-                        .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
-                    const qq_bias = k.loadOpts(qq_ptrs, .{
-                        .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
-                        .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
-                    });
-                    S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
-                }
-
-                var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
-                m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
-
-                const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
-                const P = k.exp2(S.sub(mj_2d));
-                const l_j = k.sumOpts(P, .{ .axis = 1 });
-                const alpha = k.exp2(M.sub(m_j));
-
-                const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
-                const acc_scaled = acc.mul(alpha_2d);
-                const new_L = L.mul(alpha).add(l_j);
-
-                const P_cast = P.to(config.q_dtype);
-                const new_acc = k.dot(P_cast, V, acc_scaled);
-
-                loop.yield(.{ m_j, new_L, new_acc });
-            }
-            const M_final = loop.results[0];
-            const L_final = loop.results[1];
-            const acc_final = loop.results[2];
-
-            // Store segm_output, segm_max, segm_expsum.
-            const segm_out_head_stride: i64 = NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
-            const segm_out_token_stride: i64 = NUM_QUERY_HEADS * segm_out_head_stride;
-
-            const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-                .mul(@as(i64, segm_out_token_stride));
-            const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-                .mul(@as(i64, segm_out_head_stride));
-            const seg_term = segm_idx.to(.i64).mul(@as(i64, HEAD_SIZE_PADDED))
-                .splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED });
-            const segm_output_offset = oo0_2d.add(oo1_2d).add(seg_term).add(offs_d_2d);
-
-            const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
-                .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-            k.storeOpts(
-                segm_output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(segm_output_offset),
-                acc_final,
-                .{ .mask = store_mask_2d },
-            );
-
-            const segm_head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
-            const segm_token_stride: i64 = NUM_QUERY_HEADS * segm_head_stride;
-            const segm_offset = query_offset_0.mul(@as(i64, segm_token_stride))
-                .add(query_offset_1.mul(@as(i64, segm_head_stride)))
-                .add(segm_idx.to(.i64).splatTo(&.{BLOCK_M}));
-            const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
-            k.storeOpts(segm_max_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
-            k.storeOpts(segm_expsum_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
-
+            mi.yieldThen(.{loaded.to(.f32).mul(RCP_LN2)});
         }
+        {
+            mi.yieldElse(.{k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32)});
+        }
+        break :mb mi.results[0];
+    } else k.full(&.{BLOCK_M}, -std.math.inf(f32), .f32);
+
+    const l_init = k.full(&.{BLOCK_M}, 1.0, .f32);
+    const acc_init = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, .f32);
+
+    const context_len = seq_len.sub(cur_batch_query_len);
+
+    const alibi_slope: Value = if (config.use_alibi_slopes)
+        k.loadOpts(alibi_slopes_ptr.splatTo(&.{BLOCK_M}).addPtr(query_offset_1), .{
+            .mask = query_mask_1,
+            .other = k.full(&.{BLOCK_M}, 0.0, config.scale_dtype),
+        })
+    else
+        k.zeros(&.{BLOCK_M}, config.scale_dtype);
+
+    const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
+        qq_bias_ptr.splatTo(&.{BLOCK_M}).addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
+    else
+        qq_bias_ptr.splatTo(&.{BLOCK_M});
+
+    const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
+    const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
+    const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
+    const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
+
+    const segm_tile_lo = segm_idx.mul(tiles_per_segment);
+    const segm_tile_hi = segm_tile_lo.add(tiles_per_segment).minimum(num_tiles);
+
+    const kv_cache_mod: ttir.CacheModifier =
+        if (config.all_decode) .cg else .none;
+
+    var loop = k.openFor(segm_tile_lo, segm_tile_hi, @as(i32, 1), .{ m_init, l_init, acc_init });
+    {
+        const j = loop.iv;
+        const M = loop.carried[0];
+        const L = loop.carried[1];
+        const acc = loop.carried[2];
+
+        const seq_offset = j.mul(@as(i32, @intCast(TILE_SIZE))).add(offs_t);
+        const tile_mask: Value = if (TILE_SIZE == BLOCK_SIZE)
+            k.full(&.{TILE_SIZE}, 1, .i1)
+        else
+            seq_offset.lt(max_seq_prefix_len);
+
+        const physical_block_idx = k.load(
+            block_tables_ptr.splatTo(&.{TILE_SIZE})
+                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
+        ).to(.i64);
+
+        const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
+
+        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
+        const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(@as(i64, config.stride_v_cache_3));
+        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
+            .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
+        const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
+
+        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
+        const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(@as(i64, config.stride_k_cache_3));
+        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
+            .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
+        const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
+
+        const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
+        const K_load = k.loadOpts(key_cache_ptr.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }).addPtr(k_offset), .{
+            .mask = k_mask,
+            .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
+            .cache_modifier = kv_cache_mod,
+        });
+        const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
+
+        const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
+        const V_load = k.loadOpts(value_cache_ptr.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }).addPtr(v_offset), .{
+            .mask = v_mask,
+            .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
+            .cache_modifier = kv_cache_mod,
+        });
+        const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
+
+        const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
+        const qk = k.dot(Q, K, acc_zero);
+        var S = qk_scale.mul(qk);
+
+        if (config.use_softcap) {
+            S = applySoftcap(k, S, softcap).mul(RCP_LN2);
+        }
+
+        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
+        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
+        const seq_mask = so_2d.lt(rhs);
+
+        const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
+        S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
+
+        if (SLIDING_WINDOW > 0) {
+            const diff = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).sub(so_2d);
+            const in_win = diff.lt(@as(i32, @intCast(SLIDING_WINDOW)));
+            S = k.where(in_win, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
+        }
+
+        if (config.use_alibi_slopes) {
+            const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
+            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
+            S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
+        }
+
+        if (config.use_qq_bias) {
+            const key_rel_pos = seq_offset.sub(context_len);
+            const is_query_key = key_rel_pos.ge(@as(i32, 0))
+                .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
+            const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
+                .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
+            const qq_bias = k.loadOpts(qq_ptrs, .{
+                .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
+                .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
+            });
+            S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
+        }
+
+        var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
+        m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
+
+        const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const P = k.exp2(S.sub(mj_2d));
+        const l_j = k.sumOpts(P, .{ .axis = 1 });
+        const alpha = k.exp2(M.sub(m_j));
+
+        const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+        const acc_scaled = acc.mul(alpha_2d);
+        const new_L = L.mul(alpha).add(l_j);
+
+        const P_cast = P.to(config.q_dtype);
+        const new_acc = k.dot(P_cast, V, acc_scaled);
+
+        loop.yield(.{ m_j, new_L, new_acc });
     }
+    const M_final = loop.results[0];
+    const L_final = loop.results[1];
+    const acc_final = loop.results[2];
+
+    // Store segm_output, segm_max, segm_expsum.
+    const segm_out_head_stride: i64 = NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
+    const segm_out_token_stride: i64 = NUM_QUERY_HEADS * segm_out_head_stride;
+
+    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(@as(i64, segm_out_token_stride));
+    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
+        .mul(@as(i64, segm_out_head_stride));
+    const seg_term = segm_idx.to(.i64).mul(@as(i64, HEAD_SIZE_PADDED))
+        .splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED });
+    const segm_output_offset = oo0_2d.add(oo1_2d).add(seg_term).add(offs_d_2d);
+
+    const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
+        .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+    k.storeOpts(
+        segm_output_ptr.splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED }).addPtr(segm_output_offset),
+        acc_final,
+        .{ .mask = store_mask_2d },
+    );
+
+    const segm_head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
+    const segm_token_stride: i64 = NUM_QUERY_HEADS * segm_head_stride;
+    const segm_offset = query_offset_0.mul(@as(i64, segm_token_stride))
+        .add(query_offset_1.mul(@as(i64, segm_head_stride)))
+        .add(segm_idx.to(.i64).splatTo(&.{BLOCK_M}));
+    const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
+    k.storeOpts(segm_max_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
+    k.storeOpts(segm_expsum_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
 }
 
 // ============================================================================
