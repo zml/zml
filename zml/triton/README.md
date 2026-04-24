@@ -482,6 +482,53 @@ const r = w.results[0];
 - `yieldBefore(cond, forwarded)` — `forwarded` arity must match `after_types`.
 - `yieldAfter(values)` — arity must match `inits`.
 
+### `returnIf` — early `tt.return` via cf.cond_br
+
+```zig
+// Python: if pid_m * BLOCK >= num_tokens_post_padded: return
+const out_of_range = pid_m.mul(block).ge(num_tokens);
+k.returnIf(out_of_range, .{});
+// ... ops here live in a fresh fall-through block ...
+```
+
+Lowers to:
+
+```mlir
+cf.cond_br %out_of_range, ^ret, ^cont
+^ret:
+  tt.return
+^cont:
+  // subsequent ops
+```
+
+- `values` is a tuple of `Value`s matching the `tt.func`'s declared result
+  types (pass `.{}` for a void kernel).
+- Works **only at the top-level `tt.func` body** — don't call inside an
+  `scf.if`/`scf.for`/`scf.while` region (those must stay structured; cf
+  branches can't escape their parent scf region).
+- After `returnIf`, the kernel's current block is swapped to a fresh
+  fall-through block — any subsequent `k.*` calls emit into that block, and
+  `k.finish(...)` appends the final `tt.return` there.
+- Use this to match Python Triton's `if cond: return` lowering exactly.
+  Python emits `cf.cond_br` for early-return idioms while using `scf.for` /
+  `scf.if` for structured loops and value-carrying branches; our DSL does
+  the same.
+
+### When to use `cf` (returnIf) vs `scf` (openIf / openIfElse / openFor)
+
+| Python source                          | Emits | DSL builder                     |
+|----------------------------------------|-------|---------------------------------|
+| `if cond: return`                      | `cf`  | `k.returnIf(cond, .{})`         |
+| `if cond: <side-effects>`              | `scf` | `k.openIf(cond) {...; yieldThen(.{})}` |
+| `if cond: x=A else: x=B` (value-carrying) | `scf` | `k.openIfElse(cond, .{ty}) {...; yieldThen(.{a})} {...; yieldElse(.{b})}` |
+| `for i in range(...)`                  | `scf` | `k.openFor(lo, hi, step, .{inits})` |
+| `while cond:`                          | `scf` | `k.openWhile(.{inits}, .{after_types})` |
+
+Rule of thumb: **`scf` for structured, value-carrying control. `cf` for
+early-exits.** Both lower to identical PTX after the
+`convert-scf-to-cf` pass — the difference only matters at the TTIR layer
+(pattern-matching passes that run before lowering).
+
 ### `reduce` / `scan` — custom combiners (still callback-based)
 
 ```zig
@@ -588,6 +635,7 @@ is the manual form.
 | `while cond: ...`                             | `var w = k.openWhile(.{inits}, .{after_types}); { ...; w.yieldBefore(cond, .{...}); }; { ...; w.yieldAfter(.{...}); }` |
 | `if cond: ...` (side-effects, no else)        | `var i = k.openIf(cond); { ...; i.yieldThen(.{}); }`                                         |
 | `if cond: ... else: ...`                      | `var i = k.openIfElse(cond, .{result_types}); { ...; i.yieldThen(.{...}); }; { ...; i.yieldElse(.{...}); }` |
+| `if cond: return` (early exit)                | `k.returnIf(cond, .{});` — emits `cf.cond_br` + `tt.return`, continues in fall-through block  |
 
 ---
 

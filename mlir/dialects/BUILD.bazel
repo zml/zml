@@ -5,6 +5,7 @@ zig_library(
     tags = ["manual"],
     srcs = [
         "arith.zig",
+        "cf.zig",
         "func.zig",
         "math.zig",
         "scf.zig",

@@ -291,136 +291,138 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
 
     // Python: if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded: return
     const num_tokens_post_padded = k.load(a.num_tokens_post_padded_ptr).to(.i64);
-    const in_range = pid_m.mul(block_size_m).lt(num_tokens_post_padded);
+    const out_of_range = pid_m.mul(block_size_m).ge(num_tokens_post_padded);
+    k.returnIf(out_of_range, .{});
 
-    var range_if = k.openIf(in_range);
+    // offs_token, token_mask — two paths based on naive_block_assignment.
+    const offs = k.arange(0, block_size_m, .i64);
+    const offs_token = if (config.naive_block_assignment)
+        k.select(
+            offs.eq(@as(i64, 0)),
+            pid_m.splatTo(&.{block_size_m}),
+            num_valid_tokens.splatTo(&.{block_size_m}),
+        )
+    else off: {
+        const ids_ptrs = a.sorted_token_ids_ptr.splatTo(&.{block_size_m})
+            .addPtr(pid_m.mul(block_size_m).splatTo(&.{block_size_m}).add(offs));
+        break :off k.load(ids_ptrs).to(.i64);
+    };
+    const token_mask = offs_token.lt(num_valid_tokens);
+
+    // off_experts = expert_ids[pid_m].to(i64)
+    const off_experts = k.load(a.expert_ids_ptr.addPtr(pid_m.to(.i32))).to(.i64);
+    const is_dead = off_experts.eq(@as(i64, -1));
+
+    // Python: if off_experts == -1: write_zeros_to_output(...); return
+    //
+    // The write-zeros helper runs *before* the return, so we can't use a
+    // plain `returnIf` — we need a then-branch with side-effects that then
+    // returns. Model this as: skip the gemm path with an `scf.if` on
+    // `!is_dead`, but inline the write-zeros in the dead branch and emit
+    // `returnIf(is_dead)` after it. Simpler: predicate the rest of the
+    // kernel on `!is_dead` after side-effecting on `is_dead`.
+    var dead_if = k.openIf(is_dead);
     {
-        // offs_token, token_mask — two paths based on naive_block_assignment.
-        const offs = k.arange(0, block_size_m, .i64);
-        const offs_token = if (config.naive_block_assignment)
-            k.select(
-                offs.eq(@as(i64, 0)),
-                pid_m.splatTo(&.{block_size_m}),
-                num_valid_tokens.splatTo(&.{block_size_m}),
-            )
-        else off: {
-            const ids_ptrs = a.sorted_token_ids_ptr.splatTo(&.{block_size_m})
-                .addPtr(pid_m.mul(block_size_m).splatTo(&.{block_size_m}).add(offs));
-            break :off k.load(ids_ptrs).to(.i64);
-        };
-        const token_mask = offs_token.lt(num_valid_tokens);
-
-        // off_experts = expert_ids[pid_m].to(i64)
-        const off_experts = k.load(a.expert_ids_ptr.addPtr(pid_m.to(.i32))).to(.i64);
-        const is_dead = off_experts.eq(@as(i64, -1));
-
-        // Python: if off_experts == -1: write_zeros_to_output(...); return
-        var dead_if = k.openIfElse(is_dead, .{});
-        {
-            writeZerosToOutput(
-                k,
-                a.c_ptr,
-                stride_cm_block,
-                stride_cn_block,
-                pid_n,
-                n_block,
-                offs_token,
-                token_mask,
-                block_size_m,
-                block_size_n,
-                compute_type,
-            );
-            dead_if.yieldThen(.{});
-        }
-        {
-            // Alive body — inlined from Python fused_moe_kernel (bf16 path).
-
-            // offs_bn = (pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N).to(i64)) % n_block
-            const offs_bn = pid_n.mul(block_size_n).splatTo(&.{block_size_n})
-                .add(k.arange(0, block_size_n, .i64))
-                .rem(n_block.splatTo(&.{block_size_n}));
-            const offs_k = k.arange(0, block_size_k, .i64);
-
-            // a_ptrs = a_ptr + (offs_token // top_k) * stride_am + offs_k * stride_ak   [m,k]
-            const am_term = offs_token.div(top_k).broadcast2d(1, block_size_m, block_size_k)
-                .mul(stride_am_block.splatTo(&.{ block_size_m, block_size_k }));
-            const ak_term = offs_k.broadcast2d(0, block_size_m, block_size_k)
-                .mul(stride_ak_block.splatTo(&.{ block_size_m, block_size_k }));
-            const a_ptrs_init = a.a_ptr.splatTo(&.{ block_size_m, block_size_k }).addPtr(am_term.add(ak_term));
-
-            // b_ptrs = b_ptr + off_experts*stride_be + offs_k[:,None]*stride_bk + offs_bn[None,:]*stride_bn   [k,n]
-            const be_term = off_experts.mul(stride_be_block).splatTo(&.{ block_size_k, block_size_n });
-            const bk_term = offs_k.broadcast2d(1, block_size_k, block_size_n)
-                .mul(stride_bk_block.splatTo(&.{ block_size_k, block_size_n }));
-            const bn_term = offs_bn.broadcast2d(0, block_size_k, block_size_n)
-                .mul(stride_bn_block.splatTo(&.{ block_size_k, block_size_n }));
-            const b_ptrs_init = a.b_ptr.splatTo(&.{ block_size_k, block_size_n }).addPtr(be_term.add(bk_term.add(bn_term)));
-
-            // accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-            const acc_init = k.zeros(&.{ block_size_m, block_size_n }, .f32);
-
-            // for k in range(0, tl.cdiv(k_block, BLOCK_SIZE_K)):
-            const num_k_iters = k_block.cdiv(block_size_k).to(.i32);
-            var loop = k.openFor(0, num_k_iters, 1, .{ acc_init, a_ptrs_init, b_ptrs_init });
-            {
-                const k_iter = loop.iv;
-                const acc = loop.carried[0];
-                const a_ptrs = loop.carried[1];
-                const b_ptrs = loop.carried[2];
-
-                // k_remaining = k_block - k_iter * BLOCK_SIZE_K
-                const k_remaining = k_block.sub(k_iter.to(.i64).mul(block_size_k));
-                const offs_k_lt = offs_k.lt(k_remaining);
-
-                // a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < k_remaining), other=0.0)
-                const mask_a = k.mask2d(token_mask, offs_k_lt, block_size_m, block_size_k);
-                const a_val = k.loadMasked(a_ptrs, mask_a);
-
-                // b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
-                const mask_b = offs_k_lt.broadcast2d(1, block_size_k, block_size_n);
-                const b_val = k.loadMasked(b_ptrs, mask_b);
-
-                // accumulator += tl.dot(a, b)
-                const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .tf32, .max_num_imprecise_acc = 0 });
-
-                // a_ptrs += BLOCK_SIZE_K * stride_ak_block; b_ptrs += BLOCK_SIZE_K * stride_bk_block
-                const new_a_ptrs = a_ptrs.addPtr(stride_ak_block.mul(block_size_k).splatTo(&.{ block_size_m, block_size_k }));
-                const new_b_ptrs = b_ptrs.addPtr(stride_bk_block.mul(block_size_k).splatTo(&.{ block_size_k, block_size_n }));
-
-                loop.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
-            }
-            var accumulator = loop.results[0];
-
-            // if MUL_ROUTED_WEIGHT: accumulator *= topk_weights[offs_token][:, None]
-            if (config.mul_routed_weight) {
-                const tw_ptrs = a.topk_weights_ptr.splatTo(&.{block_size_m}).addPtr(offs_token);
-                const tw = k.loadMasked(tw_ptrs, token_mask);
-                accumulator = accumulator.mul(tw.broadcast2d(1, block_size_m, block_size_n));
-            }
-
-            // accumulator = accumulator.to(compute_type)
-            accumulator = accumulator.to(compute_type);
-
-            // Write back:
-            //   offs_cn = pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N)   (i32 → i64 for ptr math)
-            //   c_ptrs  = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-            //   c_mask  = token_mask[:, None] & (offs_cn[None, :] < n_block)
-            const offs_cn = pid_n.to(.i32)
-                .mul(@as(i32, @intCast(block_size_n))).splatTo(&.{block_size_n})
-                .add(k.arange(0, block_size_n, .i32))
-                .to(.i64);
-            const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
-                .mul(stride_cm_block.splatTo(&.{ block_size_m, block_size_n }));
-            const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n)
-                .mul(stride_cn_block.splatTo(&.{ block_size_m, block_size_n }));
-            const c_ptrs = a.c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
-            const c_mask = k.mask2d(token_mask, offs_cn.lt(n_block), block_size_m, block_size_n);
-            k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
-
-            dead_if.yieldElse(.{});
-        }
-        range_if.yieldThen(.{});
+        writeZerosToOutput(
+            k,
+            a.c_ptr,
+            stride_cm_block,
+            stride_cn_block,
+            pid_n,
+            n_block,
+            offs_token,
+            token_mask,
+            block_size_m,
+            block_size_n,
+            compute_type,
+        );
+        dead_if.yieldThen(.{});
     }
+    k.returnIf(is_dead, .{});
+
+    // Alive body — inlined from Python fused_moe_kernel (bf16 path).
+
+    // offs_bn = (pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N).to(i64)) % n_block
+    const offs_bn = pid_n.mul(block_size_n).splatTo(&.{block_size_n})
+        .add(k.arange(0, block_size_n, .i64))
+        .rem(n_block.splatTo(&.{block_size_n}));
+    const offs_k = k.arange(0, block_size_k, .i64);
+
+    // a_ptrs = a_ptr + (offs_token // top_k) * stride_am + offs_k * stride_ak   [m,k]
+    const am_term = offs_token.div(top_k).broadcast2d(1, block_size_m, block_size_k)
+        .mul(stride_am_block.splatTo(&.{ block_size_m, block_size_k }));
+    const ak_term = offs_k.broadcast2d(0, block_size_m, block_size_k)
+        .mul(stride_ak_block.splatTo(&.{ block_size_m, block_size_k }));
+    const a_ptrs_init = a.a_ptr.splatTo(&.{ block_size_m, block_size_k }).addPtr(am_term.add(ak_term));
+
+    // b_ptrs = b_ptr + off_experts*stride_be + offs_k[:,None]*stride_bk + offs_bn[None,:]*stride_bn   [k,n]
+    const be_term = off_experts.mul(stride_be_block).splatTo(&.{ block_size_k, block_size_n });
+    const bk_term = offs_k.broadcast2d(1, block_size_k, block_size_n)
+        .mul(stride_bk_block.splatTo(&.{ block_size_k, block_size_n }));
+    const bn_term = offs_bn.broadcast2d(0, block_size_k, block_size_n)
+        .mul(stride_bn_block.splatTo(&.{ block_size_k, block_size_n }));
+    const b_ptrs_init = a.b_ptr.splatTo(&.{ block_size_k, block_size_n }).addPtr(be_term.add(bk_term.add(bn_term)));
+
+    // accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
+    const acc_init = k.zeros(&.{ block_size_m, block_size_n }, .f32);
+
+    // for k in range(0, tl.cdiv(k_block, BLOCK_SIZE_K)):
+    const num_k_iters = k_block.cdiv(block_size_k).to(.i32);
+    var loop = k.openFor(0, num_k_iters, 1, .{ acc_init, a_ptrs_init, b_ptrs_init });
+    {
+        const k_iter = loop.iv;
+        const acc = loop.carried[0];
+        const a_ptrs = loop.carried[1];
+        const b_ptrs = loop.carried[2];
+
+        // k_remaining = k_block - k_iter * BLOCK_SIZE_K
+        const k_remaining = k_block.sub(k_iter.to(.i64).mul(block_size_k));
+        const offs_k_lt = offs_k.lt(k_remaining);
+
+        // a = tl.load(a_ptrs, mask=token_mask[:, None] & (offs_k[None, :] < k_remaining), other=0.0)
+        const mask_a = k.mask2d(token_mask, offs_k_lt, block_size_m, block_size_k);
+        const a_val = k.loadMasked(a_ptrs, mask_a);
+
+        // b = tl.load(b_ptrs, mask=offs_k[:, None] < k_remaining, other=0.0)
+        const mask_b = offs_k_lt.broadcast2d(1, block_size_k, block_size_n);
+        const b_val = k.loadMasked(b_ptrs, mask_b);
+
+        // accumulator += tl.dot(a, b)
+        const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .tf32, .max_num_imprecise_acc = 0 });
+
+        // a_ptrs += BLOCK_SIZE_K * stride_ak_block; b_ptrs += BLOCK_SIZE_K * stride_bk_block
+        const new_a_ptrs = a_ptrs.addPtr(stride_ak_block.mul(block_size_k).splatTo(&.{ block_size_m, block_size_k }));
+        const new_b_ptrs = b_ptrs.addPtr(stride_bk_block.mul(block_size_k).splatTo(&.{ block_size_k, block_size_n }));
+
+        loop.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
+    }
+    var accumulator = loop.results[0];
+
+    // if MUL_ROUTED_WEIGHT: accumulator *= topk_weights[offs_token][:, None]
+    if (config.mul_routed_weight) {
+        const tw_ptrs = a.topk_weights_ptr.splatTo(&.{block_size_m}).addPtr(offs_token);
+        const tw = k.loadMasked(tw_ptrs, token_mask);
+        accumulator = accumulator.mul(tw.broadcast2d(1, block_size_m, block_size_n));
+    }
+
+    // accumulator = accumulator.to(compute_type)
+    accumulator = accumulator.to(compute_type);
+
+    // Write back:
+    //   offs_cn = pid_n * BLOCK_SIZE_N + arange(BLOCK_SIZE_N)   (i32 → i64 for ptr math)
+    //   c_ptrs  = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+    //   c_mask  = token_mask[:, None] & (offs_cn[None, :] < n_block)
+    const offs_cn = pid_n.to(.i32)
+        .mul(@as(i32, @intCast(block_size_n))).splatTo(&.{block_size_n})
+        .add(k.arange(0, block_size_n, .i32))
+        .to(.i64);
+    const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
+        .mul(stride_cm_block.splatTo(&.{ block_size_m, block_size_n }));
+    const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n)
+        .mul(stride_cn_block.splatTo(&.{ block_size_m, block_size_n }));
+    const c_ptrs = a.c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
+    const c_mask = k.mask2d(token_mask, offs_cn.lt(n_block), block_size_m, block_size_n);
+    k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
 
     return k.finish(&.{}) catch |err| {
         log.err("failed to finalize fused_moe_kernel TTIR: {}", .{err});

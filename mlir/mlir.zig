@@ -805,6 +805,10 @@ pub const Block = opaque {
         return @ptrCast(c.mlirBlockGetParentOperation(self.ptr()).ptr);
     }
 
+    pub fn parentRegion(self: *const Block) *Region {
+        return @ptrCast(c.mlirBlockGetParentRegion(self.ptr()).ptr);
+    }
+
     pub fn detach(self: *Block) void {
         c.mlirBlockDetach(self.ptr());
     }
@@ -1046,6 +1050,14 @@ pub const Operation = opaque {
         return self;
     }
 
+    pub fn numRegions(self: *const Operation) usize {
+        return @intCast(c.mlirOperationGetNumRegions(self.ptr()));
+    }
+
+    pub fn region(self: *const Operation, index: usize) *Region {
+        return @ptrCast(c.mlirOperationGetRegion(self.ptr(), @intCast(index)).ptr);
+    }
+
     pub fn parent(self: *const Operation) ?*Operation {
         return @ptrCast(c.mlirOperationGetParentOperation(self.ptr()).ptr);
     }
@@ -1196,11 +1208,11 @@ pub const Operation = opaque {
             state.addAttributes(attrs);
         }
         if (args.blocks) |blocks| {
-            const region = Region.init();
+            const body_region = Region.init();
             for (blocks) |block_| {
-                region.appendOwnedBlock(block_);
+                body_region.appendOwnedBlock(block_);
             }
-            state.addOwnedRegions(&.{region});
+            state.addOwnedRegions(&.{body_region});
         }
         const new_op = try Operation.init(&state);
         errdefer new_op.deinit();

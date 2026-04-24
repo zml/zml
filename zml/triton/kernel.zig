@@ -17,6 +17,7 @@ const dialects = @import("mlir/dialects");
 const stdx = @import("stdx");
 
 const arith = dialects.arith;
+const cf = dialects.cf;
 const math = dialects.math;
 const scf = dialects.scf;
 const ttir = dialects.ttir;
@@ -2435,6 +2436,64 @@ pub const Kernel = struct {
         };
     }
 
+    /// Early `tt.return` on a condition. Matches Python Triton's
+    /// `if cond: return` idiom — lowers to:
+    ///
+    ///     cf.cond_br %cond, ^ret, ^cont
+    ///   ^ret:
+    ///     tt.return <values...>
+    ///   ^cont:
+    ///     ... subsequent ops go here ...
+    ///
+    /// The current block's terminator becomes `cf.cond_br`; a fresh
+    /// fall-through block is pushed as the new current block, so any ops you
+    /// emit after this call live in `^cont`. Works only at the `tt.func`
+    /// body level (not nested inside `scf.if`/`scf.for`/`scf.while` regions
+    /// — those must stay structured).
+    ///
+    /// `values` is a tuple of `Value`s matching the `tt.func`'s declared
+    /// result types — pass `.{}` for a void-returning kernel.
+    pub fn returnIf(self: *Kernel, cond: Value, values: anytype) void {
+        const current = self.currentBlock();
+        const region = current.parentRegion();
+
+        const ret_block = mlir.Block.init(&.{}, &.{});
+        const cont_block = mlir.Block.init(&.{}, &.{});
+        region.appendOwnedBlock(ret_block);
+        region.appendOwnedBlock(cont_block);
+
+        const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
+        var ret_operands: [fields.len]*const mlir.Value = undefined;
+        inline for (fields, 0..) |f, i| {
+            if (f.type != Value)
+                @compileError("returnIf: every value must be a Value");
+            ret_operands[i] = @field(values, f.name).inner;
+        }
+        _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(ret_block);
+
+        _ = cf.cond_br(
+            self.ctx,
+            cond.inner,
+            ret_block,
+            &.{},
+            cont_block,
+            &.{},
+            null,
+            self.loc(),
+        ).appendTo(current);
+
+        // Swap the top-of-stack (or the entry-block default) so subsequent
+        // ops emit into the fall-through block. If the stack is empty, the
+        // current block was the entry block — in that case we push `cont`
+        // without popping. We also need `finish` to append `tt.return` to
+        // `cont` (not the entry), so record it.
+        if (self.block_stack.items.len == 0) {
+            self.pushBlock(cont_block);
+        } else {
+            self.block_stack.items[self.block_stack.items.len - 1] = cont_block;
+        }
+    }
+
     /// Open a scoped `scf.if` with no else branch and no results — use this
     /// for conditional side-effects. `yieldThen(.{})` closes the scope and
     /// builds scf.if with an empty else block. See `IfOnlyScope`.
@@ -2539,7 +2598,12 @@ pub const Kernel = struct {
     /// serialize to a NUL-terminated TTIR string owned by the kernel's
     /// allocator (passed to `init`). Caller must `defer allocator.free(ir)`.
     pub fn finish(self: *Kernel, results: []const Value) FinishError![:0]const u8 {
-        _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(self.entry_block);
+        // After any `returnIf` call, the entry block already has a
+        // `cf.cond_br` terminator; the fall-through block sits on the stack
+        // as the new insertion point. `currentBlock()` returns that block
+        // (or `entry_block` if no cf was emitted), so the final `tt.return`
+        // goes to the correct "tail" block in either case.
+        _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(self.currentBlock());
 
         if (!self.module.operation().verify()) {
             return error.InvalidMlir;
