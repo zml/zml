@@ -809,7 +809,7 @@ pub const Kernel = struct {
     module: *mlir.Module,
     func_op: *mlir.Operation,
     entry_block: *mlir.Block,
-    block_stack: stdx.BoundedArray(*mlir.Block, 16) = .{},
+    block_stack: std.ArrayList(*mlir.Block),
 
     /// Create a sub-module containing a single public `tt.func` of the given
     /// name, signature, and result types. The entry block is populated with
@@ -826,30 +826,34 @@ pub const Kernel = struct {
         const module: *mlir.Module = .init(unknown_loc);
         errdefer module.deinit();
 
-        var arg_types: stdx.BoundedArray(*const mlir.Type, 64) = .{};
-        var arg_locs: stdx.BoundedArray(*const mlir.Location, 64) = .{};
-        for (args) |a| {
-            arg_types.appendAssumeCapacity(switch (a.kind) {
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        errdefer arena.deinit();
+        const scratch = arena.allocator();
+
+        const arg_types = try scratch.alloc(*const mlir.Type, args.len);
+        const arg_locs = try scratch.alloc(*const mlir.Location, args.len);
+        for (args, 0..) |a, i| {
+            arg_types[i] = switch (a.kind) {
                 .ptr => |dt| ttir.pointerType(dt.toMlir(ctx), 1),
                 .ptr_opts => |p| ttir.pointerType(p.dtype.toMlir(ctx), p.address_space),
                 .scalar => |dt| dt.toMlir(ctx),
                 .tensor => |t| mlir.rankedTensorType(t[0], t[1].toMlir(ctx)),
-            });
-            arg_locs.appendAssumeCapacity(unknown_loc);
+            };
+            arg_locs[i] = unknown_loc;
         }
 
-        const entry = mlir.Block.init(arg_types.constSlice(), arg_locs.constSlice());
+        const entry = mlir.Block.init(arg_types, arg_locs);
 
-        var arg_attrs: stdx.BoundedArray(*const mlir.Attribute, 64) = .{};
+        const arg_attrs = try scratch.alloc(*const mlir.Attribute, args.len);
         var any_arg_attr = false;
-        for (args) |a| {
+        for (args, 0..) |a, i| {
             const empty_dict: *const mlir.Attribute = mlir.dictionaryAttribute(ctx, &.{});
             switch (a.kind) {
                 .ptr => {
                     const div_attr = mlir.dictionaryAttribute(ctx, &.{
                         .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, 32)),
                     });
-                    arg_attrs.appendAssumeCapacity(div_attr);
+                    arg_attrs[i] = div_attr;
                     any_arg_attr = true;
                 },
                 .ptr_opts => |p| {
@@ -857,20 +861,20 @@ pub const Kernel = struct {
                         const div_attr = mlir.dictionaryAttribute(ctx, &.{
                             .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, v)),
                         });
-                        arg_attrs.appendAssumeCapacity(div_attr);
+                        arg_attrs[i] = div_attr;
                         any_arg_attr = true;
                     } else {
-                        arg_attrs.appendAssumeCapacity(empty_dict);
+                        arg_attrs[i] = empty_dict;
                     }
                 },
-                else => arg_attrs.appendAssumeCapacity(empty_dict),
+                else => arg_attrs[i] = empty_dict,
             }
         }
 
         const func_op = ttir.func(ctx, .{
             .name = name,
-            .args = arg_types.constSlice(),
-            .args_attributes = if (any_arg_attr) arg_attrs.constSlice() else null,
+            .args = arg_types,
+            .args_attributes = if (any_arg_attr) arg_attrs else null,
             .results = result_types,
             .block = entry,
             .location = unknown_loc,
@@ -879,11 +883,12 @@ pub const Kernel = struct {
 
         return .{
             .allocator = allocator,
-            .arena = std.heap.ArenaAllocator.init(allocator),
+            .arena = arena,
             .ctx = ctx,
             .module = module,
             .func_op = func_op,
             .entry_block = entry,
+            .block_stack = .empty,
         };
     }
 
@@ -945,7 +950,7 @@ pub const Kernel = struct {
     }
 
     pub fn pushBlock(self: *Kernel, b: *mlir.Block) void {
-        self.block_stack.appendAssumeCapacity(b);
+        self.block_stack.append(self.arena.allocator(), b) catch @panic("Kernel.pushBlock OOM");
     }
 
     pub fn popBlock(self: *Kernel) void {
@@ -953,10 +958,18 @@ pub const Kernel = struct {
     }
 
     pub fn currentBlock(self: *Kernel) *mlir.Block {
-        return if (self.block_stack.len == 0)
+        return if (self.block_stack.items.len == 0)
             self.entry_block
         else
-            self.block_stack.get(self.block_stack.len - 1);
+            self.block_stack.items[self.block_stack.items.len - 1];
+    }
+
+    /// Unpack a slice of `Value`s into an arena-allocated slice of raw MLIR
+    /// value pointers. Used by ops that take a variadic operand slice.
+    fn innerSlice(self: *Kernel, values: []const Value) []const *const mlir.Value {
+        const out = self.arena.allocator().alloc(*const mlir.Value, values.len) catch @panic("Kernel.innerSlice OOM");
+        for (values, 0..) |v, i| out[i] = v.inner;
+        return out;
     }
 
     /// Emit `op` into the current block and return its first result as a Value.
@@ -1879,9 +1892,7 @@ pub const Kernel = struct {
 
     /// `tt.call` — call another tt.func in this module by symbol name.
     pub fn call(self: *Kernel, callee: []const u8, operands: []const Value, result_types: []const *const mlir.Type) []Value {
-        var buf: stdx.BoundedArray(*const mlir.Value, 32) = .{};
-        for (operands) |v| buf.appendAssumeCapacity(v.inner);
-        const op = ttir.call(self.ctx, callee, buf.constSlice(), result_types, null, null, self.loc());
+        const op = ttir.call(self.ctx, callee, self.innerSlice(operands), result_types, null, null, self.loc());
         return self.emitMulti(op, result_types.len);
     }
 
@@ -1960,15 +1971,13 @@ pub const Kernel = struct {
         symbol: []const u8,
         opts: ExternElementwiseOpts,
     ) Value {
-        var buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
-        for (srcs) |s| buf.appendAssumeCapacity(s.inner);
         const result_type: *const mlir.Type = if (result_shape.len == 0)
             result_dtype.toMlir(self.ctx)
         else
             mlir.rankedTensorType(result_shape, result_dtype.toMlir(self.ctx));
         return self.emit(ttir.extern_elementwise(
             self.ctx,
-            buf.constSlice(),
+            self.innerSlice(srcs),
             result_type,
             libname,
             libpath,
@@ -1999,9 +2008,7 @@ pub const Kernel = struct {
         is_signed: []const i32,
         opts: PrintOpts,
     ) void {
-        var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (args) |a| buf.appendAssumeCapacity(a.inner);
-        _ = ttir.print(self.ctx, prefix, opts.hex, buf.constSlice(), is_signed, self.loc()).appendTo(self.currentBlock());
+        _ = ttir.print(self.ctx, prefix, opts.hex, self.innerSlice(args), is_signed, self.loc()).appendTo(self.currentBlock());
     }
 
     /// `tt.make_tensor_descriptor` — build a TMA descriptor.
@@ -2016,16 +2023,12 @@ pub const Kernel = struct {
         block_shape: []const i64,
         dtype: DType,
     ) Value {
-        var shape_buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (shape) |s| shape_buf.appendAssumeCapacity(s.inner);
-        var strides_buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (strides) |s| strides_buf.appendAssumeCapacity(s.inner);
         const result_type = ttir.tensorDescType(block_shape, dtype.toMlir(self.ctx), null);
         return self.emit(ttir.make_tensor_descriptor(
             self.ctx,
             base.inner,
-            shape_buf.constSlice(),
-            strides_buf.constSlice(),
+            self.innerSlice(shape),
+            self.innerSlice(strides),
             padding,
             result_type,
             self.loc(),
@@ -2054,17 +2057,13 @@ pub const Kernel = struct {
         dtype: DType,
         opts: DescriptorLoadOpts,
     ) Value {
-        var idx_buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
-        for (indices) |i| idx_buf.appendAssumeCapacity(i.inner);
         const result_ty = mlir.rankedTensorType(shape, dtype.toMlir(self.ctx));
-        return self.emit(ttir.descriptor_load(self.ctx, desc.inner, idx_buf.constSlice(), result_ty, opts.cache_modifier, opts.eviction_policy, self.loc()));
+        return self.emit(ttir.descriptor_load(self.ctx, desc.inner, self.innerSlice(indices), result_ty, opts.cache_modifier, opts.eviction_policy, self.loc()));
     }
 
     /// `tt.descriptor_store` — TMA store.
     pub fn descriptorStore(self: *Kernel, desc: Value, src: Value, indices: []const Value) void {
-        var idx_buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
-        for (indices) |i| idx_buf.appendAssumeCapacity(i.inner);
-        _ = ttir.descriptor_store(self.ctx, desc.inner, src.inner, idx_buf.constSlice(), self.loc()).appendTo(self.currentBlock());
+        _ = ttir.descriptor_store(self.ctx, desc.inner, src.inner, self.innerSlice(indices), self.loc()).appendTo(self.currentBlock());
     }
 
     /// `tt.descriptor_reduce` — TMA reducing store.
@@ -2075,9 +2074,7 @@ pub const Kernel = struct {
         src: Value,
         indices: []const Value,
     ) void {
-        var idx_buf: stdx.BoundedArray(*const mlir.Value, 8) = .{};
-        for (indices) |i| idx_buf.appendAssumeCapacity(i.inner);
-        _ = ttir.descriptor_reduce(self.ctx, kind, desc.inner, src.inner, idx_buf.constSlice(), self.loc()).appendTo(self.currentBlock());
+        _ = ttir.descriptor_reduce(self.ctx, kind, desc.inner, src.inner, self.innerSlice(indices), self.loc()).appendTo(self.currentBlock());
     }
 
     /// `tt.descriptor_gather` — TMA gather (rows by x_offsets + single y_offset).
@@ -2226,25 +2223,21 @@ pub const Kernel = struct {
         comptime body_fn: anytype,
         body_ctx: anytype,
     ) []Value {
-        var locs: stdx.BoundedArray(*const mlir.Location, 32) = .{};
-        for (scalar_arg_types) |_| locs.appendAssumeCapacity(self.loc());
-        const body_block = mlir.Block.init(scalar_arg_types, locs.constSlice());
+        const scratch = self.arena.allocator();
+        const locs = scratch.alloc(*const mlir.Location, scalar_arg_types.len) catch @panic("Kernel.mapElementwise OOM");
+        for (locs) |*l| l.* = self.loc();
+        const body_block = mlir.Block.init(scalar_arg_types, locs);
 
         self.pushBlock(body_block);
-        var block_args: stdx.BoundedArray(Value, 32) = .{};
-        for (0..scalar_arg_types.len) |i| block_args.appendAssumeCapacity(.{ .inner = body_block.argument(i), .kernel = self });
-        const out_vals: []const Value = body_fn(self, block_args.constSlice(), body_ctx);
-        var ret_vals: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (out_vals) |v| ret_vals.appendAssumeCapacity(v.inner);
-        _ = ttir.map_elementwise_return(self.ctx, ret_vals.constSlice(), self.loc()).appendTo(body_block);
+        const block_args = scratch.alloc(Value, scalar_arg_types.len) catch @panic("Kernel.mapElementwise OOM");
+        for (block_args, 0..) |*v, i| v.* = .{ .inner = body_block.argument(i), .kernel = self };
+        const out_vals: []const Value = body_fn(self, block_args, body_ctx);
+        _ = ttir.map_elementwise_return(self.ctx, self.innerSlice(out_vals), self.loc()).appendTo(body_block);
         self.popBlock();
-
-        var src_vals: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (srcs) |s| src_vals.appendAssumeCapacity(s.inner);
 
         const op = ttir.map_elementwise(
             self.ctx,
-            src_vals.constSlice(),
+            self.innerSlice(srcs),
             pack,
             body_block,
             result_tensor_types,
@@ -2276,9 +2269,7 @@ pub const Kernel = struct {
         result_types: []const *const mlir.Type,
         opts: InlineAsmOpts,
     ) []Value {
-        var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (args) |a| buf.appendAssumeCapacity(a.inner);
-        const op = ttir.elementwise_inline_asm(self.ctx, asm_string, constraints, buf.constSlice(), result_types, opts.is_pure, opts.pack, self.loc());
+        const op = ttir.elementwise_inline_asm(self.ctx, asm_string, constraints, self.innerSlice(args), result_types, opts.is_pure, opts.pack, self.loc());
         return self.emitMulti(op, result_types.len);
     }
 
@@ -2306,26 +2297,24 @@ pub const Kernel = struct {
         std.debug.assert(lbs.len == ubs.len);
         std.debug.assert(inits.len == reduction_result_types.len);
 
-        var iv_types: stdx.BoundedArray(*const mlir.Type, 16) = .{};
-        var iv_locs: stdx.BoundedArray(*const mlir.Location, 16) = .{};
+        const scratch = self.arena.allocator();
         const idx_ty = mlir.indexType(self.ctx);
-        for (lbs) |_| {
-            iv_types.appendAssumeCapacity(idx_ty);
-            iv_locs.appendAssumeCapacity(self.loc());
+        const iv_types = scratch.alloc(*const mlir.Type, lbs.len) catch @panic("Kernel.parallel OOM");
+        const iv_locs = scratch.alloc(*const mlir.Location, lbs.len) catch @panic("Kernel.parallel OOM");
+        for (iv_types, iv_locs) |*t, *l| {
+            t.* = idx_ty;
+            l.* = self.loc();
         }
-        const body_block = mlir.Block.init(iv_types.constSlice(), iv_locs.constSlice());
+        const body_block = mlir.Block.init(iv_types, iv_locs);
 
         self.pushBlock(body_block);
-        var iv_args: stdx.BoundedArray(Value, 16) = .{};
-        for (0..lbs.len) |i| iv_args.appendAssumeCapacity(.{ .inner = body_block.argument(i), .kernel = self });
-        const reduce_operands: []const Value = body_fn(self, iv_args.constSlice(), body_ctx);
+        const iv_args = scratch.alloc(Value, lbs.len) catch @panic("Kernel.parallel OOM");
+        for (iv_args, 0..) |*v, i| v.* = .{ .inner = body_block.argument(i), .kernel = self };
+        const reduce_operands: []const Value = body_fn(self, iv_args, body_ctx);
         std.debug.assert(reduce_operands.len == reduction_result_types.len);
 
         // Build scf.reduce with one region per reduction.
-        var red_operand_raw: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (reduce_operands) |v| red_operand_raw.appendAssumeCapacity(v.inner);
-
-        var red_blocks: stdx.BoundedArray(*mlir.Block, 16) = .{};
+        const red_blocks = scratch.alloc(*mlir.Block, combiners.len) catch @panic("Kernel.parallel OOM");
         inline for (combiners, 0..) |comb, i| {
             const arg_ty = reduce_operands[i].type_();
             const arg_locs: [2]*const mlir.Location = .{ self.loc(), self.loc() };
@@ -2336,27 +2325,18 @@ pub const Kernel = struct {
             const combined: Value = comb(self, lhs_v, rhs_v, body_ctx);
             _ = scf.reduce_return(self.ctx, combined.inner, self.loc()).appendTo(red_block);
             self.popBlock();
-            red_blocks.appendAssumeCapacity(red_block);
+            red_blocks[i] = red_block;
         }
 
-        _ = scf.reduce(self.ctx, red_operand_raw.constSlice(), red_blocks.constSlice(), self.loc()).appendTo(body_block);
+        _ = scf.reduce(self.ctx, self.innerSlice(reduce_operands), red_blocks, self.loc()).appendTo(body_block);
         self.popBlock();
-
-        var lb_raw: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        var ub_raw: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        var step_raw: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        var init_raw: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (lbs) |v| lb_raw.appendAssumeCapacity(v.inner);
-        for (ubs) |v| ub_raw.appendAssumeCapacity(v.inner);
-        for (steps) |v| step_raw.appendAssumeCapacity(v.inner);
-        for (inits) |v| init_raw.appendAssumeCapacity(v.inner);
 
         const op = scf.parallel(
             self.ctx,
-            lb_raw.constSlice(),
-            ub_raw.constSlice(),
-            step_raw.constSlice(),
-            init_raw.constSlice(),
+            self.innerSlice(lbs),
+            self.innerSlice(ubs),
+            self.innerSlice(steps),
+            self.innerSlice(inits),
             body_block,
             reduction_result_types,
             self.loc(),
@@ -2559,9 +2539,7 @@ pub const Kernel = struct {
     /// serialize to a NUL-terminated TTIR string owned by the kernel's
     /// allocator (passed to `init`). Caller must `defer allocator.free(ir)`.
     pub fn finish(self: *Kernel, results: []const Value) FinishError![:0]const u8 {
-        var return_values: stdx.BoundedArray(*const mlir.Value, 16) = .{};
-        for (results) |r| return_values.appendAssumeCapacity(r.inner);
-        _ = ttir.return_(self.ctx, return_values.constSlice(), self.loc()).appendTo(self.entry_block);
+        _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(self.entry_block);
 
         if (!self.module.operation().verify()) {
             return error.InvalidMlir;
@@ -3150,9 +3128,10 @@ fn parityBuildModuleWithArgs(
     const loc: *const mlir.Location = .unknown(ctx);
     const module: *mlir.Module = .init(loc);
 
-    var arg_locs_buf: stdx.BoundedArray(*const mlir.Location, 8) = .{};
-    for (0..arg_types.len) |_| arg_locs_buf.appendAssumeCapacity(loc);
-    const entry = mlir.Block.init(arg_types, arg_locs_buf.constSlice());
+    const arg_locs = std.testing.allocator.alloc(*const mlir.Location, arg_types.len) catch @panic("parityBuildModuleWithArgs OOM");
+    defer std.testing.allocator.free(arg_locs);
+    for (arg_locs) |*l| l.* = loc;
+    const entry = mlir.Block.init(arg_types, arg_locs);
 
     build_body(ctx, entry);
     _ = ttir.return_(ctx, &.{}, loc).appendTo(entry);
