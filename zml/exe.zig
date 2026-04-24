@@ -73,7 +73,7 @@ pub const Exe = struct {
 
     pub const FlatBuffers = struct {
         buffers: []const [*]*pjrt.Buffer,
-        raw_buffers: []const *pjrt.Buffer,
+        raw_buffers: []*pjrt.Buffer,
 
         num_devices: usize,
 
@@ -224,7 +224,7 @@ pub const Exe = struct {
             var context: LocalContext = .{ .self = self, .current_index = 0 };
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *Buffer) void {
-                    var shards: Buffer.Shards = .{};
+                    var shards: Buffer.Shards = .empty;
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
@@ -244,7 +244,7 @@ pub const Exe = struct {
             meta.visit(struct {
                 fn cb(context_: *LocalContext, buffer: *Buffer) void {
                     //stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
-                    var shards: Buffer.Shards = .{};
+                    var shards: Buffer.Shards = .empty;
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }

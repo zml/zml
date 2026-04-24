@@ -24,11 +24,11 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    const logical_mesh: zml.sharding.LogicalMesh = try .init("benchmark_mesh", .{
+    const logical_mesh: zml.sharding.LogicalMesh = .init("benchmark_mesh", .{
         .m = .low_bandwidth,
         .n = .high_bandwidth,
     });
-    const strategy: zml.sharding.Strategy = try .suggest(logical_mesh, platform.physical_mesh);
+    const strategy: zml.sharding.Strategy = .suggest(logical_mesh, platform.physical_mesh);
     const benchmark_sharding: zml.sharding.Sharding = try .initFromStrategy(platform, logical_mesh, strategy);
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);

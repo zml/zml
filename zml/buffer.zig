@@ -101,7 +101,7 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = .{},
+            ._shards = .empty,
         };
 
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
@@ -193,7 +193,7 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = .{},
+            ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);
