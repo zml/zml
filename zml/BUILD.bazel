@@ -36,6 +36,7 @@ zig_library(
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton.zig",
+        "attention/triton_kernels.zig",
         "moe.zig",
         "moe/triton.zig",
         "moe/triton_kernels.zig",
