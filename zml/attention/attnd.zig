@@ -58,6 +58,16 @@ pub const Parameters = struct {
 };
 
 pub const Metadata = struct {
+    conversation_id: zml.Tensor,
+    layer_id: zml.Tensor,
+
+    pub fn init() Metadata {
+        return .{
+            .conversation_id = .scalar(0, .u32),
+            .layer_id = .scalar(0, .u32),
+        };
+    }
+
     pub fn initBuffer(
         self: Metadata,
         io: std.Io,
@@ -65,13 +75,15 @@ pub const Metadata = struct {
         sharding: zml.sharding.Sharding,
     ) !zml.Bufferized(Metadata) {
         _ = self; // autofix
-        _ = io; // autofix
-        _ = platform; // autofix
-        _ = sharding; // autofix
+        return .{
+            .conversation_id = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
+            .layer_id = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
+        };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
-        _ = self; // autofix
+        self.conversation_id.deinit();
+        self.layer_id.deinit();
     }
 };
 
@@ -152,7 +164,7 @@ fn cpuCall(
 ) !?*zml.pjrt.ffi.Error {
     const ctx: *Context = @ptrCast(@alignCast(try call_frame.ctx.getContext(context_type_id.?, call_frame.api)));
 
-    var buffer: []u8 = try ctx.allocator.alloc(u8, @sizeOf(Header) + parameters.num_kv_heads * (2 + parameters.num_q_per_head) * parameters.head_dim * @sizeOf(u16));
+    var buffer: []u8 = try ctx.allocator.alloc(u8, @sizeOf(Header) + (2 + parameters.num_q_per_head) * parameters.head_dim * @sizeOf(u16));
     defer ctx.allocator.free(buffer);
 
     const req: Request = b: {
@@ -219,7 +231,7 @@ fn cpuCall(
 
     while (recv_q < parameters.num_kv_heads * parameters.num_q_per_head) {
         const resp = ctx.client.receive(ctx.io, buffer) catch |err| {
-            log.err("Failed to receveive response: {any}", .{err});
+            log.err("Failed to receive response: {any}", .{err});
             return err;
         };
 
@@ -314,7 +326,7 @@ const Message = struct {
             .payload = bytes[n..],
         };
 
-        if (!(msg.header.magic[0] == 'Z' and msg.header.magic[1] == 'M' and msg.header.magic[2] == 'L' and @intFromEnum(msg.header.model_id) < 4)) {
+        if (!(msg.header.magic[0] == 'Z' and msg.header.magic[1] == 'M' and msg.header.magic[2] == 'L' and @intFromEnum(msg.header.model_id) < 5)) {
             return error.InvalidHeader;
         }
 

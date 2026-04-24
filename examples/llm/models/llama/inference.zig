@@ -20,6 +20,7 @@ pub const CompilationParameters = struct {
     shardings: common.Shardings,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
+        _ = backend; // autofix
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
@@ -31,8 +32,16 @@ pub const CompilationParameters = struct {
                 .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
             }, mdl.model.embed_tokens.weight.dtype())),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
-            .attention_parameters = .init(.fromBackend(backend)),
+            .attention_metadata = .{ .attnd = .init() },
+            .attention_parameters = .{
+                .attnd = .init(.{
+                    .model_id = .@"llama-3.1-8B",
+                    .head_dim = 128,
+                    .num_attention_heads = 32,
+                    .num_kv_heads = 8,
+                    .mtu = 9000,
+                }),
+            },
             .seqlen = seqlen,
             .shardings = shardings,
         };

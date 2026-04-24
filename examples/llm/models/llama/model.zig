@@ -298,7 +298,10 @@ pub const Llama = struct {
                 hidden,
                 token_index,
                 updated_kv_cache.atLayer(i),
-                attention_metadata,
+                .{ .attnd = .{
+                    .layer_id = zml.Tensor.scalar(i, .u32),
+                    .conversation_id = attention_metadata.attnd.conversation_id,
+                } },
                 attention_parameters,
             );
         }

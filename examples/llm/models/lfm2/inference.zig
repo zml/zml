@@ -45,13 +45,13 @@ pub const CompilationParameters = struct {
             .batch_dim = 1,
             .rng = .init(),
             .cache = cache,
-            .attention_metadata = .{ .attnd = .{} },
+            .attention_metadata = .{ .attnd = .init() },
             .attention_parameters = .{
                 .attnd = .init(.{
                     .model_id = .@"lfm2.5-1.2B",
                     .head_dim = 128,
-                    .num_attention_heads = 16,
-                    .num_kv_heads = 16,
+                    .num_attention_heads = 32,
+                    .num_kv_heads = 8,
                     .mtu = 9000,
                 }),
             },
