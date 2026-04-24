@@ -9,7 +9,12 @@ const log = std.log.scoped(.@"zml/attnd");
 
 var context_type_id: ?zml.pjrt.ffi.TypeId = null;
 
-const Context = struct { client: Client, allocator: std.mem.Allocator, io: std.Io };
+const Context = struct {
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    // One client per device.
+    clients: []Client,
+};
 
 pub const Config = struct {
     desctination: std.Io.net.IpAddress,
@@ -60,11 +65,13 @@ pub const Parameters = struct {
 pub const Metadata = struct {
     conversation_id: zml.Tensor,
     layer_id: zml.Tensor,
+    num_tokens: zml.Tensor,
 
     pub fn init() Metadata {
         return .{
-            .conversation_id = .scalar(0, .u32),
-            .layer_id = .scalar(0, .u32),
+            .conversation_id = .fromShape(.scalar(.u64)),
+            .layer_id = .fromShape(.scalar(.u16)),
+            .num_tokens = .fromShape(.scalar(.u32)),
         };
     }
 
@@ -74,16 +81,17 @@ pub const Metadata = struct {
         platform: *const zml.Platform,
         sharding: zml.sharding.Sharding,
     ) !zml.Bufferized(Metadata) {
-        _ = self; // autofix
         return .{
-            .conversation_id = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
-            .layer_id = try zml.Buffer.scalar(io, platform, 0, .u32, sharding),
+            .conversation_id = try zml.Buffer.scalar(io, platform, 749, .u64, sharding),
+            .layer_id = try zml.Buffer.uninitialized(io, platform, self.layer_id.shape(), sharding, .{}),
+            .num_tokens = try zml.Buffer.uninitialized(io, platform, self.num_tokens.shape(), sharding, .{}),
         };
     }
 
     pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
         self.conversation_id.deinit();
         self.layer_id.deinit();
+        self.num_tokens.deinit();
     }
 };
 
@@ -93,8 +101,15 @@ pub fn register(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
 
     ctx.allocator = allocator;
     ctx.io = io;
-    ctx.client = try Client.init(io, config.desctination, config.client_options);
-    errdefer ctx.client.deinit(io);
+    ctx.clients = try allocator.alloc(Client, platform.devices.len);
+    errdefer allocator.free(ctx.clients);
+
+    var i: usize = 0;
+    errdefer for (ctx.clients[0..i]) |*c| c.deinit(io);
+    for (ctx.clients) |*c| {
+        c.* = try Client.init(io, config.desctination, config.client_options);
+        i += 1;
+    }
 
     if (context_type_id) |_| {
         @panic("Cannot configure the attnd context twice.");
@@ -115,33 +130,51 @@ pub fn register(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.P
 fn deleter(object: ?*anyopaque) callconv(.c) void {
     const ptr = object.?;
     const ctx: *Context = @ptrCast(@alignCast(ptr));
-    ctx.client.deinit(ctx.io);
+    for (ctx.clients) |*c| {
+        c.deinit(ctx.io);
+    }
+    ctx.allocator.free(ctx.clients);
 }
 
-pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_pos: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
-    _ = metadata; // autofix
+pub fn causalAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_offset: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     // Here is doesn't matter which target we call, they all have the same input/output/parameters
+    // zml.Tensor.print(metadata.layer_id, "layer_id");
+    //
+    const ctx = zml.module.CompilationContext.current();
+    const num_partitions = ctx.partitioning.numPartitionsForLogicalAxis(q.shape(), .model) catch unreachable;
+
     const out = targets.cpu.call(
         .{
             .q = q,
             .k = k,
             .v = v,
-            .token_pos = token_pos,
+            .conversation_id = metadata.conversation_id,
+            .layer_id = metadata.layer_id,
+            .token_offset = token_offset,
+            .num_tokens = metadata.num_tokens,
         },
         .{
             .attn = q.shape(),
         },
-        parameters,
+        .{
+            .model_id = parameters.model_id,
+            .head_dim = parameters.head_dim,
+            .head_size_in_bytes = parameters.head_bytes,
+            .num_kv_heads = parameters.num_kv_heads,
+            .num_q_per_head = parameters.num_q_per_head,
+            .num_q_per_packet = parameters.num_q_per_packet,
+            .num_partitions = @intCast(num_partitions),
+        },
     );
     return out.attn;
 }
 
 pub const targets = struct {
-    pub const cpu = zml.ops.CustomCall(Input, Output, Parameters, cpuCall, .{
+    pub const cpu = zml.ops.CustomCall(Input, Output, Attributes, cpuCall, .{
         .name = "attnd",
-        .sharding_aware = false,
+        .sharding_aware = true,
         .has_side_effect = false,
-        .output_operand_aliases = .{ .attn = .q },
+        .output_operand_aliases = .{ .attn = null },
     });
 };
 
@@ -149,30 +182,46 @@ const Input = struct {
     q: zml.Tensor,
     k: zml.Tensor,
     v: zml.Tensor,
-    token_pos: zml.Tensor,
+    conversation_id: zml.Tensor,
+    layer_id: zml.Tensor,
+    token_offset: zml.Tensor,
+    num_tokens: zml.Tensor,
 };
 
 const Output = struct {
     attn: zml.Shape,
 };
 
+const Attributes = struct {
+    model_id: ModelId,
+    head_dim: u32,
+    head_size_in_bytes: u32,
+    num_kv_heads: u8,
+    num_q_per_head: u8,
+    num_q_per_packet: u8,
+    num_partitions: u32,
+};
+
 fn cpuCall(
     call_frame: *zml.pjrt.ffi.CallFrame,
     input: zml.pjrtx.TensorToCustomCallBuffer(Input),
     output: zml.pjrtx.ShapeToCustomCallBuffer(Output),
-    parameters: Parameters,
+    attrs: Attributes,
 ) !?*zml.pjrt.ffi.Error {
     const ctx: *Context = @ptrCast(@alignCast(try call_frame.ctx.getContext(context_type_id.?, call_frame.api)));
+    const device_ordinal: u64 = @intCast(try call_frame.ctx.getDeviceOrdinal(call_frame.api));
 
-    var buffer: []u8 = try ctx.allocator.alloc(u8, @sizeOf(Header) + (2 + parameters.num_q_per_head) * parameters.head_dim * @sizeOf(u16));
+    var buffer: []u8 = try ctx.allocator.alloc(u8, @sizeOf(Header) + (2 + attrs.num_q_per_head) * attrs.head_size_in_bytes);
     defer ctx.allocator.free(buffer);
+
+    const client = &ctx.clients[device_ordinal];
 
     const req: Request = b: {
         const header: *align(1) Header = std.mem.bytesAsValue(Header, buffer[0..@sizeOf(Header)]);
         const payload: []u8 = buffer[@sizeOf(Header)..buffer.len];
-        const q: []u8 = payload[0 .. parameters.num_q_per_packet * parameters.head_bytes];
-        const k: []u8 = payload[q.len..(q.len + parameters.head_bytes)];
-        const v: []u8 = payload[(q.len + parameters.head_bytes)..(q.len + 2 * parameters.head_bytes)];
+        const q: []u8 = payload[0 .. attrs.num_q_per_packet * attrs.head_size_in_bytes];
+        const k: []u8 = payload[q.len..(q.len + attrs.head_size_in_bytes)];
+        const v: []u8 = payload[(q.len + attrs.head_size_in_bytes)..(q.len + 2 * attrs.head_size_in_bytes)];
         break :b .{
             .bytes = buffer,
             .header = header,
@@ -181,68 +230,82 @@ fn cpuCall(
             .v = v,
         };
     };
-    req.header.* = .{
-        .type = .attn,
-        .kv_head_id = undefined, // set in the for loop
-        .first_q_id = undefined, // set in the inner while loop
-        .num_queries = undefined, // set in the inner while loop
-        .model_id = parameters.model_id,
-        .conversation_id = 0,
-        .layer_id = 0,
-        .token_pos = std.mem.bytesAsValue(u32, asConstSlice(input.token_pos)[0..@sizeOf(u32)]).*,
-    };
 
-    const q = asConstSlice(input.q);
-    const k = asConstSlice(input.k);
-    const v = asConstSlice(input.v);
-    const head_bytes = parameters.head_bytes;
-    const num_queries = parameters.num_q_per_head;
-    for (0..parameters.num_kv_heads) |kv_head_id| {
-        const k_offset = kv_head_id * head_bytes;
-        @memcpy(req.k, k[k_offset..][0..head_bytes]);
+    const q_size_in_bytes = attrs.num_q_per_head * attrs.head_size_in_bytes;
+    const q_ = asConstSlice(input.q);
+    const k_ = asConstSlice(input.k);
+    const v_ = asConstSlice(input.v);
+    const attn_ = asSlice(output.attn);
+    const head_size_in_bytes = attrs.head_size_in_bytes;
+    const kv_heads_per_partitions = @divExact(attrs.num_kv_heads, attrs.num_partitions);
+    const kv_head_offset = kv_heads_per_partitions * device_ordinal;
+    const token_offset = asScalar(u32, input.token_offset);
+    const num_tokens = asScalar(u32, input.num_tokens);
 
-        const v_offset = kv_head_id * head_bytes;
-        @memcpy(req.v, v[v_offset..][0..head_bytes]);
-
-        req.header.kv_head_id = @intCast(kv_head_id);
-
-        var q_offset = kv_head_id * head_bytes * num_queries;
-        var q_sent: u8 = 0;
-
-        while (num_queries - q_sent > 0) {
-            const nq = @min(num_queries - q_sent, parameters.num_q_per_packet);
-            @memcpy(req.q, q[q_offset..][0 .. head_bytes * nq]);
-            q_offset += head_bytes * nq;
-
-            req.header.num_queries = nq;
-            req.header.first_q_id = q_sent;
-            q_sent += nq;
-
-            try ctx.client.send(ctx.io, req);
-        }
-    }
-
-    //
-    // ---------
-    //
-
-    const attn: []u8 = asSlice(output.attn);
-    var recv_q: usize = 0;
-
-    while (recv_q < parameters.num_kv_heads * parameters.num_q_per_head) {
-        const resp = ctx.client.receive(ctx.io, buffer) catch |err| {
-            log.err("Failed to receive response: {any}", .{err});
-            return err;
+    for (0..num_tokens) |t| {
+        req.header.* = .{
+            .type = .attn,
+            .kv_head_id = undefined, // set in the for loop
+            .first_q_id = undefined, // set in the inner while loop
+            .num_queries = undefined, // set in the inner while loop
+            .model_id = attrs.model_id,
+            .conversation_id = asScalar(u64, input.conversation_id),
+            .layer_id = asScalar(u16, input.layer_id),
+            .token_pos = token_offset + @as(u32, @intCast(t)),
         };
 
-        std.debug.assert(resp.header.num_queries <= parameters.num_q_per_head);
-        std.debug.assert(resp.payload.len == resp.header.num_queries * parameters.head_bytes);
-        std.debug.assert(resp.header.kv_head_id < parameters.num_kv_heads);
-        std.debug.assert(resp.header.first_q_id + resp.header.num_queries <= parameters.num_q_per_head);
+        const q = q_[t * kv_heads_per_partitions * q_size_in_bytes ..][0 .. kv_heads_per_partitions * q_size_in_bytes];
+        const k = k_[(token_offset + t) * kv_heads_per_partitions * head_size_in_bytes ..][0 .. kv_heads_per_partitions * head_size_in_bytes];
+        const v = v_[(token_offset + t) * kv_heads_per_partitions * head_size_in_bytes ..][0 .. kv_heads_per_partitions * head_size_in_bytes];
 
-        const q_offset = (@as(usize, resp.header.kv_head_id) * parameters.num_q_per_head + resp.header.first_q_id) * parameters.head_bytes;
-        @memcpy(attn[q_offset .. q_offset + resp.payload.len], resp.payload);
-        recv_q += resp.header.num_queries;
+        for (0..kv_heads_per_partitions) |kv_head_id| {
+            const k_offset = kv_head_id * head_size_in_bytes;
+            @memcpy(req.k, k[k_offset..][0..head_size_in_bytes]);
+
+            const v_offset = kv_head_id * head_size_in_bytes;
+            @memcpy(req.v, v[v_offset..][0..head_size_in_bytes]);
+
+            req.header.kv_head_id = @intCast(kv_head_offset + kv_head_id);
+
+            var q_offset = kv_head_id * head_size_in_bytes * attrs.num_q_per_head;
+            var q_sent: u8 = 0;
+
+            while (q_sent < attrs.num_q_per_head) {
+                const nq = @min(attrs.num_q_per_head - q_sent, attrs.num_q_per_packet);
+                @memcpy(req.q, q[q_offset..][0 .. head_size_in_bytes * nq]);
+                q_offset += head_size_in_bytes * nq;
+
+                req.header.num_queries = nq;
+                req.header.first_q_id = q_sent;
+                q_sent += nq;
+
+                try client.send(ctx.io, req);
+            }
+        }
+
+        //
+        // ---------
+        //
+
+        var attn = attn_[t * kv_heads_per_partitions * q_size_in_bytes ..][0 .. kv_heads_per_partitions * q_size_in_bytes];
+        var recv_q: usize = 0;
+
+        while (recv_q < kv_heads_per_partitions * attrs.num_q_per_head) {
+            const resp = client.receive(ctx.io, buffer) catch |err| {
+                log.err("Failed to receive response: {any}", .{err});
+                return err;
+            };
+
+            std.debug.assert(resp.header.num_queries <= attrs.num_q_per_head);
+            std.debug.assert(resp.payload.len == resp.header.num_queries * attrs.head_size_in_bytes);
+            std.debug.assert(resp.header.kv_head_id < attrs.num_kv_heads);
+            std.debug.assert(resp.header.first_q_id + resp.header.num_queries <= attrs.num_q_per_head);
+
+            const kv_head_id = resp.header.kv_head_id - kv_head_offset;
+            const q_offset = (@as(usize, kv_head_id) * attrs.num_q_per_head + resp.header.first_q_id) * attrs.head_size_in_bytes;
+            @memcpy(attn[q_offset .. q_offset + resp.payload.len], resp.payload);
+            recv_q += resp.header.num_queries;
+        }
     }
 
     return null;
@@ -256,6 +319,11 @@ fn asSlice(buf: zml.pjrtx.CustomCallBuffer) []u8 {
 fn asConstSlice(buf: zml.pjrtx.CustomCallBuffer) []const u8 {
     const bytes: [*]const u8 = @ptrCast(@alignCast(buf.ptr));
     return bytes[0..buf.shape.byteSize()];
+}
+
+fn asScalar(T: type, buf: zml.pjrtx.CustomCallBuffer) T {
+    std.debug.assert(buf.shape.byteSize() == @sizeOf(T));
+    return std.mem.bytesAsValue(T, asConstSlice(buf)[0..@sizeOf(T)]).*;
 }
 
 pub const Options = struct {

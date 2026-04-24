@@ -359,7 +359,8 @@ pub const DecoderLayer = struct {
                     kv_cache_index,
                     .{ .attnd = .{
                         .conversation_id = attention_metadata.attnd.conversation_id,
-                        .layer_id = kv_cache_index,
+                        .layer_id = kv_cache_index.convert(.u16),
+                        .num_tokens = attention_metadata.attnd.num_tokens,
                     } },
                     attention_parameters,
                 );

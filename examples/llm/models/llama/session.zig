@@ -138,7 +138,11 @@ pub const Session = struct {
             prefill_token_pos_buffer,
             &self.kv_cache_buffers,
             &self.rng_buffers,
-            &self.attention_metadata_buffers,
+            &.{ .attnd = .{
+                .conversation_id = try zml.Buffer.scalar(self.io, self.platform, 789, .u64, replicated_sharding),
+                .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16, replicated_sharding),
+                .num_tokens = try zml.Buffer.scalar(self.io, self.platform, all_tokens.len, .u32, replicated_sharding),
+            } },
         });
         self.compiled_model.prefill_exe.call(prefill_args, &prefill_results);
 
@@ -187,7 +191,11 @@ pub const Session = struct {
                 token_pos_buffer,
                 &self.kv_cache_buffers,
                 &self.rng_buffers,
-                &self.attention_metadata_buffers,
+                &.{ .attnd = .{
+                    .conversation_id = try zml.Buffer.scalar(self.io, self.platform, 789, .u64, replicated_sharding),
+                    .layer_id = try zml.Buffer.scalar(self.io, self.platform, 0, .u16, replicated_sharding),
+                    .num_tokens = try zml.Buffer.scalar(self.io, self.platform, 1, .u32, replicated_sharding),
+                } },
             });
             self.compiled_model.decode_exe.call(decode_args, &decode_results);
 
