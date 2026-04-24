@@ -105,7 +105,7 @@ fn ctx() *mlir.Context {
 /// Floor to a multiple of 16 — matches the Python `(v // 16) * 16` guards
 /// that keep dynamic strides aligned for tt.load/store.
 fn blockFloor16(v: Value) Value {
-    return v.div(@as(i64, 16)).mul(@as(i64, 16));
+    return v.div(16).mul(16);
 }
 
 // =============================================================================
@@ -159,7 +159,7 @@ pub fn perTokenGroupQuantFp8(allocator: std.mem.Allocator, config: QuantGenerati
     const absmax = k.maximumf(k.max(k.absf(y)), eps);
 
     // scale_raw = _absmax * (1.0 / fp8_max)
-    const scale_raw = absmax.mul(@as(f32, 1.0 / config.fp8_max));
+    const scale_raw = absmax.mul(1.0 / config.fp8_max);
     const y_s = if (config.use_ue8m0) k.exp2(k.ceil(k.log2(scale_raw))) else scale_raw;
 
     // y_q = clamp(y / y_s, fp8_min, fp8_max).to(output_dtype)
@@ -186,12 +186,13 @@ pub fn perTokenGroupQuantFp8(allocator: std.mem.Allocator, config: QuantGenerati
 // =============================================================================
 
 /// Direct port of Python `write_zeros_to_output`. Stores a masked zero-tile
-/// for blocks whose expert is `-1` (no expert assigned).
+/// for blocks whose expert is `-1` (no expert assigned). `stride_cn` is
+/// hardcoded to 1 (contiguous last dim), so the N-axis offset is just
+/// `offs_cn` itself.
 fn writeZerosToOutput(
     k: *Kernel,
     c_ptr: Value,
     stride_cm: Value,
-    stride_cn: Value,
     pid_n: Value,
     n: Value,
     offs_token: Value,
@@ -207,8 +208,7 @@ fn writeZerosToOutput(
         .to(.i64);
     const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
         .mul(stride_cm.splatTo(&.{ block_size_m, block_size_n }));
-    const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n)
-        .mul(stride_cn.splatTo(&.{ block_size_m, block_size_n }));
+    const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n);
     const c_ptrs = c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
     const c_mask = k.mask2d(token_mask, offs_cn.lt(n), block_size_m, block_size_n);
     k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
@@ -273,9 +273,8 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
     const stride_be_block = blockFloor16(k.load(a.stride_be_ptr));
     const stride_bn_block = blockFloor16(k.load(a.stride_bn_ptr));
     const stride_cm_block = blockFloor16(k.load(a.stride_cm_ptr));
-    const stride_ak_block = k.lift(@as(i64, 1));
-    const stride_bk_block = k.lift(@as(i64, 1));
-    const stride_cn_block = k.lift(@as(i64, 1));
+    // stride_ak / stride_bk / stride_cn are all 1 in this port — the A/B/C
+    // inner dimension is contiguous, so those mul-by-1 terms are elided.
 
     // pid grouping (all i64).
     const pid = k.programId(.x).to(.i64);
@@ -298,7 +297,7 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
     const offs = k.arange(0, block_size_m, .i64);
     const offs_token = if (config.naive_block_assignment)
         k.select(
-            offs.eq(@as(i64, 0)),
+            offs.eq(0),
             pid_m.splatTo(&.{block_size_m}),
             num_valid_tokens.splatTo(&.{block_size_m}),
         )
@@ -311,7 +310,7 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
 
     // off_experts = expert_ids[pid_m].to(i64)
     const off_experts = k.load(a.expert_ids_ptr.addPtr(pid_m.to(.i32))).to(.i64);
-    const is_dead = off_experts.eq(@as(i64, -1));
+    const is_dead = off_experts.eq(-1);
 
     // Python: if off_experts == -1: write_zeros_to_output(...); return
     var dead_ret = k.openReturnIf(is_dead);
@@ -320,7 +319,6 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
             k,
             a.c_ptr,
             stride_cm_block,
-            stride_cn_block,
             pid_n,
             n_block,
             offs_token,
@@ -340,17 +338,17 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
         .rem(n_block.splatTo(&.{block_size_n}));
     const offs_k = k.arange(0, block_size_k, .i64);
 
-    // a_ptrs = a_ptr + (offs_token // top_k) * stride_am + offs_k * stride_ak   [m,k]
+    // a_ptrs = a_ptr + (offs_token // top_k) * stride_am + offs_k   [m,k]
+    // (stride_ak = 1 → `offs_k * stride_ak` simplifies to `offs_k`.)
     const am_term = offs_token.div(top_k).broadcast2d(1, block_size_m, block_size_k)
         .mul(stride_am_block.splatTo(&.{ block_size_m, block_size_k }));
-    const ak_term = offs_k.broadcast2d(0, block_size_m, block_size_k)
-        .mul(stride_ak_block.splatTo(&.{ block_size_m, block_size_k }));
+    const ak_term = offs_k.broadcast2d(0, block_size_m, block_size_k);
     const a_ptrs_init = a.a_ptr.splatTo(&.{ block_size_m, block_size_k }).addPtr(am_term.add(ak_term));
 
-    // b_ptrs = b_ptr + off_experts*stride_be + offs_k[:,None]*stride_bk + offs_bn[None,:]*stride_bn   [k,n]
+    // b_ptrs = b_ptr + off_experts*stride_be + offs_k[:,None] + offs_bn[None,:]*stride_bn   [k,n]
+    // (stride_bk = 1 → `offs_k * stride_bk` simplifies to `offs_k`.)
     const be_term = off_experts.mul(stride_be_block).splatTo(&.{ block_size_k, block_size_n });
-    const bk_term = offs_k.broadcast2d(1, block_size_k, block_size_n)
-        .mul(stride_bk_block.splatTo(&.{ block_size_k, block_size_n }));
+    const bk_term = offs_k.broadcast2d(1, block_size_k, block_size_n);
     const bn_term = offs_bn.broadcast2d(0, block_size_k, block_size_n)
         .mul(stride_bn_block.splatTo(&.{ block_size_k, block_size_n }));
     const b_ptrs_init = a.b_ptr.splatTo(&.{ block_size_k, block_size_n }).addPtr(be_term.add(bk_term.add(bn_term)));
@@ -382,9 +380,9 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
         // accumulator += tl.dot(a, b)
         const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .tf32, .max_num_imprecise_acc = 0 });
 
-        // a_ptrs += BLOCK_SIZE_K * stride_ak_block; b_ptrs += BLOCK_SIZE_K * stride_bk_block
-        const new_a_ptrs = a_ptrs.addPtr(stride_ak_block.mul(block_size_k).splatTo(&.{ block_size_m, block_size_k }));
-        const new_b_ptrs = b_ptrs.addPtr(stride_bk_block.mul(block_size_k).splatTo(&.{ block_size_k, block_size_n }));
+        // a_ptrs += BLOCK_SIZE_K; b_ptrs += BLOCK_SIZE_K   (stride_ak = stride_bk = 1)
+        const new_a_ptrs = a_ptrs.addPtr(k.splat(block_size_k, &.{ block_size_m, block_size_k }));
+        const new_b_ptrs = b_ptrs.addPtr(k.splat(block_size_k, &.{ block_size_k, block_size_n }));
 
         loop.yield(.{ new_acc, new_a_ptrs, new_b_ptrs });
     }
@@ -408,10 +406,10 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
         .mul(@as(i32, @intCast(block_size_n))).splatTo(&.{block_size_n})
         .add(k.arange(0, block_size_n, .i32))
         .to(.i64);
+    // stride_cn = 1 → cn_off is just the broadcast of offs_cn.
     const cm_off = offs_token.broadcast2d(1, block_size_m, block_size_n)
         .mul(stride_cm_block.splatTo(&.{ block_size_m, block_size_n }));
-    const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n)
-        .mul(stride_cn_block.splatTo(&.{ block_size_m, block_size_n }));
+    const cn_off = offs_cn.broadcast2d(0, block_size_m, block_size_n);
     const c_ptrs = a.c_ptr.splatTo(&.{ block_size_m, block_size_n }).addPtr(cm_off.add(cn_off));
     const c_mask = k.mask2d(token_mask, offs_cn.lt(n_block), block_size_m, block_size_n);
     k.storeOpts(c_ptrs, accumulator, .{ .mask = c_mask });
@@ -516,7 +514,7 @@ pub fn moeAlignBlockSizeKernel(allocator: std.mem.Allocator, config: AlignBlockS
             const block_ids = block_start.splatTo(&.{hist_block}).add(block_offs);
             const block_mask = block_ids.lt(@as(i32, @intCast(max_num_m_blocks)));
             const block_offsets = block_ids.mul(@as(i32, @intCast(block_size_m)));
-            const init = k.splat(@as(i32, -1), &.{hist_block});
+            const init = k.splat(-1, &.{hist_block});
 
             var exp_loop = k.openFor(0, num_experts, 1, .{init});
             {

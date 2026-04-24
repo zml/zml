@@ -157,7 +157,7 @@ fn findSeqIdx(
     block_q: i64,
     use_q_block_mode: bool,
 ) Value {
-    const left_init = k.liftAs(@as(i32, 0), .i32);
+    const left_init = k.liftAs(0, .i32);
 
     var w = k.openWhile(.{ left_init, num_seqs }, .{ k.scalarTy(.i32), k.scalarTy(.i32) });
     {
@@ -168,7 +168,7 @@ fn findSeqIdx(
     {
         const left = w.after_carried[0];
         const right = w.after_carried[1];
-        const mid = left.add(right).div(@as(i32, 2));
+        const mid = left.add(right).div(2);
         const val = k.load(query_start_len_ptr.addPtr(mid));
         const mid_val = if (use_q_block_mode)
             val.div(@as(i32, @intCast(block_q))).add(mid)
@@ -177,7 +177,7 @@ fn findSeqIdx(
 
         var i = k.openIfElse(mid_val.le(target_idx), .{ k.scalarTy(.i32), k.scalarTy(.i32) });
         {
-            i.yieldThen(.{ mid.add(@as(i32, 1)), right });
+            i.yieldThen(.{ mid.add(1), right });
         }
         {
             i.yieldElse(.{ left, mid });
@@ -185,7 +185,7 @@ fn findSeqIdx(
         w.yieldAfter(.{ i.results[0], i.results[1] });
     }
 
-    return w.results[0].sub(@as(i32, 1));
+    return w.results[0].sub(1);
 }
 
 /// Convert K/V loaded values to Q's dtype with scale applied when storage is
@@ -257,7 +257,7 @@ fn kernelUnifiedAttention2d(
     const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
-    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(@as(i32, 1))));
+    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(1)));
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     // Python: if q_block_local_idx * BLOCK_Q >= cur_batch_query_len: return
@@ -289,7 +289,7 @@ fn kernelUnifiedAttention2d(
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
+    const query_mask_1 = query_offset_1.lt(NUM_QUERY_HEADS);
 
     // Q : (BLOCK_M, HEAD_SIZE_PADDED)
     const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
@@ -335,29 +335,29 @@ fn kernelUnifiedAttention2d(
 
     // max_seq_prefix_len = context_len + q_block_local_idx*BLOCK_Q + (BLOCK_M-1)/NQ_PER_KV + 1
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
+    const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
     const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
 
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
     // Sliding-window tile pruning — comptime branch.
-    var tile_start: Value = k.liftAs(@as(i32, 0), .i32);
+    var tile_start: Value = k.liftAs(0, .i32);
     var tile_end: Value = num_tiles;
     if (SLIDING_WINDOW > 0) {
         const qpos_lo = q_local_bq;
-        const qpos_hi_raw = qpos_lo.add(@as(i32, pad_term - 1));
-        const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(@as(i32, 1)));
+        const qpos_hi_raw = qpos_lo.add(pad_term - 1);
+        const qpos_hi = qpos_hi_raw.minimum(cur_batch_query_len.sub(1));
         const first_allowed_key = context_len.add(qpos_lo).sub(@as(i32, @intCast(SLIDING_WINDOW - 1)));
         const last_allowed_key = context_len.add(qpos_hi);
-        tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(@as(i32, 0));
-        tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(@as(i32, 1)).minimum(num_tiles);
+        tile_start = first_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).maximum(0);
+        tile_end = last_allowed_key.div(@as(i32, @intCast(TILE_SIZE))).add(1).minimum(num_tiles);
     }
 
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
 
     // Iterate through tiles (loop carries M, L, acc).
-    var loop = k.openFor(tile_start, tile_end, @as(i32, 1), .{ m_init, l_init, acc_init });
+    var loop = k.openFor(tile_start, tile_end, 1, .{ m_init, l_init, acc_init });
     {
         const j = loop.iv;
         const M = loop.carried[0];
@@ -383,7 +383,7 @@ fn kernelUnifiedAttention2d(
             .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
         const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
         const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(@as(i64, config.stride_v_cache_3));
+            .mul(config.stride_v_cache_3);
         const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
             .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
         const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
@@ -393,7 +393,7 @@ fn kernelUnifiedAttention2d(
             .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
         const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
         const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(@as(i64, config.stride_k_cache_3));
+            .mul(config.stride_k_cache_3);
         const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
             .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
         const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
@@ -428,7 +428,7 @@ fn kernelUnifiedAttention2d(
         // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
         const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
         const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
+        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(1);
         const seq_mask = so_2d.lt(rhs);
 
         // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
@@ -451,7 +451,7 @@ fn kernelUnifiedAttention2d(
 
         if (config.use_qq_bias) {
             const key_rel_pos = seq_offset.sub(context_len);
-            const is_query_key = key_rel_pos.ge(@as(i32, 0))
+            const is_query_key = key_rel_pos.ge(0)
                 .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
             const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
                 .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
@@ -572,7 +572,7 @@ fn kernelUnifiedAttention3d(
     const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
-    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(@as(i32, 1))));
+    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(1)));
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
@@ -608,7 +608,7 @@ fn kernelUnifiedAttention3d(
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = query_offset_1.lt(@as(i64, NUM_QUERY_HEADS));
+    const query_mask_1 = query_offset_1.lt(NUM_QUERY_HEADS);
 
     const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
     const q_mask = q_mask_ab.bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
@@ -620,7 +620,7 @@ fn kernelUnifiedAttention3d(
     const block_table_offset = seq_idx.to(.i64).mul(block_table_stride);
 
     // M init: USE_SINKS + segm_idx==0 → loaded sinks; else -inf.
-    const segm_is_zero = segm_idx.eq(@as(i32, 0));
+    const segm_is_zero = segm_idx.eq(0);
     const m_init: Value = if (config.use_sinks) mb: {
         var mi = k.openIfElse(segm_is_zero, .{k.tensorTy(&.{BLOCK_M}, .f32)});
         {
@@ -655,7 +655,7 @@ fn kernelUnifiedAttention3d(
         qq_bias_ptr.splatTo(&.{BLOCK_M});
 
     const pad_term: i32 = @intCast(@divTrunc(BLOCK_M - 1, NUM_QUERIES_PER_KV) + 1);
-    const max_prefix_raw = context_len.add(q_local_bq).add(@as(i32, pad_term));
+    const max_prefix_raw = context_len.add(q_local_bq).add(pad_term);
     const max_seq_prefix_len = max_prefix_raw.minimum(seq_len);
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
@@ -665,7 +665,7 @@ fn kernelUnifiedAttention3d(
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
 
-    var loop = k.openFor(segm_tile_lo, segm_tile_hi, @as(i32, 1), .{ m_init, l_init, acc_init });
+    var loop = k.openFor(segm_tile_lo, segm_tile_hi, 1, .{ m_init, l_init, acc_init });
     {
         const j = loop.iv;
         const M = loop.carried[0];
@@ -680,16 +680,16 @@ fn kernelUnifiedAttention3d(
 
         const physical_block_idx = k.load(
             block_tables_ptr.splatTo(&.{TILE_SIZE})
-                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(@as(i64, BLOCK_SIZE)))),
+                .addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
         ).to(.i64);
 
-        const seq_in_block = seq_offset.to(.i64).rem(@as(i64, BLOCK_SIZE));
+        const seq_in_block = seq_offset.to(.i64).rem(BLOCK_SIZE);
 
         const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
             .mul(stride_v_cache_0.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
         const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2).splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED });
         const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(@as(i64, config.stride_v_cache_3));
+            .mul(config.stride_v_cache_3);
         const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED)
             .mul(stride_v_cache_1.splatTo(&.{ TILE_SIZE, HEAD_SIZE_PADDED }));
         const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
@@ -698,7 +698,7 @@ fn kernelUnifiedAttention3d(
             .mul(stride_k_cache_0.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
         const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2).splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE });
         const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(@as(i64, config.stride_k_cache_3));
+            .mul(config.stride_k_cache_3);
         const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE)
             .mul(stride_k_cache_1.splatTo(&.{ HEAD_SIZE_PADDED, TILE_SIZE }));
         const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
@@ -729,7 +729,7 @@ fn kernelUnifiedAttention3d(
 
         const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
         const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(@as(i32, 1));
+        const rhs = ql_2d_i32.add(context_len.splatTo(&.{ BLOCK_M, TILE_SIZE })).add(1);
         const seq_mask = so_2d.lt(rhs);
 
         const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
@@ -751,7 +751,7 @@ fn kernelUnifiedAttention3d(
 
         if (config.use_qq_bias) {
             const key_rel_pos = seq_offset.sub(context_len);
-            const is_query_key = key_rel_pos.ge(@as(i32, 0))
+            const is_query_key = key_rel_pos.ge(0)
                 .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
             const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
                 .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
@@ -788,10 +788,10 @@ fn kernelUnifiedAttention3d(
     const segm_out_token_stride: i64 = NUM_QUERY_HEADS * segm_out_head_stride;
 
     const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(@as(i64, segm_out_token_stride));
+        .mul(segm_out_token_stride);
     const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(@as(i64, segm_out_head_stride));
-    const seg_term = segm_idx.to(.i64).mul(@as(i64, HEAD_SIZE_PADDED))
+        .mul(segm_out_head_stride);
+    const seg_term = segm_idx.to(.i64).mul(HEAD_SIZE_PADDED)
         .splatTo(&.{ BLOCK_M, HEAD_SIZE_PADDED });
     const segm_output_offset = oo0_2d.add(oo1_2d).add(seg_term).add(offs_d_2d);
 
@@ -805,8 +805,8 @@ fn kernelUnifiedAttention3d(
 
     const segm_head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
     const segm_token_stride: i64 = NUM_QUERY_HEADS * segm_head_stride;
-    const segm_offset = query_offset_0.mul(@as(i64, segm_token_stride))
-        .add(query_offset_1.mul(@as(i64, segm_head_stride)))
+    const segm_offset = query_offset_0.mul(segm_token_stride)
+        .add(query_offset_1.mul(segm_head_stride))
         .add(segm_idx.to(.i64).splatTo(&.{BLOCK_M}));
     const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
     k.storeOpts(segm_max_ptr.splatTo(&.{BLOCK_M}).addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
@@ -862,8 +862,8 @@ fn reduceSegments(
     // segm_offset = query_token_idx*NQH*NSPS + query_head_idx*NSPS + arange(NSPS)
     const tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
     const head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
-    const segm_offset = query_token_idx.to(.i64).mul(@as(i64, tok_stride))
-        .add(query_head_idx.to(.i64).mul(@as(i64, head_stride)))
+    const segm_offset = query_token_idx.to(.i64).mul(tok_stride)
+        .add(query_head_idx.to(.i64).mul(head_stride))
         .add(seg_range.to(.i64));
 
     const segm_max = k.loadOpts(segm_max_ptr.splatTo(&.{NUM_SEGMENTS_PER_SEQ}).addPtr(segm_offset), .{
@@ -883,10 +883,10 @@ fn reduceSegments(
     const out_tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
     const out_head_stride: i64 = NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
     const seg_off_2d = seg_range.to(.i64).broadcast2d(1, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED)
-        .mul(@as(i64, HEAD_SIZE_PADDED));
+        .mul(HEAD_SIZE_PADDED);
     const dim_off_2d = offs_d.to(.i64).broadcast2d(0, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED);
-    const base = query_token_idx.to(.i64).mul(@as(i64, out_tok_stride))
-        .add(query_head_idx.to(.i64).mul(@as(i64, out_head_stride)));
+    const base = query_token_idx.to(.i64).mul(out_tok_stride)
+        .add(query_head_idx.to(.i64).mul(out_head_stride));
     const segm_output_offset = base.splatTo(&.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED })
         .add(seg_off_2d).add(dim_off_2d);
 
@@ -902,7 +902,7 @@ fn reduceSegments(
     const acc_sum = k.sumOpts(segm_output, .{ .axis = 0 });
 
     var acc = k.where(
-        overall_expsum.eq(@as(f32, 0.0)),
+        overall_expsum.eq(0.0),
         k.full(&.{HEAD_SIZE_PADDED}, 0.0, .f32),
         acc_sum.div(overall_expsum),
     );
