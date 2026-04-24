@@ -185,14 +185,21 @@ default; `.olt` / `.oge` / ... for floats.
 
 `v.to(.f32)` chooses the right MLIR op based on the current vs target kind:
 
-| Source kind | Target kind | MLIR op                       |
-|-------------|-------------|-------------------------------|
-| int         | wider int   | `arith.extsi`                 |
-| int         | narrower int| `arith.trunci`                |
-| int         | float       | `arith.sitofp`                |
-| float       | int         | `arith.fptosi`                |
-| float       | float       | `tt.fp_to_fp` (rounding=rtne) |
-| same type   | same type   | no-op (returns `self`)        |
+| Source kind | Target kind      | MLIR op                       |
+|-------------|------------------|-------------------------------|
+| int         | wider int        | `arith.extsi`                 |
+| int         | narrower int     | `arith.trunci`                |
+| int         | float            | `arith.sitofp`                |
+| float       | int              | `arith.fptosi`                |
+| float       | wider float      | `arith.extf` (no rounding)    |
+| float       | narrower float   | `tt.fp_to_fp` (rounding=rtne) |
+| same type   | same type        | no-op (returns `self`)        |
+
+Triton's verifier rejects `tt.fp_to_fp` with a rounding attribute when the
+target is not strictly narrower than the source (e.g. `bf16 → f32`, or
+same-width `bf16 ↔ f16`). The DSL routes strict upcasts through
+`arith.extf` to match Python Triton's own lowering; only genuine
+downcasts carry the `rtne` rounding attribute.
 
 ### Shape / pointer helpers
 

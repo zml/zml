@@ -1714,6 +1714,15 @@ pub const Kernel = struct {
         const cur_is_float = src.isFloatElem();
         const tgt_is_float = isFloatDtype(dtype);
         if (cur_is_float and tgt_is_float) {
+            // Triton rejects `tt.fp_to_fp` with a rounding attribute for
+            // non-downcast conversions (upcast or same-width): rounding is
+            // only meaningful when the target is strictly narrower. Route
+            // strict upcasts through `arith.extf` (no rounding attr) and
+            // apply `rtne` only on actual downcasts unless the caller asks
+            // otherwise.
+            const cur_bw_f = dtypeBitwidth(self.mlirElemToDType(cur_elem));
+            const tgt_bw_f = dtypeBitwidth(dtype);
+            if (tgt_bw_f > cur_bw_f) return self.extf(src, dtype);
             return self.fpToFpOpts(src, dtype, .{ .rounding = opts.fp_downcast_rounding orelse .rtne });
         }
         if (cur_is_float and !tgt_is_float) return self.fptosi(src, dtype);
