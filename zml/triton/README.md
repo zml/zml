@@ -82,8 +82,9 @@ The four arg kinds mirror what TTIR's `tt.func` can carry:
 | `.{ .tensor = .{ &.{64, 128}, .f32 } }`                 | `tensor<64x128 x f32>`   | Pre-built tensor input (rare)   |
 | `.{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } }` | `!tt.ptr<f32>` with override | Custom `address_space`/divisibility |
 
-`.ptr` gets a default `tt.divisibility = 32` hint. Use `.ptr_opts` to change
-that (or set `divisibility = null` to suppress). Runtime dtypes work by
+`.ptr` gets a default `tt.divisibility = 16` hint (matching Python Triton's
+default). Use `.ptr_opts` to change that (or set `divisibility = null` to
+suppress). Runtime dtypes work by
 substituting the enum literal: `.a_ptr = .{ .ptr = dsl(config.a_dtype) }`.
 
 `Kernel.build` returns a heap-allocated `*Built(Spec)`:

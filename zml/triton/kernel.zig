@@ -353,7 +353,7 @@ pub const ArgSpec = struct {
     kind: Kind,
 
     pub const Kind = union(enum) {
-        /// `!tt.ptr<T, addr_space = 1>` with default `tt.divisibility = 32`.
+        /// `!tt.ptr<T, addr_space = 1>` with default `tt.divisibility = 16`.
         /// Terse form: `.{ .ptr = .f32 }`.
         ptr: DType,
         /// Plain scalar argument (e.g. strides, sizes). `.{ .scalar = .i64 }`.
@@ -367,11 +367,11 @@ pub const ArgSpec = struct {
     };
 
     /// Overrides for pointer args when the defaults (`address_space = 1`,
-    /// `divisibility = 32`) aren't what you want.
+    /// `divisibility = 16`) aren't what you want.
     pub const PtrOpts = struct {
         dtype: DType,
         address_space: i32 = 1,
-        divisibility: ?u32 = 32,
+        divisibility: ?u32 = 16,
     };
 };
 
@@ -851,7 +851,7 @@ pub const Kernel = struct {
             switch (a.kind) {
                 .ptr => {
                     const div_attr = mlir.dictionaryAttribute(ctx, &.{
-                        .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, 32)),
+                        .named(ctx, "tt.divisibility", mlir.integerAttribute(ctx, .i32, 16)),
                     });
                     arg_attrs[i] = div_attr;
                     any_arg_attr = true;

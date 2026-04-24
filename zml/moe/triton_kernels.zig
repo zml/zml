@@ -381,7 +381,7 @@ pub fn fusedMoeKernel(allocator: std.mem.Allocator, config: GenerationConfig) ![
                 const b_val = k.loadMasked(b_ptrs, mask_b);
 
                 // accumulator += tl.dot(a, b)
-                const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .ieee, .max_num_imprecise_acc = 0 });
+                const new_acc = k.dotOpts(a_val, b_val, acc, .{ .input_precision = .tf32, .max_num_imprecise_acc = 0 });
 
                 // a_ptrs += BLOCK_SIZE_K * stride_ak_block; b_ptrs += BLOCK_SIZE_K * stride_bk_block
                 const new_a_ptrs = a_ptrs.addPtr(stride_ak_block.mul(block_size_k).splatTo(&.{ block_size_m, block_size_k }));
