@@ -199,7 +199,7 @@ pub fn fusedExpertsImpl(
         .bf16,
     );
 
-    const ttir_first_matmul = try kernels.generateFusedMoeKernelTtir(allocator, first_generation_config);
+    const ttir_first_matmul = try kernels.fusedMoeKernel(allocator, first_generation_config);
     defer allocator.free(ttir_first_matmul);
 
     var b_bias = opts.w1_bias orelse metadata.w1_zero_bias.?;
@@ -243,7 +243,7 @@ pub fn fusedExpertsImpl(
         false,
         .bf16,
     );
-    const ttir_second_matmul = try kernels.generateFusedMoeKernelTtir(allocator, second_generation_config);
+    const ttir_second_matmul = try kernels.fusedMoeKernel(allocator, second_generation_config);
     defer allocator.free(ttir_second_matmul);
     b_bias = opts.w2_bias orelse metadata.w2_zero_bias.?;
     b_scale = opts.w2_scale orelse Tensor.scalar(1.0, .f32);
@@ -378,12 +378,12 @@ fn alignBlockSize(allocator: std.mem.Allocator, topk_ids: Tensor, num_experts: i
         .sort_block_size = @intCast(sort_block_size),
         .sort_grid_x = @intCast(sort_grid_x),
     };
-    const ttir_align = try kernels.generateAlignBlockSizeKernelTtir(allocator, align_config);
+    const ttir_align = try kernels.moeAlignBlockSizeKernel(allocator, align_config);
     defer allocator.free(ttir_align);
 
     var count_sort_config = align_config;
     count_sort_config.kernel_name = kernels.AlignBlockSizeKernel.count_and_sort.kernelName();
-    const ttir_count_sort = try kernels.generateCountAndSortKernelTtir(allocator, count_sort_config);
+    const ttir_count_sort = try kernels.countAndSortExpertTokensKernel(allocator, count_sort_config);
     defer allocator.free(ttir_count_sort);
 
     const flat_experts = topk_ids_.reshape(.{ .g = num_assignments });
@@ -465,7 +465,7 @@ fn quantizePerTokenGroupFp8(
         .use_ue8m0 = false,
     };
 
-    const ir = try kernels.generatePerTokenGroupQuantFp8KernelTtir(allocator, config);
+    const ir = try kernels.perTokenGroupQuantFp8(allocator, config);
     defer allocator.free(ir);
 
     const groups_per_row = @divExact(x.dim(1), group_size);

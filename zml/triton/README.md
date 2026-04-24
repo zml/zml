@@ -1,8 +1,9 @@
 # ZML Triton DSL — Author's Guide
 
 A Zig builder for Triton IR (TTIR) that tries to read like `triton.language`
-Python while staying in pure Zig. Used by `zml/moe/triton_kernels.zig` and by
-anything else that wants to emit TTIR to hand to `zml.ops.triton(...)`.
+Python while staying in pure Zig. Used by `zml/moe/triton_kernels.zig`,
+`zml/attention/triton_kernels.zig`, and by anything else that wants to emit
+TTIR to hand to `zml.ops.triton(...)`.
 
 Two files define the surface:
 
