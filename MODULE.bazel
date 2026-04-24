@@ -141,7 +141,7 @@ pip.parse(
     download_only = True,
     hub_name = "triton_py_deps",
     python_version = "3.12",
-    requirements_lock = "//zml/attention/triton:requirements.lock.txt",
+    requirements_lock = "//zml/triton/generation:requirements.lock.txt",
     target_platforms = [
         "linux_x86_64",
         "linux_arm64",

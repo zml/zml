@@ -2,26 +2,32 @@ load("@bazel_lib//lib:copy_to_directory.bzl", "copy_to_directory")
 load("@rules_python//python:py_library.bzl", "py_library")
 load("@zml//bazel:runfiles.bzl", "runfiles_to_default")
 
+exports_files(["triton_kernels/config.json"])
+
 py_library(
     name = "triton_kernels",
     srcs = [
         "triton_kernels/__init__.py",
-        "triton_kernels/unified_attention.py",
+        "triton_kernels/moe.py",
     ],
-    target_compatible_with = ["@platforms//os:linux"],
     visibility = ["//visibility:public"],
     deps = ["@triton_py_deps//triton"],
 )
 
 py_library(
-    name = "attention_compile",
-    srcs = ["attention_compile.py"],
-    target_compatible_with = ["@platforms//os:linux"],
+    name = "moe_compile",
+    srcs = ["moe_compile.py"],
     visibility = ["//visibility:public"],
     deps = [
         ":triton_kernels",
         "@triton_py_deps//triton",
         "//zml/triton/generation:kernels_utils",
     ],
+)
+
+filegroup(
+    name = "moe_config",
+    srcs = ["triton_kernels/config.json"],
+    visibility = ["//visibility:public"],
 )
 

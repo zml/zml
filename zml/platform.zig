@@ -7,6 +7,7 @@ pub const Target = platforms.Platform;
 const stdx = @import("stdx");
 
 const attention = @import("attention.zig");
+const moe = @import("moe.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiler.zig");
@@ -202,14 +203,14 @@ pub const Platform = struct {
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
 
-    triton_runtime: ?attention.triton.Runtime = null,
+    triton_runtime: ?zml.triton.Runtime = null,
     tpu_ir_runtime: ?attention.tpu.Runtime = null,
 
     pub fn initBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: attention.paged_attention.Backend) !void {
         switch (backend) {
             .triton => {
                 if (self.triton_runtime == null) {
-                    self.triton_runtime = try zml.attention.triton.Runtime.init(allocator, io);
+                    self.triton_runtime = try zml.triton.Runtime.init(allocator, io);
                 }
             },
             .mosaic_tpu => {
@@ -218,6 +219,16 @@ pub const Platform = struct {
                 }
             },
             else => {},
+        }
+    }
+
+    pub fn initMoeBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: moe.Backend) !void {
+        switch (backend) {
+            .triton => {
+                if (self.triton_runtime == null) {
+                    self.triton_runtime = try zml.triton.Runtime.init(allocator, io);
+                }
+            },
         }
     }
 
