@@ -75,8 +75,7 @@ pub const Exe = struct {
         buffers: []const [*]*pjrt.Buffer,
         raw_buffers: []*pjrt.Buffer,
 
-        num_devices: u32,
-        buffer_count: u32,
+        num_devices: usize,
 
         pub fn init(allocator: std.mem.Allocator, count: usize, num_devices: usize) !FlatBuffers {
             const raw_buffers = try allocator.alloc(*pjrt.Buffer, num_devices * count);
