@@ -123,6 +123,9 @@ bazel run --config=release //examples/llm               \
           --prompt="What is the capital of France?"
 ```
 
+## Troubleshooting
+
+If you run into trouble in the setup process, please check out the [Troubleshooting](../misc/troubleshooting.md) guide.
 
 ## Where to go next:
 
