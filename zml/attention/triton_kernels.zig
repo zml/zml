@@ -3,7 +3,7 @@
 //! from vLLM). Each top-level function here mirrors a Python kernel 1:1:
 //! same name (snake_case → camelCase), same parameter intent, same body
 //! flow. Helper functions (`fastExp`, `cdivFn`, `applySoftcap`,
-//! `findSeqIdx`) take explicit `*Kernel` + `Value` arguments — no
+//! `findSeqIdx`) take explicit `*Builder` + `Value` arguments — no
 //! anytype/context plumbing.
 //!
 //! The generated IR is handed to `zml.ops.triton(...)` by
@@ -17,7 +17,7 @@ const ttir = dialects.ttir;
 
 const zml = @import("../zml.zig");
 const tri = @import("zml/triton");
-const Kernel = tri.Kernel;
+const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
 
@@ -130,17 +130,26 @@ fn isFp8(dt: DType) bool {
 }
 
 /// Python `fast_exp(x)` — `exp2(x * RCP_LN2)`.
-fn fastExp(k: *Kernel, x: Value) Value {
+fn fastExp(k: *Builder, x: Value) Value {
     return k.exp2(x.mul(RCP_LN2));
 }
 
 /// Python `cdiv_fn(x, y)` — ceiling integer divide for positive operands.
+/// Python `cdiv_fn(x, y)` from unified_attention.py — `(x + y - 1) // y`.
+/// Python evaluates left-to-right, so the runtime emit form is
+/// `addi(x, y)` → `subi(_, 1)` → `divsi`. This is **distinct from**
+/// Triton's `tl.cdiv`, which is `(x + (div - 1)) // div` and emits
+/// `subi(div, 1)` → `addi(x, _)` → `divsi`. Both fold to one constant
+/// when `y` is comptime, but differ when `y` is a runtime tensor.
 fn cdivFn(x: Value, y: anytype) Value {
-    return x.cdiv(y);
+    return switch (@typeInfo(@TypeOf(y))) {
+        .comptime_int, .comptime_float => x.add(y - 1).div(y),
+        else => x.add(y).sub(1).div(y),
+    };
 }
 
 /// Python `apply_softcap(S, x)` — tanh-style softcap using exp2.
-fn applySoftcap(k: *Kernel, s_val: Value, x: Value) Value {
+fn applySoftcap(k: *Builder, s_val: Value, x: Value) Value {
     const sdiv = s_val.div(x);
     const p1 = k.exp2(sdiv);
     const p2 = k.exp2(k.negf(sdiv));
@@ -150,7 +159,7 @@ fn applySoftcap(k: *Kernel, s_val: Value, x: Value) Value {
 /// Python `find_seq_idx(query_start_len_ptr, target_idx, num_seqs, BLOCK_Q,
 /// use_q_block_mode)` — binary search into the CSR-style offset table.
 fn findSeqIdx(
-    k: *Kernel,
+    k: *Builder,
     query_start_len_ptr: Value,
     target_idx: Value,
     num_seqs: Value,
@@ -203,7 +212,7 @@ fn dequantKv(loaded: Value, scale: Value, kv_is_fp8: bool, q_dtype: DType) Value
 /// `*_scale`, `softcap`, strides, `num_seqs`) are passed as Values so this
 /// helper can be called from both the scalar- and pointer-arg variants.
 fn kernelUnifiedAttention2d(
-    k: *Kernel,
+    k: *Builder,
     output_ptr: Value,
     query_ptr: Value,
     key_cache_ptr: Value,
@@ -257,7 +266,8 @@ fn kernelUnifiedAttention2d(
     const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
-    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(1)));
+    // Match Python's left-to-right `query_start_len_ptr + seq_idx + 1`: two `tt.addptr`s.
+    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx).addPtr(1));
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     // Python: if q_block_local_idx * BLOCK_Q >= cur_batch_query_len: return
@@ -272,22 +282,24 @@ fn kernelUnifiedAttention2d(
     const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
     const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
-    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
+    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos);
     const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
-        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
+        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
     // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
-    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_0);
-    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_1);
-    const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
-    const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
+    // Inline `expandDims(offs_d, 0)` *inside* the chain so it's emitted after
+    // the qo0+qo1 addi — matches Python's source-order emission (the trailing
+    // term's expand_dims sits between the i64 addi and its broadcast).
+    const qo0_2d = k.expandDims(query_offset_0, 1).mul(query_stride_0);
+    const qo1_2d = k.expandDims(query_offset_1, 1).mul(query_stride_1);
+    const query_offset = qo0_2d.add(qo1_2d).add(k.expandDims(offs_d, 0));
 
     const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = query_offset_1.lt(NUM_QUERY_HEADS);
+    const query_mask_1 = query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
 
     // Q : (BLOCK_M, HEAD_SIZE_PADDED)
     const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
@@ -357,6 +369,11 @@ fn kernelUnifiedAttention2d(
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
 
+    // Python: `block_tables_ptr + block_table_offset + seq_offset // BLOCK_SIZE`
+    // parses left-to-right, so the scalar `+ block_table_offset` is its own
+    // hoisted `tt.addptr` and the in-loop add stays i32. Mirror that.
+    const block_tables_ptr_shifted = block_tables_ptr.addPtr(block_table_offset);
+
     // Iterate through tiles (loop carries M, L, acc).
     var loop = k.openFor(tile_start, tile_end, 1, .{ m_init, l_init, acc_init });
     {
@@ -373,10 +390,10 @@ fn kernelUnifiedAttention2d(
             seq_offset.lt(max_seq_prefix_len);
 
         const physical_block_idx = k.load(
-            block_tables_ptr.addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
+            block_tables_ptr_shifted.addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
         ).to(.i64);
 
-        const seq_in_block = seq_offset.to(.i64).rem(BLOCK_SIZE);
+        const seq_in_block = seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))).to(.i64);
 
         // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED)
         const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_0);
@@ -481,9 +498,11 @@ fn kernelUnifiedAttention2d(
     const L_final = loop.results[1];
     var acc_final = loop.results[2];
 
-    // Epilogue: acc /= L (via 1/L for Newton-Raphson stability).
-    const one_over_L = k.full(&.{BLOCK_M}, 1.0, .f32).div(L_final);
-    acc_final = acc_final.mul(one_over_L.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+    // Epilogue: acc /= L. Python writes `1.0 / L[:, None]` — the divf is
+    // emitted at (BLOCK_M, 1) shape, then broadcast to (BLOCK_M, HSP).
+    const L_2d = k.expandDims(L_final, 1);
+    const one_over_L = k.full(&.{ BLOCK_M, 1 }, 1.0, .f32).div(L_2d);
+    acc_final = acc_final.mul(k.broadcastTo(one_over_L, &.{ BLOCK_M, HEAD_SIZE_PADDED }));
 
     if (config.use_fp8) {
         acc_final = acc_final.mul(out_scale);
@@ -496,7 +515,7 @@ fn kernelUnifiedAttention2d(
 
     const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_0);
     const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_1);
-    const output_offset = oo0_2d.add(oo1_2d).add(offs_d_2d);
+    const output_offset = oo0_2d.add(oo1_2d).add(k.expandDims(offs_d, 0));
 
     const store_mask = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
         .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
@@ -512,7 +531,7 @@ fn kernelUnifiedAttention2d(
 // ============================================================================
 
 fn kernelUnifiedAttention3d(
-    k: *Kernel,
+    k: *Builder,
     segm_output_ptr: Value,
     segm_max_ptr: Value,
     segm_expsum_ptr: Value,
@@ -566,7 +585,8 @@ fn kernelUnifiedAttention3d(
     const q_block_local_idx = q_block_global_idx.sub(q_block_start_idx);
 
     const cur_batch_in_all_start_index = q_start_raw;
-    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx.add(1)));
+    // Match Python's left-to-right `query_start_len_ptr + seq_idx + 1`: two `tt.addptr`s.
+    const cur_batch_in_all_stop_index = k.load(query_start_len_ptr.addPtr(seq_idx).addPtr(1));
     const cur_batch_query_len = cur_batch_in_all_stop_index.sub(cur_batch_in_all_start_index);
 
     const q_out_of_range = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q))).ge(cur_batch_query_len);
@@ -586,26 +606,38 @@ fn kernelUnifiedAttention3d(
     const q_local_bq = q_block_local_idx.mul(@as(i32, @intCast(BLOCK_Q)));
     const query_pos = q_local_bq.add(offs_m.div(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
-    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos).to(.i64);
+    const query_offset_0 = cur_batch_in_all_start_index.add(query_pos);
     const query_offset_1 = kv_head_idx.mul(@as(i32, @intCast(NUM_QUERIES_PER_KV)))
-        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV)))).to(.i64);
+        .add(offs_m.rem(@as(i32, @intCast(NUM_QUERIES_PER_KV))));
 
-    const qo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_0);
-    const qo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(query_stride_1);
-    const offs_d_2d = offs_d.to(.i64).broadcast2d(0, BLOCK_M, HEAD_SIZE_PADDED);
-    const query_offset = qo0_2d.add(qo1_2d).add(offs_d_2d);
+    // query_offset = qo_0[:, None]*qstride_0 + qo_1[:, None]*qstride_1 + offs_d[None, :]
+    // Inline `expandDims(offs_d, 0)` *inside* the chain so it's emitted after
+    // the qo0+qo1 addi — matches Python's source-order emission (the trailing
+    // term's expand_dims sits between the i64 addi and its broadcast).
+    const qo0_2d = k.expandDims(query_offset_0, 1).mul(query_stride_0);
+    const qo1_2d = k.expandDims(query_offset_1, 1).mul(query_stride_1);
+    const query_offset = qo0_2d.add(qo1_2d).add(k.expandDims(offs_d, 0));
 
     const dim_mask: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
         offs_d.lt(@as(i32, @intCast(HEAD_SIZE)))
     else
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
     const query_mask_0 = query_pos.lt(cur_batch_query_len);
-    const query_mask_1 = query_offset_1.lt(NUM_QUERY_HEADS);
+    const query_mask_1 = query_offset_1.lt(@as(i32, @intCast(NUM_QUERY_HEADS)));
 
-    const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
-    const q_mask = q_mask_ab.bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
-    const Q = k.loadOpts(query_ptr.addPtr(query_offset), .{
-        .mask = q_mask,
+    // Match Python's `dim_mask[None, :] & query_mask_0[:, None] & query_mask_1[:, None]`:
+    // when HEAD_SIZE == HEAD_SIZE_PADDED, dim_mask is constant-true and Triton's
+    // canonicalizer drops the AND, leaving a 16x1 andi that broadcasts at the load
+    // site. Compute the partial-shape mask here, then broadcast inline at the load
+    // call so the broadcast op emits *after* the addptr (Python's emit order).
+    const q_mask_pre = k.expandDims(query_mask_0, 1).bitAnd(k.expandDims(query_mask_1, 1));
+    const q_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+        q_mask_pre.bitAnd(k.expandDims(dim_mask, 0))
+    else
+        q_mask_pre;
+    const q_ptrs = query_ptr.addPtr(query_offset);
+    const Q = k.loadOpts(q_ptrs, .{
+        .mask = k.broadcastTo(q_mask_partial, &.{ BLOCK_M, HEAD_SIZE_PADDED }),
         .other = k.zeros(&.{ BLOCK_M, HEAD_SIZE_PADDED }, config.q_dtype),
     });
 
@@ -654,7 +686,8 @@ fn kernelUnifiedAttention3d(
     const num_tiles = cdivFn(max_seq_prefix_len, @as(i32, @intCast(TILE_SIZE)));
 
     const segm_tile_lo = segm_idx.mul(tiles_per_segment);
-    const segm_tile_hi = segm_tile_lo.add(tiles_per_segment).minimum(num_tiles);
+    // Match Python: `min((segm_idx + 1) * tiles_per_segment, num_tiles)`.
+    const segm_tile_hi = segm_idx.add(1).mul(tiles_per_segment).minimum(num_tiles);
 
     const kv_cache_mod: ttir.CacheModifier =
         if (config.all_decode) .cg else .none;
@@ -672,41 +705,66 @@ fn kernelUnifiedAttention3d(
         else
             seq_offset.lt(max_seq_prefix_len);
 
+        // Match Python's left-to-right `block_tables_ptr + block_table_offset +
+        // seq_offset // BLOCK_SIZE`: two `tt.addptr`s. Emit inline so XLA's
+        // LICM picks a hoist position consistent with Python's frontend (the
+        // first addptr lands among the loop-invariant splats, in source order).
         const physical_block_idx = k.load(
-            block_tables_ptr.addPtr(block_table_offset.add(seq_offset.to(.i64).div(BLOCK_SIZE))),
+            block_tables_ptr.addPtr(block_table_offset).addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
         ).to(.i64);
 
-        const seq_in_block = seq_offset.to(.i64).rem(BLOCK_SIZE);
+        // v_offset / k_offset: chain the running sum so each `term_i` is computed
+        // right before its addi, matching Python's source-order emission. Inline
+        // `seq_offset % BLOCK_SIZE` so the remsi emits between pb_v's broadcast
+        // and blk_v's expand_dims; defer extsi past expand_dims (Python keeps
+        // `(seq_offset % BLOCK_SIZE)[:, None]` at i32 until the i64 mul triggers
+        // auto-promote). MLIR's CSE pass dedupes the remsi between v and k uses.
+        const v_offset = k.expandDims(physical_block_idx, 1).mul(stride_v_cache_0)
+            .add(kv_head_idx.to(.i64).mul(stride_v_cache_2))
+            .add(k.expandDims(offs_d, 0).mul(config.stride_v_cache_3))
+            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 1).mul(stride_v_cache_1));
 
-        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_0);
-        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2);
-        const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(config.stride_v_cache_3);
-        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_1);
-        const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
+        const k_offset = k.expandDims(physical_block_idx, 0).mul(stride_k_cache_0)
+            .add(kv_head_idx.to(.i64).mul(stride_k_cache_2))
+            .add(k.expandDims(offs_d, 1).mul(config.stride_k_cache_3))
+            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 0).mul(stride_k_cache_1));
 
-        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_0);
-        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2);
-        const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(config.stride_k_cache_3);
-        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_1);
-        const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
-
-        const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);
+        // K mask: `dim_mask[:, None] & tile_mask[None, :]`. When HEAD_SIZE ==
+        // HEAD_SIZE_PADDED, dim_mask is constant-true and Triton's canonicalizer
+        // drops the AND, leaving `tile_mask[None, :]` at 1xTILE. Broadcast at
+        // the load call site so the broadcast op emits *after* the addptr.
+        const k_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+            k.expandDims(dim_mask, 1).bitAnd(k.expandDims(tile_mask, 0))
+        else
+            k.expandDims(tile_mask, 0);
         const K_load = k.loadOpts(key_cache_ptr.addPtr(k_offset), .{
-            .mask = k_mask,
+            .mask = k.broadcastTo(k_mask_partial, &.{ HEAD_SIZE_PADDED, TILE_SIZE }),
             .other = k.zeros(&.{ HEAD_SIZE_PADDED, TILE_SIZE }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
         });
         const K = dequantKv(K_load, k_scale, isFp8(config.kv_dtype), config.q_dtype);
 
-        const v_mask = k.mask2d(tile_mask, dim_mask, TILE_SIZE, HEAD_SIZE_PADDED);
+        const v_mask_partial: Value = if (HEAD_SIZE_PADDED != HEAD_SIZE)
+            k.expandDims(tile_mask, 1).bitAnd(k.expandDims(dim_mask, 0))
+        else
+            k.expandDims(tile_mask, 1);
         const V_load = k.loadOpts(value_cache_ptr.addPtr(v_offset), .{
-            .mask = v_mask,
+            .mask = k.broadcastTo(v_mask_partial, &.{ TILE_SIZE, HEAD_SIZE_PADDED }),
             .other = k.zeros(&.{ TILE_SIZE, HEAD_SIZE_PADDED }, config.kv_dtype),
             .cache_modifier = kv_cache_mod,
         });
         const V = dequantKv(V_load, v_scale, isFp8(config.kv_dtype), config.q_dtype);
+
+        // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
+        // Compute *before* S = qk_scale * dot(Q,K) to match Python source order;
+        // after XLA's LICM hoists both, the int seq_mask preprocessing lands
+        // before the f32 qk_scale_splat in the pre-loop block. Match Python's
+        // operand order: `context_len + query_pos[:, None]` puts the splat on
+        // the LHS of the addi (Triton's frontend preserves Python source order).
+        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
+        const rhs = context_len.add(ql_2d_i32).add(1);
+        const seq_mask = so_2d.lt(rhs);
 
         const acc_zero = k.zeros(&.{ BLOCK_M, TILE_SIZE }, .f32);
         const qk = k.dot(Q, K, acc_zero);
@@ -715,11 +773,6 @@ fn kernelUnifiedAttention3d(
         if (config.use_softcap) {
             S = applySoftcap(k, S, softcap).mul(RCP_LN2);
         }
-
-        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
-        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
-        const rhs = ql_2d_i32.add(context_len).add(1);
-        const seq_mask = so_2d.lt(rhs);
 
         const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
         const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
@@ -772,16 +825,21 @@ fn kernelUnifiedAttention3d(
     const L_final = loop.results[1];
     const acc_final = loop.results[2];
 
-    // Store segm_output, segm_max, segm_expsum.
-    const segm_out_head_stride: i64 = NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
-    const segm_out_token_stride: i64 = NUM_QUERY_HEADS * segm_out_head_stride;
+    // segm_output_offset = qo_0[:, None].to(i64) * (NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+    //                    + qo_1[:, None] * (NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED)
+    //                    + segm_idx * HEAD_SIZE_PADDED + offs_d[None, :]
+    const segm_out_head_stride_i32: i32 = @intCast(NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED);
+    const segm_out_token_stride_i64: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
 
-    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(segm_out_token_stride);
-    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED)
-        .mul(segm_out_head_stride);
-    const seg_term = segm_idx.to(.i64).mul(HEAD_SIZE_PADDED);
-    const segm_output_offset = oo0_2d.add(oo1_2d).add(seg_term).add(offs_d_2d);
+    // Inline `segm_idx * HEAD_SIZE_PADDED` and `offs_d[None, :]` inside the chain
+    // so each term's ops emit in source order — matches Python's deferred extsi
+    // for the i32 oo1 muli (Python emits seg_term's i32 muli *after* oo0+oo1's
+    // addi; the chained-Zig form mirrors that).
+    const oo0_2d = k.expandDims(query_offset_0, 1).to(.i64).mul(segm_out_token_stride_i64);
+    const oo1_2d = k.expandDims(query_offset_1, 1).mul(segm_out_head_stride_i32);
+    const segm_output_offset = oo0_2d.add(oo1_2d)
+        .add(segm_idx.mul(@as(i32, @intCast(HEAD_SIZE_PADDED))))
+        .add(k.expandDims(offs_d, 0));
 
     const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
         .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
@@ -791,11 +849,13 @@ fn kernelUnifiedAttention3d(
         .{ .mask = store_mask_2d },
     );
 
-    const segm_head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
-    const segm_token_stride: i64 = NUM_QUERY_HEADS * segm_head_stride;
-    const segm_offset = query_offset_0.mul(segm_token_stride)
-        .add(query_offset_1.mul(segm_head_stride))
-        .add(segm_idx.to(.i64));
+    // segm_offset = qo_0.to(i64) * (NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ)
+    //             + qo_1 * NUM_SEGMENTS_PER_SEQ + segm_idx
+    const segm_head_stride_i32: i32 = @intCast(NUM_SEGMENTS_PER_SEQ);
+    const segm_token_stride_i64: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
+    const segm_offset = query_offset_0.to(.i64).mul(segm_token_stride_i64)
+        .add(query_offset_1.mul(segm_head_stride_i32))
+        .add(segm_idx);
     const store_mask_1d = query_mask_0.bitAnd(query_mask_1);
     k.storeOpts(segm_max_ptr.addPtr(segm_offset), M_final, .{ .mask = store_mask_1d });
     k.storeOpts(segm_expsum_ptr.addPtr(segm_offset), L_final, .{ .mask = store_mask_1d });
@@ -806,7 +866,7 @@ fn kernelUnifiedAttention3d(
 // ============================================================================
 
 fn reduceSegments(
-    k: *Kernel,
+    k: *Builder,
     output_ptr: Value,
     segm_output_ptr: Value,
     segm_max_ptr: Value,
@@ -848,10 +908,11 @@ fn reduceSegments(
         k.full(&.{HEAD_SIZE_PADDED}, 1, .i1);
 
     // segm_offset = query_token_idx*NQH*NSPS + query_head_idx*NSPS + arange(NSPS)
+    // Python keeps `query_head_idx * NSPS` as i32, then extsi to i64.
     const tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ;
-    const head_stride: i64 = NUM_SEGMENTS_PER_SEQ;
+    const head_stride: i32 = @intCast(NUM_SEGMENTS_PER_SEQ);
     const segm_offset = query_token_idx.to(.i64).mul(tok_stride)
-        .add(query_head_idx.to(.i64).mul(head_stride))
+        .add(query_head_idx.mul(head_stride).to(.i64))
         .add(seg_range.to(.i64));
 
     const segm_max = k.loadOpts(segm_max_ptr.addPtr(segm_offset), .{
@@ -868,14 +929,25 @@ fn reduceSegments(
     const overall_expsum = k.sum(segm_expsum);
 
     // segm_output_offset : (NSPS, HSP)
+    // Python keeps `qhi * (NSPS*HSP)` and `seg[:,None] * HSP` as i32 muls,
+    // then extsi each to i64 individually. Mirror that to match TTIR.
     const out_tok_stride: i64 = NUM_QUERY_HEADS * NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
-    const out_head_stride: i64 = NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED;
-    const seg_off_2d = seg_range.to(.i64).broadcast2d(1, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED)
-        .mul(HEAD_SIZE_PADDED);
-    const dim_off_2d = offs_d.to(.i64).broadcast2d(0, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED);
+    const out_head_stride: i32 = @intCast(NUM_SEGMENTS_PER_SEQ * HEAD_SIZE_PADDED);
+    const head_size_padded_i32: i32 = @intCast(HEAD_SIZE_PADDED);
     const base = query_token_idx.to(.i64).mul(out_tok_stride)
-        .add(query_head_idx.to(.i64).mul(out_head_stride));
-    const segm_output_offset = base.add(seg_off_2d).add(dim_off_2d);
+        .add(query_head_idx.mul(out_head_stride).to(.i64));
+    const seg_off_2d = b: {
+        const seg_col_i32 = k.expandDims(seg_range, 1);                  // (NSPS, 1) i32
+        const seg_col_scaled = seg_col_i32.mul(head_size_padded_i32);    // (NSPS, 1) i32
+        break :b seg_col_scaled.to(.i64);                                // extsi → (NSPS, 1) i64
+    };
+    const dim_off_2d = b: {
+        const dim_row_i32 = k.expandDims(offs_d, 0);                     // (1, HSP) i32
+        break :b dim_row_i32.to(.i64);                                   // extsi → (1, HSP) i64
+    };
+    const seg_offset_2d_full = k.broadcastTo(base.add(seg_off_2d), &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
+    const dim_offset_2d_full = k.broadcastTo(dim_off_2d, &.{ NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED });
+    const segm_output_offset = seg_offset_2d_full.add(dim_offset_2d_full);
 
     var segm_output = k.loadOpts(
         segm_output_ptr.addPtr(segm_output_offset),
@@ -914,236 +986,228 @@ fn reduceSegments(
 }
 
 // ============================================================================
-// Top-level `_ptr` wrappers — these are the kernels launched by the host.
-// Each loads the runtime scalar args via `tl.load` and then emits the body.
+// Top-level `_ptr` kernels — launched by the host. Each declares its args
+// (`b.declareArgs`), loads runtime scalar args via `tl.load`, then dispatches
+// to the private `kernelUnifiedAttention*` / `reduceSegments` body fn.
 // ============================================================================
 
-/// Build the TTIR for `kernel_unified_attention_2d_ptr`.
-pub fn kernelUnifiedAttention2dPtr(allocator: std.mem.Allocator, config: Config2D) ![:0]const u8 {
-    var spec = try Kernel.build(allocator, ctx(), "kernel_unified_attention_2d_ptr", .{
-        .query_ptr = .{ .ptr = config.q_dtype },
-        .key_cache_ptr = .{ .ptr = config.kv_dtype },
-        .value_cache_ptr = .{ .ptr = config.kv_dtype },
-        .sink_ptr = .{ .ptr = config.scale_dtype },
-        .block_tables_ptr = .{ .ptr = .i32 },
-        .seq_lens_ptr = .{ .ptr = .i32 },
-        .alibi_slopes_ptr = .{ .ptr = config.scale_dtype },
-        .qq_bias_ptr = .{ .ptr = config.scale_dtype },
-        .scale_ptr = .{ .ptr = .f32 },
-        .k_scale_ptr = .{ .ptr = .f32 },
-        .v_scale_ptr = .{ .ptr = .f32 },
-        .out_scale_ptr = .{ .ptr = .f32 },
-        .softcap_ptr = .{ .ptr = .f32 },
-        .block_table_stride_ptr = .{ .ptr = .i64 },
-        .query_stride_0_ptr = .{ .ptr = .i64 },
-        .query_stride_1_ptr = .{ .ptr = .i64 },
-        .output_stride_0_ptr = .{ .ptr = .i64 },
-        .output_stride_1_ptr = .{ .ptr = .i64 },
-        .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_0_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_1_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_2_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_0_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_1_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_2_ptr = .{ .ptr = .i64 },
-        .query_start_len_ptr = .{ .ptr = .i32 },
-        .num_seqs_ptr = .{ .ptr = .i32 },
-        .output_ptr = .{ .ptr = config.o_dtype },
-    }, &.{});
-    defer spec.deinit();
-    const k = &spec.kernel;
-    const a = spec.args;
+/// Direct port of Python `kernel_unified_attention_2d_ptr`.
+pub const KernelUnifiedAttention2dPtr = zml.Kernel(.{
+    .name = "kernel_unified_attention_2d_ptr",
+    .config = Config2D,
+}, struct {
+    pub fn run(b: *Builder, cfg: anytype) !void {
+        const a = try b.declareArgs(.{
+            .query_ptr = .{ .ptr = cfg.q_dtype },
+            .key_cache_ptr = .{ .ptr = cfg.kv_dtype },
+            .value_cache_ptr = .{ .ptr = cfg.kv_dtype },
+            .sink_ptr = .{ .ptr = cfg.scale_dtype },
+            .block_tables_ptr = .{ .ptr = .i32 },
+            .seq_lens_ptr = .{ .ptr = .i32 },
+            .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
+            .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .scale_ptr = .{ .ptr = .f32 },
+            .k_scale_ptr = .{ .ptr = .f32 },
+            .v_scale_ptr = .{ .ptr = .f32 },
+            .out_scale_ptr = .{ .ptr = .f32 },
+            .softcap_ptr = .{ .ptr = .f32 },
+            .block_table_stride_ptr = .{ .ptr = .i64 },
+            .query_stride_0_ptr = .{ .ptr = .i64 },
+            .query_stride_1_ptr = .{ .ptr = .i64 },
+            .output_stride_0_ptr = .{ .ptr = .i64 },
+            .output_stride_1_ptr = .{ .ptr = .i64 },
+            .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_0_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_1_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_2_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_0_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_1_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_2_ptr = .{ .ptr = .i64 },
+            .query_start_len_ptr = .{ .ptr = .i32 },
+            .num_seqs_ptr = .{ .ptr = .i32 },
+            .output_ptr = .{ .ptr = cfg.o_dtype },
+        });
 
-    const scale = k.load(a.scale_ptr);
-    const k_scale = k.load(a.k_scale_ptr);
-    const v_scale = k.load(a.v_scale_ptr);
-    const out_scale = k.load(a.out_scale_ptr);
-    const softcap = k.load(a.softcap_ptr);
-    const block_table_stride = k.load(a.block_table_stride_ptr);
-    const query_stride_0 = k.load(a.query_stride_0_ptr);
-    const query_stride_1 = k.load(a.query_stride_1_ptr);
-    const output_stride_0 = k.load(a.output_stride_0_ptr);
-    const output_stride_1 = k.load(a.output_stride_1_ptr);
-    const qq_bias_stride_0 = k.load(a.qq_bias_stride_0_ptr);
-    const stride_k_cache_0 = k.load(a.stride_k_cache_0_ptr);
-    const stride_k_cache_1 = k.load(a.stride_k_cache_1_ptr);
-    const stride_k_cache_2 = k.load(a.stride_k_cache_2_ptr);
-    const stride_v_cache_0 = k.load(a.stride_v_cache_0_ptr);
-    const stride_v_cache_1 = k.load(a.stride_v_cache_1_ptr);
-    const stride_v_cache_2 = k.load(a.stride_v_cache_2_ptr);
-    const num_seqs = k.load(a.num_seqs_ptr);
+        const scale = b.load(a.scale_ptr);
+        const k_scale = b.load(a.k_scale_ptr);
+        const v_scale = b.load(a.v_scale_ptr);
+        const out_scale = b.load(a.out_scale_ptr);
+        const softcap = b.load(a.softcap_ptr);
+        const block_table_stride = b.load(a.block_table_stride_ptr);
+        const query_stride_0 = b.load(a.query_stride_0_ptr);
+        const query_stride_1 = b.load(a.query_stride_1_ptr);
+        const output_stride_0 = b.load(a.output_stride_0_ptr);
+        const output_stride_1 = b.load(a.output_stride_1_ptr);
+        const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
+        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
+        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
+        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
+        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
+        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
+        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
+        const num_seqs = b.load(a.num_seqs_ptr);
 
-    kernelUnifiedAttention2d(
-        k,
-        a.output_ptr,
-        a.query_ptr,
-        a.key_cache_ptr,
-        a.value_cache_ptr,
-        a.sink_ptr,
-        a.block_tables_ptr,
-        a.seq_lens_ptr,
-        a.alibi_slopes_ptr,
-        a.qq_bias_ptr,
-        scale,
-        k_scale,
-        v_scale,
-        out_scale,
-        softcap,
-        block_table_stride,
-        query_stride_0,
-        query_stride_1,
-        output_stride_0,
-        output_stride_1,
-        qq_bias_stride_0,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-        a.query_start_len_ptr,
-        num_seqs,
-        config,
-    );
+        kernelUnifiedAttention2d(
+            b,
+            a.output_ptr,
+            a.query_ptr,
+            a.key_cache_ptr,
+            a.value_cache_ptr,
+            a.sink_ptr,
+            a.block_tables_ptr,
+            a.seq_lens_ptr,
+            a.alibi_slopes_ptr,
+            a.qq_bias_ptr,
+            scale,
+            k_scale,
+            v_scale,
+            out_scale,
+            softcap,
+            block_table_stride,
+            query_stride_0,
+            query_stride_1,
+            output_stride_0,
+            output_stride_1,
+            qq_bias_stride_0,
+            stride_k_cache_0,
+            stride_k_cache_1,
+            stride_k_cache_2,
+            stride_v_cache_0,
+            stride_v_cache_1,
+            stride_v_cache_2,
+            a.query_start_len_ptr,
+            num_seqs,
+            cfg,
+        );
+    }
+});
 
-    return k.finish(&.{}) catch |err| {
-        log.err("failed to finalize kernel_unified_attention_2d_ptr TTIR: {}", .{err});
-        return error.TritonTtirGenerationFailed;
-    };
-}
+/// Direct port of Python `kernel_unified_attention_3d_ptr`.
+pub const KernelUnifiedAttention3dPtr = zml.Kernel(.{
+    .name = "kernel_unified_attention_3d_ptr",
+    .config = Config3D,
+}, struct {
+    pub fn run(b: *Builder, cfg: anytype) !void {
+        const a = try b.declareArgs(.{
+            .query_ptr = .{ .ptr = cfg.q_dtype },
+            .key_cache_ptr = .{ .ptr = cfg.kv_dtype },
+            .value_cache_ptr = .{ .ptr = cfg.kv_dtype },
+            .sink_ptr = .{ .ptr = cfg.scale_dtype },
+            .block_tables_ptr = .{ .ptr = .i32 },
+            .seq_lens_ptr = .{ .ptr = .i32 },
+            .alibi_slopes_ptr = .{ .ptr = cfg.scale_dtype },
+            .qq_bias_ptr = .{ .ptr = cfg.scale_dtype },
+            .scale_ptr = .{ .ptr = .f32 },
+            .k_scale_ptr = .{ .ptr = .f32 },
+            .v_scale_ptr = .{ .ptr = .f32 },
+            .softcap_ptr = .{ .ptr = .f32 },
+            .block_table_stride_ptr = .{ .ptr = .i64 },
+            .query_stride_0_ptr = .{ .ptr = .i64 },
+            .query_stride_1_ptr = .{ .ptr = .i64 },
+            .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_0_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_1_ptr = .{ .ptr = .i64 },
+            .stride_k_cache_2_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_0_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_1_ptr = .{ .ptr = .i64 },
+            .stride_v_cache_2_ptr = .{ .ptr = .i64 },
+            .query_start_len_ptr = .{ .ptr = .i32 },
+            .num_seqs_ptr = .{ .ptr = .i32 },
+            .segm_output_ptr = .{ .ptr = .f32 },
+            .segm_max_ptr = .{ .ptr = .f32 },
+            .segm_expsum_ptr = .{ .ptr = .f32 },
+        });
 
-/// Build the TTIR for `kernel_unified_attention_3d_ptr`.
-pub fn kernelUnifiedAttention3dPtr(allocator: std.mem.Allocator, config: Config3D) ![:0]const u8 {
-    var spec = try Kernel.build(allocator, ctx(), "kernel_unified_attention_3d_ptr", .{
-        .query_ptr = .{ .ptr = config.q_dtype },
-        .key_cache_ptr = .{ .ptr = config.kv_dtype },
-        .value_cache_ptr = .{ .ptr = config.kv_dtype },
-        .sink_ptr = .{ .ptr = config.scale_dtype },
-        .block_tables_ptr = .{ .ptr = .i32 },
-        .seq_lens_ptr = .{ .ptr = .i32 },
-        .alibi_slopes_ptr = .{ .ptr = config.scale_dtype },
-        .qq_bias_ptr = .{ .ptr = config.scale_dtype },
-        .scale_ptr = .{ .ptr = .f32 },
-        .k_scale_ptr = .{ .ptr = .f32 },
-        .v_scale_ptr = .{ .ptr = .f32 },
-        .softcap_ptr = .{ .ptr = .f32 },
-        .block_table_stride_ptr = .{ .ptr = .i64 },
-        .query_stride_0_ptr = .{ .ptr = .i64 },
-        .query_stride_1_ptr = .{ .ptr = .i64 },
-        .qq_bias_stride_0_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_0_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_1_ptr = .{ .ptr = .i64 },
-        .stride_k_cache_2_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_0_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_1_ptr = .{ .ptr = .i64 },
-        .stride_v_cache_2_ptr = .{ .ptr = .i64 },
-        .query_start_len_ptr = .{ .ptr = .i32 },
-        .num_seqs_ptr = .{ .ptr = .i32 },
-        .segm_output_ptr = .{ .ptr = .f32 },
-        .segm_max_ptr = .{ .ptr = .f32 },
-        .segm_expsum_ptr = .{ .ptr = .f32 },
-    }, &.{});
-    defer spec.deinit();
-    const k = &spec.kernel;
-    const a = spec.args;
+        const scale = b.load(a.scale_ptr);
+        const k_scale = b.load(a.k_scale_ptr);
+        const v_scale = b.load(a.v_scale_ptr);
+        const softcap = b.load(a.softcap_ptr);
+        const block_table_stride = b.load(a.block_table_stride_ptr);
+        const query_stride_0 = b.load(a.query_stride_0_ptr);
+        const query_stride_1 = b.load(a.query_stride_1_ptr);
+        const qq_bias_stride_0 = b.load(a.qq_bias_stride_0_ptr);
+        const stride_k_cache_0 = b.load(a.stride_k_cache_0_ptr);
+        const stride_k_cache_1 = b.load(a.stride_k_cache_1_ptr);
+        const stride_k_cache_2 = b.load(a.stride_k_cache_2_ptr);
+        const stride_v_cache_0 = b.load(a.stride_v_cache_0_ptr);
+        const stride_v_cache_1 = b.load(a.stride_v_cache_1_ptr);
+        const stride_v_cache_2 = b.load(a.stride_v_cache_2_ptr);
+        const num_seqs = b.load(a.num_seqs_ptr);
 
-    const scale = k.load(a.scale_ptr);
-    const k_scale = k.load(a.k_scale_ptr);
-    const v_scale = k.load(a.v_scale_ptr);
-    const softcap = k.load(a.softcap_ptr);
-    const block_table_stride = k.load(a.block_table_stride_ptr);
-    const query_stride_0 = k.load(a.query_stride_0_ptr);
-    const query_stride_1 = k.load(a.query_stride_1_ptr);
-    const qq_bias_stride_0 = k.load(a.qq_bias_stride_0_ptr);
-    const stride_k_cache_0 = k.load(a.stride_k_cache_0_ptr);
-    const stride_k_cache_1 = k.load(a.stride_k_cache_1_ptr);
-    const stride_k_cache_2 = k.load(a.stride_k_cache_2_ptr);
-    const stride_v_cache_0 = k.load(a.stride_v_cache_0_ptr);
-    const stride_v_cache_1 = k.load(a.stride_v_cache_1_ptr);
-    const stride_v_cache_2 = k.load(a.stride_v_cache_2_ptr);
-    const num_seqs = k.load(a.num_seqs_ptr);
+        kernelUnifiedAttention3d(
+            b,
+            a.segm_output_ptr,
+            a.segm_max_ptr,
+            a.segm_expsum_ptr,
+            a.query_ptr,
+            a.key_cache_ptr,
+            a.value_cache_ptr,
+            a.sink_ptr,
+            a.block_tables_ptr,
+            a.seq_lens_ptr,
+            a.alibi_slopes_ptr,
+            a.qq_bias_ptr,
+            scale,
+            k_scale,
+            v_scale,
+            softcap,
+            block_table_stride,
+            query_stride_0,
+            query_stride_1,
+            qq_bias_stride_0,
+            stride_k_cache_0,
+            stride_k_cache_1,
+            stride_k_cache_2,
+            stride_v_cache_0,
+            stride_v_cache_1,
+            stride_v_cache_2,
+            a.query_start_len_ptr,
+            num_seqs,
+            cfg,
+        );
+    }
+});
 
-    kernelUnifiedAttention3d(
-        k,
-        a.segm_output_ptr,
-        a.segm_max_ptr,
-        a.segm_expsum_ptr,
-        a.query_ptr,
-        a.key_cache_ptr,
-        a.value_cache_ptr,
-        a.sink_ptr,
-        a.block_tables_ptr,
-        a.seq_lens_ptr,
-        a.alibi_slopes_ptr,
-        a.qq_bias_ptr,
-        scale,
-        k_scale,
-        v_scale,
-        softcap,
-        block_table_stride,
-        query_stride_0,
-        query_stride_1,
-        qq_bias_stride_0,
-        stride_k_cache_0,
-        stride_k_cache_1,
-        stride_k_cache_2,
-        stride_v_cache_0,
-        stride_v_cache_1,
-        stride_v_cache_2,
-        a.query_start_len_ptr,
-        num_seqs,
-        config,
-    );
+/// Direct port of Python `reduce_segments_ptr`.
+pub const ReduceSegmentsPtr = zml.Kernel(.{
+    .name = "reduce_segments_ptr",
+    .config = ConfigReduce,
+}, struct {
+    pub fn run(b: *Builder, cfg: anytype) !void {
+        const a = try b.declareArgs(.{
+            .segm_output_ptr = .{ .ptr = .f32 },
+            .segm_max_ptr = .{ .ptr = .f32 },
+            .segm_expsum_ptr = .{ .ptr = .f32 },
+            .seq_lens_ptr = .{ .ptr = .i32 },
+            .num_seqs_ptr = .{ .ptr = .i32 },
+            .out_scale_inv_ptr = .{ .ptr = .f32 },
+            .output_stride_0_ptr = .{ .ptr = .i64 },
+            .output_stride_1_ptr = .{ .ptr = .i64 },
+            .block_table_stride_ptr = .{ .ptr = .i64 },
+            .query_start_len_ptr = .{ .ptr = .i32 },
+            .output_ptr = .{ .ptr = cfg.o_dtype },
+        });
 
-    return k.finish(&.{}) catch |err| {
-        log.err("failed to finalize kernel_unified_attention_3d_ptr TTIR: {}", .{err});
-        return error.TritonTtirGenerationFailed;
-    };
-}
+        const num_seqs = b.load(a.num_seqs_ptr);
+        const out_scale_inv = b.load(a.out_scale_inv_ptr);
+        const output_stride_0 = b.load(a.output_stride_0_ptr);
+        const output_stride_1 = b.load(a.output_stride_1_ptr);
+        const block_table_stride = b.load(a.block_table_stride_ptr);
 
-/// Build the TTIR for `reduce_segments_ptr`.
-pub fn reduceSegmentsPtr(allocator: std.mem.Allocator, config: ConfigReduce) ![:0]const u8 {
-    var spec = try Kernel.build(allocator, ctx(), "reduce_segments_ptr", .{
-        .segm_output_ptr = .{ .ptr = .f32 },
-        .segm_max_ptr = .{ .ptr = .f32 },
-        .segm_expsum_ptr = .{ .ptr = .f32 },
-        .seq_lens_ptr = .{ .ptr = .i32 },
-        .num_seqs_ptr = .{ .ptr = .i32 },
-        .out_scale_inv_ptr = .{ .ptr = .f32 },
-        .output_stride_0_ptr = .{ .ptr = .i64 },
-        .output_stride_1_ptr = .{ .ptr = .i64 },
-        .block_table_stride_ptr = .{ .ptr = .i64 },
-        .query_start_len_ptr = .{ .ptr = .i32 },
-        .output_ptr = .{ .ptr = config.o_dtype },
-    }, &.{});
-    defer spec.deinit();
-    const k = &spec.kernel;
-    const a = spec.args;
-
-    const num_seqs = k.load(a.num_seqs_ptr);
-    const out_scale_inv = k.load(a.out_scale_inv_ptr);
-    const output_stride_0 = k.load(a.output_stride_0_ptr);
-    const output_stride_1 = k.load(a.output_stride_1_ptr);
-    const block_table_stride = k.load(a.block_table_stride_ptr);
-
-    reduceSegments(
-        k,
-        a.output_ptr,
-        a.segm_output_ptr,
-        a.segm_max_ptr,
-        a.segm_expsum_ptr,
-        a.seq_lens_ptr,
-        num_seqs,
-        out_scale_inv,
-        output_stride_0,
-        output_stride_1,
-        block_table_stride,
-        a.query_start_len_ptr,
-        config,
-    );
-
-    return k.finish(&.{}) catch |err| {
-        log.err("failed to finalize reduce_segments_ptr TTIR: {}", .{err});
-        return error.TritonTtirGenerationFailed;
-    };
-}
+        reduceSegments(
+            b,
+            a.output_ptr,
+            a.segm_output_ptr,
+            a.segm_max_ptr,
+            a.segm_expsum_ptr,
+            a.seq_lens_ptr,
+            num_seqs,
+            out_scale_inv,
+            output_stride_0,
+            output_stride_1,
+            block_table_stride,
+            a.query_start_len_ptr,
+            cfg,
+        );
+    }
+});

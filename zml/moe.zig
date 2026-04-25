@@ -2,6 +2,11 @@ const std = @import("std");
 const zml = @import("zml.zig");
 const triton = @import("moe/triton.zig");
 
+/// Triton kernel declarations for MoE — `pub const FusedMoe`,
+/// `pub const PerTokenGroupQuantFp8`, etc. Exposed for tooling that
+/// wants to reach the kernels directly (e.g. offline TTIR dumps).
+pub const triton_kernels = @import("moe/triton_kernels.zig");
+
 pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
     triton,

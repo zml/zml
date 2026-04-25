@@ -62,6 +62,7 @@ zig_library(
         "tensor.zig",
         "testing.zig",
         "tracer.zig",
+        "triton.zig",
         "zml.zig",
     ],
     data = select({

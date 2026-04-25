@@ -246,9 +246,9 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     if (args.results_attributes) |results_attributes| {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, results_attributes)));
     }
-    if (args.no_inline) {
-        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
-    }
+    // Triton's `get_or_insert_function` (`python/src/ir.cc:1114`) always
+    // attaches `noinline = BoolAttr(...)`, even for the false case.
+    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "noinline", mlir.boolAttribute(ctx, args.no_inline)));
 
     return mlir.Operation.make(ctx, "tt.func", .{
         .blocks = &.{args.block},
@@ -516,8 +516,11 @@ pub fn reduce(
     result_types: []const *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
+    // `tt.reduce` has a single variadic operand group (`$srcs`), so the
+    // auto-emitted `operandSegmentSizes` attribute would be redundant —
+    // use a flat operand list to match Triton's frontend output.
     return mlir.Operation.make(ctx, "tt.reduce", .{
-        .operands = .{ .variadic = &.{srcs} },
+        .operands = .{ .flat = srcs },
         .results = .{ .flat = result_types },
         .blocks = &.{combine_block},
         .attributes = &.{

@@ -801,6 +801,21 @@ pub const Block = opaque {
         }
     }
 
+    /// Returns the first operation in the block, or null if the block is
+    /// empty. Useful when you need to insert ops at the start of a block
+    /// (constants, hoisted invariants) without disturbing the rest.
+    pub fn firstOperation(self: *const Block) ?*Operation {
+        const op = c.mlirBlockGetFirstOperation(self.ptr());
+        if (op.ptr == null) return null;
+        return @ptrCast(op.ptr);
+    }
+
+    /// Inserts `op` immediately before `reference` in this block. Both must
+    /// belong to this block; ownership of `op` transfers to the block.
+    pub fn insertOwnedOperationBefore(self: *Block, reference: *Operation, op: *Operation) void {
+        c.mlirBlockInsertOwnedOperationBefore(self.ptr(), reference.ptr(), op.ptr());
+    }
+
     pub fn parentOperation(self: *const Block) ?*Operation {
         return @ptrCast(c.mlirBlockGetParentOperation(self.ptr()).ptr);
     }
@@ -1105,6 +1120,11 @@ pub const Operation = opaque {
         print_generic_op_form: bool = false,
         use_local_scope: bool = false,
         assume_verified: bool = false,
+        /// When true, block arguments whose location is a `NameLoc("foo")`
+        /// print as `%foo` instead of `%argN`. Triton's frontend enables this
+        /// (see `triton/python/src/ir.cc:getOpPrintingFlags`); useful when
+        /// diffing Zig-emitted IR against Triton's reference output.
+        print_name_loc_as_prefix: bool = false,
 
         const Ctx = struct {
             self: *const Operation,
@@ -1129,6 +1149,9 @@ pub const Operation = opaque {
             }
             if (self.assume_verified) {
                 c.mlirOpPrintingFlagsAssumeVerified(flags);
+            }
+            if (self.print_name_loc_as_prefix) {
+                c.mlirOpPrintingFlagsPrintNameLocAsPrefix(flags);
             }
             return flags;
         }

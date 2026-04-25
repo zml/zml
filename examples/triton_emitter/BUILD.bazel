@@ -1,0 +1,36 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "dump_zig_ir",
+    srcs = glob(["**/*.zig"]),
+    main = "dump_zig_ir.zig",
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttir",
+        "//zml",
+        "//zml/triton",
+    ],
+)
+
+zig_binary(
+    name = "dump_via_xla",
+    srcs = glob(["**/*.zig"]),
+    main = "dump_via_xla.zig",
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttir",
+        "//zml",
+        "//zml/triton",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":dump_zig_ir",
+        ":dump_via_xla",
+    ],
+)
