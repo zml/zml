@@ -36,7 +36,7 @@ git_override(
 )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.7.1")
+bazel_dep(name = "llvm", version = "0.7.3")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
