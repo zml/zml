@@ -286,13 +286,16 @@ pub const Value = struct {
     }
 
     /// `addptr(self, offset)` where offset can be a Value or comptime int.
-    /// If `self` is a scalar pointer and `offset` is a tensor, the pointer
-    /// is auto-splatted to match (Triton-style `x_ptr + offs`).
+    /// Mirrors Triton's `ptr + offset` semantics: scalar↔tensor pairings
+    /// auto-splat the scalar side to match the tensor side's shape, in
+    /// either direction (scalar ptr + tensor offset, or tensor ptrs +
+    /// scalar offset).
     pub fn addPtr(self: Value, offset: anytype) Value {
         const k = self.kern();
         const off: Value = if (@TypeOf(offset) == Value) offset else k.lift(offset);
         const ptr = if (!self.isTensor() and off.isTensor()) k.splat(self, off.shape().constSlice()) else self;
-        return k.addptr(ptr, off);
+        const off2 = if (self.isTensor() and !off.isTensor()) k.splat(off, self.shape().constSlice()) else off;
+        return k.addptr(ptr, off2);
     }
 };
 

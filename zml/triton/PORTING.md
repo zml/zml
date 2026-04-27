@@ -709,7 +709,7 @@ If a divergence resists all the standard fixes:
 
 Every time a divergence makes you suspect the DSL itself is buggy and you
 reach for `zml/triton/kernel.zig` — **verify against the Triton sources
-first** at `/home/rigole/Documents/Git-Repos/triton`. The DSL exists to
+first** at `/Users/raph/Documents/Git-Repos/triton`. The DSL exists to
 mirror what Python's frontend emits; the source of truth is the Python
 trace, not what the rule "looks like" or what feels symmetric.
 

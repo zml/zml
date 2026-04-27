@@ -463,19 +463,18 @@ with no `b.broadcastTo` calls needed. Reach for `.broadcast2d` /
 `b.broadcastTo` only when there is no binop / `addPtr` partner to ride
 along with (e.g. before `b.select`, which has no auto-broadcast).
 
-`.addPtr` is **asymmetric**: it auto-splats a scalar *pointer* when the
-offset is a tensor (`x_ptr.addPtr(tensor_offs)` works without `splatTo`),
-but it does **not** splat a scalar offset against a tensor pointer. So
-`tensor_of_ptrs.addPtr(scalar)` will hit `tt.addptr op requires the same
-shape for all operands and results` at verify time — splat the offset
-explicitly: `tensor_of_ptrs.addPtr(b.splat(scalar, shape))`. The common
-loop-stride case `a_ptrs = a_ptrs.addPtr(BLOCK_K)` falls into this trap.
+`.addPtr` auto-splats in **both directions**, matching Triton's
+`ptr + offset` semantics: a scalar pointer is splatted to match a tensor
+offset (`x_ptr.addPtr(tensor_offs)`), and a scalar offset is splatted to
+match a tensor pointer (`a_ptrs.addPtr(BLOCK_K)`). Pre-splatting via
+`b.splat` is no longer required for the loop-stride case.
 
 ### When is `scalar.splatTo(shape)` redundant?
 
 Because fluent binops (`.add` / `.mul` / …) already auto-splat scalars
-against tensor siblings, and `.addPtr` auto-splats a scalar pointer against
-a tensor offset, a pre-emptive `scalar.splatTo(shape)` is usually noise:
+against tensor siblings, and `.addPtr` auto-splats either side (scalar
+pointer or scalar offset) against a tensor partner, a pre-emptive
+`scalar.splatTo(shape)` is usually noise:
 
 ```zig
 // redundant
@@ -484,8 +483,8 @@ pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_blocb.splatTo(shape)
 pid_n.mul(N).add(b.arange(0, N, .i64)).rem(n_block)
 ```
 
-Keep the explicit `splatTo` only when there is no binop (or `addPtr` scalar
-side) for the scalar to ride along with — e.g. `b.select(cond, t, f)`,
+Keep the explicit `splatTo` only when there is no binop / `addPtr`
+partner for the scalar to ride along with — e.g. `b.select(cond, t, f)`,
 which has no auto-broadcast, or when you need a tensor input for
 `.broadcast2d` downstream with no intermediate binop.
 
@@ -949,7 +948,7 @@ Prefer `zml.Kernel(decl, Impl)` for the common case.
 | `vec[:, None]`                                | `vec.broadcast2d(1, m, n)`                                         |
 | `vec[None, :]`                                | `vec.broadcast2d(0, m, n)`                                         |
 | `m[:, None] & (c[None, :] < N)`               | `b.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
-| `ptr + offs`                                  | `ptr.addPtr(offs)` (scalar ptr auto-splats to tensor-of-ptrs)      |
+| `ptr + offs`                                  | `ptr.addPtr(offs)` (auto-splats scalar↔tensor either way)          |
 | `tl.load(ptr)`                                | `b.load(ptrs)`                                                     |
 | `tl.load(ptr, mask=m)`                        | `b.loadOpts(ptrs, .{ .mask = m })`                                 |
 | `tl.load(ptr, mask=m, other=o)`               | `b.loadOpts(ptrs, .{ .mask = m, .other = o })`                     |
@@ -1009,9 +1008,10 @@ Prefer `zml.Kernel(decl, Impl)` for the common case.
    `.to(...)` or reshape the kernel to stay within a single int width. Comptime
    literals adapt automatically — runtime values don't.
 
-2. **Tensor-of-pointers via `.addPtr`.** `ptr` is a scalar `!tt.ptr<T>`; when
-   `offs` is a tensor, `ptr.addPtr(offs)` auto-splats the pointer to match
-   (no manual `.splatTo` needed).
+2. **Tensor-of-pointers via `.addPtr`.** Auto-splats either side: scalar
+   `!tt.ptr<T>` + tensor offset (`x_ptr.addPtr(tensor_offs)`) and tensor
+   `tensor<...x!tt.ptr<T>>` + scalar offset (`a_ptrs.addPtr(BLOCK_K)`)
+   both work without manual `.splatTo`.
 
 3. **Scope-based control flow — no closures needed.** `openFor` / `openIf` /
    `openIfElse` / `openWhile` push a block onto the kernel's insertion stack;
