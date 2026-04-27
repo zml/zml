@@ -2,7 +2,7 @@
 //! functions in `triton_kernels/moe.py`. Each kernel here is a
 //! `zml.Kernel(...)` declaration with its own inline config struct (no
 //! defaults — every field is required at call time). Production callers
-//! invoke these via `K.call(.{ ... })`; offline tooling reaches the TTIR
+//! invoke these via `K.call(inputs, outputs, opts)`; offline tooling reaches the TTIR
 //! string via `K.emit(allocator, ctx, cfg)`.
 
 const std = @import("std");

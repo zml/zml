@@ -35,6 +35,10 @@ _SKIP = {
     "kernel_unified_attention_2d",
     "kernel_unified_attention_3d",
     "reduce_segments",
+    # `gdn.py` helpers (inlined into `fused_recurrent_gated_delta_rule_fwd_kernel_ptr`).
+    "exp",
+    "exp2",
+    "fused_recurrent_gated_delta_rule_fwd_kernel",
 }
 
 
@@ -281,6 +285,59 @@ def _reduce_segments_ptr():
     ], {})
 
 
+def _fused_recurrent_gated_delta_rule_fwd_kernel_ptr():
+    """Mirrors monorepo's `compile_gated_delta_net_kernel` for the constexpr
+    config used in qwen3_5 (USE_G=True, IS_VARLEN=True, …). Constexpr ints
+    and tensor shapes match the Zig `withConfig(...)` call in `kernels_zig.zig`
+    so the dumped TTIR is byte-comparable."""
+    import torch
+    import math
+    num_tokens = 64
+    num_qk_heads = 4
+    num_v_heads = 16
+    key_dim = 32
+    value_dim = 64
+    num_sequences = 2
+    bk = 32
+    bv = 8
+    qk_shape = (1, num_tokens, num_qk_heads, key_dim)
+    v_shape = (1, num_tokens, num_v_heads, value_dim)
+    gbeta_shape = (1, num_tokens, num_v_heads)
+    state_shape = (num_sequences, num_v_heads, key_dim, value_dim)
+    cu_seqlens_shape = (num_sequences + 1,)
+    return ([
+        torch.empty(qk_shape, dtype=torch.bfloat16, device="cuda"),       # q_ptr
+        torch.empty(qk_shape, dtype=torch.bfloat16, device="cuda"),       # k_ptr
+        torch.empty(v_shape, dtype=torch.bfloat16, device="cuda"),        # v_ptr
+        torch.empty(gbeta_shape, dtype=torch.float32, device="cuda"),     # g_ptr
+        torch.empty(gbeta_shape, dtype=torch.bfloat16, device="cuda"),    # beta_ptr
+        torch.empty(state_shape, dtype=torch.float32, device="cuda"),     # h0_ptr
+        torch.empty(cu_seqlens_shape, dtype=torch.int32, device="cuda"),  # cu_seqlens_ptr
+        torch.empty(v_shape, dtype=torch.bfloat16, device="cuda"),        # o_ptr
+        torch.empty(state_shape, dtype=torch.float32, device="cuda"),     # ht_ptr
+        None,                                # gk (constexpr)
+        None,                                # gv (constexpr)
+        1.0 / math.sqrt(key_dim),            # scale (constexpr float)
+        num_tokens,                          # T (constexpr)
+        num_qk_heads,                        # H (constexpr)
+        num_v_heads,                         # HV (constexpr)
+        key_dim,                             # K (constexpr)
+        value_dim,                           # V (constexpr)
+        bk,                                  # BK (constexpr)
+        bv,                                  # BV (constexpr)
+        True,                                # USE_G
+        False,                               # USE_GK
+        False,                               # USE_GV
+        True,                                # USE_QK_L2NORM_IN_KERNEL
+        True,                                # IS_BETA_HEADWISE
+        True,                                # USE_INITIAL_STATE
+        True,                                # STORE_FINAL_STATE
+        False,                               # USE_EXP2
+        False,                               # TRANSPOSE_STATE
+        True,                                # IS_VARLEN
+    ], {})
+
+
 _OVERRIDES = {
     "per_token_group_quant_fp8": _per_token_group_quant_fp8,
     "fused_moe_kernel": _fused_moe_kernel,
@@ -289,6 +346,7 @@ _OVERRIDES = {
     "kernel_unified_attention_2d_ptr": _kernel_unified_attention_2d_ptr,
     "kernel_unified_attention_3d_ptr": _kernel_unified_attention_3d_ptr,
     "reduce_segments_ptr": _reduce_segments_ptr,
+    "fused_recurrent_gated_delta_rule_fwd_kernel_ptr": _fused_recurrent_gated_delta_rule_fwd_kernel_ptr,
 }
 
 

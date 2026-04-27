@@ -296,8 +296,8 @@ fn callFusedMoe(
     const stride_bsk: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) 1 else 0;
     const stride_bsn: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) b_scale.dim(2) else 0;
 
-    return kernels.FusedMoe.call(.{
-        .inputs = .{
+    return kernels.FusedMoe.call(
+        .{
             a,
             b,
             b_bias,
@@ -323,12 +323,14 @@ fn callFusedMoe(
             Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
             Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
         },
-        .outputs = .{output_shape},
-        .cfg = cfg,
-        .grid = .{ @intCast(grid_x), 1, 1 },
-        .num_warps = @intCast(options.num_warps),
-        .num_stages = @intCast(options.num_stages),
-    })[0];
+        .{output_shape},
+        .{
+            .cfg = cfg,
+            .grid = .{ @intCast(grid_x), 1, 1 },
+            .num_warps = @intCast(options.num_warps),
+            .num_stages = @intCast(options.num_stages),
+        },
+    )[0];
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
@@ -354,39 +356,41 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     var num_tokens_post_padded = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
 
     {
-        const align_outs = kernels.MoeAlignBlockSize.call(.{
-            .inputs = .{
+        const align_outs = kernels.MoeAlignBlockSize.call(
+            .{
                 flat_experts,
                 sorted_token_ids,
                 expert_ids,
                 num_tokens_post_padded,
                 cumsums,
             },
-            .outputs = .{
+            .{
                 sorted_token_ids.shape(),
                 expert_ids.shape(),
                 num_tokens_post_padded.shape(),
                 cumsums.shape(),
             },
-            .cfg = .{
-                .numel = @intCast(num_assignments),
-                .num_experts = @intCast(num_experts),
-                .padded_num_experts = @intCast(padded_num_experts),
-                .max_num_tokens_padded = @intCast(max_num_tokens_padded),
-                .max_num_m_blocks = @intCast(max_num_m_blocks),
-                .block_size_m = @intCast(block_size_m),
-                .hist_block = 256,
+            .{
+                .cfg = .{
+                    .numel = @intCast(num_assignments),
+                    .num_experts = @intCast(num_experts),
+                    .padded_num_experts = @intCast(padded_num_experts),
+                    .max_num_tokens_padded = @intCast(max_num_tokens_padded),
+                    .max_num_m_blocks = @intCast(max_num_m_blocks),
+                    .block_size_m = @intCast(block_size_m),
+                    .hist_block = 256,
+                },
+                .grid = .{ 2, 1, 1 },
+                .num_stages = 1,
+                .num_warps = 8,
+                .output_operand_aliases = &.{
+                    .{ .output_index = 0, .operand_index = 1 },
+                    .{ .output_index = 1, .operand_index = 2 },
+                    .{ .output_index = 2, .operand_index = 3 },
+                    .{ .output_index = 3, .operand_index = 4 },
+                },
             },
-            .grid = .{ 2, 1, 1 },
-            .num_stages = 1,
-            .num_warps = 8,
-            .output_operand_aliases = &.{
-                .{ .output_index = 0, .operand_index = 1 },
-                .{ .output_index = 1, .operand_index = 2 },
-                .{ .output_index = 2, .operand_index = 3 },
-                .{ .output_index = 3, .operand_index = 4 },
-            },
-        });
+        );
         sorted_token_ids = align_outs[0];
         expert_ids = align_outs[1];
         num_tokens_post_padded = align_outs[2];
@@ -394,26 +398,28 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     }
 
     {
-        const sort_outs = kernels.CountAndSortExpertTokens.call(.{
-            .inputs = .{
+        const sort_outs = kernels.CountAndSortExpertTokens.call(
+            .{
                 flat_experts,
                 sorted_token_ids,
                 cumsums,
             },
-            .outputs = .{ sorted_token_ids.shape(), cumsums.shape() },
-            .cfg = .{
-                .numel = @intCast(num_assignments),
-                .num_experts = @intCast(num_experts),
-                .sort_block_size = @intCast(sort_block_size),
+            .{ sorted_token_ids.shape(), cumsums.shape() },
+            .{
+                .cfg = .{
+                    .numel = @intCast(num_assignments),
+                    .num_experts = @intCast(num_experts),
+                    .sort_block_size = @intCast(sort_block_size),
+                },
+                .grid = .{ @intCast(sort_grid_x), 1, 1 },
+                .num_stages = 1,
+                .num_warps = 4,
+                .output_operand_aliases = &.{
+                    .{ .output_index = 0, .operand_index = 1 },
+                    .{ .output_index = 1, .operand_index = 2 },
+                },
             },
-            .grid = .{ @intCast(sort_grid_x), 1, 1 },
-            .num_stages = 1,
-            .num_warps = 4,
-            .output_operand_aliases = &.{
-                .{ .output_index = 0, .operand_index = 1 },
-                .{ .output_index = 1, .operand_index = 2 },
-            },
-        });
+        );
         sorted_token_ids = sort_outs[0];
         cumsums = sort_outs[1];
     }
@@ -429,28 +435,30 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
     const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, .f8e4m3fn));
     const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, .bf16));
 
-    const outs = kernels.PerTokenGroupQuantFp8.call(.{
-        .inputs = .{
+    const outs = kernels.PerTokenGroupQuantFp8.call(
+        .{
             x,
             Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
             Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
             Tensor.scalar(1e-6, .f32),
         },
-        .outputs = .{ quantized.shape(), scales.shape() },
-        .cfg = .{
-            .input_dtype = toDType(x.dtype()),
-            .output_dtype = .f8e4m3fn,
-            .scale_dtype = .bf16,
-            .block = @intCast(group_size),
-            .fp8_min = -448.0,
-            .fp8_max = 448.0,
-            .use_ue8m0 = false,
+        .{ quantized.shape(), scales.shape() },
+        .{
+            .cfg = .{
+                .input_dtype = toDType(x.dtype()),
+                .output_dtype = .f8e4m3fn,
+                .scale_dtype = .bf16,
+                .block = @intCast(group_size),
+                .fp8_min = -448.0,
+                .fp8_max = 448.0,
+                .use_ue8m0 = false,
+            },
+            .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
+            .num_stages = 1,
+            .num_warps = 1,
         },
-        .grid = .{ @intCast(x.dim(0) * groups_per_row), 1, 1 },
-        .num_stages = 1,
-        .num_warps = 1,
-    });
+    );
 
     return .{ outs[0], outs[1] };
 }

@@ -97,17 +97,20 @@ defer allocator.free(ttir);
 into the model in one shot:
 
 ```zig
-const out = MyKernel.call(.{
-    .inputs  = .{ x_tensor, y_tensor },
-    .outputs = .{ x_tensor.shape() },
-    .cfg     = .{ .BLOCK = 1024 },
-    .grid    = .{ ceilDiv(n, 1024), 1, 1 },
-    .num_warps  = 4,
-    .num_stages = 2,
-})[0];
+const out = MyKernel.call(
+    .{ x_tensor, y_tensor },        // tuple of input Tensors
+    .{ x_tensor.shape() },          // tuple of output Shapes
+    .{
+        .cfg = .{ .BLOCK = 1024 },
+        .grid = .{ ceilDiv(n, 1024), 1, 1 },
+        .num_warps = 4,
+        .num_stages = 2,
+    },
+)[0];
 ```
 
-The returned type exposes `MyKernel.name` and `MyKernel.Config`.
+The returned type exposes `MyKernel.name`, `MyKernel.Config`, and
+`MyKernel.CallOpts`.
 
 ---
 
@@ -149,14 +152,16 @@ ZML ops with `K.call(...)`:
 pub fn forward(self: Model, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
     const x_pre = x.mul(2.0);                           // stablehlo
 
-    const out = MyKernel.call(.{
-        .inputs  = .{ x_pre, y, x_pre },                // tensor inputs
-        .outputs = .{ x_pre.shape() },                  // output shapes
-        .cfg     = .{ .BLOCK = 1024 },                  // runtime config
-        .grid    = .{ ceilDiv(x.dim(0), 1024), 1, 1 },
-        .num_warps  = 4,
-        .num_stages = 2,
-    })[0];
+    const out = MyKernel.call(
+        .{ x_pre, y, x_pre },                           // input Tensors
+        .{ x_pre.shape() },                             // output Shapes
+        .{
+            .cfg = .{ .BLOCK = 1024 },                  // runtime config
+            .grid = .{ ceilDiv(x.dim(0), 1024), 1, 1 },
+            .num_warps = 4,
+            .num_stages = 2,
+        },
+    )[0];
 
     return out.relu();                                  // stablehlo
 }
@@ -168,23 +173,38 @@ must be called from inside a `CompilationContext` (i.e., during
 (e.g., dump-to-disk diff harnesses), use `K.emit(allocator, ctx, cfg)`
 directly to get the TTIR string.
 
-`call` args (struct literal):
+Signature: `K.call(inputs, outputs, opts: K.CallOpts) [outputs.len]Tensor`.
+
+| Positional arg | Type              | Meaning                                  |
+|----------------|-------------------|------------------------------------------|
+| `inputs`       | tuple of `Tensor` | Operands. Tensors map to ptr args; 0-d tensors map to scalar args. |
+| `outputs`      | tuple of `Shape`  | Declared output shapes.                  |
+
+`K.CallOpts` (typed struct, all fields named):
 
 | Field                     | Type                  | Meaning                                  |
 |---------------------------|-----------------------|------------------------------------------|
-| `.inputs`                 | tuple of `Tensor`     | Operands. Tensors map to ptr args; 0-d tensors map to scalar args. |
-| `.outputs`                | tuple of `Shape`      | Declared output shapes.                  |
 | `.cfg`                    | `K.Config`            | Per-call kernel config.                  |
 | `.grid`                   | `[3]i32`              | Triton launch grid `(grid_x, grid_y, grid_z)`. |
 | `.num_warps`              | `i32`                 | Triton launch param.                     |
 | `.num_stages`             | `i32`                 | Triton launch param.                     |
-| `.output_operand_aliases` | (optional) `[]const ...` | For in-place updates.                |
+| `.output_operand_aliases` | `[]const ...` (default `&.{}`) | For in-place updates.       |
+| `.debug`                  | `bool` (default false)| Emit `tt.debug = true` on the custom call. |
 
 Returns `[outputs.len]Tensor`. Index with `[0]` for single-output kernels.
 
 The `cfg` value can be a comptime literal *or* a runtime expression built
 from `Tensor.dim()` / `Options` fields. The kernel TTIR is regenerated per
 call (cached by the MLIR canonicalizer / CSE pass at the XLA layer).
+
+> **Why `inputs` and `outputs` are positional, not in `CallOpts`.** They
+> are tuples whose element types vary per call site (different `Tensor`s,
+> different `Shape`s), which means they need `anytype`. Zig forbids
+> `anytype` inside struct fields, so they stay as positional `anytype`
+> parameters. Everything else lives in the typed `CallOpts` struct so that
+> `@intCast(...)` inside `.grid` / `.cfg` / `.output_operand_aliases`
+> infers a known result type — the previous unified-`anytype` form forced
+> `@as(usize, @intCast(x))` boilerplate at every cast site.
 
 ---
 

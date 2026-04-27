@@ -22,6 +22,7 @@ const VectorExpBwd = @import("kernels_zig/vector_exp.zig").VectorExpBwd;
 const LowMemDropout = @import("kernels_zig/low_mem_dropout.zig").LowMemDropout;
 const SumScalar = @import("kernels_zig/sum_scalar.zig").SumScalar;
 const Softmax = @import("kernels_zig/softmax.zig").Softmax;
+const FusedRecurrentGatedDeltaRule = @import("kernels_zig/gdn.zig").FusedRecurrentGatedDeltaRule;
 
 pub const Entry = struct {
     name: []const u8,
@@ -157,5 +158,28 @@ pub const KERNELS: []const Entry = &.{
         .block_q = 16,
         .num_segments_per_seq = 4,
         .use_fp8 = false,
+    }),
+    // Gated Delta Net recurrent forward — config matches the monorepo's
+    // `TritonGatedDeltaNetHelper.forward`. num_tokens=64, num_qk_heads=4,
+    // num_v_heads=16, key_dim=32, value_dim=64, num_sequences=2 → BK=32, BV=8.
+    withConfig(FusedRecurrentGatedDeltaRule, .{
+        .scale = 1.0 / @sqrt(@as(f32, 32.0)),
+        .T = 64,
+        .H = 4,
+        .HV = 16,
+        .K = 32,
+        .V = 64,
+        .BK = 32,
+        .BV = 8,
+        .USE_G = true,
+        .USE_GK = false,
+        .USE_GV = false,
+        .USE_QK_L2NORM_IN_KERNEL = true,
+        .IS_BETA_HEADWISE = true,
+        .USE_INITIAL_STATE = true,
+        .STORE_FINAL_STATE = true,
+        .USE_EXP2 = false,
+        .TRANSPOSE_STATE = false,
+        .IS_VARLEN = true,
     }),
 };

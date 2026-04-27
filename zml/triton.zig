@@ -36,14 +36,16 @@
 //!
 //! Inside `forward(...)`:
 //!
-//!     const out = try VectorAdd.call(.{
-//!         .inputs  = .{ x, y, x.shape() },                  // x and y are inputs;
-//!         .outputs = .{ x.shape() },                        // x.shape() = output shape
-//!         .cfg     = .{ .BLOCK_SIZE = 1024 },
-//!         .grid    = .{ ceilDiv(x.dim(0), 1024), 1, 1 },
-//!         .num_warps  = 4,
-//!         .num_stages = 2,
-//!     });
+//!     const out = VectorAdd.call(
+//!         .{ x, y, x.shape() },           // tuple of input Tensors
+//!         .{ x.shape() },                 // tuple of output Shapes
+//!         .{
+//!             .cfg = .{ .BLOCK_SIZE = 1024 },
+//!             .grid = .{ ceilDiv(x.dim(0), 1024), 1, 1 },
+//!             .num_warps = 4,
+//!             .num_stages = 2,
+//!         },
+//!     );
 //!
 //! `cfg` can be a comptime literal or a runtime value built from
 //! `Tensor.dim()` / `Options` fields — same API either way.
@@ -64,6 +66,23 @@ pub fn Kernel(comptime decl: anytype, comptime Impl: type) type {
         pub const name: [:0]const u8 = decl.name;
         pub const Config = ConfigT;
 
+        /// Typed launch options for `.call(...)`. Splitting the launch
+        /// parameters into a typed struct (separate from `inputs`/`outputs`,
+        /// which must stay `anytype` to carry tuple arity) means call-site
+        /// literals like `.grid = .{ @intCast(g), 1, 1 }` and
+        /// `.cfg = .{ .NUMEL = @intCast(n) }` get a known result type — the
+        /// previous unified `args: anytype` form forced every `@intCast`
+        /// inside `.cfg` / `.grid` / `.output_operand_aliases` to be wrapped
+        /// in `@as(T, @intCast(x))` or a typed local.
+        pub const CallOpts = struct {
+            cfg: ConfigT,
+            grid: [3]i32,
+            num_stages: i32,
+            num_warps: i32,
+            output_operand_aliases: @FieldType(ops.TritonOps, "output_operand_aliases") = &.{},
+            debug: bool = false,
+        };
+
         /// Emit TTIR for this kernel. Caller owns the returned string.
         /// Useful for offline tooling; production code calls `.call(...)`.
         pub fn emit(
@@ -80,34 +99,28 @@ pub fn Kernel(comptime decl: anytype, comptime Impl: type) type {
         /// Emit TTIR *and* insert a `stablehlo.custom_call` op into the
         /// current `CompilationContext` (i.e. inside a model's `forward`).
         ///
-        /// `args` is a struct literal with:
         ///   - `inputs`: tuple of `Tensor` — operands fed to the kernel.
         ///   - `outputs`: tuple of `Shape` — declared output shapes.
-        ///   - `cfg`: `Config` — the kernel's runtime config.
-        ///   - `grid`: `[3]i32` — Triton launch grid.
-        ///   - `num_warps`, `num_stages`: `i32` — launch params.
-        ///   - `output_operand_aliases` (optional): for in-place updates.
+        ///   - `opts`: typed `CallOpts` carrying `cfg`, `grid`,
+        ///     `num_warps`, `num_stages`, optional `output_operand_aliases`.
         ///
         /// Returns `[outputs.len]Tensor`. For single-output kernels, index
         /// with `[0]` at the call site.
-        pub fn call(args: anytype) [args.outputs.len]Tensor {
+        pub fn call(inputs: anytype, outputs: anytype, opts: CallOpts) [outputs.len]Tensor {
             const cur = CompilationContext.current();
-            const ttir = emit(cur.allocator, cur.mlir_ctx, args.cfg) catch |err| {
+            const ttir = emit(cur.allocator, cur.mlir_ctx, opts.cfg) catch |err| {
                 std.debug.panic("zml.Kernel({s}).call: emit failed: {}", .{ name, err });
             };
             defer cur.allocator.free(ttir);
 
-            return ops.triton(args.inputs, args.outputs, .{
-                .debug = if (@hasField(@TypeOf(args), "debug")) args.debug else false,
+            return ops.triton(inputs, outputs, .{
+                .debug = opts.debug,
                 .name = name,
                 .ir = ttir,
-                .grid = args.grid,
-                .num_stages = args.num_stages,
-                .num_warps = args.num_warps,
-                .output_operand_aliases = if (@hasField(@TypeOf(args), "output_operand_aliases"))
-                    args.output_operand_aliases
-                else
-                    &.{},
+                .grid = opts.grid,
+                .num_stages = opts.num_stages,
+                .num_warps = opts.num_warps,
+                .output_operand_aliases = opts.output_operand_aliases,
             });
         }
     };

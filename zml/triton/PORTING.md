@@ -121,7 +121,7 @@ pub const MyKernel = zml.Kernel(.{
 Inside the same `.zig` directory, find the function that launches your
 kernel (e.g. `pagedAttention2d`, `fusedExpertsImpl`). Replace the
 TTIR-emit + `ops.triton(...)` two-step with a single
-`MyKernel.call(.{ ... })` — see the [README](./README.md#calling-kernels-from-a-zml-model--kcall)
+`MyKernel.call(inputs, outputs, opts)` — see the [README](./README.md#calling-kernels-from-a-zml-model--kcall)
 for the exact shape.
 
 If this is a brand-new kernel with no existing caller, write the caller

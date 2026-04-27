@@ -471,8 +471,8 @@ pub const paged = struct {
         const scale: f32 = paged_attention_opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q.dim(.hd)))));
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
 
-        const output = kernels.KernelUnifiedAttention2dPtr.call(.{
-            .inputs = .{
+        const output = kernels.KernelUnifiedAttention2dPtr.call(
+            .{
                 q,
                 k_cache,
                 v_cache,
@@ -501,12 +501,14 @@ pub const paged = struct {
                 parameters.query_start_len,
                 num_seqs_ptr,
             },
-            .outputs = .{q.shape()},
-            .cfg = kernel_config,
-            .grid = .{ @intCast(paged_attention_opts.num_kv_heads), @intCast(config.total_q_blocks), 1 },
-            .num_stages = @intCast(config.num_stages),
-            .num_warps = @intCast(config.num_warps),
-        });
+            .{q.shape()},
+            .{
+                .cfg = kernel_config,
+                .grid = .{ @intCast(paged_attention_opts.num_kv_heads), @intCast(config.total_q_blocks), 1 },
+                .num_stages = @intCast(config.num_stages),
+                .num_warps = @intCast(config.num_warps),
+            },
+        );
         return output[0];
     }
 
@@ -570,8 +572,8 @@ pub const paged = struct {
         const scale_ptr = zml.Tensor.constant(zml.DataType.f32.constant(scale));
 
         const attn_grid: [3]i32 = .{ @intCast(config.attention.total_q_blocks), @intCast(paged_attention_opts.num_kv_heads), @intCast(config.attention.num_segments_per_seq) };
-        const attn_output = kernels.KernelUnifiedAttention3dPtr.call(.{
-            .inputs = .{
+        const attn_output = kernels.KernelUnifiedAttention3dPtr.call(
+            .{
                 q,
                 k_cache,
                 v_cache,
@@ -597,19 +599,21 @@ pub const paged = struct {
                 parameters.query_start_len,
                 num_seqs_ptr,
             },
-            .outputs = .{
+            .{
                 zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq, std.math.ceilPowerOfTwoAssert(usize, paged_attention_opts.head_dim) }, .f32),
                 zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
                 zml.Shape.init(.{ paged_attention_opts.num_tokens, paged_attention_opts.num_heads, config.attention.num_segments_per_seq }, .f32),
             },
-            .cfg = attn_kernel_config,
-            .grid = attn_grid,
-            .num_stages = @intCast(config.attention.num_stages),
-            .num_warps = @intCast(config.attention.num_warps),
-        });
+            .{
+                .cfg = attn_kernel_config,
+                .grid = attn_grid,
+                .num_stages = @intCast(config.attention.num_stages),
+                .num_warps = @intCast(config.attention.num_warps),
+            },
+        );
 
-        const output = kernels.ReduceSegmentsPtr.call(.{
-            .inputs = .{
+        const output = kernels.ReduceSegmentsPtr.call(
+            .{
                 attn_output[0],
                 attn_output[1],
                 attn_output[2],
@@ -621,12 +625,14 @@ pub const paged = struct {
                 block_table_strides_ptr,
                 parameters.query_start_len,
             },
-            .outputs = .{q.shape()},
-            .cfg = reduce_kernel_config,
-            .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
-            .num_stages = @intCast(config.reduce.num_stages),
-            .num_warps = @intCast(config.reduce.num_warps),
-        });
+            .{q.shape()},
+            .{
+                .cfg = reduce_kernel_config,
+                .grid = .{ @intCast(paged_attention_opts.num_tokens), @intCast(paged_attention_opts.num_heads), 1 },
+                .num_stages = @intCast(config.reduce.num_stages),
+                .num_warps = @intCast(config.reduce.num_warps),
+            },
+        );
 
         return output[0];
     }

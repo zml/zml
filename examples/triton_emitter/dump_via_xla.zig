@@ -287,6 +287,51 @@ const ReduceSegmentsPtr = struct {
     }
 };
 
+// Gated Delta Net recurrent forward — `_ptr` wrapper kernel from
+// `kernels_py/gdn.py`. Two outputs (o, ht), so we return them as a tuple
+// rather than going through the single-output `run` helper.
+const FusedRecurrentGatedDeltaRule = struct {
+    pub fn forward(
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        g: Tensor,
+        beta: Tensor,
+        h0: Tensor,
+        cu_seqlens: Tensor,
+        _: Tensor,
+        _: Tensor,
+    ) struct { Tensor, Tensor } {
+        const out = ops.triton(
+            .{ q, k, v, g, beta, h0, cu_seqlens },
+            .{ v.shape(), h0.shape() },
+            .{
+                .name = "fused_recurrent_gated_delta_rule_fwd_kernel_ptr",
+                .ir = active_ttir,
+                .grid = .{ 8, 32, 1 },
+                .num_warps = 1,
+                .num_stages = 1,
+            },
+        );
+        return .{ out[0], out[1] };
+    }
+    fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
+        // Shapes match the Python kwargs in monorepo's `compile_gated_delta_net_kernel`:
+        // num_tokens=64, num_qk_heads=4, num_v_heads=16, key_dim=32, value_dim=64, num_sequences=2.
+        return .{
+            ten1d(.bf16, 1 * 64 * 4 * 32), // q_ptr      (1, T, H, K)
+            ten1d(.bf16, 1 * 64 * 4 * 32), // k_ptr      (1, T, H, K)
+            ten1d(.bf16, 1 * 64 * 16 * 64), // v_ptr      (1, T, HV, V)
+            ten1d(.f32, 1 * 64 * 16), // g_ptr      (1, T, HV)
+            ten1d(.bf16, 1 * 64 * 16), // beta_ptr   (1, T, HV)
+            ten1d(.f32, 2 * 16 * 32 * 64), // h0_ptr     (NS, HV, K, V)
+            ten1d(.i32, 3), // cu_seqlens_ptr (NS+1,)
+            ten1d(.bf16, 1 * 64 * 16 * 64), // o_ptr      (output)
+            ten1d(.f32, 2 * 16 * 32 * 64), // ht_ptr     (output)
+        };
+    }
+};
+
 // `name` must equal the kernel's `tt.func` symbol (matches `<name>.ttir`).
 const KERNELS = .{
     .{ "triton_add_kernel", VectorAdd },
@@ -302,6 +347,7 @@ const KERNELS = .{
     .{ "kernel_unified_attention_2d_ptr", KernelUnifiedAttention2dPtr },
     .{ "kernel_unified_attention_3d_ptr", KernelUnifiedAttention3dPtr },
     .{ "reduce_segments_ptr", ReduceSegmentsPtr },
+    .{ "fused_recurrent_gated_delta_rule_fwd_kernel_ptr", FusedRecurrentGatedDeltaRule },
 };
 
 fn readTtir(allocator: std.mem.Allocator, io: std.Io, in_dir: []const u8, name: []const u8) ![:0]const u8 {
