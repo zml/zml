@@ -2241,8 +2241,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
             .unknown(mlirCtx()),
+            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));

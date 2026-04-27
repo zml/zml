@@ -136,6 +136,12 @@ pub const mosaic_tpu = struct {
         num_seqs: zml.Tensor,
     };
 
+    pub fn alignedKernelHeadDim(head_dim: usize) usize {
+        stdx.debug.assert(head_dim > 0, "mosaic_tpu ragged paged attention head_dim must be non-zero", .{});
+        const alignment: usize = 128;
+        return (std.math.divCeil(usize, head_dim, alignment) catch unreachable) * alignment;
+    }
+
     pub const Options = struct {
         is_prefill: bool,
         batch_size: usize,
@@ -270,12 +276,38 @@ pub const mosaic_tpu = struct {
     }
 
     inline fn restoreQueryHeads(q_template: zml.Tensor, q_out: zml.Tensor) zml.Tensor {
-        return q_out.splitAxis(.h, .{ .hkv = q_template.dim(.hkv), .hg = q_template.dim(.hg) });
+        const restored = q_out.splitAxis(.h, .{ .hkv = q_template.dim(.hkv), .hg = q_template.dim(.hg) });
+        if (restored.dim(.hd) == q_template.dim(.hd)) return restored;
+        stdx.debug.assert(
+            restored.dim(.hd) > q_template.dim(.hd),
+            "mosaic_tpu ragged paged attention cannot restore output from head_dim {} to {}",
+            .{ restored.dim(.hd), q_template.dim(.hd) },
+        );
+        return restored.slice1d(.hd, .{ .end = q_template.dim(.hd) });
+    }
+
+    inline fn alignQueryHeadDimForKernel(q: zml.Tensor, target_head_dim: i64) zml.Tensor {
+        if (q.dim(.hd) == target_head_dim) return q;
+        stdx.debug.assert(
+            q.dim(.hd) < target_head_dim,
+            "mosaic_tpu ragged paged attention q head_dim {} exceeds kernel/cache head_dim {}",
+            .{ q.dim(.hd), target_head_dim },
+        );
+        return q.pad(0, .{ .hd = zml.Tensor.Pad{ .high = target_head_dim - q.dim(.hd) } })
+            .withPartitioning(.{ .h = .model });
     }
 
     inline fn prepareInputs(parameters: Parameters, q: zml.Tensor, kv_pages: zml.Tensor) PreparedInputs {
-        const q_ragged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
         const kv_pages_partitioned = kv_pages.withPartitioning(.{ .hkv = .model });
+        const q_merged = q.merge(.{ .h = .{ .hkv, .hg } }).withPartitioning(.{ .h = .model });
+        const logical_head_dim: usize = @intCast(q_merged.dim(.hd));
+        const cache_head_dim: usize = @intCast(kv_pages_partitioned.dim(.hd));
+        stdx.debug.assert(
+            cache_head_dim == alignedKernelHeadDim(logical_head_dim),
+            "mosaic_tpu ragged paged attention expects KV cache head_dim {} to match aligned logical head_dim {}",
+            .{ cache_head_dim, logical_head_dim },
+        );
+        const q_ragged = alignQueryHeadDimForKernel(q_merged, kv_pages_partitioned.dim(.hd));
         const query_start_len = parameters.query_start_len.withPartitioning(.{ .b = .replicated });
 
         // Note
@@ -303,6 +335,11 @@ pub const mosaic_tpu = struct {
         const q_token_count = if (q_shape.hasTag(.q) != null) q_shape.dim(.q) else q_shape.dim(.b);
         const max_num_seqs = block_table_shape.dim(.b);
         const num_q_heads = q_shape.dim(.h);
+        stdx.debug.assert(
+            q_shape.dim(.hd) == kv_pages_shape.dim(.hd),
+            "mosaic_tpu ragged paged attention expects q and KV cache head_dim to match, got {} and {}",
+            .{ q_shape.dim(.hd), kv_pages_shape.dim(.hd) },
+        );
         stdx.debug.assert(@mod(kv_pages_shape.dim(.hkv), 2) == 0, "Expected fused KV pages .hkv dimension to be even, got {}", .{kv_pages_shape.dim(.hkv)});
         const num_kv_heads = std.math.divExact(i64, kv_pages_shape.dim(.hkv), 2) catch |err| switch (err) {
             error.UnexpectedRemainder => stdx.debug.panic("Expected fused KV pages .hkv dimension to be even, got {}", .{kv_pages_shape.dim(.hkv)}),
@@ -310,7 +347,7 @@ pub const mosaic_tpu = struct {
             error.Overflow => stdx.debug.panic("KV pages .hkv dimension is too large to fit in i64: {}", .{kv_pages_shape.dim(.hkv)}),
         };
         const num_queries_per_block = @max(@as(i64, 1), @min(q_token_count, max_num_seqs));
-        const sm_scale: f32 = opts.scale orelse @floatCast(1.0 / @sqrt(@as(f64, @floatFromInt(q_shape.dim(.hd)))));
+        const logical_head_dim: f64 = @floatFromInt(parameters.opts.head_dim);
 
         return .{
             .num_q_tokens = q_token_count,
@@ -323,7 +360,7 @@ pub const mosaic_tpu = struct {
             .pages_per_seq = @intCast(parameters.opts.max_num_pages),
             .total_num_pages = kv_pages_shape.dim(.page),
             .page_size = kv_pages_shape.dim(.k_chunk),
-            .sm_scale = sm_scale,
+            .sm_scale = opts.scale orelse @floatCast(1.0 / @sqrt(logical_head_dim)),
             .sliding_window = if (opts.sliding_window < 0) null else @intCast(opts.sliding_window),
             .num_kv_pages_per_block = checkedU32(parameters.opts.pages_per_compute_block, "num_kv_pages_per_block"),
             .num_queries_per_block = checkedU32(@intCast(num_queries_per_block), "num_queries_per_block"),
@@ -398,3 +435,39 @@ pub const mosaic_tpu = struct {
         return restored;
     }
 };
+
+test "mosaic_tpu aligns kernel head dimensions to 128" {
+    try std.testing.expectEqual(@as(usize, 128), mosaic_tpu.alignedKernelHeadDim(64));
+    try std.testing.expectEqual(@as(usize, 128), mosaic_tpu.alignedKernelHeadDim(128));
+    try std.testing.expectEqual(@as(usize, 256), mosaic_tpu.alignedKernelHeadDim(180));
+    try std.testing.expectEqual(@as(usize, 256), mosaic_tpu.alignedKernelHeadDim(256));
+}
+
+test "mosaic_tpu request uses kernel head dim and logical scale" {
+    const parameters = mosaic_tpu.Parameters.init(.{
+        .is_prefill = false,
+        .batch_size = 1,
+        .max_num_pages = 2,
+        .max_seqlen_k = 32,
+        .max_token_count = 1,
+        .num_heads = 8,
+        .num_kv_heads = 2,
+        .head_dim = 64,
+    });
+    const prepared_inputs: mosaic_tpu.PreparedInputs = .{
+        .q = zml.Tensor.init(.{ .b = 1, .h = 8, .hd = 128 }, .bf16),
+        .kv_pages = zml.Tensor.init(.{ .page = 2, .k_chunk = 16, .hkv = 4, .hd = 128 }, .bf16),
+        .seq_lens = parameters.seq_lens,
+        .block_table = parameters.block_table,
+        .query_start_len = parameters.query_start_len,
+        .num_seqs = zml.Tensor.init(.{1}, .i32),
+    };
+
+    const request = mosaic_tpu.buildRequest(prepared_inputs, parameters, .{});
+    try std.testing.expectEqual(@as(i64, 128), request.head_dim);
+    try std.testing.expectApproxEqAbs(
+        @as(f32, 1.0 / @sqrt(@as(f32, 64.0))),
+        request.sm_scale,
+        0.000001,
+    );
+}
