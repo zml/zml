@@ -40,6 +40,19 @@ pub const Tokenizer = union(Tokenizers) {
                 inline else => |*encoder_| try allocator.dupe(u32, try encoder_.encode(text)),
             };
         }
+
+        pub fn encode(self: *Encoder, writer: *std.Io.Writer, text: []const u8) !void {
+            return switch (self.*) {
+                .iree => |*e| {
+                    try e.feed(text, writer);
+                    try e.finalize(writer);
+                },
+                inline else => |*e| {
+                    const encoded: []const u32 = try e.encode(text);
+                    try writer.writeAll(std.mem.sliceAsBytes(encoded));
+                },
+            };
+        }
     };
 
     pub const Decoder = union(Tokenizers) {

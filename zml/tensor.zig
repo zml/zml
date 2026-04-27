@@ -5,12 +5,11 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
 const Memory = @import("platform.zig").Memory;
+const mem = @import("mem.zig");
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
@@ -521,17 +520,19 @@ pub const Tensor = struct {
         _state: Tensor,
         algorithm: dialects.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
+        pub const Buffer = mem.Bufferized(Rng);
+
         pub fn init() Rng {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(platform: *const Platform, seed: u128, io: std.Io, sharding: Sharding) !Bufferized(Rng) {
+        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
             };
         }
 
-        pub fn deinitBuffer(self: *Bufferized(Rng)) void {
+        pub fn deinitBuffer(self: *Buffer) void {
             self._state.deinit();
         }
 
@@ -631,7 +632,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.uniformStats, .{ Rng.init(), Shape.init(.{1024}, .f32), .{ .min = -2, .max = 10 } }, platform, .{ .shardings = &.{replicated_sharding} });
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io, replicated_sharding);
+            var rng_buffer = try Rng.initBuffer(std.testing.io, platform, replicated_sharding, 1234);
             defer rng_buffer._state.deinit();
 
             var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.uniformStats, .{rng_buffer});
@@ -740,7 +741,7 @@ pub const Tensor = struct {
             var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Stats.gumbelStats, .{ Rng.init(), tgt_dist }, platform, .{ .shardings = &.{replicated_sharding} });
             defer exe.deinit();
 
-            var rng_buffer = try Rng.initBuffer(platform, 1234, std.testing.io, replicated_sharding);
+            var rng_buffer = try Rng.initBuffer(std.testing.io, platform, replicated_sharding, 1234);
             defer rng_buffer._state.deinit();
             var tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, std.mem.sliceAsBytes(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
@@ -2775,7 +2776,7 @@ pub const Tensor = struct {
 
             var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), replicated_sharding, std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
             defer a_buffer.deinit();
-            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), replicated_sharding, std.mem.sliceAsBytes(&[2]i32{ 0, 2 }));
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), replicated_sharding, @ptrCast(&[2]i32{ 0, 2 }));
             defer scatter_indices_buffer.deinit();
             var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), replicated_sharding, std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
             defer updates_buffer.deinit();

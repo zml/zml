@@ -35,7 +35,7 @@ pub const Session = struct {
         errdefer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, shardings.replicated);
+        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, shardings.replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         return .{
@@ -70,21 +70,19 @@ pub const Session = struct {
         const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
         const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
-        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ self.config.bos_token_id, start_header });
-        const user_tokens = try encoder.encodeAlloc(allocator, "user");
-        defer allocator.free(user_tokens);
-        try tokens.appendSlice(allocator, user_tokens);
-        try tokens.appendSlice(allocator, &.{ end_header, newline });
-        const prompt_tokens = try encoder.encodeAlloc(allocator, prompt);
-        defer allocator.free(prompt_tokens);
-        try tokens.appendSlice(allocator, prompt_tokens);
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        const assistant_tokens = try encoder.encodeAlloc(allocator, "assistant");
-        defer allocator.free(assistant_tokens);
-        try tokens.appendSlice(allocator, assistant_tokens);
-        try tokens.appendSlice(allocator, &.{ end_header, newline });
-        return tokens.toOwnedSlice(allocator);
+        var tokens = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+        try tokens.ensureUnusedCapacity(prompt.len);
+
+        const w: *std.Io.Writer = &tokens.writer;
+        try w.writeAll(@ptrCast(&.{ self.config.bos_token_id, start_header }));
+        try encoder.encode(w, "user");
+        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.encode(w, prompt);
+        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.encode(w, "assistant");
+        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+
+        return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
     }
 
     pub fn tokenizeTurn(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
@@ -96,21 +94,19 @@ pub const Session = struct {
         const eot = self.tokenizer.tokenId("<|eot_id|>") orelse return error.NoSuchToken;
         const newline = self.tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
-        var tokens: std.ArrayList(u32) = try .initCapacity(allocator, prompt.len);
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        const user_tokens = try encoder.encodeAlloc(allocator, "user");
-        defer allocator.free(user_tokens);
-        try tokens.appendSlice(allocator, user_tokens);
-        try tokens.appendSlice(allocator, &.{ end_header, newline });
-        const prompt_tokens = try encoder.encodeAlloc(allocator, prompt);
-        defer allocator.free(prompt_tokens);
-        try tokens.appendSlice(allocator, prompt_tokens);
-        try tokens.appendSlice(allocator, &.{ eot, newline, start_header });
-        const assistant_tokens = try encoder.encodeAlloc(allocator, "assistant");
-        defer allocator.free(assistant_tokens);
-        try tokens.appendSlice(allocator, assistant_tokens);
-        try tokens.appendSlice(allocator, &.{ end_header, newline });
-        return tokens.toOwnedSlice(allocator);
+        var tokens = std.Io.Writer.Allocating.initAligned(allocator, .of(u32));
+        try tokens.ensureUnusedCapacity(prompt.len);
+
+        const w: *std.Io.Writer = &tokens.writer;
+        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.encode(w, "user");
+        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.encode(w, prompt);
+        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.encode(w, "assistant");
+        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+
+        return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
     }
 
     pub fn runPrefill(self: *Session, all_tokens: []const u32) !void {
@@ -154,6 +150,8 @@ pub const Session = struct {
 
         var decode_args = try self.compiled_model.decode_exe.args(self.allocator);
         defer decode_args.deinit(self.allocator);
+        // Fix model buffers, since they are stable for the full gen.
+        decode_args.bake(self.model_buffers);
 
         var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
         defer decode_results.deinit(self.allocator);
@@ -177,12 +175,10 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(all_tokens.items.len)}));
-            var token_pos_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, token_pos_slice, replicated_sharding);
+            var token_pos_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32, replicated_sharding);
             defer token_pos_buffer.deinit();
 
             decode_args.set(.{
-                self.model_buffers,
                 current_token_buffer,
                 token_pos_buffer,
                 &self.kv_cache_buffers,

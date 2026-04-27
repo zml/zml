@@ -225,9 +225,7 @@ pub const FixedBufferPool = struct {
 
 pub const DynamicBufferPool = struct {
     const Node = struct { next: ?*Node };
-    const alignment: std.mem.Alignment = .max(.of(u8), .of(Node));
-    const ItemPtr = [*]align(alignment.toByteUnits()) u8;
-    const Slice = []align(alignment.toByteUnits()) u8;
+    const alignment: std.mem.Alignment = .of(Node);
 
     block_size: usize,
     max_blocks: usize,
@@ -311,8 +309,8 @@ pub const DynamicBufferPool = struct {
         }
     }
 
-    fn nodeToSlice(self: *DynamicBufferPool, node: *Node) Slice {
-        const ptr: ItemPtr = @ptrCast(@alignCast(node));
+    fn nodeToSlice(self: DynamicBufferPool, node: *Node) []u8 {
+        const ptr: [*]u8 = @ptrCast(node);
         return ptr[0..self.block_size];
     }
 };
