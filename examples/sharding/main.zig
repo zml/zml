@@ -189,11 +189,11 @@ pub fn main(init: std.process.Init) !void {
     log.info("{f}", .{platform.physical_mesh});
 
     const physical_mesh = platform.physical_mesh;
-    const mesh: zml.sharding.LogicalMesh = try .init("demo_mesh", .{
+    const mesh: zml.sharding.LogicalMesh = .init("demo_mesh", .{
         .data = .low_bandwidth,
         .model = .high_bandwidth,
     });
-    const strategy: zml.sharding.Strategy = try .suggest(mesh, physical_mesh);
+    const strategy: zml.sharding.Strategy = .suggest(mesh, physical_mesh);
     const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
 
     log.info("{f}", .{mesh});

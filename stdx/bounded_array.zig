@@ -27,12 +27,16 @@ pub fn BoundedArray(comptime T: type, comptime buffer_capacity: usize) type {
 /// only known at runtime, but whose maximum size is known at comptime, without
 /// requiring an `Allocator`.
 /// ```zig
-//  var a = try BoundedArrayAligned(u8, 16, 2).init(0);
-//  try a.append(255);
-//  try a.append(255);
-//  const b = @ptrCast(*const [1]u16, a.constSlice().ptr);
-//  try testing.expectEqual(@as(u16, 65535), b[0]);
+/// var a: BoundedArrayAligned(u8, 16, 2) = .empty;
+/// try a.append(255);
+/// try a.append(255);
+/// const b: *const [1]u16 = @ptrCast(a.constSlice().ptr);
+/// try testing.expectEqual(@as(u16, 65535), b[0]);
 /// ```
+///
+/// Note: there is no init anymore. It's generally unsafe because it makes `slice()` return undefined.;
+/// If you used `try init(0)` use `.empty`
+/// If you used `try init(n)` use `.{ .buffer = undefined, .len = n }` and fill `buffer` yourself.
 pub fn BoundedArrayAligned(
     comptime T: type,
     comptime alignment: Alignment,
@@ -40,15 +44,10 @@ pub fn BoundedArrayAligned(
 ) type {
     return struct {
         const Self = @This();
-        buffer: [buffer_capacity]T align(alignment.toByteUnits()) = undefined,
-        len: usize = 0,
+        buffer: [buffer_capacity]T align(alignment.toByteUnits()),
+        len: usize,
 
-        /// Set the actual length of the slice.
-        /// Returns error.Overflow if it exceeds the length of the backing array.
-        pub fn init(len: usize) error{Overflow}!Self {
-            if (len > buffer_capacity) return error.Overflow;
-            return Self{ .len = len };
-        }
+        pub const empty: Self = .{ .buffer = undefined, .len = 0 };
 
         /// View the internal array as a slice whose size was previously set.
         pub fn slice(self: anytype) switch (@TypeOf(&self.buffer)) {
@@ -78,8 +77,10 @@ pub fn BoundedArrayAligned(
 
         /// Copy the content of an existing slice.
         pub fn fromSlice(m: []const T) error{Overflow}!Self {
-            var list = try init(m.len);
-            @memcpy(list.slice(), m);
+            if (m.len > buffer_capacity) return error.Overflow;
+
+            var list: Self = .{ .buffer = undefined, .len = m.len };
+            @memcpy(list.buffer[0..m.len], m);
             return list;
         }
 
@@ -294,7 +295,7 @@ pub fn BoundedArrayAligned(
 }
 
 test BoundedArray {
-    var a = try BoundedArray(u8, 64).init(32);
+    var a: BoundedArray(u8, 64) = .{ .buffer = undefined, .len = 32 };
 
     try testing.expectEqual(a.capacity(), 64);
     try testing.expectEqual(a.slice().len, 32);
@@ -303,8 +304,8 @@ test BoundedArray {
     try a.resize(48);
     try testing.expectEqual(a.len, 48);
 
-    const x = [_]u8{1} ** 10;
-    a = try BoundedArray(u8, 64).fromSlice(&x);
+    const x: [10]u8 = @splat(1);
+    a = try .fromSlice(&x);
     try testing.expectEqualSlices(u8, &x, a.constSlice());
 
     var a2 = a;
@@ -399,7 +400,7 @@ test BoundedArray {
 }
 
 test "BoundedArrayAligned" {
-    var a = try BoundedArrayAligned(u8, .@"16", 4).init(0);
+    var a: BoundedArrayAligned(u8, .@"16", 4) = .empty;
     try a.append(0);
     try a.append(0);
     try a.append(255);
