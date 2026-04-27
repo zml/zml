@@ -12,12 +12,11 @@
 
 const std = @import("std");
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const FusedRecurrentGatedDeltaRule = zml.Kernel(.{
-    .name = "fused_recurrent_gated_delta_rule_fwd_kernel_ptr",
-    .config = struct {
+pub const FusedRecurrentGatedDeltaRule = struct {
+    pub const Cfg = struct {
         // Pointer dtypes — match the monorepo call (q/k/v/beta/o = bf16, g/h0/ht = f32).
         q_dtype: tri.DType = .bf16,
         k_dtype: tri.DType = .bf16,
@@ -45,9 +44,14 @@ pub const FusedRecurrentGatedDeltaRule = zml.Kernel(.{
         USE_EXP2: bool,
         TRANSPOSE_STATE: bool,
         IS_VARLEN: bool,
-    },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "fused_recurrent_gated_delta_rule_fwd_kernel_ptr",
+        .inputs = &.{ "q_ptr", "k_ptr", "v_ptr", "g_ptr", "beta_ptr", "h0_ptr", "cu_seqlens_ptr" },
+        .outputs = &.{ "o", "ht" },
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         // This port is pinned to the monorepo config. Other combos change the
         // loop's iter_args arity (and Python's emit order); they're a separate
         // exercise. Asserts run at TTIR-emit time, before any IR is built.
@@ -231,4 +235,4 @@ pub const FusedRecurrentGatedDeltaRule = zml.Kernel(.{
             .addPtr(b.broadcastTo(b.expandDims(o_v, 0), &.{ BK_i64, BV_i64 }));
         b.storeOpts(p_ht, b_h_final.to(cfg.h_dtype), .{ .mask = mask_h });
     }
-});
+};

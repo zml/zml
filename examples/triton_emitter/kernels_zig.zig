@@ -29,43 +29,44 @@ pub const Entry = struct {
     emit: *const fn (std.mem.Allocator, *mlir.Context) anyerror![:0]const u8,
 };
 
-/// Lift a `zml.Kernel(...)` type with a default-constructible `Config` to
-/// the dump driver's `Entry` shape.
-fn defaults(comptime K: type) Entry {
+/// Lift a kernel-wrapper type (`struct { Cfg, Kernel = tri.Kernel(...), run }`)
+/// with a default-constructible `Cfg` to the dump driver's `Entry` shape.
+fn defaults(comptime W: type) Entry {
     const E = struct {
         fn emit(allocator: std.mem.Allocator, ctx: *mlir.Context) anyerror![:0]const u8 {
-            return K.emit(allocator, ctx, .{});
+            return W.Kernel.emit(allocator, ctx, .{});
         }
     };
-    return .{ .name = K.name, .emit = E.emit };
+    return .{ .name = W.Kernel.name, .emit = E.emit };
 }
 
-/// Same, but with an explicit `Config` value (for kernels whose required
+/// Same, but with an explicit `Cfg` value (for kernels whose required
 /// fields have no defaults).
-fn withConfig(comptime K: type, comptime cfg: K.Config) Entry {
+fn withConfig(comptime W: type, comptime cfg: W.Kernel.Config) Entry {
     const E = struct {
         fn emit(allocator: std.mem.Allocator, ctx: *mlir.Context) anyerror![:0]const u8 {
-            return K.emit(allocator, ctx, cfg);
+            return W.Kernel.emit(allocator, ctx, cfg);
         }
     };
-    return .{ .name = K.name, .emit = E.emit };
+    return .{ .name = W.Kernel.name, .emit = E.emit };
 }
 
 /// Like `withConfig`, but suffixes the **filename** with `__<label>` while
-/// keeping the kernel's inner `tt.func` symbol identical (= `K.name`).
+/// keeping the kernel's inner `tt.func` symbol identical (= `W.Kernel.name`).
 /// Used by the unified-attention fuzzer to register multiple Config2D /
 /// Config3D / ConfigReduce variants under the same Python source kernel —
-/// each variant's TTIR ends up in `<K.name>__<label>.ttir` but the body
-/// still says `tt.func @<K.name>`, so `compare_ir.py` pairs the per-variant
-/// Zig and Python files by stem and the XLA pipeline finds the same symbol
-/// inside both. The label string is what the Python sweep also uses.
-fn variantOf(comptime K: type, comptime label: []const u8, comptime cfg: K.Config) Entry {
+/// each variant's TTIR ends up in `<W.Kernel.name>__<label>.ttir` but the
+/// body still says `tt.func @<W.Kernel.name>`, so `compare_ir.py` pairs the
+/// per-variant Zig and Python files by stem and the XLA pipeline finds the
+/// same symbol inside both. The label string is what the Python sweep also
+/// uses.
+fn variantOf(comptime W: type, comptime label: []const u8, comptime cfg: W.Kernel.Config) Entry {
     const E = struct {
         fn emit(allocator: std.mem.Allocator, ctx: *mlir.Context) anyerror![:0]const u8 {
-            return K.emit(allocator, ctx, cfg);
+            return W.Kernel.emit(allocator, ctx, cfg);
         }
     };
-    const variant_name = std.fmt.comptimePrint("{s}__{s}", .{ K.name, label });
+    const variant_name = std.fmt.comptimePrint("{s}__{s}", .{ W.Kernel.name, label });
     return .{ .name = variant_name, .emit = E.emit };
 }
 
@@ -179,7 +180,7 @@ pub const KERNELS: []const Entry = &.{
     }),
     //
     // Unified-attention fuzzer — additional config variants drawn from
-    // monorepo/llmd's call space (`zml/attention/triton.zig:select2dConfig` /
+    // monorepo/llmd's call space (`zml/attention/triton_attention.zig:select2dConfig` /
     // `select3dConfig`). Each variant's filename suffix matches the label
     // emitted by `dump_python_ir.py`'s `_UNIFIED_ATTENTION_VARIANTS`. The
     // inner `tt.func` symbol stays equal to the production kernel name so

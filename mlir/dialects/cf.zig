@@ -76,7 +76,7 @@ pub fn cond_br(
     branch_weights: ?[]const i32,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 128) = .{};
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 128) = .empty;
     operands_buf.appendAssumeCapacity(cond);
     operands_buf.appendSliceAssumeCapacity(true_operands);
     operands_buf.appendSliceAssumeCapacity(false_operands);
@@ -88,7 +88,7 @@ pub fn cond_br(
     var successors: [2]*const mlir.Block = .{ true_dest, false_dest };
     state.addSuccessors(&successors);
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)));
     if (branch_weights) |w| {
         std.debug.assert(w.len == 2);
@@ -128,11 +128,11 @@ pub fn switch_(
     std.debug.assert(case_values.len == case_dests.len);
     std.debug.assert(case_values.len == case_operands.len);
 
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 256) = .{};
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 256) = .empty;
     operands_buf.appendAssumeCapacity(flag);
     operands_buf.appendSliceAssumeCapacity(default_operands);
 
-    var case_seg_sizes: stdx.BoundedArray(i32, 64) = .{};
+    var case_seg_sizes: stdx.BoundedArray(i32, 64) = .empty;
     var case_total: i32 = 0;
     for (case_operands) |segment| {
         operands_buf.appendSliceAssumeCapacity(segment);
@@ -146,7 +146,7 @@ pub fn switch_(
     var state: mlir.OperationState = .init("cf.switch", location);
     state.addOperands(operands_buf.constSlice());
 
-    var successors_buf: stdx.BoundedArray(*const mlir.Block, 64) = .{};
+    var successors_buf: stdx.BoundedArray(*const mlir.Block, 64) = .empty;
     successors_buf.appendAssumeCapacity(default_dest);
     for (case_dests) |d| successors_buf.appendAssumeCapacity(d);
     state.addSuccessors(@constCast(successors_buf.constSlice()));

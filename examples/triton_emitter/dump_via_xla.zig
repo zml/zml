@@ -192,7 +192,7 @@ const CountAndSort = struct {
 };
 
 // Unified-attention `_ptr` kernels — arg order matches the `tt.func` signature
-// emitted by `zml/attention/triton_kernels.zig` (which is the production
+// emitted by `zml/attention/triton_kernels/unified_attention.zig` (which is the production
 // version we're comparing against). Tensor sizes are dummies; XLA never
 // launches these — it just runs the per-pass codegen pipeline. The shapes
 // below are oversized (max num_query_heads=64, head_size_padded=256,

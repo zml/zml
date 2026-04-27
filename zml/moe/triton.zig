@@ -16,30 +16,12 @@ const DataType = zml.DataType;
 const Tensor = zml.Tensor;
 const Shape = zml.Shape;
 
-const tri = @import("zml/triton");
+const tri = zml.kernel.triton;
 const DType = tri.DType;
 
 const kernels = @import("triton_kernels.zig");
 
-/// Map a zml `DataType` to the closest Triton DSL `DType`. The Triton set is
-/// narrower (e.g. several fp8 variants collapse to `.f8e4m3fn`), so this is
-/// intentionally lossy.
-fn toDType(dt: DataType) DType {
-    return switch (dt) {
-        .bool => .i1,
-        .i8, .u8 => .i8,
-        .i16, .u16 => .i16,
-        .i32, .u32 => .i32,
-        .i64, .u64 => .i64,
-        .f16 => .f16,
-        .bf16 => .bf16,
-        .f32 => .f32,
-        .f64 => .f64,
-        .f8e4m3fn, .f8e4m3b11fnuz, .f8e4m3fnuz => .f8e4m3fn,
-        .f8e5m2, .f8e5m2fnuz => .f8e5m2,
-        else => .i8,
-    };
-}
+const toDType = tri.from;
 
 const log = std.log.scoped(.moe_triton);
 
@@ -270,7 +252,7 @@ fn callFusedMoe(
     sorted_token_ids: Tensor,
     expert_ids: Tensor,
     num_tokens_post_padded: Tensor,
-    cfg: kernels.FusedMoe.Config,
+    cfg: kernels.FusedMoe.Cfg,
     options: Options,
     max_num_tokens_padded: i64,
     num_valid_tokens: i64,
@@ -296,41 +278,41 @@ fn callFusedMoe(
     const stride_bsk: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) 1 else 0;
     const stride_bsn: i64 = if (cfg.b_scale_dtype != null and b_scale.rank() == 3) b_scale.dim(2) else 0;
 
-    return kernels.FusedMoe.call(
+    return kernels.FusedMoe.Kernel.call(
         .{
-            a,
-            b,
-            b_bias,
-            a_scale,
-            b_scale,
-            topk_weights,
-            sorted_token_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            Tensor.constant(.{ .i64 = b.dim(1) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = num_valid_tokens }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = a.dim(1) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = b.dim(1) * b.dim(2) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = b.dim(.out) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+            .a_ptr = a,
+            .b_ptr = b,
+            .b_bias_ptr = b_bias,
+            .a_scale_ptr = a_scale,
+            .b_scale_ptr = b_scale,
+            .topk_weights_ptr = topk_weights,
+            .sorted_token_ids_ptr = sorted_token_ids,
+            .expert_ids_ptr = expert_ids,
+            .num_tokens_post_padded_ptr = num_tokens_post_padded,
+            .N_ptr = Tensor.constant(.{ .i64 = b.dim(1) }).reshape(.{1}),
+            .K_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
+            .EM_ptr = Tensor.constant(.{ .i64 = em_effective }).reshape(.{1}),
+            .num_valid_tokens_ptr = Tensor.constant(.{ .i64 = num_valid_tokens }).reshape(.{1}),
+            .stride_am_ptr = Tensor.constant(.{ .i64 = a.dim(1) }).reshape(.{1}),
+            .stride_be_ptr = Tensor.constant(.{ .i64 = b.dim(1) * b.dim(2) }).reshape(.{1}),
+            .stride_bn_ptr = Tensor.constant(.{ .i64 = b.dim(2) }).reshape(.{1}),
+            .stride_cm_ptr = Tensor.constant(.{ .i64 = b.dim(.out) }).reshape(.{1}),
+            .stride_asm_ptr = Tensor.constant(.{ .i64 = stride_asm }).reshape(.{1}),
+            .stride_ask_ptr = Tensor.constant(.{ .i64 = stride_ask }).reshape(.{1}),
+            .stride_bse_ptr = Tensor.constant(.{ .i64 = stride_bse }).reshape(.{1}),
+            .stride_bsk_ptr = Tensor.constant(.{ .i64 = stride_bsk }).reshape(.{1}),
+            .stride_bsn_ptr = Tensor.constant(.{ .i64 = stride_bsn }).reshape(.{1}),
+            .stride_bbe_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
+            .stride_bbn_ptr = Tensor.constant(.{ .i64 = 0 }).reshape(.{1}),
         },
-        .{output_shape},
+        .{ .c = output_shape },
         .{
             .cfg = cfg,
             .grid = .{ @intCast(grid_x), 1, 1 },
             .num_warps = @intCast(options.num_warps),
             .num_stages = @intCast(options.num_stages),
         },
-    )[0];
+    ).c;
 }
 
 fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct { Tensor, Tensor, Tensor } {
@@ -356,19 +338,19 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
     var num_tokens_post_padded = Tensor.zeroes(Shape.init(.{ .g = 1 }, .i32));
 
     {
-        const align_outs = kernels.MoeAlignBlockSize.call(
+        const align_outs = kernels.MoeAlignBlockSize.Kernel.call(
             .{
-                flat_experts,
-                sorted_token_ids,
-                expert_ids,
-                num_tokens_post_padded,
-                cumsums,
+                .topk_ids_ptr = flat_experts,
+                .sorted_token_ids_ptr = sorted_token_ids,
+                .expert_ids_ptr = expert_ids,
+                .num_tokens_post_pad_ptr = num_tokens_post_padded,
+                .cumsum_ptr = cumsums,
             },
             .{
-                sorted_token_ids.shape(),
-                expert_ids.shape(),
-                num_tokens_post_padded.shape(),
-                cumsums.shape(),
+                .sorted_token_ids = sorted_token_ids.shape(),
+                .expert_ids = expert_ids.shape(),
+                .num_tokens_post_pad = num_tokens_post_padded.shape(),
+                .cumsum = cumsums.shape(),
             },
             .{
                 .cfg = .{
@@ -391,20 +373,23 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 },
             },
         );
-        sorted_token_ids = align_outs[0];
-        expert_ids = align_outs[1];
-        num_tokens_post_padded = align_outs[2];
-        cumsums = align_outs[3];
+        sorted_token_ids = align_outs.sorted_token_ids;
+        expert_ids = align_outs.expert_ids;
+        num_tokens_post_padded = align_outs.num_tokens_post_pad;
+        cumsums = align_outs.cumsum;
     }
 
     {
-        const sort_outs = kernels.CountAndSortExpertTokens.call(
+        const sort_outs = kernels.CountAndSortExpertTokens.Kernel.call(
             .{
-                flat_experts,
-                sorted_token_ids,
-                cumsums,
+                .topk_ids_ptr = flat_experts,
+                .sorted_token_ids_ptr = sorted_token_ids,
+                .cumsum_ptr = cumsums,
             },
-            .{ sorted_token_ids.shape(), cumsums.shape() },
+            .{
+                .sorted_token_ids = sorted_token_ids.shape(),
+                .cumsum = cumsums.shape(),
+            },
             .{
                 .cfg = .{
                     .numel = @intCast(num_assignments),
@@ -420,8 +405,8 @@ fn alignBlockSize(topk_ids: Tensor, num_experts: i64, block_size_m: i64) struct 
                 },
             },
         );
-        sorted_token_ids = sort_outs[0];
-        cumsums = sort_outs[1];
+        sorted_token_ids = sort_outs.sorted_token_ids;
+        cumsums = sort_outs.cumsum;
     }
 
     return .{ sorted_token_ids, expert_ids, num_tokens_post_padded };
@@ -435,15 +420,15 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
     const quantized = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .feature = x.dim(1) }, .f8e4m3fn));
     const scales = Tensor.zeroes(Shape.init(.{ .token = x.dim(0), .group = groups_per_row }, .bf16));
 
-    const outs = kernels.PerTokenGroupQuantFp8.call(
+    const outs = kernels.PerTokenGroupQuantFp8.Kernel.call(
         .{
-            x,
-            Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
-            Tensor.scalar(1e-6, .f32),
+            .y_ptr = x,
+            .group_size_ptr = Tensor.constant(.{ .i64 = group_size }).reshape(.{1}),
+            .y_num_columns_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
+            .y_row_stride_ptr = Tensor.constant(.{ .i64 = x.dim(1) }).reshape(.{1}),
+            .eps_ptr = Tensor.scalar(1e-6, .f32),
         },
-        .{ quantized.shape(), scales.shape() },
+        .{ .y_q = quantized.shape(), .y_s = scales.shape() },
         .{
             .cfg = .{
                 .input_dtype = toDType(x.dtype()),
@@ -460,7 +445,7 @@ fn quantizePerTokenGroupFp8(x: Tensor, group_size: i64) struct { Tensor, Tensor 
         },
     );
 
-    return .{ outs[0], outs[1] };
+    return .{ outs.y_q, outs.y_s };
 }
 
 // =============================================================================
@@ -476,7 +461,7 @@ fn makeFusedMoeConfig(
     mul_routed_weight: bool,
     has_bias: bool,
     output_dtype: DataType,
-) kernels.FusedMoe.Config {
+) kernels.FusedMoe.Cfg {
     var use_fp8 = opts.use_fp8_w8a8;
     if (b.dtype() == .f8e4m3fn) use_fp8 = true;
     return .{

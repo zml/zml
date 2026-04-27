@@ -2,14 +2,22 @@
 
 const std = @import("std");
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const Softmax = zml.Kernel(.{
-    .name = "softmax_kernel",
-    .config = struct { BLOCK_SIZE: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const Softmax = struct {
+    pub const Cfg = struct { BLOCK_SIZE: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "softmax_kernel",
+        // NOTE: This kernel's `tt.func` declares `output_ptr` first then inputs;
+        // the args order doesn't follow the inputs-then-outputs convention used
+        // by the runtime custom_call lowering. Declared here as all-inputs since
+        // this kernel is emit-only (not invoked through `Kernel.call`).
+        .inputs = &.{ "output_ptr", "input_ptr", "input_row_stride", "output_row_stride", "n_cols" },
+        .outputs = &.{},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .output_ptr = .{ .ptr = .f32 },
             .input_ptr = .{ .ptr = .f32 },
@@ -38,4 +46,4 @@ pub const Softmax = zml.Kernel(.{
         const output_ptrs = row_start_out.addPtr(col_offsets);
         b.storeOpts(output_ptrs, softmax_out, .{ .mask = mask });
     }
-});
+};

@@ -1,0 +1,28 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "ragged_paged_attention",
+    main = "main.zig",
+    deps = [
+        "//mlir",
+        "//platforms/tpu:ragged_paged",
+    ],
+)
+
+zig_binary(
+    name = "canonicalize",
+    main = "canonicalize.zig",
+    deps = [
+        "//mlir",
+        "//mlir/dialects/mosaic_tpu",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":canonicalize",
+        ":ragged_paged_attention",
+    ],
+)

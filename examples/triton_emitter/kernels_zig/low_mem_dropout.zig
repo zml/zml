@@ -2,14 +2,18 @@
 
 const arith = @import("mlir/dialects").arith;
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const LowMemDropout = zml.Kernel(.{
-    .name = "_triton_dropout",
-    .config = struct { BLOCK_SIZE: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const LowMemDropout = struct {
+    pub const Cfg = struct { BLOCK_SIZE: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "_triton_dropout",
+        .inputs = &.{ "x_ptr", "x_keep_ptr", "n_elements", "p" },
+        .outputs = &.{"output"},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .x_ptr = .{ .ptr = .f32 },
             .x_keep_ptr = .{ .ptr = .f32 },
@@ -36,4 +40,4 @@ pub const LowMemDropout = zml.Kernel(.{
 
         b.storeOpts(a.output_ptr.addPtr(offsets), out, .{ .mask = mask });
     }
-});
+};

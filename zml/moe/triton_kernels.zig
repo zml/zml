@@ -1,6 +1,6 @@
 //! Triton MoE kernel declarations — direct ports of the `@triton.jit`
 //! functions in `triton_kernels/moe.py`. Each kernel here is a
-//! `zml.Kernel(...)` declaration with its own inline config struct (no
+//! `tri.Kernel(...)` declaration with its own inline config struct (no
 //! defaults — every field is required at call time). Production callers
 //! invoke these via `K.call(inputs, outputs, opts)`; offline tooling reaches the TTIR
 //! string via `K.emit(allocator, ctx, cfg)`.
@@ -8,7 +8,7 @@
 const std = @import("std");
 
 const zml = @import("../zml.zig");
-const tri = @import("zml/triton");
+const tri = zml.kernel.triton;
 const Builder = tri.Builder;
 const Value = tri.Value;
 const DType = tri.DType;
@@ -27,9 +27,8 @@ fn blockFloor16(v: Value) Value {
 
 /// Direct port of Python `per_token_group_quant_fp8` — per-token-group
 /// float8 quantization.
-pub const PerTokenGroupQuantFp8 = zml.Kernel(.{
-    .name = "per_token_group_quant_fp8",
-    .config = struct {
+pub const PerTokenGroupQuantFp8 = struct {
+    pub const Cfg = struct {
         input_dtype: DType,
         output_dtype: DType,
         scale_dtype: DType,
@@ -37,9 +36,14 @@ pub const PerTokenGroupQuantFp8 = zml.Kernel(.{
         fp8_min: f32,
         fp8_max: f32,
         use_ue8m0: bool,
-    },
-}, struct {
-    pub fn run(b: *Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "per_token_group_quant_fp8",
+        .inputs = &.{ "y_ptr", "group_size_ptr", "y_num_columns_ptr", "y_row_stride_ptr", "eps_ptr" },
+        .outputs = &.{ "y_q", "y_s" },
+        .run = run,
+    });
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .y_ptr = .{ .ptr = cfg.input_dtype },
             .group_size_ptr = .{ .ptr = .i64 },
@@ -112,7 +116,7 @@ pub const PerTokenGroupQuantFp8 = zml.Kernel(.{
         b.storeOpts(y_q_ptrs, y_q, .{ .mask = mask });
         b.store(y_s_ptr_shifted, y_s.to(scale_dt));
     }
-});
+};
 
 // =============================================================================
 // write_zeros_to_output — helper called by FusedMoe
@@ -163,9 +167,8 @@ fn writeZerosToOutput(
 
 /// Direct port of Python `fused_moe_kernel`. Bf16 / no-quant / no-bias path
 /// only — errors out for the feature flags that aren't implemented yet.
-pub const FusedMoe = zml.Kernel(.{
-    .name = "fused_moe_kernel",
-    .config = struct {
+pub const FusedMoe = struct {
+    pub const Cfg = struct {
         a_dtype: DType,
         b_dtype: DType,
         c_dtype: DType,
@@ -189,12 +192,24 @@ pub const FusedMoe = zml.Kernel(.{
         use_int8_w8a16: bool,
         per_channel_quant: bool,
         has_bias: bool,
-    },
-}, struct {
-    pub fn run(b: *Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "fused_moe_kernel",
+        .inputs = &.{
+            "a_ptr",                       "b_ptr",                  "b_bias_ptr",     "a_scale_ptr",      "b_scale_ptr",
+            "topk_weights_ptr",            "sorted_token_ids_ptr",   "expert_ids_ptr", "num_tokens_post_padded_ptr",
+            "N_ptr",                       "K_ptr",                  "EM_ptr",         "num_valid_tokens_ptr",
+            "stride_am_ptr",               "stride_be_ptr",          "stride_bn_ptr",  "stride_cm_ptr",
+            "stride_asm_ptr",              "stride_ask_ptr",         "stride_bse_ptr", "stride_bsk_ptr",     "stride_bsn_ptr",
+            "stride_bbe_ptr",              "stride_bbn_ptr",
+        },
+        .outputs = &.{"c"},
+        .run = run,
+    });
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         if (cfg.use_fp8_w8a8 or cfg.use_int8_w8a8 or cfg.use_int8_w8a16 or cfg.has_bias or cfg.per_channel_quant) {
             log.err("fused_moe_kernel: unsupported config (fp8/int8/bias/per_channel)", .{});
-            return error.TritonTtirGenerationFailed;
+            return error.InvalidMlir;
         }
 
         const a = try b.declareArgs(.{
@@ -421,7 +436,7 @@ pub const FusedMoe = zml.Kernel(.{
         const offs_cn_lt_full = b.broadcastTo(offs_cn_lt_2d, &.{ block_size_m, block_size_n });
         b.storeOpts(c_ptrs, accumulator, .{ .mask = token_mask_full_c.bitAnd(offs_cn_lt_full) });
     }
-});
+};
 
 // =============================================================================
 // moe_align_block_size_kernel
@@ -430,9 +445,8 @@ pub const FusedMoe = zml.Kernel(.{
 /// Direct port of Python `moe_align_block_size_kernel`. pid==0 runs the
 /// histogram + cumsum + block-to-expert assignment pass; pid==1 fills
 /// sorted_token_ids with NUMEL.
-pub const MoeAlignBlockSize = zml.Kernel(.{
-    .name = "moe_align_block_size_kernel",
-    .config = struct {
+pub const MoeAlignBlockSize = struct {
+    pub const Cfg = struct {
         numel: usize,
         num_experts: usize,
         padded_num_experts: usize,
@@ -440,9 +454,14 @@ pub const MoeAlignBlockSize = zml.Kernel(.{
         max_num_m_blocks: usize,
         block_size_m: usize,
         hist_block: usize,
-    },
-}, struct {
-    pub fn run(b: *Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "moe_align_block_size_kernel",
+        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "expert_ids_ptr", "num_tokens_post_pad_ptr", "cumsum_ptr" },
+        .outputs = &.{ "sorted_token_ids", "expert_ids", "num_tokens_post_pad", "cumsum" },
+        .run = run,
+    });
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
@@ -545,7 +564,7 @@ pub const MoeAlignBlockSize = zml.Kernel(.{
             assign_loop.yield(.{});
         }
     }
-});
+};
 
 // =============================================================================
 // count_and_sort_expert_tokens_kernel
@@ -554,15 +573,19 @@ pub const MoeAlignBlockSize = zml.Kernel(.{
 /// Direct port of Python `count_and_sort_expert_tokens_kernel`. Each program
 /// atomically bumps `cumsum[expert]`, writing its block's token offsets into
 /// `sorted_token_ids` at the returned rank.
-pub const CountAndSortExpertTokens = zml.Kernel(.{
-    .name = "count_and_sort_expert_tokens_kernel",
-    .config = struct {
+pub const CountAndSortExpertTokens = struct {
+    pub const Cfg = struct {
         numel: usize,
         num_experts: usize,
         sort_block_size: usize,
-    },
-}, struct {
-    pub fn run(b: *Builder, cfg: anytype) !void {
+    };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "count_and_sort_expert_tokens_kernel",
+        .inputs = &.{ "topk_ids_ptr", "sorted_token_ids_ptr", "cumsum_ptr" },
+        .outputs = &.{ "sorted_token_ids", "cumsum" },
+        .run = run,
+    });
+    fn run(b: *Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .topk_ids_ptr = .{ .ptr = .i32 },
             .sorted_token_ids_ptr = .{ .ptr = .i32 },
@@ -623,4 +646,4 @@ pub const CountAndSortExpertTokens = zml.Kernel(.{
             w.yieldAfter(.{ts.add(step)});
         }
     }
-});
+};

@@ -253,6 +253,14 @@ pub const Context = opaque {
         return c.mlirContextIsRegisteredOperation(self.ptr(), stringRef(op));
     }
 
+    pub fn setAllowUnregisteredDialects(self: *Context, allow: bool) void {
+        c.mlirContextSetAllowUnregisteredDialects(self.ptr(), allow);
+    }
+
+    pub fn allowUnregisteredDialects(self: *const Context) bool {
+        return c.mlirContextGetAllowUnregisteredDialects(self.ptr());
+    }
+
     pub fn format(self: *const Context, writer: *std.Io.Writer) !void {
         try writer.print("{s}{{ .numThreads = {d}, .numRegisteredDialects = {d}, .numLoadedDialects = {d} }}", .{
             @typeName(Context),
@@ -1638,17 +1646,18 @@ pub fn unitAttribute(ctx: *Context) *const Attribute {
 pub const MemRefType = opaque {
     const M = Methods(MemRefType, c.MlirType);
 
-    pub const isAFn = c.mlirTypeIsAInteger;
+    pub const isAFn = c.mlirTypeIsAMemRef;
     pub const ptr = M.ptr;
     pub const eql = M.eql(c.mlirTypeEqual);
     pub const format = M.format(c.mlirTypePrint);
+    pub const isA = M.isA;
 
-    pub fn init(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const MemRefType {
+    pub fn init(element_type: *const Type, shape: []const i64, layout_attr: ?*const Attribute, memory_space: ?*const Attribute) *const MemRefType {
         return @ptrCast(c.mlirMemRefTypeGet(
             element_type.ptr(),
             @intCast(shape.len),
             @ptrCast(shape),
-            if (layout) |l| l.ptr() else .{ .ptr = null },
+            if (layout_attr) |l| l.ptr() else .{ .ptr = null },
             if (memory_space) |m| m.ptr() else .{ .ptr = null },
         ).ptr);
     }
@@ -1666,6 +1675,27 @@ pub const MemRefType = opaque {
         );
     }
 
+    pub fn elementType(self: *const MemRefType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
+
+    pub fn rank(self: *const MemRefType) usize {
+        return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
+    }
+
+    pub fn dimension(self: *const MemRefType, dim: usize) i64 {
+        return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
+    }
+
+    pub fn layout(self: *const MemRefType) *const Attribute {
+        return @ptrCast(c.mlirMemRefTypeGetLayout(self.ptr()).ptr);
+    }
+
+    pub fn memorySpace(self: *const MemRefType) ?*const Attribute {
+        const a = c.mlirMemRefTypeGetMemorySpace(self.ptr());
+        return if (a.ptr == null) null else @ptrCast(a.ptr);
+    }
+
     pub fn shaped(self: *const MemRefType) *const ShapedType {
         return @ptrCast(self);
     }
@@ -1673,4 +1703,272 @@ pub const MemRefType = opaque {
 
 pub fn memRefType(element_type: *const Type, shape: []const i64, layout: ?*const Attribute, memory_space: ?*const Attribute) *const Type {
     return @ptrCast(MemRefType.init(element_type, shape, layout, memory_space));
+}
+
+// =============================================================================
+// VectorType — `vector<S0xS1x...xElement>`. Used by the vector dialect, by
+// affine `vector_load`/`vector_store`, and by SIMD-style lowerings in general.
+// =============================================================================
+
+pub const VectorType = opaque {
+    const M = Methods(VectorType, c.MlirType);
+
+    pub const isAFn = c.mlirTypeIsAVector;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+    pub const isA = M.isA;
+
+    /// Plain (non-scalable) vector type.
+    pub fn init(shape: []const i64, element_type: *const Type) *const VectorType {
+        return @ptrCast(c.mlirVectorTypeGet(
+            @intCast(shape.len),
+            @ptrCast(shape),
+            element_type.ptr(),
+        ).ptr);
+    }
+
+    /// Vector type with explicit per-dim scalability flags. `scalable.len`
+    /// must equal `shape.len`.
+    pub fn initScalable(
+        shape: []const i64,
+        scalable: []const bool,
+        element_type: *const Type,
+    ) *const VectorType {
+        std.debug.assert(shape.len == scalable.len);
+        return @ptrCast(c.mlirVectorTypeGetScalable(
+            @intCast(shape.len),
+            @ptrCast(shape),
+            @ptrCast(scalable),
+            element_type.ptr(),
+        ).ptr);
+    }
+
+    pub fn elementType(self: *const VectorType) *const Type {
+        return @ptrCast(c.mlirShapedTypeGetElementType(self.ptr()).ptr);
+    }
+
+    pub fn rank(self: *const VectorType) usize {
+        return @intCast(c.mlirShapedTypeGetRank(self.ptr()));
+    }
+
+    pub fn dimension(self: *const VectorType, dim: usize) i64 {
+        return c.mlirShapedTypeGetDimSize(self.ptr(), @intCast(dim));
+    }
+
+    pub fn shaped(self: *const VectorType) *const ShapedType {
+        return @ptrCast(self);
+    }
+};
+
+pub fn vectorType(shape: []const i64, element_type: *const Type) *const Type {
+    return @ptrCast(VectorType.init(shape, element_type));
+}
+
+// =============================================================================
+// UnrankedMemRefType — `memref<*xElement, memorySpace?>`. Used by memref.cast.
+// =============================================================================
+
+pub const UnrankedMemRefType = opaque {
+    const M = Methods(UnrankedMemRefType, c.MlirType);
+
+    pub const isAFn = c.mlirTypeIsAUnrankedMemRef;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirTypeEqual);
+    pub const format = M.format(c.mlirTypePrint);
+    pub const isA = M.isA;
+
+    pub fn init(element_type: *const Type, memory_space: ?*const Attribute) *const UnrankedMemRefType {
+        return @ptrCast(c.mlirUnrankedMemRefTypeGet(
+            element_type.ptr(),
+            if (memory_space) |m| m.ptr() else .{ .ptr = null },
+        ).ptr);
+    }
+};
+
+pub fn unrankedMemRefType(element_type: *const Type, memory_space: ?*const Attribute) *const Type {
+    return @ptrCast(UnrankedMemRefType.init(element_type, memory_space));
+}
+
+// =============================================================================
+// AffineExpr / AffineMap / IntegerSet — used by the `affine`, `vector`, and
+// `memref` dialects (and by anyone embedding affine attributes).
+//
+// AffineMap and IntegerSet round-trip through MLIR's text parser via
+// `Attribute.parse`, so for the common case ("write `affine_map<...>` once"
+// from a kernel) we expose `parseAffineMap` / `parseIntegerSet` helpers that
+// take the textual form and return the corresponding attribute. Programmatic
+// expression building is also exposed via `AffineExpr` for callers that need
+// to compute maps at runtime.
+// =============================================================================
+
+pub const AffineExpr = opaque {
+    const M = Methods(AffineExpr, c.MlirAffineExpr);
+
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAffineExprEqual);
+    pub const format = M.format(c.mlirAffineExprPrint);
+
+    pub fn dim(ctx: *Context, position: usize) *const AffineExpr {
+        return @ptrCast(c.mlirAffineDimExprGet(ctx.ptr(), @intCast(position)).ptr);
+    }
+
+    pub fn symbol(ctx: *Context, position: usize) *const AffineExpr {
+        return @ptrCast(c.mlirAffineSymbolExprGet(ctx.ptr(), @intCast(position)).ptr);
+    }
+
+    pub fn constant(ctx: *Context, value: i64) *const AffineExpr {
+        return @ptrCast(c.mlirAffineConstantExprGet(ctx.ptr(), value).ptr);
+    }
+
+    pub fn add(self: *const AffineExpr, other: *const AffineExpr) *const AffineExpr {
+        return @ptrCast(c.mlirAffineAddExprGet(self.ptr(), other.ptr()).ptr);
+    }
+
+    pub fn mul(self: *const AffineExpr, other: *const AffineExpr) *const AffineExpr {
+        return @ptrCast(c.mlirAffineMulExprGet(self.ptr(), other.ptr()).ptr);
+    }
+
+    pub fn floorDiv(self: *const AffineExpr, other: *const AffineExpr) *const AffineExpr {
+        return @ptrCast(c.mlirAffineFloorDivExprGet(self.ptr(), other.ptr()).ptr);
+    }
+
+    pub fn ceilDiv(self: *const AffineExpr, other: *const AffineExpr) *const AffineExpr {
+        return @ptrCast(c.mlirAffineCeilDivExprGet(self.ptr(), other.ptr()).ptr);
+    }
+
+    pub fn mod(self: *const AffineExpr, other: *const AffineExpr) *const AffineExpr {
+        return @ptrCast(c.mlirAffineModExprGet(self.ptr(), other.ptr()).ptr);
+    }
+};
+
+pub const AffineMap = opaque {
+    const M = Methods(AffineMap, c.MlirAffineMap);
+
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAffineMapEqual);
+    pub const format = M.format(c.mlirAffineMapPrint);
+
+    /// Empty `() -> ()` map.
+    pub fn empty(ctx: *Context) *const AffineMap {
+        return @ptrCast(c.mlirAffineMapEmptyGet(ctx.ptr()).ptr);
+    }
+
+    /// Zero-result map: `(d0, d1, ...) -> ()`.
+    pub fn zeroResult(ctx: *Context, dim_count: usize, symbol_count: usize) *const AffineMap {
+        return @ptrCast(c.mlirAffineMapZeroResultGet(
+            ctx.ptr(),
+            @intCast(dim_count),
+            @intCast(symbol_count),
+        ).ptr);
+    }
+
+    /// Identity map: `(d0, d1, ..., dN-1) -> (d0, d1, ..., dN-1)`.
+    pub fn multiDimIdentity(ctx: *Context, num_dims: usize) *const AffineMap {
+        return @ptrCast(c.mlirAffineMapMultiDimIdentityGet(ctx.ptr(), @intCast(num_dims)).ptr);
+    }
+
+    /// Build a map from explicit results.
+    pub fn get(
+        ctx: *Context,
+        dim_count: usize,
+        symbol_count: usize,
+        results: []const *const AffineExpr,
+    ) *const AffineMap {
+        return @ptrCast(c.mlirAffineMapGet(
+            ctx.ptr(),
+            @intCast(dim_count),
+            @intCast(symbol_count),
+            @intCast(results.len),
+            @ptrCast(@constCast(results.ptr)),
+        ).ptr);
+    }
+
+    pub fn numDims(self: *const AffineMap) usize {
+        return @intCast(c.mlirAffineMapGetNumDims(self.ptr()));
+    }
+
+    pub fn numSymbols(self: *const AffineMap) usize {
+        return @intCast(c.mlirAffineMapGetNumSymbols(self.ptr()));
+    }
+
+    pub fn numResults(self: *const AffineMap) usize {
+        return @intCast(c.mlirAffineMapGetNumResults(self.ptr()));
+    }
+};
+
+/// AffineMapAttr — `affine_map<(d0,...) -> (...)>` wrapped as an attribute.
+pub const AffineMapAttribute = opaque {
+    const M = Methods(AffineMapAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAAffineMap;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(map: *const AffineMap) *const AffineMapAttribute {
+        return @ptrCast(c.mlirAffineMapAttrGet(map.ptr()).ptr);
+    }
+
+    pub fn value(self: *const AffineMapAttribute) *const AffineMap {
+        return @ptrCast(c.mlirAffineMapAttrGetValue(self.ptr()).ptr);
+    }
+};
+
+pub fn affineMapAttribute(map: *const AffineMap) *const Attribute {
+    return @ptrCast(AffineMapAttribute.init(map));
+}
+
+/// Convenience: parse a textual `affine_map<(d0,...) -> (...)>` (the form is
+/// a normal MLIR attribute literal) into an attribute. Useful when the map is
+/// known at compile time and writing `AffineExpr` builders by hand would be
+/// noisy.
+pub fn parseAffineMapAttribute(ctx: *Context, src: []const u8) Error!*const Attribute {
+    return Attribute.parse(ctx, src);
+}
+
+pub const IntegerSet = opaque {
+    const M = Methods(IntegerSet, c.MlirIntegerSet);
+
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirIntegerSetEqual);
+    pub const format = M.format(c.mlirIntegerSetPrint);
+
+    /// Build an integer set from constraint expressions and per-constraint
+    /// equality flags. `eqs[i] == true` ⇒ `constraints[i] == 0`,
+    /// `eqs[i] == false` ⇒ `constraints[i] >= 0`.
+    pub fn get(
+        ctx: *Context,
+        num_dims: usize,
+        num_symbols: usize,
+        constraints: []const *const AffineExpr,
+        eqs: []const bool,
+    ) *const IntegerSet {
+        std.debug.assert(constraints.len == eqs.len);
+        return @ptrCast(c.mlirIntegerSetGet(
+            ctx.ptr(),
+            @intCast(num_dims),
+            @intCast(num_symbols),
+            @intCast(constraints.len),
+            @ptrCast(constraints),
+            @ptrCast(eqs),
+        ).ptr);
+    }
+};
+
+pub const IntegerSetAttribute = opaque {
+    const M = Methods(IntegerSetAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.mlirAttributeIsAIntegerSet;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+
+    pub fn init(set: *const IntegerSet) *const IntegerSetAttribute {
+        return @ptrCast(c.mlirIntegerSetAttrGet(set.ptr()).ptr);
+    }
+};
+
+pub fn integerSetAttribute(set: *const IntegerSet) *const Attribute {
+    return @ptrCast(IntegerSetAttribute.init(set));
 }

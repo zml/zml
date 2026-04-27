@@ -1,13 +1,17 @@
 //! Zig port of `kernels_py/vector_add.py:triton_add_kernel`.
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const VectorAdd = zml.Kernel(.{
-    .name = "triton_add_kernel",
-    .config = struct { BLOCK_SIZE: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const VectorAdd = struct {
+    pub const Cfg = struct { BLOCK_SIZE: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "triton_add_kernel",
+        .inputs = &.{ "x_ptr", "y_ptr", "n_elements" },
+        .outputs = &.{"output"},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .x_ptr = .{ .ptr = .f32 },
             .y_ptr = .{ .ptr = .f32 },
@@ -26,4 +30,4 @@ pub const VectorAdd = zml.Kernel(.{
         const out = x.add(y);
         b.storeOpts(a.output_ptr.addPtr(offsets), out, .{ .mask = mask });
     }
-});
+};

@@ -5,7 +5,7 @@ const stdx = @import("stdx");
 const zml = @import("../zml.zig");
 const flashattn = @import("flashattn.zig");
 const tpu = @import("tpu_attention.zig");
-const triton = @import("triton.zig");
+const triton = @import("triton_attention.zig");
 
 const PagedAttention = @This();
 
@@ -265,8 +265,6 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &[_]zml.platform.Device{},
         .memories = &[_]zml.platform.Memory{},
         .physical_mesh = undefined,
-        .triton_runtime = null,
-        .tpu_ir_runtime = null,
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));

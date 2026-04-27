@@ -1,0 +1,16 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "gated_delta_net",
+    main = "main.zig",
+    deps = [
+        "//mlir",
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [":gated_delta_net"],
+)

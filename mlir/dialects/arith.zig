@@ -329,7 +329,7 @@ pub fn convertf(
     opts: ConvertFOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
     }
@@ -350,7 +350,7 @@ pub fn scaling_truncf(
     opts: ConvertFOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "roundingmode", mlir.integerAttribute(ctx, .i32, @intFromEnum(rm))));
     }

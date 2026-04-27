@@ -1,0 +1,40 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# Upstream MLIR doesn't ship a public `mlir-c/Dialect/Affine.h`, so we provide
+# a tiny shim that exposes `mlirGetDialectHandle__affine__`. Modeled on
+# `//mlir/dialects/ttir:ttir_capi`.
+cc_library(
+    name = "affine_capi",
+    srcs = ["affine_capi.cc"],
+    hdrs = ["affine_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "@llvm-project//mlir:AffineDialect",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+    # MLIR_DEFINE_CAPI_DIALECT_REGISTRATION expands to a global static
+    # initializer that the linker would otherwise dead-strip.
+    alwayslink = True,
+)
+
+zig_library(
+    name = "affine",
+    tags = ["manual"],
+    import_name = "mlir/dialects/affine",
+    main = "affine.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":affine_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":affine"],
+)

@@ -1,0 +1,31 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# Pure DSL — emits TTIR text. Independent of `//zml`, the ZML compiler, JAX,
+# and the Mosaic-TPU dialect. The integration shim that wires this into a
+# `forward(...)` lives in `//zml:zml` (`zml.kernel.triton.Kernel`).
+#
+# Bare target name `triton_builder` (rather than `builder`) avoids a
+# module-name collision with `//kernels/mosaic_tpu:mosaic_tpu_builder` in the
+# same Zig build graph. `import_name` is what user code sees.
+zig_library(
+    name = "triton_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+    ],
+    import_name = "kernels/triton/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttir",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":triton_builder"],
+)

@@ -2,14 +2,18 @@
 
 const ttir_dialect = @import("mlir/dialects/ttir");
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const SumScalar = zml.Kernel(.{
-    .name = "triton_sum_kernel_scalar_result",
-    .config = struct { BLOCK_SIZE_M: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const SumScalar = struct {
+    pub const Cfg = struct { BLOCK_SIZE_M: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "triton_sum_kernel_scalar_result",
+        .inputs = &.{ "input_ptr", "output_ptr", "M" },
+        .outputs = &.{},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .input_ptr = .{ .ptr = .f32 },
             .output_ptr = .{ .ptr = .f32 },
@@ -29,4 +33,4 @@ pub const SumScalar = zml.Kernel(.{
         const true_mask = b.full(&.{1}, 1, .i1);
         _ = b.atomicRmwOpts(ttir_dialect.RMWOp.fadd, out_ptrs, total.splatTo(&.{1}), .{ .mask = true_mask });
     }
-});
+};

@@ -1,0 +1,22 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "common",
+    srcs = [
+        "args.zig",
+        "control_flow.zig",
+    ],
+    import_name = "kernels/common",
+    main = "dsl.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//mlir",
+        "//mlir/dialects",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":common"],
+)

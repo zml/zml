@@ -31,14 +31,14 @@ pub fn for_(
     opts: ForOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .{};
+    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .empty;
     operands.appendSliceAssumeCapacity(&.{ lower, upper, step });
     operands.appendSliceAssumeCapacity(init_args);
 
-    var result_types: stdx.BoundedArray(*const mlir.Type, 64) = .{};
+    var result_types: stdx.BoundedArray(*const mlir.Type, 64) = .empty;
     for (init_args) |v| result_types.appendAssumeCapacity(v.type_());
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.unsigned_cmp) {
         attrs.appendAssumeCapacity(.named(ctx, "unsignedCmp", mlir.unitAttribute(ctx)));
     }
@@ -128,7 +128,7 @@ pub fn condition(
     args: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 64) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 64) = .empty;
     buf.appendAssumeCapacity(cond);
     buf.appendSliceAssumeCapacity(args);
     return mlir.Operation.make(ctx, "scf.condition", .{
@@ -151,7 +151,7 @@ pub fn execute_region(
     opts: ExecuteRegionOpts,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (opts.no_inline) {
         attrs.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
     }
@@ -183,7 +183,7 @@ pub fn parallel(
     std.debug.assert(lbs.len == ubs.len);
     std.debug.assert(lbs.len == steps.len);
 
-    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .{};
+    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .empty;
     operands.appendSliceAssumeCapacity(lbs);
     operands.appendSliceAssumeCapacity(ubs);
     operands.appendSliceAssumeCapacity(steps);
@@ -221,7 +221,7 @@ pub fn reduce(
     var state: mlir.OperationState = .init("scf.reduce", location);
     state.addOperands(operands);
 
-    var regions: stdx.BoundedArray(*mlir.Region, 16) = .{};
+    var regions: stdx.BoundedArray(*mlir.Region, 16) = .empty;
     for (reduction_blocks) |b| {
         const r = mlir.Region.init();
         r.appendOwnedBlock(b);
@@ -261,7 +261,7 @@ pub fn forall(
     std.debug.assert(lbs.len == ubs.len);
     std.debug.assert(lbs.len == steps.len);
 
-    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .{};
+    var operands: stdx.BoundedArray(*const mlir.Value, 64) = .empty;
     operands.appendSliceAssumeCapacity(lbs);
     operands.appendSliceAssumeCapacity(ubs);
     operands.appendSliceAssumeCapacity(steps);
@@ -280,11 +280,11 @@ pub fn forall(
     // `scf.forall (%iv) = (%lb) to (%ub) step (%step)` when no static
     // constants are folded in.
     const k_dynamic: i64 = std.math.minInt(i64);
-    var sentinel: stdx.BoundedArray(i64, 16) = .{};
+    var sentinel: stdx.BoundedArray(i64, 16) = .empty;
     for (0..lbs.len) |_| sentinel.appendAssumeCapacity(k_dynamic);
     const sentinel_slice = sentinel.constSlice();
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 5) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(ctx, "operandSegmentSizes", mlir.denseArrayAttribute(ctx, .i32, &seg_sizes)),
         .named(ctx, "staticLowerBound", mlir.denseArrayAttribute(ctx, .i64, sentinel_slice)),
@@ -344,7 +344,7 @@ pub fn index_switch(
     const default_region = mlir.Region.init();
     default_region.appendOwnedBlock(default_block);
 
-    var regions: stdx.BoundedArray(*mlir.Region, 64) = .{};
+    var regions: stdx.BoundedArray(*mlir.Region, 64) = .empty;
     regions.appendAssumeCapacity(default_region);
     for (case_blocks) |b| {
         const r = mlir.Region.init();

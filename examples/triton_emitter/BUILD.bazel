@@ -10,7 +10,7 @@ zig_binary(
         "//mlir/dialects",
         "//mlir/dialects/ttir",
         "//zml",
-        "//zml/triton",
+        
     ],
 )
 
@@ -23,7 +23,7 @@ zig_binary(
         "//mlir/dialects",
         "//mlir/dialects/ttir",
         "//zml",
-        "//zml/triton",
+        
     ],
 )
 

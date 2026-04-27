@@ -1,14 +1,18 @@
 //! Zig ports of `kernels_py/vector_exp.py` (`triton_exp_kernel` +
 //! `triton_exp_backward_kernel`).
 
-const tri = @import("zml/triton");
+const tri = @import("zml").kernel.triton;
 const zml = @import("zml");
 
-pub const VectorExpFwd = zml.Kernel(.{
-    .name = "triton_exp_kernel",
-    .config = struct { BLOCK_SIZE: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const VectorExpFwd = struct {
+    pub const Cfg = struct { BLOCK_SIZE: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "triton_exp_kernel",
+        .inputs = &.{ "x_ptr", "n_elements" },
+        .outputs = &.{"output"},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .x_ptr = .{ .ptr = .f32 },
             .output_ptr = .{ .ptr = .f32 },
@@ -23,13 +27,17 @@ pub const VectorExpFwd = zml.Kernel(.{
         const out = b.exp(x);
         b.storeOpts(a.output_ptr.addPtr(offsets), out, .{ .mask = mask });
     }
-});
+};
 
-pub const VectorExpBwd = zml.Kernel(.{
-    .name = "triton_exp_backward_kernel",
-    .config = struct { BLOCK_SIZE: i32 = 1024 },
-}, struct {
-    pub fn run(b: *tri.Builder, cfg: anytype) !void {
+pub const VectorExpBwd = struct {
+    pub const Cfg = struct { BLOCK_SIZE: i32 = 1024 };
+    pub const Kernel = tri.Kernel(Cfg, .{
+        .name = "triton_exp_backward_kernel",
+        .inputs = &.{ "grad_output_ptr", "output_ptr", "n_elements" },
+        .outputs = &.{"grad_input"},
+        .run = run,
+    });
+    fn run(b: *tri.Builder, cfg: Cfg) tri.FinishError!void {
         const a = try b.declareArgs(.{
             .grad_output_ptr = .{ .ptr = .f32 },
             .output_ptr = .{ .ptr = .f32 },
@@ -46,4 +54,4 @@ pub const VectorExpBwd = zml.Kernel(.{
         const grad_input = grad_output.mul(output);
         b.storeOpts(a.grad_input_ptr.addPtr(offsets), grad_input, .{ .mask = mask });
     }
-});
+};

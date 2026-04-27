@@ -202,23 +202,14 @@ pub const Platform = struct {
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
 
-    triton_runtime: ?attention.triton.Runtime = null,
-    tpu_ir_runtime: ?attention.tpu.Runtime = null,
-
     pub fn initBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: attention.paged_attention.Backend) !void {
-        switch (backend) {
-            .triton => {
-                if (self.triton_runtime == null) {
-                    self.triton_runtime = try zml.attention.triton.Runtime.init(allocator, io);
-                }
-            },
-            .mosaic_tpu => {
-                if (self.tpu_ir_runtime == null) {
-                    self.tpu_ir_runtime = try zml.attention.tpu.Runtime.init(allocator, io);
-                }
-            },
-            else => {},
-        }
+        _ = self;
+        _ = allocator;
+        _ = io;
+        _ = backend;
+        // All attention backends emit IR in-process now — no helper runtime
+        // needed. Kept as a no-op so callers don't need to special-case the
+        // call site.
     }
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
@@ -422,9 +413,8 @@ pub const Platform = struct {
     }
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
+        _ = io;
         self.pjrt_client.deinit(self.pjrt_api);
-        if (self.tpu_ir_runtime) |*rt| rt.deinit(io);
-        if (self.triton_runtime) |*rt| rt.deinit(allocator, io);
         self.arena_state.promote(allocator).deinit();
     }
 

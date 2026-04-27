@@ -17,8 +17,14 @@ const FuncOpArgs = struct {
     block: *mlir.Block,
     location: *const mlir.Location,
     no_inline: bool = false,
-    visibility: Visibility = .public,
+    /// `null` omits the `sym_visibility` attribute. MLIR's printer
+    /// elides it in that case, matching what Pallas / JAX emit.
+    visibility: ?Visibility = .public,
     verify: bool = true,
+    /// Frontend-supplied attributes appended onto the func.func op.
+    /// Used by dialect-specific DSLs (e.g. Mosaic) to attach
+    /// `dimension_semantics`, `tpu.core_type`, `scalar_prefetch`, etc.
+    extra_attributes: []const mlir.NamedAttribute = &.{},
 };
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
@@ -26,9 +32,11 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
 
     var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
+    attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)));
+    if (args.visibility) |v| {
+        attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(v))));
+    }
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
-        .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
-        .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),
         .named(ctx, "function_type", mlir.typeAttribute(mlir.functionType(
             ctx,
             args.args orelse args: {
@@ -57,6 +65,9 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     }
     if (args.no_inline) {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "no_inline", mlir.unitAttribute(ctx)));
+    }
+    for (args.extra_attributes) |a| {
+        attr_tuples_buffer.appendAssumeCapacity(a);
     }
 
     return mlir.Operation.make(ctx, "func.func", .{

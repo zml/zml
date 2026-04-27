@@ -1,0 +1,16 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary")
+
+zig_binary(
+    name = "mosaic_print_ir",
+    main = "main.zig",
+    deps = [
+        "//mlir",
+        "//kernels/mosaic_tpu:mosaic_tpu_builder",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [":mosaic_print_ir"],
+)

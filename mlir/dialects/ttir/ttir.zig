@@ -212,10 +212,10 @@ pub const FuncOpArgs = struct {
 };
 
 pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
-    var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .{};
-    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .{};
+    var args_buffer: stdx.BoundedArray(*const mlir.Type, 1024) = .empty;
+    var results_buffer: stdx.BoundedArray(*const mlir.Type, 32) = .empty;
 
-    var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .{};
+    var attr_tuples_buffer: stdx.BoundedArray(mlir.NamedAttribute, 16) = .empty;
     attr_tuples_buffer.appendSliceAssumeCapacity(&.{
         .named(ctx, "sym_name", mlir.stringAttribute(ctx, args.name)),
         .named(ctx, "sym_visibility", mlir.stringAttribute(ctx, @tagName(args.visibility))),
@@ -364,7 +364,7 @@ pub fn reshape(
     efficient_layout: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     if (allow_reorder) {
         attrs.appendAssumeCapacity(.named(ctx, "allow_reorder", mlir.unitAttribute(ctx)));
     }
@@ -427,7 +427,7 @@ pub fn load(
     is_volatile: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendAssumeCapacity(ptr_val);
     const mask_len: i32 = if (mask) |m| blk: {
         operands_buf.appendAssumeCapacity(m);
@@ -462,7 +462,7 @@ pub fn store(
     evict: EvictionPolicy,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     buf.appendSliceAssumeCapacity(&.{ ptr_val, value });
     if (mask) |m| buf.appendAssumeCapacity(m);
     return mlir.Operation.make(ctx, "tt.store", .{
@@ -590,7 +590,7 @@ pub fn fp_to_fp(
     rounding: ?RoundingMode,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 1) = .empty;
     if (rounding) |rm| {
         attrs.appendAssumeCapacity(.named(ctx, "rounding", roundingMode(ctx, rm)));
     }
@@ -743,7 +743,7 @@ pub fn gather(
     efficient_layout: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 2) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "axis", mlir.integerAttribute(ctx, .i32, axis)));
     if (efficient_layout) {
         attrs.appendAssumeCapacity(.named(ctx, "efficient_layout", mlir.unitAttribute(ctx)));
@@ -764,7 +764,7 @@ pub fn histogram(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 2) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 2) = .empty;
     buf.appendAssumeCapacity(src);
     if (mask) |m| buf.appendAssumeCapacity(m);
     return mlir.Operation.make(ctx, "tt.histogram", .{
@@ -828,7 +828,7 @@ pub fn atomic_rmw(
     scope: MemSyncScope,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .{};
+    var operands_buf: stdx.BoundedArray(*const mlir.Value, 3) = .empty;
     operands_buf.appendSliceAssumeCapacity(&.{ ptr_val, val });
     if (mask) |m| operands_buf.appendAssumeCapacity(m);
 
@@ -900,7 +900,7 @@ pub fn call(
     res_attrs: ?[]const *const mlir.Attribute,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 3) = .empty;
     attrs.appendAssumeCapacity(.named(ctx, "callee", mlir.flatSymbolRefAttribute(ctx, callee)));
     if (arg_attrs) |aa| {
         attrs.appendAssumeCapacity(.named(ctx, "arg_attrs", mlir.arrayAttribute(ctx, aa)));
@@ -937,7 +937,7 @@ pub fn dot_scaled(
     rhs_k_pack: bool,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 5) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 5) = .empty;
     buf.appendSliceAssumeCapacity(&.{ a, b, c_acc });
     const a_scale_len: i32 = if (a_scale) |s| blk: {
         buf.appendAssumeCapacity(s);
@@ -1033,7 +1033,7 @@ pub fn make_tensor_descriptor(
     result_type: *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendAssumeCapacity(base);
     buf.appendSliceAssumeCapacity(shape);
     buf.appendSliceAssumeCapacity(strides);
@@ -1057,7 +1057,7 @@ pub fn descriptor_load(
     evict: EvictionPolicy,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendAssumeCapacity(desc);
     buf.appendSliceAssumeCapacity(indices);
     return mlir.Operation.make(ctx, "tt.descriptor_load", .{
@@ -1078,7 +1078,7 @@ pub fn descriptor_store(
     indices: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendSliceAssumeCapacity(&.{ desc, src });
     buf.appendSliceAssumeCapacity(indices);
     return mlir.Operation.make(ctx, "tt.descriptor_store", .{
@@ -1095,7 +1095,7 @@ pub fn descriptor_reduce(
     indices: []const *const mlir.Value,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .{};
+    var buf: stdx.BoundedArray(*const mlir.Value, 16) = .empty;
     buf.appendSliceAssumeCapacity(&.{ desc, src });
     buf.appendSliceAssumeCapacity(indices);
     return mlir.Operation.make(ctx, "tt.descriptor_reduce", .{

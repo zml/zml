@@ -1,0 +1,31 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+# Pure DSL — emits Mosaic-TPU MLIR. Independent of `//zml`, the ZML compiler,
+# the Triton dialect, and XLA. The integration shim that wires this into a
+# `forward(...)` lives in `//zml:zml` (`zml.kernel.mosaic_tpu.Kernel`).
+#
+# Bare target name `mosaic_tpu_builder` (rather than `builder`) avoids a
+# module-name collision with `//kernels/triton:triton_builder` in the same
+# Zig build graph. `import_name` is what user code sees.
+zig_library(
+    name = "mosaic_tpu_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+    ],
+    import_name = "kernels/mosaic_tpu/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/mosaic_tpu",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":mosaic_tpu_builder"],
+)
