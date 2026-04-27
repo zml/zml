@@ -36,12 +36,12 @@ run_binary(
     name = "amdgpu_ids",
     srcs = [
         "@libdrm-amdgpu-common//:amdgpu_ids",
-        "@libdrm_mesa_amdgpu_ids//file:amdgpu.ids",
+        "@libdrm_mesa_amdgpu_ids//:amdgpu_ids",
     ],
     outs = ["amdgpu.ids"],
     args = [
         "$(location @libdrm-amdgpu-common//:amdgpu_ids)",
-        "$(location @libdrm_mesa_amdgpu_ids//file:amdgpu.ids)",
+        "$(location @libdrm_mesa_amdgpu_ids//:amdgpu_ids)",
         "$(location amdgpu.ids)",
     ],
     tool = ":merge_amdgpu_ids",

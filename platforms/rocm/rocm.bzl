@@ -1,4 +1,4 @@
-load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_file")
+load("@bazel_tools//tools/build_defs/repo:git.bzl", "new_git_repository")
 load("@llvm//:http_bsdtar_archive.bzl", http_archive = "http_bsdtar_archive")
 load("//bazel:http_deb_archive.bzl", "http_deb_archive")
 load("//platforms:packages.bzl", "packages")
@@ -244,11 +244,14 @@ def _rocm_impl(mctx):
             build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + build_file_content,
         )
 
-    http_file(
+    new_git_repository(
         name = "libdrm_mesa_amdgpu_ids",
-        url = "https://cgit.freedesktop.org/mesa/drm/plain/data/amdgpu.ids?id=b9dea73dfa310bc945ae6f09004a08fd624952ec",
-        sha256 = "ffd2a8f1bfa755f4d90f537b4969fc4676f116e5af051ce2f18ef93a96d8beb6",
-        downloaded_file_path = "amdgpu.ids",
+        remote = "https://gitlab.freedesktop.org/mesa/drm.git",
+        commit = "b9dea73dfa310bc945ae6f09004a08fd624952ec",
+        build_file_content = _BUILD_FILE_DEFAULT_VISIBILITY + packages.filegroup(
+            name = "amdgpu_ids",
+            srcs = ["data/amdgpu.ids"],
+        ),
     )
 
     http_archive(
