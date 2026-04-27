@@ -133,15 +133,45 @@ build() {
   fi
 
   printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
+  FILES=()
+  local built_platforms=0
+  local skipped_platforms=0
+  local platform os arch archive_target sha_target output_list
 
-  bazel build --config=release //bin/zml-smi:archives
+  for platform in linux_amd64 linux_arm64 macos_arm64; do
+    os="${platform%_*}"
+    arch="${platform#*_}"
+    archive_target="//bin/zml-smi:archive_${os}_${arch}"
+    sha_target="//bin/zml-smi:zml-smi-${os}-${arch}.sha256"
+
+    info "${os}/${arch}"
+
+    if bazel build --config=release --platforms="//platforms:${platform}" "$archive_target" "$sha_target"; then
+      output_list="$(mktemp)"
+      bazel cquery --config=release --platforms="//platforms:${platform}" --output=files "$archive_target" > "$output_list" 2>/dev/null
+      bazel cquery --config=release --platforms="//platforms:${platform}" --output=files "$sha_target" >> "$output_list" 2>/dev/null
+      while IFS= read -r line; do
+        FILES+=("$line")
+      done < "$output_list"
+      rm -f "$output_list"
+      built_platforms=$((built_platforms + 1))
+      success "${os}/${arch}"
+    else
+      skipped_platforms=$((skipped_platforms + 1))
+      warn "SKIP ${os}/${arch} ${DIM}(not buildable on this host/toolchain)${RESET}"
+    fi
+  done
 
   printf "${DIM}%s${RESET}\n" "────────────────────────────────────────"
-  FILES=()
-  while IFS= read -r line; do
-    FILES+=("$line")
-  done < <(bazel cquery --config=release --output=files //bin/zml-smi:archives 2>/dev/null)
-  success "Built ${CYAN}${#FILES[@]}${RESET}${GREEN} artifacts"
+
+  if [ "${#FILES[@]}" -eq 0 ]; then
+    fail "No release artifacts were built"
+  fi
+
+  success "Built ${CYAN}${#FILES[@]}${RESET}${GREEN} artifacts across ${CYAN}${built_platforms}${RESET}${GREEN} platform(s)"
+  if [ "$skipped_platforms" -gt 0 ]; then
+    warn "Skipped ${CYAN}${skipped_platforms}${RESET}${YELLOW} platform(s)"
+  fi
 }
 
 upload() {

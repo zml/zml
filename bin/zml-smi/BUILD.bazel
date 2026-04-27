@@ -136,9 +136,9 @@ genrule(
 #     strip_prefix = "bin",
 # )
 
-# Release archives, one per platform, correctly named for distribution
-# Build one:  bazel build --config=release //bin/zml-smi:zml-smi-linux-amd64
-# Build all:  bazel build --config=release //bin/zml-smi:archives
+# Release archives, one per platform, correctly named for distribution.
+# Build one:  bazel build --config=release --platforms=//platforms:linux_amd64 //bin/zml-smi:archive_linux_amd64 //bin/zml-smi:zml-smi-linux-amd64.sha256
+# Build all:  bazel run //bin/zml-smi:release -- <version>
 
 _RELEASE_PLATFORMS = [
     ("linux", "amd64"),
@@ -165,29 +165,15 @@ _RELEASE_PLATFORMS = [
     tags = ["manual"],
 ) for os, arch in _RELEASE_PLATFORMS]
 
-[platform_transition_filegroup(
-    name = "zml-smi-" + os + "-" + arch,
-    srcs = [":archive_" + os + "_" + arch],
-    target_platform = "//platforms:" + os + "_" + arch,
-    tags = ["manual"],
-) for os, arch in _RELEASE_PLATFORMS]
-
 [hashes(
     name = "zml-smi-" + os + "-" + arch + ".sha256",
-    src = ":zml-smi-" + os + "-" + arch,
+    src = ":archive_" + os + "_" + arch,
     tags = ["manual"],
 ) for os, arch in _RELEASE_PLATFORMS]
 
 sh_binary(
     name = "release",
     srcs = ["scripts/release.sh"],
-    tags = ["manual"],
-)
-
-filegroup(
-    name = "archives",
-    srcs = [":zml-smi-" + os + "-" + arch for os, arch in _RELEASE_PLATFORMS] +
-           [":zml-smi-" + os + "-" + arch + ".sha256" for os, arch in _RELEASE_PLATFORMS],
     tags = ["manual"],
 )
 
