@@ -73,7 +73,7 @@ pub const Exe = struct {
 
     pub const FlatBuffers = struct {
         buffers: []const [*]*pjrt.Buffer,
-        raw_buffers: []*pjrt.Buffer,
+        raw_buffers: []const *pjrt.Buffer,
 
         num_devices: usize,
 
