@@ -183,7 +183,7 @@ pub const Tensor = struct {
         return _result(partitioned_shape, op_result);
     }
 
-    pub fn toMemory(self: Tensor, kind: Memory) Tensor {
+    pub fn toMemory(self: Tensor, kind: Memory.Kind) Tensor {
         const ctx = CompilationContext.current();
         if (ctx.platform.target == .cpu) return self;
 
