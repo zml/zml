@@ -83,7 +83,7 @@ pub const PaddingOption = enum(i32) { pad_zero = 1, pad_nan = 2 };
 pub const RoundingMode = enum(i32) { rtz = 0, rtne = 1 };
 pub const InputPrecision = enum(i32) { tf32 = 0, tf32x3 = 1, ieee = 2, bf16x3 = 3, bf16x6 = 4 };
 
-/// Atomic RMW operator (TritonAttrDefs.td line 53).
+/// Atomic read-modify-write operations.
 pub const RMWOp = enum(i32) {
     and_ = 1,
     or_ = 2,
@@ -97,7 +97,7 @@ pub const RMWOp = enum(i32) {
     xchg = 10,
 };
 
-/// Memory ordering semantics (TritonAttrDefs.td line 21).
+/// Memory ordering semantics.
 pub const MemSemantic = enum(i32) {
     relaxed = 1,
     acquire = 2,
@@ -105,21 +105,20 @@ pub const MemSemantic = enum(i32) {
     acq_rel = 4,
 };
 
-/// Memory sync scope (TritonAttrDefs.td line 85).
+/// Memory sync scope.
 pub const MemSyncScope = enum(i32) {
     gpu = 1,
     cta = 2,
     sys = 3,
 };
 
-/// NaN propagation for clampf (TritonAttrDefs.td line 117). Values are 0 and
-/// 0xFFFF in the td — we keep those exact integer encodings.
+/// NaN propagation for clampf. 0xFFFF is the exact .td encoding.
 pub const PropagateNan = enum(i32) {
     none = 0,
     all = 0xFFFF,
 };
 
-/// Packed FP element types for tt.dot_scaled (TritonAttrDefs.td line 140).
+/// Packed FP element types for tt.dot_scaled.
 pub const ScaleDotElemType = enum(i32) {
     e4m3 = 0,
     e5m2 = 1,
@@ -130,7 +129,7 @@ pub const ScaleDotElemType = enum(i32) {
     fp16 = 6,
 };
 
-/// Reduction kind for tt.descriptor_reduce (TritonAttrDefs.td line 70).
+/// Reduction kind for tt.descriptor_reduce.
 pub const DescriptorReduceKind = enum(i32) {
     add = 1,
     min = 2,
@@ -194,7 +193,7 @@ pub fn descriptorReduceKind(ctx: *mlir.Context, v: DescriptorReduceKind) *const 
 // Function ops — tt.func / tt.return
 // =============================================================================
 
-/// Structural analog of `mlir.dialects.func.func` for `tt.func`.
+/// Args for building a `tt.func` op.
 pub const FuncOpArgs = struct {
     pub const Visibility = enum { public, private };
 
@@ -246,8 +245,7 @@ pub fn func(ctx: *mlir.Context, args: FuncOpArgs) *mlir.Operation {
     if (args.results_attributes) |results_attributes| {
         attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "res_attrs", mlir.arrayAttribute(ctx, results_attributes)));
     }
-    // Triton's `get_or_insert_function` (`python/src/ir.cc:1114`) always
-    // attaches `noinline = BoolAttr(...)`, even for the false case.
+    // Always emit noinline even when false — matches Triton's IR convention.
     attr_tuples_buffer.appendAssumeCapacity(.named(ctx, "noinline", mlir.boolAttribute(ctx, args.no_inline)));
 
     return mlir.Operation.make(ctx, "tt.func", .{
@@ -416,11 +414,8 @@ pub fn addptr(
     });
 }
 
-/// tt.load — AttrSizedOperandSegments: (ptr, [mask], [other]). Written as a
-/// flat operand list plus an explicit `operandSegmentSizes` attribute, because
-/// the `Operation.make` variadic coercion for mixed-length segments produces
-/// zero lengths for each segment (coercion issue with `&fixed_array`
-/// of different lengths in a single anon-struct literal).
+/// tt.load — AttrSizedOperandSegments: (ptr, [mask], [other]). Uses flat operand list +
+/// explicit operandSegmentSizes because Operation.make variadic coercion zeros mixed-length segments.
 pub fn load(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
@@ -457,8 +452,7 @@ pub fn load(
     });
 }
 
-/// tt.store — operands are (ptr, value, [mask]) — variadic mask only.
-/// Not AttrSizedOperandSegments on v1 scope; build with flat operand list.
+/// tt.store — operands: (ptr, value, [mask]). Flat operand list; mask is trailing variadic.
 pub fn store(
     ctx: *mlir.Context,
     ptr_val: *const mlir.Value,
@@ -506,8 +500,8 @@ pub fn dot(
     });
 }
 
-/// tt.reduce — combine_block must have args [elem, elem, ...] matching srcs'
-/// element types and must already be terminated with tt.reduce.return.
+/// tt.reduce — combine_block must have args [elem, elem] matching srcs' element types,
+/// terminated with tt.reduce.return.
 pub fn reduce(
     ctx: *mlir.Context,
     srcs: []const *const mlir.Value,
@@ -516,9 +510,7 @@ pub fn reduce(
     result_types: []const *const mlir.Type,
     location: *const mlir.Location,
 ) *mlir.Operation {
-    // `tt.reduce` has a single variadic operand group (`$srcs`), so the
-    // auto-emitted `operandSegmentSizes` attribute would be redundant —
-    // use a flat operand list to match Triton's frontend output.
+    // Single variadic operand group — flat list, no operandSegmentSizes needed.
     return mlir.Operation.make(ctx, "tt.reduce", .{
         .operands = .{ .flat = srcs },
         .results = .{ .flat = result_types },
@@ -825,9 +817,7 @@ pub fn scan_return(
 // Atomics
 // =============================================================================
 
-/// tt.atomic_rmw — (ptr, val, [mask]). No AttrSizedOperandSegments trait;
-/// trailing optional mask is disambiguated by operand count.
-/// Result type matches val's type.
+/// tt.atomic_rmw — (ptr, val, [mask]). Result type matches val's type.
 pub fn atomic_rmw(
     ctx: *mlir.Context,
     rmw: RMWOp,
@@ -900,8 +890,7 @@ pub fn assert_(
 // =============================================================================
 
 /// tt.call — direct call to another tt.func in the same module.
-/// `arg_attrs` and `res_attrs` are per-operand / per-result dictionary attrs
-/// (e.g. to propagate `tt.divisibility` hints); pass `null` to omit.
+/// arg_attrs / res_attrs propagate hints like tt.divisibility; pass null to omit.
 pub fn call(
     ctx: *mlir.Context,
     callee: []const u8,
@@ -931,9 +920,8 @@ pub fn call(
 // Scaled dot (microscaling spec).
 // =============================================================================
 
-/// tt.dot_scaled — like `dot` but with optional per-block scale factors.
-/// `a_scale`/`b_scale` may be null. AttrSizedOperandSegments over
-/// (a, b, c, [a_scale], [b_scale]).
+/// tt.dot_scaled — dot with optional per-block scale factors.
+/// a_scale/b_scale may be null. AttrSizedOperandSegments: (a, b, c, [a_scale], [b_scale]).
 pub fn dot_scaled(
     ctx: *mlir.Context,
     a: *const mlir.Value,
@@ -1049,7 +1037,7 @@ pub fn make_tensor_descriptor(
     buf.appendAssumeCapacity(base);
     buf.appendSliceAssumeCapacity(shape);
     buf.appendSliceAssumeCapacity(strides);
-    // SameVariadicOperandSize — not AttrSizedOperandSegments, so just flatten.
+    // SameVariadicOperandSize — flatten all operands.
     return mlir.Operation.make(ctx, "tt.make_tensor_descriptor", .{
         .operands = .{ .flat = buf.constSlice() },
         .results = .{ .flat = &.{result_type} },

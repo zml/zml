@@ -1,15 +1,3 @@
-//! Layer B — high-level DSL for building TTIR kernels from Zig.
-//!
-//! A `Builder` owns its own `mlir.Module` and `tt.func` entry block. Consumers
-//! build the body with typed `Value` handles via the `programId`/`makeRange`/
-//! `addptr`/`load`/`store`/`addi`/... helpers, plus `openFor`/`openIf`/`openWhile`
-//! for SCF regions. Call `finish(...)` to terminate with `tt.return`, verify,
-//! and serialize the module to a TTIR string suitable for `zml.ops.triton(...)`.
-//!
-//! The `mlir.Context` is provided by the caller; it must have the `tt`, `scf`,
-//! and `arith` dialects loaded (the main ZML context loads them all — see
-//! `zml/module.zig` registration).
-
 const std = @import("std");
 
 const mlir = @import("mlir");
@@ -119,10 +107,7 @@ pub const Value = struct {
         return if (l.isFloatElem()) k.remf(l, r) else k.remsi(l, r);
     }
 
-    /// `tl.cdiv(x, div)` desugars to `(x + (div - 1)) // div`
-    /// (`triton/python/triton/language/standard.py:43`). For comptime `rhs`
-    /// we fold `rhs - 1` so the emitted IR has one constant, matching what
-    /// Triton's JIT does at trace time.
+    /// `(x + (div - 1)) // div`. For comptime rhs we fold `rhs - 1` to one constant.
     pub fn cdiv(self: Value, rhs: anytype) Value {
         const k = self.kern();
         const l, const r = k.broadcast(self, rhs);
@@ -144,22 +129,18 @@ pub const Value = struct {
         return k.ori(l, r);
     }
 
-    /// Elementwise min — `tl.minimum(a, b)`. Name distinguished from the reduce
-    /// `min` (Python `tl.min`). Use `minimumOpts` for `propagate_nan`.
+    /// Elementwise min. Use `minimumOpts` for `propagate_nan`.
     pub fn minimum(self: Value, rhs: anytype) Value {
         return self.kern().minimum(self, rhs);
     }
-    /// `tl.minimum(self, rhs, propagate_nan=...)`.
     pub fn minimumOpts(self: Value, rhs: anytype, opts: MinMaxOpts) Value {
         return self.kern().minimumOpts(self, rhs, opts);
     }
 
-    /// Elementwise max — `tl.maximum(a, b)`. Name distinguished from the reduce
-    /// `max` (Python `tl.max`). Use `maximumOpts` for `propagate_nan`.
+    /// Elementwise max. Use `maximumOpts` for `propagate_nan`.
     pub fn maximum(self: Value, rhs: anytype) Value {
         return self.kern().maximum(self, rhs);
     }
-    /// `tl.maximum(self, rhs, propagate_nan=...)`.
     pub fn maximumOpts(self: Value, rhs: anytype, opts: MinMaxOpts) Value {
         return self.kern().maximumOpts(self, rhs, opts);
     }
@@ -199,26 +180,17 @@ pub const Value = struct {
 
     // -------- fluent casts (`to`) --------
 
-    /// `tl.cast(self, dtype)` / `self.to(dtype)` — numeric cast, preserving
-    /// shape. Auto-picks extsi/trunci/extf/truncf/sitofp/fptosi/fpToFp. Use
-    /// `toOpts` for `fp_downcast_rounding` / `bitcast=True`.
+    /// Numeric cast preserving shape. Use `toOpts` for rounding / bitcast.
     pub fn to(self: Value, dtype: DType) Value {
         return self.kern().cast(self, dtype);
     }
-    /// `tl.cast(self, dtype, fp_downcast_rounding=..., bitcast=...)`.
     pub fn toOpts(self: Value, dtype: DType, opts: CastOpts) Value {
         return self.kern().castOpts(self, dtype, opts);
     }
 
     // -------- shape manipulation --------
 
-    /// `tt.expand_dims` — insert a size-1 axis at `axis`. Matches Python's
-    /// `vec[:, None]` (`axis=1`) / `vec[None, :]` (`axis=0`) idioms.
-    ///
-    /// Prefer this over an eager broadcast: every fluent binop, `addPtr`,
-    /// `select`/`where`, and load/store mask auto-broadcasts size-1 dims, so
-    /// the consumer materializes the final shape lazily — matching what
-    /// Triton's Python frontend emits (`semantic.broadcast_impl_value`).
+    /// Insert a size-1 axis at `axis`. Fluent binops auto-broadcast size-1 dims lazily.
     pub fn expandDims(self: Value, axis: i32) Value {
         return self.kern().expandDims(self, axis);
     }
@@ -230,66 +202,57 @@ pub const Value = struct {
 
     // -------- fluent reductions / scans / gather --------
 
-    /// Reduce sum — `tl.sum(self)` over all dims (Python's axis=None default).
+    /// Reduce sum over all dims. Use `sumOpts` for axis / keep_dims.
     pub fn sum(self: Value) Value {
         return self.kern().sum(self);
     }
-    /// Reduce sum with opts — `tl.sum(self, axis=..., keep_dims=...)`.
     pub fn sumOpts(self: Value, opts: ReduceOpts) Value {
         return self.kern().sumOpts(self, opts);
     }
 
-    /// Reduce max — `tl.max(self)` over all dims. For elementwise max, use `.maximum(rhs)`.
+    /// Reduce max over all dims. For elementwise max use `.maximum(rhs)`.
     pub fn max(self: Value) Value {
         return self.kern().max(self);
     }
-    /// Reduce max with opts — `tl.max(self, axis=..., keep_dims=...)`.
     pub fn maxOpts(self: Value, opts: ReduceOpts) Value {
         return self.kern().maxOpts(self, opts);
     }
 
-    /// Reduce min — `tl.min(self)` over all dims. For elementwise min, use `.minimum(rhs)`.
+    /// Reduce min over all dims. For elementwise min use `.minimum(rhs)`.
     pub fn min(self: Value) Value {
         return self.kern().min(self);
     }
-    /// Reduce min with opts — `tl.min(self, axis=..., keep_dims=...)`.
     pub fn minOpts(self: Value, opts: ReduceOpts) Value {
         return self.kern().minOpts(self, opts);
     }
 
-    /// Cumulative sum — `tl.cumsum(self, axis=0)`.
+    /// Cumulative sum (axis=0). Use `cumsumOpts` for axis / reverse.
     pub fn cumsum(self: Value) Value {
         return self.kern().cumsum(self);
     }
-    /// Cumulative sum with opts — `tl.cumsum(self, axis=..., reverse=...)`.
     pub fn cumsumOpts(self: Value, opts: ScanOpts) Value {
         return self.kern().cumsumOpts(self, opts);
     }
 
-    /// Cumulative product — `tl.cumprod(self, axis=0)`.
+    /// Cumulative product (axis=0). Use `cumprodOpts` for axis / reverse.
     pub fn cumprod(self: Value) Value {
         return self.kern().cumprod(self);
     }
-    /// Cumulative product with opts — `tl.cumprod(self, axis=..., reverse=...)`.
     pub fn cumprodOpts(self: Value, opts: ScanOpts) Value {
         return self.kern().cumprodOpts(self, opts);
     }
 
-    /// `tl.gather(self, indices, axis)` — gather elements from self.
+    /// Gather elements from self along axis.
     pub fn gather(self: Value, indices: Value, axis: i32) Value {
         return self.kern().gather(self, indices, axis);
     }
 
-    /// `tl.abs(self)` — absolute value (dispatches float/int on element type).
+    /// Absolute value (float→absf, int→absi).
     pub fn abs(self: Value) Value {
         return self.kern().abs(self);
     }
 
-    /// `addptr(self, offset)` where offset can be a Value or comptime int.
-    /// Mirrors Triton's `ptr + offset` semantics: scalar↔tensor pairings
-    /// auto-splat the scalar side to match the tensor side's shape, in
-    /// either direction (scalar ptr + tensor offset, or tensor ptrs +
-    /// scalar offset).
+    /// tt.addptr with auto-splat for scalar↔tensor pairings.
     pub fn addPtr(self: Value, offset: anytype) Value {
         const k = self.kern();
         const off: Value = if (@TypeOf(offset) == Value) offset else k.lift(offset);
@@ -386,9 +349,7 @@ pub const ArgSpec = struct {
         tensor: struct { []const i64, DType },
         /// `.{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } }`
         ptr_opts: PtrOpts,
-        /// `.{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } }` —
-        /// mirrors the `tt.divisibility` hint Triton's JIT runtime attaches
-        /// when an int arg's value is divisible by a power of two.
+        /// `.{ .scalar_opts = .{ .dtype = .i32, .divisibility = 16 } }` — attaches `tt.divisibility`.
         scalar_opts: ScalarOpts,
     };
 
@@ -404,8 +365,7 @@ pub const ArgSpec = struct {
     };
 };
 
-/// Struct type mirroring `Spec`, with each field retyped to `Value`. Populated
-/// by `Builder.build` and reached via the returned `Built(Spec).args` field.
+/// `Spec` with each field retyped to `Value`. Reached via `Built(Spec).args`.
 pub fn NamedArgs(comptime Spec: type) type {
     const in = @typeInfo(Spec).@"struct".fields;
     comptime var names: [in.len][]const u8 = undefined;
@@ -431,41 +391,34 @@ pub fn Built(comptime Spec: type) type {
 
 pub const FinishError = error{InvalidMlir} || std.mem.Allocator.Error || std.Io.Writer.Error;
 
-/// Named-param struct for `Builder.clampfOpts` — mirrors
-/// `tl.clamp(x, min, max, propagate_nan=...)`.
+/// Named-param struct for `Builder.clampfOpts`.
 pub const ClampOpts = struct {
     propagate_nan: ttir.PropagateNan = .none,
 };
 
-/// Named-param struct for `Builder.histogramOpts` —
-/// `tl.histogram(src, num_bins, mask=...)`.
+/// Named-param struct for `Builder.histogramOpts`.
 pub const HistogramOpts = struct {
     mask: ?Value = null,
 };
 
-/// Named-param struct for `Builder.printOpts` —
-/// `tl.device_print(prefix, *args, hex=...)`.
+/// Named-param struct for `Builder.devicePrintOpts`.
 pub const PrintOpts = struct {
     hex: bool = false,
 };
 
-/// Named-param struct for `Builder.sumOpts` / `Builder.maxOpts` — mirrors
-/// `tl.sum(src, axis=None, keep_dims=False)` / `tl.max(src, axis=None, keep_dims=False)`.
-/// `axis = null` flattens over all dims (Python's `axis=None` default).
+/// Named-param struct for `Builder.sumOpts`/`maxOpts`/`minOpts`. `axis=null` reduces all dims.
 pub const ReduceOpts = struct {
     axis: ?i32 = null,
     keep_dims: bool = false,
 };
 
-/// Named-param struct for `Builder.cumsumOpts` —
-/// `tl.cumsum(src, axis=0, reverse=False)`.
+/// Named-param struct for `Builder.cumsumOpts`/`cumprodOpts`.
 pub const ScanOpts = struct {
     axis: i32 = 0,
     reverse: bool = false,
 };
 
-/// Named-param struct for `Builder.loadOpts` — mirrors
-/// `tl.load(ptr, mask=..., other=..., cache_modifier=..., eviction_policy=..., volatile=...)`.
+/// Named-param struct for `Builder.loadOpts`.
 pub const LoadOpts = struct {
     mask: ?Value = null,
     other: ?Value = null,
@@ -474,41 +427,32 @@ pub const LoadOpts = struct {
     @"volatile": bool = false,
 };
 
-/// Named-param struct for `Builder.storeOpts` — mirrors
-/// `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`.
+/// Named-param struct for `Builder.storeOpts`.
 pub const StoreOpts = struct {
     mask: ?Value = null,
     cache_modifier: ttir.CacheModifier = .none,
     eviction_policy: ttir.EvictionPolicy = .normal,
 };
 
-/// Named-param struct for `Builder.reshapeOpts` —
-/// `tl.reshape(src, shape, can_reorder=...)` plus the `efficient_layout`
-/// escape hatch.
+/// Named-param struct for `Builder.reshapeOpts`.
 pub const ReshapeOpts = struct {
     can_reorder: bool = false,
     efficient_layout: bool = false,
 };
 
-/// Named-param struct for `Builder.dotOpts` — mirrors
-/// `tl.dot(a, b, acc, input_precision=..., max_num_imprecise_acc=...)`.
-///
-/// `.input_precision` defaults to `.tf32` to match Triton's NVIDIA default
-/// (`triton/python/triton/language/core.py:dot`). Set `.input_precision =
-/// .ieee` explicitly when you need IEEE-754-strict matmul.
+/// Named-param struct for `Builder.dotOpts`.
+/// `.input_precision` defaults to `.tf32` (Triton's NVIDIA default); use `.ieee` for strict matmul.
 pub const DotOpts = struct {
     input_precision: ttir.InputPrecision = .tf32,
     max_num_imprecise_acc: i32 = 0,
 };
 
-/// Named-param struct for `Builder.fpToFpOpts`. If `rounding` is null, no
-/// rounding-mode attribute is emitted.
+/// Named-param struct for `Builder.fpToFpOpts`. `rounding=null` omits the rounding attribute.
 pub const FpToFpOpts = struct {
     rounding: ?ttir.RoundingMode = null,
 };
 
-/// Named-param struct for `Builder.atomicRmwOpts` — mirrors
-/// `tl.atomic_add(ptr, val, mask=..., sem=..., scope=...)`.
+/// Named-param struct for `Builder.atomicRmwOpts`.
 pub const AtomicRMWOpts = struct {
     mask: ?Value = null,
     sem: ttir.MemSemantic = .acq_rel,
@@ -528,8 +472,7 @@ pub const DotScaledOpts = struct {
     rhs_k_pack: bool = true,
 };
 
-/// Named-param struct for `Builder.externElementwiseOpts` — mirrors
-/// `tl.extern_elementwise(..., is_pure=...)`.
+/// Named-param struct for `Builder.externElementwiseOpts`.
 pub const ExternElementwiseOpts = struct {
     is_pure: bool = true,
 };
@@ -540,35 +483,30 @@ pub const DescriptorLoadOpts = struct {
     eviction_policy: ttir.EvictionPolicy = .normal,
 };
 
-/// Named-param struct for `Builder.inlineAsmElementwiseOpts` — mirrors
-/// `tl.inline_asm_elementwise(asm, constraints, args, dtype, is_pure=..., pack=...)`.
+/// Named-param struct for `Builder.inlineAsmElementwiseOpts`.
 pub const InlineAsmOpts = struct {
     is_pure: bool = true,
     pack: i32 = 1,
 };
 
-/// Named-param struct for `Builder.catOpts` — mirrors
-/// `tl.cat(input, other, can_reorder=False, dim=0)`.
+/// Named-param struct for `Builder.catOpts`.
 pub const CatOpts = struct {
     can_reorder: bool = false,
     dim: i32 = 0,
 };
 
-/// Named-param struct for `Builder.castOpts` / `Value.toOpts` — mirrors
-/// `tl.cast(input, dtype, fp_downcast_rounding=None, bitcast=False)`.
+/// Named-param struct for `Builder.castOpts` / `Value.toOpts`.
 pub const CastOpts = struct {
     fp_downcast_rounding: ?ttir.RoundingMode = null,
     bitcast: bool = false,
 };
 
-/// Named-param struct for `Builder.maximumOpts`/`minimumOpts` / `Value.maximumOpts`/`minimumOpts` —
-/// mirrors `tl.maximum(a, b, propagate_nan=...)` / `tl.minimum(a, b, propagate_nan=...)`.
+/// Named-param struct for `Builder.maximumOpts`/`minimumOpts`.
 pub const MinMaxOpts = struct {
     propagate_nan: ttir.PropagateNan = .none,
 };
 
-/// Named-param struct for `Builder.deviceAssertOpts` — mirrors
-/// `tl.device_assert(cond, msg="", mask=None)`.
+/// Named-param struct for `Builder.deviceAssertOpts`.
 pub const DeviceAssertOpts = struct {
     mask: ?Value = null,
 };
@@ -698,9 +636,7 @@ pub const ReturnIfScope = struct {
         _ = cf.br(k.ctx, k.exit_block.?, &.{}, k.loc()).appendTo(self.ret_block);
         k.popBlock();
 
-        // Mirror `returnIf`'s swap-or-push protocol: make `^cont` the new
-        // insertion point so subsequent ops and the trailing `tt.return`
-        // from `finish` land there.
+        // Make ^cont the new insertion point for subsequent ops and the trailing tt.return.
         if (k.block_stack.items.len == 0) {
             k.pushBlock(self.cont_block);
         } else {
@@ -901,8 +837,7 @@ pub const Builder = struct {
     entry_block: ?*mlir.Block,
     exit_block: ?*mlir.Block = null,
     block_stack: std.ArrayList(*mlir.Block),
-    /// Knobs mirroring `@triton.jit(...)` decorators. `noinline` is a Zig
-    /// keyword — call sites write `.{ .@"noinline" = true }`.
+    /// `noinline` is a Zig keyword — write `.{ .@"noinline" = true }`.
     pub const Opts = struct {
         @"noinline": bool = false,
     };
@@ -971,7 +906,6 @@ pub const Builder = struct {
     }
 
     /// Same as `declareArgs`, plus result types and `Opts` (e.g. `.noinline`).
-    /// Mirrors `@triton.jit(noinline=True, ...)`.
     pub fn declareArgsOpts(
         self: *Builder,
         spec: anytype,
@@ -1122,7 +1056,6 @@ pub const Builder = struct {
     }
 
     /// Same as `build`, plus optional `Builder.Opts` knobs (e.g. `.noinline`).
-    /// Mirrors `@triton.jit(noinline=True, ...)` on the Python side.
     pub fn buildOpts(
         allocator: std.mem.Allocator,
         ctx: *mlir.Context,
@@ -1316,8 +1249,7 @@ pub const Builder = struct {
         return switch (dtype) {
             .f32 => self.emit(arith.constant_float(self.ctx, value, .f32, self.loc())),
             .f64 => self.emit(arith.constant_float(self.ctx, value, .f64, self.loc())),
-            // Narrower-than-f32 floats: emit f32 then `tt.fp_to_fp` (matches
-            // what Triton's frontend does for non-fp32/64 scalar constants).
+            // non-fp32/64: emit f32 then fp_to_fp.
             else => self.fpToFp(self.emitFloat(.f32, value), dtype),
         };
     }
@@ -1421,30 +1353,15 @@ pub const Builder = struct {
         return v;
     }
 
-    /// Mirror Python's `binary_op_type_checking_impl`
-    /// (`triton/python/triton/language/semantic.py:175`):
-    ///
-    /// 1. Lift comptime/runtime scalars to DSL constants matching the other
-    ///    side's element type.
-    /// 2. Integer auto-promotion (`integer_promote_impl`): when both sides are
-    ///    integer with different widths, `extsi` the narrower side so the
-    ///    binop sees one common width.
-    /// 3. Scalar→tensor splat: `tensor.op(scalar)` and `scalar.op(tensor)`
-    ///    both work.
-    /// 4. Rank align via `expand_dims`: a `(M,)` and `(M, N)` operand pair
-    ///    grows the lower-rank to `(1, M)` first.
-    /// 5. Size-1 broadcast: `(M, 1)` and `(1, N)` both broadcast to `(M, N)`.
-    ///
-    /// Used by every fluent op (`.add`, `.lt`, …), so `tensor[:,None] +
-    /// tensor[None,:]` works without explicit `broadcastTo` calls.
+    /// Binary op coercion: lift scalars, int-width promotion, scalar↔tensor splat, rank align, size-1 broadcast.
+    /// Used by every fluent op so mixed-shape binops work without explicit broadcastTo calls.
     pub fn broadcast(self: *Builder, a: anytype, b: anytype) struct { Value, Value } {
         const a_ref: ?*const mlir.Type = if (@TypeOf(b) == Value) b.elemType() else null;
         const b_ref: ?*const mlir.Type = if (@TypeOf(a) == Value) a.elemType() else null;
         var av = if (a_ref) |t| self.liftMatching(a, t) else self.lift(a);
         var bv = if (b_ref) |t| self.liftMatching(b, t) else self.lift(b);
 
-        // (2) integer-width promotion. Skipped for ptrs and floats — Python
-        // only does width promotion within the int family.
+        // integer-width promotion (int family only, not ptrs or floats).
         if (av.isIntElem() and bv.isIntElem()) {
             const a_dt = self.mlirElemToDType(av.elemType());
             const b_dt = self.mlirElemToDType(bv.elemType());
@@ -1454,11 +1371,11 @@ pub const Builder = struct {
             if (bw < aw) bv = bv.to(a_dt);
         }
 
-        // (3) scalar↔tensor splat.
+        // scalar↔tensor splat.
         if (av.isTensor() and !bv.isTensor()) bv = self.splat(bv, av.shape().constSlice());
         if (!av.isTensor() and bv.isTensor()) av = self.splat(av, bv.shape().constSlice());
 
-        // (4 & 5) rank align + size-1 broadcast — only when both are tensors.
+        // rank align + size-1 broadcast.
         if (av.isTensor() and bv.isTensor()) {
             const a_rank = av.rank();
             const b_rank = bv.rank();
@@ -1561,58 +1478,42 @@ pub const Builder = struct {
         return self.splat(self.liftAs(value, dtype), shape);
     }
 
-    /// 2-D mask from two 1-D conditions. Equivalent to
-    /// `cond_m[:, None] & cond_n[None, :]` in Python. Result has size-1 dims
-    /// — `(m, 1) & (1, n)` — auto-broadcast to `(m, n)` lazily at the next
-    /// op (matches Python's `semantic.broadcast_impl_value`).
+    /// 2-D mask from two 1-D conditions. Result is `(m, 1) & (1, n)` — auto-broadcasts to `(m, n)`.
     pub fn mask2d(self: *Builder, cond_m: Value, cond_n: Value, _: i64, _: i64) Value {
         const cm2 = self.expandDims(cond_m, 1);
         const cn2 = self.expandDims(cond_n, 0);
         return cm2.bitAnd(cn2);
     }
 
-    /// `reduce` with an internal adder — `tl.sum(src)` reducing over all dims
-    /// (Python's `axis=None` default). Use `sumOpts` to target a specific axis
-    /// or set `keep_dims`.
+    /// Reduce sum over all dims. Use `sumOpts` for axis / keep_dims.
     pub fn sum(self: *Builder, src: Value) Value {
         return self.sumOpts(src, .{});
     }
 
-    /// `reduce` with an internal adder — `tl.sum(src, axis=..., keep_dims=...)`.
-    /// `opts.axis = null` flattens over all dims.
     pub fn sumOpts(self: *Builder, src: Value, opts: ReduceOpts) Value {
         return self.reduceDispatch(src, opts, .sum);
     }
 
-    /// `reduce` with an internal maximum — `tl.max(src)` reducing over all dims
-    /// (Python's `axis=None` default). Use `maxOpts` to target a specific axis
-    /// or set `keep_dims`.
+    /// Reduce max over all dims. Use `maxOpts` for axis / keep_dims.
     pub fn max(self: *Builder, src: Value) Value {
         return self.maxOpts(src, .{});
     }
 
-    /// `reduce` with an internal maximum — `tl.max(src, axis=..., keep_dims=...)`.
-    /// `opts.axis = null` flattens over all dims.
     pub fn maxOpts(self: *Builder, src: Value, opts: ReduceOpts) Value {
         return self.reduceDispatch(src, opts, .max);
     }
 
-    /// `reduce` with an internal minimum — `tl.min(src)` reducing over all dims
-    /// (Python's `axis=None` default). Use `minOpts` to target a specific axis
-    /// or set `keep_dims`.
+    /// Reduce min over all dims. Use `minOpts` for axis / keep_dims.
     pub fn min(self: *Builder, src: Value) Value {
         return self.minOpts(src, .{});
     }
 
-    /// `reduce` with an internal minimum — `tl.min(src, axis=..., keep_dims=...)`.
     pub fn minOpts(self: *Builder, src: Value, opts: ReduceOpts) Value {
         return self.reduceDispatch(src, opts, .min);
     }
 
     fn reduceDispatch(self: *Builder, src: Value, opts: ReduceOpts, comptime kind: enum { sum, max, min }) Value {
-        // axis=null → flatten then reduce axis 0. Mirrors `semantic.py:1651`,
-        // which always emits `reshape(can_reorder=true)`; the layout pass
-        // uses it to pick a reduction-friendly layout.
+        // axis=null → flatten then reduce axis 0; reshape(can_reorder=true) helps the layout pass.
         const src_shape = src.shape();
         const input: Value, const axis: i32 = if (opts.axis) |a| .{ src, a } else blk: {
             var total: i64 = 1;
@@ -1625,9 +1526,7 @@ pub const Builder = struct {
         const result_ty: *const mlir.Type = computeReducedType(in_shape.constSlice(), axis, elem);
         const is_float = input.isFloatElem();
         const Ctx = struct { is_float: bool, kind: @TypeOf(kind) };
-        // tl.max / tl.min default to PropagateNan.NONE → maxnumf / minnumf
-        // (`semantic.py:390`). Use Builder.maximumf / minimumf directly for
-        // NaN-propagating semantics.
+        // max/min default to non-NaN-propagating (maxnumf/minnumf). Use maximumf/minimumf for NaN-propagating.
         const combine = struct {
             fn c(kk: *Builder, lhs: Value, rhs: Value, cc: Ctx) Value {
                 return switch (cc.kind) {
@@ -1655,24 +1554,20 @@ pub const Builder = struct {
         return self.expandDims(out, axis);
     }
 
-    /// `scan` with addition — `tl.cumsum(src, axis=0)`. Use `cumsumOpts`
-    /// to override `axis` / `reverse`.
+    /// Cumulative sum (axis=0). Use `cumsumOpts` for axis / reverse.
     pub fn cumsum(self: *Builder, src: Value) Value {
         return self.cumsumOpts(src, .{});
     }
 
-    /// `scan` with addition — `tl.cumsum(src, axis=..., reverse=...)`.
     pub fn cumsumOpts(self: *Builder, src: Value, opts: ScanOpts) Value {
         return self.scanDispatch(src, opts, .sum);
     }
 
-    /// `scan` with multiplication — `tl.cumprod(src, axis=0)`. Use `cumprodOpts`
-    /// to override `axis` / `reverse`.
+    /// Cumulative product (axis=0). Use `cumprodOpts` for axis / reverse.
     pub fn cumprod(self: *Builder, src: Value) Value {
         return self.cumprodOpts(src, .{});
     }
 
-    /// `scan` with multiplication — `tl.cumprod(src, axis=..., reverse=...)`.
     pub fn cumprodOpts(self: *Builder, src: Value, opts: ScanOpts) Value {
         return self.scanDispatch(src, opts, .prod);
     }
@@ -1726,22 +1621,12 @@ pub const Builder = struct {
         return self.emit(ttir.addptr(self.ctx, ptr.inner, offset.inner, self.loc()));
     }
 
-    /// `tt.load` from a scalar (or tensor of) pointer with defaulted options —
-    /// `tl.load(ptr)` in Python. The result type is inferred from `ptr`:
-    /// scalar `!tt.ptr<T>` loads a scalar `T`, `tensor<... x !tt.ptr<T>>`
-    /// loads a `tensor<... x T>`. Use `loadOpts` for mask / other / cache /
-    /// eviction / volatile.
+    /// tt.load — result type inferred from ptr. Use `loadOpts` for mask / other / cache / eviction.
     pub fn load(self: *Builder, ptr: Value) Value {
         return self.loadOpts(ptr, .{});
     }
 
-    /// `tt.load` with the full named-param set — `tl.load(ptr, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`.
-    /// Result type is inferred from `ptr` the same way `load` does.
-    ///
-    /// Auto-broadcast: matches Triton's `semantic.load`
-    /// (`triton/python/triton/language/semantic.py:1022-1026`) — when `ptr` is
-    /// a tensor, `mask` and `other` are run through `broadcast_impl_value`
-    /// against `ptr` so callers don't need an explicit `broadcastTo`.
+    /// tt.load with full options. mask and other are auto-broadcast against ptr.
     pub fn loadOpts(self: *Builder, ptr: Value, opts: LoadOpts) Value {
         var mask_v = opts.mask;
         var other_v = opts.other;
@@ -1758,16 +1643,12 @@ pub const Builder = struct {
         return self.emit(ttir.load(self.ctx, ptr.inner, self.loadResultType(ptr), mask_inner, other_inner, opts.cache_modifier, opts.eviction_policy, opts.@"volatile", self.loc()));
     }
 
-    /// `tt.store` with defaulted options — `tl.store(ptr, value)` in Python.
-    /// Use `storeOpts` for mask / cache / eviction.
+    /// tt.store. Use `storeOpts` for mask / cache / eviction.
     pub fn store(self: *Builder, ptr: Value, value: Value) void {
         self.storeOpts(ptr, value, .{});
     }
 
-    /// `tt.store` with the full named-param set — `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`.
-    ///
-    /// Auto-broadcast: matches Triton's `semantic.store` — when `ptr` is a
-    /// tensor, `mask` is broadcast against `ptr` via `broadcast_impl_value`.
+    /// tt.store with full options. mask is auto-broadcast against ptr.
     pub fn storeOpts(self: *Builder, ptr: Value, value: Value, opts: StoreOpts) void {
         var mask_v = opts.mask;
         if (ptr.isTensor()) {
@@ -1810,25 +1691,16 @@ pub const Builder = struct {
         return self.emit(arith.cmpf(self.ctx, predicate, lhs.inner, rhs.inner, self.loc()));
     }
 
-    /// `arith.select` — low-level backend op. Prefer `where(cond, x, y)` for
-    /// the Python-named entry point (`tl.where`).
+    /// `arith.select` — low-level; prefer `where(cond, x, y)` for the public entry point.
     pub fn select(self: *Builder, cond: Value, t: Value, f: Value) Value {
         return self.emit(arith.select(self.ctx, cond.inner, t.inner, f.inner, self.loc()));
     }
 
-    /// `tl.where(condition, x, y)` — select `x` where condition is true, `y`
-    /// elsewhere.
-    ///
-    /// Auto-broadcast: matches Triton's `semantic.where`
-    /// (`triton/python/triton/language/semantic.py:1621-1635`) — `condition`,
-    /// `x`, `y` are unified to a common shape via `broadcast_impl_value`,
-    /// so callers don't need explicit `broadcastTo` calls.
+    /// Select `x` where condition is true, `y` elsewhere. Condition/x/y are auto-broadcast.
     pub fn where(self: *Builder, condition: Value, x: Value, y: Value) Value {
         var c = condition;
         var xv, var yv = .{ x, y };
-        // (1) align x, y first (Python: `binary_op_type_checking_impl(x, y)`).
         xv, yv = self.broadcast(xv, yv);
-        // (2) align condition against the now-broadcasted x.
         if (c.isTensor()) {
             c, xv = self.broadcast(c, xv);
             xv, yv = self.broadcast(xv, yv);
@@ -1896,11 +1768,11 @@ pub const Builder = struct {
     pub fn minimumf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.emit(arith.minimumf(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
-    /// `arith.maxnumf` — non-NaN-propagating max (default for `tl.max`).
+    /// arith.maxnumf — non-NaN-propagating max.
     pub fn maxnumf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.emit(arith.maxnumf(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
-    /// `arith.minnumf` — non-NaN-propagating min (default for `tl.min`).
+    /// arith.minnumf — non-NaN-propagating min.
     pub fn minnumf(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.emit(arith.minnumf(self.ctx, lhs.inner, rhs.inner, self.loc()));
     }
@@ -1908,17 +1780,12 @@ pub const Builder = struct {
         return self.emit(arith.negf(self.ctx, src.inner, self.loc()));
     }
 
-    /// `tl.maximum(a, b)` — elementwise max with symmetric scalar↔tensor
-    /// auto-broadcast, dispatches to `maximumf` for floats, `maxsi` for ints.
-    /// Use `maximumOpts` for `propagate_nan`.
+    /// Elementwise max with auto-broadcast. Use `maximumOpts` for propagate_nan.
     pub fn maximum(self: *Builder, a: anytype, b: anytype) Value {
         return self.maximumOpts(a, b, .{});
     }
 
-    /// `tl.maximum(a, b, propagate_nan=...)`. `propagate_nan` only applies to
-    /// floats; ignored for integer operands. Default is `.none` →
-    /// `arith.maxnumf` (matches Python's `tl.maximum`), `.all` →
-    /// `arith.maximumf` (IEEE-754 NaN-propagating).
+    /// Elementwise max with propagate_nan. `.none` → maxnumf, `.all` → maximumf (NaN-propagating).
     pub fn maximumOpts(self: *Builder, a: anytype, b: anytype, opts: MinMaxOpts) Value {
         const l, const r = self.broadcast(a, b);
         if (l.isFloatElem()) {
@@ -1930,14 +1797,12 @@ pub const Builder = struct {
         return self.maxsi(l, r);
     }
 
-    /// `tl.minimum(a, b)` — elementwise min, see `maximum`.
+    /// Elementwise min with auto-broadcast. Use `minimumOpts` for propagate_nan.
     pub fn minimum(self: *Builder, a: anytype, b: anytype) Value {
         return self.minimumOpts(a, b, .{});
     }
 
-    /// `tl.minimum(a, b, propagate_nan=...)`. Default `.none` →
-    /// `arith.minnumf` (matches Python's `tl.minimum`), `.all` →
-    /// `arith.minimumf`.
+    /// Elementwise min with propagate_nan. `.none` → minnumf, `.all` → minimumf (NaN-propagating).
     pub fn minimumOpts(self: *Builder, a: anytype, b: anytype, opts: MinMaxOpts) Value {
         const l, const r = self.broadcast(a, b);
         if (l.isFloatElem()) {
@@ -1983,26 +1848,19 @@ pub const Builder = struct {
 
     // ==================== Triton-specific ops ====================
 
-    /// `tt.bitcast` — same-bitwidth cast. Shape preserved from `src`; elem → `out_dtype`.
-    /// For ptr ↔ ptr bitcasts use `bitcastTo` with an explicit pointer type.
+    /// tt.bitcast — same-bitwidth cast. Shape preserved from src.
     pub fn bitcast(self: *Builder, src: Value, out_dtype: DType) Value {
         return self.emit(ttir.bitcast(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
 
-    /// `tl.cast(src, dtype)` — numeric cast with auto-dispatch
-    /// (extsi/trunci/sitofp/fptosi/fpToFp). Shape preserved. Use `castOpts`
-    /// for `fp_downcast_rounding` / `bitcast=True`.
+    /// Numeric cast with auto-dispatch. Use `castOpts` for rounding / bitcast.
     pub fn cast(self: *Builder, src: Value, dtype: DType) Value {
         return self.castOpts(src, dtype, .{});
     }
 
-    /// `tl.cast(src, dtype, fp_downcast_rounding=..., bitcast=...)`. Dispatch
-    /// matches `semantic.py:cast` (lines 820-895):
-    ///   - fp ↔ fp narrowing: `truncf`, except fp8-on-either-side or custom
-    ///     rounding falls back to `tt.fp_to_fp`.
-    ///   - fp ↔ fp widening: `extf`.
-    ///   - bool (i1) → fp: `uitofp` (signed widening would map `1` to `-1.0`).
-    ///   - int → int: `extsi` / `trunci` / `bitcast` by relative bitwidth.
+    /// Numeric cast with options. Dispatch:
+    ///   - fp↔fp narrow: truncf, except fp8 or custom rounding → tt.fp_to_fp.
+    ///   - fp↔fp wide: extf. i1→fp: uitofp. int↔int: extsi/trunci/bitcast by width.
     pub fn castOpts(self: *Builder, src: Value, dtype: DType, opts: CastOpts) Value {
         if (opts.bitcast) return self.bitcast(src, dtype);
         const cur_elem = src.elemType();
@@ -2034,8 +1892,7 @@ pub const Builder = struct {
         if (tgt_bw < cur_bw) return self.trunci(src, dtype);
         return self.arithBitcast(src, dtype);
     }
-    /// `tt.int_to_ptr` — cast integer (scalar or tensor) to `!tt.ptr<pointee, address_space>`,
-    /// preserving shape.
+    /// tt.int_to_ptr — cast int (scalar or tensor) to pointer, preserving shape.
     pub fn intToPtr(self: *Builder, src: Value, pointee: DType, address_space: i32) Value {
         const ptr_elem = ttir.pointerType(pointee.toMlir(self.ctx), address_space);
         const result_type: *const mlir.Type = if (src.isTensor())
@@ -2044,28 +1901,23 @@ pub const Builder = struct {
             ptr_elem;
         return self.emit(ttir.int_to_ptr(self.ctx, src.inner, result_type, self.loc()));
     }
-    /// `tt.ptr_to_int` — cast pointer (scalar or tensor) to integer, preserving shape.
+    /// tt.ptr_to_int — cast pointer (scalar or tensor) to integer, preserving shape.
     pub fn ptrToInt(self: *Builder, src: Value, out_dtype: DType) Value {
         return self.emit(ttir.ptr_to_int(self.ctx, src.inner, self.swapElem(src, out_dtype), self.loc()));
     }
-    /// `tt.fp_to_fp` with default IEEE downcast rounding (`rtne`). Shape is
-    /// preserved from `src`; only the element type changes to `out_dtype`.
-    /// Use `fpToFpOpts` to choose a different `rounding`.
+    /// tt.fp_to_fp with default rtne rounding. Use `fpToFpOpts` for other rounding modes.
     pub fn fpToFp(self: *Builder, src: Value, out_dtype: DType) Value {
         return self.fpToFpOpts(src, out_dtype, .{ .rounding = .rtne });
     }
-    /// `tt.fp_to_fp` with the full named-param set (currently just
-    /// `rounding`). `tl.cast(x, dtype, fp_downcast_rounding=...)` in Python.
+    /// tt.fp_to_fp with rounding option.
     pub fn fpToFpOpts(self: *Builder, src: Value, out_dtype: DType, opts: FpToFpOpts) Value {
         return self.emit(ttir.fp_to_fp(self.ctx, src.inner, self.swapElem(src, out_dtype), opts.rounding, self.loc()));
     }
-    /// `tt.clampf` with default `propagate_nan = .none` — `tl.clamp(x, min, max)`.
-    /// Use `clampfOpts` to override NaN propagation.
+    /// tt.clampf with propagate_nan=.none. Use `clampfOpts` to override.
     pub fn clampf(self: *Builder, x: Value, lo: Value, hi: Value) Value {
         return self.clampfOpts(x, lo, hi, .{});
     }
-    /// `tt.clampf` with the full named-param set —
-    /// `tl.clamp(x, min, max, propagate_nan=...)`.
+    /// tt.clampf with full options.
     pub fn clampfOpts(self: *Builder, x: Value, lo: Value, hi: Value, opts: ClampOpts) Value {
         return self.emit(ttir.clampf(self.ctx, x.inner, lo.inner, hi.inner, opts.propagate_nan, self.loc()));
     }
@@ -2082,39 +1934,28 @@ pub const Builder = struct {
         return self.emit(ttir.mulhiui(self.ctx, x.inner, y.inner, self.loc()));
     }
 
-    /// `tt.dot` — matmul with accumulator, default options (ieee precision).
-    /// `a`, `b`, `c_acc` are tensors. The result type follows `c_acc`'s type.
-    /// Use `dotOpts` for `input_precision` / `max_num_imprecise_acc` /
-    /// `allow_tf32`.
+    /// tt.dot — matmul with accumulator. Result type = c_acc. Use `dotOpts` for precision.
     pub fn dot(self: *Builder, a: Value, b: Value, c_acc: Value) Value {
         return self.dotOpts(a, b, c_acc, .{});
     }
 
-    /// `tt.dot` with the full named-param set — matches `tl.dot(a, b, acc,
-    /// input_precision=..., max_num_imprecise_acc=..., out_dtype=...)`.
-    /// Result type = `c_acc.type_()`.
+    /// tt.dot with full options. Result type = `c_acc.type_()`.
     pub fn dotOpts(self: *Builder, a: Value, b: Value, c_acc: Value, opts: DotOpts) Value {
         return self.emit(ttir.dot(self.ctx, a.inner, b.inner, c_acc.inner, c_acc.type_(), opts.input_precision, opts.max_num_imprecise_acc, self.loc()));
     }
 
-    /// `tt.reshape` with default options — `tl.reshape(src, shape)`. Element
-    /// type is preserved from `src`. Use `reshapeOpts` for `can_reorder` /
-    /// `efficient_layout`.
+    /// tt.reshape, element type preserved. Use `reshapeOpts` for can_reorder / efficient_layout.
     pub fn reshape(self: *Builder, src: Value, new_shape: []const i64) Value {
         return self.reshapeOpts(src, new_shape, .{});
     }
 
-    /// `tt.reshape` with the full named-param set —
-    /// `tl.reshape(src, shape, can_reorder=...)` plus the `efficient_layout`
-    /// escape hatch. Element type preserved from `src`.
+    /// tt.reshape with full options.
     pub fn reshapeOpts(self: *Builder, src: Value, new_shape: []const i64, opts: ReshapeOpts) Value {
         const result_ty = mlir.rankedTensorType(new_shape, src.elemType());
         return self.emit(ttir.reshape(self.ctx, src.inner, result_ty, opts.can_reorder, opts.efficient_layout, self.loc()));
     }
 
-    /// `tl.trans(src, *dims)` / `tt.trans` — permute dimensions according to
-    /// `order`. Result shape is `src.shape` permuted by `order`; element type
-    /// preserved.
+    /// tt.trans — permute dimensions. Result shape is src.shape permuted by order.
     pub fn trans(self: *Builder, src: Value, order: []const i32) Value {
         const src_shape = src.shape();
         std.debug.assert(order.len == src_shape.len);
@@ -2129,19 +1970,14 @@ pub const Builder = struct {
         return self.trans(src, order);
     }
 
-    /// `tl.cat(input, other)` — concatenate two tensors along dim 0 (Python
-    /// default). Both operands must share rank, element type, and dims ≥ 1;
-    /// result dim 0 = sum of the operand dim 0s. Use `catOpts` for
-    /// `can_reorder` / `dim`.
+    /// tt.cat — concatenate along dim 0. Use `catOpts` for can_reorder / dim.
     pub fn cat(self: *Builder, lhs: Value, rhs: Value) Value {
         return self.catOpts(lhs, rhs, .{});
     }
 
-    /// `tl.cat(input, other, can_reorder=..., dim=...)` — concat with kwargs.
-    /// Currently `dim != 0` is unsupported (Python decomposes via
-    /// `join + permute + reshape`; we would need to mirror that).
+    /// tt.cat with full options. dim != 0 is not yet supported.
     pub fn catOpts(self: *Builder, lhs: Value, rhs: Value, opts: CatOpts) Value {
-        std.debug.assert(opts.dim == 0); // TODO: general dim via join+permute+reshape
+        std.debug.assert(opts.dim == 0); // TODO: dim != 0 requires join+permute+reshape
         _ = opts.can_reorder; // forwarded to ttir.cat when supported
         const ls = lhs.shape();
         const rs = rhs.shape();
@@ -2184,63 +2020,53 @@ pub const Builder = struct {
         return self.emit(ttir.unsplat(self.ctx, src.inner, src.elemType(), self.loc()));
     }
 
-    /// `tt.gather` — `tl.gather(src, index, axis)`. All positional, no opts
-    /// (mirrors Python: no kwargs). Output shape matches `indices`, element
-    /// type matches `src`.
+    /// tt.gather — output shape matches indices, element type matches src.
     pub fn gather(self: *Builder, src: Value, indices: Value, axis: i32) Value {
         const result_ty = mlir.rankedTensorType(indices.shape().constSlice(), src.elemType());
         return self.emit(ttir.gather(self.ctx, src.inner, indices.inner, axis, result_ty, false, self.loc()));
     }
 
-    /// `tt.histogram` without a mask — `tl.histogram(src, num_bins)` in Python.
-    /// Output is `tensor<num_bins x i32>`. Use `histogramOpts` to pass a mask.
+    /// tt.histogram — output is `tensor<num_bins x i32>`. Use `histogramOpts` for mask.
     pub fn histogram(self: *Builder, src: Value, num_bins: i64) Value {
         return self.histogramOpts(src, num_bins, .{});
     }
 
-    /// `tt.histogram` with the full named-param set —
-    /// `tl.histogram(src, num_bins, mask=...)`.
+    /// tt.histogram with mask option.
     pub fn histogramOpts(self: *Builder, src: Value, num_bins: i64, opts: HistogramOpts) Value {
         const result_ty = mlir.rankedTensorType(&.{num_bins}, DType.i32.toMlir(self.ctx));
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
         return self.emit(ttir.histogram(self.ctx, src.inner, mask_inner, result_ty, self.loc()));
     }
 
-    /// `tl.device_assert(cond, msg="")` / `tt.assert` — device-side assert on a
-    /// condition (i1 or tensor<...xi1>). Use `deviceAssertOpts` for a mask.
+    /// tt.assert — device-side assert (i1 or tensor<...xi1>). Use `deviceAssertOpts` for mask.
     pub fn deviceAssert(self: *Builder, condition: Value, message: []const u8) void {
         self.deviceAssertOpts(condition, message, .{});
     }
 
-    /// `tl.device_assert(cond, msg="", mask=...)`.
+    /// tt.assert with mask option.
     pub fn deviceAssertOpts(self: *Builder, condition: Value, message: []const u8, opts: DeviceAssertOpts) void {
         // TODO: threading mask through ttir.assert_ when supported.
         _ = opts.mask;
         _ = ttir.assert_(self.ctx, condition.inner, message, self.loc()).appendTo(self.currentBlock());
     }
 
-    /// `tt.atomic_rmw` with default options — `tl.atomic_add(ptr, val)` (no
-    /// mask, default sem/scope). Use `atomicRmwOpts` for mask / sem / scope.
-    /// Returns the old value at ptr before the RMW.
+    /// tt.atomic_rmw — returns old value. Use `atomicRmwOpts` for mask / sem / scope.
     pub fn atomicRmw(self: *Builder, rmw: ttir.RMWOp, ptr: Value, val: Value) Value {
         return self.atomicRmwOpts(rmw, ptr, val, .{});
     }
 
-    /// `tt.atomic_rmw` with the full named-param set —
-    /// `tl.atomic_add(ptr, val, mask=..., sem=..., scope=...)`.
+    /// tt.atomic_rmw with full options.
     pub fn atomicRmwOpts(self: *Builder, rmw: ttir.RMWOp, ptr: Value, val: Value, opts: AtomicRMWOpts) Value {
         const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
         return self.emit(ttir.atomic_rmw(self.ctx, rmw, ptr.inner, val.inner, mask_inner, opts.sem, opts.scope, self.loc()));
     }
 
-    /// `tt.atomic_cas` with default sem/scope — `tl.atomic_cas(ptr, cmp, val)`.
-    /// Returns the old value at ptr. Use `atomicCasOpts` for sem / scope.
+    /// tt.atomic_cas — returns old value. Use `atomicCasOpts` for sem / scope.
     pub fn atomicCas(self: *Builder, ptr: Value, cmp: Value, val: Value) Value {
         return self.atomicCasOpts(ptr, cmp, val, .{});
     }
 
-    /// `tt.atomic_cas` with the full named-param set —
-    /// `tl.atomic_cas(ptr, cmp, val, sem=..., scope=...)`.
+    /// tt.atomic_cas with full options.
     pub fn atomicCasOpts(self: *Builder, ptr: Value, cmp: Value, val: Value, opts: AtomicCasOpts) Value {
         return self.emit(ttir.atomic_cas(self.ctx, ptr.inner, cmp.inner, val.inner, opts.sem, opts.scope, self.loc()));
     }
@@ -2251,9 +2077,7 @@ pub const Builder = struct {
         return self.emitMulti(op, result_types.len);
     }
 
-    /// `tt.dot_scaled` — dot with microscaling factors; defaulted options.
-    /// Result type follows `c_acc`'s type. Use `dotScaledOpts` for `fast_math`
-    /// / `lhs_k_pack` / `rhs_k_pack`.
+    /// tt.dot_scaled — dot with microscaling factors. Use `dotScaledOpts` for options.
     pub fn dotScaled(
         self: *Builder,
         a: Value,
@@ -2298,11 +2122,8 @@ pub const Builder = struct {
         ));
     }
 
-    /// `tt.extern_elementwise` — call a library symbol pointwise with default
-    /// options. Use `externElementwiseOpts` for `pure` and the rest of the
-    /// named-param set.
-    /// `tt.extern_elementwise` — result is `tensor<result_shape x result_dtype>`.
-    /// For a scalar result, pass `&.{}` as `result_shape`.
+    /// tt.extern_elementwise — call a library symbol pointwise.
+    /// Result is `tensor<result_shape x result_dtype>`; pass `&.{}` for scalar.
     pub fn externElementwise(
         self: *Builder,
         srcs: []const Value,
@@ -2342,10 +2163,8 @@ pub const Builder = struct {
         ));
     }
 
-    /// `tl.device_print(prefix, *args)` / `tt.print` — device-side print with
-    /// default options (non-hex). `is_signed` must have one entry per `args`
-    /// entry (Python infers this from Python types; we need it explicit). Use
-    /// `devicePrintOpts` to set `hex = true`.
+    /// tt.print — device-side print. `is_signed` has one entry per arg (1=signed, 0=unsigned).
+    /// Use `devicePrintOpts` for hex.
     pub fn devicePrint(
         self: *Builder,
         prefix: []const u8,
@@ -2355,7 +2174,7 @@ pub const Builder = struct {
         self.devicePrintOpts(prefix, args, is_signed, .{});
     }
 
-    /// `tl.device_print(prefix, *args, hex=...)` with the full named-param set.
+    /// tt.print with full options.
     pub fn devicePrintOpts(
         self: *Builder,
         prefix: []const u8,
@@ -2366,9 +2185,8 @@ pub const Builder = struct {
         _ = ttir.print(self.ctx, prefix, opts.hex, self.innerSlice(args), is_signed, self.loc()).appendTo(self.currentBlock());
     }
 
-    /// `tt.make_tensor_descriptor` — build a TMA descriptor.
-    /// `shape` / `strides` are runtime Values; `block_shape` / `dtype` describe
-    /// the compile-time tile shape baked into the descriptor type.
+    /// tt.make_tensor_descriptor — build a TMA descriptor.
+    /// shape/strides are runtime; block_shape/dtype describe the compile-time tile.
     pub fn makeTensorDescriptor(
         self: *Builder,
         base: Value,
@@ -2390,9 +2208,7 @@ pub const Builder = struct {
         ));
     }
 
-    /// `tt.descriptor_load` — TMA load with default options. `shape` and
-    /// `dtype` describe the tile being loaded. Use `descriptorLoadOpts` for
-    /// cache / eviction modifiers.
+    /// tt.descriptor_load — TMA load. Use `descriptorLoadOpts` for cache / eviction.
     pub fn descriptorLoad(
         self: *Builder,
         desc: Value,
@@ -2432,8 +2248,7 @@ pub const Builder = struct {
         _ = ttir.descriptor_reduce(self.ctx, kind, desc.inner, src.inner, self.innerSlice(indices), self.loc()).appendTo(self.currentBlock());
     }
 
-    /// `tt.descriptor_gather` — TMA gather (rows by x_offsets + single y_offset).
-    /// `shape` / `dtype` describe the gathered tile.
+    /// tt.descriptor_gather — TMA gather by x_offsets + y_offset.
     pub fn descriptorGather(
         self: *Builder,
         desc: Value,
@@ -3035,734 +2850,3 @@ pub const Builder = struct {
         return try self.allocator.dupeZ(u8, al.written());
     }
 };
-
-// The high-level declarative `Kernel(decl, Impl)` lives one layer up at
-// `zml/triton.zig`, where it can also expose `.call(...)` (which needs
-// `zml.ops.triton`). Use that for production. This file (`zml/triton/kernel.zig`)
-// is the lower layer: `Builder`, `Value`, `ArgSpec`, `DType`, etc.
-
-test {
-    std.testing.refAllDecls(@This());
-}
-
-fn setupTestContext() !*mlir.Context {
-    const registry = try mlir.DialectRegistry.init();
-    inline for (.{ "func", "arith", "scf", "math", "tt" }) |d| {
-        mlir.DialectHandle.fromString(d).insertDialect(registry);
-    }
-    const ctx = try mlir.Context.init(.{ .registry = registry, .threading = false });
-    ctx.loadAllAvailableDialects();
-    return ctx;
-}
-
-test "Builder builds a trivial tt.func round-trip" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var kernel = try Builder.init(std.testing.allocator, ctx, "add_one", &.{
-        .{ .name = "a_ptr", .kind = .{ .ptr = .f32 } },
-        .{ .name = "b_ptr", .kind = .{ .ptr = .f32 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const a_ptr = kernel.arg(0);
-    const b_ptr = kernel.arg(1);
-
-    const loaded = kernel.load(a_ptr);
-    const one = kernel.lift(@as(f32, 1.0));
-    const summed = kernel.addf(loaded, one);
-    kernel.store(b_ptr, summed);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    // Text must contain the expected operators.
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.func") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.load") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "arith.addf") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.store") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.return") != null);
-
-    // Round-trip: re-parse as a module and verify.
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "Builder with scf.for iter_args" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    // tt.func @sum_range(%base: !tt.ptr<f32>) {
-    //   %lb = arith.constant 0 : i32
-    //   %ub = arith.constant 8 : i32
-    //   %step = arith.constant 1 : i32
-    //   %init = arith.constant 0.0 : f32
-    //   %sum = scf.for %iv = %lb to %ub step %step
-    //       iter_args(%acc = %init) -> f32 : i32 {
-    //     %v = tt.load %base : !tt.ptr<f32>
-    //     %next = arith.addf %acc, %v : f32
-    //     scf.yield %next : f32
-    //   }
-    //   tt.store %base, %sum
-    //   tt.return
-    // }
-    var kernel = try Builder.init(std.testing.allocator, ctx, "sum_range", &.{
-        .{ .name = "base", .kind = .{ .ptr = .f32 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const base = kernel.arg(0);
-    const lb = kernel.lift(@as(i32, 0));
-    const ub = kernel.lift(@as(i32, 8));
-    const step = kernel.lift(@as(i32, 1));
-    const init_acc = kernel.lift(@as(f32, 0.0));
-
-    var loop = kernel.openFor(lb, ub, step, .{init_acc});
-    {
-        const v = kernel.load(base);
-        loop.yield(.{kernel.addf(loop.carried[0], v)});
-    }
-    kernel.store(base, loop.results[0]);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "scf.for") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "iter_args") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "scf.yield") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "Builder with scf.if" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    // tt.func @branch(%a: !tt.ptr<f32>) {
-    //   %c1 = arith.constant 1 : i32
-    //   %c2 = arith.constant 2 : i32
-    //   %eq = arith.cmpi eq, %c1, %c2 : i32
-    //   %v = scf.if %eq -> f32 {
-    //     %one = arith.constant 1.0 : f32
-    //     scf.yield %one : f32
-    //   } else {
-    //     %two = arith.constant 2.0 : f32
-    //     scf.yield %two : f32
-    //   }
-    //   tt.store %a, %v
-    //   tt.return
-    // }
-    var kernel = try Builder.init(std.testing.allocator, ctx, "branch", &.{
-        .{ .name = "a", .kind = .{ .ptr = .f32 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const a_ptr = kernel.arg(0);
-    const c1 = kernel.lift(@as(i32, 1));
-    const c2 = kernel.lift(@as(i32, 2));
-    const eq = kernel.cmpi(.eq, c1, c2);
-
-    const f32_ty = mlir.floatType(ctx, .f32);
-    var i = kernel.openIfElse(eq, .{f32_ty});
-    {
-        i.yieldThen(.{kernel.lift(@as(f32, 1.0))});
-    }
-    {
-        i.yieldElse(.{kernel.lift(@as(f32, 2.0))});
-    }
-    kernel.store(a_ptr, i.results[0]);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "scf.if") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "else") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "tt.bitcast / tt.int_to_ptr / tt.fp_to_fp round-trip" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var kernel = try Builder.init(std.testing.allocator, ctx, "cast_kernel", &.{
-        .{ .name = "iptr", .kind = .{ .ptr = .i64 } },
-        .{ .name = "fptr", .kind = .{ .ptr = .f32 } },
-        .{ .name = "half_ptr", .kind = .{ .ptr = .f16 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const iptr = kernel.arg(0);
-    const fptr = kernel.arg(1);
-    const half_ptr = kernel.arg(2);
-
-    // Round-trip: i64 → ptr<f32> → int → ptr<f32>.
-    const raw = kernel.load(iptr);
-    const cast_ptr = kernel.intToPtr(raw, .f32, 1);
-    const back_int = kernel.ptrToInt(cast_ptr, .i64);
-    _ = back_int;
-
-    // tt.bitcast f32 → i32 scalar.
-    const fval = kernel.load(fptr);
-    const bits = kernel.bitcast(fval, .i32);
-    _ = bits;
-
-    // fp_to_fp f32 → f16 with default rounding (rtne).
-    const narrowed = kernel.fpToFp(fval, .f16);
-    kernel.store(half_ptr, narrowed);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.int_to_ptr") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.ptr_to_int") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.bitcast") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.fp_to_fp") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "rounding = rtne") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "math dialect round-trip (softmax-like bits)" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var kernel = try Builder.init(std.testing.allocator, ctx, "softmax_bits", &.{
-        .{ .name = "x_ptr", .kind = .{ .ptr = .f32 } },
-        .{ .name = "out_ptr", .kind = .{ .ptr = .f32 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const x_ptr = kernel.arg(0);
-    const out_ptr = kernel.arg(1);
-
-    const x = kernel.load(x_ptr);
-
-    const e = kernel.exp2(x);
-    const sq = kernel.sqrt(e);
-    const rq = kernel.rsqrt(sq);
-    const t = kernel.tanh(rq);
-    const e2 = kernel.erf(t);
-
-    kernel.store(out_ptr, e2);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "math.exp2") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "math.sqrt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "math.rsqrt") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "math.tanh") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "math.erf") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "tt.atomic_rmw round-trip" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var kernel = try Builder.init(std.testing.allocator, ctx, "atomic_incr", &.{
-        .{ .name = "counter", .kind = .{ .ptr = .i32 } },
-    }, &.{});
-    defer kernel.deinit();
-
-    const counter = kernel.arg(0);
-    const one = kernel.lift(@as(i32, 1));
-    _ = kernel.atomicRmw(.add, counter, one);
-
-    const ir = try kernel.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "tt.atomic_rmw") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "add") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-// =============================================================================
-// Parity with Triton's own canonical tests at `triton/test/Triton/ops.mlir`.
-// Each test reproduces the body of a `tt.func` in that file, prints the IR,
-// and round-trips it through `mlir.Module.parse` + `verify()`. Purpose: prove
-// our native Zig builder produces IR that MLIR accepts for every op shape
-// exercised by upstream.
-// =============================================================================
-
-fn parityPrintAndVerify(ctx: *mlir.Context, module: *mlir.Module) !void {
-    var al: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer al.deinit();
-    try al.writer.print("{f}", .{module.operation()});
-    const parsed = try mlir.Module.parse(ctx, al.written());
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "ops_mlir parity: cast_ops" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "cast_ops", &.{
-        .{ .name = "scalar_ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
-        .{ .name = "scalar_f32", .kind = .{ .scalar = .f32 } },
-        .{ .name = "scalar_i64", .kind = .{ .scalar = .i64 } },
-    }, &.{});
-    defer k.deinit();
-
-    const sp = k.arg(0);
-    const sf = k.arg(1);
-    const si = k.arg(2);
-
-    // scalar ↔ scalar
-    _ = k.intToPtr(si, .f32, 1);
-    _ = k.ptrToInt(sp, .i64);
-    _ = k.truncf(sf, .f16);
-
-    // 0D-tensor ↔ 0D-tensor
-    const t_ptr_0d = k.splat(sp, &.{});
-    const t_f32_0d = k.splat(sf, &.{});
-    const t_i64_0d = k.splat(si, &.{});
-    _ = k.intToPtr(t_i64_0d, .f32, 1);
-    _ = k.ptrToInt(t_ptr_0d, .i64);
-    _ = k.truncf(t_f32_0d, .f16);
-
-    // 1D-tensor ↔ 1D-tensor
-    const t_ptr_1d = k.splat(sp, &.{16});
-    const t_f32_1d = k.splat(sf, &.{16});
-    const t_i64_1d = k.splat(si, &.{16});
-    _ = k.intToPtr(t_i64_1d, .f32, 1);
-    _ = k.ptrToInt(t_ptr_1d, .i64);
-    _ = k.truncf(t_f32_1d, .f16);
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    // finish() also verifies; still round-trip the textual form.
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: addptr_ops" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "addptr_ops", &.{
-        .{ .name = "scalar_ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
-        .{ .name = "scalar_i32", .kind = .{ .scalar = .i32 } },
-    }, &.{});
-    defer k.deinit();
-
-    const sp = k.arg(0);
-    const si = k.arg(1);
-
-    // scalar
-    _ = k.addptr(sp, si);
-    // 0D tensor
-    const tp0 = k.splat(sp, &.{});
-    const ti0 = k.splat(si, &.{});
-    _ = k.addptr(tp0, ti0);
-    // 1D tensor
-    const tp1 = k.splat(sp, &.{16});
-    const ti1 = k.splat(si, &.{16});
-    _ = k.addptr(tp1, ti1);
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: load_store_ops_scalar" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "load_store_ops_scalar", &.{
-        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = 16 } } },
-        .{ .name = "mask", .kind = .{ .scalar = .i1 } },
-    }, &.{});
-    defer k.deinit();
-
-    const ptr = k.arg(0);
-    const mask = k.arg(1);
-
-    const other = k.lift(@as(f32, 0.0));
-
-    const a = k.load(ptr);
-    const b = k.loadOpts(ptr, .{ .mask = mask });
-    const c = k.loadOpts(ptr, .{ .mask = mask, .other = other });
-
-    k.store(ptr, a);
-    k.storeOpts(ptr, b, .{ .mask = mask });
-    k.storeOpts(ptr, c, .{ .mask = mask });
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: reduce_ops_infer" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "reduce_ops_infer", &.{
-        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
-        .{ .name = "v", .kind = .{ .tensor = .{ &.{ 1, 2, 4 }, .f32 } } },
-    }, &.{});
-    defer k.deinit();
-
-    const v = k.arg(1);
-    const f32_ty = mlir.floatType(ctx, .f32);
-    const loc: *const mlir.Location = .unknown(ctx);
-
-    // Reduce axis=0: tensor<1x2x4xf32> -> tensor<2x4xf32>
-    {
-        const combine = mlir.Block.init(&.{ f32_ty, f32_ty }, &.{ loc, loc });
-        const sum = arith.addf(ctx, combine.argument(0), combine.argument(1), loc);
-        _ = sum.appendTo(combine);
-        _ = ttir.reduce_return(ctx, &.{sum.result(0)}, loc).appendTo(combine);
-        const res_ty = mlir.rankedTensorType(&.{ 2, 4 }, f32_ty);
-        _ = ttir.reduce(ctx, &.{v.inner}, 0, combine, &.{res_ty}, loc).appendTo(k.currentBlock());
-    }
-    // Reduce axis=2: tensor<1x2x4xf32> -> tensor<1x2xf32>
-    {
-        const combine = mlir.Block.init(&.{ f32_ty, f32_ty }, &.{ loc, loc });
-        const sum = arith.addf(ctx, combine.argument(0), combine.argument(1), loc);
-        _ = sum.appendTo(combine);
-        _ = ttir.reduce_return(ctx, &.{sum.result(0)}, loc).appendTo(combine);
-        const res_ty = mlir.rankedTensorType(&.{ 1, 2 }, f32_ty);
-        _ = ttir.reduce(ctx, &.{v.inner}, 2, combine, &.{res_ty}, loc).appendTo(k.currentBlock());
-    }
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: dot_ops_infer" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "dot_ops_infer", &.{
-        .{ .name = "ptr", .kind = .{ .ptr_opts = .{ .dtype = .f32, .divisibility = null } } },
-        .{ .name = "v", .kind = .{ .scalar = .f32 } },
-    }, &.{});
-    defer k.deinit();
-
-    const v = k.arg(1);
-
-    const v128x32 = k.splat(v, &.{ 128, 32 });
-    const v32x128 = k.splat(v, &.{ 32, 128 });
-    const zero128 = k.lift(@as(f32, 0.0));
-    const z128x128 = k.splat(zero128, &.{ 128, 128 });
-    const z32x32 = k.splat(zero128, &.{ 32, 32 });
-
-    _ = k.dot(v128x32, v32x128, z128x128);
-    _ = k.dot(v32x128, v128x32, z32x32);
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: scan_op" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "scan_op", &.{
-        .{ .name = "v", .kind = .{ .tensor = .{ &.{ 1, 2, 4 }, .f32 } } },
-    }, &.{});
-    defer k.deinit();
-
-    const v = k.arg(0);
-    const f32_ty = mlir.floatType(ctx, .f32);
-    const loc: *const mlir.Location = .unknown(ctx);
-
-    const combine = mlir.Block.init(&.{ f32_ty, f32_ty }, &.{ loc, loc });
-    const sum = arith.addf(ctx, combine.argument(0), combine.argument(1), loc);
-    _ = sum.appendTo(combine);
-    _ = ttir.scan_return(ctx, &.{sum.result(0)}, loc).appendTo(combine);
-
-    const res_ty = mlir.rankedTensorType(&.{ 1, 2, 4 }, f32_ty);
-    _ = ttir.scan(ctx, &.{v.inner}, 1, false, combine, &.{res_ty}, loc).appendTo(k.currentBlock());
-
-    const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: inline_asm tensor + scalar" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    // tensor form: tensor<512xi8> -> tensor<512xi8>, packed_element=4
-    var kt = try Builder.init(std.testing.allocator, ctx, "inline_asm", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i8 } } },
-    }, &.{});
-    defer kt.deinit();
-    const x = kt.arg(0);
-    const i8_1d = mlir.rankedTensorType(&.{512}, mlir.integerType(ctx, .i8));
-    _ = kt.inlineAsmElementwiseOpts("shl.b32 $0, $0, 3;", "=r,r", &.{x}, &.{i8_1d}, .{ .is_pure = true, .pack = 4 });
-    const __ir_kt = try kt.finish(&.{}); std.testing.allocator.free(__ir_kt);
-    try parityPrintAndVerify(ctx, kt.module);
-
-    // scalar form: i32 -> i32, packed_element=1
-    var ks = try Builder.init(std.testing.allocator, ctx, "inline_asm_scalar", &.{
-        .{ .name = "x", .kind = .{ .scalar = .i32 } },
-    }, &.{});
-    defer ks.deinit();
-    const xs = ks.arg(0);
-    const i32_ty = mlir.integerType(ctx, .i32);
-    _ = ks.inlineAsmElementwiseOpts("shl.b32 $0, $0, 3;", "=r,r", &.{xs}, &.{i32_ty}, .{ .is_pure = true, .pack = 1 });
-    const __ir_ks = try ks.finish(&.{}); std.testing.allocator.free(__ir_ks);
-    try parityPrintAndVerify(ctx, ks.module);
-}
-
-test "ops_mlir parity: reshape variants" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "reshape_fn", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
-    }, &.{});
-    defer k.deinit();
-
-    const x = k.arg(0);
-
-    _ = k.reshape(x, &.{ 16, 32 });
-    _ = k.reshapeOpts(x, &.{ 16, 32 }, .{ .can_reorder = true });
-    _ = k.reshapeOpts(x, &.{ 16, 32 }, .{ .can_reorder = true, .efficient_layout = true });
-    _ = k.reshapeOpts(x, &.{ 16, 32 }, .{ .efficient_layout = true });
-
-    const ir = try k.finish(&.{});
-    defer std.testing.allocator.free(ir);
-
-    try std.testing.expect(std.mem.indexOf(u8, ir, "allow_reorder") != null);
-    try std.testing.expect(std.mem.indexOf(u8, ir, "efficient_layout") != null);
-
-    const parsed = try mlir.Module.parse(ctx, ir);
-    defer parsed.deinit();
-    try std.testing.expect(parsed.operation().verify());
-}
-
-test "ops_mlir parity: histogram + masked_histogram" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    {
-        var k = try Builder.init(std.testing.allocator, ctx, "histogram", &.{
-            .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
-        }, &.{});
-        defer k.deinit();
-        _ = k.histogram(k.arg(0), 16);
-        const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-        try parityPrintAndVerify(ctx, k.module);
-    }
-    {
-        var k = try Builder.init(std.testing.allocator, ctx, "masked_histogram", &.{
-            .{ .name = "x", .kind = .{ .tensor = .{ &.{512}, .i32 } } },
-            .{ .name = "m", .kind = .{ .tensor = .{ &.{512}, .i1 } } },
-        }, &.{});
-        defer k.deinit();
-        _ = k.histogramOpts(k.arg(0), 16, .{ .mask = k.arg(1) });
-        const __ir = try k.finish(&.{}); std.testing.allocator.free(__ir);
-        try parityPrintAndVerify(ctx, k.module);
-    }
-}
-
-test "ops_mlir parity: gather" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "gather_op", &.{
-        .{ .name = "src", .kind = .{ .tensor = .{ &.{ 128, 16 }, .f32 } } },
-        .{ .name = "idx", .kind = .{ .tensor = .{ &.{ 512, 16 }, .i32 } } },
-    }, &.{mlir.rankedTensorType(&.{ 512, 16 }, mlir.floatType(ctx, .f32))});
-    defer k.deinit();
-
-    const src = k.arg(0);
-    const idx = k.arg(1);
-    const g = k.gather(src, idx, 0);
-
-    const __ir = try k.finish(&.{g}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-test "ops_mlir parity: item (unsplat)" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "item_fn", &.{
-        .{ .name = "x", .kind = .{ .tensor = .{ &.{ 1, 1 }, .f32 } } },
-    }, &.{mlir.floatType(ctx, .f32)});
-    defer k.deinit();
-
-    const x = k.arg(0);
-    const scalar = k.item(x);
-
-    const __ir = try k.finish(&.{scalar}); std.testing.allocator.free(__ir);
-    try parityPrintAndVerify(ctx, k.module);
-}
-
-// The tensordesc-using functions need an arg of type `!tt.tensordesc<...>`
-// which Builder's ArgSpec doesn't model directly. Build them with Layer A.
-fn parityBuildModuleWithArgs(
-    ctx: *mlir.Context,
-    fname: []const u8,
-    arg_types: []const *const mlir.Type,
-    results: []const *const mlir.Type,
-    build_body: *const fn (ctx: *mlir.Context, entry: *mlir.Block) void,
-) *mlir.Module {
-    const loc: *const mlir.Location = .unknown(ctx);
-    const module: *mlir.Module = .init(loc);
-
-    const arg_locs = std.testing.allocator.alloc(*const mlir.Location, arg_types.len) catch @panic("parityBuildModuleWithArgs OOM");
-    defer std.testing.allocator.free(arg_locs);
-    for (arg_locs) |*l| l.* = loc;
-    const entry = mlir.Block.init(arg_types, arg_locs);
-
-    build_body(ctx, entry);
-    _ = ttir.return_(ctx, &.{}, loc).appendTo(entry);
-
-    const f = ttir.func(ctx, .{
-        .name = fname,
-        .args = arg_types,
-        .results = results,
-        .block = entry,
-        .location = loc,
-    });
-    _ = f.appendTo(module.body());
-    return module;
-}
-
-test "ops_mlir parity: descriptor_load" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    const f32_ty = mlir.floatType(ctx, .f32);
-    const desc_ty = ttir.tensorDescType(&.{128}, f32_ty, null);
-
-    const Body = struct {
-        fn build(c: *mlir.Context, entry: *mlir.Block) void {
-            const l: *const mlir.Location = .unknown(c);
-            const i32_ = mlir.integerType(c, .i32);
-            const f32_ = mlir.floatType(c, .f32);
-            const r = mlir.rankedTensorType(&.{128}, f32_);
-            const c0 = arith.constant_int(c, 0, i32_, l);
-            _ = c0.appendTo(entry);
-            _ = ttir.descriptor_load(c, entry.argument(0), &.{c0.result(0)}, r, .none, .normal, l).appendTo(entry);
-        }
-    };
-
-    const module = parityBuildModuleWithArgs(ctx, "descriptor_load", &.{desc_ty}, &.{}, &Body.build);
-    defer module.deinit();
-    try std.testing.expect(module.operation().verify());
-    try parityPrintAndVerify(ctx, module);
-}
-
-test "ops_mlir parity: tma_gather + tma_scatter" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    const bf16_ty = mlir.floatType(ctx, .bf16);
-    const i32_ty = mlir.integerType(ctx, .i32);
-    const desc_ty = ttir.tensorDescType(&.{ 1, 128 }, bf16_ty, null);
-    const off_ty = mlir.rankedTensorType(&.{32}, i32_ty);
-    const data_ty = mlir.rankedTensorType(&.{ 32, 128 }, bf16_ty);
-
-    // tma_gather: (!tt.tensordesc<1x128xbf16>, tensor<32xi32>, i32) -> tensor<32x128xbf16>
-    {
-        const GatherBody = struct {
-            fn build(c: *mlir.Context, entry: *mlir.Block) void {
-                const l: *const mlir.Location = .unknown(c);
-                const bf16_ = mlir.floatType(c, .bf16);
-                const out_ty = mlir.rankedTensorType(&.{ 32, 128 }, bf16_);
-                _ = ttir.descriptor_gather(c, entry.argument(0), entry.argument(1), entry.argument(2), out_ty, l).appendTo(entry);
-            }
-        };
-        const module = parityBuildModuleWithArgs(ctx, "tma_gather", &.{ desc_ty, off_ty, i32_ty }, &.{}, &GatherBody.build);
-        defer module.deinit();
-        try parityPrintAndVerify(ctx, module);
-    }
-
-    // tma_scatter: (!tt.tensordesc<1x128xbf16>, tensor<32xi32>, i32, tensor<32x128xbf16>) -> ()
-    {
-        const ScatterBody = struct {
-            fn build(c: *mlir.Context, entry: *mlir.Block) void {
-                const l: *const mlir.Location = .unknown(c);
-                _ = ttir.descriptor_scatter(c, entry.argument(0), entry.argument(1), entry.argument(2), entry.argument(3), l).appendTo(entry);
-            }
-        };
-        const module = parityBuildModuleWithArgs(ctx, "tma_scatter", &.{ desc_ty, off_ty, i32_ty, data_ty }, &.{}, &ScatterBody.build);
-        defer module.deinit();
-        try parityPrintAndVerify(ctx, module);
-    }
-}
-
-test "lift handles large comptime_int and unsigned runtime bit patterns" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "lift_big_ints", &.{}, &.{});
-    defer k.deinit();
-
-    // comptime_int > i64 max, within u64 range → i64 with all-ones bit pattern.
-    const c1 = k.lift(0xFFFF_FFFF_FFFF_FFFF);
-    try std.testing.expectEqual(DType.i64, k.mlirElemToDType(c1.elemType()));
-
-    // runtime u64 at u64 max → i64 with all-ones bit pattern (no panic).
-    const v_u64: u64 = 0xFFFF_FFFF_FFFF_FFFF;
-    const c2 = k.lift(v_u64);
-    try std.testing.expectEqual(DType.i64, k.mlirElemToDType(c2.elemType()));
-
-    // runtime u32 at u32 max → i32 with all-ones bit pattern (no panic).
-    const v_u32: u32 = 0xFFFF_FFFF;
-    const c3 = k.lift(v_u32);
-    try std.testing.expectEqual(DType.i32, k.mlirElemToDType(c3.elemType()));
-
-    const ir = try k.finish(&.{});
-    defer std.testing.allocator.free(ir);
-}
-
-test "lift preserves f16 width through fluent ops" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "lift_f16", &.{
-        .{ .name = "a", .kind = .{ .scalar = .f16 } },
-    }, &.{});
-    defer k.deinit();
-
-    // Direct lift of f16 stays f16.
-    const f = k.lift(@as(f16, 1.5));
-    try std.testing.expectEqual(DType.f16, k.mlirElemToDType(f.elemType()));
-
-    // Fluent op on an f16 Value with an f16 rhs must verify cleanly
-    // (pre-fix this emitted an f32 constant and failed arith.addf verification).
-    const a = k.arg(0);
-    _ = a.add(@as(f16, 2.0));
-
-    const ir = try k.finish(&.{});
-    defer std.testing.allocator.free(ir);
-}
-
-test "openFor with Value bounds and no carried values" {
-    const ctx = try setupTestContext();
-    defer ctx.deinit();
-
-    var k = try Builder.init(std.testing.allocator, ctx, "loop_mixed", &.{
-        .{ .name = "lb", .kind = .{ .scalar = .i32 } },
-    }, &.{});
-    defer k.deinit();
-
-    const lb = k.arg(0);
-    const ub = k.liftAs(@as(usize, 10), .i32);
-
-    var loop = k.openFor(lb, ub, 1, .{});
-    {
-        loop.yield(.{});
-    }
-
-    const ir = try k.finish(&.{});
-    defer std.testing.allocator.free(ir);
-}
