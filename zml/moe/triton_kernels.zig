@@ -581,7 +581,6 @@ pub const CountAndSortExpertTokens = zml.Kernel(.{
         const token_offs = b.makeRange(0, block);
 
         const token_start_init = pid.mul(block_i32);
-        const step = num_progs.mul(block_i32);
 
         // while token_start < NUMEL:
         var w = b.openWhile(.{token_start_init}, .{b.scalarTy(.i32)});
@@ -616,6 +615,11 @@ pub const CountAndSortExpertTokens = zml.Kernel(.{
             const sorted_ptrs = a.sorted_token_ids_ptr.addPtr(rank);
             b.storeOpts(sorted_ptrs, offs, .{ .mask = valid });
 
+            // token_start += num_programs * BLOCK_SIZE
+            // Compute step INSIDE the loop body (Python's source position).
+            // It's loop-invariant, so XLA's LICM hoists it out — the hoisted
+            // op-order then matches Python's IR (splats before step).
+            const step = num_progs.mul(block_i32);
             w.yieldAfter(.{ts.add(step)});
         }
     }
