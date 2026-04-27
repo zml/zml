@@ -682,13 +682,20 @@ pub const ReturnIfScope = struct {
     pub fn yieldReturn(self: *ReturnIfScope, values: anytype) void {
         const k = self.kernel;
         const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
-        var ret_operands: [fields.len]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
-            ret_operands[i] = @field(values, f.name).inner;
+
+        if (k.exit_block == null) {
+            k.exit_block = mlir.Block.init(&.{}, &.{});
+
+            var ret_operands: [fields.len]*const mlir.Value = undefined;
+            inline for (fields, 0..) |f, i| {
+                if (f.type != Value)
+                    @compileError("ReturnIfScope.yieldReturn: every value must be a Value");
+                ret_operands[i] = @field(values, f.name).inner;
+            }
+            _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(k.exit_block.?);
         }
-        _ = ttir.return_(k.ctx, &ret_operands, k.loc()).appendTo(self.ret_block);
+
+        _ = cf.br(k.ctx, k.exit_block.?, &.{}, k.loc()).appendTo(self.ret_block);
         k.popBlock();
 
         // Mirror `returnIf`'s swap-or-push protocol: make `^cont` the new
@@ -892,6 +899,7 @@ pub const Builder = struct {
     /// Entry block for the `tt.func`. `null` between `open` and the first
     /// `declareArgs` call; populated thereafter.
     entry_block: ?*mlir.Block,
+    exit_block: ?*mlir.Block = null,
     block_stack: std.ArrayList(*mlir.Block),
     /// Knobs mirroring `@triton.jit(...)` decorators. `noinline` is a Zig
     /// keyword — call sites write `.{ .@"noinline" = true }`.
@@ -2804,28 +2812,29 @@ pub const Builder = struct {
         const region = current.parentRegion();
 
         const fields = @typeInfo(@TypeOf(values)).@"struct".fields;
-        // Each `returnIf` site emits its own `tt.return` block — matches
-        // Python's frontend, which emits a `tt.return` per `if cond: return`
-        // and lets MLIR's canonicalize/BlockMerging pass merge identical
-        // adjacent ret blocks downstream. Append ret-block before cont-block
-        // so the early-return lands at the position right after the entry's
-        // `cf.cond_br` (matches Python's `visit_if_top_level` block order).
         const cont_block = mlir.Block.init(&.{}, &.{});
-        const ret_block = mlir.Block.init(&.{}, &.{});
-        var ret_operands: [fields.len]*const mlir.Value = undefined;
-        inline for (fields, 0..) |f, i| {
-            if (f.type != Value)
-                @compileError("returnIf: every value must be a Value");
-            ret_operands[i] = @field(values, f.name).inner;
+
+        // Use a shared exit block for all returns. This ensures that every
+        // return path (early or natural) goes through a pure tt.return block,
+        // allowing MLIR's Canonicalizer/BlockMerging to create a single join
+        // point.
+        if (self.exit_block == null) {
+            self.exit_block = mlir.Block.init(&.{}, &.{});
+
+            var ret_operands: [fields.len]*const mlir.Value = undefined;
+            inline for (fields, 0..) |f, i| {
+                if (f.type != Value)
+                    @compileError("returnIf: every value must be a Value");
+                ret_operands[i] = @field(values, f.name).inner;
+            }
+            _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(self.exit_block.?);
         }
-        _ = ttir.return_(self.ctx, &ret_operands, self.loc()).appendTo(ret_block);
-        region.appendOwnedBlock(ret_block);
         region.appendOwnedBlock(cont_block);
 
         _ = cf.cond_br(
             self.ctx,
             cond.inner,
-            ret_block,
+            self.exit_block.?,
             &.{},
             cont_block,
             &.{},
@@ -3000,7 +3009,14 @@ pub const Builder = struct {
         // as the new insertion point. `currentBlock()` returns that block
         // (or `entry_block` if no cf was emitted), so the final terminator
         // goes to the correct "tail" block in either case.
-        _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(self.currentBlock());
+        const current = self.currentBlock();
+        if (self.exit_block) |exit| {
+            const region = self.entry_block.?.parentRegion();
+            region.appendOwnedBlock(exit);
+            _ = cf.br(self.ctx, exit, &.{}, self.loc()).appendTo(current);
+        } else {
+            _ = ttir.return_(self.ctx, self.innerSlice(results), self.loc()).appendTo(current);
+        }
 
         if (!self.module.operation().verify()) {
             return error.InvalidMlir;
