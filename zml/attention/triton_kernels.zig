@@ -303,7 +303,7 @@ fn kernelUnifiedAttention2d(
 
     // Q : (BLOCK_M, HEAD_SIZE_PADDED)
     const q_mask_ab = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED);
-    const q_mask_c = query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+    const q_mask_c = query_mask_1.expandDims(1);
     const q_mask = q_mask_ab.bitAnd(q_mask_c);
     const q_cache_mod: ttir.CacheModifier =
         if (config.all_decode or BLOCK_M >= NUM_QUERY_HEADS) .cg else .none;
@@ -340,7 +340,7 @@ fn kernelUnifiedAttention2d(
 
     // In the `use_qq_bias = true` branch, the tensor offset auto-splats the
     // scalar ptr via addPtr. In the else branch there is no offset, so we
-    // need an explicit splatTo to give broadcast2d a tensor to work on.
+    // need an explicit splatTo to give expandDims a tensor to work on.
     const qq_bias_row_ptrs: Value = if (config.use_qq_bias)
         qq_bias_ptr.addPtr(query_pos.to(.i64).mul(qq_bias_stride_0))
     else
@@ -438,14 +438,14 @@ fn kernelUnifiedAttention2d(
         }
 
         // seq_mask = seq_offset[None, :] < context_len + query_pos[:, None] + 1
-        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
-        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
+        const ql_2d_i32 = query_pos.expandDims(1);
+        const so_2d = seq_offset.expandDims(0);
         const rhs = ql_2d_i32.add(context_len).add(1);
         const seq_mask = so_2d.lt(rhs);
 
         // S = tl.where(qmask_1 & qmask_0 & seq_mask, S, -inf)
-        const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
-        const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const qm0_2d = query_mask_0.expandDims(1);
+        const qm1_2d = query_mask_1.expandDims(1);
         const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
@@ -456,8 +456,8 @@ fn kernelUnifiedAttention2d(
         }
 
         if (config.use_alibi_slopes) {
-            const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
+            const alibi_2d = alibi_slope.expandDims(1);
+            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).expandDims(0);
             S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
         }
 
@@ -465,10 +465,10 @@ fn kernelUnifiedAttention2d(
             const key_rel_pos = seq_offset.sub(context_len);
             const is_query_key = key_rel_pos.ge(0)
                 .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
-            const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
-                .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
+            const qq_ptrs = qq_bias_row_ptrs.expandDims(1)
+                .addPtr(key_rel_pos.to(.i64).expandDims(0));
             const qq_bias = k.loadOpts(qq_ptrs, .{
-                .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
+                .mask = is_query_key.expandDims(0),
                 .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
             });
             S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
@@ -479,12 +479,12 @@ fn kernelUnifiedAttention2d(
         m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
 
         // P = exp2(S - m_j[:, None]); l_j = sum(P, axis=1); alpha = exp2(M - m_j)
-        const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const mj_2d = m_j.expandDims(1);
         const P = k.exp2(S.sub(mj_2d));
         const l_j = k.sumOpts(P, .{ .axis = 1 });
         const alpha = k.exp2(M.sub(m_j));
 
-        const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+        const alpha_2d = alpha.expandDims(1);
         const acc_scaled = acc.mul(alpha_2d);
         const new_L = L.mul(alpha).add(l_j);
         const new_M = m_j;
@@ -512,12 +512,12 @@ fn kernelUnifiedAttention2d(
         );
     }
 
-    const oo0_2d = query_offset_0.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_0);
-    const oo1_2d = query_offset_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED).mul(output_stride_1);
+    const oo0_2d = query_offset_0.expandDims(1).mul(output_stride_0);
+    const oo1_2d = query_offset_1.expandDims(1).mul(output_stride_1);
     const output_offset = oo0_2d.add(oo1_2d).add(k.expandDims(offs_d, 0));
 
     const store_mask = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
-        .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+        .bitAnd(query_mask_1.expandDims(1));
     k.storeOpts(
         output_ptr.addPtr(output_offset),
         acc_final.to(config.o_dtype),
@@ -760,8 +760,8 @@ fn kernelUnifiedAttention3d(
         // before the f32 qk_scale_splat in the pre-loop block. Match Python's
         // operand order: `context_len + query_pos[:, None]` puts the splat on
         // the LHS of the addi (Triton's frontend preserves Python source order).
-        const ql_2d_i32 = query_pos.broadcast2d(1, BLOCK_M, TILE_SIZE);
-        const so_2d = seq_offset.broadcast2d(0, BLOCK_M, TILE_SIZE);
+        const ql_2d_i32 = query_pos.expandDims(1);
+        const so_2d = seq_offset.expandDims(0);
         const rhs = context_len.add(ql_2d_i32).add(1);
         const seq_mask = so_2d.lt(rhs);
 
@@ -773,8 +773,8 @@ fn kernelUnifiedAttention3d(
             S = applySoftcap(k, S, softcap).mul(RCP_LN2);
         }
 
-        const qm0_2d = query_mask_0.broadcast2d(1, BLOCK_M, TILE_SIZE);
-        const qm1_2d = query_mask_1.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const qm0_2d = query_mask_0.expandDims(1);
+        const qm1_2d = query_mask_1.expandDims(1);
         const keep_mask = qm1_2d.bitAnd(qm0_2d).bitAnd(seq_mask);
         S = k.where(keep_mask, S, k.full(&.{ BLOCK_M, TILE_SIZE }, -std.math.inf(f32), .f32));
 
@@ -785,8 +785,8 @@ fn kernelUnifiedAttention3d(
         }
 
         if (config.use_alibi_slopes) {
-            const alibi_2d = alibi_slope.broadcast2d(1, BLOCK_M, TILE_SIZE);
-            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).broadcast2d(0, BLOCK_M, TILE_SIZE);
+            const alibi_2d = alibi_slope.expandDims(1);
+            const pos_diff = seq_offset.sub(context_len).to(config.scale_dtype).expandDims(0);
             S = S.add(alibi_2d.mul(pos_diff).to(.f32).mul(RCP_LN2));
         }
 
@@ -794,10 +794,10 @@ fn kernelUnifiedAttention3d(
             const key_rel_pos = seq_offset.sub(context_len);
             const is_query_key = key_rel_pos.ge(0)
                 .bitAnd(key_rel_pos.to(.i64).lt(qq_bias_stride_0));
-            const qq_ptrs = qq_bias_row_ptrs.broadcast2d(1, BLOCK_M, TILE_SIZE)
-                .addPtr(key_rel_pos.to(.i64).broadcast2d(0, BLOCK_M, TILE_SIZE));
+            const qq_ptrs = qq_bias_row_ptrs.expandDims(1)
+                .addPtr(key_rel_pos.to(.i64).expandDims(0));
             const qq_bias = k.loadOpts(qq_ptrs, .{
-                .mask = is_query_key.broadcast2d(0, BLOCK_M, TILE_SIZE),
+                .mask = is_query_key.expandDims(0),
                 .other = k.zeros(&.{ BLOCK_M, TILE_SIZE }, config.scale_dtype),
             });
             S = S.add(qq_bias.to(.f32).mul(RCP_LN2));
@@ -806,12 +806,12 @@ fn kernelUnifiedAttention3d(
         var m_j = M.maximum(k.maxOpts(S, .{ .axis = 1 }));
         m_j = k.where(m_j.gt(-std.math.inf(f32)), m_j, k.full(&.{BLOCK_M}, 0.0, .f32));
 
-        const mj_2d = m_j.broadcast2d(1, BLOCK_M, TILE_SIZE);
+        const mj_2d = m_j.expandDims(1);
         const P = k.exp2(S.sub(mj_2d));
         const l_j = k.sumOpts(P, .{ .axis = 1 });
         const alpha = k.exp2(M.sub(m_j));
 
-        const alpha_2d = alpha.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED);
+        const alpha_2d = alpha.expandDims(1);
         const acc_scaled = acc.mul(alpha_2d);
         const new_L = L.mul(alpha).add(l_j);
 
@@ -841,7 +841,7 @@ fn kernelUnifiedAttention3d(
         .add(k.expandDims(offs_d, 0));
 
     const store_mask_2d = k.mask2d(query_mask_0, dim_mask, BLOCK_M, HEAD_SIZE_PADDED)
-        .bitAnd(query_mask_1.broadcast2d(1, BLOCK_M, HEAD_SIZE_PADDED));
+        .bitAnd(query_mask_1.expandDims(1));
     k.storeOpts(
         segm_output_ptr.addPtr(segm_output_offset),
         acc_final,
@@ -956,7 +956,7 @@ fn reduceSegments(
         },
     );
     const rescale = k.exp2(segm_max.sub(overall_max));
-    segm_output = segm_output.mul(rescale.broadcast2d(1, NUM_SEGMENTS_PER_SEQ, HEAD_SIZE_PADDED));
+    segm_output = segm_output.mul(rescale.expandDims(1));
     const acc_sum = k.sumOpts(segm_output, .{ .axis = 0 });
 
     var acc = k.where(

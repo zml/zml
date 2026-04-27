@@ -398,7 +398,7 @@ pub const FusedMoe = zml.Kernel(.{
             const tw_dtype = cfg.topk_weights_dtype orelse .f32;
             const tw_other = b.zeros(&.{block_size_m}, tw_dtype);
             const tw = b.loadOpts(a.topk_weights_ptr.addPtr(offs_token), .{ .mask = token_mask, .other = tw_other });
-            accumulator = accumulator.mul(tw.broadcast2d(1, block_size_m, block_size_n));
+            accumulator = accumulator.mul(tw.expandDims(1));
         }
 
         accumulator = accumulator.to(compute_type);

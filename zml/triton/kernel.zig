@@ -212,15 +212,15 @@ pub const Value = struct {
 
     // -------- shape manipulation --------
 
-    /// Expand this 1-D vector to a 2-D `[m, n]` tensor by broadcasting along
-    /// the axis opposite to `axis`. `axis=0` keeps the value as a column
-    /// (replicates across rows); `axis=1` keeps it as a row. Matches Python's
-    /// `vec[:, None]` (axis=1) / `vec[None, :]` (axis=0) idioms.
-    pub fn broadcast2d(self: Value, axis: i32, m: i64, n: i64) Value {
-        const k = self.kern();
-        const exp = k.expandDims(self, axis);
-        const target: [2]i64 = .{ m, n };
-        return k.broadcastTo(exp, &target);
+    /// `tt.expand_dims` — insert a size-1 axis at `axis`. Matches Python's
+    /// `vec[:, None]` (`axis=1`) / `vec[None, :]` (`axis=0`) idioms.
+    ///
+    /// Prefer this over an eager broadcast: every fluent binop, `addPtr`,
+    /// `select`/`where`, and load/store mask auto-broadcasts size-1 dims, so
+    /// the consumer materializes the final shape lazily — matching what
+    /// Triton's Python frontend emits (`semantic.broadcast_impl_value`).
+    pub fn expandDims(self: Value, axis: i32) Value {
+        return self.kern().expandDims(self, axis);
     }
 
     /// Splat this scalar value to a tensor of the given shape.
@@ -1553,19 +1553,14 @@ pub const Builder = struct {
         return self.splat(self.liftAs(value, dtype), shape);
     }
 
-    /// 2D broadcast helper. Matches `vec[:, None]` (axis=1) and `vec[None, :]`
-    /// (axis=0) Python idioms. Grows a 1-D vector into a `[m, n]` tensor.
-    pub fn broadcast2d(_: *Builder, vec: Value, axis: i32, m: i64, n: i64) Value {
-        return vec.broadcast2d(axis, m, n);
-    }
-
     /// 2-D mask from two 1-D conditions. Equivalent to
-    /// `cond_m[:, None] & cond_n[None, :]` in Python. `cond_m` has length `m`,
-    /// `cond_n` has length `n`; result is `[m, n] x i1`.
-    pub fn mask2d(self: *Builder, cond_m: Value, cond_n: Value, m: i64, n: i64) Value {
-        const cm2 = cond_m.broadcast2d(1, m, n);
-        const cn2 = cond_n.broadcast2d(0, m, n);
-        return self.andi(cm2, cn2);
+    /// `cond_m[:, None] & cond_n[None, :]` in Python. Result has size-1 dims
+    /// — `(m, 1) & (1, n)` — auto-broadcast to `(m, n)` lazily at the next
+    /// op (matches Python's `semantic.broadcast_impl_value`).
+    pub fn mask2d(self: *Builder, cond_m: Value, cond_n: Value, _: i64, _: i64) Value {
+        const cm2 = self.expandDims(cond_m, 1);
+        const cn2 = self.expandDims(cond_n, 0);
+        return cm2.bitAnd(cn2);
     }
 
     /// `reduce` with an internal adder — `tl.sum(src)` reducing over all dims
@@ -1734,9 +1729,24 @@ pub const Builder = struct {
 
     /// `tt.load` with the full named-param set — `tl.load(ptr, mask=..., other=..., cache_modifier=..., eviction_policy=..., is_volatile=...)`.
     /// Result type is inferred from `ptr` the same way `load` does.
+    ///
+    /// Auto-broadcast: matches Triton's `semantic.load`
+    /// (`triton/python/triton/language/semantic.py:1022-1026`) — when `ptr` is
+    /// a tensor, `mask` and `other` are run through `broadcast_impl_value`
+    /// against `ptr` so callers don't need an explicit `broadcastTo`.
     pub fn loadOpts(self: *Builder, ptr: Value, opts: LoadOpts) Value {
-        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
-        const other_inner: ?*const mlir.Value = if (opts.other) |o| o.inner else null;
+        var mask_v = opts.mask;
+        var other_v = opts.other;
+        if (ptr.isTensor()) {
+            if (mask_v) |m| {
+                _, mask_v = self.broadcast(ptr, m);
+            }
+            if (other_v) |o| {
+                _, other_v = self.broadcast(ptr, o);
+            }
+        }
+        const mask_inner: ?*const mlir.Value = if (mask_v) |m| m.inner else null;
+        const other_inner: ?*const mlir.Value = if (other_v) |o| o.inner else null;
         return self.emit(ttir.load(self.ctx, ptr.inner, self.loadResultType(ptr), mask_inner, other_inner, opts.cache_modifier, opts.eviction_policy, opts.@"volatile", self.loc()));
     }
 
@@ -1747,8 +1757,17 @@ pub const Builder = struct {
     }
 
     /// `tt.store` with the full named-param set — `tl.store(ptr, value, mask=..., cache_modifier=..., eviction_policy=...)`.
+    ///
+    /// Auto-broadcast: matches Triton's `semantic.store` — when `ptr` is a
+    /// tensor, `mask` is broadcast against `ptr` via `broadcast_impl_value`.
     pub fn storeOpts(self: *Builder, ptr: Value, value: Value, opts: StoreOpts) void {
-        const mask_inner: ?*const mlir.Value = if (opts.mask) |m| m.inner else null;
+        var mask_v = opts.mask;
+        if (ptr.isTensor()) {
+            if (mask_v) |m| {
+                _, mask_v = self.broadcast(ptr, m);
+            }
+        }
+        const mask_inner: ?*const mlir.Value = if (mask_v) |m| m.inner else null;
         _ = ttir.store(self.ctx, ptr.inner, value.inner, mask_inner, opts.cache_modifier, opts.eviction_policy, self.loc()).appendTo(self.currentBlock());
     }
 
@@ -1790,10 +1809,25 @@ pub const Builder = struct {
     }
 
     /// `tl.where(condition, x, y)` — select `x` where condition is true, `y`
-    /// elsewhere. Same as `select(condition, x, y)`; this is the Python-named
-    /// alias.
+    /// elsewhere.
+    ///
+    /// Auto-broadcast: matches Triton's `semantic.where`
+    /// (`triton/python/triton/language/semantic.py:1621-1635`) — `condition`,
+    /// `x`, `y` are unified to a common shape via `broadcast_impl_value`,
+    /// so callers don't need explicit `broadcastTo` calls.
     pub fn where(self: *Builder, condition: Value, x: Value, y: Value) Value {
-        return self.select(condition, x, y);
+        var c = condition;
+        var xv, var yv = .{ x, y };
+        // (1) align x, y first (Python: `binary_op_type_checking_impl(x, y)`).
+        xv, yv = self.broadcast(xv, yv);
+        // (2) align condition against the now-broadcasted x.
+        if (c.isTensor()) {
+            c, xv = self.broadcast(c, xv);
+            xv, yv = self.broadcast(xv, yv);
+        } else {
+            c, _ = self.broadcast(c, xv);
+        }
+        return self.select(c, xv, yv);
     }
 
     // Integer div / mod

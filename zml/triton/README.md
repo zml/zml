@@ -360,9 +360,34 @@ a runtime value, not a literal.
 
 | Method                       | Effect                                                      |
 |------------------------------|-------------------------------------------------------------|
-| `.broadcast2d(axis, m, n)`   | 1-D → `[m, n]`; `axis=1` keeps as column (`v[:, None]`), `axis=0` as row (`v[None, :]`). |
+| `v.expandDims(axis)` / `b.expandDims(v, axis)` | `tt.expand_dims` — insert a size-1 axis at `axis`. Mirrors `v[:, None]` (`axis=1`) / `v[None, :]` (`axis=0`). |
+| `b.broadcastTo(v, shape)`    | `tt.broadcast` — explicit broadcast (size-1 dims → target). Rarely needed; auto-broadcast handles it. |
 | `.splatTo(shape)`            | `tt.splat` this scalar to the given shape.                  |
 | `.addPtr(offset)`            | `tt.addptr`; `offset` can be a Value or a comptime int.     |
+
+> **Auto-broadcast is everywhere.** Mirrors Triton's
+> `semantic.broadcast_impl_value` (`triton/python/triton/language/semantic.py:724`):
+> rank-unification (prepend size-1 axes) + size-1 → size-N expansion.
+> Applied transparently at:
+> - every fluent binop (`.add`, `.mul`, `.lt`, `.bitAnd`, …)
+> - `.addPtr(offset)` (either side may be scalar or rank-mismatched)
+> - `b.where(cond, x, y)` / `b.select(...)`
+> - `mask` and `other` of `b.loadOpts` / `b.storeOpts`
+>
+> So `v[:, None] * stride + w[None, :] * other_stride` is just:
+>
+> ```zig
+> v.expandDims(1).mul(stride).add(w.expandDims(0).mul(other_stride))
+> ```
+>
+> No `broadcastTo`, no full-shape `tt.splat` — the broadcast materializes
+> implicitly at the `addi`. This matches Python's emit pattern op-for-op
+> (Python's frontend never emits an eager `tt.broadcast` followed by a
+> `arith.muli` either; it emits `expand_dims` + `splat<size-1> + muli`).
+>
+> Reach for `b.broadcastTo` only when the consumer is a low-level op that
+> bypasses the DSL's auto-broadcast — direct `arith.*` / raw `ttir.*`
+> escape-hatch paths.
 
 ---
 
@@ -459,9 +484,10 @@ broadcast to `(M, N)` automatically, and a `(M,)` lined up against a
 const offs = b.expandDims(offs_token, 1).add(b.expandDims(offs_k, 0));
 ```
 
-with no `b.broadcastTo` calls needed. Reach for `.broadcast2d` /
-`b.broadcastTo` only when there is no binop / `addPtr` partner to ride
-along with (e.g. before `b.select`, which has no auto-broadcast).
+with no `b.broadcastTo` calls needed. `b.where` / `b.select` and the
+`mask` / `other` operands of `b.loadOpts` / `b.storeOpts` also auto-broadcast,
+so the only time `b.broadcastTo` is needed is when the consumer bypasses
+the DSL (raw `arith.*` / `ttir.*` escape-hatch paths).
 
 `.addPtr` auto-splats in **both directions**, matching Triton's
 `ptr + offset` semantics: a scalar pointer is splatted to match a tensor
@@ -483,10 +509,9 @@ pid_n.mul(N).splatTo(shape).add(b.arange(0, N, .i64)).rem(n_blocb.splatTo(shape)
 pid_n.mul(N).add(b.arange(0, N, .i64)).rem(n_block)
 ```
 
-Keep the explicit `splatTo` only when there is no binop / `addPtr`
-partner for the scalar to ride along with — e.g. `b.select(cond, t, f)`,
-which has no auto-broadcast, or when you need a tensor input for
-`.broadcast2d` downstream with no intermediate binop.
+Keep the explicit `splatTo` only when the scalar feeds into a raw
+`arith.*` / `ttir.*` escape-hatch op that doesn't go through the DSL's
+auto-broadcast.
 
 ---
 
@@ -528,8 +553,8 @@ const offs = b.arange(BLOCK, .i64);
 | `b.zeros(shape, dtype)`                | `tl.zeros(shape, dtype=dtype)`.                  |
 | `b.ones(shape, dtype)`                 | Ones tensor.                                     |
 | `b.splat(value, shape)`                | `tl.splat`; accepts Value or comptime scalar.    |
-| `b.broadcast2d(vec, axis, m, n)`       | Same as `vec.broadcast2d(axis, m, n)`.           |
-| `b.mask2d(cond_m, cond_n, m, n)`       | `cond_m[:, None] & cond_n[None, :]`. Replaces ~5 lines. |
+| `b.expandDims(v, axis)` / `v.expandDims(axis)` | `tt.expand_dims` — insert a size-1 axis. Mirrors `v[:, None]` (`axis=1`) / `v[None, :]` (`axis=0`). |
+| `b.mask2d(cond_m, cond_n, _, _)`       | `cond_m[:, None] & cond_n[None, :]` — emits the `(m,1) & (1,n)` form; auto-broadcast at the next consumer. |
 | `b.lift(value)`                        | Wrap a Zig scalar as a DSL Value; dtype inferred from source. |
 | `b.liftAs(value, dtype)`               | Wrap a Zig scalar as a DSL Value of a specific `DType`. |
 
@@ -945,8 +970,8 @@ Prefer `zml.Kernel(decl, Impl)` for the common case.
 | `a < b`                                       | `a.lt(b)`                                                          |
 | `mask & other`                                | `masb.bitAnd(other)`                                               |
 | `tl.where(c, a, b)`                           | `b.where(c, a, b)` (alias of `b.select`)                           |
-| `vec[:, None]`                                | `vec.broadcast2d(1, m, n)`                                         |
-| `vec[None, :]`                                | `vec.broadcast2d(0, m, n)`                                         |
+| `vec[:, None]`                                | `vec.expandDims(1)`                                                |
+| `vec[None, :]`                                | `vec.expandDims(0)`                                                |
 | `m[:, None] & (c[None, :] < N)`               | `b.mask2d(m, c.lt(N), m_sz, n_sz)`                                 |
 | `ptr + offs`                                  | `ptr.addPtr(offs)` (auto-splats scalar↔tensor either way)          |
 | `tl.load(ptr)`                                | `b.load(ptrs)`                                                     |
