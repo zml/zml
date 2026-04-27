@@ -5,7 +5,9 @@ const mlir = @import("mlir");
 const pjrt = @import("pjrt");
 
 pub const DataType = @import("dtype.zig").DataType;
+const meta = @import("meta.zig");
 const Shape = @import("shape.zig").Shape;
+const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/pjrtx");
 
@@ -43,6 +45,14 @@ pub const Client = opaque {
     }
 };
 
+pub fn TensorToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Tensor, CustomCallBuffer).map(T);
+}
+
+pub fn ShapeToCustomCallBuffer(T: type) type {
+    return meta.MapRestrict(Shape, CustomCallBuffer).map(T);
+}
+
 pub const CustomCallBuffer = struct {
     shape: Shape,
     ptr: *anyopaque,
@@ -64,6 +74,24 @@ pub const CustomCallBuffer = struct {
             .ptr = buffer.data,
             .shape = .init(buffer.dims(), dt),
         };
+    }
+
+    // Assumes as host-side buffer
+    pub fn asHostSlice(self: CustomCallBuffer) []u8 {
+        const bytes: [*]u8 = @ptrCast(@alignCast(self.ptr));
+        return bytes[0..self.shape.byteSize()];
+    }
+
+    // Assumes as host-side buffer
+    pub fn asHostConstSlice(self: CustomCallBuffer) []const u8 {
+        const bytes: [*]const u8 = @ptrCast(@alignCast(self.ptr));
+        return bytes[0..self.shape.byteSize()];
+    }
+
+    // Assumes as host-side buffer
+    pub fn asHostScalar(self: CustomCallBuffer, T: type) T {
+        std.debug.assert(self.shape.byteSize() == @sizeOf(T));
+        return std.mem.bytesAsValue(T, self.asHostConstSlice()[0..@sizeOf(T)]).*;
     }
 };
 
