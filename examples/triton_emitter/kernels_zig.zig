@@ -51,6 +51,24 @@ fn withConfig(comptime K: type, comptime cfg: K.Config) Entry {
     return .{ .name = K.name, .emit = E.emit };
 }
 
+/// Like `withConfig`, but suffixes the **filename** with `__<label>` while
+/// keeping the kernel's inner `tt.func` symbol identical (= `K.name`).
+/// Used by the unified-attention fuzzer to register multiple Config2D /
+/// Config3D / ConfigReduce variants under the same Python source kernel —
+/// each variant's TTIR ends up in `<K.name>__<label>.ttir` but the body
+/// still says `tt.func @<K.name>`, so `compare_ir.py` pairs the per-variant
+/// Zig and Python files by stem and the XLA pipeline finds the same symbol
+/// inside both. The label string is what the Python sweep also uses.
+fn variantOf(comptime K: type, comptime label: []const u8, comptime cfg: K.Config) Entry {
+    const E = struct {
+        fn emit(allocator: std.mem.Allocator, ctx: *mlir.Context) anyerror![:0]const u8 {
+            return K.emit(allocator, ctx, cfg);
+        }
+    };
+    const variant_name = std.fmt.comptimePrint("{s}__{s}", .{ K.name, label });
+    return .{ .name = variant_name, .emit = E.emit };
+}
+
 pub const KERNELS: []const Entry = &.{
     defaults(VectorAdd),
     defaults(VectorExpFwd),
@@ -159,6 +177,159 @@ pub const KERNELS: []const Entry = &.{
         .num_segments_per_seq = 4,
         .use_fp8 = false,
     }),
+    //
+    // Unified-attention fuzzer — additional config variants drawn from
+    // monorepo/llmd's call space (`zml/attention/triton.zig:select2dConfig` /
+    // `select3dConfig`). Each variant's filename suffix matches the label
+    // emitted by `dump_python_ir.py`'s `_UNIFIED_ATTENTION_VARIANTS`. The
+    // inner `tt.func` symbol stays equal to the production kernel name so
+    // both sides flow through the standard XLA pipeline.
+    //
+    // 2D variants — covers the dispatch axes that monorepo actually triggers:
+    //   - decode vs prefill (`all_decode`, `tile_size`)
+    //   - GQA group sizes 1/4/8 (`num_queries_per_kv`)
+    //   - head_size 64/128/256 (`head_size`, `head_size_padded`)
+    //   - sliding window 0/4096 (gemma3 path)
+    //   - long-prefill `block_m=128` path (max_seqlen_q ≥ 256)
+    //
+    variantOf(attn.KernelUnifiedAttention2dPtr, "dec_h128_g4", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 4,               .block_m = 16,
+        .use_fp8 = false,           .all_decode = true,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "pre_h128_g4", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 64,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 4,               .block_m = 16,
+        .use_fp8 = false,           .all_decode = false,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "pre_h128_g8", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 64,      .num_queries_per_kv = 8,
+        .block_size = 16,           .tile_size = 64,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 2,               .block_m = 16,
+        .use_fp8 = false,           .all_decode = false,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "pre_h128_g4_long", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 64,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 32,              .block_m = 128,
+        .use_fp8 = false,           .all_decode = false,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "dec_h256_swa", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 256,           .head_size_padded = 256,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 4096,
+        .block_q = 16,              .block_m = 64,
+        .use_fp8 = false,           .all_decode = true,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "pre_h256_swa", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 256,           .head_size_padded = 256,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 4096,
+        .block_q = 4,               .block_m = 16,
+        .use_fp8 = false,           .all_decode = false,
+    }),
+    variantOf(attn.KernelUnifiedAttention2dPtr, "dec_h64_g1", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,         .o_dtype = .bf16,
+        .num_query_heads = 16,      .num_queries_per_kv = 1,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 64,            .head_size_padded = 64,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 16,              .block_m = 16,
+        .use_fp8 = false,           .all_decode = true,
+    }),
+
+    // 3D variants — `tile_size = block_size` always; segment count varies
+    // with `target_num_prgms / num_2d_prgms` (we sample 16, 32, 64).
+    variantOf(attn.KernelUnifiedAttention3dPtr, "pre_h128_g4_seg16", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 4,               .block_m = 16,
+        .num_segments_per_seq = 16,
+    }),
+    variantOf(attn.KernelUnifiedAttention3dPtr, "pre_h128_g8_seg32", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,
+        .num_query_heads = 64,      .num_queries_per_kv = 8,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 2,               .block_m = 16,
+        .num_segments_per_seq = 32,
+    }),
+    variantOf(attn.KernelUnifiedAttention3dPtr, "dec_h128_g4_seg64", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 4,               .block_m = 16,
+        .num_segments_per_seq = 64,
+        .all_decode = true,
+    }),
+    variantOf(attn.KernelUnifiedAttention3dPtr, "pre_h256_seg16", .{
+        .q_dtype = .bf16,           .kv_dtype = .bf16,
+        .num_query_heads = 32,      .num_queries_per_kv = 4,
+        .block_size = 16,           .tile_size = 16,
+        .head_size = 256,           .head_size_padded = 256,
+        .use_alibi_slopes = false,  .use_qq_bias = false,      .use_softcap = false,
+        .use_sinks = false,         .sliding_window = 0,
+        .block_q = 4,               .block_m = 16,
+        .num_segments_per_seq = 16,
+    }),
+
+    // Reduce variants — match each 3D head/segment combination.
+    variantOf(attn.ReduceSegmentsPtr, "h128_qh32_seg16", .{
+        .o_dtype = .bf16,
+        .num_query_heads = 32,      .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .block_q = 4,               .num_segments_per_seq = 16,
+        .use_fp8 = false,
+    }),
+    variantOf(attn.ReduceSegmentsPtr, "h128_qh64_seg32", .{
+        .o_dtype = .bf16,
+        .num_query_heads = 64,      .tile_size = 16,
+        .head_size = 128,           .head_size_padded = 128,
+        .block_q = 2,               .num_segments_per_seq = 32,
+        .use_fp8 = false,
+    }),
+    variantOf(attn.ReduceSegmentsPtr, "h256_qh32_seg16", .{
+        .o_dtype = .bf16,
+        .num_query_heads = 32,      .tile_size = 16,
+        .head_size = 256,           .head_size_padded = 256,
+        .block_q = 4,               .num_segments_per_seq = 16,
+        .use_fp8 = false,
+    }),
+
     // Gated Delta Net recurrent forward — config matches the monorepo's
     // `TritonGatedDeltaNetHelper.forward`. num_tokens=64, num_qk_heads=4,
     // num_v_heads=16, key_dim=32, value_dim=64, num_sequences=2 → BK=32, BV=8.

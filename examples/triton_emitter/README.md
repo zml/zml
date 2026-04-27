@@ -75,3 +75,36 @@ post-passes (module attribute decoration, `scf→cf` lowering, etc.) cancel.
 | `sum_scalar.{py,zig}`         | `triton_sum_kernel_scalar_result`            |
 | `softmax.{py,zig}`            | `softmax_kernel`                             |
 | `moe.{py,zig}`                | `per_token_group_quant_fp8`, `fused_moe_kernel`, `moe_align_block_size_kernel`, `count_and_sort_expert_tokens_kernel` |
+| `unified_attention.py` *(no `kernels_zig/` file — kernel lives in `zml/attention/triton_kernels.zig`)* | `kernel_unified_attention_2d_ptr`, `kernel_unified_attention_3d_ptr`, `reduce_segments_ptr` |
+| `gdn.py` + `kernels_zig/gdn.zig` | `fused_recurrent_gated_delta_rule_fwd_kernel_ptr` |
+
+## Unified-attention fuzzer
+
+The unified-attention `_ptr` kernels are also dumped under multiple
+variant configs sampled from monorepo's `select{2,3}dConfig` call space —
+decode/prefill, GQA group sizes 1/4/8, head sizes 64/128/256, sliding
+window on/off, and the `block_m=128` long-prefill path. Each variant
+pairs a Zig `variantOf(...)` entry in `kernels_zig.zig` with a
+constexpr override in `dump_python_ir.py`'s
+`_UNIFIED_ATTENTION_*_VARIANTS` tables; the inner `tt.func` symbol stays
+identical across variants while the **filename** is suffixed
+`__<label>` so `compare_ir.py` pairs Python's and Zig's TTIR by stem.
+
+Variants flow through the standard pipeline (`run.sh`); compare per
+variant with the same `--kernel=` flag the rest of the harness uses:
+
+```bash
+./examples/triton_emitter/run.sh --kernel kernel_unified_attention_2d_ptr__pre_h128_g8
+```
+
+To add a new variant, append matching entries on both sides:
+
+- `examples/triton_emitter/kernels_zig.zig` → new `variantOf(...)` line
+  in `KERNELS` with the chosen `Config2D` / `Config3D` / `ConfigReduce`.
+- `examples/triton_emitter/dump_python_ir.py` →
+  `_UNIFIED_ATTENTION_*_VARIANTS` (or `_REDUCE_VARIANTS`) gets the same
+  label keying a dict of constexpr overrides.
+- `examples/triton_emitter/dump_via_xla.zig`'s `KERNELS` tuple gets the
+  full suffixed filename mapped to the same `KernelUnifiedAttention*Ptr`
+  / `ReduceSegmentsPtr` Mod struct (no per-variant `forward` needed —
+  the dummy tensor shapes are oversized to cover every variant).

@@ -350,6 +350,111 @@ _OVERRIDES = {
 }
 
 
+# =============================================================================
+# Unified-attention fuzzer — variant configurations matching the entries in
+# `kernels_zig.zig`. Each variant overrides a subset of the constexpr fields
+# of `_kernel_unified_attention_*_ptr` (or `_reduce_segments_ptr`); every
+# other arg falls back to the base override. The dump driver runs
+# `JITFunction.warmup` once per (kernel, variant) pair and writes the result
+# to `<kernel>__<label>.<stage>` so it pairs with Zig's variant TTIR by stem.
+#
+# Field set drawn from monorepo/llmd's `select2dConfig` / `select3dConfig`
+# call space (head_dim ∈ {64,128,256}, num_queries_per_kv ∈ {1,4,8},
+# block_m ∈ {16,64,128}, sliding_window ∈ {0,4096}, all_decode ∈ {true,false}).
+# =============================================================================
+_UNIFIED_ATTENTION_2D_VARIANTS = {
+    "dec_h128_g4": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "BLOCK_Q": 4, "BLOCK_M": 16, "ALL_DECODE": True},
+    "pre_h128_g4": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 64, "BLOCK_Q": 4, "BLOCK_M": 16, "ALL_DECODE": False},
+    "pre_h128_g8": {"NUM_QUERY_HEADS": 64, "NUM_QUERIES_PER_KV": 8, "TILE_SIZE": 64, "BLOCK_Q": 2, "BLOCK_M": 16, "ALL_DECODE": False},
+    "pre_h128_g4_long": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 64, "BLOCK_Q": 32, "BLOCK_M": 128, "ALL_DECODE": False},
+    "dec_h256_swa": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "HEAD_SIZE": 256, "HEAD_SIZE_PADDED": 256, "SLIDING_WINDOW": 4096, "BLOCK_Q": 16, "BLOCK_M": 64, "ALL_DECODE": True},
+    "pre_h256_swa": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "HEAD_SIZE": 256, "HEAD_SIZE_PADDED": 256, "SLIDING_WINDOW": 4096, "BLOCK_Q": 4, "BLOCK_M": 16, "ALL_DECODE": False},
+    "dec_h64_g1": {"NUM_QUERY_HEADS": 16, "NUM_QUERIES_PER_KV": 1, "TILE_SIZE": 16, "HEAD_SIZE": 64, "HEAD_SIZE_PADDED": 64, "BLOCK_Q": 16, "BLOCK_M": 16, "ALL_DECODE": True},
+}
+
+_UNIFIED_ATTENTION_3D_VARIANTS = {
+    "pre_h128_g4_seg16": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "BLOCK_Q": 4, "BLOCK_M": 16, "NUM_SEGMENTS_PER_SEQ": 16},
+    "pre_h128_g8_seg32": {"NUM_QUERY_HEADS": 64, "NUM_QUERIES_PER_KV": 8, "TILE_SIZE": 16, "BLOCK_Q": 2, "BLOCK_M": 16, "NUM_SEGMENTS_PER_SEQ": 32},
+    "dec_h128_g4_seg64": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "BLOCK_Q": 4, "BLOCK_M": 16, "NUM_SEGMENTS_PER_SEQ": 64, "ALL_DECODE": True},
+    "pre_h256_seg16": {"NUM_QUERIES_PER_KV": 4, "TILE_SIZE": 16, "HEAD_SIZE": 256, "HEAD_SIZE_PADDED": 256, "BLOCK_Q": 4, "BLOCK_M": 16, "NUM_SEGMENTS_PER_SEQ": 16},
+}
+
+_REDUCE_VARIANTS = {
+    "h128_qh32_seg16": {"NUM_QUERY_HEADS": 32, "TILE_SIZE": 16, "BLOCK_Q": 4, "NUM_SEGMENTS_PER_SEQ": 16},
+    "h128_qh64_seg32": {"NUM_QUERY_HEADS": 64, "TILE_SIZE": 16, "BLOCK_Q": 2, "NUM_SEGMENTS_PER_SEQ": 32},
+    "h256_qh32_seg16": {"NUM_QUERY_HEADS": 32, "TILE_SIZE": 16, "HEAD_SIZE": 256, "HEAD_SIZE_PADDED": 256, "BLOCK_Q": 4, "NUM_SEGMENTS_PER_SEQ": 16},
+}
+
+
+# Position of each constexpr in the matching `_kernel_*` override's args
+# tuple. Mirrors the order the override builds the tuple in. Used by
+# `_apply_overrides` to splice variant values into the base args.
+_UAT_2D_CONSTEXPR_INDEX = {
+    "NUM_QUERY_HEADS": 13, "NUM_QUERIES_PER_KV": 14,
+    "BLOCK_SIZE": 21, "TILE_SIZE": 22, "HEAD_SIZE": 23, "HEAD_SIZE_PADDED": 24,
+    "USE_ALIBI_SLOPES": 25, "USE_QQ_BIAS": 26, "USE_SOFTCAP": 27, "USE_SINKS": 28,
+    "SLIDING_WINDOW": 29,
+    "BLOCK_Q": 39, "BLOCK_M": 41,
+    "USE_FP8": 42, "ALL_DECODE": 45,
+}
+
+_UAT_3D_CONSTEXPR_INDEX = {
+    "NUM_QUERY_HEADS": 12, "NUM_QUERIES_PER_KV": 13,
+    "BLOCK_SIZE": 18, "TILE_SIZE": 19, "HEAD_SIZE": 20, "HEAD_SIZE_PADDED": 21,
+    "USE_ALIBI_SLOPES": 22, "USE_QQ_BIAS": 23, "USE_SOFTCAP": 24, "USE_SINKS": 25,
+    "SLIDING_WINDOW": 26,
+    "BLOCK_Q": 36, "BLOCK_M": 38,
+    "NUM_SEGMENTS_PER_SEQ": 39, "ALL_DECODE": 40,
+}
+
+_REDUCE_CONSTEXPR_INDEX = {
+    "NUM_QUERY_HEADS": 5,
+    "TILE_SIZE": 10, "HEAD_SIZE": 11, "HEAD_SIZE_PADDED": 12,
+    "BLOCK_Q": 14, "NUM_SEGMENTS_PER_SEQ": 15,
+    "USE_FP8": 16,
+}
+
+
+_UNIFIED_ATTENTION_VARIANT_TABLE = [
+    ("kernel_unified_attention_2d_ptr", _kernel_unified_attention_2d_ptr,
+     _UNIFIED_ATTENTION_2D_VARIANTS, _UAT_2D_CONSTEXPR_INDEX),
+    ("kernel_unified_attention_3d_ptr", _kernel_unified_attention_3d_ptr,
+     _UNIFIED_ATTENTION_3D_VARIANTS, _UAT_3D_CONSTEXPR_INDEX),
+    ("reduce_segments_ptr", _reduce_segments_ptr,
+     _REDUCE_VARIANTS, _REDUCE_CONSTEXPR_INDEX),
+]
+
+
+def _apply_overrides(base_pos, base_kw, overrides, index_map):
+    """Splice `overrides` (dict of constexpr name → value) into a base
+    override's positional args at the indices in `index_map`. Both the
+    Python overrides and the Zig variants pin everything as positional, so
+    we only touch positions named in `index_map`."""
+    pos = list(base_pos)
+    for name, val in overrides.items():
+        idx = index_map.get(name)
+        if idx is None:
+            raise KeyError(f"unknown constexpr {name!r} for variant override")
+        pos[idx] = val
+    return pos, dict(base_kw)
+
+
+def _enumerate_variant_jobs(jit_fns_by_name, kernel_filter):
+    """Yield `(out_name, jit_fn, pos_args, kw_args)` for every fuzzer
+    variant whose base kernel was loaded. Skips variants whose base kernel
+    is missing (e.g. `kernels_dir` was filtered to a different file)."""
+    for base_name, base_factory, variants, index_map in _UNIFIED_ATTENTION_VARIANT_TABLE:
+        if base_name not in jit_fns_by_name:
+            continue
+        for label, overrides in variants.items():
+            out_name = f"{base_name}__{label}"
+            if kernel_filter and kernel_filter != out_name and kernel_filter != base_name:
+                continue
+            base_pos, base_kw = base_factory()
+            pos, kw = _apply_overrides(base_pos, base_kw, overrides, index_map)
+            yield out_name, jit_fns_by_name[base_name], pos, kw
+
+
 def _make_synthetic_args(jit_fn) -> Tuple[List[Any], Dict[str, Any]]:
     """Heuristic args for simple kernels: `*_ptr` → f32 tensor, `tl.constexpr`
     → 1024 kwarg, names in `_FLOAT_HINTS` → 0.5, anything else → 1024 int."""
@@ -415,6 +520,7 @@ def main(argv=None) -> int:
         return 1
 
     total = 0
+    jit_fns_by_name: Dict[str, "JITFunction"] = {}
     for src in files:
         mod = _load_module(src)
         for attr in dir(mod):
@@ -424,7 +530,12 @@ def main(argv=None) -> int:
             kname = getattr(obj.fn, "__name__", "")
             if kname in _SKIP:
                 continue
+            jit_fns_by_name[kname] = obj
             if args.kernel and args.kernel != attr and args.kernel != kname:
+                # Even if the user filtered out this kernel by name, keep it
+                # in the table so a variant filter like
+                # `kernel_unified_attention_2d_ptr__dec_h128_g4` can still
+                # find its base kernel below.
                 continue
             pos, kw = _make_synthetic_args(obj)
             try:
@@ -433,6 +544,18 @@ def main(argv=None) -> int:
                 print(f"dump_python: warmup failed for {attr}: {e}", file=sys.stderr)
                 continue
             total += _dump_compiled(compiled, out_dir, attr)
+
+    # Unified-attention fuzzer variants — runs the same `_ptr` kernels with
+    # constexpr overrides drawn from monorepo's `select{2,3}dConfig` call
+    # space, writes each result to `<base>__<label>.<stage>` for byte-by-byte
+    # comparison against `kernels_zig.zig`'s `variantOf(...)` entries.
+    for out_name, jit_fn, pos, kw in _enumerate_variant_jobs(jit_fns_by_name, args.kernel):
+        try:
+            compiled = jit_fn.warmup(*pos, **kw, grid=(1,))
+        except Exception as e:
+            print(f"dump_python: variant warmup failed for {out_name}: {e}", file=sys.stderr)
+            continue
+        total += _dump_compiled(compiled, out_dir, out_name)
 
     if total == 0:
         print("dump_python: no IR captured", file=sys.stderr)

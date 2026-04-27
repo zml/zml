@@ -120,11 +120,16 @@ def main(argv=None) -> int:
     written = 0
 
     # MLIR per-pass snapshots → .ttir / .ttgir
+    # XLA names these `<program>.<inner_symbol>.triton-to-llvm.txt`. We key
+    # the output by **program** (= the entry name passed to `compileKernel`)
+    # because the unified-attention fuzzer registers multiple variants that
+    # share the same inner `tt.func` symbol — keying by symbol would
+    # collapse all variants into one output file.
     for dump in sorted(in_dir.glob("*.triton-to-llvm.txt")):
         stem = dump.name[: -len(".triton-to-llvm.txt")]
         if "." not in stem:
             continue
-        _, kernel = stem.split(".", 1)
+        kernel = stem.split(".", 1)[0]
         snapshots = _split_snapshots(dump.read_text())
         for pass_name, ext in (("ConvertTritonToTritonGPU", "ttir"),
                                 ("ConvertTritonGPUToLLVM", "ttgir")):

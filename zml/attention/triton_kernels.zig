@@ -393,23 +393,22 @@ fn kernelUnifiedAttention2d(
             block_tables_ptr_shifted.addPtr(seq_offset.div(@as(i32, @intCast(BLOCK_SIZE)))),
         ).to(.i64);
 
-        const seq_in_block = seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))).to(.i64);
-
-        // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED)
-        const pb_v = physical_block_idx.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_0);
-        const head_v = kv_head_idx.to(.i64).mul(stride_v_cache_2);
-        const dim_v = offs_d.to(.i64).broadcast2d(0, TILE_SIZE, HEAD_SIZE_PADDED)
-            .mul(config.stride_v_cache_3);
-        const blk_v = seq_in_block.broadcast2d(1, TILE_SIZE, HEAD_SIZE_PADDED).mul(stride_v_cache_1);
-        const v_offset = pb_v.add(head_v).add(dim_v).add(blk_v);
+        // v_offset : (TILE_SIZE, HEAD_SIZE_PADDED). Use `expandDims(.., axis).mul(stride)`
+        // (rank-2 size-1, auto-broadcast at addi) to match Python's
+        // `pb[:, None]*stride_0 + kv_head*stride_2 + offs_d[None, :]*stride_3 + (so%BS)[:, None]*stride_1`.
+        // Splats stay at (T,1)/(1,H) so XLA's LICM can hoist them out of the loop;
+        // `broadcast2d(.., T, H)` would force a full (T,H) splat that doesn't hoist.
+        // Defer extsi past expand_dims (PORTING.md §3.2.13).
+        const v_offset = k.expandDims(physical_block_idx, 1).mul(stride_v_cache_0)
+            .add(kv_head_idx.to(.i64).mul(stride_v_cache_2))
+            .add(k.expandDims(offs_d, 0).mul(config.stride_v_cache_3))
+            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 1).mul(stride_v_cache_1));
 
         // k_offset : (HEAD_SIZE_PADDED, TILE_SIZE)
-        const pb_k = physical_block_idx.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_0);
-        const head_k = kv_head_idx.to(.i64).mul(stride_k_cache_2);
-        const dim_k = offs_d.to(.i64).broadcast2d(1, HEAD_SIZE_PADDED, TILE_SIZE)
-            .mul(config.stride_k_cache_3);
-        const blk_k = seq_in_block.broadcast2d(0, HEAD_SIZE_PADDED, TILE_SIZE).mul(stride_k_cache_1);
-        const k_offset = pb_k.add(head_k).add(dim_k).add(blk_k);
+        const k_offset = k.expandDims(physical_block_idx, 0).mul(stride_k_cache_0)
+            .add(kv_head_idx.to(.i64).mul(stride_k_cache_2))
+            .add(k.expandDims(offs_d, 1).mul(config.stride_k_cache_3))
+            .add(k.expandDims(seq_offset.rem(@as(i32, @intCast(BLOCK_SIZE))), 0).mul(stride_k_cache_1));
 
         // K : (HEAD_SIZE_PADDED, TILE_SIZE)
         const k_mask = k.mask2d(dim_mask, tile_mask, HEAD_SIZE_PADDED, TILE_SIZE);

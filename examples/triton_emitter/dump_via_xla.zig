@@ -194,7 +194,20 @@ const CountAndSort = struct {
 // Unified-attention `_ptr` kernels — arg order matches the `tt.func` signature
 // emitted by `zml/attention/triton_kernels.zig` (which is the production
 // version we're comparing against). Tensor sizes are dummies; XLA never
-// launches these — it just runs the per-pass codegen pipeline.
+// launches these — it just runs the per-pass codegen pipeline. The shapes
+// below are oversized (max num_query_heads=64, head_size_padded=256,
+// num_segments_per_seq=128) so they cover every variant in the fuzzer.
+const _MAX_NUM_TOKENS: i64 = 64;
+const _MAX_NUM_QUERY_HEADS: i64 = 64;
+const _MAX_HEAD_SIZE_PADDED: i64 = 256;
+const _MAX_NUM_BLOCKS: i64 = 64;
+const _MAX_NUM_KV_HEADS: i64 = 16;
+const _MAX_BLOCK_SIZE: i64 = 16;
+const _MAX_NUM_SEGMENTS: i64 = 128;
+const _MAX_Q_BUF: i64 = _MAX_NUM_TOKENS * _MAX_NUM_QUERY_HEADS * _MAX_HEAD_SIZE_PADDED;
+const _MAX_KV_BUF: i64 = _MAX_NUM_BLOCKS * _MAX_NUM_KV_HEADS * _MAX_BLOCK_SIZE * _MAX_HEAD_SIZE_PADDED;
+const _MAX_SEGM_BASE: i64 = _MAX_NUM_TOKENS * _MAX_NUM_QUERY_HEADS * _MAX_NUM_SEGMENTS;
+
 const KernelUnifiedAttention2dPtr = struct {
     pub fn forward(
         query: Tensor, key_cache: Tensor, value_cache: Tensor, sink: Tensor,
@@ -217,12 +230,12 @@ const KernelUnifiedAttention2dPtr = struct {
     }
     fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
         return .{
-            ten1d(.bf16, 64 * 32 * 128), ten1d(.bf16, 64 * 8 * 16 * 128), ten1d(.bf16, 64 * 8 * 16 * 128),
-            ten1d(.f32, 1), ten1d(.i32, 64), ten1d(.i32, 1), ten1d(.f32, 32), ten1d(.f32, 1),
+            ten1d(.bf16, _MAX_Q_BUF), ten1d(.bf16, _MAX_KV_BUF), ten1d(.bf16, _MAX_KV_BUF),
+            ten1d(.f32, _MAX_NUM_QUERY_HEADS), ten1d(.i32, _MAX_NUM_BLOCKS), ten1d(.i32, 1), ten1d(.f32, _MAX_NUM_QUERY_HEADS), ten1d(.f32, 1),
             ten1d(.f32, 1), ten1d(.f32, 1), ten1d(.f32, 1), ten1d(.f32, 1), ten1d(.f32, 1),
             ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
             ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
-            ten1d(.i32, 2), ten1d(.i32, 1), ten1d(.bf16, 64 * 32 * 128),
+            ten1d(.i32, 2), ten1d(.i32, 1), ten1d(.bf16, _MAX_Q_BUF),
         };
     }
 };
@@ -249,15 +262,14 @@ const KernelUnifiedAttention3dPtr = struct {
         );
     }
     fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
-        const segm_n = 64 * 32 * 4;
         return .{
-            ten1d(.bf16, 64 * 32 * 128), ten1d(.bf16, 64 * 8 * 16 * 128), ten1d(.bf16, 64 * 8 * 16 * 128),
-            ten1d(.f32, 1), ten1d(.i32, 64), ten1d(.i32, 1), ten1d(.f32, 32), ten1d(.f32, 1),
+            ten1d(.bf16, _MAX_Q_BUF), ten1d(.bf16, _MAX_KV_BUF), ten1d(.bf16, _MAX_KV_BUF),
+            ten1d(.f32, _MAX_NUM_QUERY_HEADS), ten1d(.i32, _MAX_NUM_BLOCKS), ten1d(.i32, 1), ten1d(.f32, _MAX_NUM_QUERY_HEADS), ten1d(.f32, 1),
             ten1d(.f32, 1), ten1d(.f32, 1), ten1d(.f32, 1), ten1d(.f32, 1),
             ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
             ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1),
             ten1d(.i32, 2), ten1d(.i32, 1),
-            ten1d(.f32, segm_n * 128), ten1d(.f32, segm_n), ten1d(.f32, segm_n),
+            ten1d(.f32, _MAX_SEGM_BASE * _MAX_HEAD_SIZE_PADDED), ten1d(.f32, _MAX_SEGM_BASE), ten1d(.f32, _MAX_SEGM_BASE),
         };
     }
 };
@@ -272,17 +284,16 @@ const ReduceSegmentsPtr = struct {
             "reduce_segments_ptr",
             .{ segm_out, segm_max, segm_expsum, seq_lens, num_seqs, out_scale_inv,
                o_s0, o_s1, bt_stride, qsl },
-            Shape.init(.{ 64 * 32 * 128 }, .bf16),
+            Shape.init(.{ _MAX_Q_BUF }, .bf16),
             .{ 64, 32, 1 }, 4, 1,
         );
     }
     fn args() std.meta.ArgsTuple(@TypeOf(forward)) {
-        const segm_n = 64 * 32 * 4;
         return .{
-            ten1d(.f32, segm_n * 128), ten1d(.f32, segm_n), ten1d(.f32, segm_n),
+            ten1d(.f32, _MAX_SEGM_BASE * _MAX_HEAD_SIZE_PADDED), ten1d(.f32, _MAX_SEGM_BASE), ten1d(.f32, _MAX_SEGM_BASE),
             ten1d(.i32, 1), ten1d(.i32, 1), ten1d(.f32, 1),
             ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i64, 1), ten1d(.i32, 2),
-            ten1d(.bf16, 64 * 32 * 128),
+            ten1d(.bf16, _MAX_Q_BUF),
         };
     }
 };
@@ -347,6 +358,25 @@ const KERNELS = .{
     .{ "kernel_unified_attention_2d_ptr", KernelUnifiedAttention2dPtr },
     .{ "kernel_unified_attention_3d_ptr", KernelUnifiedAttention3dPtr },
     .{ "reduce_segments_ptr", ReduceSegmentsPtr },
+    // Unified-attention fuzzer variants — each label-suffixed file contains
+    // a `tt.func @kernel_unified_attention_*_ptr` body with a different
+    // Config2D / Config3D / ConfigReduce baked in. Tensor signatures are
+    // identical across variants in a family, so we reuse the same Mod
+    // struct (the dummy shapes are oversized to cover every variant).
+    .{ "kernel_unified_attention_2d_ptr__dec_h128_g4", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__pre_h128_g4", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__pre_h128_g8", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__pre_h128_g4_long", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__dec_h256_swa", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__pre_h256_swa", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_2d_ptr__dec_h64_g1", KernelUnifiedAttention2dPtr },
+    .{ "kernel_unified_attention_3d_ptr__pre_h128_g4_seg16", KernelUnifiedAttention3dPtr },
+    .{ "kernel_unified_attention_3d_ptr__pre_h128_g8_seg32", KernelUnifiedAttention3dPtr },
+    .{ "kernel_unified_attention_3d_ptr__dec_h128_g4_seg64", KernelUnifiedAttention3dPtr },
+    .{ "kernel_unified_attention_3d_ptr__pre_h256_seg16", KernelUnifiedAttention3dPtr },
+    .{ "reduce_segments_ptr__h128_qh32_seg16", ReduceSegmentsPtr },
+    .{ "reduce_segments_ptr__h128_qh64_seg32", ReduceSegmentsPtr },
+    .{ "reduce_segments_ptr__h256_qh32_seg16", ReduceSegmentsPtr },
     .{ "fused_recurrent_gated_delta_rule_fwd_kernel_ptr", FusedRecurrentGatedDeltaRule },
 };
 
