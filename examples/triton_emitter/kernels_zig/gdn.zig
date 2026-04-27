@@ -137,8 +137,11 @@ pub const FusedRecurrentGatedDeltaRule = zml.Kernel(.{
         // step needs explicit broadcasts on both sides since `addPtr` doesn't
         // auto-broadcast tensor-of-ptrs against a tensor offset.
         const p_h0_col = a.h0_ptr.addPtr(i_nh.mul(K).mul(V)).addPtr(b.expandDims(o_k, 1).mul(V));
+        // Emit expand_dims before broadcast(p_h0_col) so the IR op-order
+        // matches Python (expand_dims → broadcast(ptr) → broadcast(dim)).
+        const o_v_2d = b.expandDims(o_v, 0);
         const p_h0 = b.broadcastTo(p_h0_col, &.{ BK_i64, BV_i64 })
-            .addPtr(b.broadcastTo(b.expandDims(o_v, 0), &.{ BK_i64, BV_i64 }));
+            .addPtr(b.broadcastTo(o_v_2d, &.{ BK_i64, BV_i64 }));
         const h0_loaded = b.loadOpts(p_h0, .{
             .mask = mask_h,
             .other = b.zeros(&.{ BK_i64, BV_i64 }, cfg.h_dtype),
