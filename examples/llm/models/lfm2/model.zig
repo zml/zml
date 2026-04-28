@@ -520,7 +520,7 @@ pub const Attention = struct {
         stdx.debug.assert(q.dim(.batch) == 1, "LFM attention currently expects batch size 1 for flash attention backend, got {}", .{q.dim(.batch)});
         const attn = switch (attention_parameters) {
             .vanilla => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }),
-            .neuron => zml.attention.attention.attention(q, k, v, tokens_position_offset, attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }),
+            .neuron => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
             .cuda_fa2, .cuda_fa3 => zml.attention.attention.attention(q.squeeze(.batch), k.squeeze(.batch), v.squeeze(.batch), tokens_position_offset.squeeze(.batch), attention_metadata, attention_parameters).merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .seq }).insertAxes(.seq, .{.batch}),
         };
 
@@ -542,7 +542,7 @@ pub const Cache = struct {
     kv: KvCache,
 
     pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Cache) {
-        return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(io, platform, sharding) };
+        return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(allocator, io, platform, sharding) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(Cache)) void {
@@ -587,8 +587,16 @@ pub const KvCache = struct {
         return .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
-        return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}) };
+    pub fn initBuffers(self: KvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
+        const sh = self.k.shape();
+        const host = try allocator.alloc(u8, sh.byteSize());
+        defer allocator.free(host);
+        @memset(host, 0);
+
+        // Decode kernels receive the full static cache shape. Vanilla attention
+        // masks future positions semantically, but custom kernels may still load
+        // those lanes while applying the mask, so unwritten slots must be stable.
+        return .{ .k = try zml.Buffer.fromBytes(io, platform, sh, sharding, host), .v = try zml.Buffer.fromBytes(io, platform, self.v.shape(), sharding, host) };
     }
 
     pub fn unloadBuffers(self: *zml.Bufferized(KvCache)) void {

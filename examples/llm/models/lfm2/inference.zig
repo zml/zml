@@ -22,6 +22,13 @@ pub const CompilationParameters = struct {
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, single: bool, shardings: common.Shardings) CompilationParameters {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
+        const attention_parameters: attention.Parameters = switch (backend) {
+            // LFM reuses one decode executable across all token positions. The
+            // TKG kernel needs a static curr_sprior bucket, so use the masked
+            // single-call kernel for the dynamic-position decode contract.
+            .neuron => .init(.{ .neuron = .{ .kernel = .decode_inhouse } }),
+            else => .init(.fromBackend(backend)),
+        };
         const cache: model.Cache = .{
             .kv = .init(.init(.{
                 .layer = mdl.num_attention_layers,
@@ -45,10 +52,17 @@ pub const CompilationParameters = struct {
             .rng = .init(),
             .cache = cache,
             .attention_metadata = .init(.fromBackend(backend, seqlen, config.num_attention_heads)),
-            .attention_parameters = .init(.fromBackend(backend)),
+            .attention_parameters = attention_parameters,
             .seqlen = seqlen,
             .shardings = shardings,
         };
+    }
+
+    fn withVanillaAttention(self: CompilationParameters) CompilationParameters {
+        var opts = self;
+        opts.attention_metadata = .init(.{ .vanilla = {} });
+        opts.attention_parameters = .init(.{ .vanilla = {} });
+        return opts;
     }
 };
 
@@ -82,8 +96,13 @@ pub const CompiledModel = struct {
         opts: CompilationParameters,
         progress: *std.Progress.Node,
     ) !CompiledModel {
+        const prefill_opts = switch (opts.attention_parameters) {
+            .neuron => opts.withVanillaAttention(),
+            else => opts,
+        };
+
         if (opts.single) {
-            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
+            const prefill_exe = try compileSingleKernelExe(allocator, io, platform, mdl, prefill_opts, opts.seqlen, true, progress, opts.shardings);
             const decode_exe = try compileSingleKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
 
             return .{
@@ -93,7 +112,7 @@ pub const CompiledModel = struct {
                 .params = opts,
             };
         } else {
-            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, opts.seqlen, true, progress, opts.shardings);
+            const prefill_exe = try compileComposedKernelExe(allocator, io, platform, mdl, prefill_opts, opts.seqlen, true, progress, opts.shardings);
             const decode_exe = try compileComposedKernelExe(allocator, io, platform, mdl, opts, 1, false, progress, opts.shardings);
 
             return .{

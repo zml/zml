@@ -22,19 +22,20 @@ const bf16 = zml.floats.BFloat16;
 const llama_num_heads = 32;
 const llama_num_kv_heads = 8;
 const llama_head_dim = 64;
-const decode_token_index = 127;
-const decode_seq_len = decode_token_index + 1;
+const decode_seq_len = 128;
 
 const Args = struct {
     kernel: zml.attention.neuron.Kernel = .decode_tkg,
-    warmups: usize = 2,
-    iterations: usize = 3,
+    token_index: u32 = decode_seq_len - 1,
+    warmups: usize = 3,
+    iterations: usize = 20,
 
     pub const help =
         \\ neuron_nki attention --kernel=decode_tkg --iterations=20
         \\
         \\ Options:
-        \\   --kernel=<text>  Neuron attention kernel to test: decode_tkg or forward_sample.
+        \\   --kernel=<text>  Neuron attention kernel to test: decode_tkg or decode_inhouse.
+        \\   --token-index=<n> Decode position inside the fixed 128-token cache.
         \\   --warmups=<n>    Untimed execution warmups for each program.
         \\   --iterations=<n> Timed execution iterations for each program.
         \\
@@ -90,6 +91,7 @@ pub fn main(init: std.process.Init) !void {
 
 fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, sharding: zml.sharding.Sharding, args: Args) !void {
     stdx.debug.assert(args.iterations > 0, "attention benchmark expects at least one timed iteration", .{});
+    stdx.debug.assert(args.token_index < decode_seq_len, "token_index ({}) must be less than seq_len ({})", .{ args.token_index, decode_seq_len });
 
     const q: zml.Tensor = .init(.{
         .q = 1,
@@ -133,7 +135,7 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, 
     var v_buffer = try zml.Buffer.fromBytes(io, platform, v.shape(), sharding, std.mem.sliceAsBytes(v_host));
     defer v_buffer.deinit();
 
-    var token_index_buffer = try zml.Buffer.scalar(io, platform, @as(u32, decode_token_index), .u32, sharding);
+    var token_index_buffer = try zml.Buffer.scalar(io, platform, args.token_index, .u32, sharding);
     defer token_index_buffer.deinit();
 
     var vanilla_bench = try benchmarkExecutable(allocator, io, &vanilla_exe, .{
@@ -161,7 +163,7 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, 
     std.log.info("Bench decode attention warmups={} iterations={} token_index={} seq_len={} heads={} kv_heads={} head_dim={}", .{
         args.warmups,
         args.iterations,
-        decode_token_index,
+        args.token_index,
         decode_seq_len,
         llama_num_heads,
         llama_num_kv_heads,

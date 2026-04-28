@@ -66,8 +66,7 @@ zig_library(
         "//conditions:default": ["//zml/attention/triton:sandbox"],
     }),
     extra_srcs = [
-        "attention/neuron_attention_fwd_sample.py",
-        "attention/neuron_attention_tkg.py",
+        "attention/neuron_attention.py",
     ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
