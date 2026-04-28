@@ -1574,7 +1574,7 @@ test sampleTokens {
     var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{ .shardings = &.{replicated_sharding} });
     defer exe.deinit();
 
-    var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, 0xdeadbeef, std.testing.io, replicated_sharding);
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(platform, std.testing.io, replicated_sharding, 0xdeadbeef);
     defer rng_buffer._state.deinit();
 
     const inf = std.math.inf(f32);
