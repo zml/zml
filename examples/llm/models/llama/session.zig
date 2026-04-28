@@ -166,8 +166,7 @@ pub const Session = struct {
             if (isEosToken(self.config, last_token_id)) break :generation;
 
             try decoder.writeTokens(&.{last_token_id});
-            // try decoder.writer.flush();
-            try decoder.out.flush();
+            try stdout.flush();
 
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;

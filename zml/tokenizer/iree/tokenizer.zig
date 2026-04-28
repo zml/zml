@@ -473,7 +473,9 @@ pub const Tokenizer = struct {
         out_buffer_owned: bool,
         finalized: bool = false,
 
-        const min_buf_size = 128;
+        // Iree decoder needs to be able to write a least one UTF8 codepoint.
+        // We increase this a bit to avoid pathological cases where each codepoint would be decoded independently.
+        const min_buf_size = 64;
 
         const vtable: std.Io.Writer.VTable = .{
             .drain = DecoderWriter.drain,
@@ -482,9 +484,9 @@ pub const Tokenizer = struct {
         pub fn init(tokenizer: Tokenizer, allocator: std.mem.Allocator, out: *std.Io.Writer, tokens_buffer: []u32) !DecoderWriter {
             const out_buffer_owned = out.buffer.len == 0;
             if (out_buffer_owned) {
-                out.buffer = try allocator.alloc(u8, @max(min_buf_size, tokens_buffer.len * 8));
+                out.buffer = try allocator.alloc(u8, 1024);
             } else {
-                if (out.buffer.len < min_buf_size) @panic("Iree detokenizer requires at least 128 bytes of buffering");
+                if (out.buffer.len < min_buf_size) @panic("Iree detokenizer requires at least 64 bytes of buffering");
             }
             errdefer if (out_buffer_owned) allocator.free(out.buffer);
 
