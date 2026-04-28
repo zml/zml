@@ -118,7 +118,7 @@ pub const Session = struct {
         defer prefill_tokens_slice.free(self.allocator);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const replicated_sharding = self.platform.replicated_sharding;
+        const replicated_sharding = &self.compiled_model.params.shardings.replicated;
 
         var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
@@ -157,7 +157,7 @@ pub const Session = struct {
         var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
         defer decode_results.deinit(self.allocator);
 
-        const replicated_sharding = self.platform.replicated_sharding;
+        const replicated_sharding = &self.compiled_model.params.shardings.replicated;
 
         var last_token_id: u32 = self.last_generated_token;
         var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), replicated_sharding, @ptrCast(&last_token_id));

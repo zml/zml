@@ -201,6 +201,25 @@ pub const Platform = struct {
     devices: []const Device,
     memories: []const Memory,
     replicated_sharding: *const zml.sharding.Sharding,
+    physical_mesh: zml.sharding.PhysicalMesh,
+    triton_runtime: ?attention.triton.Runtime = null,
+    tpu_ir_runtime: ?attention.tpu.Runtime = null,
+
+    pub fn initBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: attention.paged_attention.Backend) !void {
+        switch (backend) {
+            .triton => {
+                if (self.triton_runtime == null) {
+                    self.triton_runtime = try zml.attention.triton.Runtime.init(allocator, io);
+                }
+            },
+            .mosaic_tpu => {
+                if (self.tpu_ir_runtime == null) {
+                    self.tpu_ir_runtime = try zml.attention.tpu.Runtime.init(allocator, io);
+                }
+            },
+            else => {},
+        }
+    }
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -223,7 +242,6 @@ pub const Platform = struct {
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
         const memories = try arena.alloc(Memory, pjrt_memories.len);
-        const replicated_sharding = try allocator.create(zml.sharding.Sharding);
 
         const platform = try arena.create(Platform);
         platform.* = .{
@@ -233,7 +251,7 @@ pub const Platform = struct {
             .pjrt_client = pjrt_client,
             .devices = devices,
             .memories = memories,
-            .replicated_sharding = replicated_sharding,
+            .physical_mesh = undefined, // set below
         };
         defer platform.arena_state = arena_state.state;
 
@@ -247,12 +265,10 @@ pub const Platform = struct {
                 platform_memory.* = try .init(arena, pjrt_memory, platform, devices);
             }
 
-            const physical_mesh = try switch (options.physical_mesh) {
+            platform.physical_mesh = try switch (options.physical_mesh) {
                 .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
-
-            replicated_sharding.* = try .init(physical_mesh, .init("replicated", .{ .x = .high_bandwidth }));
         }
 
         switch (target) {
@@ -497,10 +513,6 @@ pub const Platform = struct {
 
     pub fn profiler(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, options: ProfilerOptions) !Profiler {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
-    }
-
-    pub fn sharding(platform: *const Platform, logical: zml.sharding.LogicalMesh) !zml.sharding.Sharding {
-        return try .init(platform.replicated_sharding.physical, logical);
     }
 };
 
