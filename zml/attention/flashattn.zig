@@ -467,11 +467,13 @@ pub const fa3 = struct {
 
         /// Replace .model partitioning with .replicated on all head-sharded tensors.
         /// Use this for single-GPU deployment where no .model mesh axis is defined.
+        /// Operates on Shape level (not Tensor.withPartitioning) so it can be called
+        /// at init time without requiring a CompilationContext.
         pub fn withReplicatedPartitioning(self: Metadata) Metadata {
             return .{
-                .softmax_lse = self.softmax_lse.withPartitioning(.{ .h = .replicated }),
-                .softmax_lse_accum = self.softmax_lse_accum.withPartitioning(.{ .h = .replicated }),
-                .out_accum = self.out_accum.withPartitioning(.{ .h = .replicated }),
+                .softmax_lse = .fromShape(self.softmax_lse.shape().withPartitioning(.{ .h = .replicated })),
+                .softmax_lse_accum = .fromShape(self.softmax_lse_accum.shape().withPartitioning(.{ .h = .replicated })),
+                .out_accum = .fromShape(self.out_accum.shape().withPartitioning(.{ .h = .replicated })),
                 .scheduler_metadata = self.scheduler_metadata,
             };
         }
@@ -510,9 +512,13 @@ pub const fa3 = struct {
     fn fa3CustomCall(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, cu_seqlens_k: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
-        const q = q_.insertAxes(.q, .{.b}).merge(.{ .tot = .{ .b, .q } });
-        const k = k_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
-        const v = v_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
+        // Insert a batch axis only if one doesn't already exist.
+        const q_with_b = if (q_.shape().hasTag(.b) != null) q_ else q_.insertAxes(.q, .{.b});
+        const k_with_b = if (k_.shape().hasTag(.b) != null) k_ else k_.insertAxes(.k, .{.b});
+        const v_with_b = if (v_.shape().hasTag(.b) != null) v_ else v_.insertAxes(.k, .{.b});
+        const q = q_with_b.merge(.{ .tot = .{ .b, .q } });
+        const k = k_with_b.merge(.{ .tot = .{ .b, .k } });
+        const v = v_with_b.merge(.{ .tot = .{ .b, .k } });
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
             .withPartitioning(.{ ._0 = .replicated });
@@ -544,7 +550,9 @@ pub const fa3 = struct {
             },
         );
 
-        return o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) }).squeeze(.b);
+        const had_batch = q_.shape().hasTag(.b) != null;
+        const result = o.splitAxis(.tot, .{ .b = 1, .q = q_.dim(.q) });
+        return if (had_batch) result else result.squeeze(.b);
     }
 };
 
