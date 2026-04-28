@@ -1319,8 +1319,8 @@ fn runStage1(
     const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
     const audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
     const num_heads: i64 = 32; // all LTX attention kinds use 32 heads
-    const video_attn_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, video_seqlen, num_heads, 128)).withReplicatedPartitioning();
-    const audio_attn_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, audio_seqlen, num_heads, 128)).withReplicatedPartitioning();
+    const video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, video_seqlen, num_heads, 128, .replicated));
+    const audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, audio_seqlen, num_heads, 128, .replicated));
 
     // Compile args for bf16 variants include FA3 scratch buffer shapes.
     const block_compile_args_bf16 = block_compile_args_base ++ .{
@@ -2671,8 +2671,8 @@ fn runStage2(
     const s2_video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
     const s2_audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
     const s2_num_heads: i64 = 32;
-    const s2_video_fa3_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, s2_video_seqlen, s2_num_heads, 128)).withReplicatedPartitioning();
-    const s2_audio_fa3_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, s2_audio_seqlen, s2_num_heads, 128)).withReplicatedPartitioning();
+    const s2_video_fa3_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_video_seqlen, s2_num_heads, 128, .replicated));
+    const s2_audio_fa3_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, s2_audio_seqlen, s2_num_heads, 128, .replicated));
 
     const block_compile_args_bf16 = block_compile_args_base ++ .{
         s2_video_fa3_meta.cuda_fa3.softmax_lse,

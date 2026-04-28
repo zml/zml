@@ -438,22 +438,39 @@ pub const fa3 = struct {
             seqlen: i64,
             num_heads: i64,
             head_dim: i64 = 128,
+            /// How to partition the head dimension across the device mesh.
+            /// Defaults to .model for multi-GPU tensor-parallel LLM deployments.
+            /// Use .replicated for single-GPU deployments without a .model mesh axis.
+            head_partitioning: zml.Shape.PartitionSpec = .{ .axis = zml.Shape.toTag(.model) },
         };
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
                 // softmax_lse: [num_heads, seqlen] of f32
-                .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .softmax_lse = .fromShape(withHeadPartitioning(
+                    zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8).withTags(.{.h}),
+                    opts.head_partitioning,
+                )),
                 // softmax_lse_accum: [max_splits, num_heads, seqlen] of f32
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .softmax_lse_accum = .fromShape(withHeadPartitioning(
+                    zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * 4}, .i8).withTags(.{.h}),
+                    opts.head_partitioning,
+                )),
                 // out_accum: [max_splits, num_heads, seqlen, head_dim] of f32
-                .out_accum = .fromShape(zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * opts.head_dim * 4}, .i8)
-                    .withTags(.{.h}).withPartitioning(.{ .h = .model })),
+                .out_accum = .fromShape(withHeadPartitioning(
+                    zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * opts.head_dim * 4}, .i8).withTags(.{.h}),
+                    opts.head_partitioning,
+                )),
                 .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
                     .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
             };
+        }
+
+        /// Set the partitioning of the .h axis (always axis 0 for these 1D scratch tensors).
+        fn withHeadPartitioning(shape: zml.Shape, spec: zml.Shape.PartitionSpec) zml.Shape {
+            var res = shape.withDefaultPartitioning();
+            res._partitioning.set(0, spec);
+            return res;
         }
 
         pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Metadata) {
@@ -462,19 +479,6 @@ pub const fa3 = struct {
                 .softmax_lse_accum = try zml.Buffer.uninitialized(io, platform, self.softmax_lse_accum.shape(), sharding, .{}),
                 .out_accum = try zml.Buffer.uninitialized(io, platform, self.out_accum.shape(), sharding, .{}),
                 .scheduler_metadata = try zml.Buffer.uninitialized(io, platform, self.scheduler_metadata.shape(), sharding, .{}),
-            };
-        }
-
-        /// Replace .model partitioning with .replicated on all head-sharded tensors.
-        /// Use this for single-GPU deployment where no .model mesh axis is defined.
-        /// Operates on Shape level (not Tensor.withPartitioning) so it can be called
-        /// at init time without requiring a CompilationContext.
-        pub fn withReplicatedPartitioning(self: Metadata) Metadata {
-            return .{
-                .softmax_lse = .fromShape(self.softmax_lse.shape().withPartitioning(.{ .h = .replicated })),
-                .softmax_lse_accum = .fromShape(self.softmax_lse_accum.shape().withPartitioning(.{ .h = .replicated })),
-                .out_accum = .fromShape(self.out_accum.shape().withPartitioning(.{ .h = .replicated })),
-                .scheduler_metadata = self.scheduler_metadata,
             };
         }
 

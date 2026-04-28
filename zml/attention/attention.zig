@@ -78,6 +78,14 @@ pub const Metadata = union(Backend) {
                 .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads, .head_dim = head_dim } },
             };
         }
+
+        pub fn fromBackendWithPartitioning(backend: Backend, seqlen: i64, num_heads: i64, head_dim: i64, head_partitioning: zml.Shape.PartitionSpec) InitOptions {
+            return switch (backend) {
+                .vanilla => .{ .vanilla = {} },
+                .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads, .head_dim = head_dim, .head_partitioning = head_partitioning } },
+            };
+        }
     };
 
     pub fn init(opts: InitOptions) Metadata {
@@ -102,16 +110,6 @@ pub const Metadata = union(Backend) {
             .cuda_fa2 => |*v| flashattn.fa2.Metadata.deinitBuffer(v),
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
         }
-    }
-
-    /// Replace .model partitioning with .replicated on all head-sharded tensors.
-    /// Use this for single-GPU deployment where no .model mesh axis is defined.
-    pub fn withReplicatedPartitioning(self: Metadata) Metadata {
-        return switch (self) {
-            .vanilla => .{ .vanilla = {} },
-            .cuda_fa2 => @panic("withReplicatedPartitioning not yet supported for FA2"),
-            .cuda_fa3 => |v| .{ .cuda_fa3 = v.withReplicatedPartitioning() },
-        };
     }
 };
 
