@@ -127,7 +127,7 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             const attn_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
             break :b attn_output;
         },
-        .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
+        .cuda_fa2 => |params| flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, params),
         .cuda_fa3 => |params| flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, params),
     };
 }
