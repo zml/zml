@@ -66,10 +66,18 @@ pub fn main(init: std.process.Init) !void {
     
     //try test5Hz(zml_handler);
     //try testVae(zml_handler);
+    //try testDit(zml_handler);
     
-    //if (0 * 0 > -6 + 5) return;
+    try runFullPipeline(init);
+    
+}
+
+pub fn runFullPipeline(init: std.process.Init) !void {
+    var zml_handler: Zml_handler = try .fromInit(init);
+    defer zml_handler.deinit();
     
     //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    const target_duration: u32 = 120;
     
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
@@ -116,13 +124,13 @@ pub fn main(init: std.process.Init) !void {
     const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
     defer zml_handler.allocator.free(int_codes);
     
-    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(), audio_codes.len());
+    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(), target_duration, int_codes.len);
     defer aceenc.deinit(zml_handler.allocator);
 
     // Test model activations
     //try aceenc.testModel(zml_handler);
     
-    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes);
+    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, target_duration);
     defer diffuse_args.deinit(zml_handler.allocator);
     
     //try diffuse_args.print(zml_handler.io);
@@ -132,7 +140,7 @@ pub fn main(init: std.process.Init) !void {
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, 5 * audio_codes.len(), diffuse_args.encoder_conditions.shape.dim(.s_enc));
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, target_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
 
     // Test model activations
@@ -149,7 +157,7 @@ pub fn main(init: std.process.Init) !void {
     // with the VAE model
     // ------------------------------------------------
 
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, 5 * audio_codes.len());
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, target_duration);
     defer acevae.deinit(zml_handler.allocator);
     
     // Test model activations
@@ -261,8 +269,85 @@ pub fn test5Hz(zml_handler: Zml_handler) !void {
 }
 
 pub fn testVae(zml_handler: Zml_handler) !void {
-    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 25);
+    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 300);
     defer vae.deinit(zml_handler.allocator);
     try acevae_.testModel(zml_handler, vae);
     vae.unloadBuffers();
 }
+
+pub fn testDit(zml_handler: Zml_handler) !void {
+    var dit = try acedit_.AceDit_handler.initFromFile(zml_handler, 3000, 65);
+    defer dit.deinit(zml_handler.allocator);
+    try acedit_.testModel(zml_handler, dit);
+    dit.unloadBuffers();
+}
+
+pub fn testVaeWav(zml_handler: Zml_handler) !void {
+    const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//example_encoded.safetensors";
+    const encoded_slice = try getSlice(zml_handler, path, "latents_tc");
+    const t = encoded_slice.shape.dim(0);
+    defer encoded_slice.free(zml_handler.allocator);
+    
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(t));
+    defer acevae.deinit(zml_handler.allocator);
+    
+    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, .{ .x = encoded_slice });
+    defer decoded_audio.deinit(zml_handler.allocator);
+    acevae.unloadBuffers();
+    
+    try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
+}
+
+
+pub fn getSlice(zml_handler: Zml_handler, file_name: []const u8, tensor_name: []const u8) !zml.Slice {
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, file_name);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
+    defer store.deinit();
+    const model: TensorExtractor = .init(store.view(), tensor_name);
+    const shardings: Shardings = try .init(zml_handler.platform);
+    const shardings_arr = shardings.all();
+    const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+    const extract_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{}, opts);
+    defer extract_exe.deinit();
+    var model_buffers = try model.load(zml_handler, &store, &shardings.all());
+    defer TensorExtractor.unloadBuffers(&model_buffers);
+    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), .f32));
+    var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, shardings.all()[0]);
+    defer buffer.deinit();
+    var extract_args = try extract_exe.args(zml_handler.allocator);
+    defer extract_args.deinit(zml_handler.allocator);
+    var extract_results = try extract_exe.results(zml_handler.allocator);
+    defer extract_results.deinit(zml_handler.allocator);
+    extract_args.set(.{ model_buffers });
+    extract_exe.call(extract_args, &extract_results);
+    extract_results.fill(.{ &buffer });
+    try buffer.toSlice(zml_handler.io, slice);
+    return slice;
+}
+
+const TensorExtractor = struct {
+    tensor: zml.Tensor,
+    pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8) TensorExtractor {
+        return .{
+            .tensor = store.createTensor(tensor_name, .{ .t, .a }, null),
+        };
+    }
+    pub fn load(self: *const TensorExtractor, zml_handler: Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(TensorExtractor) {
+        return zml.io.load(TensorExtractor, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
+            .shardings = shardings,
+            .parallelism = 1,
+            .dma_chunks = 1,
+            .dma_chunk_size = 128 * 1024 * 1024,
+        });
+    }
+    pub fn unloadBuffers(self: *zml.Bufferized(TensorExtractor)) void {
+        self.tensor.deinit();
+    }
+    pub fn shape(self: TensorExtractor) zml.Shape {
+        return self.tensor.shape();
+    }
+    pub fn forward(self: TensorExtractor) zml.Tensor {
+        return self.tensor;
+    }
+};
