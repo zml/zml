@@ -29,7 +29,7 @@ pub fn main(init: std.process.Init) !void {
         .n = .high_bandwidth,
     });
     const strategy: zml.sharding.Strategy = .suggest(logical_mesh, platform.physical_mesh);
-    const benchmark_sharding: zml.sharding.Sharding = try .initFromStrategy(platform, logical_mesh, strategy);
+    const benchmark_sharding: *const zml.sharding.Sharding = try .initFromStrategy(platform, logical_mesh, strategy);
 
     const cli_args: CliArgs = stdx.flags.parse(init.minimal.args, CliArgs);
 
@@ -97,7 +97,7 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.sharding.Sharding, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: *const zml.sharding.Sharding, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 

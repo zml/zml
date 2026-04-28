@@ -1625,7 +1625,7 @@ pub const DynamicSamplingStrategy = struct {
     pub fn makeBuffers(
         io: std.Io,
         platform: *const zml.Platform,
-        sharding: zml.sharding.Sharding,
+        sharding: *const zml.sharding.Sharding,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {

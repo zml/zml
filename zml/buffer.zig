@@ -26,7 +26,7 @@ const log = std.log.scoped(.zml);
 pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
-    _sharding: Sharding,
+    _sharding: *const Sharding,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
@@ -93,7 +93,7 @@ pub const Buffer = struct {
         io: std.Io,
         platform: *const Platform,
         sh: Shape,
-        sharding: Sharding,
+        sharding: *const Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
@@ -152,22 +152,22 @@ pub const Buffer = struct {
 
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8) !Buffer {
+    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: *const Sharding, data: []const u8) !Buffer {
         return from(io, platform, sh, sharding, data, .{});
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding) !Buffer {
+    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: *const Sharding) !Buffer {
         return fromSliceOpts(io, platform, slice, sharding, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding, opts: FromOptions) !Buffer {
+    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: *const Sharding, opts: FromOptions) !Buffer {
         return from(io, platform, slice.shape, sharding, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: Sharding) !Buffer {
+    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: *const Sharding) !Buffer {
         const x = dtype_.constant(val);
         return fromBytes(io, platform, .scalar(dtype_), sharding, x.asBytes());
     }
@@ -186,7 +186,7 @@ pub const Buffer = struct {
         _: std.Io,
         platform: *const Platform,
         sh: Shape,
-        sharding: Sharding,
+        sharding: *const Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
         var res: Buffer = .{
@@ -233,7 +233,7 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: *const Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
 

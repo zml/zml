@@ -192,7 +192,7 @@ pub fn main(init: std.process.Init) !void {
 
             const replicated_sharding = try zml.sharding.replicatedSharding(platform);
 
-            const sharded_sharding: zml.sharding.Sharding = blk: {
+            const sharded_sharding: *const zml.sharding.Sharding = blk: {
                 const model_logical_mesh: zml.sharding.LogicalMesh = .init("playground_model", .{ .model = .high_bandwidth });
                 const model_strategy: zml.sharding.Strategy = .suggest(model_logical_mesh, platform.physical_mesh);
                 break :blk try .initFromStrategy(platform, model_logical_mesh, model_strategy);

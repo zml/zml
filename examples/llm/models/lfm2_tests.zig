@@ -134,7 +134,7 @@ const TestContext = struct {
     activations_store: *zml.io.TensorStore,
     attention_metadata: attention.Metadata,
     attention_parameters: attention.Parameters,
-    sharding: zml.sharding.Sharding,
+    sharding: *const zml.sharding.Sharding,
 
     fn testLayerPrint(self: *TestContext, comptime name_fmt: []const u8, name_args: anytype, tagz: anytype, layer: anytype, layer_buffers: anytype, opts: zml.testing.CompareOpts) !void {
         const name = try std.fmt.allocPrint(self.allocator, name_fmt, name_args);
@@ -299,7 +299,7 @@ const TestContext = struct {
     }
 };
 
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8, sharding: zml.sharding.Sharding) !zml.Buffer {
+fn loadBufferFromStore(allocator: std.mem.Allocator, io: anytype, platform: *zml.Platform, store: *zml.io.TensorStore, key: []const u8, sharding: *const zml.sharding.Sharding) !zml.Buffer {
     const shape = store.view().getShape(key) orelse return error.NotFound;
 
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
