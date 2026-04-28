@@ -46,7 +46,7 @@ pub const Options = union(Backend) {
         is_prefill: bool,
         batch_size: u32,
         seq_len: u32,
-        page_chunk_size: u32,
+        max_num_pages: u32,
         max_token_count: u32,
         num_heads: u32,
         num_kv_heads: u32,
@@ -55,14 +55,13 @@ pub const Options = union(Backend) {
     };
 
     pub fn fromBackend(args: Args) Options {
-        const max_num_pages = std.math.divCeil(u32, args.seq_len, args.page_chunk_size) catch unreachable;
         return switch (args.backend) {
             .cuda_fa2 => if (args.is_prefill) .{
                 .cuda_fa2 = .{
                     .mixed = .{
                         .batch_size_decode = args.batch_size,
                         .batch_size_prefill = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -74,7 +73,7 @@ pub const Options = union(Backend) {
                 .cuda_fa2 = .{
                     .decode = .{
                         .batch_size = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -88,7 +87,7 @@ pub const Options = union(Backend) {
                     .mixed = .{
                         .batch_size_decode = args.batch_size,
                         .batch_size_prefill = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -100,7 +99,7 @@ pub const Options = union(Backend) {
                 .cuda_fa3 = .{
                     .decode = .{
                         .batch_size = args.batch_size,
-                        .max_num_pages = max_num_pages,
+                        .max_num_pages = args.max_num_pages,
                         .max_seqlen_k = args.seq_len,
                         .max_token_count = args.max_token_count,
                         .num_heads = args.num_heads,
@@ -112,7 +111,7 @@ pub const Options = union(Backend) {
             .triton => .{
                 .triton = .{
                     .batch_size = args.batch_size,
-                    .max_num_pages = max_num_pages,
+                    .max_num_pages = args.max_num_pages,
                     .max_seqlen_q = args.max_seqlen_q,
                     .is_prefill = args.is_prefill,
                 },
@@ -121,7 +120,7 @@ pub const Options = union(Backend) {
                 .mosaic_tpu = .{
                     .is_prefill = args.is_prefill,
                     .batch_size = args.batch_size,
-                    .max_num_pages = max_num_pages,
+                    .max_num_pages = args.max_num_pages,
                     .max_seqlen_k = args.seq_len,
                     .max_token_count = args.max_token_count,
                     .num_heads = args.num_heads,
