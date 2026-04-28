@@ -959,6 +959,8 @@ pub const LogicalMesh = struct {
     axes: Axes,
     intents: Intents,
 
+    pub const replicated = init("replicated", .{ .x = .high_bandwidth });
+
     pub fn init(name: []const u8, axes_: anytype) LogicalMesh {
         const T = @TypeOf(axes_);
 

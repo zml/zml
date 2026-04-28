@@ -1109,6 +1109,7 @@ pub fn load(
         platform: *const Platform,
         buffers: []*Buffer,
         shardings: []const *const Sharding,
+        replicated_sharding: Sharding,
         store: *const TensorStore,
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
@@ -1123,6 +1124,7 @@ pub fn load(
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
+        .replicated_sharding = try .init(platform.physical_mesh, .replicated),
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
@@ -1146,10 +1148,9 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
-                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
-                    const sharding = if (select_sharding) |s| s else blk: {
+                    const sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                        break :blk ctx_.platform.replicated_sharding;
+                        break :blk &ctx_.replicated_sharding;
                     };
 
                     var writer = MemoryWriter.init(
