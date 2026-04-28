@@ -1282,7 +1282,7 @@ fn runStage1(
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
 
-    const block_compile_args = .{
+    const block_compile_args_base = .{
         zml.Tensor.fromShape(init_pre_out.vx.shape()),
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
@@ -1311,27 +1311,49 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+    };
+    const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
+    const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
+
+    // FA3 metadata shapes (sized by Q seqlen for each attention group).
+    const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
+    const audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
+    const num_heads: i64 = 32; // all LTX attention kinds use 32 heads
+    const video_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = video_seqlen, .num_heads = num_heads });
+    const audio_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = audio_seqlen, .num_heads = num_heads });
+
+    // Compile args for bf16 variants include FA3 scratch buffer shapes.
+    const block_compile_args_bf16 = block_compile_args_base ++ .{
+        // video FA3 metadata
+        video_fa3_meta.softmax_lse,
+        video_fa3_meta.softmax_lse_accum,
+        video_fa3_meta.out_accum,
+        video_fa3_meta.scheduler_metadata,
+        // audio FA3 metadata
+        audio_fa3_meta.softmax_lse,
+        audio_fa3_meta.softmax_lse_accum,
+        audio_fa3_meta.out_accum,
+        audio_fa3_meta.scheduler_metadata,
         block_params_shape.blocks[0],
     };
-    const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
     std.log.info("Compiling block exe (normal, bf16_attn={})...", .{use_bf16_attn});
     var block_normal_exe = if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args, compile_opts)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_normal_exe.deinit();
 
     std.log.info("Compiling block exe (STG, bf16_attn={})...", .{use_bf16_attn});
     var block_stg_exe = if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args, compile_opts)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args_bf16, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0NativeSTG, block_compile_args, compile_opts);
     defer block_stg_exe.deinit();
 
     std.log.info("Compiling block exe (isolated, bf16_attn={})...", .{use_bf16_attn});
     const mask_scalar_shape = zml.Shape.init(.{}, .bf16);
-    const iso_compile_args = .{
+    const iso_compile_args_base = .{
         zml.Tensor.fromShape(init_pre_out.vx.shape()),
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
@@ -1362,10 +1384,23 @@ fn runStage1(
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
         zml.Tensor.fromShape(mask_scalar_shape), // v2a_mask
+    };
+    const iso_compile_args = iso_compile_args_base ++ .{block_params_shape.blocks[0]};
+    const iso_compile_args_bf16 = iso_compile_args_base ++ .{
+        // video FA3 metadata
+        video_fa3_meta.softmax_lse,
+        video_fa3_meta.softmax_lse_accum,
+        video_fa3_meta.out_accum,
+        video_fa3_meta.scheduler_metadata,
+        // audio FA3 metadata
+        audio_fa3_meta.softmax_lse,
+        audio_fa3_meta.softmax_lse_accum,
+        audio_fa3_meta.out_accum,
+        audio_fa3_meta.scheduler_metadata,
         block_params_shape.blocks[0],
     };
     var block_iso_exe = if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args, compile_opts)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args_bf16, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasks, iso_compile_args, compile_opts);
     defer block_iso_exe.deinit();
@@ -1579,6 +1614,18 @@ fn runStage1(
     var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32, sharding);
     defer rescale_a_buf.deinit();
 
+    // ---- FA3 scratch buffers (allocated once, reused every step) ----
+    var v_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    var a_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    if (use_bf16_attn) {
+        v_fa3_meta_bufs = try video_fa3_meta.initBuffer(io, platform, sharding);
+        a_fa3_meta_bufs = try audio_fa3_meta.initBuffer(io, platform, sharding);
+    }
+    defer if (use_bf16_attn) {
+        model.Fa3Metadata.deinitBuffer(&v_fa3_meta_bufs);
+        model.Fa3Metadata.deinitBuffer(&a_fa3_meta_bufs);
+    };
+
     // ---- Denoising loop ----
     std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{num_stage1_steps});
 
@@ -1629,23 +1676,47 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                blk_args.set(.{
-                    cond_h_v,                     cond_h_a,
-                    pre_out.video_timesteps,      pre_out.audio_timesteps,
-                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                    block_params_bufs[i],
-                });
+                if (use_bf16_attn) {
+                    blk_args.set(.{
+                        cond_h_v,                     cond_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
+                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
+                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
+                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        block_params_bufs[i],
+                    });
+                } else {
+                    blk_args.set(.{
+                        cond_h_v,                     cond_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        block_params_bufs[i],
+                    });
+                }
                 block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -1679,23 +1750,47 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                blk_args.set(.{
-                    neg_h_v,                      neg_h_a,
-                    pre_out.video_timesteps,      pre_out.audio_timesteps,
-                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                    v_context_neg_buf,            a_context_neg_buf,
-                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                    block_params_bufs[i],
-                });
+                if (use_bf16_attn) {
+                    blk_args.set(.{
+                        neg_h_v,                      neg_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        v_context_neg_buf,            a_context_neg_buf,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
+                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
+                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
+                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        block_params_bufs[i],
+                    });
+                } else {
+                    blk_args.set(.{
+                        neg_h_v,                      neg_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        v_context_neg_buf,            a_context_neg_buf,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        block_params_bufs[i],
+                    });
+                }
                 block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -1735,23 +1830,47 @@ fn runStage1(
             for (0..model.num_transformer_blocks) |i| {
                 // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
                 if (i == STG_BLOCK_IDX) {
-                    blk_stg_args.set(.{
-                        ptb_h_v,                      ptb_h_a,
-                        pre_out.video_timesteps,      pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        block_params_bufs[i],
-                    });
+                    if (use_bf16_attn) {
+                        blk_stg_args.set(.{
+                            ptb_h_v,                      ptb_h_a,
+                            pre_out.video_timesteps,      pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                            v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
+                            v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
+                            a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
+                            a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                            block_params_bufs[i],
+                        });
+                    } else {
+                        blk_stg_args.set(.{
+                            ptb_h_v,                      ptb_h_a,
+                            pre_out.video_timesteps,      pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                            block_params_bufs[i],
+                        });
+                    }
                     block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = true });
                     const out = blk_stg_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
@@ -1761,23 +1880,47 @@ fn runStage1(
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
                 } else {
-                    blk_normal_args.set(.{
-                        ptb_h_v,                      ptb_h_a,
-                        pre_out.video_timesteps,      pre_out.audio_timesteps,
-                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        block_params_bufs[i],
-                    });
+                    if (use_bf16_attn) {
+                        blk_normal_args.set(.{
+                            ptb_h_v,                      ptb_h_a,
+                            pre_out.video_timesteps,      pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                            v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
+                            v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
+                            a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
+                            a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                            block_params_bufs[i],
+                        });
+                    } else {
+                        blk_normal_args.set(.{
+                            ptb_h_v,                      ptb_h_a,
+                            pre_out.video_timesteps,      pre_out.audio_timesteps,
+                            pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                            pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                            pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                            pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                            pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                            pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                            pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                            pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                            pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                            pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                            pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                            pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                            block_params_bufs[i],
+                        });
+                    }
                     block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = true });
                     const out = blk_normal_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
@@ -1812,24 +1955,49 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                blk_args.set(.{
-                    iso_h_v,                      iso_h_a,
-                    pre_out.video_timesteps,      pre_out.audio_timesteps,
-                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                    zero_mask_buf,                pre_out.v2a_pe_cos,
-                    pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
-                    pre_out.v2a_k_pe_sin,         zero_mask_buf,
-                    block_params_bufs[i],
-                });
+                if (use_bf16_attn) {
+                    blk_args.set(.{
+                        iso_h_v,                      iso_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        zero_mask_buf,                pre_out.v2a_pe_cos,
+                        pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
+                        pre_out.v2a_k_pe_sin,         zero_mask_buf,
+                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
+                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
+                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
+                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        block_params_bufs[i],
+                    });
+                } else {
+                    blk_args.set(.{
+                        iso_h_v,                      iso_h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        zero_mask_buf,                pre_out.v2a_pe_cos,
+                        pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
+                        pre_out.v2a_k_pe_sin,         zero_mask_buf,
+                        block_params_bufs[i],
+                    });
+                }
                 block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -2467,7 +2635,7 @@ fn runStage2(
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
 
-    const block_compile_args = .{
+    const block_compile_args_base = .{
         zml.Tensor.fromShape(init_pre_out.vx.shape()),
         zml.Tensor.fromShape(init_pre_out.ax.shape()),
         zml.Tensor.fromShape(init_pre_out.video_timesteps.shape()),
@@ -2496,12 +2664,32 @@ fn runStage2(
         zml.Tensor.fromShape(init_pre_out.v2a_pe_sin.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_cos.shape()),
         zml.Tensor.fromShape(init_pre_out.v2a_k_pe_sin.shape()),
+    };
+    const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
+
+    // FA3 metadata for Stage 2 (different seqlens than Stage 1)
+    const s2_video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
+    const s2_audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
+    const s2_num_heads: i64 = 32;
+    const s2_video_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = s2_video_seqlen, .num_heads = s2_num_heads });
+    const s2_audio_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = s2_audio_seqlen, .num_heads = s2_num_heads });
+
+    const block_compile_args_bf16 = block_compile_args_base ++ .{
+        s2_video_fa3_meta.softmax_lse,
+        s2_video_fa3_meta.softmax_lse_accum,
+        s2_video_fa3_meta.out_accum,
+        s2_video_fa3_meta.scheduler_metadata,
+        s2_audio_fa3_meta.softmax_lse,
+        s2_audio_fa3_meta.softmax_lse_accum,
+        s2_audio_fa3_meta.out_accum,
+        s2_audio_fa3_meta.scheduler_metadata,
         block_params_shape.blocks[0],
     };
+
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
     var block_exe = if (use_bf16_attn)
-        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args, compile_opts)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_exe.deinit();
@@ -2637,6 +2825,18 @@ fn runStage2(
     std.log.info("All Stage 2 weights loaded.", .{});
     timer.addLoad();
 
+    // ---- FA3 scratch buffers for Stage 2 ----
+    var s2_v_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    var s2_a_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    if (use_bf16_attn) {
+        s2_v_fa3_meta_bufs = try s2_video_fa3_meta.initBuffer(io, platform, sharding);
+        s2_a_fa3_meta_bufs = try s2_audio_fa3_meta.initBuffer(io, platform, sharding);
+    }
+    defer if (use_bf16_attn) {
+        model.Fa3Metadata.deinitBuffer(&s2_v_fa3_meta_bufs);
+        model.Fa3Metadata.deinitBuffer(&s2_a_fa3_meta_bufs);
+    };
+
     // ---- Denoising loop: N-step Euler ----
     const num_steps = stage2_sigmas.len - 1;
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
@@ -2686,23 +2886,47 @@ fn runStage2(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                blk_args.set(.{
-                    h_v,                          h_a,
-                    pre_out.video_timesteps,      pre_out.audio_timesteps,
-                    pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
-                    pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
-                    pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
-                    pre_out.v_pe_cos,             pre_out.v_pe_sin,
-                    pre_out.a_pe_cos,             pre_out.a_pe_sin,
-                    pre_out.v_text_ctx,           pre_out.a_text_ctx,
-                    pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
-                    pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
-                    pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
-                    pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
-                    pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
-                    pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                    block_params_bufs[i],
-                });
+                if (use_bf16_attn) {
+                    blk_args.set(.{
+                        h_v,                            h_a,
+                        pre_out.video_timesteps,        pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero,   pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,         pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,      pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,               pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,               pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,             pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,          pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,          pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,             pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,           pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,             pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,           pre_out.v2a_k_pe_sin,
+                        s2_v_fa3_meta_bufs.softmax_lse, s2_v_fa3_meta_bufs.softmax_lse_accum,
+                        s2_v_fa3_meta_bufs.out_accum,   s2_v_fa3_meta_bufs.scheduler_metadata,
+                        s2_a_fa3_meta_bufs.softmax_lse, s2_a_fa3_meta_bufs.softmax_lse_accum,
+                        s2_a_fa3_meta_bufs.out_accum,   s2_a_fa3_meta_bufs.scheduler_metadata,
+                        block_params_bufs[i],
+                    });
+                } else {
+                    blk_args.set(.{
+                        h_v,                          h_a,
+                        pre_out.video_timesteps,      pre_out.audio_timesteps,
+                        pre_out.video_timesteps_zero, pre_out.audio_timesteps_zero,
+                        pre_out.v_denoise_mask,       pre_out.a_denoise_mask,
+                        pre_out.v_prompt_timestep,    pre_out.a_prompt_timestep,
+                        pre_out.v_pe_cos,             pre_out.v_pe_sin,
+                        pre_out.a_pe_cos,             pre_out.a_pe_sin,
+                        pre_out.v_text_ctx,           pre_out.a_text_ctx,
+                        pre_out.v_cross_ss_ts,        pre_out.v_cross_gate_ts,
+                        pre_out.a_cross_ss_ts,        pre_out.a_cross_gate_ts,
+                        pre_out.a2v_pe_cos,           pre_out.a2v_pe_sin,
+                        pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
+                        pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
+                        pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
+                        block_params_bufs[i],
+                    });
+                }
                 block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
