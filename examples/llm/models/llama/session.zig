@@ -14,10 +14,10 @@ pub const Session = struct {
     kv_cache_buffers: zml.Bufferized(model.KvCache),
     attention_metadata_buffers: zml.Bufferized(zml.attention.attention.Metadata),
     rng_buffers: zml.Bufferized(zml.Tensor.Rng),
-    generated_token_slice: zml.Slice,
     tokenizer: zml.tokenizer.Tokenizer,
     config: *const model.Config,
     seqlen: u32,
+    last_generated_token: u32 = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -47,7 +47,6 @@ pub const Session = struct {
             .kv_cache_buffers = kv_cache_buffers,
             .attention_metadata_buffers = attention_metadata_buffers,
             .rng_buffers = rng_buffers,
-            .generated_token_slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32)),
             .tokenizer = tokenizer,
             .config = &compiled_model.loaded_model.parsed_config.value,
             .seqlen = @intCast(compiled_model.params.seqlen),
@@ -58,7 +57,6 @@ pub const Session = struct {
         model.KvCache.deinitBuffer(&self.kv_cache_buffers);
         zml.attention.attention.Metadata.deinitBuffer(&self.attention_metadata_buffers);
         zml.Tensor.Rng.deinitBuffer(&self.rng_buffers);
-        self.generated_token_slice.free(self.allocator);
     }
 
     pub fn tokenizePrompt(self: *const Session, allocator: std.mem.Allocator, prompt: []const u8) ![]const u32 {
@@ -74,13 +72,13 @@ pub const Session = struct {
         try tokens.ensureUnusedCapacity(prompt.len);
 
         const w: *std.Io.Writer = &tokens.writer;
-        try w.writeAll(@ptrCast(&.{ self.config.bos_token_id, start_header }));
+        try encoder.appendTokens(w, &.{ self.config.bos_token_id, start_header });
         try encoder.encode(w, "user");
-        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.appendTokens(w, &.{ end_header, newline });
         try encoder.encode(w, prompt);
-        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.appendTokens(w, &.{ eot, newline, start_header });
         try encoder.encode(w, "assistant");
-        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.appendTokens(w, &.{ end_header, newline });
 
         return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
     }
@@ -98,13 +96,13 @@ pub const Session = struct {
         try tokens.ensureUnusedCapacity(prompt.len);
 
         const w: *std.Io.Writer = &tokens.writer;
-        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.appendTokens(w, &.{ eot, newline, start_header });
         try encoder.encode(w, "user");
-        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.appendTokens(w, &.{ end_header, newline });
         try encoder.encode(w, prompt);
-        try w.writeAll(@ptrCast(&.{ eot, newline, start_header }));
+        try encoder.appendTokens(w, &.{ eot, newline, start_header });
         try encoder.encode(w, "assistant");
-        try w.writeAll(@ptrCast(&.{ end_header, newline }));
+        try encoder.appendTokens(w, &.{ end_header, newline });
 
         return @ptrCast(@alignCast(try tokens.toOwnedSlice()));
     }
@@ -141,38 +139,37 @@ pub const Session = struct {
         prefill_results.fill(.{ &prefill_tokens_buffer, &self.kv_cache_buffers, &self.rng_buffers });
         try prefill_tokens_buffer.toSlice(self.io, prefill_tokens_slice);
 
-        self.generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
+        self.last_generated_token = prefill_tokens_slice.items(u32)[all_tokens.len - 1];
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
-        var decoder = try self.tokenizer.decoder();
-        defer decoder.deinit();
+        var decoder: zml.tokenizer.iree.Tokenizer.DecoderWriter = try .init(self.tokenizer.iree, self.allocator, stdout, &.{});
+        defer decoder.deinit(self.allocator);
 
         var decode_args = try self.compiled_model.decode_exe.args(self.allocator);
         defer decode_args.deinit(self.allocator);
         // Fix model buffers, since they are stable for the full gen.
-        decode_args.bake(self.model_buffers);
+        decode_args.bake(self.model_buffers.*);
 
         var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
         defer decode_results.deinit(self.allocator);
 
         const replicated_sharding = try zml.sharding.replicatedSharding(self.platform);
 
-        var current_token_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, self.generated_token_slice, replicated_sharding);
+        var last_token_id: u32 = self.last_generated_token;
+        var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), replicated_sharding, @ptrCast(&last_token_id));
         defer current_token_buffer.deinit();
 
-        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
-        defer self.allocator.free(out_tokens_buffer);
+        std.log.warn("starting generation", .{});
+
         generation: while (true) {
-            const token_id = self.generated_token_slice.items(u32)[0];
+            if (isEosToken(self.config, last_token_id)) break :generation;
 
-            if (isEosToken(self.config, token_id)) break :generation;
+            try decoder.writeTokens(&.{last_token_id});
+            // try decoder.writer.flush();
+            try decoder.out.flush();
 
-            const token = try decoder.feedOne(token_id, out_tokens_buffer);
-            try stdout.writeAll(token);
-            try stdout.flush();
-
-            try all_tokens.append(self.allocator, token_id);
+            try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
             var token_pos_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32, replicated_sharding);
@@ -188,10 +185,10 @@ pub const Session = struct {
             self.compiled_model.decode_exe.call(decode_args, &decode_results);
 
             decode_results.fill(.{ &current_token_buffer, &self.kv_cache_buffers, &self.rng_buffers });
-            try current_token_buffer.toSlice(self.io, self.generated_token_slice);
+            last_token_id = try current_token_buffer.getValue(u32, self.io);
         }
 
-        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
+        try decoder.finalize();
         try stdout.flush();
     }
 };

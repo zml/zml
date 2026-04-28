@@ -53,6 +53,10 @@ pub const Tokenizer = union(Tokenizers) {
                 },
             };
         }
+
+        pub fn appendTokens(_: *Encoder, writer: *std.Io.Writer, tokens: []const u32) !void {
+            try writer.writeAll(@ptrCast(tokens));
+        }
     };
 
     pub const Decoder = union(Tokenizers) {
@@ -71,6 +75,20 @@ pub const Tokenizer = union(Tokenizers) {
             switch (self.*) {
                 inline else => |*v| v.reset(),
             }
+        }
+
+        pub fn decode(self: *Decoder, w: *std.Io.Writer, token_ids: []const u32) !void {
+            return switch (self.*) {
+                .iree => |*d| {
+                    std.debug.assert(w.buffer.len >= 128); // Iree decoder needs at least 128 bytes of buffering.
+                    try d.decode(token_ids, w);
+                },
+                inline else => |*d| {
+                    for (token_ids) |token_id| {
+                        if (try d.next(token_id)) |token| try w.writeAll(token);
+                    }
+                },
+            };
         }
 
         pub fn decodeAlloc(self: *Decoder, allocator: std.mem.Allocator, token_ids: []const u32) !std.ArrayList(u8) {
@@ -93,11 +111,35 @@ pub const Tokenizer = union(Tokenizers) {
             };
         }
 
+        pub fn decodeOne(self: *Decoder, w: *std.Io.Writer, token_id: u32) !void {
+            return switch (self.*) {
+                .iree => |*d| {
+                    const token = try d.feedOne(token_id, try w.writableSliceGreedy(128));
+                    w.advance(token.len);
+                },
+                inline else => |*d| {
+                    if (try d.next(token_id)) |token| {
+                        try w.writeAll(token);
+                    }
+                },
+            };
+        }
+
         /// Output is only valid until the next feed/finalize call and while the decoder AND buffer is alive.
         pub fn finalize(self: *Decoder, buffer: []u8) ![]const u8 {
             return switch (self.*) {
                 .iree => |*v| v.finalize(buffer),
                 inline else => &.{},
+            };
+        }
+
+        pub fn flush(self: *Decoder, w: *std.Io.Writer) !void {
+            return switch (self.*) {
+                .iree => |*v| {
+                    const final = try v.finalize(try w.writableSliceGreedy(128));
+                    w.advance(final.len);
+                },
+                inline else => {},
             };
         }
     };

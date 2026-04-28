@@ -201,7 +201,7 @@ pub fn printZmlLogo(io: std.Io) !void {
         \\
         \\
     ;
-    var writer = std.Io.File.stdout().writer(io, &.{});
+    var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll(LOGO);
     try writer.interface.flush();
 }
