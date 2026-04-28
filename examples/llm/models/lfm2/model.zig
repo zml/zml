@@ -540,7 +540,7 @@ pub const Cache = struct {
     conv: ConvCache,
     kv: KvCache,
 
-    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(Cache) {
+    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !zml.Bufferized(Cache) {
         return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(io, platform, sharding) };
     }
 
@@ -561,7 +561,7 @@ pub const ConvCache = struct {
         return .{ .state = .fromShape(shape) };
     }
 
-    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(ConvCache) {
+    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !zml.Bufferized(ConvCache) {
         const sh = self.state.shape();
         const host = try allocator.alloc(u8, sh.byteSize());
         defer allocator.free(host);
@@ -586,7 +586,7 @@ pub const KvCache = struct {
         return .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
+    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !zml.Bufferized(KvCache) {
         return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}) };
     }
 

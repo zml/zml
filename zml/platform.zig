@@ -194,13 +194,13 @@ pub const Device = struct {
 };
 
 pub const Platform = struct {
-    arena_state: std.heap.ArenaAllocator.State = .{},
+    arena_state: std.heap.ArenaAllocator.State,
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
-    physical_mesh: zml.sharding.PhysicalMesh,
+    replicated_sharding: *const zml.sharding.Sharding,
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -215,42 +215,49 @@ pub const Platform = struct {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
-        var arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena.deinit();
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena_state.deinit();
+        const arena = arena_state.allocator();
 
-        const devices = try arena.allocator().alloc(Device, pjrt_devices.len);
+        const devices = try arena.alloc(Device, pjrt_devices.len);
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
-        const memories = try arena.allocator().alloc(Memory, pjrt_memories.len);
+        const memories = try arena.alloc(Memory, pjrt_memories.len);
+        const replicated_sharding = try allocator.create(zml.sharding.Sharding);
 
-        const platform = try arena.allocator().create(Platform);
+        const platform = try arena.create(Platform);
         platform.* = .{
+            .arena_state = undefined, // delayed to function exit so we capture the last state
             .target = target,
             .pjrt_api = api,
             .pjrt_client = pjrt_client,
             .devices = devices,
             .memories = memories,
-            .physical_mesh = undefined,
+            .replicated_sharding = replicated_sharding,
         };
-        defer platform.arena_state = arena.state;
+        defer platform.arena_state = arena_state.state;
 
         {
+            // TODO: part of the complication here is that we layout the data in spaghetti mode,
+            // where devices and memories point to each other and also point to the platform.
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
-                platform_device.* = try .init(arena.allocator(), pjrt_device, platform, memories);
+                platform_device.* = try .init(arena, pjrt_device, platform, memories);
             }
             for (pjrt_memories, memories) |pjrt_memory, *platform_memory| {
-                platform_memory.* = try .init(arena.allocator(), pjrt_memory, platform, devices);
+                platform_memory.* = try .init(arena, pjrt_memory, platform, devices);
             }
 
-            platform.physical_mesh = try switch (options.physical_mesh) {
-                .auto => zml.sharding.PhysicalMesh.auto(arena.allocator(), target, devices),
-                .custom => |builder| builder(arena.allocator(), target, devices),
+            const physical_mesh = try switch (options.physical_mesh) {
+                .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
+                .custom => |builder| builder(arena, target, devices),
             };
+
+            replicated_sharding.* = try .init(physical_mesh, .init("replicated", .{ .x = .high_bandwidth }));
         }
 
         switch (target) {
             .cuda => {
-                zml.attention.flashattn.load(arena.allocator(), io) catch {
+                zml.attention.flashattn.load(arena, io) catch {
                     log.warn("Failed to load flashattn", .{});
                 };
                 zml.attention.flashattn.register(platform) catch {
@@ -490,6 +497,10 @@ pub const Platform = struct {
 
     pub fn profiler(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, options: ProfilerOptions) !Profiler {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
+    }
+
+    pub fn sharding(platform: *const Platform, logical: zml.sharding.LogicalMesh) !zml.sharding.Sharding {
+        return try .init(platform.replicated_sharding.physical, logical);
     }
 };
 

@@ -30,8 +30,8 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const replicated_sharding = compiled_model.params.shardings.replicated;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
+        const replicated_sharding = &compiled_model.params.shardings.replicated;
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, &compiled_model.params.shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
@@ -79,7 +79,7 @@ pub const Session = struct {
         @memset(prefill_tokens_slice.items(u32), 0);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const replicated_sharding = self.compiled_model.params.shardings.replicated;
+        const replicated_sharding = &self.compiled_model.params.shardings.replicated;
 
         var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
         defer prefill_tokens_buffer.deinit();
@@ -142,7 +142,7 @@ pub const Session = struct {
     fn runDecodeStep(self: *Session, token_id: u32, token_index: u32) !void {
         self.step_token_slice.items(u32)[0] = token_id;
 
-        const replicated_sharding = self.compiled_model.params.shardings.replicated;
+        const replicated_sharding = &self.compiled_model.params.shardings.replicated;
 
         var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, replicated_sharding);
         defer token_buffer.deinit();

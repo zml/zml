@@ -237,7 +237,7 @@ pub const ComposedKernelExe = struct {
         };
         defer hidden_buf.deinit();
 
-        const replicated_sharding = try zml.sharding.replicatedSharding(args.platform);
+        const replicated_sharding = args.platform.replicated_sharding;
         var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, replicated_sharding);
         defer conv_cache_index_buf.deinit();
         var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, replicated_sharding);

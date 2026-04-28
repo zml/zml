@@ -526,7 +526,7 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
+        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: *const Sharding, seed: u128) !Buffer {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
             };

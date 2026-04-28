@@ -140,7 +140,7 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: zml.sharding.Sharding,
+    sharding: *const zml.sharding.Sharding,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -194,7 +194,7 @@ pub fn main(init: std.process.Init) !void {
         .model = .high_bandwidth,
     });
     const strategy: zml.sharding.Strategy = .suggest(mesh, physical_mesh);
-    const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
+    const sharding: *const zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
 
     log.info("{f}", .{mesh});
     log.info("{f}", .{sharding});

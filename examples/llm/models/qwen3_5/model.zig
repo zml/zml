@@ -882,7 +882,7 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(kv: SelfAttnCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !SelfAttnCache.Buffers {
+        pub fn initBuffer(kv: SelfAttnCache, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !SelfAttnCache.Buffers {
             return .{
                 .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
                 .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
@@ -968,7 +968,7 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !GatedDeltaNetCache.Buffers {
+        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !GatedDeltaNetCache.Buffers {
             return .{
                 .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), sharding, .{}),
                 .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), sharding, .{}),
@@ -1047,7 +1047,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !zml.Bufferized(KvCache) {
         return .{
             .self_attn = try self.self_attn.initBuffer(io, platform, sharding),
             .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform, sharding),
