@@ -1319,21 +1319,21 @@ fn runStage1(
     const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
     const audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
     const num_heads: i64 = 32; // all LTX attention kinds use 32 heads
-    const video_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = video_seqlen, .num_heads = num_heads });
-    const audio_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = audio_seqlen, .num_heads = num_heads });
+    const video_attn_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, video_seqlen, num_heads, 128)).withReplicatedPartitioning();
+    const audio_attn_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, audio_seqlen, num_heads, 128)).withReplicatedPartitioning();
 
     // Compile args for bf16 variants include FA3 scratch buffer shapes.
     const block_compile_args_bf16 = block_compile_args_base ++ .{
         // video FA3 metadata
-        video_fa3_meta.softmax_lse,
-        video_fa3_meta.softmax_lse_accum,
-        video_fa3_meta.out_accum,
-        video_fa3_meta.scheduler_metadata,
+        video_attn_meta.cuda_fa3.softmax_lse,
+        video_attn_meta.cuda_fa3.softmax_lse_accum,
+        video_attn_meta.cuda_fa3.out_accum,
+        video_attn_meta.cuda_fa3.scheduler_metadata,
         // audio FA3 metadata
-        audio_fa3_meta.softmax_lse,
-        audio_fa3_meta.softmax_lse_accum,
-        audio_fa3_meta.out_accum,
-        audio_fa3_meta.scheduler_metadata,
+        audio_attn_meta.cuda_fa3.softmax_lse,
+        audio_attn_meta.cuda_fa3.softmax_lse_accum,
+        audio_attn_meta.cuda_fa3.out_accum,
+        audio_attn_meta.cuda_fa3.scheduler_metadata,
         block_params_shape.blocks[0],
     };
 
@@ -1388,15 +1388,15 @@ fn runStage1(
     const iso_compile_args = iso_compile_args_base ++ .{block_params_shape.blocks[0]};
     const iso_compile_args_bf16 = iso_compile_args_base ++ .{
         // video FA3 metadata
-        video_fa3_meta.softmax_lse,
-        video_fa3_meta.softmax_lse_accum,
-        video_fa3_meta.out_accum,
-        video_fa3_meta.scheduler_metadata,
+        video_attn_meta.cuda_fa3.softmax_lse,
+        video_attn_meta.cuda_fa3.softmax_lse_accum,
+        video_attn_meta.cuda_fa3.out_accum,
+        video_attn_meta.cuda_fa3.scheduler_metadata,
         // audio FA3 metadata
-        audio_fa3_meta.softmax_lse,
-        audio_fa3_meta.softmax_lse_accum,
-        audio_fa3_meta.out_accum,
-        audio_fa3_meta.scheduler_metadata,
+        audio_attn_meta.cuda_fa3.softmax_lse,
+        audio_attn_meta.cuda_fa3.softmax_lse_accum,
+        audio_attn_meta.cuda_fa3.out_accum,
+        audio_attn_meta.cuda_fa3.scheduler_metadata,
         block_params_shape.blocks[0],
     };
     var block_iso_exe = if (use_bf16_attn)
@@ -1615,15 +1615,15 @@ fn runStage1(
     defer rescale_a_buf.deinit();
 
     // ---- FA3 scratch buffers (allocated once, reused every step) ----
-    var v_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
-    var a_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    var v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    var a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     if (use_bf16_attn) {
-        v_fa3_meta_bufs = try video_fa3_meta.initBuffer(io, platform, sharding);
-        a_fa3_meta_bufs = try audio_fa3_meta.initBuffer(io, platform, sharding);
+        v_attn_meta_bufs = try video_attn_meta.initBuffer(io, platform, sharding);
+        a_attn_meta_bufs = try audio_attn_meta.initBuffer(io, platform, sharding);
     }
     defer if (use_bf16_attn) {
-        model.Fa3Metadata.deinitBuffer(&v_fa3_meta_bufs);
-        model.Fa3Metadata.deinitBuffer(&a_fa3_meta_bufs);
+        model.AttnMetadata.deinitBuffer(&v_attn_meta_bufs);
+        model.AttnMetadata.deinitBuffer(&a_attn_meta_bufs);
     };
 
     // ---- Denoising loop ----
@@ -1692,10 +1692,10 @@ fn runStage1(
                         pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
                         pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
                         pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
-                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
-                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
-                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        v_attn_meta_bufs.cuda_fa3.softmax_lse,  v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        v_attn_meta_bufs.cuda_fa3.out_accum,    v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        a_attn_meta_bufs.cuda_fa3.softmax_lse,  a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        a_attn_meta_bufs.cuda_fa3.out_accum,    a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -1766,10 +1766,10 @@ fn runStage1(
                         pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
                         pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
                         pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
-                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
-                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
-                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        v_attn_meta_bufs.cuda_fa3.softmax_lse,  v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        v_attn_meta_bufs.cuda_fa3.out_accum,    v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        a_attn_meta_bufs.cuda_fa3.softmax_lse,  a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        a_attn_meta_bufs.cuda_fa3.out_accum,    a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -1846,10 +1846,10 @@ fn runStage1(
                             pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
                             pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
                             pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                            v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
-                            v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
-                            a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
-                            a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                            v_attn_meta_bufs.cuda_fa3.softmax_lse,  v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                            v_attn_meta_bufs.cuda_fa3.out_accum,    v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                            a_attn_meta_bufs.cuda_fa3.softmax_lse,  a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                            a_attn_meta_bufs.cuda_fa3.out_accum,    a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                             block_params_bufs[i],
                         });
                     } else {
@@ -1896,10 +1896,10 @@ fn runStage1(
                             pre_out.a2v_k_pe_cos,         pre_out.a2v_k_pe_sin,
                             pre_out.v2a_pe_cos,           pre_out.v2a_pe_sin,
                             pre_out.v2a_k_pe_cos,         pre_out.v2a_k_pe_sin,
-                            v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
-                            v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
-                            a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
-                            a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                            v_attn_meta_bufs.cuda_fa3.softmax_lse,  v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                            v_attn_meta_bufs.cuda_fa3.out_accum,    v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                            a_attn_meta_bufs.cuda_fa3.softmax_lse,  a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                            a_attn_meta_bufs.cuda_fa3.out_accum,    a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                             block_params_bufs[i],
                         });
                     } else {
@@ -1972,10 +1972,10 @@ fn runStage1(
                         zero_mask_buf,                pre_out.v2a_pe_cos,
                         pre_out.v2a_pe_sin,           pre_out.v2a_k_pe_cos,
                         pre_out.v2a_k_pe_sin,         zero_mask_buf,
-                        v_fa3_meta_bufs.softmax_lse,  v_fa3_meta_bufs.softmax_lse_accum,
-                        v_fa3_meta_bufs.out_accum,    v_fa3_meta_bufs.scheduler_metadata,
-                        a_fa3_meta_bufs.softmax_lse,  a_fa3_meta_bufs.softmax_lse_accum,
-                        a_fa3_meta_bufs.out_accum,    a_fa3_meta_bufs.scheduler_metadata,
+                        v_attn_meta_bufs.cuda_fa3.softmax_lse,  v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        v_attn_meta_bufs.cuda_fa3.out_accum,    v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        a_attn_meta_bufs.cuda_fa3.softmax_lse,  a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        a_attn_meta_bufs.cuda_fa3.out_accum,    a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {
@@ -2671,18 +2671,18 @@ fn runStage2(
     const s2_video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
     const s2_audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
     const s2_num_heads: i64 = 32;
-    const s2_video_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = s2_video_seqlen, .num_heads = s2_num_heads });
-    const s2_audio_fa3_meta = model.Fa3Metadata.init(.{ .seqlen = s2_audio_seqlen, .num_heads = s2_num_heads });
+    const s2_video_fa3_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, s2_video_seqlen, s2_num_heads, 128)).withReplicatedPartitioning();
+    const s2_audio_fa3_meta = model.AttnMetadata.init(.fromBackendWithHeadDim(.cuda_fa3, s2_audio_seqlen, s2_num_heads, 128)).withReplicatedPartitioning();
 
     const block_compile_args_bf16 = block_compile_args_base ++ .{
-        s2_video_fa3_meta.softmax_lse,
-        s2_video_fa3_meta.softmax_lse_accum,
-        s2_video_fa3_meta.out_accum,
-        s2_video_fa3_meta.scheduler_metadata,
-        s2_audio_fa3_meta.softmax_lse,
-        s2_audio_fa3_meta.softmax_lse_accum,
-        s2_audio_fa3_meta.out_accum,
-        s2_audio_fa3_meta.scheduler_metadata,
+        s2_video_fa3_meta.cuda_fa3.softmax_lse,
+        s2_video_fa3_meta.cuda_fa3.softmax_lse_accum,
+        s2_video_fa3_meta.cuda_fa3.out_accum,
+        s2_video_fa3_meta.cuda_fa3.scheduler_metadata,
+        s2_audio_fa3_meta.cuda_fa3.softmax_lse,
+        s2_audio_fa3_meta.cuda_fa3.softmax_lse_accum,
+        s2_audio_fa3_meta.cuda_fa3.out_accum,
+        s2_audio_fa3_meta.cuda_fa3.scheduler_metadata,
         block_params_shape.blocks[0],
     };
 
@@ -2826,15 +2826,15 @@ fn runStage2(
     timer.addLoad();
 
     // ---- FA3 scratch buffers for Stage 2 ----
-    var s2_v_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
-    var s2_a_fa3_meta_bufs: zml.Bufferized(model.Fa3Metadata) = undefined;
+    var s2_v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
+    var s2_a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     if (use_bf16_attn) {
-        s2_v_fa3_meta_bufs = try s2_video_fa3_meta.initBuffer(io, platform, sharding);
-        s2_a_fa3_meta_bufs = try s2_audio_fa3_meta.initBuffer(io, platform, sharding);
+        s2_v_attn_meta_bufs = try s2_video_fa3_meta.initBuffer(io, platform, sharding);
+        s2_a_attn_meta_bufs = try s2_audio_fa3_meta.initBuffer(io, platform, sharding);
     }
     defer if (use_bf16_attn) {
-        model.Fa3Metadata.deinitBuffer(&s2_v_fa3_meta_bufs);
-        model.Fa3Metadata.deinitBuffer(&s2_a_fa3_meta_bufs);
+        model.AttnMetadata.deinitBuffer(&s2_v_attn_meta_bufs);
+        model.AttnMetadata.deinitBuffer(&s2_a_attn_meta_bufs);
     };
 
     // ---- Denoising loop: N-step Euler ----
@@ -2902,10 +2902,10 @@ fn runStage2(
                         pre_out.a2v_k_pe_cos,           pre_out.a2v_k_pe_sin,
                         pre_out.v2a_pe_cos,             pre_out.v2a_pe_sin,
                         pre_out.v2a_k_pe_cos,           pre_out.v2a_k_pe_sin,
-                        s2_v_fa3_meta_bufs.softmax_lse, s2_v_fa3_meta_bufs.softmax_lse_accum,
-                        s2_v_fa3_meta_bufs.out_accum,   s2_v_fa3_meta_bufs.scheduler_metadata,
-                        s2_a_fa3_meta_bufs.softmax_lse, s2_a_fa3_meta_bufs.softmax_lse_accum,
-                        s2_a_fa3_meta_bufs.out_accum,   s2_a_fa3_meta_bufs.scheduler_metadata,
+                        s2_v_attn_meta_bufs.cuda_fa3.softmax_lse, s2_v_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        s2_v_attn_meta_bufs.cuda_fa3.out_accum,   s2_v_attn_meta_bufs.cuda_fa3.scheduler_metadata,
+                        s2_a_attn_meta_bufs.cuda_fa3.softmax_lse, s2_a_attn_meta_bufs.cuda_fa3.softmax_lse_accum,
+                        s2_a_attn_meta_bufs.cuda_fa3.out_accum,   s2_a_attn_meta_bufs.cuda_fa3.scheduler_metadata,
                         block_params_bufs[i],
                     });
                 } else {

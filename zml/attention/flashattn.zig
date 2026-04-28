@@ -412,13 +412,21 @@ pub const fa3 = struct {
     }
 
     pub const Parameters = struct {
-        pub const InitOptions = struct {};
+        is_causal: bool = true,
+
+        pub const InitOptions = struct {
+            is_causal: bool = true,
+        };
 
         pub fn init(opts: InitOptions) fa3.Parameters {
-            _ = opts;
-            return .{};
+            return .{ .is_causal = opts.is_causal };
         }
     };
+
+    /// Maximum number of splits the FA3 kernel may use at runtime when
+    /// num_splits=0 (auto). The kernel picks splits based on available SMs
+    /// and work per split. We pre-allocate scratch buffers for this worst case.
+    pub const MAX_NUM_SPLITS: i64 = 8;
 
     pub const Metadata = struct {
         softmax_lse: zml.Tensor,
@@ -429,15 +437,19 @@ pub const fa3 = struct {
         pub const InitOptions = struct {
             seqlen: i64,
             num_heads: i64,
+            head_dim: i64 = 128,
         };
 
         pub fn init(opts: InitOptions) Metadata {
             return .{
+                // softmax_lse: [num_heads, seqlen] of f32
                 .softmax_lse = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .softmax_lse_accum = .fromShape(zml.Shape.init(.{opts.num_heads * 128 * 4}, .i8)
+                // softmax_lse_accum: [max_splits, num_heads, seqlen] of f32
+                .softmax_lse_accum = .fromShape(zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
-                .out_accum = .fromShape(zml.Shape.init(.{opts.num_heads * opts.seqlen * 128 * 4}, .i8)
+                // out_accum: [max_splits, num_heads, seqlen, head_dim] of f32
+                .out_accum = .fromShape(zml.Shape.init(.{MAX_NUM_SPLITS * opts.num_heads * opts.seqlen * opts.head_dim * 4}, .i8)
                     .withTags(.{.h}).withPartitioning(.{ .h = .model })),
                 .scheduler_metadata = .fromShape(zml.Shape.init(.{2}, .i32)
                     .withTags(.{.meta}).withPartitioning(.{ .meta = .replicated })),
@@ -453,6 +465,17 @@ pub const fa3 = struct {
             };
         }
 
+        /// Replace .model partitioning with .replicated on all head-sharded tensors.
+        /// Use this for single-GPU deployment where no .model mesh axis is defined.
+        pub fn withReplicatedPartitioning(self: Metadata) Metadata {
+            return .{
+                .softmax_lse = self.softmax_lse.withPartitioning(.{ .h = .replicated }),
+                .softmax_lse_accum = self.softmax_lse_accum.withPartitioning(.{ .h = .replicated }),
+                .out_accum = self.out_accum.withPartitioning(.{ .h = .replicated }),
+                .scheduler_metadata = self.scheduler_metadata,
+            };
+        }
+
         pub fn deinitBuffer(self: *zml.Bufferized(Metadata)) void {
             self.softmax_lse.deinit();
             self.softmax_lse_accum.deinit();
@@ -461,7 +484,8 @@ pub const fa3 = struct {
         }
     };
 
-    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, _: Parameters) zml.Tensor {
+    /// Causal attention with KV-cache token index (for autoregressive decoding).
+    pub fn attention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
         stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3.attention support for batch size != 1 is not supported yet.", .{});
         const seqused_k = token_index.addConstant(q_.dim(.q)).reshape(.{1});
         // TODO(Corendos): replace with cumsum
@@ -469,16 +493,31 @@ pub const fa3 = struct {
             const zero = zml.Tensor.constant(token_index.dtype().zero()).reshape(.{1});
             break :b zml.Tensor.concatenate(&.{ zero, seqused_k }, 0).convert(.i32);
         };
+        return fa3CustomCall(q_, k_, v_, cu_seqlens_k, metadata, parameters);
+    }
+
+    /// Full-sequence attention (no KV-cache, no token index).
+    /// Supports both causal and non-causal via parameters.is_causal.
+    pub fn fullSequenceAttention(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+        stdx.debug.assert(q_.shape().hasTag(.b) == null or q_.dim(.b) == 1, "fa3: batch size != 1 is not supported yet.", .{});
+        const max_seqlen_k: i32 = @intCast(k_.dim(.k));
+        const cu_seqlens_k = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_k }))
+            .withPartitioning(.{ ._0 = .replicated });
+        return fa3CustomCall(q_, k_, v_, cu_seqlens_k, metadata, parameters);
+    }
+
+    /// Shared FA3 custom call emission.
+    fn fa3CustomCall(q_: zml.Tensor, k_: zml.Tensor, v_: zml.Tensor, cu_seqlens_k: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
         const max_seqlen_q: i32 = @intCast(q_.dim(.q));
         const max_seqlen_k: i32 = @intCast(k_.dim(.k));
-        var q = q_.insertAxes(.q, .{.b}).merge(.{ .tot = .{ .b, .q } });
+        const q = q_.insertAxes(.q, .{.b}).merge(.{ .tot = .{ .b, .q } });
         const k = k_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         const v = v_.insertAxes(.k, .{.b}).merge(.{ .tot = .{ .b, .k } });
         // TODO(Corendos): replace with cumsum
         const cu_seqlens_q = zml.Tensor.constantTensor(zml.Shape.init(.{2}, .i32), std.mem.sliceAsBytes(&[2]i32{ 0, max_seqlen_q }))
             .withPartitioning(.{ ._0 = .replicated });
 
-        var o = zml.ops.customCall(
+        const o = zml.ops.customCall(
             custom_call_name,
             .{
                 q,
@@ -493,7 +532,7 @@ pub const fa3 = struct {
             },
             .{q.shape()},
             .{
-                .is_causal = true,
+                .is_causal = parameters.is_causal,
                 .window_size_left = @as(i32, -1),
                 .window_size_right = @as(i32, -1),
                 .max_seqlen_q = max_seqlen_q,

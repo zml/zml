@@ -68,10 +68,14 @@ pub const Metadata = union(Backend) {
         cuda_fa3: flashattn.fa3.Metadata.InitOptions,
 
         pub fn fromBackend(backend: Backend, seqlen: i64, num_heads: i64) InitOptions {
+            return fromBackendWithHeadDim(backend, seqlen, num_heads, 128);
+        }
+
+        pub fn fromBackendWithHeadDim(backend: Backend, seqlen: i64, num_heads: i64, head_dim: i64) InitOptions {
             return switch (backend) {
                 .vanilla => .{ .vanilla = {} },
                 .cuda_fa2 => .{ .cuda_fa2 = .{ .seqlen = seqlen, .num_heads = num_heads } },
-                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads } },
+                .cuda_fa3 => .{ .cuda_fa3 = .{ .seqlen = seqlen, .num_heads = num_heads, .head_dim = head_dim } },
             };
         }
     };
@@ -99,8 +103,19 @@ pub const Metadata = union(Backend) {
             .cuda_fa3 => |*v| flashattn.fa3.Metadata.deinitBuffer(v),
         }
     }
+
+    /// Replace .model partitioning with .replicated on all head-sharded tensors.
+    /// Use this for single-GPU deployment where no .model mesh axis is defined.
+    pub fn withReplicatedPartitioning(self: Metadata) Metadata {
+        return switch (self) {
+            .vanilla => .{ .vanilla = {} },
+            .cuda_fa2 => @panic("withReplicatedPartitioning not yet supported for FA2"),
+            .cuda_fa3 => |v| .{ .cuda_fa3 = v.withReplicatedPartitioning() },
+        };
+    }
 };
 
+/// Causal attention with KV-cache token index (for autoregressive LLM decoding).
 pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
     return switch (parameters) {
         .vanilla => b: {
@@ -115,6 +130,17 @@ pub fn attention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.T
             break :b attn_output;
         },
         .cuda_fa2 => flashattn.fa2.attention(q, k, v, token_index, metadata.cuda_fa2, parameters.cuda_fa2),
-        .cuda_fa3 => flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, parameters.cuda_fa3),
+        .cuda_fa3 => |params| flashattn.fa3.attention(q, k, v, token_index, metadata.cuda_fa3, params),
+    };
+}
+
+/// Full-sequence attention (no KV-cache, no token index).
+/// Supports both causal and non-causal via parameters.is_causal (FA3 only;
+/// vanilla and FA2 always use non-causal / no mask).
+pub fn fullSequenceAttention(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, metadata: Metadata, parameters: Parameters) zml.Tensor {
+    return switch (parameters) {
+        .vanilla => zml.nn.sdpa(q, k, v, .{ .allow_cudnn = true }),
+        .cuda_fa2 => @panic("fullSequenceAttention not yet supported for FA2"),
+        .cuda_fa3 => |params| flashattn.fa3.fullSequenceAttention(q, k, v, metadata.cuda_fa3, params),
     };
 }
