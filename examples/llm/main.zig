@@ -122,21 +122,16 @@ pub fn main(init: std.process.Init) !void {
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     errdefer progress.end();
 
-    var fut_tokenizer = io.async(loadTokenizer, .{ allocator, io, repo, &progress });
-
-    var fut_compiled_model = io.async(models.LoadedModel.compile, .{ &model, allocator, io, platform, backend, shardings, args.seqlen, &progress });
-
-    // Load buffers after the model compilation to be sure to give enough room to the autotune.
-    var fut_model_buffers = io.async(models.LoadedModel.loadBuffers, .{ &model, allocator, io, platform, &store, &progress, shardings });
-
-    var tokenizer = try fut_tokenizer.await(io);
+    var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var compiled_model = try fut_compiled_model.await(io);
+    var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
 
-    var model_buffers = try fut_model_buffers.await(io);
+    // Load buffers after the model compilation to be sure to give enough room to the autotune.
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
     defer model.unloadBuffers(&model_buffers, allocator);
+
     progress.end();
 
     //
