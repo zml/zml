@@ -14,6 +14,8 @@ zig_library(
         "//bin/zml-smi/info",
         "//bin/zml-smi/utils:double_buffer",
         "//bin/zml-smi/utils:dynlib",
-        "@cuda_nvml_dev//:nvml",
-    ],
+    ] + select({
+        "@llvm//platforms/config:linux_x86_64": ["@cuda_nvml_dev_linux_x86_64//:nvml"],
+        "@llvm//platforms/config:linux_aarch64": ["@cuda_nvml_dev_linux_sbsa//:nvml"],
+    }),
 )

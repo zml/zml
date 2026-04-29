@@ -41,7 +41,7 @@ copy_to_directory(
     name = "sandbox",
     srcs = select({
         "@platforms//os:macos": [],
-        "//conditions:default": [
+        "@llvm//platforms/config:linux_x86_64": [
             ":libncfw.stripped",
             ":libnrt.stripped",
             "//platforms/rocm:zmlxrocm",
@@ -50,6 +50,7 @@ copy_to_directory(
             "@libdrm2-amdgpu//:libdrm2-amdgpu",
             "@libpjrt_rocm//:amdgpu_ids",
         ],
+        "@llvm//platforms/config:linux_aarch64": [],
     }),
     include_external_repositories = ["**"],
     replace_prefixes = {
@@ -93,14 +94,19 @@ zig_binary(
         "@rules_zig//zig/runfiles",
     ] + select({
         "@platforms//os:macos": ["//bin/zml-smi/platforms/macos"],
-        "//conditions:default": [
-            "//bin/zml-smi/platforms/linux",
+        "@platforms//os:linux": ["//bin/zml-smi/platforms/linux"],
+    }) + select({
+        "@llvm//platforms/config:linux_x86_64": [
             "//bin/zml-smi/platforms/amdsmi",
             "//bin/zml-smi/platforms/neuron",
             "//bin/zml-smi/platforms/nvml",
             "//bin/zml-smi/platforms/tpu",
             "//platforms/neuron:libnrt_headers",
         ],
+        "@llvm//platforms/config:linux_aarch64": [
+            "//bin/zml-smi/platforms/nvml",
+        ],
+        "//conditions:default": [],
     }),
 )
 
@@ -189,6 +195,10 @@ oci_image(
     name = "image_",
     base = "@distroless_cc_debian12",
     entrypoint = ["/zml-smi/zml-smi"],
+    target_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
     tars = [
         ":archive_linux_amd64",
     ],

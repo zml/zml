@@ -113,11 +113,13 @@ pub const Session = struct {
         var decoder = try self.tokenizer.decoder();
         defer decoder.deinit();
 
+        const out_tokens_buffer: []u8 = try self.allocator.alloc(u8, 1024);
+        defer self.allocator.free(out_tokens_buffer);
         generation: while (true) {
             const token_id = self.generated_token_slice.items(u32)[0];
             if (token_id == self.eos_token_id) break :generation;
 
-            const token = try decoder.feed_one(token_id);
+            const token = try decoder.feedOne(token_id, out_tokens_buffer);
             if (self.think_start) |think_start| if (token_id == think_start) {
                 try stdout.writeAll("\x1b[2m");
             };
@@ -133,7 +135,7 @@ pub const Session = struct {
             try self.runDecodeStep(token_id, @intCast(all_tokens.items.len));
         }
 
-        try stdout.writeAll(try decoder.finalize());
+        try stdout.writeAll(try decoder.finalize(out_tokens_buffer));
         try stdout.flush();
     }
 
@@ -174,7 +176,7 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
 
     const im_start = tokenizer.tokenId("<|im_start|>") orelse special_tokens.im_start_token_id;
     const im_end = tokenizer.tokenId("<|im_end|>") orelse special_tokens.im_end_token_id;
-    const newline = tokenizer.tokenId("\n") orelse return error.NoSuchToken;
+    const newline = tokenizer.tokenId("\\n") orelse return error.NoSuchToken;
 
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 32);
     if (!is_first_turn) {
@@ -182,10 +184,16 @@ fn tokenizeChatPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tok
     }
 
     try tokens.append(allocator, im_start);
-    try encoder.encodeAppend(allocator, &tokens, "user\n");
-    try encoder.encodeAppend(allocator, &tokens, prompt);
+    const user_tokens = try encoder.encodeAlloc(allocator, "user\n");
+    defer allocator.free(user_tokens);
+    try tokens.appendSlice(allocator, user_tokens);
+    const prompt_tokens = try encoder.encodeAlloc(allocator, prompt);
+    defer allocator.free(prompt_tokens);
+    try tokens.appendSlice(allocator, prompt_tokens);
     try tokens.appendSlice(allocator, &.{ im_end, newline, im_start });
-    try encoder.encodeAppend(allocator, &tokens, "assistant\n");
+    const assistant_tokens = try encoder.encodeAlloc(allocator, "assistant\n");
+    defer allocator.free(assistant_tokens);
+    try tokens.appendSlice(allocator, assistant_tokens);
 
     return tokens.toOwnedSlice(allocator);
 }

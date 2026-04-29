@@ -63,9 +63,9 @@ jobs:
             runner_labels: ["self-hosted", "platform=rocm"]
     runs-on: ${{ matrix.runner_labels }}
     steps:
-      - uses: runs-on/action@v1
+      - uses: runs-on/action@v2.1.0
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Ensure self hosted cache permissions
         if: ${{ matrix.self_hosted }}
@@ -90,7 +90,8 @@ jobs:
             ${{ matrix.self_hosted && 'common --disk_cache=/home/actions/.cache/bazel-disk' || '' }}
 
       - run: bazel mod graph
-      - run: bazel query ${{ matrix.bazel_opts }} //...
+      - run: bazel query --output=graph ${{ matrix.bazel_opts }} //...
+      - run: bazel cquery ${{ matrix.bazel_opts }} //...
       - run: bazel build ${{ matrix.bazel_opts }} //...
       - if: ${{ matrix.run_tests }}
         run: bazel test ${{ matrix.bazel_opts }} //...
@@ -105,14 +106,14 @@ jobs:
         "extras=s3-cache",
       ]
     steps:
-      - uses: runs-on/action@v1
+      - uses: runs-on/action@v2.1.0
       - name: Checkout
         uses: actions/checkout@v6
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@v2.2.1
         with:
-          version: 0.15.2
+          version: 0.16.0
           mirror: https://mirror.zml.ai/zig
 
       - name: Zig Format

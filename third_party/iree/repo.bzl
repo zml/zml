@@ -13,6 +13,7 @@ def repo():
         ],
         patches = [
             "//third_party/iree:tokenizer-only.patch",
+            "//third_party/iree:fix-gemma4-encode.patch",
         ],
         patch_args = ["-p1"],
     )

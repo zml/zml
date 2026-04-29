@@ -88,7 +88,7 @@ pub fn reduce(inputs: anytype, inits: anytype, axes_: []const i64, comptime func
     // To that order, we initialize `result` to `inputs`, then we use stdx.meta.visit,
     // to find the correct mlir.Value, but we first broadcast before creating the final
     // Tensor struct.
-    var broadcasting_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    var broadcasting_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
     for (0..constants.MAX_RANK) |i| {
         if (std.mem.indexOfScalar(i64, axes_, @intCast(i)) == null) {
             broadcasting_axes.append(@intCast(i)) catch unreachable;
@@ -713,11 +713,11 @@ pub fn scatter(
 }
 
 const ScatterConfig = struct {
-    op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{},
-    up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{},
-    indices_batch_axes: Shape.DimsArray = .{},
-    scatter_to_operand_axes: Shape.DimsArray = .{},
-    updates_transpose: Shape.AxesArray = .{},
+    op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty,
+    up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty,
+    indices_batch_axes: Shape.DimsArray = .empty,
+    scatter_to_operand_axes: Shape.DimsArray = .empty,
+    updates_transpose: Shape.AxesArray = .empty,
 };
 
 const ScatterAxisKind = enum { batching, update_window, inserted_window, window_id };
@@ -728,11 +728,11 @@ fn scatterConfig(
     indices_per_axis: stdx.BoundedArray(Tensor, constants.MAX_RANK),
     indices_axes: Shape.TagsArray,
 ) ScatterConfig {
-    var op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{};
-    var up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .{};
-    var indices_batch_axes: Shape.DimsArray = .{};
-    var scatter_to_operand_axes: Shape.DimsArray = .{};
-    var updates_transpose: Shape.AxesArray = .{};
+    var op_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty;
+    var up_kind: stdx.BoundedArray(ScatterAxisKind, constants.MAX_RANK) = .empty;
+    var indices_batch_axes: Shape.DimsArray = .empty;
+    var scatter_to_operand_axes: Shape.DimsArray = .empty;
+    var updates_transpose: Shape.AxesArray = .empty;
 
     const tagged_api = indices_axes.len > 0;
     const indices = indices_per_axis.get(0).shape();
@@ -878,12 +878,12 @@ fn scatterPrepareIndices(
         cfg.up_kind.buffer[update.axis(batch_tag)] = .window_id;
         old_scatter_to_op_axes.appendAssumeCapacity(batch_ax);
     }
-    cfg.indices_batch_axes = .{};
+    cfg.indices_batch_axes = .empty;
 
     // Reorder the axes so that in indices_per_axis is ordered like in op if possible.
     // TODO: transpose updates if needed
-    var indices: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .{};
-    var scatter_to_op_axes: Shape.DimsArray = .{};
+    var indices: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .empty;
+    var scatter_to_op_axes: Shape.DimsArray = .empty;
 
     while (old_scatter_to_op_axes.len > 0) {
         const scatter_ax = std.sort.argMin(i64, old_scatter_to_op_axes.constSlice(), {}, std.sort.asc(i64)).?;
@@ -927,7 +927,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
         stdx.debug.assert(idx.shape().canBroadcastTo(indices_shape), "gather indices can't be broadcasted together {any}", .{idx_per_axis});
     }
 
-    var idx_batch_axes: Shape.DimsArray = .{};
+    var idx_batch_axes: Shape.DimsArray = .empty;
 
     var self_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{ .buffer = @splat(.offset), .len = self.rank() };
 
@@ -950,7 +950,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 
     // compute res shape
     var res_shape = Shape.init(.{}, self.dtype());
-    var res_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .{};
+    var res_kind: stdx.BoundedArray(GatherAxisKind, constants.MAX_RANK) = .empty;
     for (self_kind.slice(), 0..) |kind, ax_usize| {
         const ax: u3 = @intCast(ax_usize);
         if (ax == idx_axes[0]) {
@@ -980,7 +980,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
         return self.dynamicSlice1d(idx_axes[0], .{ .start = idx_per_axis[0].asScalar(), .len = 1 }).reshape(res_shape);
     }
 
-    var slice_dims: Shape.DimsArray = .{};
+    var slice_dims: Shape.DimsArray = .empty;
     for (self_kind.slice(), self.dims()) |k, d| {
         slice_dims.appendAssumeCapacity(switch (k) {
             .batching, .collapsed => 1,
@@ -1015,7 +1015,7 @@ pub fn gather(self: Tensor, idx_axes: []const u3, idx_per_axis: []const Tensor, 
 }
 
 pub fn _collectAxes(T: type, bounded_array: stdx.BoundedArray(T, constants.MAX_RANK), value: T) stdx.BoundedArray(i64, constants.MAX_RANK) {
-    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
     for (bounded_array.constSlice(), 0..) |v, ax| {
         if (v == value) {
             res.appendAssumeCapacity(@intCast(ax));
@@ -1499,6 +1499,58 @@ fn manualComputationSliceToReturn(comptime ReturnT: type, outputs: []Tensor) Ret
     return outputs;
 }
 
+fn metadataIntegerFieldToMlirAttribute(mlir_ctx: *mlir.Context, int_field: std.builtin.Type.Int, value: anytype) *const mlir.Attribute {
+    return switch (int_field.signedness) {
+        .signed => switch (int_field.bits) {
+            8 => mlir.integerAttribute(mlir_ctx, .i8, value),
+            16 => mlir.integerAttribute(mlir_ctx, .i16, value),
+            32 => mlir.integerAttribute(mlir_ctx, .i32, value),
+            64 => mlir.integerAttribute(mlir_ctx, .i64, value),
+            else => @panic("Unsupported DataType"),
+        },
+        .unsigned => switch (int_field.bits) {
+            8 => mlir.integerAttribute(mlir_ctx, .u8, value),
+            16 => mlir.integerAttribute(mlir_ctx, .u16, value),
+            32 => mlir.integerAttribute(mlir_ctx, .u32, value),
+            64 => mlir.integerAttribute(mlir_ctx, .u64, value),
+            else => @panic("Unsupported DataType"),
+        },
+    };
+}
+
+fn metadataFloatFieldToMlirAttribute(mlir_ctx: *mlir.Context, float_field: std.builtin.Type.Float, value: anytype) *const mlir.Attribute {
+    return switch (float_field.bits) {
+        16 => mlir.floatAttribute(mlir_ctx, .f16, @as(f64, value)),
+        32 => mlir.floatAttribute(mlir_ctx, .f32, @as(f64, value)),
+        64 => mlir.floatAttribute(mlir_ctx, .f64, @as(f64, value)),
+        else => @panic("Unsupported DataType"),
+    };
+}
+
+fn metadataFieldToMlirAttribute(mlir_ctx: *mlir.Context, comptime T: type, value: anytype) ?*const mlir.Attribute {
+    const type_info = @typeInfo(T);
+    return switch (type_info) {
+        .comptime_int => mlir.integerAttribute(mlir_ctx, .u64, @as(u64, value)),
+        .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, value),
+        .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, value),
+        .bool => mlir.boolAttribute(mlir_ctx, value),
+        .pointer => |pointer_info| switch (pointer_info.size) {
+            .slice => if (pointer_info.child == u8)
+                mlir.stringAttribute(mlir_ctx, value)
+            else
+                @panic("Unsupported pointer type in metadata"),
+            else => @panic("Unsupported pointer type in metadata"),
+        },
+        .optional => |optional_info| if (value) |wrapped_value| switch (@typeInfo(optional_info.child)) {
+            .int => |int_field| metadataIntegerFieldToMlirAttribute(mlir_ctx, int_field, wrapped_value),
+            .float => |float_field| metadataFloatFieldToMlirAttribute(mlir_ctx, float_field, wrapped_value),
+            .bool => mlir.boolAttribute(mlir_ctx, wrapped_value),
+            else => @panic("Unsupported optional child type in metadata"),
+        } else null,
+        else => @compileError("Unsupported metadata type: " ++ @typeName(T)),
+    };
+}
+
 fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs: []const Shape, metadata: anytype, opts: CustomCallOptions) []Tensor {
     const ctx = CompilationContext.current();
     const allocator = ctx.arena.allocator();
@@ -1520,51 +1572,7 @@ fn customCallInternal(target_name: [:0]const u8, inputs: []const Tensor, outputs
     const metadata_type_info = @typeInfo(@TypeOf(metadata));
     var metadata_attribute_list = std.ArrayList(mlir.NamedAttribute).initCapacity(allocator, metadata_type_info.@"struct".fields.len + 2) catch unreachable;
     inline for (metadata_type_info.@"struct".fields) |field| {
-        const maybe_attribute: ?*const mlir.Attribute = switch (@typeInfo(field.type)) {
-            .comptime_int => mlir.integerAttribute(ctx.mlir_ctx, .u64, @as(u64, @field(metadata, field.name))),
-            .int => |int_field| switch (int_field.signedness) {
-                .signed => switch (int_field.bits) {
-                    8 => mlir.integerAttribute(ctx.mlir_ctx, .i8, @field(metadata, field.name)),
-                    16 => mlir.integerAttribute(ctx.mlir_ctx, .i16, @field(metadata, field.name)),
-                    32 => mlir.integerAttribute(ctx.mlir_ctx, .i32, @field(metadata, field.name)),
-                    64 => mlir.integerAttribute(ctx.mlir_ctx, .i64, @field(metadata, field.name)),
-                    else => @panic("Unsupported DataType"),
-                },
-                .unsigned => switch (int_field.bits) {
-                    8 => mlir.integerAttribute(ctx.mlir_ctx, .u8, @field(metadata, field.name)),
-                    16 => mlir.integerAttribute(ctx.mlir_ctx, .u16, @field(metadata, field.name)),
-                    32 => mlir.integerAttribute(ctx.mlir_ctx, .u32, @field(metadata, field.name)),
-                    64 => mlir.integerAttribute(ctx.mlir_ctx, .u64, @field(metadata, field.name)),
-                    else => @panic("Unsupported DataType"),
-                },
-            },
-            .float => |float_field| switch (float_field.bits) {
-                16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, @field(metadata, field.name))),
-                32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, @field(metadata, field.name))),
-                64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, @field(metadata, field.name))),
-                else => @panic("Unsupported DataType"),
-            },
-            .bool => mlir.boolAttribute(ctx.mlir_ctx, @field(metadata, field.name)),
-            .pointer => |pointer_info| switch (pointer_info.size) {
-                .slice => if (pointer_info.child == u8)
-                    mlir.stringAttribute(ctx.mlir_ctx, @field(metadata, field.name))
-                else
-                    @panic("Unsupported pointer type in metadata"),
-                else => @panic("Unsupported pointer type in metadata"),
-            },
-            .optional => |optional_info| if (@field(metadata, field.name)) |value| switch (@typeInfo(optional_info.child)) {
-                .float => |float_field| switch (float_field.bits) {
-                    16 => mlir.floatAttribute(ctx.mlir_ctx, .f16, @as(f64, value)),
-                    32 => mlir.floatAttribute(ctx.mlir_ctx, .f32, @as(f64, value)),
-                    64 => mlir.floatAttribute(ctx.mlir_ctx, .f64, @as(f64, value)),
-                    else => @panic("Unsupported DataType"),
-                },
-
-                else => @panic("Unsupported optional child type in metadata"),
-            } else null,
-            else => @compileError("Unsupported metadata type: " ++ @typeName(field.type)),
-        };
-        if (maybe_attribute) |attribute| {
+        if (metadataFieldToMlirAttribute(ctx.mlir_ctx, field.type, @field(metadata, field.name))) |attribute| {
             metadata_attribute_list.appendAssumeCapacity(mlir.NamedAttribute.named(ctx.mlir_ctx, field.name, attribute));
         }
     }
@@ -2002,7 +2010,7 @@ test "CustomCallOutputOperandAliases maps named fields to indices" {
 }
 
 fn toUsize(values: anytype) stdx.BoundedArray(usize, constants.MAX_RANK) {
-    var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .{};
+    var res: stdx.BoundedArray(usize, constants.MAX_RANK) = .empty;
     for (values) |val| res.appendAssumeCapacity(@intCast(val));
     return res;
 }

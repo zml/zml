@@ -31,18 +31,12 @@ bazel_dep(name = "rules_shell", version = "0.6.1")
 bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
-    commit = "56911842f4527df036e8d52e78dd0f54a22d4215",
+    commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
     remote = "https://github.com/zml/rules_zig.git",
 )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.7.0")
-git_override(
-    module_name = "llvm",
-    commit = "9086d034fa7b91b61db0ad66fc78453e576299cd",
-    remote = "https://github.com/hermeticbuild/hermetic-llvm.git",
-)
-
+bazel_dep(name = "llvm", version = "0.7.3")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
@@ -67,7 +61,7 @@ zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
     translate_c = "@translate-c",
-    zig_version = "0.16.0-dev.3153+d6f43caad",
+    zig_version = "0.16.0",
 )
 zig.mirrors(urls = [
     "https://pkg.machengine.org/zig",
@@ -148,14 +142,28 @@ pip.parse(
     hub_name = "triton_py_deps",
     python_version = "3.12",
     requirements_lock = "//zml/attention/triton:requirements.lock.txt",
+    target_platforms = [
+        "linux_x86_64",
+        "linux_arm64",
+    ],
 )
 use_repo(pip, "triton_py_deps")
+
+# For TPU IR generation
+pip.parse(
+    download_only = False,
+    hub_name = "tpu_py_deps",
+    python_version = "3.12",
+    requirements_lock = "//platforms/tpu:requirements.lock.txt",
+    target_platforms = ["linux_x86_64"],
+)
+use_repo(pip, "tpu_py_deps")
 
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
 cuda = use_extension("//platforms/cuda:cuda.bzl", "cuda_packages")
-use_repo(cuda, "cuda_nvml_dev", "libpjrt_cuda")
+use_repo(cuda, "libpjrt_cuda_linux_amd64", "libpjrt_cuda_linux_arm64", "cuda_nvml_dev_linux_x86_64", "cuda_nvml_dev_linux_sbsa", "zlib1g_linux_arm64", "zlib1g_linux_amd64")
 
 rocm = use_extension("//platforms/rocm:rocm.bzl", "rocm_packages")
 use_repo(rocm, "amd-smi-lib", "hipblaslt", "libdrm-amdgpu-amdgpu1", "libdrm2-amdgpu", "libpjrt_rocm", "rocblas")
@@ -164,7 +172,7 @@ tpu = use_extension("//platforms/tpu:tpu.bzl", "tpu_packages")
 use_repo(tpu, "libpjrt_tpu")
 
 neuron = use_extension("//platforms/neuron:neuron.bzl", "neuron_packages")
-use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron", "zlib1g")
+use_repo(neuron, "aws-neuronx-collectives", "aws-neuronx-runtime-lib", "libgomp1", "libpjrt_neuron")
 
 zls = use_extension("//third_party/zls:zls_toolchain.bzl", "zls_toolchains")
 use_repo(zls, "zls_toolchains")
@@ -172,7 +180,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -258,7 +266,7 @@ oci.pull(
 oci.pull(
     name = "debian_12",
     digest = "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
-    image = "docker.io/library/debian:12",
+    image = "mirror.gcr.io/library/debian:12",
     platforms = ["linux/amd64"],
 )
 use_repo(

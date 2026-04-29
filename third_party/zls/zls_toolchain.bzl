@@ -2,13 +2,19 @@
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-_VERSION = "0.16.0-dev.254+695a1d5c"
+_VERSION = "0.16.0"
 
 _ZLS_PLATFORMS = {
     "x86_64-linux": struct(
         compatible_with = [
             "@platforms//os:linux",
             "@platforms//cpu:x86_64",
+        ],
+    ),
+    "aarch64-linux": struct(
+        compatible_with = [
+            "@platforms//os:linux",
+            "@platforms//cpu:aarch64",
         ],
     ),
     "x86_64-macos": struct(
@@ -26,9 +32,10 @@ _ZLS_PLATFORMS = {
 }
 
 _ZLS_VERSIONS = {
-    "x86_64-linux": "b02f9623a0cec2475c26268f12f49f48b81e9c41f2a8a6628806452685cd1013",
-    "x86_64-macos": "4cab46f56a9685822a5ad3665af3a9b11d2556313defa634b5e8b85cac8151cb",
-    "aarch64-macos": "8e4ef0603042a2081ae02672ad72f271d8c840746bbfa0ed9934c6b72ea10d7b",
+    "x86_64-linux": "ded6d562a0b86ee878b1ddf70ffab2797ce3cdca3b02d6077548f9d56dff96b6",
+    "aarch64-linux": "430cd293d201eb70ae2519dbc96c854bf8791b8df7fc9392e8d2dc9680a2bed7",
+    "x86_64-macos": "49f716ea96c1aadaecaa5d9c0a50874cbcf443dc42b825f1e7ee35499ad3eb96",
+    "aarch64-macos": "b93ec549f8558a7e85984a840e9276d274f1059b54ade4254296ef4982958359",
 }
 
 ZlsToolchainInfo = provider(
@@ -105,7 +112,6 @@ def _zls_toolchains_repo_impl(rctx):
 toolchain(
     name = "{platform}_toolchain",
     exec_compatible_with = {compatible_with},
-    target_compatible_with = {compatible_with},
     toolchain = "@zls_{platform}//:toolchain",
     toolchain_type = "@zml//third_party/zls:toolchain_type",
 )

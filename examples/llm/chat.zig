@@ -25,6 +25,7 @@ pub fn rememberPrompt(line: [*:0]const u8) void {
 pub const Chat = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
+    platform: *const zml.Platform,
     session: models.Session,
     tokens: std.ArrayList(u32),
 
@@ -48,6 +49,7 @@ pub const Chat = struct {
         return .{
             .allocator = allocator,
             .io = io,
+            .platform = platform,
             .session = session,
             .tokens = try .initCapacity(allocator, session.maxTokens()),
         };
@@ -58,16 +60,42 @@ pub const Chat = struct {
         self.session.deinit();
     }
 
-    pub fn runOnce(self: *Chat, prompt: []const u8) !void {
+    pub const RunOnceOptions = struct {
+        profile: bool = false,
+    };
+
+    pub fn runOnce(self: *Chat, prompt: []const u8, opts: RunOnceOptions) !void {
         const prompt_tokens = try self.session.tokenizePrompt(self.allocator, prompt);
         defer self.allocator.free(prompt_tokens);
 
-        var stdout = std.Io.File.stdout().writer(self.io, &.{});
+        var stdout = std.Io.File.stdout().writerStreaming(self.io, &.{});
+        var profiler: ?zml.Platform.Profiler = null;
+        defer if (profiler) |*p| p.deinit();
+
+        if (opts.profile) {
+            var session_id_buf: [64]u8 = undefined;
+            const session_id = try std.fmt.bufPrint(
+                &session_id_buf,
+                "llm-runonce-{d}",
+                .{@as(u64, @intCast(std.Io.Clock.now(.real, self.io).toNanoseconds()))},
+            );
+            profiler = try self.platform.profiler(self.allocator, self.io, .{
+                .session_id = session_id,
+            });
+            try profiler.?.start();
+        }
 
         try self.runPrefill(prompt_tokens, &stdout.interface);
         try self.runDecodeTurn(&stdout.interface);
+        const profile = if (profiler) |*p| try p.stop() else null;
 
-        try stdout.interface.writeAll("\n\n");
+        if (opts.profile) {
+            if (profile) |trace| {
+                try stdout.interface.print("\x1b[2mprofile: perfetto: {s} protobuf: {s})\x1b[0m\n\n", .{ trace.perfetto_path, trace.protobuf_path });
+            } else {
+                try stdout.interface.writeAll("\x1b[2mprofile: unavailable on this PJRT plugin\x1b[0m\n\n");
+            }
+        }
         try stdout.interface.flush();
     }
 
@@ -75,7 +103,7 @@ pub const Chat = struct {
         var turn_tokens = try self.session.tokenizePrompt(self.allocator, initial_prompt);
         defer self.allocator.free(turn_tokens);
 
-        var stdout = std.Io.File.stdout().writer(self.io, &.{});
+        var stdout = std.Io.File.stdout().writerStreaming(self.io, &.{});
 
         while (self.tokens.items.len <= self.session.maxTokens()) {
             try self.runPrefill(turn_tokens, &stdout.interface);
@@ -122,6 +150,7 @@ pub const Chat = struct {
             decode_duration,
             tokensPerSecond(decode_duration, decode_tokens),
         });
+
         try stdout.flush();
     }
 

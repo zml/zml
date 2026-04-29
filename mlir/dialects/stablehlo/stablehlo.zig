@@ -759,7 +759,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         break :blk ret;
     };
 
-    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 32) = .{};
+    var attrs: stdx.BoundedArray(mlir.NamedAttribute, 32) = .empty;
     attrs.appendSliceAssumeCapacity(&.{
         .named(ctx, "call_target_name", mlir.stringAttribute(ctx, opts.call_target_name)),
     });
@@ -787,7 +787,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
     }
 
     if (opts.output_operand_aliases) |output_operand_aliases| {
-        var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .{};
+        var buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_RESULTS) = .empty;
         for (output_operand_aliases) |alias| {
             const output_tuple_indices = if (result_types.len > 1) &[1]i64{alias.output_index} else &.{};
             buffer.appendAssumeCapacity(
@@ -799,7 +799,7 @@ pub fn custom_call(ctx: *mlir.Context, inputs: []const *const mlir.Value, result
         );
     }
 
-    var layouts_buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_OPERANDS) = .{};
+    var layouts_buffer: stdx.BoundedArray(*const mlir.Attribute, MAX_OPERANDS) = .empty;
     if (opts.operand_layouts) |layouts| {
         for (layouts) |ol| {
             layouts_buffer.appendAssumeCapacity(

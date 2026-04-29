@@ -101,7 +101,7 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = .{},
+            ._shards = .empty,
         };
 
         const buffer_type = pjrtx.bufferTypeFromDtype(sh.dtype());
@@ -169,7 +169,7 @@ pub const Buffer = struct {
     /// Creates a Buffer with a single element.
     pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: Sharding) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, Shape.init(.{}, dtype_), sharding, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), sharding, x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -193,7 +193,7 @@ pub const Buffer = struct {
             ._platform = platform,
             ._shape = sh,
             ._sharding = sharding,
-            ._shards = .{},
+            ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
             shard.deinit(platform.pjrt_api);

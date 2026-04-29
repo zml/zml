@@ -57,7 +57,8 @@
     "https://bcr.bazel.build/modules/bazel_features/1.38.0/MODULE.bazel": "f9b8a9c890ebd216b4049fd12a31d3c2602e3403c7af636b04fbbd7453edc9c9",
     "https://bcr.bazel.build/modules/bazel_features/1.4.1/MODULE.bazel": "e45b6bb2350aff3e442ae1111c555e27eac1d915e77775f6fdc4b351b758b5d7",
     "https://bcr.bazel.build/modules/bazel_features/1.42.0/MODULE.bazel": "e8ca15cb2639c5f12183db6dcb678735555d0cdd739b32a0418b6532b5e565f8",
-    "https://bcr.bazel.build/modules/bazel_features/1.42.0/source.json": "f2ea90e5dd0322481147114c7d5e4608c4b3fae2eeccae655e4d76a382389f6f",
+    "https://bcr.bazel.build/modules/bazel_features/1.43.0/MODULE.bazel": "defa2226f06ba20550d6548c3a2ea2a7929634437a52973869c20c225450eb91",
+    "https://bcr.bazel.build/modules/bazel_features/1.43.0/source.json": "1c4207dc858d6de0eecef30026793616bbf420c74aac27b6bad212534a730437",
     "https://bcr.bazel.build/modules/bazel_features/1.9.0/MODULE.bazel": "885151d58d90d8d9c811eb75e3288c11f850e1d6b481a8c9f766adee4712358b",
     "https://bcr.bazel.build/modules/bazel_features/1.9.1/MODULE.bazel": "8f679097876a9b609ad1f60249c49d68bfab783dd9be012faf9d82547b14815a",
     "https://bcr.bazel.build/modules/bazel_lib/3.0.0-beta.1/MODULE.bazel": "407729e232f611c3270005b016b437005daa7b1505826798ea584169a476e878",
@@ -75,6 +76,7 @@
     "https://bcr.bazel.build/modules/bazel_skylib/1.5.0/MODULE.bazel": "32880f5e2945ce6a03d1fbd588e9198c0a959bb42297b2cfaf1685b7bc32e138",
     "https://bcr.bazel.build/modules/bazel_skylib/1.6.1/MODULE.bazel": "8fdee2dbaace6c252131c00e1de4b165dc65af02ea278476187765e1a617b917",
     "https://bcr.bazel.build/modules/bazel_skylib/1.7.1/MODULE.bazel": "3120d80c5861aa616222ec015332e5f8d3171e062e3e804a2a0253e1be26e59b",
+    "https://bcr.bazel.build/modules/bazel_skylib/1.8.0/MODULE.bazel": "2fb3fb53675f6adfc1ca5bfbd5cfb655ae350fba4706d924a8ec7e3ba945671c",
     "https://bcr.bazel.build/modules/bazel_skylib/1.8.1/MODULE.bazel": "88ade7293becda963e0e3ea33e7d54d3425127e0a326e0d17da085a5f1f03ff6",
     "https://bcr.bazel.build/modules/bazel_skylib/1.8.2/MODULE.bazel": "69ad6927098316848b34a9142bcc975e018ba27f08c4ff403f50c1b6e646ca67",
     "https://bcr.bazel.build/modules/bazel_skylib/1.9.0/MODULE.bazel": "72997b29dfd95c3fa0d0c48322d05590418edef451f8db8db5509c57875fb4b7",
@@ -151,6 +153,9 @@
     "https://bcr.bazel.build/modules/libbacktrace/1.0.0-20250926-7939218/source.json": "83239989d09748f63dee4bdd430d261e217a012670e066e2238925a303a65d89",
     "https://bcr.bazel.build/modules/libpfm/4.11.0/MODULE.bazel": "45061ff025b301940f1e30d2c16bea596c25b176c8b6b3087e92615adbd52902",
     "https://bcr.bazel.build/modules/libpfm/4.11.0/source.json": "caaffb3ac2b59b8aac456917a4ecf3167d40478ee79f15ab7a877ec9273937c9",
+    "https://bcr.bazel.build/modules/llvm/0.6.7/MODULE.bazel": "d37a2e10571864dc6a5bb53c29216d90b9400bbcadb422337f49107fd2eaf0d2",
+    "https://bcr.bazel.build/modules/llvm/0.7.3/MODULE.bazel": "b8ffe1ec9d18c0deb6d6dc1a6f78a64bcfcec8648c97b92ed6cd98a7fe49c64f",
+    "https://bcr.bazel.build/modules/llvm/0.7.3/source.json": "44d694e1559683ea4cf96052c56c5426d2604016636133798fcd57cc78542984",
     "https://bcr.bazel.build/modules/mbedtls/3.6.0/MODULE.bazel": "8e380e4698107c5f8766264d4df92e36766248447858db28187151d884995a09",
     "https://bcr.bazel.build/modules/mbedtls/3.6.0/source.json": "1dbe7eb5258050afcc3806b9d43050f71c6f539ce0175535c670df606790b30c",
     "https://bcr.bazel.build/modules/nlohmann_json/3.11.3/MODULE.bazel": "87023db2f55fc3a9949c7b08dc711fae4d4be339a80a99d04453c4bb3998eefc",
@@ -239,7 +244,8 @@
     "https://bcr.bazel.build/modules/rules_cc/0.2.0/MODULE.bazel": "b5c17f90458caae90d2ccd114c81970062946f49f355610ed89bebf954f5783c",
     "https://bcr.bazel.build/modules/rules_cc/0.2.15/MODULE.bazel": "6a0a4a75a57aa6dc888300d848053a58c6b12a29f89d4304e1c41448514ec6e8",
     "https://bcr.bazel.build/modules/rules_cc/0.2.16/MODULE.bazel": "9242fa89f950c6ef7702801ab53922e99c69b02310c39fb6e62b2bd30df2a1d4",
-    "https://bcr.bazel.build/modules/rules_cc/0.2.16/source.json": "d03d5cde49376d87e14ec14b666c56075e5e3926930327fd5d0484a1ff2ac1cc",
+    "https://bcr.bazel.build/modules/rules_cc/0.2.18/MODULE.bazel": "4460ec36adc8f722a6a2a4ac9374cb91f2acebadaa93fc37966129afb3dece87",
+    "https://bcr.bazel.build/modules/rules_cc/0.2.18/source.json": "abad668ff2fd63ada1ac49bf386d37e27048b89a3465a6fd968bb832b00a09d3",
     "https://bcr.bazel.build/modules/rules_cc/0.2.4/MODULE.bazel": "1ff1223dfd24f3ecf8f028446d4a27608aa43c3f41e346d22838a4223980b8cc",
     "https://bcr.bazel.build/modules/rules_cc/0.2.8/MODULE.bazel": "f1df20f0bf22c28192a794f29b501ee2018fa37a3862a1a2132ae2940a23a642",
     "https://bcr.bazel.build/modules/rules_distroless/0.6.2/MODULE.bazel": "eafe8b473c0c78038d9a6e1dbd9278b7bf83457ddc78207297483bfbe1012d56",
@@ -1022,8 +1028,8 @@
     },
     "@@rules_oci+//oci:extensions.bzl%oci": {
       "general": {
-        "bzlTransitiveDigest": "twSeB3VPTVkayY0uwqEzDzal5MbnZX45iC6jdheZQRo=",
-        "usagesDigest": "V0dQbNX+eB3aThhopTuYblOol9rtleO/RA16gC5Zn+Y=",
+        "bzlTransitiveDigest": "rM01g4kd1EG6Z+4iqFqd+ZkaNCU9oVCGJf+Kg9jgr5k=",
+        "usagesDigest": "JLbamplho20rviuebatMGqnQnaoj32ewCzLuRVusGoU=",
         "recordedFileInputs": {},
         "recordedDirentsInputs": {},
         "envVariables": {},
@@ -1062,7 +1068,7 @@
             "attributes": {
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platform": "linux/amd64",
@@ -1076,7 +1082,7 @@
               "target_name": "debian_12",
               "www_authenticate_challenges": {},
               "scheme": "https",
-              "registry": "index.docker.io",
+              "registry": "mirror.gcr.io",
               "repository": "library/debian",
               "identifier": "sha256:bc960ef50e6feed90686c593361df158517556ed1d2d98e5d1df3724024e0f49",
               "platforms": {
@@ -1414,19 +1420,19 @@
     },
     "@@rules_zig+//zig:extensions.bzl%zig": {
       "general": {
-        "bzlTransitiveDigest": "r7tCqbjlVKc7XEXV8Hiak2ElFfkjvDdMf8Ym+7zxukU=",
-        "usagesDigest": "DObSrV9vF3T1Diz4Mp2HSPgtKmxRPL/y5KPhcX6zjvU=",
+        "bzlTransitiveDigest": "xx2lb1ba6RcnnXdfUyaxI5j2wFLM03GTQfTv2UUie3Q=",
+        "usagesDigest": "3YLtfwSfkXudL3+Coim7hrTFktQHln4CiUbszoYuRzE=",
         "recordedFileInputs": {
-          "@@//bazel/zig_index.json": "4d85811c879dbd2c11d1d7a40decbe25070abe49d4a1ba704b532999b246ad24",
+          "@@//bazel/zig_index.json": "2e3b4b83f1add5d3ca12fd05797c04c38af21d86c7fc7c1a9b356560141a4797",
           "@@rules_zig+//zig/private/versions.json": "6eb85ebaee72c4e6fbc82d8ad73f69e0899d839b70a7e19caa792ab6a5fa0c36"
         },
         "recordedDirentsInputs": {},
         "envVariables": {},
         "generatedRepoSpecs": {
-          "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-linux": {
+          "zig_0.16.0_aarch64-linux": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-aarch64-linux-0.16.0-dev.3153+d6f43caad.tar.xz",
+              "url": "https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1443,16 +1449,16 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "e46037f7747492b405a42d40bb9bf3ca3f28c71cf9c1ccdf165a4de74cb484bb",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17",
+              "zig_version": "0.16.0",
               "platform": "aarch64-linux",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
-          "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-macos": {
+          "zig_0.16.0_aarch64-macos": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-aarch64-macos-0.16.0-dev.3153+d6f43caad.tar.xz",
+              "url": "https://ziglang.org/download/0.16.0/zig-aarch64-macos-0.16.0.tar.xz",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1469,16 +1475,16 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "9121e3f03515a3434ef9f362f8c541540968316d33ed6485b2d8a31dc7332fe6",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489",
+              "zig_version": "0.16.0",
               "platform": "aarch64-macos",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
-          "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-windows": {
+          "zig_0.16.0_aarch64-windows": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-aarch64-windows-0.16.0-dev.3153+d6f43caad.zip",
+              "url": "https://ziglang.org/download/0.16.0/zig-aarch64-windows-0.16.0.zip",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1495,16 +1501,16 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "b25c7046c111f5a4e614fae1a1b33c8db73fbc3de4c135acabb5740455a3b6fc",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "aee38316ee4111717900f45dd3130145c39289e105541d737eb8c5ed653c78ef",
+              "zig_version": "0.16.0",
               "platform": "aarch64-windows",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
-          "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-linux": {
+          "zig_0.16.0_x86_64-linux": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-x86_64-linux-0.16.0-dev.3153+d6f43caad.tar.xz",
+              "url": "https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1521,16 +1527,16 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "afb3016a94a8b5608d364e58ec7b01111af775a020d5f93f69eaebde2053fe77",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "70e49664a74374b48b51e6f3fdfbf437f6395d42509050588bd49abe52ba3d00",
+              "zig_version": "0.16.0",
               "platform": "x86_64-linux",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
-          "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-macos": {
+          "zig_0.16.0_x86_64-macos": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-x86_64-macos-0.16.0-dev.3153+d6f43caad.tar.xz",
+              "url": "https://ziglang.org/download/0.16.0/zig-x86_64-macos-0.16.0.tar.xz",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1547,16 +1553,16 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "0251a8414f98513a33a7a7bd1f6cc13fb59f391168a742eee47b8c685e9827a0",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "0387557ed1877bc6a2e1802c8391953baddba76081876301c522f52977b52ba7",
+              "zig_version": "0.16.0",
               "platform": "x86_64-macos",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
           },
-          "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-windows": {
+          "zig_0.16.0_x86_64-windows": {
             "repoRuleId": "@@rules_zig+//zig/private/repo:zig_repository.bzl%zig_repository",
             "attributes": {
-              "url": "https://ziglang.org/builds/zig-x86_64-windows-0.16.0-dev.3153+d6f43caad.zip",
+              "url": "https://ziglang.org/download/0.16.0/zig-x86_64-windows-0.16.0.zip",
               "mirrors": [
                 "https://pkg.machengine.org/zig",
                 "https://zigmirror.hryx.net/zig",
@@ -1573,8 +1579,8 @@
                 "https://fs.liujiacai.net/zigbuilds",
                 "https://ziglang.org/builds/"
               ],
-              "sha256": "ab31039adca06ae87c95c11b3ff8ed82808335866d58bc6e508cd3174d2d7e3d",
-              "zig_version": "0.16.0-dev.3153+d6f43caad",
+              "sha256": "68659eb5f1e4eb1437a722f1dd889c5a322c9954607f5edcf337bc3684a75a7e",
+              "zig_version": "0.16.0",
               "platform": "x86_64-windows",
               "translate_c": "@@+non_module_deps+translate-c//:translate-c"
             }
@@ -1583,28 +1589,28 @@
             "repoRuleId": "@@rules_zig+//zig/private/repo:toolchains_repo.bzl%toolchains_repo",
             "attributes": {
               "names": [
-                "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-linux",
-                "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-macos",
-                "zig_0.16.0-dev.3153_Pd6f43caad_aarch64-windows",
-                "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-linux",
-                "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-macos",
-                "zig_0.16.0-dev.3153_Pd6f43caad_x86_64-windows"
+                "zig_0.16.0_aarch64-linux",
+                "zig_0.16.0_aarch64-macos",
+                "zig_0.16.0_aarch64-windows",
+                "zig_0.16.0_x86_64-linux",
+                "zig_0.16.0_x86_64-macos",
+                "zig_0.16.0_x86_64-windows"
               ],
               "labels": [
-                "@zig_0.16.0-dev.3153_Pd6f43caad_aarch64-linux//:zig_toolchain",
-                "@zig_0.16.0-dev.3153_Pd6f43caad_aarch64-macos//:zig_toolchain",
-                "@zig_0.16.0-dev.3153_Pd6f43caad_aarch64-windows//:zig_toolchain",
-                "@zig_0.16.0-dev.3153_Pd6f43caad_x86_64-linux//:zig_toolchain",
-                "@zig_0.16.0-dev.3153_Pd6f43caad_x86_64-macos//:zig_toolchain",
-                "@zig_0.16.0-dev.3153_Pd6f43caad_x86_64-windows//:zig_toolchain"
+                "@zig_0.16.0_aarch64-linux//:zig_toolchain",
+                "@zig_0.16.0_aarch64-macos//:zig_toolchain",
+                "@zig_0.16.0_aarch64-windows//:zig_toolchain",
+                "@zig_0.16.0_x86_64-linux//:zig_toolchain",
+                "@zig_0.16.0_x86_64-macos//:zig_toolchain",
+                "@zig_0.16.0_x86_64-windows//:zig_toolchain"
               ],
               "zig_versions": [
-                "0.16.0-dev.3153+d6f43caad",
-                "0.16.0-dev.3153+d6f43caad",
-                "0.16.0-dev.3153+d6f43caad",
-                "0.16.0-dev.3153+d6f43caad",
-                "0.16.0-dev.3153+d6f43caad",
-                "0.16.0-dev.3153+d6f43caad"
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0",
+                "0.16.0"
               ],
               "exec_lengths": [
                 2,

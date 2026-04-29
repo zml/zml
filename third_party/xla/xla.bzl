@@ -112,6 +112,7 @@ filegroup(
         "sycl/build_defs.bzl": _BZL_HELPERS + """\
 if_sycl = always_if_false
 if_sycl_is_configured = always_if_false
+sycl_library = native.cc_library
 """,
     })
     simple_files(name = "local_config_remote_execution", files = {
@@ -134,6 +135,51 @@ filegroup(
         "py_version.bzl": """USE_PYWRAP_RULES = False""",
     })
     simple_files(name = "rules_ml_toolchain", files = {
+        "py/rules_pywrap/BUILD.bazel": """\
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "pywrap.default.bzl",
+    "pywrap.impl.bzl",
+])
+
+filegroup(
+    name = "pywrap_bzl",
+    srcs = [
+        "pywrap.default.bzl",
+        "pywrap.impl.bzl",
+    ],
+)
+""",
+        "py/rules_pywrap/pywrap.default.bzl": """\
+def use_pywrap_rules():
+    return False
+
+def _unsupported(*args, **kwargs):
+    fail("rules_ml_toolchain pywrap rules are not available in this workspace")
+
+pybind_extension = _unsupported
+pywrap_aware_cc_import = _unsupported
+pywrap_aware_filegroup = _unsupported
+pywrap_aware_genrule = _unsupported
+pywrap_binaries = _unsupported
+pywrap_common_library = _unsupported
+pywrap_library = _unsupported
+stripped_cc_info = _unsupported
+""",
+        "py/rules_pywrap/pywrap.impl.bzl": """\
+def _unsupported(*args, **kwargs):
+    fail("rules_ml_toolchain pywrap rules are not available in this workspace")
+
+collected_pywrap_infos = _unsupported
+generated_common_win_def_file = _unsupported
+pybind_extension = _unsupported
+python_extension = _unsupported
+pywrap_binaries = _unsupported
+pywrap_common_library = _unsupported
+pywrap_library = _unsupported
+stripped_cc_info = _unsupported
+""",
         "third_party/gpus/BUILD.bazel": "",
         "third_party/gpus/nvidia_common_rules.bzl": """cuda_rpath_flags = lambda *args, **kwargs: []""",
         "third_party/extensions/sycl_configure.bzl": "",
@@ -152,10 +198,10 @@ def _xla_impl(mctx):
 
     tf_http_archive(
         name = "com_github_grpc_grpc",
-        sha256 = "dd6a2fa311ba8441bbefd2764c55b99136ff10f7ea42954be96006a2723d33fc",
-        strip_prefix = "grpc-1.74.0",
+        sha256 = "e2ace790a5f2d0f83259d1390a816a33b013ea34df2e86084d927e58daa4c5d9",
+        strip_prefix = "grpc-1.78.0",
         patch_file = ["//third_party/grpc:grpc.patch"],
-        urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.74.0.tar.gz"),
+        urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.78.0.tar.gz"),
     )
     tf_vendored(name = "tsl", path = "third_party/tsl")
 

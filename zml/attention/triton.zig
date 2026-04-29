@@ -201,15 +201,6 @@ pub const GenerationConfig = union(KernelKind) {
     reduce_segments_ptr: GenerationConfigReduce,
 };
 
-fn getGenerateBinPath(allocator: std.mem.Allocator) ![]const u8 {
-    const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
-
-    var sandbox_path_buf: [std.Io.Dir.max_path_bytes]u8 = undefined;
-    const sandbox_path = runfiles.rlocation("zml/zml/attention/triton/sandbox", &sandbox_path_buf) catch unreachable;
-
-    return std.fs.path.join(allocator, &.{ sandbox_path.?, "bin", "generate" });
-}
-
 fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConfig) ![:0]const u8 {
     var arena: std.heap.ArenaAllocator = .init(allocator);
     defer arena.deinit();
@@ -220,14 +211,19 @@ fn generateTtir(allocator: std.mem.Allocator, io: std.Io, config: GenerationConf
     const platform = compilation_context.platform;
     const triton_runtime = platform.triton_runtime.?;
 
-    var writer = triton_runtime.process.stdin.?.writer(io, writer_buffer);
-    try writer.interface.print("{f}\n", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
-    try writer.interface.flush();
-
-    var reader = triton_runtime.process.stdout.?.reader(io, reader_buffer);
     var allocating: std.Io.Writer.Allocating = .init(arena.allocator());
-    _ = try reader.interface.streamDelimiter(&allocating.writer, '\n');
-    _ = try reader.interface.discardShort(1);
+    {
+        try triton_runtime.process_mutex.lock(compilation_context.io);
+        defer triton_runtime.process_mutex.unlock(compilation_context.io);
+
+        var writer = triton_runtime.process.stdin.?.writer(io, writer_buffer);
+        try writer.interface.print("{f}\n", .{std.json.fmt(config, .{ .emit_null_optional_fields = false })});
+        try writer.interface.flush();
+
+        var reader = triton_runtime.process.stdout.?.reader(io, reader_buffer);
+        _ = try reader.interface.streamDelimiter(&allocating.writer, '\n');
+        _ = try reader.interface.discardShort(1);
+    }
 
     const response: std.json.Value = try std.json.parseFromSliceLeaky(std.json.Value, arena.allocator(), allocating.written(), .{});
     return if (response.object.get("ok").?.bool)
@@ -647,18 +643,37 @@ pub const paged = struct {
 
 pub const Runtime = struct {
     process: std.process.Child,
+    process_mutex: *std.Io.Mutex,
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io) !Runtime {
-        const path = try getGenerateBinPath(allocator);
-        defer allocator.free(path);
+        var arena: std.heap.ArenaAllocator = .init(allocator);
+        defer arena.deinit();
 
-        const process = try std.process.spawn(io, .{ .argv = &.{path}, .stdin = .pipe, .stdout = .pipe });
-        errdefer process.kill(io);
+        const runfiles = bazel.runfiles(bazel_builtin.current_repository) catch unreachable;
+        const sandbox_path = runfiles.rlocationAlloc(arena.allocator(), "zml/zml/attention/triton/sandbox") catch unreachable;
 
-        return .{ .process = process };
+        var map: std.process.Environ.Map = .init(arena.allocator());
+        try map.put("LD_LIBRARY_PATH", std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "lib" }) catch unreachable);
+
+        const process_mutex = try allocator.create(std.Io.Mutex);
+        errdefer allocator.destroy(process_mutex);
+        process_mutex.* = .init;
+
+        const process = try std.process.spawn(io, .{
+            .argv = &.{std.Io.Dir.path.join(arena.allocator(), &.{ sandbox_path.?, "bin", "generate" }) catch unreachable},
+            .stdin = .pipe,
+            .stdout = .pipe,
+            .environ_map = &map,
+        });
+
+        return .{
+            .process = process,
+            .process_mutex = process_mutex,
+        };
     }
 
-    pub fn deinit(self: *Runtime, io: std.Io) void {
+    pub fn deinit(self: *Runtime, allocator: std.mem.Allocator, io: std.Io) void {
+        allocator.destroy(self.process_mutex);
         // NOTE(Corendos): This is not portable, but I couldn't find a better way with the current std.Io.
         _ = std.c.kill(self.process.id.?, .INT);
         _ = self.process.wait(io) catch unreachable;

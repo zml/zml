@@ -7,7 +7,7 @@ _BUILD_FILE_DEFAULT_VISIBILITY = """\
 package(default_visibility = ["//visibility:public"])
 """
 
-_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.1"
+_ROCM_STRIP_PREFIX = "./opt/rocm-7.2.2"
 
 def _rocm_dlopen_patchelf(name, src):
     return "\n".join([
@@ -226,7 +226,7 @@ def _rocm_impl(mctx):
     ])
 
     for pkg_name, build_file_content in _UBUNTU_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
+        pkg = loaded_packages[pkg_name]["amd64"]
         http_deb_archive(
             name = pkg_name,
             urls = pkg["urls"],
@@ -235,7 +235,7 @@ def _rocm_impl(mctx):
         )
 
     for pkg_name, build_file_content in _ROCM_PACKAGES.items():
-        pkg = loaded_packages[pkg_name]
+        pkg = loaded_packages[pkg_name]["amd64"]
         http_deb_archive(
             name = pkg_name,
             urls = pkg["urls"],

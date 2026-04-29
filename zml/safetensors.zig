@@ -434,7 +434,7 @@ pub fn parseSafetensors(
         const start: u64 = @intCast(offset_field.array.items[0].integer);
         const dtype = try stringToDtype(value.object.get("dtype").?.string);
 
-        var dims: Dims = .{};
+        var dims: Dims = .empty;
         for (shape_field.items) |d| {
             dims.appendAssumeCapacity(d.integer);
         }

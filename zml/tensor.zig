@@ -5,11 +5,10 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const Buffer = @import("buffer.zig").Buffer;
-const Bufferized = @import("zml.zig").Bufferized;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
+const mem = @import("mem.zig");
 const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
@@ -521,17 +520,19 @@ pub const Tensor = struct {
         _state: Tensor,
         algorithm: dialects.stablehlo.RngAlgorithm.Type = .DEFAULT,
 
+        pub const Buffer = mem.Bufferized(Rng);
+
         pub fn init() Rng {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Bufferized(Rng) {
+        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
             };
         }
 
-        pub fn deinitBuffer(self: *Bufferized(Rng)) void {
+        pub fn deinitBuffer(self: *Buffer) void {
             self._state.deinit();
         }
 
@@ -742,7 +743,7 @@ pub const Tensor = struct {
 
             var rng_buffer = try Rng.initBuffer(std.testing.io, platform, replicated_sharding, 1234);
             defer rng_buffer._state.deinit();
-            var tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, std.mem.sliceAsBytes(&tgt_dist_data));
+            var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, @ptrCast(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
             var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
@@ -1187,7 +1188,7 @@ pub const Tensor = struct {
         const lhs_contracting_dim: i8 = @intCast(lhs.shape().hasTag(args).?);
         const rhs_contracting_dim: i8 = @intCast(rhs.shape().hasTag(args).?);
 
-        var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .{};
+        var batching_axes: stdx.BoundedArray([2]i8, constants.MAX_RANK) = .empty;
         for (0..lhs.rank()) |lhs_tag_index| {
             const lhs_tag = lhs.shape().tag(lhs_tag_index);
             if (lhs_tag == Shape.toTag(args)) continue;
@@ -1265,8 +1266,8 @@ pub const Tensor = struct {
 
         var res_shape: Shape = .{ ._dtype = lhs.dtype() };
         // Validate batching axes
-        var lhs_batching_axes: Axes = .{};
-        var rhs_batching_axes: Axes = .{};
+        var lhs_batching_axes: Axes = .empty;
+        var rhs_batching_axes: Axes = .empty;
         for (batching_axes) |b_axes| {
             const l, const r = b_axes;
             stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects batching dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
@@ -1278,8 +1279,8 @@ pub const Tensor = struct {
         }
 
         // Validate contracting axes
-        var lhs_contracting_axes: Axes = .{};
-        var rhs_contracting_axes: Axes = .{};
+        var lhs_contracting_axes: Axes = .empty;
+        var rhs_contracting_axes: Axes = .empty;
         for (contracting_axes) |c_axes| {
             const l, const r = c_axes;
             stdx.debug.assert(lhs._shape.dim(l) == rhs._shape.dim(r), "dotGeneral expects contracting dimensions to be equal, got {} and {} in {f} and {f}", .{ l, r, lhs, rhs });
@@ -1575,7 +1576,7 @@ pub const Tensor = struct {
 
     pub fn swapAxes(self: Tensor, a: anytype, b: anytype) Tensor {
         if (self.axis(a) == self.axis(b)) return self;
-        var perm: Shape.AxesArray = .{};
+        var perm: Shape.AxesArray = .empty;
         for (0..self.rank()) |i| {
             perm.appendAssumeCapacity(@intCast(i));
         }
@@ -1715,7 +1716,7 @@ pub const Tensor = struct {
         ).appendTo(currentBlock());
 
         var res = _result(res_shape, slice_op.result(0));
-        var to_remove: Shape.AxesArray = .{};
+        var to_remove: Shape.AxesArray = .empty;
         for (slices, 0..) |s, a| {
             if (s.singleton) to_remove.appendAssumeCapacity(@intCast(a));
         }
@@ -2232,7 +2233,7 @@ pub const Tensor = struct {
         }
 
         // check that each axis of self maps to an axis of other
-        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var axes_: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
         for (self._shape.tags()) |t| {
             axes_.appendAssumeCapacity(@intCast(other.axis(t)));
         }
@@ -2285,8 +2286,8 @@ pub const Tensor = struct {
             mlirCtx(),
             self.value(),
             Tensor.scalar(padding_value, self.dtype()).value(),
-            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
             .unknown(mlirCtx()),
+            .{ .low = low[0..rk], .high = high[0..rk], .interior = interior[0..rk] },
         ).appendTo(currentBlock());
 
         return _result(res_shape, pad_op.result(0));
@@ -2368,7 +2369,7 @@ pub const Tensor = struct {
     /// so that gather can
     pub fn gather(self: Tensor, _indices: anytype, opts: GatherOpts) Tensor {
         const idx_per_axis, const idx_tags = Shape.parseStruct(Tensor, _indices);
-        var idx_axes: Shape.AxesArray = .{};
+        var idx_axes: Shape.AxesArray = .empty;
         for (idx_tags.slice()) |t| {
             idx_axes.appendAssumeCapacity(self.axis(t));
         }
@@ -2483,10 +2484,10 @@ pub const Tensor = struct {
         // Compute result shape
         var res_shape = indices._shape.remove(index_coord_axis).withDtype(self.dtype());
         var slice_dims = self._shape._dims;
-        var self_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
-        var indices_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
-        var start_index_map: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
-        var self_offset_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+        var self_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+        var indices_batch_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+        var start_index_map: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
+        var self_offset_axes: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
         for (self._shape.tags(), 0..self.rank()) |t, self_ax| {
             const maybe_slice_ax: ?u3 = if (tagged_api) slice_shape.hasTag(t) else @intCast(self_ax);
 
@@ -2819,7 +2820,7 @@ pub const Tensor = struct {
 
             var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), replicated_sharding, std.mem.sliceAsBytes(&[9]i32{ 0, 1, 2, 3, 4, 5, 6, 7, 8 }));
             defer a_buffer.deinit();
-            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), replicated_sharding, std.mem.sliceAsBytes(&[2]i32{ 0, 2 }));
+            var scatter_indices_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, scatter_indices.shape(), replicated_sharding, @ptrCast(&[2]i32{ 0, 2 }));
             defer scatter_indices_buffer.deinit();
             var updates_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, updates.shape(), replicated_sharding, std.mem.sliceAsBytes(&[2][3]i32{ .{ 10, 20, 30 }, .{ 70, 80, 90 } }));
             defer updates_buffer.deinit();
@@ -2940,14 +2941,14 @@ pub const Tensor = struct {
             const left_gt_right = values.left.cmp(.GT, values.right);
             const is_nan = values.left.cmp(.NE, values.left);
             const left_gt_or_nan = left_gt_right.logical(.OR, is_nan);
-            // we are bubbling up Nan.
-            const max_val = left_gt_or_nan.select(values.left, values.right);
 
             // If values.left == values.right: keep the smallest idx.
             const is_same = values.left.cmp(.EQ, values.right);
             const is_first = indices.left.cmp(.LT, indices.right);
             const is_same_but_first = is_same.logical(.AND, is_first);
             const keep_left_idx = left_gt_or_nan.logical(.OR, is_same_but_first);
+            // we are bubbling up Nan.
+            const max_val = left_gt_or_nan.select(values.left, values.right);
             const max_idx = keep_left_idx.select(indices.left, indices.right);
 
             return .{ max_val, max_idx };
@@ -4082,7 +4083,7 @@ pub const Tensor = struct {
     ///
     /// - res[a, b, c, d] == (A[a], B[b], C[c], D[d])
     pub fn cartesianProductStacked(vectors: []const Tensor) Tensor {
-        var out = stdx.BoundedArray(Tensor, constants.MAX_RANK).init(vectors.len) catch unreachable;
+        var out: stdx.BoundedArray(Tensor, constants.MAX_RANK) = .{ .buffer = undefined, .len = vectors.len };
         _cartesianProduct(vectors, out.slice());
 
         return Tensor.stack(out.constSlice(), .last, .coord);
@@ -4331,13 +4332,13 @@ fn _parseGatherCoord(self: Tensor, axes_: anytype) struct { bool, stdx.BoundedAr
 }
 
 fn toI64(values: anytype) stdx.BoundedArray(i64, constants.MAX_RANK) {
-    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .{};
+    var res: stdx.BoundedArray(i64, constants.MAX_RANK) = .empty;
     for (values) |val| res.appendAssumeCapacity(@intCast(val));
     return res;
 }
 
 fn transposeIsJustAReshape(x: Shape, permutation: []const i64) bool {
-    var perm: stdx.BoundedArray(struct { u8, bool }, constants.MAX_RANK) = .{};
+    var perm: stdx.BoundedArray(struct { u8, bool }, constants.MAX_RANK) = .empty;
     // Don't rewrite on invalid inputs.
     if (permutation.len > x.rank()) return false;
     for (permutation) |ax| {

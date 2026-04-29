@@ -20,6 +20,7 @@ const Args = struct {
     topk: u32 = 4,
     backend: ?zml.attention.attention.Backend = null,
     single: bool = false,
+    profile: bool = false,
 
     pub const help =
         \\ Use llm --model=<path> [options]
@@ -32,8 +33,9 @@ const Args = struct {
         \\   --seqlen=<number>   Sequence length (default: 2048)
         \\   --topk=<number>     Top-k sampling cutoff (default: 4)
         \\   --backend=<text>    Attention backend to use ([vanilla, cuda_fa2, cuda_fa3], default: auto-selection)
-        \\   --single            Create a single kernel encompassing all the layers when supported 
+        \\   --single            Create a single kernel encompassing all the layers when supported
         \\                       (only used by LFM2 which uses multiple kernels by default)
+        \\   --profile           Capture a PJRT profile for non-interactive runs and write a Perfetto trace
         \\
     ;
 };
@@ -123,11 +125,12 @@ pub fn main(init: std.process.Init) !void {
     var tokenizer = try loadTokenizer(allocator, io, repo, &progress);
     defer tokenizer.deinit();
 
-    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
-    defer model.unloadBuffers(&model_buffers, allocator);
-
     var compiled_model = try models.LoadedModel.compile(&model, allocator, io, platform, backend, shardings, args.seqlen, &progress);
     defer compiled_model.deinit();
+
+    // Load buffers after the model compilation to be sure to give enough room to the autotune.
+    var model_buffers = try models.LoadedModel.loadBuffers(&model, allocator, io, platform, &store, &progress, shardings);
+    defer model.unloadBuffers(&model_buffers, allocator);
 
     progress.end();
 
@@ -161,7 +164,9 @@ pub fn main(init: std.process.Init) !void {
     if (interactive) {
         try llm_chat.runInteractive(prompt);
     } else {
-        try llm_chat.runOnce(prompt);
+        try llm_chat.runOnce(prompt, .{
+            .profile = args.profile,
+        });
     }
 }
 
@@ -196,7 +201,7 @@ pub fn printZmlLogo(io: std.Io) !void {
         \\
         \\
     ;
-    var writer = std.Io.File.stdout().writer(io, &.{});
+    var writer = std.Io.File.stdout().writerStreaming(io, &.{});
     try writer.interface.writeAll(LOGO);
     try writer.interface.flush();
 }
