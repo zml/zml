@@ -1042,7 +1042,7 @@ fn runStage1(
     // ---- Generate noise and run noise init ----
     std.log.info("Generating Stage 1 noise (seed={d})...", .{seed});
 
-    var rng_buf = try zml.Tensor.Rng.initBuffer(platform, seed, io, sharding);
+    var rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, sharding, seed);
 
     // Generate video noise (draw #1)
     var v_noise_buf = blk: {

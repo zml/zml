@@ -35,7 +35,7 @@ pub const Session = struct {
         errdefer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, shardings.replicated);
+        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, shardings.replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         return .{
