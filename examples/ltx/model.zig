@@ -63,9 +63,7 @@ pub const FeedForward = struct {
         _ = self;
         const x_ = x.withPartialTags(.{ .b, .t, .d });
         const h1 = params.proj.forward(x_);
-        // GELU in f32 for precision parity with Python reference, then cast back.
-        const dt = h1.dtype();
-        const h2 = h1.convert(.f32).gelu().convert(dt);
+        const h2 = h1.gelu();
         return params.out.forward(h2);
     }
 };
