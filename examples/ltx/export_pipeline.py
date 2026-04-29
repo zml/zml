@@ -38,6 +38,7 @@ Usage (on GPU server):
 import argparse
 import json
 import logging
+import time
 from pathlib import Path
 
 import torch
@@ -254,6 +255,9 @@ def main() -> None:
     if has_image:
         print(f"Strength: {args.strength}")
     print(f"Output: {out}")
+
+    # Timing accumulator: {phase: {"load": float, "execute": float}}
+    timings: dict[str, dict[str, float]] = {}
 
     # Stage 1 resolution (half)
     s1_h, s1_w = args.height // 2, args.width // 2
@@ -490,7 +494,9 @@ def main() -> None:
             print(f"    (unconditioned — all mask values should be 1.0)")
             print(f"      mask mean={video_state.denoise_mask.mean().item():.4f}")
 
-        return euler_denoising_loop(
+        torch.cuda.synchronize()
+        _s1_exec_start = time.monotonic()
+        result = euler_denoising_loop(
             sigmas=sigmas,
             video_state=video_state,
             audio_state=audio_state,
@@ -498,8 +504,13 @@ def main() -> None:
             transformer=transformer,
             denoiser=denoiser,
         )
+        torch.cuda.synchronize()
+        _s1_exec_time[0] = time.monotonic() - _s1_exec_start
+        return result
 
     print("  Running Stage 1 denoising...")
+    _s1_t0 = time.monotonic()
+    _s1_exec_time = [0.0]  # mutable capture for callback
     video_state_s1, audio_state_s1 = stage_1_diffusion(
         denoiser=FactoryGuidedDenoiser(
             v_context=v_context_p,
@@ -524,6 +535,8 @@ def main() -> None:
         loop=stage1_loop,
     )
 
+    _s1_total = time.monotonic() - _s1_t0
+    timings["Stage 1"] = {"load": _s1_total - _s1_exec_time[0], "execute": _s1_exec_time[0]}
     print(f"  Stage 1 done.")
     print(f"    video_latent (unpatchified): {list(video_state_s1.latent.shape)}")
 
@@ -543,7 +556,10 @@ def main() -> None:
     # Upsample video latent
     # ========================================================================
     print("\n=== Upsampling video latent 2x ===")
+    _up_t0 = time.monotonic()
     upscaled_video_latent = upsampler(video_state_s1.latent[:1])
+    _up_total = time.monotonic() - _up_t0
+    timings["Bridge (upsample)"] = {"load": _up_total, "execute": 0.0}  # load+exec mixed
     print(f"  Upscaled: {list(upscaled_video_latent.shape)}")
 
     save_safetensors(
@@ -604,7 +620,9 @@ def main() -> None:
             print(f"    (unconditioned — all mask values should be 1.0)")
             print(f"      mask mean={video_state.denoise_mask.mean().item():.4f}")
 
-        return euler_denoising_loop(
+        torch.cuda.synchronize()
+        _s2_exec_start = time.monotonic()
+        result = euler_denoising_loop(
             sigmas=sigmas,
             video_state=video_state,
             audio_state=audio_state,
@@ -612,8 +630,13 @@ def main() -> None:
             transformer=transformer,
             denoiser=denoiser,
         )
+        torch.cuda.synchronize()
+        _s2_exec_time[0] = time.monotonic() - _s2_exec_start
+        return result
 
     print("  Running Stage 2 denoising...")
+    _s2_t0 = time.monotonic()
+    _s2_exec_time = [0.0]
     video_state_s2, audio_state_s2 = stage_2_diffusion(
         denoiser=SimpleDenoiser(v_context=v_context_p, a_context=a_context_p),
         sigmas=distilled_sigmas,
@@ -636,6 +659,8 @@ def main() -> None:
         loop=stage2_loop,
     )
 
+    _s2_total = time.monotonic() - _s2_t0
+    timings["Stage 2"] = {"load": _s2_total - _s2_exec_time[0], "execute": _s2_exec_time[0]}
     print(f"  Stage 2 done.")
     print(f"    video_latent (unpatchified): {list(video_state_s2.latent.shape)}")
 
@@ -797,24 +822,67 @@ def main() -> None:
         decode_generator = torch.Generator(device=device).manual_seed(args.seed)
 
         video_decoder = VideoDecoder(args.stage2_checkpoint, dtype, device)
+        torch.cuda.synchronize()
+        _vdec_t0 = time.monotonic()
         decoded_video = video_decoder(video_state_s2.latent, tiling_config, decode_generator)
+        # Consume the iterator to force execution (VideoDecoder returns an iterator)
+        if hasattr(decoded_video, '__iter__') and not isinstance(decoded_video, torch.Tensor):
+            decoded_video = list(decoded_video)
+        torch.cuda.synchronize()
+        timings["Video VAE Decode"] = {"load": 0.0, "execute": time.monotonic() - _vdec_t0}
         print("  Video decoded.")
 
         audio_decoder = AudioDecoder(args.stage2_checkpoint, dtype, device)
+        torch.cuda.synchronize()
+        _adec_t0 = time.monotonic()
         decoded_audio = audio_decoder(audio_state_s2.latent)
+        torch.cuda.synchronize()
+        timings["Audio VAE Decode"] = {"load": 0.0, "execute": time.monotonic() - _adec_t0}
         print(f"  Audio decoded: sample_rate={decoded_audio.sampling_rate}")
 
         python_video_path = out / "python_reference.mp4"
         python_video_path.parent.mkdir(parents=True, exist_ok=True)
         video_chunks_number = get_video_chunks_number(args.num_frames, tiling_config)
+        _enc_t0 = time.monotonic()
         encode_video(
-            video=decoded_video,
+            video=iter(decoded_video) if isinstance(decoded_video, list) else decoded_video,
             fps=args.frame_rate,
             audio=decoded_audio,
             output_path=str(python_video_path),
             video_chunks_number=video_chunks_number,
         )
+        timings["MP4 Encoding"] = {"load": 0.0, "execute": time.monotonic() - _enc_t0}
         print(f"  Full-Python reference video: {python_video_path}")
+
+    # ========================================================================
+    # Timing summary
+    # ========================================================================
+    if timings:
+        print("\n" + "=" * 70)
+        print("TIMING SUMMARY")
+        print("=" * 70)
+        print(f"| {'Phase':<22s} | {'Load':>8s} | {'Execute':>9s} | {'Total':>9s} |")
+        print(f"| {'-'*22} | {'-'*8}: | {'-'*9}: | {'-'*9}: |")
+        total_load = 0.0
+        total_exec = 0.0
+        for phase in ["Stage 1", "Bridge (upsample)", "Stage 2",
+                      "Video VAE Decode", "Audio VAE Decode", "MP4 Encoding"]:
+            if phase not in timings:
+                continue
+            t = timings[phase]
+            phase_total = t["load"] + t["execute"]
+            total_load += t["load"]
+            total_exec += t["execute"]
+            print(f"| {phase:<22s} | {t['load']:>7.1f}s | {t['execute']:>8.1f}s | {phase_total:>8.1f}s |")
+            # Per-step average for diffusion stages
+            if phase == "Stage 1":
+                n_steps = args.num_inference_steps
+                print(f"| {'  (per step avg)':<22s} | {'':>8s} | {t['execute']/n_steps:>8.1f}s | {'':>9s} |")
+            elif phase == "Stage 2":
+                n_steps = len(STAGE_2_DISTILLED_SIGMA_VALUES) - 1
+                print(f"| {'  (per step avg)':<22s} | {'':>8s} | {t['execute']/n_steps:>8.1f}s | {'':>9s} |")
+        grand_total = total_load + total_exec
+        print(f"| {'**TOTAL**':<22s} | {total_load:>7.1f}s | {total_exec:>8.1f}s | {grand_total:>8.1f}s |")
 
     # ========================================================================
     # Summary

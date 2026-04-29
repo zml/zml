@@ -305,6 +305,14 @@ pub const OutputProjection = struct {
 // Python ref: ltx_core/models/attention.py — Attention, CrossAttention
 // ============================================================================
 
+/// FA3 scratch buffers. Two groups suffice for the 4 mask-free attention kinds since
+/// metadata is sized by the Q sequence length:
+///   - video_attn_meta: used by attn1 (Q=video) and audio_to_video_attn (Q=video)
+///   - audio_attn_meta: used by audio_attn1 (Q=audio) and video_to_audio_attn (Q=audio)
+pub const attention = zml.attention.attention;
+pub const AttnMetadata = attention.Metadata;
+pub const AttnParameters = attention.Parameters;
+
 /// Like zml.nn.sdpa but computes softmax in native dtype (no f32 upcast).
 ///
 /// Hierarchical concatenation that works around Tensor.concatenate's 32-tensor limit.
@@ -405,6 +413,9 @@ pub const Attention = struct {
         pe_sin: ?Tensor = null,
         k_pe_cos: ?Tensor = null,
         k_pe_sin: ?Tensor = null,
+        /// FA3 scratch buffers and parameters. When non-null and bf16_native, uses flash attention.
+        attn_meta: ?AttnMetadata = null,
+        attn_params: ?AttnParameters = null,
     };
 
     pub const Params = struct {
@@ -597,20 +608,22 @@ pub const Attention = struct {
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
         const sdpa_opts: zml.nn.SdpaOpts = .{ .attn_mask = if (opts.mask) |m| m.rename(.{ .b = .batch }) else null };
-        var attn = (if (bf16_native)
+        var attn = if (bf16_native and opts.attn_meta != null and opts.attn_params != null and opts.mask == null)
+            attention.fullSequenceAttention(qh, kh, vh, opts.attn_meta.?, opts.attn_params.?)
+        else if (bf16_native)
             sdpaNoF32Upcast(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
                 sdpa_opts,
-            )
+            ).rename(.{ .batch = .b })
         else
             zml.nn.sdpa(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
                 sdpa_opts,
-            )).rename(.{ .batch = .b }); // [B, Q, H, HD]
+            ).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
         // Compute per-head gates as 2 * sigmoid(logits) so zero-initialized logits preserve identity.
         var gate_logits = x_compute.dot(params.to_gate_logits.weight.convert(compute_dtype), .d); // [B, T, H]
@@ -887,6 +900,12 @@ pub const BasicAVTransformerBlock = struct {
         v2a_k_pe_cos: Tensor,
         v2a_k_pe_sin: Tensor,
         v2a_mask: ?Tensor = null,
+        /// FA3 metadata and parameters for mask-free attention kinds (null = vanilla SDPA fallback).
+        /// video_attn_meta: sized for Q=video tokens, used by attn1 and audio_to_video_attn.
+        /// audio_attn_meta: sized for Q=audio tokens, used by audio_attn1 and video_to_audio_attn.
+        video_attn_meta: ?AttnMetadata = null,
+        audio_attn_meta: ?AttnMetadata = null,
+        attn_params: ?AttnParameters = null,
     };
 
     /// Full block forward from raw stream state, computing all AdaLN values inline.
@@ -919,6 +938,8 @@ pub const BasicAVTransformerBlock = struct {
         else if (bf16_attn) self.attn1.forwardBf16(norm_vx, params.attn1, kindNumHeads(.attn1), .{
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
+            .attn_meta = inputs.video_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.attn1.forward(norm_vx, params.attn1, kindNumHeads(.attn1), .{
             .pe_cos = inputs.v_pe_cos,
             .pe_sin = inputs.v_pe_sin,
@@ -971,6 +992,8 @@ pub const BasicAVTransformerBlock = struct {
         else if (bf16_attn) self.audio_attn1.forwardBf16(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
             .pe_cos = inputs.a_pe_cos,
             .pe_sin = inputs.a_pe_sin,
+            .attn_meta = inputs.audio_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.audio_attn1.forward(norm_ax, params.audio_attn1, kindNumHeads(.audio_attn1), .{
             .pe_cos = inputs.a_pe_cos,
             .pe_sin = inputs.a_pe_sin,
@@ -1039,6 +1062,8 @@ pub const BasicAVTransformerBlock = struct {
             .pe_sin = inputs.a2v_pe_sin,
             .k_pe_cos = inputs.a2v_k_pe_cos,
             .k_pe_sin = inputs.a2v_k_pe_sin,
+            .attn_meta = inputs.video_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.audio_to_video_attn.forward(vx_scaled_a2v, params.audio_to_video_attn, kindNumHeads(.audio_to_video_attn), .{
             .context = ax_scaled_a2v,
             .pe_cos = inputs.a2v_pe_cos,
@@ -1079,6 +1104,8 @@ pub const BasicAVTransformerBlock = struct {
             .pe_sin = inputs.v2a_pe_sin,
             .k_pe_cos = inputs.v2a_k_pe_cos,
             .k_pe_sin = inputs.v2a_k_pe_sin,
+            .attn_meta = inputs.audio_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.video_to_audio_attn.forward(ax_scaled_v2a, params.video_to_audio_attn, kindNumHeads(.video_to_audio_attn), .{
             .context = vx_scaled_v2a,
             .pe_cos = inputs.v2a_pe_cos,
@@ -1838,6 +1865,16 @@ pub fn forwardBlock0NativeBf16Attn(
     v2a_pe_sin: Tensor,
     v2a_k_pe_cos: Tensor,
     v2a_k_pe_sin: Tensor,
+    // FA3 scratch buffers (video-seqlen group)
+    v_fa3_softmax_lse: Tensor,
+    v_fa3_softmax_lse_accum: Tensor,
+    v_fa3_out_accum: Tensor,
+    v_fa3_scheduler_metadata: Tensor,
+    // FA3 scratch buffers (audio-seqlen group)
+    a_fa3_softmax_lse: Tensor,
+    a_fa3_softmax_lse_accum: Tensor,
+    a_fa3_out_accum: Tensor,
+    a_fa3_scheduler_metadata: Tensor,
     params: Block0FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     const block = BasicAVTransformerBlock.init();
@@ -1868,6 +1905,19 @@ pub fn forwardBlock0NativeBf16Attn(
         .v2a_pe_sin = v2a_pe_sin,
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
+        .video_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = v_fa3_softmax_lse,
+            .softmax_lse_accum = v_fa3_softmax_lse_accum,
+            .out_accum = v_fa3_out_accum,
+            .scheduler_metadata = v_fa3_scheduler_metadata,
+        } },
+        .audio_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = a_fa3_softmax_lse,
+            .softmax_lse_accum = a_fa3_softmax_lse_accum,
+            .out_accum = a_fa3_out_accum,
+            .scheduler_metadata = a_fa3_scheduler_metadata,
+        } },
+        .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
     }, params);
 }
 
@@ -1967,6 +2017,16 @@ pub fn forwardBlock0NativeSTGBf16Attn(
     v2a_pe_sin: Tensor,
     v2a_k_pe_cos: Tensor,
     v2a_k_pe_sin: Tensor,
+    // FA3 scratch buffers (video-seqlen group)
+    v_fa3_softmax_lse: Tensor,
+    v_fa3_softmax_lse_accum: Tensor,
+    v_fa3_out_accum: Tensor,
+    v_fa3_scheduler_metadata: Tensor,
+    // FA3 scratch buffers (audio-seqlen group)
+    a_fa3_softmax_lse: Tensor,
+    a_fa3_softmax_lse_accum: Tensor,
+    a_fa3_out_accum: Tensor,
+    a_fa3_scheduler_metadata: Tensor,
     params: Block0FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     const block = BasicAVTransformerBlock.init();
@@ -1997,6 +2057,19 @@ pub fn forwardBlock0NativeSTGBf16Attn(
         .v2a_pe_sin = v2a_pe_sin,
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
+        .video_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = v_fa3_softmax_lse,
+            .softmax_lse_accum = v_fa3_softmax_lse_accum,
+            .out_accum = v_fa3_out_accum,
+            .scheduler_metadata = v_fa3_scheduler_metadata,
+        } },
+        .audio_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = a_fa3_softmax_lse,
+            .softmax_lse_accum = a_fa3_softmax_lse_accum,
+            .out_accum = a_fa3_out_accum,
+            .scheduler_metadata = a_fa3_scheduler_metadata,
+        } },
+        .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
     }, params);
 }
 pub fn forwardBlock0NativeWithAVMasks(
@@ -2097,6 +2170,16 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
     v2a_k_pe_cos: Tensor,
     v2a_k_pe_sin: Tensor,
     v2a_mask: Tensor,
+    // FA3 scratch buffers (video-seqlen group)
+    v_fa3_softmax_lse: Tensor,
+    v_fa3_softmax_lse_accum: Tensor,
+    v_fa3_out_accum: Tensor,
+    v_fa3_scheduler_metadata: Tensor,
+    // FA3 scratch buffers (audio-seqlen group)
+    a_fa3_softmax_lse: Tensor,
+    a_fa3_softmax_lse_accum: Tensor,
+    a_fa3_out_accum: Tensor,
+    a_fa3_scheduler_metadata: Tensor,
     params: Block0FullParams,
 ) BasicAVTransformerBlock.FullOutputs {
     const block = BasicAVTransformerBlock.init();
@@ -2129,6 +2212,19 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
         .v2a_k_pe_cos = v2a_k_pe_cos,
         .v2a_k_pe_sin = v2a_k_pe_sin,
         .v2a_mask = v2a_mask,
+        .video_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = v_fa3_softmax_lse,
+            .softmax_lse_accum = v_fa3_softmax_lse_accum,
+            .out_accum = v_fa3_out_accum,
+            .scheduler_metadata = v_fa3_scheduler_metadata,
+        } },
+        .audio_attn_meta = .{ .cuda_fa3 = .{
+            .softmax_lse = a_fa3_softmax_lse,
+            .softmax_lse_accum = a_fa3_softmax_lse_accum,
+            .out_accum = a_fa3_out_accum,
+            .scheduler_metadata = a_fa3_scheduler_metadata,
+        } },
+        .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
     }, params);
 }
 
