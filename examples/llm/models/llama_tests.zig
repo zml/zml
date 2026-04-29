@@ -45,7 +45,6 @@ pub fn main(init: std.process.Init) !void {
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
     const shardings: common.Shardings = .{
-        .replicated = try .init(platform.physical_mesh, .replicated),
         .model = try .init(platform.physical_mesh, .init("tp_mesh", .{ .model = .high_bandwidth })),
     };
 
@@ -53,7 +52,7 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, &shardings.replicated);
+    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, platform.replicated_sharding);
 }
 
 fn run(
@@ -139,5 +138,5 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, shape, .{ .sharded = sharding }, host_bytes);
 }

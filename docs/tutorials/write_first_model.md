@@ -171,9 +171,7 @@ We're only going to use the CPU for our simple model, but we need to compile the
 // Our computation require an input tensor
 const input: zml.Tensor = .init(.{3}, .f16);
 
-const sharding = try zml.sharding.replicatedSharding(platform);
-
-var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{ .shardings = &.{sharding}});
+var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
 defer executable.deinit();
 ```
 
@@ -193,8 +191,8 @@ provides ways to have extra-low loading times).
 const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 2.0, 3.0}));
 const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{1.0, 1.0, 1.0}));
 var layer_buffers: zml.Bufferized(Layer) = .{
-    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, sharding),
-    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, sharding),
+    .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
+    .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
 };
 defer layer_buffers.weight.deinit();
 defer layer_buffers.bias.?.deinit();
@@ -359,23 +357,21 @@ pub fn main(init: std.process.Init) !void {
     // Our computation require an input tensor
     const input: zml.Tensor = .init(.{3}, .f16);
 
-    const sharding = try zml.sharding.replicatedSharding(platform);
-
-    var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{ .shardings = &.{sharding} });
+    var executable = try platform.compile(allocator, io, layer, .forward, .{input}, .{});
     defer executable.deinit();
 
     const weight_slice: zml.Slice = .init(layer.weight.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 2.0, 3.0 }));
     const bias_slice: zml.Slice = .init(layer.bias.?.shape(), std.mem.sliceAsBytes(&[3]f16{ 1.0, 1.0, 1.0 }));
     var layer_buffers: zml.Bufferized(Layer) = .{
-        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, sharding),
-        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, sharding),
+        .weight = try zml.Buffer.fromSlice(io, platform, weight_slice, .replicated),
+        .bias = try zml.Buffer.fromSlice(io, platform, bias_slice, .replicated),
     };
     defer layer_buffers.weight.deinit();
     defer layer_buffers.bias.?.deinit();
 
     // create the input buffer
     const input_slice: zml.Slice = .init(input.shape(), std.mem.sliceAsBytes(&[3]f16{ 5.0, 5.0, 5.0 }));
-    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, sharding);
+    var input_buffer: zml.Buffer = try .fromSlice(io, platform, input_slice, .replicated);
     defer input_buffer.deinit();
 
     // create the Args and Results structs

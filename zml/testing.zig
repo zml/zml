@@ -11,7 +11,6 @@ const zml = @import("zml.zig");
 const log = std.log.scoped(.@"zml/testing");
 
 var _platform: ?*const Platform = null;
-var _replicated_sharding: ?sharding.Sharding = null;
 
 pub fn env() *const Platform {
     if (!builtin.is_test) @compileError("Cannot use zml.testing.env outside of a test block");
@@ -26,14 +25,6 @@ pub fn env() *const Platform {
 
 pub fn physicalMesh() sharding.PhysicalMesh {
     return env().physical_mesh;
-}
-
-pub fn replicatedSharding() *const sharding.Sharding {
-    if (_replicated_sharding == null) {
-        const platform = env();
-        _replicated_sharding = sharding.Sharding.init(platform.physical_mesh, .replicated) catch unreachable;
-    }
-    return &_replicated_sharding.?;
 }
 
 /// In neural network we generally care about the relative precision,
@@ -303,7 +294,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const zml.sharding.Sharding,
+    shardings: []const *const zml.sharding.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -333,14 +324,12 @@ pub fn testLayer(
             var buffer: [256]u8 = undefined;
             const subkey = std.fmt.bufPrint(&buffer, "{d}", .{ctx_.index}) catch unreachable;
 
-            tensor.* = ctx_.activation_store.createTensor(subkey, null, null);
+            tensor.* = ctx_.activation_store.createTensor(subkey, null, .replicated);
             ctx_.index += 1;
         }
     }.cb, &ctx, &args);
 
-    const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-
-    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{replicated_sharding} });
+    const exe = try platform.compile(allocator, io, layer, func, args, .{ .shardings = if (shardings.len != 0) shardings else &.{} });
     defer exe.deinit();
 
     const output_name = try std.fmt.allocPrint(arena.allocator(), "{s}.out", .{name});

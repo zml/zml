@@ -1121,7 +1121,7 @@ pub const Sharding = struct {
         return null;
     }
 
-    pub fn physicalView(self: Sharding) PhysicalView {
+    pub fn physicalView(self: *const Sharding) PhysicalView {
         const physical = self.physical;
         var view: PhysicalView = .{
             .axes = .empty,
@@ -1159,7 +1159,7 @@ pub const Sharding = struct {
         return view;
     }
 
-    pub fn name(self: Sharding) []const u8 {
+    pub fn name(self: *const Sharding) []const u8 {
         return self.logical.name;
     }
 
@@ -1167,7 +1167,7 @@ pub const Sharding = struct {
         return self.physical.linearIndexFromCoords(coords);
     }
 
-    pub fn numPartitions(self: Sharding) i32 {
+    pub fn numPartitions(self: *const Sharding) i32 {
         return @intCast(self.physicalView().total_devices);
     }
 
@@ -1193,7 +1193,7 @@ pub const Sharding = struct {
         return partitions;
     }
 
-    pub fn numReplicas(_: Sharding) i32 {
+    pub fn numReplicas(_: *const Sharding) i32 {
         return 1;
     }
 
@@ -1201,7 +1201,7 @@ pub const Sharding = struct {
         return self.numPartitions() * self.numReplicas();
     }
 
-    pub fn sdyMeshAttr(self: Sharding, allocator: std.mem.Allocator) ![]const u8 {
+    pub fn sdyMeshAttr(self: *const Sharding, allocator: std.mem.Allocator) ![]const u8 {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
@@ -1264,7 +1264,7 @@ pub const Sharding = struct {
         };
     }
 
-    pub fn sdyShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub fn sdyShardingAttrForShape(self: *const Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1325,7 +1325,7 @@ pub const Sharding = struct {
         return try out.toOwnedSlice();
     }
 
-    pub fn gspmdShardingAttrForShape(self: Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
+    pub fn gspmdShardingAttrForShape(self: *const Sharding, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
         var has_sharding = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) == .axis) {
@@ -1389,7 +1389,7 @@ pub const Sharding = struct {
         return try out.toOwnedSlice();
     }
 
-    pub fn deviceAssignment(self: Sharding, allocator: std.mem.Allocator) ![]usize {
+    pub fn deviceAssignment(self: *const Sharding, allocator: std.mem.Allocator) ![]usize {
         const view = self.physicalView();
         const count: usize = @intCast(view.total_devices);
 
