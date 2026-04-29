@@ -107,7 +107,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
     g_tile = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
     beta_tile = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
     decay = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
-    decay_b = nl.ndarray((key_dim, 1), dtype=nl.float32, buffer=nl.sbuf)
 
     # Final-state HBM transpose tile (32x32 keeps it as a stream transpose).
     chunk = 32
@@ -160,19 +159,18 @@ def gated_deltanet(q, k, v, g, beta, h0):
                 nisa.tensor_copy(dst=q_kp, src=kp_psum)
 
                 # ==== Decay: state[:, ir*Dv:(ir+1)*Dv] *= exp(g[t, vh]) ====
-                # Each packed slot has its own decay; scalar broadcast across
-                # the partition dim into decay_b before each tensor_scalar.
+                # The broadcast_to result feeds tensor_scalar directly; no
+                # intermediate SBUF tile needed.
                 for ir in nl.affine_range(qk_rep):
                     vh = i_q_head * qk_rep + ir
                     nisa.dma_copy(dst=g_tile,
                                   src=g[i_batch, i_seq:i_seq+1, vh:vh+1])
                     nisa.activation(dst=decay, op=nl.exp, data=g_tile)
-                    nisa.tensor_copy(dst=decay_b,
-                                     src=nl.broadcast_to(decay, (key_dim, 1)))
                     nisa.tensor_scalar(
                         dst=state[0:key_dim, ir*value_dim:(ir+1)*value_dim],
                         data=state[0:key_dim, ir*value_dim:(ir+1)*value_dim],
-                        op0=nl.multiply, operand0=decay_b)
+                        op0=nl.multiply,
+                        operand0=nl.broadcast_to(decay, (key_dim, 1)))
 
                 # ==== predicted_v (1, pack_w) = k_kp.T @ state ====
                 # One matmul, contracts over Dk, free dim = pack_w.
