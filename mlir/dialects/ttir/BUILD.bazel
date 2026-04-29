@@ -1,0 +1,37 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "ttir_capi",
+    srcs = ["ttir_capi.cc"],
+    hdrs = ["ttir_capi.h"],
+    strip_include_prefix = ".",
+    tags = ["manual"],
+    visibility = ["//visibility:private"],
+    deps = [
+        "@llvm-project//mlir:CAPIIR",
+        "@triton//:TritonDialects",
+    ],
+    # MLIR_DEFINE_CAPI_DIALECT_REGISTRATION expands to a global static
+    # initializer that the linker would otherwise dead-strip.
+    alwayslink = True,
+)
+
+zig_library(
+    name = "ttir",
+    tags = ["manual"],
+    import_name = "mlir/dialects/ttir",
+    main = "ttir.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":ttir_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":ttir"],
+)

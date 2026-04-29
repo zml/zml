@@ -1,0 +1,31 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+cc_library(
+    name = "mosaic_tpu_capi",
+    hdrs = ["mosaic_tpu_capi.h"],
+    strip_include_prefix = ".",
+    visibility = ["//visibility:private"],
+    deps = [
+        "@jax//:tpu_dialect_capi",
+        "@llvm-project//mlir:CAPIIR",
+    ],
+)
+
+zig_library(
+    name = "mosaic_tpu",
+    import_name = "mlir/dialects/mosaic_tpu",
+    main = "mosaic_tpu.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        ":mosaic_tpu_capi",
+        "//mlir",
+        "//mlir:c",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":mosaic_tpu"],
+)
