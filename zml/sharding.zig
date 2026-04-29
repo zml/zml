@@ -1890,13 +1890,13 @@ const ShardingTest = struct {
 
         // Verify Placement logic / Error
         if (s.expect_error) |err| {
-            try std.testing.expectError(err, Placement.init(sharding, s.shape));
+            try std.testing.expectError(err, Placement.init(&sharding, s.shape));
             return;
         }
 
         // Verify Shard Slices (Math)
         if (s.expected_shards.len > 0) {
-            const placement = try Placement.init(sharding, s.shape);
+            const placement = try Placement.init(&sharding, s.shape);
             try std.testing.expectEqual(s.expected_shards.len, placement.shards.len);
             for (s.expected_shards, 0..) |expected, i| {
                 const actual = placement.shards.constSlice()[i];
@@ -2141,7 +2141,7 @@ test "sharding: num partitions for logical axis" {
     strategy.addBinding(.model, .link_x);
     strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
-    const sharding: *const Sharding = try .initFromStrategy(physical, logical, strategy);
+    const sharding: Sharding = try .initFromStrategy(physical, logical, strategy);
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));

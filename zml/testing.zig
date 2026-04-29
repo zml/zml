@@ -28,11 +28,12 @@ pub fn physicalMesh() sharding.PhysicalMesh {
     return env().physical_mesh;
 }
 
-pub fn replicatedSharding() sharding.Sharding {
+pub fn replicatedSharding() *const sharding.Sharding {
     if (_replicated_sharding == null) {
-        _replicated_sharding = sharding.replicatedSharding(env()) catch unreachable;
+        const platform = env();
+        _replicated_sharding = sharding.Sharding.init(platform.physical_mesh, .replicated) catch unreachable;
     }
-    return _replicated_sharding.?;
+    return &_replicated_sharding.?;
 }
 
 /// In neural network we generally care about the relative precision,
