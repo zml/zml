@@ -16,10 +16,11 @@ pub const std_options: std.Options = .{
 
 const batch_size = 1;
 const seq_len = 16;
-const num_q_heads = 1;
-const num_value_heads = 1;
-const key_dim = 32;
-const value_dim = 32;
+const num_q_heads = 16;
+const num_value_heads = 32;
+const qk_head_repetition = @divExact(num_value_heads, num_q_heads);
+const key_dim = 128;
+const value_dim = 128;
 
 const Args = struct {
     warmups: usize = 2,
@@ -50,8 +51,10 @@ const Program = struct {
 const ReferenceProgram = struct {
     fn forward(q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, g: zml.Tensor, beta: zml.Tensor, h0: zml.Tensor) [2]zml.Tensor {
         const scale: f32 = 1.0 / @sqrt(@as(f32, @floatFromInt(key_dim)));
-        const queries = zml.nn.normalizeL2(q.rename(.{ .d = .k }).convert(.f32), 1.0e-6).scale(scale);
-        const keys = zml.nn.normalizeL2(k.rename(.{ .d = .k }).convert(.f32), 1.0e-6);
+        const query_heads = zml.nn.normalizeL2(q.rename(.{ .d = .k }).convert(.f32), 1.0e-6).scale(scale);
+        const key_heads = zml.nn.normalizeL2(k.rename(.{ .d = .k }).convert(.f32), 1.0e-6);
+        const queries = query_heads.stutter1d(@intCast(query_heads.axis(.h)), qk_head_repetition);
+        const keys = key_heads.stutter1d(@intCast(key_heads.axis(.h)), qk_head_repetition);
         const values = v.rename(.{ .vh = .h, .vd = .v }).convert(.f32);
         const alphas = g.rename(.{ .vh = .h }).convert(.f32).exp();
         const betas = beta.rename(.{ .vh = .h }).convert(.f32);
@@ -264,53 +267,61 @@ fn computeExpected(
     const out_values = expected.output.items(f32);
     const ht_values = expected.final_state.items(f32);
 
-    var state = try allocator.alloc(f32, value_dim * key_dim);
+    var state = try allocator.alloc(f32, num_value_heads * value_dim * key_dim);
     defer allocator.free(state);
     @memcpy(state, h0_values[0..state.len]);
 
     const scale: f32 = 1.0 / std.math.sqrt(@as(f32, @floatFromInt(key_dim)));
-    var q_norm: [key_dim]f32 = undefined;
-    var k_norm: [key_dim]f32 = undefined;
+    var q_norm: [num_q_heads][key_dim]f32 = undefined;
+    var k_norm: [num_q_heads][key_dim]f32 = undefined;
 
     for (0..seq_len) |t| {
-        var q_sum_sq: f32 = 0;
-        var k_sum_sq: f32 = 0;
-        for (0..key_dim) |ki| {
-            const q_value = q_values[qkIndex(t, ki)].toF32();
-            const k_value = k_values[qkIndex(t, ki)].toF32();
-            q_norm[ki] = q_value;
-            k_norm[ki] = k_value;
-            q_sum_sq += q_value * q_value;
-            k_sum_sq += k_value * k_value;
+        for (0..num_q_heads) |qh| {
+            var q_sum_sq: f32 = 0;
+            var k_sum_sq: f32 = 0;
+            for (0..key_dim) |ki| {
+                const q_value = q_values[qkIndex(t, qh, ki)].toF32();
+                const k_value = k_values[qkIndex(t, qh, ki)].toF32();
+                q_norm[qh][ki] = q_value;
+                k_norm[qh][ki] = k_value;
+                q_sum_sq += q_value * q_value;
+                k_sum_sq += k_value * k_value;
+            }
+
+            const q_inv_norm: f32 = 1.0 / std.math.sqrt(q_sum_sq + 1.0e-6);
+            const k_inv_norm: f32 = 1.0 / std.math.sqrt(k_sum_sq + 1.0e-6);
+            for (0..key_dim) |ki| {
+                q_norm[qh][ki] *= q_inv_norm * scale;
+                k_norm[qh][ki] *= k_inv_norm;
+            }
         }
 
-        const q_inv_norm: f32 = 1.0 / std.math.sqrt(q_sum_sq + 1.0e-6);
-        const k_inv_norm: f32 = 1.0 / std.math.sqrt(k_sum_sq + 1.0e-6);
-        for (0..key_dim) |ki| {
-            q_norm[ki] *= q_inv_norm * scale;
-            k_norm[ki] *= k_inv_norm;
-        }
+        for (0..num_value_heads) |vh| {
+            const qh = @divTrunc(vh, qk_head_repetition);
+            const decay: f32 = @exp(g_values[gateIndex(t, vh)]);
+            const beta_value = beta_values[gateIndex(t, vh)].toF32();
 
-        const decay: f32 = @exp(g_values[gateIndex(t)]);
-        for (state) |*elem| elem.* *= decay;
+            for (0..value_dim) |vi| {
+                for (0..key_dim) |ki| {
+                    state[stateIndex(vh, vi, ki)] *= decay;
+                }
 
-        const beta_value = beta_values[gateIndex(t)].toF32();
-        for (0..value_dim) |vi| {
-            var predicted_v: f32 = 0;
-            for (0..key_dim) |ki| {
-                predicted_v += state[stateIndex(vi, ki)] * k_norm[ki];
+                var predicted_v: f32 = 0;
+                for (0..key_dim) |ki| {
+                    predicted_v += state[stateIndex(vh, vi, ki)] * k_norm[qh][ki];
+                }
+
+                const delta_v = beta_value * (v_values[inputValueIndex(t, vh, vi)].toF32() - predicted_v);
+                for (0..key_dim) |ki| {
+                    state[stateIndex(vh, vi, ki)] += delta_v * k_norm[qh][ki];
+                }
+
+                var output: f32 = 0;
+                for (0..key_dim) |ki| {
+                    output += state[stateIndex(vh, vi, ki)] * q_norm[qh][ki];
+                }
+                out_values[outputIndex(t, vh, vi)] = output;
             }
-
-            const delta_v = beta_value * (v_values[valueIndex(t, vi)].toF32() - predicted_v);
-            for (0..key_dim) |ki| {
-                state[stateIndex(vi, ki)] += delta_v * k_norm[ki];
-            }
-
-            var output: f32 = 0;
-            for (0..key_dim) |ki| {
-                output += state[stateIndex(vi, ki)] * q_norm[ki];
-            }
-            out_values[valueIndex(t, vi)] = output;
         }
     }
 
@@ -327,20 +338,27 @@ fn fillInputs(q: zml.Slice, k: zml.Slice, v: zml.Slice, g: zml.Slice, beta: zml.
     const h0_values = h0.items(f32);
 
     for (0..seq_len) |t| {
-        for (0..key_dim) |ki| {
-            q_values[qkIndex(t, ki)] = bf16.fromF32(0.015 + @as(f32, @floatFromInt((t + ki) % 17)) * 0.001);
-            k_values[qkIndex(t, ki)] = bf16.fromF32(0.020 + @as(f32, @floatFromInt((3 * t + ki) % 19)) * 0.001);
+        for (0..num_q_heads) |qh| {
+            for (0..key_dim) |ki| {
+                q_values[qkIndex(t, qh, ki)] = bf16.fromF32(0.015 + @as(f32, @floatFromInt((t + qh + ki) % 17)) * 0.001);
+                k_values[qkIndex(t, qh, ki)] = bf16.fromF32(0.020 + @as(f32, @floatFromInt((3 * t + qh + ki) % 19)) * 0.001);
+            }
         }
-        for (0..value_dim) |vi| {
-            v_values[valueIndex(t, vi)] = bf16.fromF32(0.030 + @as(f32, @floatFromInt((5 * t + vi) % 23)) * 0.001);
+
+        for (0..num_value_heads) |vh| {
+            for (0..value_dim) |vi| {
+                v_values[inputValueIndex(t, vh, vi)] = bf16.fromF32(0.030 + @as(f32, @floatFromInt((5 * t + vh + vi) % 23)) * 0.001);
+            }
+            g_values[gateIndex(t, vh)] = -0.05 - @as(f32, @floatFromInt((t + vh) % 5)) * 0.005;
+            beta_values[gateIndex(t, vh)] = bf16.fromF32(0.35 + @as(f32, @floatFromInt((t + vh) % 4)) * 0.025);
         }
-        g_values[gateIndex(t)] = -0.05 - @as(f32, @floatFromInt(t % 5)) * 0.005;
-        beta_values[gateIndex(t)] = bf16.fromF32(0.35 + @as(f32, @floatFromInt(t % 4)) * 0.025);
     }
 
-    for (0..value_dim) |vi| {
-        for (0..key_dim) |ki| {
-            h0_values[stateIndex(vi, ki)] = 0.001 * @as(f32, @floatFromInt((vi + 2 * ki) % 29));
+    for (0..num_value_heads) |vh| {
+        for (0..value_dim) |vi| {
+            for (0..key_dim) |ki| {
+                h0_values[stateIndex(vh, vi, ki)] = 0.001 * @as(f32, @floatFromInt((vh + vi + 2 * ki) % 29));
+            }
         }
     }
 }
@@ -365,20 +383,24 @@ fn outputShape() zml.Shape {
     return zml.Shape.init(.{ .b = batch_size, .s = seq_len, .vd = value_dim, .vh = num_value_heads }, .f32);
 }
 
-fn qkIndex(t: usize, k: usize) usize {
-    return ((t * num_q_heads) * key_dim) + k;
+fn qkIndex(t: usize, h: usize, k: usize) usize {
+    return ((t * num_q_heads + h) * key_dim) + k;
 }
 
-fn valueIndex(t: usize, v: usize) usize {
-    return ((t * num_value_heads) * value_dim) + v;
+fn inputValueIndex(t: usize, h: usize, v: usize) usize {
+    return ((t * num_value_heads + h) * value_dim) + v;
 }
 
-fn gateIndex(t: usize) usize {
-    return t * num_value_heads;
+fn outputIndex(t: usize, h: usize, v: usize) usize {
+    return ((t * value_dim + v) * num_value_heads) + h;
 }
 
-fn stateIndex(v: usize, k: usize) usize {
-    return ((v * key_dim) + k);
+fn gateIndex(t: usize, h: usize) usize {
+    return t * num_value_heads + h;
+}
+
+fn stateIndex(h: usize, v: usize, k: usize) usize {
+    return ((h * value_dim + v) * key_dim) + k;
 }
 
 fn nsToMs(ns: u64) f64 {

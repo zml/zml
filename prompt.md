@@ -33,13 +33,72 @@ The implementation must be fully valid so that running the following command com
 
 ----
 
+You are an expert AWS Neuron NKI and Zig developer working within the ZML framework. Your task is to update an existing GatedDeltaNet implementation to match the Qwen3.5-9B model architecture and optimize the NKI kernel using official AWS reference patterns.
 
- alway use remote build ex:  bazel run --config=remote
+**Context & Resources:**
+* Target Zig Host: `/home/kevin/zml/examples/neuron_nki/gated_deltanet.zig`
+* Target Python Kernel: `/home/kevin/zml/examples/neuron_nki/gated_deltanet.py`
+* Architecture Config: [https://huggingface.co/Qwen/Qwen3.5-9B/resolve/main/config.json](https://huggingface.co/Qwen/Qwen3.5-9B/resolve/main/config.json)
+* NKI Optimization Reference: [https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py](https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py)
+* NKI Fallback Docs: [https://awsdocs-neuron.readthedocs-hosted.com/en/v2.26.1/_sources/nki/programming_model.rst](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.26.1/_sources/nki/programming_model.rst)
 
+Please execute the following steps:
+
+**Step 1: Update the Zig Configuration**
+Fetch the Qwen3.5-9B `config.json`. Based on its parameters (like `num_attention_heads`, `num_key_value_heads`, and `hidden_size`), calculate and update the following constants in `/home/kevin/zml/examples/neuron_nki/gated_deltanet.zig`:
+```zig
+const batch_size = 1;
+const seq_len = 16;
+const num_q_heads = [extract from config];
+const num_value_heads = [extract from config];
+const key_dim = [calculate from config];
+const value_dim = [calculate from config];
+```
+
+**Step 2: Optimize the NKI Kernel**
+Review the provided `mamba_nki_kernels.py` reference file. Refactor the NKI kernel in `gated_deltanet.py` to strictly mirror its coding style and optimization techniques. 
+* Pay special attention to tiling strategies, loop unrolling, and optimal `nl.load`/`nl.store` usage for Neuron hardware.
+* If you encounter any API constraints or errors while optimizing, consult the provided Neuron NKI programming model documentation link to resolve them.
+
+**Step 3: Validation Command**
+Ensure the final output is completely self-contained, requires no external dependencies outside of standard ZML/Neuron libraries, and executes flawlessly using the following command:
+> NEURON_RT_LOG_LEVEL=error NEURON_RT_VISIBLE_CORES=1 bazel run --config=remote --@zml//platforms:neuron=true --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet
 
 ----
 
+You are an expert AWS Neuron NKI kernel developer optimizing code for Inferentia2 (inf2.8xlarge). 
 
-based on `/home/kevin/zml/zml/nn.zig` implement the same `gated delta net` test in /home/kevin/zml/examples/neuron_nki/
+**Current Situation:**
+The current GatedDeltaNet NKI kernel implementation located at `examples/neuron_nki/gated_deltanet.py` suffers from extremely slow compile times and poor runtime performance. 
 
-----
+**Your Task:**
+Rework the `gated_deltanet.py` NKI implementation. 
+
+**Reference Material:**
+Study the state-of-the-art NKI optimization techniques and memory management strategies used in this official reference:
+[https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py](https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py)
+
+**Constraints & Architecture:**
+1. **Hardware:** `inf2.8xlarge` targeting exactly ONE visible Neuron core (`NEURON_RT_VISIBLE_CORES=1`).
+2. **Neuron Architecture:** Deeply respect the Neuron memory hierarchy (HBM, SBUF, PSUM). Optimize your `nl.load` and `nl.store` patterns, DMA transfers, and use appropriate spatial/computational tiling to maximize core utilization without exhausting SBUF limits.
+3. **Compile Time:** Avoid excessive static loop unrolling or massive inline blocks that cause the Neuron compiler to hang or bloat the LLVM IR. Use `nl.affine_range` and structured loops to keep compile times fast.
+4. **Runtime:** The execution of your kernel must be faster than the baseline `ReferenceProgram`.
+
+**Context & Resources:**
+* Target Zig Host: `/home/kevin/zml/examples/neuron_nki/gated_deltanet.zig`
+* Target Python Kernel: `/home/kevin/zml/examples/neuron_nki/gated_deltanet.py`
+* Architecture Config: [https://huggingface.co/Qwen/Qwen3.5-9B/resolve/main/config.json](https://huggingface.co/Qwen/Qwen3.5-9B/resolve/main/config.json)
+* NKI Optimization Reference: [https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py](https://raw.githubusercontent.com/aws-neuron/nki-samples/refs/heads/main/src/nki_samples/tutorials/fused_mamba/mamba_nki_kernels.py)
+* NKI Fallback Docs: [https://awsdocs-neuron.readthedocs-hosted.com/en/v2.26.1/_sources/nki/programming_model.rst](https://awsdocs-neuron.readthedocs-hosted.com/en/v2.26.1/_sources/nki/programming_model.rst)
+
+**Validation Command:**
+Your code must execute cleanly via:
+`NEURON_RT_LOG_LEVEL=info NEURON_RT_VISIBLE_CORES=1 bazel run --config=remote --@zml//platforms:neuron=true --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet`
+
+**Deliverables:**
+1. **Primary Output:** The completely rewritten `examples/neuron_nki/gated_deltanet.py` file containing the optimized kernel.
+2. **Fallback Output (`followup.md`):** If achieving a runtime faster than the `ReferenceProgram` is theoretically or practically impossible due to GatedDeltaNet's specific memory access patterns, Neuron hardware constraints, or NKI API limitations, you must generate a `followup.md` file instead of (or alongside) the kernel. This document must explain the exact architectural bottlenecks (e.g., memory bandwidth, sequential dependency limits, PSUM constraints) preventing the speedup, backed by explanations of the Neuron programming model and relevant source documentation.
+ 
+**Validation Command**
+Ensure the final output is completely self-contained, requires no external dependencies outside of standard ZML/Neuron libraries, and executes flawlessly using the following command:
+> NEURON_RT_LOG_LEVEL=error NEURON_RT_VISIBLE_CORES=1 bazel run --config=remote --@zml//platforms:neuron=true --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet
