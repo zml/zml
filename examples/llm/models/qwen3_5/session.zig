@@ -35,7 +35,7 @@ pub const Session = struct {
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, seed, io, replicated_sharding);
+        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, replicated_sharding, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         return .{

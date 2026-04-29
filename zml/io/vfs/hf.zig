@@ -290,6 +290,7 @@ pub const HF = struct {
             .path = "",
         });
         const uri = try std.Uri.parse(url);
+        log.info("Fetching from HF: {s}", .{url});
 
         var req = try self.client.request(.GET, uri, .{
             .headers = .{

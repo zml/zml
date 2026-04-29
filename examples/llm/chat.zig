@@ -68,7 +68,7 @@ pub const Chat = struct {
         const prompt_tokens = try self.session.tokenizePrompt(self.allocator, prompt);
         defer self.allocator.free(prompt_tokens);
 
-        var stdout = std.Io.File.stdout().writer(self.io, &.{});
+        var stdout = std.Io.File.stdout().writerStreaming(self.io, &.{});
         var profiler: ?zml.Platform.Profiler = null;
         defer if (profiler) |*p| p.deinit();
 
@@ -103,7 +103,7 @@ pub const Chat = struct {
         var turn_tokens = try self.session.tokenizePrompt(self.allocator, initial_prompt);
         defer self.allocator.free(turn_tokens);
 
-        var stdout = std.Io.File.stdout().writer(self.io, &.{});
+        var stdout = std.Io.File.stdout().writerStreaming(self.io, &.{});
 
         while (self.tokens.items.len <= self.session.maxTokens()) {
             try self.runPrefill(turn_tokens, &stdout.interface);

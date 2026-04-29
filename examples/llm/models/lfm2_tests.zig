@@ -281,8 +281,7 @@ const TestContext = struct {
         var attention_metadata_buffers = try self.attention_metadata.initBuffer(self.io, self.platform, self.sharding);
         defer attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
-        const cache_index_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(cache_ix)}));
-        var cache_index_buf: zml.Buffer = try .fromSlice(self.io, self.platform, cache_index_slice, self.sharding);
+        var cache_index_buf: zml.Buffer = try .scalar(self.io, self.platform, cache_ix, .u32, self.sharding);
         defer cache_index_buf.deinit();
 
         args.set(.{ layer_buffers, in_buffer, cache_pos_buffer, kv_cache, cache_index_buf, attention_metadata_buffers });

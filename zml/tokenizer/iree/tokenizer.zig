@@ -30,7 +30,7 @@ inline fn stringView(s: []const u8) c.iree_string_view_t {
 }
 
 inline fn mutableStringView(s: []u8) c.iree_mutable_string_view_t {
-    return .{ .data = @ptrCast(s.ptr), .size = s.len };
+    return .{ .data = s.ptr, .size = s.len };
 }
 
 inline fn byteSpan(bytes: []u8) c.iree_byte_span_t {
@@ -64,7 +64,7 @@ inline fn statusCode(status: c.iree_status_t) u32 {
     return @intCast(@intFromPtr(status.?) & StatusCodeMask);
 }
 
-fn assertOk(status: c.iree_status_t) !void {
+fn checkOk(status: c.iree_status_t) !void {
     if (status == null) return;
     const code = statusCode(status);
     _ = c.iree_status_ignore(status);
@@ -90,12 +90,14 @@ fn assertOk(status: c.iree_status_t) !void {
 }
 
 pub const Tokenizer = struct {
+    // TODO: use the ArrayList pattern. Stop copying allocator everywhere
     allocator: std.mem.Allocator,
     inner: *c.iree_tokenizer_t,
 
     pub fn fromHuggingFaceJson(allocator: std.mem.Allocator, json: []const u8) !Tokenizer {
+        // TODO: wrap allocator into an iree allocator
         var raw: ?*c.iree_tokenizer_t = null;
-        try assertOk(c.iree_tokenizer_from_huggingface_json(stringView(json), c.iree_allocator_system(), &raw));
+        try checkOk(c.iree_tokenizer_from_huggingface_json(stringView(json), c.iree_allocator_system(), &raw));
         return .{
             .allocator = allocator,
             .inner = raw.?,
@@ -121,7 +123,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn decoder(self: *const Tokenizer) !Decoder {
-        return Decoder.init(self);
+        return Decoder.init(self, self.allocator);
     }
 
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
@@ -142,7 +144,7 @@ pub const Tokenizer = struct {
 
         fn init(tokenizer: *const Tokenizer) !Encoder {
             var state_size: usize = undefined;
-            try assertOk(c.iree_tokenizer_encode_state_calculate_size(tokenizer.inner, &state_size));
+            try checkOk(c.iree_tokenizer_encode_state_calculate_size(tokenizer.inner, &state_size));
             const state_storage = try tokenizer.allocator.alloc(u8, state_size);
             errdefer tokenizer.allocator.free(state_storage);
 
@@ -151,7 +153,7 @@ pub const Tokenizer = struct {
             errdefer tokenizer.allocator.free(transform_buffer);
 
             var state: ?*c.iree_tokenizer_encode_state_t = null;
-            try assertOk(c.iree_tokenizer_encode_state_initialize(
+            try checkOk(c.iree_tokenizer_encode_state_initialize(
                 tokenizer.inner,
                 byteSpan(state_storage),
                 byteSpan(transform_buffer),
@@ -271,7 +273,7 @@ pub const Tokenizer = struct {
                 var consumed: usize = 0;
                 var produced: usize = 0;
 
-                assertOk(c.iree_tokenizer_encode_state_feed(
+                checkOk(c.iree_tokenizer_encode_state_feed(
                     self.state,
                     stringView(remaining),
                     tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
@@ -306,7 +308,7 @@ pub const Tokenizer = struct {
             while (true) {
                 var produced: usize = 0;
 
-                assertOk(c.iree_tokenizer_encode_state_finalize(
+                checkOk(c.iree_tokenizer_encode_state_finalize(
                     self.state,
                     tokenOutput(try writableTokenSliceGreedy(out, min_tokens)),
                     &produced,
@@ -340,14 +342,14 @@ pub const Tokenizer = struct {
         state_storage: []u8,
         state: *c.iree_tokenizer_decode_state_t,
 
-        fn init(tokenizer: *const Tokenizer) !Decoder {
+        fn init(tokenizer: *const Tokenizer, allocator: std.mem.Allocator) !Decoder {
             var state_size: usize = undefined;
-            try assertOk(c.iree_tokenizer_decode_state_calculate_size(tokenizer.inner, &state_size));
-            const state_storage = try tokenizer.allocator.alloc(u8, state_size);
-            errdefer tokenizer.allocator.free(state_storage);
+            try checkOk(c.iree_tokenizer_decode_state_calculate_size(tokenizer.inner, &state_size));
+            const state_storage = try allocator.alloc(u8, state_size);
+            errdefer allocator.free(state_storage);
 
             var state: ?*c.iree_tokenizer_decode_state_t = null;
-            try assertOk(c.iree_tokenizer_decode_state_initialize(
+            try checkOk(c.iree_tokenizer_decode_state_initialize(
                 tokenizer.inner,
                 c.IREE_TOKENIZER_DECODE_FLAG_NONE,
                 byteSpan(state_storage),
@@ -369,7 +371,7 @@ pub const Tokenizer = struct {
         pub fn reset(self: *Decoder) !void {
             c.iree_tokenizer_decode_state_deinitialize(self.state);
             var state: ?*c.iree_tokenizer_decode_state_t = null;
-            try assertOk(c.iree_tokenizer_decode_state_initialize(
+            try checkOk(c.iree_tokenizer_decode_state_initialize(
                 self.tokenizer.inner,
                 c.IREE_TOKENIZER_DECODE_FLAG_NONE,
                 byteSpan(self.state_storage),
@@ -382,7 +384,7 @@ pub const Tokenizer = struct {
             std.debug.assert(out.len != 0);
             var consumed: usize = 0;
             var produced: usize = 0;
-            try assertOk(c.iree_tokenizer_decode_state_feed(
+            try checkOk(c.iree_tokenizer_decode_state_feed(
                 self.state,
                 tokenIdList(&.{token_id}),
                 mutableStringView(out),
@@ -396,7 +398,7 @@ pub const Tokenizer = struct {
         pub fn finalize(self: *Decoder, out: []u8) ![]u8 {
             std.debug.assert(out.len != 0);
             var produced: usize = 0;
-            try assertOk(c.iree_tokenizer_decode_state_finalize(
+            try checkOk(c.iree_tokenizer_decode_state_finalize(
                 self.state,
                 mutableStringView(out),
                 &produced,
@@ -411,7 +413,7 @@ pub const Tokenizer = struct {
                 var consumed: usize = 0;
                 var produced: usize = 0;
 
-                assertOk(c.iree_tokenizer_decode_state_feed(
+                checkOk(c.iree_tokenizer_decode_state_feed(
                     self.state,
                     tokenIdList(remaining),
                     mutableStringView(try out.writableSliceGreedy(min_output)),
@@ -444,7 +446,7 @@ pub const Tokenizer = struct {
             while (true) {
                 var produced: usize = 0;
 
-                assertOk(c.iree_tokenizer_decode_state_finalize(
+                checkOk(c.iree_tokenizer_decode_state_finalize(
                     self.state,
                     mutableStringView(try out.writableSliceGreedy(min_output)),
                     &produced,
