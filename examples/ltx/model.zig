@@ -408,7 +408,6 @@ pub const AttentionKind = enum {
 pub const Attention = struct {
     pub const ForwardOpts = struct {
         context: ?Tensor = null,
-        mask: ?Tensor = null,
         pe_cos: ?Tensor = null,
         pe_sin: ?Tensor = null,
         k_pe_cos: ?Tensor = null,
@@ -607,22 +606,21 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        const sdpa_opts: zml.nn.SdpaOpts = .{ .attn_mask = if (opts.mask) |m| m.rename(.{ .b = .batch }) else null };
-        var attn = if (bf16_native and opts.attn_meta != null and opts.attn_params != null and opts.mask == null)
+        var attn = if (bf16_native and opts.attn_meta != null and opts.attn_params != null)
             attention.fullSequenceAttention(qh, kh, vh, opts.attn_meta.?, opts.attn_params.?)
         else if (bf16_native)
             sdpaNoF32Upcast(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
-                sdpa_opts,
+                .{},
             ).rename(.{ .batch = .b })
         else
             zml.nn.sdpa(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
-                sdpa_opts,
+                .{},
             ).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
         // Compute per-head gates as 2 * sigmoid(logits) so zero-initialized logits preserve identity.
