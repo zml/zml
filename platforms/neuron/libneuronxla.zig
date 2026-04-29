@@ -117,11 +117,11 @@ fn neuronx_cc_(self: ?*c.PyObject, args_: [*c]*c.PyObject, nargs_: c.Py_ssize_t)
 
     const tmp_dir = try tmp_root_dir.createDirPathOpen(io, sandbox_path, .{ .permissions = .fromMode(0o700) });
 
-    defer {
-        tmp_root_dir.deleteTree(io, sandbox_path) catch |err| {
-            log.err("Error deleting temporary directory: {}", .{err});
-        };
-    }
+    // defer {
+    //     tmp_root_dir.deleteTree(io, sandbox_path) catch |err| {
+    //         log.err("Error deleting temporary directory: {}", .{err});
+    //     };
+    // }
 
     const compile_hlo = (try rewriteCustomCalls(
         arena.allocator(),
