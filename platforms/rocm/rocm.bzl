@@ -246,7 +246,7 @@ def _rocm_impl(mctx):
 
     http_file(
         name = "libdrm_mesa_amdgpu_ids",
-        url = "https://cgit.freedesktop.org/mesa/drm/plain/data/amdgpu.ids?id=b9dea73dfa310bc945ae6f09004a08fd624952ec",
+        url = "https://gitlab.freedesktop.org/mesa/libdrm/-/raw/979f607906ad64f629967ac1f3ba3590e756442c/data/amdgpu.ids?inline=false",
         sha256 = "ffd2a8f1bfa755f4d90f537b4969fc4676f116e5af051ce2f18ef93a96d8beb6",
         downloaded_file_path = "amdgpu.ids",
     )
@@ -254,8 +254,8 @@ def _rocm_impl(mctx):
     http_archive(
         name = "libpjrt_rocm",
         build_file = "libpjrt_rocm.BUILD.bazel",
-        url = "https://github.com/zml/pjrt-artifacts/releases/download/manual-2026-03-26T11-30-00Z/pjrt-rocm_linux-amd64.tar.gz",
-        sha256 = "6649e89831570926bf127f7e57f25dca4f526e22764f2df0d689818badc1d4fe",
+        url = "https://github.com/zml/pjrt-artifacts/releases/download/nightly-2026-04-17/pjrt-rocm_linux-amd64.tar.gz",
+        sha256 = "b19db71d3d9aa43bda961a22e81b6a2f48ba2c633a18010c07a66b4ca48ec4d2",
     )
 
     return mctx.extension_metadata(
