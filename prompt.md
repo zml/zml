@@ -72,7 +72,7 @@ You are an expert AWS Neuron NKI kernel developer optimizing code for Inferentia
 The current GatedDeltaNet NKI kernel implementation located at `examples/neuron_nki/gated_deltanet.py` suffers from extremely slow compile times and poor runtime performance. 
 
 **Your Task:**
-Rework the `gated_deltanet.py` NKI implementation. 
+Rework the `gated_deltanet.py` NKI implementation from scratch.
 
 **Reference Material:**
 Study the state-of-the-art NKI optimization techniques and memory management strategies used in this official reference:
@@ -102,3 +102,10 @@ Your code must execute cleanly via:
 **Validation Command**
 Ensure the final output is completely self-contained, requires no external dependencies outside of standard ZML/Neuron libraries, and executes flawlessly using the following command:
 > NEURON_RT_LOG_LEVEL=error NEURON_RT_VISIBLE_CORES=1 bazel run --config=remote --@zml//platforms:neuron=true --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet
+
+
+---
+
+
+
+bazel run --config=remote --@zml//platforms:neuron=true --run_under="NEURON_RT_INSPECT_ENABLE=1 NEURON_RT_INSPECT_OUTPUT_DIR=/home/kevin/profiling NEURON_RT_INSPECT_SYSTEM_PROFILE=1 NEURON_FRAMEWORK_DEBUG=1 NEURON_RT_INSPECT_DEVICE_PROFILE=1 XLA_HLO_DEBUG=1 XLA_IR_DEBUG=1 neuron-explorer inspect -o /home/kevin/profiling/ -- " --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet

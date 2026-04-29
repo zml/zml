@@ -75,7 +75,7 @@ def gated_deltanet(q, k, v, g, beta, h0):
     eps = 1.0e-6
 
     # PSUM update tile chunked along the packed-free dim.
-    v_chunk = 64
+    v_chunk = 256
     assert pack_w % v_chunk == 0
     n_v_chunks = pack_w // v_chunk
 
@@ -108,10 +108,9 @@ def gated_deltanet(q, k, v, g, beta, h0):
     # Resident state tile.
     state = nl.ndarray((key_dim, pack_w), dtype=nl.float32, buffer=nl.sbuf)
 
-    # Per-step q/k scratch (partition=1 layout). q_row/k_row are still
-    # used as DMA scratch in the bulk preload phase below.
-    q_row = nl.ndarray((1, key_dim), dtype=nl.float32, buffer=nl.sbuf)
-    k_row = nl.ndarray((1, key_dim), dtype=nl.float32, buffer=nl.sbuf)
+    # Per-step q/k normalize scratch (partition=1 layout). The whole
+    # sequence of q/k is loaded into q_all / k_all by ONE DMA each,
+    # then sliced per-timestep into these scratch tiles.
     q_sq = nl.ndarray((1, key_dim), dtype=nl.float32, buffer=nl.sbuf)
     k_sq = nl.ndarray((1, key_dim), dtype=nl.float32, buffer=nl.sbuf)
     q_sumsq = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
@@ -158,23 +157,48 @@ def gated_deltanet(q, k, v, g, beta, h0):
     k_kp_all = nl.ndarray((key_dim, seq_len),
                           dtype=nl.float32, buffer=nl.sbuf)
 
+    # Bulk preload scratch: q / k for the whole sequence as a single
+    # (1, S*Dk) row, fed by ONE DMA per q-head. The per-step normalize
+    # then slices columns out of these tiles.
+    q_all = nl.ndarray((1, seq_len * key_dim),
+                       dtype=nl.float32, buffer=nl.sbuf)
+    k_all = nl.ndarray((1, seq_len * key_dim),
+                       dtype=nl.float32, buffer=nl.sbuf)
+
     for i_batch in nl.affine_range(batch_size):
         for i_q_head in nl.affine_range(num_q_heads):
+            vh_s = i_q_head * qk_rep
             # ============================================================
             # Bulk preload value-side inputs for this (batch, q_head).
-            # All per-step DMAs for v / g / beta are hoisted out here.
+            # ONE DMA per tensor instead of seq_len*qk_rep DMAs. The
+            # SBUF dst stays (1, *) (partition 0 only) so downstream
+            # per-step slices keep their (1, *) layout. The HBM source
+            # is contiguous along (seq_len, qk_rep, value_dim) so the
+            # DMA engine produces a single descriptor.
             # ============================================================
+            nisa.dma_copy(
+                dst=v_rows,
+                src=v[i_batch, 0:seq_len, vh_s:vh_s+qk_rep, 0:value_dim])
+            nisa.dma_copy(
+                dst=g_rows,
+                src=g[i_batch, 0:seq_len, vh_s:vh_s+qk_rep])
+            nisa.dma_copy(
+                dst=beta_rows,
+                src=beta[i_batch, 0:seq_len, vh_s:vh_s+qk_rep])
+            nisa.dma_copy(
+                dst=q_all,
+                src=q[i_batch, 0:seq_len, i_q_head:i_q_head+1, 0:key_dim])
+            nisa.dma_copy(
+                dst=k_all,
+                src=k[i_batch, 0:seq_len, i_q_head:i_q_head+1, 0:key_dim])
+
+            # ---- L2 normalize q / k for the whole sequence ----
             for it in nl.affine_range(seq_len):
-                # ---- q / k DMA + L2 normalize (hoisted out of scan) ----
-                nisa.dma_copy(
-                    dst=q_row,
-                    src=q[i_batch, it, i_q_head:i_q_head+1, 0:key_dim])
-                nisa.dma_copy(
-                    dst=k_row,
-                    src=k[i_batch, it, i_q_head:i_q_head+1, 0:key_dim])
-                nisa.tensor_tensor(dst=q_sq, data1=q_row, data2=q_row,
+                q_row_v = q_all[0:1, it*key_dim:(it+1)*key_dim]
+                k_row_v = k_all[0:1, it*key_dim:(it+1)*key_dim]
+                nisa.tensor_tensor(dst=q_sq, data1=q_row_v, data2=q_row_v,
                                    op=nl.multiply)
-                nisa.tensor_tensor(dst=k_sq, data1=k_row, data2=k_row,
+                nisa.tensor_tensor(dst=k_sq, data1=k_row_v, data2=k_row_v,
                                    op=nl.multiply)
                 nisa.tensor_reduce(dst=q_sumsq, data=q_sq, op=nl.add,
                                    axis=1, keepdims=True)
@@ -186,29 +210,13 @@ def gated_deltanet(q, k, v, g, beta, h0):
                                 data=k_sumsq, bias=eps)
                 nisa.tensor_scalar(
                     dst=q_scaled_all[0:1, it*key_dim:(it+1)*key_dim],
-                    data=q_row,
+                    data=q_row_v,
                     op0=nl.multiply, operand0=q_inv,
                     op1=nl.multiply, operand1=scale)
                 nisa.tensor_scalar(
                     dst=k_scaled_all[0:1, it*key_dim:(it+1)*key_dim],
-                    data=k_row,
+                    data=k_row_v,
                     op0=nl.multiply, operand0=k_inv)
-
-                # ---- v / g / beta DMAs ----
-                for ir in nl.affine_range(qk_rep):
-                    vh = i_q_head * qk_rep + ir
-                    nisa.dma_copy(
-                        dst=v_rows[0:1,
-                                   it*pack_w + ir*value_dim:
-                                   it*pack_w + (ir+1)*value_dim],
-                        src=v[i_batch, it, vh:vh+1, 0:value_dim])
-                    nisa.dma_copy(
-                        dst=g_rows[0:1, it*qk_rep + ir:it*qk_rep + ir + 1],
-                        src=g[i_batch, it:it+1, vh:vh+1])
-                    nisa.dma_copy(
-                        dst=beta_rows[0:1,
-                                      it*qk_rep + ir:it*qk_rep + ir + 1],
-                        src=beta[i_batch, it:it+1, vh:vh+1])
 
             # Pre-compute decay = exp(g) for the full sequence in one op.
             nisa.activation(dst=decay_rows, op=nl.exp, data=g_rows)
