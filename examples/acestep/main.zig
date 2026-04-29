@@ -67,36 +67,38 @@ pub fn main(init: std.process.Init) !void {
     //try test5Hz(zml_handler);
     //try testVae(zml_handler);
     //try testDit(zml_handler);
+    //try testVaeExampleWav(zml_handler);
+    //try testVaeDiffused(zml_handler);
     
-    try runFullPipeline(init);
+    //try testDiffusion(zml_handler);
+    
+    try runFullPipeline(zml_handler);
     
 }
 
-pub fn runFullPipeline(init: std.process.Init) !void {
-    var zml_handler: Zml_handler = try .fromInit(init);
-    defer zml_handler.deinit();
-    
-    //const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
-    const target_duration: u32 = 120;
+pub fn runFullPipeline(zml_handler: Zml_handler) !void {
+    const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    const target_duration: u32 = 12;
     
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
     
-    //var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
-    //defer acellm.deinit(zml_handler.allocator);
+    var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
+    defer acellm.deinit(zml_handler.allocator);
 
     // Test model activations
     //try acellm.testModel(zml_handler);
 
-    //const audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    const audio_metadata: inference.AudioMetadata = .initExample();
-    //defer audio_metadata.deinit(zml_handler.allocator);
-    //const audio_codes: inference.AudioCodes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
-    const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
+    var audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
+    audio_metadata.setDuration(12);
+    //const audio_metadata: inference.AudioMetadata = .initExample();
+    defer audio_metadata.deinit(zml_handler.allocator);
+    const audio_codes: inference.AudioCodes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
+    //const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
 
-    //acellm.unloadBuffers();
+    acellm.unloadBuffers();
         
     // ------------------------------------------------
     // The text inputs of the DiT need to be embedded
@@ -181,29 +183,29 @@ pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio
     const shape = audio.shape;
 
     if (shape.rank() != 2) return error.InvalidAudioRank;
-
-    const num_frames_i64 = shape.dim(0);
-    const num_channels_i64 = shape.dim(1);
-
-    if (num_channels_i64 != 2) return error.InvalidChannelCount;
     if (audio.dtype() != .f32) return error.UnsupportedAudioType;
+
+    const num_channels_i64 = shape.dim(0);
+    const num_frames_i64 = shape.dim(1);
 
     const num_frames: u32 = std.math.cast(u32, num_frames_i64) orelse return error.AudioTooLong;
     const num_channels: u16 = std.math.cast(u16, num_channels_i64) orelse return error.InvalidChannelCount;
     const sample_rate: u32 = 48_000;
-    const bits_per_sample: u16 = 16;
-    const bytes_per_sample: u16 = bits_per_sample / 8;
+    const bytes_per_sample: u16 = @sizeOf(f32);
+    const bits_per_sample: u16 = bytes_per_sample * 8;
     const block_align: u16 = num_channels * bytes_per_sample;
     const byte_rate: u32 = sample_rate * block_align;
-    const data_chunk_size_u64 = @as(u64, num_frames) * block_align;
-    const data_chunk_size: u32 = std.math.cast(u32, data_chunk_size_u64) orelse return error.AudioTooLarge;
-    const riff_chunk_size_u64: u64 = 36 + data_chunk_size;
-    const riff_chunk_size: u32 = std.math.cast(u32, riff_chunk_size_u64) orelse return error.AudioTooLarge;
 
     const samples = audio.constItems(f32);
     const expected_samples_u64 = @as(u64, num_frames) * num_channels;
     const expected_samples: usize = std.math.cast(usize, expected_samples_u64) orelse return error.AudioTooLarge;
     if (samples.len != expected_samples) return error.InvalidAudioBufferSize;
+
+    const data_chunk_size_u64 = @as(u64, samples.len) * @sizeOf(f32);
+    const data_chunk_size: u32 = std.math.cast(u32, data_chunk_size_u64) orelse return error.AudioTooLarge;
+    const fact_chunk_size: u32 = 4;
+    const riff_chunk_size_u64: u64 = 36 + 12 + data_chunk_size;
+    const riff_chunk_size: u32 = std.math.cast(u32, riff_chunk_size_u64) orelse return error.AudioTooLarge;
 
     var file = try std.Io.Dir.createFile(.cwd(), io, output_path, .{ .truncate = true });
     defer file.close(io);
@@ -217,23 +219,25 @@ pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio
 
     try writer.writeAll("fmt ");
     try writer.writeInt(u32, 16, .little);
-    try writer.writeInt(u16, 1, .little);
+    try writer.writeInt(u16, 3, .little);
     try writer.writeInt(u16, num_channels, .little);
     try writer.writeInt(u32, sample_rate, .little);
     try writer.writeInt(u32, byte_rate, .little);
     try writer.writeInt(u16, block_align, .little);
     try writer.writeInt(u16, bits_per_sample, .little);
 
+    try writer.writeAll("fact");
+    try writer.writeInt(u32, fact_chunk_size, .little);
+    try writer.writeInt(u32, num_frames, .little);
+
     try writer.writeAll("data");
     try writer.writeInt(u32, data_chunk_size, .little);
 
-    for (samples) |sample| {
-        const clamped = std.math.clamp(sample, -1.0, 1.0);
-        const pcm_value: i16 = if (clamped <= -1.0)
-            -32768
-        else
-            @intFromFloat(clamped * 32767.0);
-        try writer.writeInt(i16, pcm_value, .little);
+    for (0..num_frames) |frame_idx| {
+        for (0..num_channels) |channel_idx| {
+            const sample = samples[channel_idx * num_frames + frame_idx];
+            try writer.writeInt(u32, @bitCast(sample), .little);
+        }
     }
 
     try writer.flush();
@@ -282,13 +286,13 @@ pub fn testDit(zml_handler: Zml_handler) !void {
     dit.unloadBuffers();
 }
 
-pub fn testVaeWav(zml_handler: Zml_handler) !void {
+pub fn testVaeExampleWav(zml_handler: Zml_handler) !void {
     const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//example_encoded.safetensors";
     const encoded_slice = try getSlice(zml_handler, path, "latents_tc");
-    const t = encoded_slice.shape.dim(0);
+    const t = encoded_slice.shape.dim(1);
     defer encoded_slice.free(zml_handler.allocator);
     
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(t));
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(@divExact(t, 25)));
     defer acevae.deinit(zml_handler.allocator);
     
     const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, .{ .x = encoded_slice });
@@ -298,8 +302,72 @@ pub fn testVaeWav(zml_handler: Zml_handler) !void {
     try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
 }
 
+pub fn testVaeDiffused(zml_handler: Zml_handler) !void {
+    const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//diffused_latents4.safetensors";
+    const diffused_slice = try getSlice(zml_handler, path, "diffused_latents");
+    const t = diffused_slice.shape.dim(1);
+    defer diffused_slice.free(zml_handler.allocator);
+    
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, @intCast(@divExact(t, 25)));
+    defer acevae.deinit(zml_handler.allocator);
+    
+    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, .{ .x = diffused_slice });
+    defer decoded_audio.deinit(zml_handler.allocator);
+    acevae.unloadBuffers();
+    
+    try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
+}
+
+pub fn testDiffusion(zml_handler: Zml_handler) !void {
+    //x shape torch.Size([1, 300, 64])
+    //encoder_hidden_states shape torch.Size([1, 65, 2048])
+    //context_latents shape torch.Size([1, 300, 128])
+    const initial_latents: inference.InitialLatents = .{
+        .x = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "xt"),
+        .context_latents = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "context_latents"),
+        .encoder_conditions = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "encoder_hidden_states"),
+    };
+    defer initial_latents.deinit(zml_handler.allocator);
+    std.log.info("Slices extracted", .{});
+    
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, 12, initial_latents.encoder_conditions.shape.dim(0));
+    defer acedit.deinit(zml_handler.allocator);
+
+    // Test model activations
+    //try acedit.testModel(zml_handler);
+
+    const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, initial_latents);
+    defer diffused_latents.deinit(zml_handler.allocator);
+
+    //try diffused_latents.print(zml_handler.io);
+    acedit.unloadBuffers();
+    
+    // ------------------------------------------------
+    // Output latents of the DiT model are decoded
+    // with the VAE model
+    // ------------------------------------------------
+
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, 12);
+    defer acevae.deinit(zml_handler.allocator);
+    
+    // Test model activations
+    //try acevae.testModel(zml_handler);
+
+    const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
+    defer decoded_audio.deinit(zml_handler.allocator);
+
+    //try decoded_audio.print(zml_handler.io);
+    acevae.unloadBuffers();
+    
+    // ------------------------------------------------
+    // Export decoded audio as WAV
+    // ------------------------------------------------
+    
+     try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
+}
 
 pub fn getSlice(zml_handler: Zml_handler, file_name: []const u8, tensor_name: []const u8) !zml.Slice {
+    std.log.info("Getting slice {s}", .{tensor_name});
     var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, file_name);
     defer registry.deinit();
     var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
@@ -330,7 +398,7 @@ const TensorExtractor = struct {
     tensor: zml.Tensor,
     pub fn init(store: zml.io.TensorStore.View, tensor_name: []const u8) TensorExtractor {
         return .{
-            .tensor = store.createTensor(tensor_name, .{ .t, .a }, null),
+            .tensor = store.createTensor(tensor_name, null, null),
         };
     }
     pub fn load(self: *const TensorExtractor, zml_handler: Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(TensorExtractor) {
