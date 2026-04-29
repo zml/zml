@@ -582,10 +582,6 @@ fn compileModuleToPjrtExecutable(arena: std.mem.Allocator, io: std.Io, platform:
                 // https://github.com/NVIDIA/JAX-Toolbox?tab=readme-ov-file#environment-variables
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_latency_hiding_scheduler", true, upb_arena);
                 try setXlaOverrideFlag(overrides_map, "xla_gpu_enable_llvm_module_compilation_parallelism", true, upb_arena);
-                // Benchmark cuBLAS/cuBLASLt/cuDNN kernel variants at compile time and pick the fastest.
-                // Level 4 = max autotuning (all algorithms + correctness checks).
-                // Increases compile time but can meaningfully speed up large GEMMs.
-                try setXlaOverrideFlag(overrides_map, "xla_gpu_autotune_level", 4, upb_arena);
             },
             .rocm => {
                 // Use hipBLASLt only
