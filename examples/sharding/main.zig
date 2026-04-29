@@ -140,7 +140,7 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: *const zml.sharding.Sharding,
+    sharding: zml.Buffer.ShardingSpec,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -221,11 +221,11 @@ pub fn main(init: std.process.Init) !void {
     );
     defer exe.deinit();
 
-    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, &sharding, 0.0);
+    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, .{ .sharded = &sharding }, 0.0);
     defer w_buf.deinit();
-    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, &sharding, 100.0);
+    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, .{ .sharded = &sharding }, 100.0);
     defer b_buf.deinit();
-    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, &sharding, 1000.0);
+    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, .{ .sharded = &sharding }, 1000.0);
     defer input_buf.deinit();
 
     log.info("input placement: {f}", .{input_buf.placement()});

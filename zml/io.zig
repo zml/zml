@@ -149,13 +149,17 @@ pub const TensorStore = struct {
                 }
             }
 
-            if (@TypeOf(partitioning) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(partitioning))) {
-                    .optional => if (partitioning) |p| {
-                        ptr.shape = ptr.shape.withPartitioning(p);
-                    },
-                    else => ptr.shape = ptr.shape.withPartitioning(partitioning),
-                }
+            if (@TypeOf(partitioning) == @TypeOf(null)) {
+                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
+            }
+
+            switch (@typeInfo(@TypeOf(partitioning))) {
+                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
+                .@"enum_literal" => switch (partitioning) {
+                    .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                },
+                else => ptr.shape = ptr.shape.withPartitioning(partitioning),
             }
 
             const tensor: Tensor = .fromShape(ptr.shape);
@@ -364,7 +368,7 @@ pub const BufferedMemoryWriter = struct {
             self.io,
             self.platform,
             self.shape,
-            self.sharding,
+            .{ .sharded = self.sharding },
             @ptrCast(self.interface.buffer),
             .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
@@ -808,7 +812,7 @@ pub const DirectMemoryWriter = struct {
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
 
-        buffer.* = Buffer.fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
+        buffer.* = Buffer.fromPjrtBuffers(platform, shape, .{ .sharded = sharding }, pjrt_buffers.constSlice());
 
         var planner = StreamPlanner.init(allocator, shape, placement);
         defer planner.deinit();
@@ -1067,7 +1071,7 @@ pub const LoadOpts = struct {
     };
 
     parallelism: usize,
-    shardings: []const *const Sharding,
+    shardings: []const *const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
     dma_chunk_size: usize,
@@ -1109,7 +1113,6 @@ pub fn load(
         platform: *const Platform,
         buffers: []*Buffer,
         shardings: []const *const Sharding,
-        replicated_sharding: Sharding,
         store: *const TensorStore,
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
@@ -1124,7 +1127,6 @@ pub fn load(
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
-        .replicated_sharding = try .init(platform.physical_mesh, .replicated),
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
@@ -1150,7 +1152,7 @@ pub fn load(
                     const shape = reader.tensor.shape;
                     const sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
                         log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
-                        break :blk &ctx_.replicated_sharding;
+                        break :blk ctx_.platform.replicated_sharding;
                     };
 
                     var writer = MemoryWriter.init(

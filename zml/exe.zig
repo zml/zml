@@ -43,8 +43,19 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
-        const input_shardings_copy = try arena.allocator().dupe(*const Sharding, input_shardings);
-        const output_shardings_copy = try arena.allocator().dupe(*const Sharding, output_shardings);
+        const input_sharding_values = try arena.allocator().alloc(Sharding, input_shardings.len);
+        const input_shardings_copy = try arena.allocator().alloc(*const Sharding, input_shardings.len);
+        for (input_shardings, 0..) |sharding, i| {
+            input_sharding_values[i] = sharding.*;
+            input_shardings_copy[i] = &input_sharding_values[i];
+        }
+
+        const output_sharding_values = try arena.allocator().alloc(Sharding, output_shardings.len);
+        const output_shardings_copy = try arena.allocator().alloc(*const Sharding, output_shardings.len);
+        for (output_shardings, 0..) |sharding, i| {
+            output_sharding_values[i] = sharding.*;
+            output_shardings_copy[i] = &output_sharding_values[i];
+        }
 
         return .{
             .platform = platform,
@@ -228,7 +239,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], .{ .sharded = context_.self.shardings[context_.current_index] }, shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &result);
@@ -248,7 +259,7 @@ pub const Exe = struct {
                     for (0..context_.self.flat_buffers.num_devices) |device_index| {
                         shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
+                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], .{ .sharded = context_.self.shardings[context_.current_index] }, shards.constSlice());
                     context_.current_index += 1;
                 }
             }.cb, &context, &v);

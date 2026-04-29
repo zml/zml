@@ -84,7 +84,7 @@ pub const Metadata = union(Backend) {
         };
     }
 
-    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: *const zml.sharding.Sharding) !zml.Bufferized(Metadata) {
+    pub fn initBuffer(self: Metadata, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !zml.Bufferized(Metadata) {
         return switch (self) {
             .vanilla => .{ .vanilla = {} },
             .cuda_fa2 => |v| .{ .cuda_fa2 = try v.initBuffer(io, platform, sharding) },

@@ -89,7 +89,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             llama_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [2]*const zml.sharding.Sharding,
+            shardings_: [1]*const zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -123,7 +123,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             llama_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [2]*const zml.sharding.Sharding,
+            shardings_: [1]*const zml.sharding.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);

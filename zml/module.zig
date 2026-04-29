@@ -44,7 +44,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
     return mlir_global_registry.?;
 }
 pub const CompilationOptions = struct {
-    shardings: []const *const Sharding,
+    shardings: []const *const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Partitioning.Partitioner = null,
     // Debugging options
@@ -98,6 +98,7 @@ pub const CompilationContext = struct {
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
+        var arena = std.heap.ArenaAllocator.init(allocator);
         const mlir_registry = mlirRegistry(io);
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
@@ -118,12 +119,26 @@ pub const CompilationContext = struct {
             }
         }
 
-        const partitioning = Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), opts.shardings) catch unreachable;
+        const shardings = shardings: {
+            const has_replicated = for (opts.shardings) |sharding| {
+                if (sharding == platform.replicated_sharding) break true;
+            } else false;
+
+            const len = opts.shardings.len + @intFromBool(!has_replicated);
+            const res = arena.allocator().alloc(*const Sharding, len) catch unreachable;
+            @memcpy(res[0..opts.shardings.len], opts.shardings);
+            if (!has_replicated) {
+                res[opts.shardings.len] = platform.replicated_sharding;
+            }
+            break :shardings res;
+        };
+
+        const partitioning = Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings) catch unreachable;
 
         return .{
             .allocator = allocator,
             .io = io,
-            .arena = std.heap.ArenaAllocator.init(allocator),
+            .arena = arena,
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
             .mlir_pass_manager = pass_manager,

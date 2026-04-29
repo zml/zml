@@ -50,9 +50,9 @@ pub fn main(init: std.process.Init) !void {
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), &benchmark_sharding, random);
+    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), .{ .sharded = &benchmark_sharding }, random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), &benchmark_sharding, random);
+    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), .{ .sharded = &benchmark_sharding }, random);
     defer b_buffer.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: *const zml.sharding.Sharding, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.Buffer.ShardingSpec, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 

@@ -202,6 +202,7 @@ pub const Platform = struct {
     memories: []const Memory,
     replicated_sharding: *const zml.sharding.Sharding,
     physical_mesh: zml.sharding.PhysicalMesh,
+    replicated_sharding: *const zml.sharding.Sharding,
     triton_runtime: ?attention.triton.Runtime = null,
     tpu_ir_runtime: ?attention.tpu.Runtime = null,
 
@@ -252,6 +253,7 @@ pub const Platform = struct {
             .devices = devices,
             .memories = memories,
             .physical_mesh = undefined, // set below
+            .replicated_sharding = undefined, // set below
         };
         defer platform.arena_state = arena_state.state;
 
@@ -269,6 +271,9 @@ pub const Platform = struct {
                 .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
+            const replicated_sharding = try arena.create(zml.sharding.Sharding);
+            replicated_sharding.* = try .init(platform.physical_mesh, .replicated);
+            platform.replicated_sharding = replicated_sharding;
         }
 
         switch (target) {
