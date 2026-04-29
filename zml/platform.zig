@@ -574,7 +574,7 @@ pub const CreateOptions = struct {
 
             pub const Options = struct {
                 preallocate: bool = true,
-                memory_fraction: f32 = 0.90,
+                memory_fraction: f32 = 0.85,
                 collective_memory_size_mb: i64 = 0,
             };
         };
