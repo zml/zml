@@ -1269,11 +1269,11 @@ const DirectMemoryWriterDeviceTest = struct {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
-        const sharding: *const Sharding = try .initFromStrategy(platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
+        const sharding: Sharding = try .initFromStrategy(platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape,
-            sharding,
+            &sharding,
             scenario.write_mode,
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
