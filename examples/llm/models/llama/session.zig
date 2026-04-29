@@ -163,8 +163,6 @@ pub const Session = struct {
         var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), replicated_sharding, @ptrCast(&last_token_id));
         defer current_token_buffer.deinit();
 
-        std.log.warn("starting generation", .{});
-
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;
 
