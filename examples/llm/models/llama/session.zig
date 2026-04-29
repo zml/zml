@@ -143,8 +143,11 @@ pub const Session = struct {
     }
 
     pub fn runDecode(self: *Session, all_tokens: *std.ArrayList(u32), stdout: *std.Io.Writer) !void {
-        var decoder: zml.tokenizer.iree.Tokenizer.DecoderWriter = try .init(self.tokenizer.iree, self.allocator, stdout, &.{});
-        defer decoder.deinit(self.allocator);
+        var decoder: zml.tokenizer.Tokenizer.Decoder = try self.tokenizer.decoder();
+        defer decoder.deinit();
+
+        const decoder_out_buffer: []u8 = try self.allocator.alloc(u8, 256);
+        defer self.allocator.free(decoder_out_buffer);
 
         var decode_args = try self.compiled_model.decode_exe.args(self.allocator);
         defer decode_args.deinit(self.allocator);
@@ -165,7 +168,7 @@ pub const Session = struct {
         generation: while (true) {
             if (isEosToken(self.config, last_token_id)) break :generation;
 
-            try decoder.writeTokens(&.{last_token_id});
+            try stdout.writeAll(try decoder.feedOne(last_token_id, decoder_out_buffer));
             try stdout.flush();
 
             try all_tokens.append(self.allocator, last_token_id);
@@ -187,7 +190,7 @@ pub const Session = struct {
             last_token_id = try current_token_buffer.getValue(u32, self.io);
         }
 
-        try decoder.finalize();
+        try stdout.writeAll(try decoder.finalize(decoder_out_buffer));
         try stdout.flush();
     }
 };

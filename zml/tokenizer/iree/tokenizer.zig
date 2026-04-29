@@ -90,10 +90,12 @@ fn checkOk(status: c.iree_status_t) !void {
 }
 
 pub const Tokenizer = struct {
+    // TODO: use the ArrayList pattern. Stop copying allocator everywhere
     allocator: std.mem.Allocator,
     inner: *c.iree_tokenizer_t,
 
     pub fn fromHuggingFaceJson(allocator: std.mem.Allocator, json: []const u8) !Tokenizer {
+        // TODO: wrap allocator into an iree allocator
         var raw: ?*c.iree_tokenizer_t = null;
         try checkOk(c.iree_tokenizer_from_huggingface_json(stringView(json), c.iree_allocator_system(), &raw));
         return .{
@@ -121,7 +123,7 @@ pub const Tokenizer = struct {
     }
 
     pub fn decoder(self: *const Tokenizer) !Decoder {
-        return Decoder.init(self);
+        return Decoder.init(self, self.allocator);
     }
 
     pub fn tokenId(self: *const Tokenizer, token: []const u8) ?u32 {
@@ -340,11 +342,11 @@ pub const Tokenizer = struct {
         state_storage: []u8,
         state: *c.iree_tokenizer_decode_state_t,
 
-        fn init(tokenizer: *const Tokenizer) !Decoder {
+        fn init(tokenizer: *const Tokenizer, allocator: std.mem.Allocator) !Decoder {
             var state_size: usize = undefined;
             try checkOk(c.iree_tokenizer_decode_state_calculate_size(tokenizer.inner, &state_size));
-            const state_storage = try tokenizer.allocator.alloc(u8, state_size);
-            errdefer tokenizer.allocator.free(state_storage);
+            const state_storage = try allocator.alloc(u8, state_size);
+            errdefer allocator.free(state_storage);
 
             var state: ?*c.iree_tokenizer_decode_state_t = null;
             try checkOk(c.iree_tokenizer_decode_state_initialize(
@@ -461,147 +463,6 @@ pub const Tokenizer = struct {
                 out.advance(produced);
                 break;
             }
-        }
-    };
-
-    pub const DecoderWriter = struct {
-        tokenizer: *c.iree_tokenizer_t,
-        state_storage: []u8,
-        state: *c.iree_tokenizer_decode_state_t,
-        writer: std.Io.Writer,
-        out: *std.Io.Writer,
-        out_buffer_owned: bool,
-        finalized: bool = false,
-
-        // Iree decoder needs to be able to write a least one UTF8 codepoint.
-        // We increase this a bit to avoid pathological cases where each codepoint would be decoded independently.
-        const min_buf_size = 64;
-
-        const vtable: std.Io.Writer.VTable = .{
-            .drain = DecoderWriter.drain,
-        };
-
-        pub fn init(tokenizer: Tokenizer, allocator: std.mem.Allocator, out: *std.Io.Writer, tokens_buffer: []u32) !DecoderWriter {
-            const out_buffer_owned = out.buffer.len == 0;
-            if (out_buffer_owned) {
-                out.buffer = try allocator.alloc(u8, 1024);
-            } else {
-                if (out.buffer.len < min_buf_size) @panic("Iree detokenizer requires at least 64 bytes of buffering");
-            }
-            errdefer if (out_buffer_owned) allocator.free(out.buffer);
-
-            var state_size: usize = undefined;
-            try checkOk(c.iree_tokenizer_decode_state_calculate_size(tokenizer.inner, &state_size));
-            const state_storage = try allocator.alloc(u8, state_size);
-            errdefer tokenizer.allocator.free(state_storage);
-
-            var state: ?*c.iree_tokenizer_decode_state_t = null;
-            try checkOk(c.iree_tokenizer_decode_state_initialize(
-                tokenizer.inner,
-                c.IREE_TOKENIZER_DECODE_FLAG_NONE,
-                byteSpan(state_storage),
-                &state,
-            ));
-
-            std.debug.assert(@intFromPtr(state) == @intFromPtr(state_storage.ptr));
-            return .{
-                .tokenizer = tokenizer.inner,
-                .state_storage = state_storage,
-                .state = state.?,
-                .out = out,
-                .out_buffer_owned = out_buffer_owned,
-                .writer = .{ .buffer = @ptrCast(tokens_buffer), .vtable = &vtable },
-            };
-        }
-
-        pub fn deinit(dec: DecoderWriter, allocator: std.mem.Allocator) void {
-            std.debug.assert(dec.finalized);
-            c.iree_tokenizer_decode_state_deinitialize(dec.state);
-            allocator.free(dec.state_storage);
-            if (dec.out_buffer_owned) allocator.free(dec.out.buffer);
-        }
-
-        pub fn reset(dec: *DecoderWriter) !void {
-            c.iree_tokenizer_decode_state_deinitialize(dec.state);
-            var state: ?*c.iree_tokenizer_decode_state_t = null;
-            try checkOk(c.iree_tokenizer_decode_state_initialize(
-                dec.tokenizer,
-                c.IREE_TOKENIZER_DECODE_FLAG_NONE,
-                byteSpan(dec.state_storage),
-                &state,
-            ));
-            dec.state = state.?;
-        }
-
-        /// Write tokens into the reader.
-        pub fn writeTokens(dec: *DecoderWriter, tokens: []const u32) std.Io.Writer.Error!void {
-            try dec.writer.writeAll(@ptrCast(tokens));
-        }
-
-        /// Decode tokens into out buffer.
-        pub fn feed(dec: *DecoderWriter, tokens: []const u32) std.Io.Writer.Error!usize {
-            const o: *std.Io.Writer = dec.out;
-
-            var consumed: usize = 0;
-            var produced: usize = 0;
-
-            checkOk(c.iree_tokenizer_decode_state_feed(
-                dec.state,
-                tokenIdList(tokens),
-                mutableStringView(try o.writableSliceGreedy(min_buf_size)),
-                &consumed,
-                &produced,
-            )) catch @panic("Iree detokenizer crashed");
-
-            o.advance(produced);
-            return consumed;
-        }
-
-        pub fn finalize(dec: *DecoderWriter) !void {
-            std.debug.assert(!dec.finalized);
-            dec.finalized = true;
-            try dec.writer.flush();
-            const o: *std.Io.Writer = dec.out;
-
-            var produced: usize = 0;
-            try checkOk(c.iree_tokenizer_decode_state_finalize(dec.state, mutableStringView(try o.writableSliceGreedy(min_buf_size)), &produced));
-            o.advance(produced);
-        }
-
-        /// Repeatedly calls `feed` on the given slice of tokens.
-        fn drain(w: *std.Io.Writer, data: []const []const u8, splat: usize) std.Io.Writer.Error!usize {
-            const dec: *DecoderWriter = @fieldParentPtr("writer", w);
-            const buffered_tokens: []const u32 = @ptrCast(@alignCast(w.buffered()));
-            if (buffered_tokens.len > 0) {
-                const buffered_tokens_written = try dec.feed(buffered_tokens);
-                if (buffered_tokens_written < buffered_tokens.len) {
-                    const remaining_bytes: []const u8 = @ptrCast(buffered_tokens[buffered_tokens_written..]);
-                    @memmove(w.buffer[0..remaining_bytes.len], remaining_bytes);
-                    w.end = remaining_bytes.len;
-                    return 0;
-                }
-            }
-
-            var total_bytes_consumed: usize = 0;
-            for (data[0 .. data.len - 1]) |tokens_bytes| {
-                const tokens: []const u32 = @ptrCast(@alignCast(tokens_bytes));
-                const tokens_consumed = try dec.feed(tokens);
-                total_bytes_consumed += tokens_consumed * @sizeOf(u32);
-                if (tokens_consumed < tokens.len) {
-                    return total_bytes_consumed;
-                }
-            }
-
-            const repeated_tokens: []const u32 = @ptrCast(@alignCast(data[data.len - 1]));
-            for (0..splat) |_| {
-                const tokens_consumed = try dec.feed(repeated_tokens);
-                total_bytes_consumed += tokens_consumed * @sizeOf(u32);
-                if (tokens_consumed < repeated_tokens.len) {
-                    return total_bytes_consumed;
-                }
-            }
-
-            return total_bytes_consumed;
         }
     };
 };
