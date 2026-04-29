@@ -408,7 +408,6 @@ pub const AttentionKind = enum {
 pub const Attention = struct {
     pub const ForwardOpts = struct {
         context: ?Tensor = null,
-        mask: ?Tensor = null,
         pe_cos: ?Tensor = null,
         pe_sin: ?Tensor = null,
         k_pe_cos: ?Tensor = null,
@@ -607,22 +606,21 @@ pub const Attention = struct {
         kh = kh.withPartialTags(.{ .b, .k, .h, .hd });
         vh = vh.withPartialTags(.{ .b, .k, .h, .hd });
 
-        const sdpa_opts: zml.nn.SdpaOpts = .{ .attn_mask = if (opts.mask) |m| m.rename(.{ .b = .batch }) else null };
-        var attn = if (bf16_native and opts.attn_meta != null and opts.attn_params != null and opts.mask == null)
+        var attn = if (bf16_native and opts.attn_meta != null and opts.attn_params != null)
             attention.fullSequenceAttention(qh, kh, vh, opts.attn_meta.?, opts.attn_params.?)
         else if (bf16_native)
             sdpaNoF32Upcast(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
-                sdpa_opts,
+                .{},
             ).rename(.{ .batch = .b })
         else
             zml.nn.sdpa(
                 qh.rename(.{ .b = .batch }),
                 kh.rename(.{ .b = .batch }),
                 vh.rename(.{ .b = .batch }),
-                sdpa_opts,
+                .{},
             ).rename(.{ .batch = .b }); // [B, Q, H, HD]
 
         // Compute per-head gates as 2 * sigmoid(logits) so zero-initialized logits preserve identity.
@@ -882,8 +880,6 @@ pub const BasicAVTransformerBlock = struct {
         /// Text cross-attention contexts.
         v_text_ctx: Tensor,
         a_text_ctx: Tensor,
-        v_text_ctx_mask: ?Tensor = null,
-        a_text_ctx_mask: ?Tensor = null,
         /// AV cross-attention scale-shift timestep embeddings.
         v_cross_ss_ts: Tensor, // video.cross_scale_shift_timestep  [B, 1, 4 * D_video]
         v_cross_gate_ts: Tensor, // video.cross_gate_timestep          [B, 1, D_video]
@@ -965,10 +961,10 @@ pub const BasicAVTransformerBlock = struct {
             .add(v_shift_kv.broad(inputs.v_text_ctx.shape()));
         const v_text_ca_out = if (bf16_attn) self.attn2.forwardBf16(v_text_x, params.attn2, kindNumHeads(.attn2), .{
             .context = v_text_ctx_mod,
-            .mask = inputs.v_text_ctx_mask,
+            .attn_meta = inputs.video_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.attn2.forward(v_text_x, params.attn2, kindNumHeads(.attn2), .{
             .context = v_text_ctx_mod,
-            .mask = inputs.v_text_ctx_mask,
         });
         const video_text_ca_delta = v_text_ca_out.mul(v_gate_q.broad(v_text_ca_out.shape()));
         if (video_all_residuals_f32) {
@@ -1019,10 +1015,10 @@ pub const BasicAVTransformerBlock = struct {
             .add(a_shift_kv.broad(inputs.a_text_ctx.shape()));
         const a_text_ca_out = if (bf16_attn) self.audio_attn2.forwardBf16(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
             .context = a_text_ctx_mod,
-            .mask = inputs.a_text_ctx_mask,
+            .attn_meta = inputs.audio_attn_meta,
+            .attn_params = inputs.attn_params,
         }) else self.audio_attn2.forward(a_text_x, params.audio_attn2, kindNumHeads(.audio_attn2), .{
             .context = a_text_ctx_mod,
-            .mask = inputs.a_text_ctx_mask,
         });
         const audio_text_ca_delta = a_text_ca_out.mul(a_gate_q.broad(a_text_ca_out.shape()));
         if (audio_all_residuals_f32) {
