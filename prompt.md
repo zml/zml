@@ -115,3 +115,39 @@ bazel run --config=remote --@zml//platforms:neuron=true --run_under="NEURON_RT_I
 to run it with profiling use
 
 neuron-explorer view -d /home/kevin/profiling/... --output-formatsummary-text
+
+
+---
+
+You are an expert AWS Neuron NKI (Neuron Kernel Interface) developer and Machine Learning Systems Engineer specializing in hardware optimization for AWS Inferentia2 (inf2.8xlarge) and Trainium. 
+
+I am investigating the performance trade-offs, dispatch overhead, and scaling limits of writing custom NKI kernels exposed as JAX XLA custom calls, compared to relying on pure native JAX implementations on the Neuron platform.
+
+Below, I will provide:
+1. A sample script (`run_matmul.py`) containing both a basic single-tile NKI matmul and a pure JAX matmul.
+2. The profiling summary output generated from `neuron-profile view --output-format summary-text`.
+
+Based on this data and your expert knowledge of the Neuron architecture, please provide a comprehensive technical report addressing the following objectives:
+
+### 1. Dispatch Overhead & Base Cost Analysis
+Analyze the profiling summary to quantify the overhead of dispatching the NKI kernel via a JAX XLA custom call versus the native JAX execution. Explain where the time is being spent (e.g., framework overhead, DMA transfers, instruction decoding, vs. actual Matrix Engine compute).
+
+### 2. The "Single-Tile Limit" and Scaling (M, K, N > 64, 128, 512)
+The basic NKI kernel states: "We must stay within the single-tile limits for this basic kernel." 
+* Explain what happens at the hardware level if we exceed these dimensions (e.g., SBUF/PSUM capacity limits).
+* Compare the scaling paths: If we scale to larger matrices, does native JAX inherently become faster because it handles tiling/blocking automatically, or does NKI remain competitive? 
+* Assess the "development cost vs. compute cost" of having to write a fully blocked, tiled, and loop-optimized NKI matmul for larger shapes.
+
+### 3. Mandatory Optimizations
+To achieve maximum TFLOPS on the Neuron Matrix Multiplication Engine for large matrices, what explicit optimizations are *mandatory* when writing NKI code? (Please touch on concepts like SRAM/SBUF double-buffering, DMA pipelining, and layout/transposition constraints).
+
+### 4. Final Verdict: When is NKI worth it?
+Provide a clear heuristic or rule-of-thumb on when an engineering team should invest time writing custom NKI kernels versus just letting the JAX XLA compiler handle the workload on Neuron. Under what specific conditions does NKI provide a clear ROI?
+
+---
+
+the code is in /home/kevin/zml/run_matmul.py
+
+source .venv/bin/activate
+
+NEURON_RT_INSPECT_ENABLE=1 NEURON_RT_INSPECT_OUTPUT_DIR=/home/kevin/profiling NEURON_RT_INSPECT_SYSTEM_PROFILE=1 NEURON_RT_INSPECT_DEVICE_PROFILE=1 NEURON_FRAMEWORK_DEBUG=1 XLA_HLO_DEBUG=1 XLA_IR_DEBUG=1 python run_matmul.py
