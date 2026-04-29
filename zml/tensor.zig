@@ -8,8 +8,8 @@ const stdx = @import("stdx");
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
-const Memory = @import("platform.zig").Memory;
 const mem = @import("mem.zig");
+const Memory = @import("platform.zig").Memory;
 const meta = @import("meta.zig");
 const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
@@ -743,7 +743,7 @@ pub const Tensor = struct {
 
             var rng_buffer = try Rng.initBuffer(std.testing.io, platform, replicated_sharding, 1234);
             defer rng_buffer._state.deinit();
-            var tgt_dist_buffer: Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, std.mem.sliceAsBytes(&tgt_dist_data));
+            var tgt_dist_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, tgt_dist.shape(), replicated_sharding, @ptrCast(&tgt_dist_data));
             defer tgt_dist_buffer.deinit();
 
             var rand, var stats = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Stats.gumbelStats, .{ rng_buffer, tgt_dist_buffer });
