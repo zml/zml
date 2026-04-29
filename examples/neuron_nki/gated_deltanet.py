@@ -84,7 +84,7 @@ def gated_deltanet(q, k, v, g, beta, h0):
     chunk = 32
     assert key_dim % chunk == 0 and value_dim % chunk == 0
 
-    output = nl.ndarray((batch_size, seq_len, value_dim, num_value_heads),
+    output = nl.ndarray((batch_size, seq_len, num_value_heads, value_dim),
                         dtype=nl.float32, buffer=nl.shared_hbm)
     ht = nl.ndarray(h0.shape, dtype=nl.float32, buffer=nl.shared_hbm)
 
@@ -95,8 +95,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
     # PSUM scratch.
     pv_psum = nl.ndarray((1, pack_w), dtype=nl.float32, buffer=nl.psum)
     out_psum = nl.ndarray((1, pack_w), dtype=nl.float32, buffer=nl.psum)
-    out_t_psum = nl.ndarray((value_dim, 1),
-                            dtype=nl.float32, buffer=nl.psum)
     update_psum_chunk = nl.ndarray((key_dim, v_chunk),
                                    dtype=nl.float32, buffer=nl.psum)
     # Bulk-transpose PSUM tile for the (Dk,S) form of q/k. Lifetime is
@@ -122,12 +120,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
     diff = nl.ndarray((1, pack_w), dtype=nl.float32, buffer=nl.sbuf)
     delta_v = nl.ndarray((1, pack_w), dtype=nl.float32, buffer=nl.sbuf)
     out_v_T = nl.ndarray((1, pack_w), dtype=nl.float32, buffer=nl.sbuf)
-    out_v_slot = nl.ndarray((value_dim, 1),
-                            dtype=nl.float32, buffer=nl.sbuf)
-
-    # Per-step decay scalar. Sliced from decay_rows; broadcast to
-    # (key_dim, 1) to scale the state tile.
-    decay_scalar = nl.ndarray((1, 1), dtype=nl.float32, buffer=nl.sbuf)
 
     # Final-state HBM transpose tile.
     final_tile = nl.ndarray((chunk, chunk),
@@ -193,17 +185,18 @@ def gated_deltanet(q, k, v, g, beta, h0):
                 src=k[i_batch, 0:seq_len, i_q_head:i_q_head+1, 0:key_dim])
 
             # ---- L2 normalize q / k for the whole sequence ----
+            # ``activation_reduce`` fuses (data*data) + sum on the
+            # Scalar engine into a single launch, replacing a
+            # tensor_tensor + tensor_reduce pair on the Vector engine.
             for it in nl.affine_range(seq_len):
                 q_row_v = q_all[0:1, it*key_dim:(it+1)*key_dim]
                 k_row_v = k_all[0:1, it*key_dim:(it+1)*key_dim]
-                nisa.tensor_tensor(dst=q_sq, data1=q_row_v, data2=q_row_v,
-                                   op=nl.multiply)
-                nisa.tensor_tensor(dst=k_sq, data1=k_row_v, data2=k_row_v,
-                                   op=nl.multiply)
-                nisa.tensor_reduce(dst=q_sumsq, data=q_sq, op=nl.add,
-                                   axis=1, keepdims=True)
-                nisa.tensor_reduce(dst=k_sumsq, data=k_sq, op=nl.add,
-                                   axis=1, keepdims=True)
+                nisa.activation_reduce(
+                    dst=q_sq, op=nl.square, data=q_row_v,
+                    reduce_op=nl.add, reduce_res=q_sumsq)
+                nisa.activation_reduce(
+                    dst=k_sq, op=nl.square, data=k_row_v,
+                    reduce_op=nl.add, reduce_res=k_sumsq)
                 nisa.activation(dst=q_inv, op=nl.rsqrt,
                                 data=q_sumsq, bias=eps)
                 nisa.activation(dst=k_inv, op=nl.rsqrt,
@@ -224,11 +217,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
             # ============================================================
             # Hoist q/k Dk-transpose out of the scan. Per-timestep we
             # need a (Dk, 1) tile for the predicted_v / output matmuls.
-            # The PE array's stationary free-dim cap is 128, so we still
-            # do S small transposes -- but they're now in their own loop
-            # before the scan, freeing the scan body of two transposes
-            # and two PSUM->SBUF copies per timestep, and letting the
-            # compiler issue them in parallel with the bulk-preload DMAs.
             # ============================================================
             for it in nl.affine_range(seq_len):
                 nisa.nc_transpose(
@@ -243,7 +231,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
 
             # ============================================================
             # Initialize the resident packed state from h0.
-            # h0[b, vh] is (Dv, Dk); load_transpose2d -> (Dk, Dv).
             # ============================================================
             for ir in nl.affine_range(qk_rep):
                 vh = i_q_head * qk_rep + ir
@@ -254,35 +241,26 @@ def gated_deltanet(q, k, v, g, beta, h0):
                     src=state_init)
 
             # ============================================================
-            # Main sequential scan over timesteps. Per-step body now
-            # consumes PSUM directly (no PSUM->SBUF tensor_copy) wherever
-            # the next consumer accepts a PSUM operand. This removes 3
-            # tensor_copys + 4 update tensor_copys per step.
+            # Main sequential scan over timesteps.
             # ============================================================
             for i_seq in nl.sequential_range(seq_len):
-                # ---- Decay each packed slot by its scalar exp(g) ----
                 for ir in nl.affine_range(qk_rep):
-                    nisa.tensor_copy(
-                        dst=decay_scalar,
-                        src=decay_rows[0:1,
-                                       i_seq*qk_rep + ir:
-                                       i_seq*qk_rep + ir + 1])
                     nisa.tensor_scalar(
                         dst=state[0:key_dim, ir*value_dim:(ir+1)*value_dim],
                         data=state[0:key_dim, ir*value_dim:(ir+1)*value_dim],
                         op0=nl.multiply,
-                        operand0=nl.broadcast_to(decay_scalar,
-                                                 (key_dim, 1)))
+                        operand0=nl.broadcast_to(
+                            decay_rows[0:1,
+                                       i_seq*qk_rep + ir:
+                                       i_seq*qk_rep + ir + 1],
+                            (key_dim, 1)))
 
-                # ---- predicted_v(1, pack_w) = k_kp.T @ state ----
                 nisa.memset(dst=pv_psum, value=0.0)
                 nisa.nc_matmul(
                     pv_psum,
                     stationary=k_kp_all[0:key_dim, i_seq:i_seq+1],
                     moving=state)
 
-                # ---- delta_v = beta * (v - predicted_v) ----
-                # ``data2`` reads predicted_v straight from PSUM.
                 nisa.tensor_tensor(
                     dst=diff,
                     data1=v_rows[0:1, i_seq*pack_w:(i_seq+1)*pack_w],
@@ -297,9 +275,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
                                            i_seq*qk_rep + ir:
                                            i_seq*qk_rep + ir + 1])
 
-                # ---- Outer-product update: state += k_scaled ⊗ delta_v ----
-                # Chunked along the packed-free dim to fit PSUM. The
-                # state add reads update_psum_chunk straight from PSUM.
                 for ivc in nl.affine_range(n_v_chunks):
                     vstart = ivc * v_chunk
                     nisa.memset(dst=update_psum_chunk, value=0.0)
@@ -314,10 +289,6 @@ def gated_deltanet(q, k, v, g, beta, h0):
                         data1=state[0:key_dim, vstart:vstart+v_chunk],
                         data2=update_psum_chunk, op=nl.add)
 
-                # ---- output(1, pack_w) = q_kp.T @ state ----
-                # nc_transpose only accepts SBUF input, so we still
-                # tensor_copy out_psum to SBUF here -- but only once,
-                # then transpose qk_rep slots out of out_v_T.
                 nisa.memset(dst=out_psum, value=0.0)
                 nisa.nc_matmul(
                     out_psum,
@@ -326,18 +297,12 @@ def gated_deltanet(q, k, v, g, beta, h0):
                 nisa.tensor_copy(dst=out_v_T, src=out_psum)
                 for ir in nl.affine_range(qk_rep):
                     vh = i_q_head * qk_rep + ir
-                    nisa.nc_transpose(
-                        dst=out_t_psum,
-                        data=out_v_T[0:1, ir*value_dim:(ir+1)*value_dim])
-                    nisa.tensor_copy(dst=out_v_slot, src=out_t_psum)
                     nl.store(
-                        output[i_batch, i_seq, 0:value_dim, vh:vh+1],
-                        out_v_slot)
+                        output[i_batch, i_seq, vh:vh+1, 0:value_dim],
+                        out_v_T[0:1, ir*value_dim:(ir+1)*value_dim])
 
             # ============================================================
-            # Persist final packed state back to HBM. Stream-transpose
-            # ``chunk`` x ``chunk`` blocks; each block fits a single
-            # PSUM bank.
+            # Persist final packed state back to HBM.
             # ============================================================
             for ir in nl.affine_range(qk_rep):
                 vh = i_q_head * qk_rep + ir

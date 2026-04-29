@@ -108,4 +108,10 @@ Ensure the final output is completely self-contained, requires no external depen
 
 
 
+You can use 
+
 bazel run --config=remote --@zml//platforms:neuron=true --run_under="NEURON_RT_INSPECT_ENABLE=1 NEURON_RT_INSPECT_OUTPUT_DIR=/home/kevin/profiling NEURON_RT_INSPECT_SYSTEM_PROFILE=1 NEURON_FRAMEWORK_DEBUG=1 NEURON_RT_INSPECT_DEVICE_PROFILE=1 XLA_HLO_DEBUG=1 XLA_IR_DEBUG=1 neuron-explorer inspect -o /home/kevin/profiling/ -- " --@zml//platforms:cpu=false //examples/neuron_nki:gated_deltanet
+
+to run it with profiling use
+
+neuron-explorer view -d /home/kevin/profiling/... --output-formatsummary-text

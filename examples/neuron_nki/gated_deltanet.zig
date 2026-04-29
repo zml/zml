@@ -62,7 +62,7 @@ const ReferenceProgram = struct {
 
         const result = zml.nn.GatedDeltaNet.forward(queries, keys, values, alphas, betas, .{ .s = initial_state });
         return .{
-            result.outputs.transpose(.{ .b, .s, .v, .h }).rename(.{ .v = .vd, .h = .vh }),
+            result.outputs.rename(.{ .h = .vh, .v = .vd }),
             result.state.s.rename(.{ .h = .vh, .v = .vd, .k = .d }),
         };
     }
@@ -380,7 +380,7 @@ fn stateShape(dtype: zml.DataType) zml.Shape {
 }
 
 fn outputShape() zml.Shape {
-    return zml.Shape.init(.{ .b = batch_size, .s = seq_len, .vd = value_dim, .vh = num_value_heads }, .f32);
+    return zml.Shape.init(.{ .b = batch_size, .s = seq_len, .vh = num_value_heads, .vd = value_dim }, .f32);
 }
 
 fn qkIndex(t: usize, h: usize, k: usize) usize {
@@ -392,7 +392,7 @@ fn inputValueIndex(t: usize, h: usize, v: usize) usize {
 }
 
 fn outputIndex(t: usize, h: usize, v: usize) usize {
-    return ((t * value_dim + v) * num_value_heads) + h;
+    return ((t * num_value_heads + h) * value_dim) + v;
 }
 
 fn gateIndex(t: usize, h: usize) usize {
