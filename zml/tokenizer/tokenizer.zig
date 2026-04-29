@@ -1,6 +1,5 @@
 const std = @import("std");
 
-pub const hftokenizers = @import("hftokenizers");
 pub const iree = @import("iree");
 pub const sentencepiece = @import("sentencepiece");
 
@@ -9,7 +8,6 @@ pub const homemade = @import("homemade.zig");
 const log = std.log.scoped(.@"zml/tokenizer");
 
 const Tokenizers = enum {
-    hftokenizers,
     iree,
     sentencepiece,
     homemade,
@@ -17,7 +15,6 @@ const Tokenizers = enum {
 
 pub const Tokenizer = union(Tokenizers) {
     pub const Encoder = union(Tokenizers) {
-        hftokenizers: hftokenizers.Encoder,
         iree: iree.Tokenizer.Encoder,
         sentencepiece: sentencepiece.Encoder,
         homemade: homemade.Encoder,
@@ -60,7 +57,6 @@ pub const Tokenizer = union(Tokenizers) {
     };
 
     pub const Decoder = union(Tokenizers) {
-        hftokenizers: hftokenizers.Decoder,
         iree: iree.Tokenizer.Decoder,
         sentencepiece: sentencepiece.Decoder,
         homemade: homemade.Decoder,
@@ -106,7 +102,6 @@ pub const Tokenizer = union(Tokenizers) {
         }
     };
 
-    hftokenizers: *hftokenizers.HFTokenizer,
     iree: iree.Tokenizer,
     sentencepiece: *sentencepiece.SentencePieceProcessor,
     homemade: *homemade.Tokenizer,
