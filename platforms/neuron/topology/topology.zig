@@ -150,11 +150,11 @@ pub fn topologyFromSortedNcIds(sorted_nc_ids: []const usize) !TopologyInfo {
 }
 
 // References for chip-count and fabric-shape inference:
-// - Inf1 instance sizes and 1/4/16-chip layouts:
-// - Inf2 instance sizes and 1/6/12-chip layouts:
-// - Trn1 / Trn1n 16-chip 2D torus:
-// - Trn2 16-chip torus and Trn2 UltraServer 64-chip ring-over-torus:
-// - Trn3 all-to-all / point-to-point scale-up:
+// - Inf1 instance sizes and 1/4/16-chip layouts
+// - Inf2 instance sizes and 1/6/12-chip layouts
+// - Trn1 / Trn1n 16-chip 2D torus
+// - Trn2 16-chip torus and Trn2 UltraServer 64-chip ring-over-torus
+// - Trn3 all-to-all / point-to-point scale-up
 fn chipTopology(family: Family, size: Size, chip_count: usize) !ChipTopology {
     if (chip_count == 1) return .none;
 
