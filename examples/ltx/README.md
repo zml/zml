@@ -1,200 +1,162 @@
-# LTX-2 Video Generation — Zig/ZML Implementation
+# LTX-2.3 Video Generation — Zig/ZML
 
-Zig port of the [LTX-2 22B](https://huggingface.co/Lightricks/LTX-2.3) two-stage text-to-video
-generation pipeline, running on ZML (MLIR/XLA/PJRT backend).
+Zig port of [LTX-2.3 (22B)](https://huggingface.co/Lightricks/LTX-2.3), a two-stage
+text-to-video+audio pipeline, running on ZML (MLIR/XLA/PJRT).
 
-## Pipeline Overview
+## Pipeline
 
-The pipeline produces video+audio from a text prompt, with optional image conditioning:
+Python runs only the Gemma-3 forward pass. Everything else runs in Zig on GPU:
 
-1. **Python** — Gemma forward pass (hidden states export)
-2. **Zig** — Everything else on GPU: text embedding post-processing (connector blocks), position/mask/clean-latent construction, noise generation, sigma schedules, optional image VAE encoding + conditioning → Stage 1 denoising → bridge (upsample) → Stage 2 denoising → video VAE decode → audio VAE decode → vocoder + BWE → MP4 mux
+```
+Python                         Zig (single binary)
+──────                         ──────────────────────────────────────────
+Gemma-3 forward ──→ hidden  ──→ Text embeddings (FeatureExtractor + Connector)
+                    states      Positions, masks, clean latents (from geometry)
+                                Noise generation (Box-Muller)
+                                Stage 1: 30 steps × 4 passes × 48 blocks
+                                Bridge: unpatchify → 2× upsample → re-noise
+                                Stage 2: 3 steps × 1 pass × 48 blocks (distilled)
+                                Video VAE decode → RGB frames
+                                Audio VAE decode → mel → vocoder+BWE → 48kHz stereo
+                                ffmpeg mux → output.mp4
+```
+
+GPU buffers flow between phases directly — no files touch disk unless
+`--dump-intermediates` is set.
 
 When `--image` is provided, the first frame is conditioned on a reference image
 via VAE encoding + per-token mask blending.
 
-The `inference` binary runs the full pipeline end-to-end in a single process,
-passing GPU buffers between phases without intermediate files.
-
-```
-Python (export)                Zig (inference)
-───────────────                ──────────────────────────────────────────────────
-Gemma forward ──→ hidden    ──→ Text embedding post-processing (connectors)
-                  states        Positions + masks + clean latents (from geometry)
-                                Noise generation (Box-Muller, seeded RNG)
-                                Stage 1 (30 steps × 4 passes)
-                                Bridge (upsample 2×, re-noise)
-                                Stage 2 (3 steps × 1 pass, distilled sigmas)
-                                Video VAE decode → RGB frames
-                                Audio VAE decode → vocoder + BWE → waveform
-                                ffmpeg mux → output.mp4
-```
-
 ## File Map
 
-### Zig (compiled to GPU via ZML)
 | File | Purpose |
 |------|---------|
-| `model.zig` | Core transformer: blocks, attention, preprocessing, output projection, denoising step, guidance, noise init, noise generation (`forwardGenerateNoise`), sigma schedule |
-| `conv_ops.zig` | Shared convolution types and operations (Conv3d, Conv2d, GroupNorm, PerChannelStats) |
-| `upsampler.zig` | Latent spatial upscaler (2×) + video patchify/unpatchify |
-| `video_vae.zig` | Video VAE decoder (3D causal convolutions, DepthToSpace) |
-| `audio_vae.zig` | Audio VAE decoder (2D causal convolutions, PixelNorm2d) |
-| `vocoder.zig` | Vocoder + BWE (BigVGAN, sinc resampler, STFT, mel projection) |
-| `video_vae_encoder.zig` | Video VAE encoder (for image conditioning) |
-| `image_loading.zig` | JPEG/PNG loading via stb_image, bilinear resize, center crop, bf16 normalize |
-| `text_embeddings.zig` | Text embedding post-processing: FeatureExtractorV2 + Embeddings1DConnector (8 transformer blocks, SPLIT RoPE) |
-| `inference.zig` | **Unified pipeline**: text embeddings → noise gen → Stage 1 → bridge → Stage 2 → VAE decode → vocoder in one binary |
+| `inference.zig` | Pipeline orchestrator: CLI, all 7 phases, MP4 mux |
+| `model.zig` | Transformer core (48-block), denoising math, guidance, noise gen, RoPE |
+| `text_embeddings.zig` | Gemma hidden states → context embeddings (FeatureExtractorV2 + 8-block Connector) |
+| `conv_ops.zig` | Shared Conv3d/Conv2d/GroupNorm/PixelShuffle primitives |
+| `upsampler.zig` | Bridge CNN: 2× spatial latent upsample + patchify/unpatchify |
+| `video_vae.zig` | Video VAE decoder (3D causal conv, DepthToSpace) |
+| `video_vae_encoder.zig` | Video VAE encoder (image conditioning) |
+| `audio_vae.zig` | Audio VAE decoder (2D causal conv) |
+| `vocoder.zig` | BigVGAN vocoder + bandwidth extension (all f32) |
+| `image_loading.zig` | stb_image load → resize → center-crop → bf16 normalize |
+| `export_pipeline.py` | Gemma hidden-state export; optional full Python reference pipeline |
 
-### Python
-| File | Purpose |
-|------|---------|
-| `export_pipeline.py` | Export Gemma hidden states for Zig inference, or run the full Python reference pipeline for validation |
-
-### Files Zig uses from Python
+### External inputs
 
 | File | Contents |
 |------|----------|
-| `pos_hidden_states.safetensors` | Gemma hidden states for positive prompt (`stacked_hidden_states` + `attention_mask`). Used by Zig |
-| `neg_hidden_states.safetensors` | Gemma hidden states for negative prompt. Used by Zig |
+| `pos_hidden_states.safetensors` | Gemma hidden states for positive prompt |
+| `neg_hidden_states.safetensors` | Gemma hidden states for negative prompt |
 
-### Stage 1 initial state (computed by Zig)
+## Latent geometry
 
-Zig computes all Stage 1 initial state tensors from the pipeline geometry.
-The normal path is to pass `--height`, `--width`, `--num-frames`, and `--fps`
-directly to the binary:
+Zig computes all initial-state tensors from `--height`, `--width`,
+`--num-frames`, `--fps`:
 
-- `F = ((num_frames - 1) / 8) + 1`
-- `H = ceil((height / 32) / 2)` and `W = ceil((width / 32) / 2)` for Stage 1 latents
-- `T_v = F × H × W`
-- `T_a = round((num_frames / fps) × 25)`
+- `F = (num_frames - 1) / 8 + 1`
+- `H = ceil((height / 32) / 2)`, `W = ceil((width / 32) / 2)` (Stage 1)
+- `T_v = F × H × W` (video tokens)
+- `T_a = round((num_frames / fps) × 25)` (audio tokens; 25 = 16000 / (160 × 4))
 
-The `25` in `T_a` comes from the audio latent rate: `16000 / (160 × 4) = 25`
-tokens per second.
-
-| Tensor | Shape | Zig computation |
-|--------|-------|------------------|
-| `video_positions` | `[1, 3, T_v, 2]` bf16 | `computeVideoPositions(F, H, W, fps)` |
-| `audio_positions` | `[1, 1, T_a, 2]` f32 | `computeAudioPositions(T_a)` |
-| `video_denoise_mask` | `[1, T_v, 1]` f32 | All 1.0 (image conditioning modifies after) |
+| Tensor | Shape | Value |
+|--------|-------|-------|
+| `video_positions` | `[1, 3, T_v, 2]` bf16 | Pixel-coord grid from `computeVideoPositions` |
+| `audio_positions` | `[1, 1, T_a, 2]` f32 | Time intervals from `computeAudioPositions` |
+| `video_denoise_mask` | `[1, T_v, 1]` f32 | All 1.0 (modified by image conditioning) |
 | `audio_denoise_mask` | `[1, T_a, 1]` f32 | All 1.0 |
-| `video_clean_latent` | `[1, T_v, 128]` bf16 | All zeros (image conditioning modifies after) |
+| `video_clean_latent` | `[1, T_v, 128]` bf16 | All zeros (modified by image conditioning) |
 | `audio_clean_latent` | `[1, T_a, 128]` bf16 | All zeros |
 
-Text embeddings (context vectors) are computed in Zig from the Gemma hidden
-states via `text_embeddings.zig`.
+Text embeddings are computed in Zig from Gemma hidden states via
+`text_embeddings.zig`.
 
-## Running the Unified Pipeline
+## Usage
 
 ### Prerequisites
 
-- CUDA GPU with enough VRAM for the 22B model
-- Model weights at a known path (e.g. `~/models/ltx-2.3/`)
-- Gemma 3 model for text encoding (e.g. `~/models/gemma-3-12b-it/`)
-- Python env with `ltx_core`, `ltx_pipelines` for the export step
+- CUDA GPU with sufficient VRAM for the 22B model
+- Model weights (e.g. `~/models/ltx-2.3/`)
+- Gemma-3 model (e.g. `~/models/gemma-3-12b-it/`)
+- Python env with `ltx_core`, `ltx_pipelines` for the Gemma export step
 
-### Step 1: Export Gemma hidden states (Python)
-
-The default workflow is to export only the Gemma hidden states. That is all the
-Zig binary needs from Python.
-
-Run the exporter in `--text-only` mode:
+### Step 1: Export Gemma hidden states
 
 ```bash
-cd /root/repos/LTX-2  # or wherever ltx_core is installed
+cd /path/to/LTX-2
 
 python examples/ltx/export_pipeline.py \
   --text-only \
   --output-dir $OUT \
   --prompt "Someone walking by the beach at sunset" \
   --negative-prompt "blurry, out of focus" \
-  --gemma-root /root/models/gemma-3-12b-it
+  --gemma-root ~/models/gemma-3-12b-it
 ```
 
-This produces:
-- `$OUT/pos_hidden_states.safetensors` — Gemma hidden states (positive prompt)
-- `$OUT/neg_hidden_states.safetensors` — Gemma hidden states (negative prompt)
+Produces `$OUT/pos_hidden_states.safetensors` and `$OUT/neg_hidden_states.safetensors`.
 
-### Step 2: Run inference (Zig)
-
-Build and run the unified binary:
+### Step 2: Run inference
 
 ```bash
 bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference -- \
-  --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
-  --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
-  --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
+  --stage1-ckpt ~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
+  --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+  --upsampler-ckpt ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
   --gemma-hidden-states-pos $OUT/pos_hidden_states.safetensors \
   --gemma-hidden-states-neg $OUT/neg_hidden_states.safetensors \
-  --output-dir $OUT/unified \
+  --output-dir $OUT/output \
   --height 1024 --width 1536 --num-frames 121 --fps 24 \
-  --bf16-attn-stage2
+  --bf16-attn-stage1 --bf16-attn-stage2
 ```
 
-This runs the full pipeline on GPU and writes `$OUT/unified/output.mp4` directly.
+Writes `$OUT/output/output.mp4`.
 
 ### Input constraints
 
-- `--height` and `--width` must be divisible by 32
-- Multiples of 64 are recommended for best Stage 1 to Stage 2 alignment
-- `--num-frames` must be of the form `8k+1` such as `121`
+- `height` and `width` must be divisible by 32 (multiples of 64 recommended)
+- `num_frames` must be `8k + 1` (e.g. 121)
 
-**Flags:**
+## CLI Flags
+
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--gemma-hidden-states-pos <path>` | (required) | Gemma hidden states for positive prompt |
-| `--gemma-hidden-states-neg <path>` | (required) | Gemma hidden states for negative prompt |
-| `--height <int>` | `1024` | Output height in pixels |
-| `--width <int>` | `1536` | Output width in pixels |
-| `--num-frames <int>` | `121` | Output frame count. Must satisfy `8k+1` |
-| `--fps <float>` | `24.0` | Output frame rate |
-| `--seed <int>` | 42 | RNG seed for noise generation (all stages) |
-| `--num-inference-steps <int>` | `30` | Number of Stage 1 denoising steps |
-| `--bf16-attn-stage1` | off | Use bf16 attention in Stage 1 (saves VRAM) |
-| `--bf16-attn-stage2` | off | Use bf16 attention in Stage 2 (recommended — avoids OOM after spatial upsample) |
-| `--cfg-v <float>` | `3.0` | Video CFG scale for Stage 1 guidance |
-| `--stg-v <float>` | `1.0` | Video STG scale for Stage 1 guidance |
-| `--mod-v <float>` | `3.0` | Video modality guidance scale for Stage 1 guidance |
-| `--rescale-v <float>` | `0.7` | Video guidance rescale for Stage 1 guidance |
-| `--cfg-a <float>` | `7.0` | Audio CFG scale for Stage 1 guidance |
-| `--stg-a <float>` | `1.0` | Audio STG scale for Stage 1 guidance |
-| `--mod-a <float>` | `3.0` | Audio modality guidance scale for Stage 1 guidance |
-| `--rescale-a <float>` | `0.7` | Audio guidance rescale for Stage 1 guidance |
-| `--dump-intermediates` | off | Write raw internal buffers (`.bin`) such as positions, masks, clean latents, noise tensors, conditioned image tokens, final latents, and audio mel data |
-| `--image <path>` | none | Path to conditioning image (JPEG/PNG) for image-to-video |
+| `--stage1-ckpt` | (required) | Stage 1 model checkpoint |
+| `--stage2-ckpt` | (required) | Stage 2 (distilled) model checkpoint |
+| `--upsampler-ckpt` | (required) | Spatial upsampler checkpoint |
+| `--gemma-hidden-states-pos` | (required) | Gemma hidden states — positive prompt |
+| `--gemma-hidden-states-neg` | (required) | Gemma hidden states — negative prompt |
+| `--output-dir` | (required) | Output directory |
+| `--height` | `1024` | Output height in pixels |
+| `--width` | `1536` | Output width in pixels |
+| `--num-frames` | `121` | Frame count (`8k + 1`) |
+| `--fps` | `24` | Frame rate |
+| `--seed` | `42` | RNG seed |
+| `--num-inference-steps` | `30` | Stage 1 denoising steps |
+| `--bf16-attn-stage1` | off | bf16 attention in Stage 1 (saves VRAM) |
+| `--bf16-attn-stage2` | off | bf16 attention in Stage 2 (recommended — avoids OOM) |
+| `--image` | none | Conditioning image path (JPEG/PNG) for image-to-video |
+| `--cfg-v` | `3.0` | Video CFG scale |
+| `--stg-v` | `1.0` | Video STG scale |
+| `--mod-v` | `3.0` | Video modality guidance scale |
+| `--rescale-v` | `0.7` | Video guidance rescale |
+| `--cfg-a` | `7.0` | Audio CFG scale |
+| `--stg-a` | `1.0` | Audio STG scale |
+| `--mod-a` | `3.0` | Audio modality guidance scale |
+| `--rescale-a` | `0.7` | Audio guidance rescale |
+| `--dump-intermediates` | off | Write raw `.bin` snapshots of internal buffers |
+| `--profile` | off | Enable XLA profiling |
+| `--meta` | none | Legacy: load geometry from `pipeline_meta.json` instead of CLI flags |
 
 ## Image Conditioning
 
-To generate video conditioned on a reference image, pass `--image` to the
-**Zig inference binary**. Zig handles image conditioning entirely on its own:
-it loads the image from disk, runs the VAE encoder on GPU for both Stage 1 and
-Stage 2 resolutions, and modifies the mask/clean_latent/noised_latent before
-denoising begins.
+Pass `--image <path>` to condition the first frame on a reference image.
+Zig handles this entirely: load → VAE encode → patchify → splice into
+mask/clean-latent/noise for both Stage 1 and Stage 2.
 
-Passing `--image` to `export_pipeline.py` is only needed when you want Python
-reference artifacts for validation; it is not part of the normal Zig workflow.
+- **Denoise mask**: 0.0 for first-frame tokens (keep fixed), 1.0 elsewhere
+- **Clean latent**: VAE-encoded image at first-frame positions, zeros elsewhere
+- **Noise init**: `noised = noise × mask × σ₀ + clean × (1 − mask × σ₀)`
 
-In image-conditioned mode, the denoise mask and clean latent encode the conditioning:
-- **Denoise mask**: 0.0 for first-frame tokens (keep clean), 1.0 for the rest (fully denoise)
-- **Clean latent**: VAE-encoded image at first-frame token positions, zeros elsewhere
-- **Noise init formula**: `noised = noise × mask × σ₀ + clean × (1 - mask × σ₀)`
-  — first-frame tokens get the clean image signal, rest get pure noise
-
-## Migration History
-
-Noise generation and sigma schedule computation were migrated from Python to Zig
-(Box-Muller via `Tensor.Rng`, logistic sigma schedule in `computeSigmaSchedule()`).
-
-Text embedding post-processing (FeatureExtractorV2 + Embeddings1DConnector with
-8 transformer blocks, SPLIT RoPE, gated attention) was migrated from Python to
-Zig. Python now only runs the Gemma forward pass; the connector blocks that
-transform hidden states into video/audio context embeddings run entirely in Zig.
-
-Stage 1 initial state (positions, denoise masks, clean latents) is now computed
-in Zig from the pipeline geometry, eliminating the need for the
-`unconditioned_stage1_inputs.safetensors` file. This covers both unconditioned
-and image-conditioned paths (image conditioning applies modifications after
-the initial state construction).
-
-The Zig binary now exposes Stage 1 guidance scales directly as CLI flags,
-instead of requiring them to be sourced from Python-exported metadata.
+`export_pipeline.py --image` is only needed for Python reference artifacts, not
+for normal Zig inference.
