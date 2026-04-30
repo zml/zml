@@ -918,6 +918,36 @@ pub fn main(init: std.process.Init) !void {
 // Phase 1: Stage 1 — guided denoising
 // ============================================================================
 
+/// Run the full Stage 1 denoising phase: N-step guided Euler diffusion.
+///
+/// This is the most expensive phase — each step runs 4 full forward passes
+/// through all 48 transformer blocks (conditional, negative/CFG, STG, isolated),
+/// then combines them via the guider formula before taking an Euler step.
+///
+/// Steps:
+///   1. Compute sigma schedule and initial state (positions, masks, clean latents)
+///   2. Run text embeddings processor (Gemma hidden states → context vectors)
+///   3. Generate noise (Box-Muller) and blend with clean latents (noise init)
+///   4. Optionally apply image conditioning (VAE encode + first-frame splice)
+///   5. Compile all executables (preprocess, 3 block variants, projection, denoising)
+///   6. Load weights (48 blocks + output projection)
+///   7. Run N-step loop: preprocess → 4-pass block chain → guider combine → Euler step
+///         Pass 1 (conditional):  positive context, normal blocks → velocity_cond
+///         Pass 2 (negative/CFG): negative context, normal blocks → velocity_neg
+///         Pass 3 (STG):          positive context, V-passthrough at block 28 → velocity_ptb
+///         Pass 4 (isolated):     positive context, zeroed AV cross-masks → velocity_iso
+///
+///         Guider: pred = cond + (cfg-1)·(cond-neg) + stg·(cond-ptb) + (mod-1)·(cond-iso)
+///                 pred *= rescale · std(cond)/std(pred) + (1-rescale)
+///
+///         Euler:  next_latent = latent + (σ_next - σ) · velocity_from_x0
+///
+///         Preprocessing runs once per step (with positive context) and its outputs
+///         are reused across all 4 passes. Pass 2 swaps in negative context for the
+///         text cross-attention. Pass 3 uses a different block exe at index 28.
+///         Pass 4 uses a block exe that zeroes out AV cross-attention masks.
+///
+/// Returns denoised v/a latents, positive context vectors, and RNG state for the bridge.
 fn runStage1(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2193,6 +2223,19 @@ fn runStage1(
 // Phase 2: Bridge — unpatchify → upsample → patchify → noise init
 // ============================================================================
 
+/// Bridge between Stage 1 and Stage 2: spatially upsample the denoised latents.
+///
+/// Converts Stage 1's low-resolution latents to Stage 2's high-resolution latents:
+///   1. Unpatchify video: [1, T_v1, 128] → [1, 128, F, H_s1, W_s1]
+///   2. 2× spatial upsample via CNN (ResBlocks + PixelShuffle)
+///   3. Crop (if needed) and re-patchify: [1, 128, F, H_s2, W_s2] → [1, T_v2, 128]
+///   4. Audio passes through unchanged (same token count at both stages)
+///   5. Recompute video positions for the new spatial resolution
+///   6. Generate fresh noise (RNG draws #3, #4) and run noise init at σ₀=0.909375
+///   7. Optionally re-apply image conditioning at the higher resolution
+///
+/// Takes ownership of Stage 1 latent buffers (frees them after unpatchify/passthrough).
+/// Context vectors pass through from Stage 1 to Stage 2 without modification.
 fn runBridge(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -2601,6 +2644,16 @@ fn runBridge(
 // Phase 3: Stage 2 — 3-step distilled denoising
 // ============================================================================
 
+/// Run Stage 2: 3-step distilled denoising at full spatial resolution.
+///
+/// Much simpler than Stage 1:
+///   - 3 steps with fixed sigmas [0.909375, 0.725, 0.421875] → 0.0
+///   - 1 pass per step (no guidance — the distilled model handles it internally)
+///   - Uses velocity-based Euler steps (forwardDenoisingStep, not from-x0)
+///   - Same 48-block architecture but with different checkpoint weights
+///
+/// Consumes bridge.v_latent and bridge.a_latent (sets them to undefined after).
+/// Returns final denoised video and audio latents ready for VAE decoding.
 fn runStage2(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -3380,6 +3433,19 @@ fn sigma1dBuffer(
 // Phase 4: Video VAE Decode
 // ============================================================================
 
+/// Decode video latents to pixel frames via the Video VAE decoder.
+///
+/// Steps:
+///   1. Unpatchify: [1, T_v, 128] → [1, 128, F, H, W] (5D spatial tensor)
+///   2. Load VAE decoder weights + per-channel statistics from checkpoint
+///   3. Run VAE decode: [1, 128, F, H, W] → [1, 3, F_px, H_px, W_px] bf16
+///   4. Post-process: bf16 [-1, 1] → u8 [0, 255] RGB in NHWC layout
+///
+/// For long videos (F > tile threshold), uses temporal tiling with overlap blending
+/// to avoid GPU OOM. The latent is downloaded to host and tiles are processed
+/// sequentially, each uploaded individually.
+///
+/// Takes ownership of v_latent_patchified (freed after unpatchify).
 fn runVideoVaeDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -3883,6 +3949,10 @@ fn postProcessDecodedVideo(
     };
 }
 
+/// Encode video + audio frames to an MP4 file using ffmpeg.
+///
+/// Pipes raw RGB24 video frames to ffmpeg's stdin and writes interleaved f32le
+/// audio to a temp file (ffmpeg can't read two pipes). Output is H.264 + AAC.
 fn encodeOutputMp4(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -3985,6 +4055,15 @@ fn encodeOutputMp4(
 // Phase 5: Audio VAE Decode
 // ============================================================================
 
+/// Decode audio latents to mel spectrogram via the Audio VAE decoder.
+///
+/// Steps:
+///   1. Unpatchify: [1, T_a, 128] → [1, 8, T_a, 16] (2D latent representation)
+///   2. Load audio VAE decoder weights + per-channel statistics
+///   3. Run VAE decode: [1, 8, T_a, 16] → [1, 2, T_mel, 64] bf16 (stereo mel)
+///
+/// The mel spectrogram output is consumed by the vocoder in Phase 6.
+/// Takes ownership of a_latent_patchified (freed after unpatchify).
 fn runAudioVaeDecode(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -4143,6 +4222,16 @@ fn runAudioVaeDecode(
 // Phase 6: Vocoder + BWE (mel spectrogram → 48kHz stereo waveform)
 // ============================================================================
 
+/// Convert mel spectrogram to 48kHz stereo waveform via BigVGAN + bandwidth extension.
+///
+/// Two-stage audio synthesis:
+///   1. Main vocoder (BigVGAN): mel → 16kHz mono waveform (6 upsampling stages, SnakeBeta activations)
+///   2. BWE pipeline: 16kHz → 48kHz stereo (sinc resampler + STFT + mel projection)
+///
+/// CRITICAL: Entire vocoder chain runs in f32. bf16 causes 40-90% spectral degradation
+/// (weights are stored bf16 but converted to f32 at each operation).
+///
+/// Takes ownership of audio_mel (freed after the main vocoder runs).
 fn runVocoderWithBWE(
     allocator: std.mem.Allocator,
     io: std.Io,
@@ -4377,6 +4466,14 @@ fn loadPipelineMeta(allocator: std.mem.Allocator, io: std.Io, path: []const u8) 
 // Compute PipelineMeta from generation params (no JSON file needed)
 // ============================================================================
 
+/// Derive pipeline geometry (latent spatial/temporal dimensions) from pixel-space
+/// generation parameters.
+///
+/// Key formulas:
+///   - f_lat = (num_frames - 1) / 8 + 1  (VAE temporal compression: 8×)
+///   - Stage 2: h_lat = height / 32, w_lat = width / 32  (VAE spatial: 32×)
+///   - Stage 1: h_lat = ceil(s2_h / 2), w_lat = ceil(s2_w / 2)  (half-res for 2× upsample)
+///   - t_audio = round(duration_sec × 25)  where 25 = 16000 / (hop=160 × downsample=4)
 fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) PipelineMeta {
     const f_lat: i64 = @as(i64, @intCast((num_frames - 1) / 8)) + 1;
     // Stage 2: full resolution
@@ -4415,6 +4512,14 @@ fn computePipelineMeta(height: u32, width: u32, num_frames: u32, fps: f64) Pipel
 // Video positions: [1, 3, T_v, 2] bf16
 // ============================================================================
 
+/// Compute the video position grid for RoPE.
+///
+/// Each video token corresponds to a 3D patch (frame, height, width). The position
+/// grid stores start/end coordinates for each axis, scaled to physical units:
+///   - Temporal axis: converted from frame indices to seconds (adjusted for causal-conv offset)
+///   - Spatial axes: raw latent-space coordinates (1 unit = 32 pixels)
+///
+/// Layout: [1, 3_axes, T_v, 2_start_end] in bf16.
 fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, fps: f64) ![]u8 {
     const T_v: usize = @intCast(F * H * W);
     const num_vals = 3 * T_v * 2; // 3 axes (frame, height, width) × 2 values (start, end) per axis
@@ -4466,6 +4571,14 @@ fn computeVideoPositions(allocator: std.mem.Allocator, F: i64, H: i64, W: i64, f
 // Audio positions: [1, 1, T_a, 2] f32
 // ============================================================================
 
+/// Compute the audio position grid for RoPE.
+///
+/// Each audio token spans a mel-spectrogram time interval. Positions are computed
+/// in seconds using the audio VAE's temporal compression parameters:
+///   mel_index = max(i * 4 + 1 - 4, 0)  (causal-conv offset, downsample_factor=4)
+///   time_sec  = mel_index * hop_length / sample_rate  (hop=160, sr=16000)
+///
+/// Layout: [1, 1_axis, T_a, 2_start_end] in f32.
 fn computeAudioPositions(allocator: std.mem.Allocator, T_a: i64) ![]u8 {
     const T: usize = @intCast(T_a);
     const num_vals = T * 2;
@@ -4487,6 +4600,7 @@ fn computeAudioPositions(allocator: std.mem.Allocator, T_a: i64) ![]u8 {
     return out;
 }
 
+/// Fill a byte buffer with f32 1.0 values (little-endian).
 fn fillOnesF32(buf: []u8) void {
     const one_bits: u32 = @bitCast(@as(f32, 1.0));
     var i: usize = 0;
@@ -4495,6 +4609,7 @@ fn fillOnesF32(buf: []u8) void {
     }
 }
 
+/// Convert f32 to bf16 with round-to-nearest-even and store as little-endian bytes.
 fn storeBf16(buf: []u8, val: f32) void {
     const bits: u32 = @bitCast(val);
     const lower: u32 = bits & 0xFFFF;

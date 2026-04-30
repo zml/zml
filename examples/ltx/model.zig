@@ -20,7 +20,7 @@ pub const Config = struct {
 };
 
 // ============================================================================
-// Section 6: FeedForward
+// Section 2: FeedForward
 // Python ref: ltx_core/models/attention.py — FeedForward
 // ============================================================================
 
@@ -89,7 +89,7 @@ fn forwardAudioFFPrecise(x: Tensor, params: FeedForward.Params) Tensor {
 }
 
 // ============================================================================
-// Section 2: Patchification (Video + Audio)
+// Section 3: Patchification (Video + Audio)
 // Python ref: ltx_core/models/patchifiers/ — VideoLatentPatchifier, AudioPatchifier
 // ============================================================================
 
@@ -248,7 +248,7 @@ pub const AdaLayerNormSingle = struct {
 };
 
 // ============================================================================
-// Section 10: Output Projection
+// Section 5: Output Projection
 // Python ref: ltx_core/models/ltx_model.py — LTXModel._postprocess()
 // ============================================================================
 
@@ -299,7 +299,7 @@ pub const OutputProjection = struct {
 };
 
 // ============================================================================
-// Section 5: Attention (self-attention, cross-attention, AV cross-attention)
+// Section 6: Attention (self-attention, cross-attention, AV cross-attention)
 // Python ref: ltx_core/models/attention.py — Attention, CrossAttention
 // ============================================================================
 
@@ -332,7 +332,9 @@ fn hierarchicalConcatenate(chunks: []const Tensor, comptime axis: anytype) Tenso
     return Tensor.concatenate(groups[0..n_groups], axis);
 }
 
-/// and chunks along the query dimension to avoid materializing a full Q×K^T
+/// SDPA without f32 upcast, using query-chunking to avoid OOM.
+///
+/// Chunks along the query dimension to avoid materializing a full Q×K^T
 /// matrix. For Stage 2 video self-attention ([32, 24576, 24576] bf16 ≈ 36 GiB),
 /// the full matrix can't fit in GPU memory. Chunking queries into blocks of
 /// CHUNK_Q tokens produces smaller [32, CHUNK_Q, 24576] intermediates that
@@ -1384,7 +1386,7 @@ pub fn selectTransformerRoot(store: zml.io.TensorStore.View) zml.io.TensorStore.
 }
 
 // ============================================================================
-// Section 11: Denoising Step (sigma schedule + Euler step + mask blending)
+// Section 9: Denoising Math (sigma schedule, Euler steps, noise init, guidance)
 // Python ref: ltx_pipelines/scheduler.py — RectifiedFlowScheduler
 // ============================================================================
 
@@ -1455,7 +1457,7 @@ pub fn forwardNoiseInit(
 }
 
 // ============================================================================
-// Section 12: Guidance Combine (CFG + STG + modality isolation + rescale)
+// Section 9 (continued): Guidance Combine (CFG + STG + modality isolation + rescale)
 // Python ref: ltx_pipelines/guiders.py — LTXGuider.combine()
 // ============================================================================
 
@@ -1756,7 +1758,7 @@ pub fn forwardDenoisingStepFromX0(
 }
 
 // ============================================================================
-// Section 13: Block-Level Entrypoints (forwardBlock0* family)
+// Section 10: Block-Level Entrypoints (forwardBlock0* family)
 // These are the ZML-compilable entrypoints — each wraps a Section 7 method
 // with explicit tensor arguments (no struct, for MLIR arg flattening).
 // ============================================================================
@@ -2066,6 +2068,11 @@ pub fn forwardBlock0NativeSTGBf16Attn(
         .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
     }, params);
 }
+/// Isolated modality block variant: accepts explicit AV cross-attention masks.
+///
+/// Used during Pass 4 (isolated/modality guidance) in Stage 1 denoising, where
+/// both a2v_mask and v2a_mask are set to zero to prevent cross-modal information
+/// flow. This creates a "modality-isolated" trajectory for the guider formula.
 pub fn forwardBlock0NativeWithAVMasks(
     vx_in: Tensor,
     ax_in: Tensor,
@@ -2223,7 +2230,7 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
 }
 
 // ============================================================================
-// Section 3: Positional Embeddings (RoPE)
+// Section 11: Positional Embeddings (RoPE)
 // Python ref: ltx_core/models/embeddings.py — RoPE3D
 // ============================================================================
 
@@ -2435,7 +2442,7 @@ fn precomputeFreqsCis(
 }
 
 // ============================================================================
-// Section 9: Preprocessing (patchify + embed + RoPE + AV mask computation)
+// Section 12: Preprocessing (patchify + embed + RoPE + AV mask computation)
 // Python ref: ltx_core/models/ltx_model.py — LTXModel._prepare_inputs()
 // ============================================================================
 
