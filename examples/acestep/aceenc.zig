@@ -362,6 +362,42 @@ pub const AceEnc = struct {
 };
 
 
+const AceEncTextWrapper = struct {
+    model: AceEnc,
+    pub fn forward(wrapper: AceEncTextWrapper, t: zml.Tensor) zml.Tensor {
+        return wrapper.model.text_encoder.forward(t.withTags(.{ .s, .d }));
+    }
+};
+
+const AceEncLyricWrapper = struct {
+    model: AceEnc,
+    pub fn forward(wrapper: AceEncLyricWrapper, l: zml.Tensor) zml.Tensor {
+        return wrapper.model.lyric_encoder.forward(l.withTags(.{ .s, .d }));
+    }
+};
+
+const AceEncTimbreWrapper = struct {
+    model: AceEnc,
+    pub fn forward(wrapper: AceEncTimbreWrapper, t: zml.Tensor) zml.Tensor {
+        return wrapper.model.timbre_encoder.forward(t.withTags(.{ .t, .a })).squeeze(.s);
+    }
+};
+
+const AceEncQuantWrapper = struct {
+    model: AceEnc,
+    pub fn forward(wrapper: AceEncQuantWrapper, ids: zml.Tensor) zml.Tensor {
+        return wrapper.model.audiocode_encoder.dequantizer.dequantize(ids.withTags(.{ .a }));
+    }
+};
+
+const AceEncAudiocWrapper = struct {
+    model: AceEnc,
+    pub fn forward(wrapper: AceEncAudiocWrapper, x: zml.Tensor) zml.Tensor {
+        return wrapper.model.audiocode_encoder.forward(x.withTags(.{ .t_code, .d }));
+    }
+};
+
+
 pub const TextEncoder = struct {
     text_projector: zml.nn.Linear,
     
@@ -723,6 +759,7 @@ pub const AudioCodeEncoder = struct {
         // depatch time dimension from 5hz * p = 5 to 25hz : [t, p, d] -> [t * p, d]
         return hidden_states.merge(.{ .t = .{ .t, .p }});
     }
+    
 };
 
 pub const AudioCodeDequantizer = struct {
@@ -806,6 +843,7 @@ pub const AudioCodeDequantizer = struct {
 
 };
 
+
 pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
      const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, hz_type);
      const window = zml.DataType.constant(.i32, window_len);
@@ -836,4 +874,48 @@ pub fn print(x: zml.Tensor, n: u8) void {
         4 => std.log.info("{s} is dim 4 : {s} x {s} x {s} x {s} = {d} x {d} x {d} x {d}", .{ name, sh.tag(0), sh.tag(1), sh.tag(2), sh.tag(3), sh.dim(0), sh.dim(1), sh.dim(2), sh.dim(3) }),
         else => std.log.info("{s} is rank >= 5", .{ name }),
     }
+}
+
+pub fn testModel(zml_handler: main.Zml_handler, aceenc: AceEnc_handler) !void {
+    const activations_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//activations.safetensors";
+    
+    try main.printSafetensors(zml_handler.allocator, zml_handler.io, activations_path);
+
+    var activations_registry = try zml.safetensors.TensorRegistry.fromPath(zml_handler.allocator, zml_handler.io, activations_path);
+    defer activations_registry.deinit();
+
+    var activations_store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &activations_registry);
+    defer activations_store.deinit();
+    
+    std.log.info("Test activations : dequant", .{});
+    const w_q: AceEncQuantWrapper = .{ .model = aceenc.model };
+    const wb_q: zml.Bufferized(AceEncQuantWrapper) = .{ .model = aceenc.model_buffers };
+    try testLayer(w_q, wb_q, "dequantizer", zml_handler, activations_store.view(), &aceenc.shardings.all());
+    
+    std.log.info("Test activations : enc audioc", .{});
+    const w_a: AceEncAudiocWrapper = .{ .model = aceenc.model };
+    const wb_a: zml.Bufferized(AceEncAudiocWrapper) = .{ .model = aceenc.model_buffers };
+    try testLayer(w_a, wb_a, "detokenizer", zml_handler, activations_store.view(), &aceenc.shardings.all());
+    
+    if (0 * 0 > -66) return;
+    
+    std.log.info("Test activations : enc text", .{});
+    const w_t: AceEncTextWrapper = .{ .model = aceenc.model };
+    const wb_t: zml.Bufferized(AceEncTextWrapper) = .{ .model = aceenc.model_buffers };
+    try testLayer(w_t, wb_t, "text_proj", zml_handler, activations_store.view(), &aceenc.shardings.all());
+    
+    std.log.info("Test activations : enc lyric", .{});
+    const w_l: AceEncLyricWrapper = .{ .model = aceenc.model };
+    const wb_l: zml.Bufferized(AceEncLyricWrapper) = .{ .model = aceenc.model_buffers };
+    try testLayer(w_l, wb_l, "lyric_encoder", zml_handler, activations_store.view(), &aceenc.shardings.all());
+    
+    std.log.info("Test activations : enc timbre", .{});
+    const w_timbre: AceEncTimbreWrapper = .{ .model = aceenc.model };
+    const wb_timbre: zml.Bufferized(AceEncTimbreWrapper) = .{ .model = aceenc.model_buffers };
+    try testLayer(w_timbre, wb_timbre, "timbre_encoder", zml_handler, activations_store.view(), &aceenc.shardings.all());
+    
+}
+
+pub fn testLayer(wrapper: anytype, buffers: anytype, layername: []const u8, zml_handler: main.Zml_handler, store: zml.io.TensorStore.View, shardings: []const zml.sharding.Sharding) !void {
+    try zml.testing.testLayer(zml_handler.allocator, zml_handler.io, zml_handler.platform, wrapper, .forward, store, layername, buffers, shardings, .{});
 }

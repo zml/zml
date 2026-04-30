@@ -11,7 +11,6 @@ const aceenc_ = @import("aceenc.zig");
 const acedit_ = @import("acedit.zig");
 const acevae_ = @import("acevae.zig");
 
-const cfg: f32 = 1.0;
 const seed: u128 = 0;
 const hz_type = .f32;
 
@@ -24,19 +23,6 @@ pub const AudioMetadata = struct {
     language: []const u8,
     timesignature: []const u8,
     lyric: []const u8,
-    
-    pub fn initExample() AudioMetadata {
-        return .{
-            .bpm = "N/A",
-            .caption = "",
-            .duration = "12",
-            .genres = "N/A",
-            .keyscale = "N/A",
-            .language = "unknown",
-            .timesignature = "N/A",
-            .lyric = "[Instrumental]",
-        };
-    }
 
     const field_names = [_][]const u8{
         "bpm:",
@@ -122,13 +108,10 @@ pub const AudioCodes = struct {
     token_id: []u32,
     string: []u8,
     
-    pub fn initExample(allocator: std.mem.Allocator) !AudioCodes {
-        const codes = [_]u32{ };
-        const str = "";
-        
+    pub fn empty() AudioCodes {
         return .{
-            .token_id = try allocator.dupe(u32, &codes),
-            .string = try allocator.dupe(u8, str),
+            .token_id = .{},
+            .string = "",
         };
     }
     
@@ -454,8 +437,11 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer generated_token_slice.free(allocator);
+    var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
+    defer token_slice.free(allocator);
+    token_slice.items(u32)[0] = 0;
+    var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    defer token_buffer.deinit();
 
     var prefill_args = try acellm.prefill_exe.args(allocator);
     defer prefill_args.deinit(allocator);
@@ -466,11 +452,8 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
     @memcpy(prefill_tokens_slice.items(u32)[0..prompt_tok.len], prompt_tok);
-
     var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
     defer prefill_tokens_buffer.deinit();
-    var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, sharding);
-    defer prefill_token_pos_buffer.deinit();
 
     const voc_len = acellm.phase.phase1_mask.len;
 
@@ -480,45 +463,19 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     var phase_mask_buffer: zml.Buffer = try .fromSlice(io, platform, mask_slice, sharding);
     defer phase_mask_buffer.deinit();
 
-    const pen_value: f32 = 2.0;
-    const pos_pen_values: []f32 = try allocator.alloc(f32, voc_len);
-    const neg_pen_values: []f32 = try allocator.alloc(f32, voc_len);
-    defer allocator.free(pos_pen_values);
-    defer allocator.free(neg_pen_values);
-    for (0..voc_len) |i| {
-        pos_pen_values[i] = 1.0;
-        neg_pen_values[i] = 1.0;
-    }
-    for (0..prompt_tok.len) |i| {
-        const token_id = prompt_tok[i];
-        pos_pen_values[token_id] /= pen_value;
-        neg_pen_values[token_id] *= pen_value;
-    }
-    const pos_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .f32));
-    const neg_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .f32));
-    defer pos_pen_slice.free(allocator);
-    defer neg_pen_slice.free(allocator);
-    @memcpy(pos_pen_slice.items(f32)[0..voc_len], pos_pen_values);
-    @memcpy(neg_pen_slice.items(f32)[0..voc_len], neg_pen_values);
-    var pos_pen_buffer: zml.Buffer = try .fromSlice(io, platform, pos_pen_slice, sharding);
-    var neg_pen_buffer: zml.Buffer = try .fromSlice(io, platform, neg_pen_slice, sharding);
-    defer pos_pen_buffer.deinit();
-    defer neg_pen_buffer.deinit();
-
     const logits_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .voc = voc_len }, .f32));
     defer logits_slice.free(allocator);
     var logits_buffer: zml.Buffer = try .fromSlice(io, platform, logits_slice, sharding);
     defer logits_buffer.deinit();
 
-    std.log.info("5Hz run prefill with sequence of {d} tokens", .{prompt_tok.len});
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buffer, neg_pen_buffer, true });
+    std.log.info("5Hz run prefill with sequence of {d} tokens", .{ prompt_tok.len });
+    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, true });
     acellm.prefill_exe.call(prefill_args, &prefill_results);
     prefill_results.fill(.{ &prefill_tokens_buffer, &acellm.kv_cache_buffers, &rng_buffers, &logits_buffer });
 
-    try logits_buffer.toSlice(io, logits_slice);
     try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
-    generated_token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
-
+    token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len-1];
+    
     // Prepare for token-by-token generation,
     std.log.info("5Hz prepare decode", .{});
     var decode_args = try acellm.decode_exe.args(allocator);
@@ -527,30 +484,24 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     defer decode_results.deinit(allocator);
 
     // start with the token generated based on the full prompt.
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
-    defer current_token_buffer.deinit();
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
 
     std.log.info("5Hz run decode", .{});
-    //var stdout = std.Io.File.stdout().writer(io, &.{});
-    //var writer: *std.Io.Writer = &stdout.interface;
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    var writer: *std.Io.Writer = &stdout.interface;
     generation: for (0..output_tokens_len + 1) |i| {
         // collect and print generated sequence
         num_tokens_generated += 1;
-        const generated_token = generated_token_slice.items(u32)[0];
+        const generated_token = token_slice.items(u32)[0];
         if (try tokenizer_decoder.next(generated_token)) |chunk| {
             try result.appendSlice(allocator, chunk);
-            //try writer.writeAll(chunk);
-            //try writer.flush();
+            try writer.writeAll(chunk);
+            try writer.flush();
         } else {
-            std.log.info("ERROR could not decode token: {d}", .{generated_token});
+            std.log.info("ERROR could not decode token: {d}", .{ generated_token });
         }
-        pos_pen_values[generated_token] /= pen_value;
-        neg_pen_values[generated_token] *= pen_value;
-        @memcpy(pos_pen_slice.items(f32)[0..voc_len], pos_pen_values);
-        @memcpy(neg_pen_slice.items(f32)[0..voc_len], neg_pen_values);
 
         // check for eos
         if (i == output_tokens_len) break :generation;
@@ -562,24 +513,24 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
                 }
             },
         }
-        // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(prompt_tok.len + i)}));
-        var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice, sharding);
-        defer token_pos_buffer.deinit();
+        
+        // token buffer was used to pass 0 as token_index to the prefill
+        // now it's used to pass the token we want to predict from to the decode
+        token_buffer.deinit();
+        token_buffer = try .fromSlice(io, platform, token_slice, sharding);
+        // we then need a new 1 token buffer to pass the token_index
+        token_slice.items(u32)[0] = @intCast(prompt_tok.len + i);
+        var decode_token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+        defer decode_token_pos_buffer.deinit();
 
-        var pos_pen_buff: zml.Buffer = try .fromSlice(io, platform, pos_pen_slice, sharding);
-        var neg_pen_buff: zml.Buffer = try .fromSlice(io, platform, neg_pen_slice, sharding);
-        defer pos_pen_buff.deinit();
-        defer neg_pen_buff.deinit();
         // call to generate the next token
-        decode_args.set(.{ acellm.model_buffers, current_token_buffer, token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buff, neg_pen_buff, false });
+        decode_args.set(.{ acellm.model_buffers, token_buffer, decode_token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, false });
         acellm.decode_exe.call(decode_args, &decode_results);
-        decode_results.fill(.{ &current_token_buffer, &acellm.kv_cache_buffers, &rng_buffers, &logits_buffer });
+        decode_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers, &logits_buffer });
         // extract the generated token from the buffer
-        try logits_buffer.toSlice(io, logits_slice);
-        try current_token_buffer.toSlice(io, generated_token_slice);
+        try token_buffer.toSlice(io, token_slice);
     }
-    std.log.info("5Hz done, generated {d} tokens", .{num_tokens_generated});
+    std.log.info("5Hz done, generated {d} tokens", .{ num_tokens_generated });
     return result.toOwnedSlice(allocator);
 }
 
@@ -602,8 +553,11 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
-    var generated_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer generated_token_slice.free(allocator);
+    var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
+    defer token_slice.free(allocator);
+    token_slice.items(u32)[0] = 0;
+    var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    defer token_buffer.deinit();
 
     var prefill_args = try acellm.prefill_exe.args(allocator);
     defer prefill_args.deinit(allocator);
@@ -613,10 +567,6 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm
     // prepare device buffers for the prefill tokens and their positions
     const prefill_tokens_slice: zml.Slice = try .alloc(allocator, .init(.{ acellm.options.seq_len }, .u32));
     defer prefill_tokens_slice.free(allocator);
-    var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
-    defer prefill_tokens_buffer.deinit();
-    var prefill_token_pos_buffer = try zml.Buffer.scalar(io, platform, 0, .u32, sharding);
-    defer prefill_token_pos_buffer.deinit();
 
     const voc_len = acellm.phase.phase1_mask.len;
 
@@ -625,31 +575,6 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm
     @memcpy(mask_slice.items(f32)[0..acellm.phase.phase1_mask.len], acellm.phase.phase2_mask);
     var phase_mask_buffer: zml.Buffer = try .fromSlice(io, platform, mask_slice, sharding);
     defer phase_mask_buffer.deinit();
-
-    const pen_value: f32 = 1.0;
-    const pos_pen_values: []f32 = try allocator.alloc(f32, voc_len);
-    const neg_pen_values: []f32 = try allocator.alloc(f32, voc_len);
-    defer allocator.free(pos_pen_values);
-    defer allocator.free(neg_pen_values);
-    for (0..voc_len) |i| {
-        pos_pen_values[i] = 1.0;
-        neg_pen_values[i] = 1.0;
-    }
-    for (0..cond_tok.len) |i| {
-        const token_id = cond_tok[i];
-        pos_pen_values[token_id] /= pen_value;
-        neg_pen_values[token_id] *= pen_value;
-    }
-    const pos_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .f32));
-    const neg_pen_slice: zml.Slice = try .alloc(allocator, .init(.{ voc_len }, .f32));
-    defer pos_pen_slice.free(allocator);
-    defer neg_pen_slice.free(allocator);
-    @memcpy(pos_pen_slice.items(f32)[0..voc_len], pos_pen_values);
-    @memcpy(neg_pen_slice.items(f32)[0..voc_len], neg_pen_values);
-    var pos_pen_buffer: zml.Buffer = try .fromSlice(io, platform, pos_pen_slice, sharding);
-    var neg_pen_buffer: zml.Buffer = try .fromSlice(io, platform, neg_pen_slice, sharding);
-    defer pos_pen_buffer.deinit();
-    defer neg_pen_buffer.deinit();
 
     const cond_logits_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .voc = voc_len }, .f32));
     const uncond_logits_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .voc = voc_len }, .f32));
@@ -662,89 +587,75 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm
 
     std.log.info("5Hz run cond prefill with sequence of {d} tokens", .{ cond_tok.len });
     @memcpy(prefill_tokens_slice.items(u32)[0..cond_tok.len], cond_tok);
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buffer, neg_pen_buffer, true });
-    acellm.prefill_exe.call(prefill_args, &prefill_results);
-    prefill_results.fill(.{ &prefill_tokens_buffer, &acellm.kv_cache_buffers, &rng_buffers, &cond_logits_buffer });
+    var cond_prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+    defer cond_prefill_tokens_buffer.deinit();
+    prefill_args.set(.{ acellm.model_buffers, cond_prefill_tokens_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, true });
+    acellm.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
+    prefill_results.fill(.{ &cond_prefill_tokens_buffer, &acellm.kv_cache_buffers, &rng_buffers, &cond_logits_buffer });
     
     std.log.info("5Hz run uncond prefill with sequence of {d} tokens", .{ uncond_tok.len });
     @memcpy(prefill_tokens_slice.items(u32)[0..uncond_tok.len], uncond_tok);
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, prefill_token_pos_buffer, acellm.kv_cache_buffers_cfg, rng_buffers, phase_mask_buffer, pos_pen_buffer, neg_pen_buffer, true });
-    acellm.prefill_exe.call(prefill_args, &prefill_results);
-    prefill_results.fill(.{ &prefill_tokens_buffer, &acellm.kv_cache_buffers_cfg, &rng_buffers, &uncond_logits_buffer });
-
-    // combine logits
-    try cond_logits_buffer.toSlice(io, cond_logits_slice);
-    try uncond_logits_buffer.toSlice(io, uncond_logits_slice);
-    var clo: []f32 = cond_logits_slice.items(f32);
-    var ulo: []f32 = uncond_logits_slice.items(f32);
-    var max_logit: f32 = -1e20;
-    var argmax_logit: u32 = 0;
-    for (0..clo.len) |i| {
-        clo[i] = ulo[i] + cfg * (clo[i] - ulo[i]);
-        if (clo[i] > max_logit) {
-            max_logit = clo[i];
-            argmax_logit = @intCast(i);
-        }
-    }   
-    generated_token_slice.items(u32)[0] = argmax_logit;
-
+    var uncond_prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
+    defer uncond_prefill_tokens_buffer.deinit();
+    prefill_args.set(.{ acellm.model_buffers, uncond_prefill_tokens_buffer, token_buffer, acellm.kv_cache_buffers_cfg, rng_buffers, phase_mask_buffer, true });
+    acellm.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
+    prefill_results.fill(.{ &uncond_prefill_tokens_buffer, &acellm.kv_cache_buffers_cfg, &rng_buffers, &uncond_logits_buffer });
+    
+    // here logits are barbage : they are the ones from the last token (seq_len-1) of prefill
+    // instead use the sampled token from the cond prompt
+    try cond_prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
+    token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[cond_tok.len - 1];
+    
     // Prepare for token-by-token generation,
     std.log.info("5Hz prepare decode", .{});
     var decode_args = try acellm.decode_exe.args(allocator);
     defer decode_args.deinit(allocator);
     var decode_results = try acellm.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
-    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, generated_token_slice, sharding);
+    var current_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer current_token_buffer.deinit();
     const nb_audio_codes = 5 * try std.fmt.parseInt(u32, metadata.duration, 10);
     const max_output_tokens = acellm.options.seq_len - cond_tok.len;
+    // TODO: if we can't generate enough tokens because of seq_len this is an issue
     var result_tok: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     var result_str: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     std.log.info("5Hz run decode, need {d} audio codes", .{ nb_audio_codes });
-    //var stdout = std.Io.File.stdout().writer(io, &.{});
-    //var writer: *std.Io.Writer = &stdout.interface;
+    var stdout = std.Io.File.stdout().writer(io, &.{});
+    var writer: *std.Io.Writer = &stdout.interface;
     for (0..max_output_tokens) |i| {
         // collect and print generated sequence
-        const generated_token = generated_token_slice.items(u32)[0];
+        const generated_token = token_slice.items(u32)[0];
         const chunk = try tokenizer_decoder.decode(&.{ generated_token });
         try result_tok.append(allocator, generated_token);
         try result_str.appendSlice(allocator, chunk);
-        //try writer.writeAll(chunk);
-        //try writer.flush();
+        try writer.writeAll(chunk);
+        try writer.flush();
         if (result_tok.items.len == nb_audio_codes) break;
         
-        // update penalty values
-        pos_pen_values[generated_token] /= pen_value;
-        neg_pen_values[generated_token] *= pen_value;
-        @memcpy(pos_pen_slice.items(f32)[0..voc_len], pos_pen_values);
-        @memcpy(neg_pen_slice.items(f32)[0..voc_len], neg_pen_values);
-
-        // current token pos needs to go into a zml.Buffer
-        const token_pos_slice: zml.Slice = .init(zml.Shape.init(.{}, .u32), std.mem.sliceAsBytes(&[_]u32{@intCast(cond_tok.len + i)}));
-        var token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_pos_slice, sharding);
-        defer token_pos_buffer.deinit();
-
-        var pos_pen_buff: zml.Buffer = try .fromSlice(io, platform, pos_pen_slice, sharding);
-        var neg_pen_buff: zml.Buffer = try .fromSlice(io, platform, neg_pen_slice, sharding);
-        defer pos_pen_buff.deinit();
-        defer neg_pen_buff.deinit();
-        
         // call to generate the next cond logits
-        decode_args.set(.{ acellm.model_buffers, current_token_buffer, token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, pos_pen_buff, neg_pen_buff, false });
-        acellm.decode_exe.call(decode_args, &decode_results);
+        token_slice.items(u32)[0] = @intCast(cond_tok.len + i);
+        var cond_token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+        defer cond_token_pos_buffer.deinit();
+        decode_args.set(.{ acellm.model_buffers, current_token_buffer, cond_token_pos_buffer, acellm.kv_cache_buffers, rng_buffers, phase_mask_buffer, false });
+        acellm.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
         decode_results.fill(.{ &current_token_buffer, &acellm.kv_cache_buffers, &rng_buffers, &cond_logits_buffer });
+        
         // call to generate the next uncond logits
-        decode_args.set(.{ acellm.model_buffers, current_token_buffer, token_pos_buffer, acellm.kv_cache_buffers_cfg, rng_buffers, phase_mask_buffer, pos_pen_buff, neg_pen_buff, true });
-        acellm.decode_exe.call(decode_args, &decode_results);
+        token_slice.items(u32)[0] = @intCast(uncond_tok.len + i);
+        var uncond_token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+        defer uncond_token_pos_buffer.deinit();
+        decode_args.set(.{ acellm.model_buffers, current_token_buffer, uncond_token_pos_buffer, acellm.kv_cache_buffers_cfg, rng_buffers, phase_mask_buffer, true });
+        acellm.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
         decode_results.fill(.{ &current_token_buffer, &acellm.kv_cache_buffers_cfg, &rng_buffers, &uncond_logits_buffer });
         
-        // combine logits
+        // here the logits are valid : combine them to perform CFG
+        // TODO: we need sampleNucleus from result, not argmax
         try cond_logits_buffer.toSlice(io, cond_logits_slice);
         try uncond_logits_buffer.toSlice(io, uncond_logits_slice);
-        clo = cond_logits_slice.items(f32);
-        ulo = uncond_logits_slice.items(f32);
-        max_logit = -1e20;
-        argmax_logit = 0;
+        const clo = cond_logits_slice.items(f32);
+        const ulo = uncond_logits_slice.items(f32);
+        var max_logit: f32 = -1e20;
+        var argmax_logit: u32 = 0;
         for (0..clo.len) |ii| {
             clo[ii] = ulo[ii] + cfg * (clo[ii] - ulo[ii]);
             if (clo[ii] > max_logit) {
@@ -752,7 +663,7 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm
                 argmax_logit = @intCast(ii);
             }
         }
-        generated_token_slice.items(u32)[0] = argmax_logit;
+        token_slice.items(u32)[0] = argmax_logit;
     }
     std.log.info("5Hz done, generated {d} tokens", .{ result_tok.items.len });
     return .{ try result_tok.toOwnedSlice(allocator), try result_str.toOwnedSlice(allocator) };
@@ -776,7 +687,7 @@ pub fn generateTextEmbedding(zml_handler: main.Zml_handler, aceemb: *aceemb_.Ace
     const emb_dim = aceemb.config.hidden_size;
     
     // the result embeddings we return
-    const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, .f32));
+    const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, hz_type));
     var embedding_buffer: zml.Buffer = try .fromSlice(io, platform, embedding_slice, sharding);
     defer embedding_buffer.deinit();
 

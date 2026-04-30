@@ -65,8 +65,10 @@ pub fn main(init: std.process.Init) !void {
     defer zml_handler.deinit();
     
     //try test5Hz(zml_handler);
-    //try testVae(zml_handler);
+    //try testEmb(zml_handler);
+    //try testEnc(zml_handler);
     //try testDit(zml_handler);
+    //try testVae(zml_handler);
     //try testVaeExampleWav(zml_handler);
     //try testVaeDiffused(zml_handler);
     
@@ -78,6 +80,11 @@ pub fn main(init: std.process.Init) !void {
 
 pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    
+    // text2music : think = false, initial latents initialized from noise
+    // cover : think = true, initial latents initialized from audio codes
+    const think = true;
+    // text2music, overrides the generated duration metadata
     const target_duration: u32 = 12;
     
     // ------------------------------------------------
@@ -87,15 +94,12 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
 
-    // Test model activations
-    //try acellm.testModel(zml_handler);
-
     var audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    audio_metadata.setDuration(12);
-    //const audio_metadata: inference.AudioMetadata = .initExample();
+    if (!think) audio_metadata.setDuration(12);
+    const actual_duration = std.fmt.parseUnsigned(u32, audio_metadata.duration, 10) catch target_duration;
     defer audio_metadata.deinit(zml_handler.allocator);
-    const audio_codes: inference.AudioCodes = try inference.runPhase2(audio_metadata, zml_handler, &acellm);
-    //const audio_codes: inference.AudioCodes = try .initExample(zml_handler.allocator);
+    
+    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acellm) else .empty();
     defer audio_codes.deinit(zml_handler.allocator);
 
     acellm.unloadBuffers();
@@ -109,13 +113,9 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, full_emb, partial_emb);
     defer aceemb.deinit(zml_handler.allocator);
 
-    // Test model activations
-    //try acedit.testModel(zml_handler, aceemb);
-
     const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
     defer text_emb.deinit(zml_handler.allocator);
     
-    //try text_emb.print(zml_handler.io);
     aceemb.unloadBuffers();
     
     // ------------------------------------------------
@@ -126,32 +126,24 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
     defer zml_handler.allocator.free(int_codes);
     
-    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(), target_duration, int_codes.len);
+    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(),  actual_duration, int_codes.len);
     defer aceenc.deinit(zml_handler.allocator);
-
-    // Test model activations
-    //try aceenc.testModel(zml_handler);
     
-    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, target_duration);
+    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, actual_duration);
     defer diffuse_args.deinit(zml_handler.allocator);
     
-    //try diffuse_args.print(zml_handler.io);
     aceenc.unloadBuffers();
     
     // ------------------------------------------------
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, target_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
+    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, actual_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
-
-    // Test model activations
-    //try acedit.testModel(zml_handler);
 
     const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
     defer diffused_latents.deinit(zml_handler.allocator);
 
-    //try diffused_latents.print(zml_handler.io);
     acedit.unloadBuffers();
     
     // ------------------------------------------------
@@ -159,16 +151,12 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     // with the VAE model
     // ------------------------------------------------
 
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, target_duration);
+    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, actual_duration);
     defer acevae.deinit(zml_handler.allocator);
-    
-    // Test model activations
-    //try acevae.testModel(zml_handler);
 
     const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
     defer decoded_audio.deinit(zml_handler.allocator);
 
-    //try decoded_audio.print(zml_handler.io);
     acevae.unloadBuffers();
     
     // ------------------------------------------------
@@ -272,11 +260,75 @@ pub fn test5Hz(zml_handler: Zml_handler) !void {
     llm.unloadBuffers();
 }
 
-pub fn testVae(zml_handler: Zml_handler) !void {
-    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 300);
-    defer vae.deinit(zml_handler.allocator);
-    try acevae_.testModel(zml_handler, vae);
-    vae.unloadBuffers();
+pub fn testEmb(zml_handler: Zml_handler) !void {
+    const path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//activations.safetensors";
+    try printSafetensors(zml_handler.allocator, zml_handler.io, path);
+    const lyric_tokens = try getSlice(zml_handler, path, "lyric_token_ids", .i64);
+    const text_tokens = try getSlice(zml_handler, path, "text_token_ids", .i64);
+    defer lyric_tokens.free(zml_handler.allocator);
+    defer text_tokens.free(zml_handler.allocator);
+    
+    const lyric_tokens_i64 = lyric_tokens.items(i64);
+    const text_tokens_i64 = text_tokens.items(i64);
+    const nb_lyric = lyric_tokens_i64.len;
+    const nb_text = text_tokens_i64.len;
+    
+    var emb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, @intCast(nb_text), @intCast(nb_lyric));
+    defer emb.deinit(zml_handler.allocator);
+
+    const lyric_tokens_u32 = try zml_handler.allocator.alloc(u32, nb_lyric);
+    const text_tokens_u32 = try zml_handler.allocator.alloc(u32, nb_text);
+    defer zml_handler.allocator.free(lyric_tokens_u32);
+    defer zml_handler.allocator.free(text_tokens_u32);
+
+    for (lyric_tokens_i64, 0..) |token, i| {
+        lyric_tokens_u32[i] = std.math.cast(u32, token) orelse return error.InvalidTokenValue;
+    }
+    for (text_tokens_i64, 0..) |token, i| {
+        text_tokens_u32[i] = std.math.cast(u32, token) orelse return error.InvalidTokenValue;
+    }
+
+    const lyric_embedding = try inference.generateTextEmbedding(zml_handler, &emb, lyric_tokens_u32, true);
+    const text_embedding = try inference.generateTextEmbedding(zml_handler, &emb, text_tokens_u32, false);
+    defer lyric_embedding.free(zml_handler.allocator);
+    defer text_embedding.free(zml_handler.allocator);
+
+    const lyric_activation = try getSlice(zml_handler, path, "lyric_embedding", .f32);
+    const text_activation = try getSlice(zml_handler, path, "text_embedding", .f32);
+    defer lyric_activation.free(zml_handler.allocator);
+    defer text_activation.free(zml_handler.allocator);
+
+    var lyric_max_abs_error: f32 = 0.0;
+    var lyric_max_rel_error: f32 = 0.0;
+    for (lyric_embedding.constItems(f32), lyric_activation.constItems(f32)) |actual, expected| {
+        const abs_error = @abs(actual - expected);
+        const rel_error = abs_error / (1.0 + @abs(actual) + @abs(expected));
+        if (abs_error > lyric_max_abs_error) lyric_max_abs_error = abs_error;
+        if (rel_error > lyric_max_rel_error) lyric_max_rel_error = rel_error;
+    }
+
+    var text_max_abs_error: f32 = 0.0;
+    var text_max_rel_error: f32 = 0.0;
+    for (text_embedding.constItems(f32), text_activation.constItems(f32)) |actual, expected| {
+        const abs_error = @abs(actual - expected);
+        const rel_error = abs_error / (1.0 + @abs(actual) + @abs(expected));
+        if (abs_error > text_max_abs_error) text_max_abs_error = abs_error;
+        if (rel_error > text_max_rel_error) text_max_rel_error = rel_error;
+    }
+
+    std.log.info("EMB lyric max absolute error: {d}", .{lyric_max_abs_error});
+    std.log.info("EMB lyric max relative error: {d}", .{lyric_max_rel_error});
+    std.log.info("EMB text max absolute error: {d}", .{text_max_abs_error});
+    std.log.info("EMB text max relative error: {d}", .{text_max_rel_error});
+
+    emb.unloadBuffers();
+}
+
+pub fn testEnc(zml_handler: Zml_handler) !void {
+    var enc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, 68, 30, 120, 0);
+    defer enc.deinit(zml_handler.allocator);
+    try aceenc_.testModel(zml_handler, enc);
+    enc.unloadBuffers();
 }
 
 pub fn testDit(zml_handler: Zml_handler) !void {
@@ -284,6 +336,13 @@ pub fn testDit(zml_handler: Zml_handler) !void {
     defer dit.deinit(zml_handler.allocator);
     try acedit_.testModel(zml_handler, dit);
     dit.unloadBuffers();
+}
+
+pub fn testVae(zml_handler: Zml_handler) !void {
+    var vae = try acevae_.AceVae_handler.initFromFile(zml_handler, 300);
+    defer vae.deinit(zml_handler.allocator);
+    try acevae_.testModel(zml_handler, vae);
+    vae.unloadBuffers();
 }
 
 pub fn testVaeExampleWav(zml_handler: Zml_handler) !void {
@@ -304,7 +363,7 @@ pub fn testVaeExampleWav(zml_handler: Zml_handler) !void {
 
 pub fn testVaeDiffused(zml_handler: Zml_handler) !void {
     const path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//diffused_latents4.safetensors";
-    const diffused_slice = try getSlice(zml_handler, path, "diffused_latents");
+    const diffused_slice = try getSlice(zml_handler, path, "diffused_latents", .f32);
     const t = diffused_slice.shape.dim(1);
     defer diffused_slice.free(zml_handler.allocator);
     
@@ -323,9 +382,9 @@ pub fn testDiffusion(zml_handler: Zml_handler) !void {
     //encoder_hidden_states shape torch.Size([1, 65, 2048])
     //context_latents shape torch.Size([1, 300, 128])
     const initial_latents: inference.InitialLatents = .{
-        .x = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "xt"),
-        .context_latents = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "context_latents"),
-        .encoder_conditions = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "encoder_hidden_states"),
+        .x = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "xt", .f32),
+        .context_latents = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "context_latents", .f32),
+        .encoder_conditions = try getSlice(zml_handler, "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//dit_args.safetensors", "encoder_hidden_states", .f32),
     };
     defer initial_latents.deinit(zml_handler.allocator);
     std.log.info("Slices extracted", .{});
@@ -366,7 +425,7 @@ pub fn testDiffusion(zml_handler: Zml_handler) !void {
      try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
 }
 
-pub fn getSlice(zml_handler: Zml_handler, file_name: []const u8, tensor_name: []const u8) !zml.Slice {
+pub fn getSlice(zml_handler: Zml_handler, file_name: []const u8, tensor_name: []const u8, dtype: anytype) !zml.Slice {
     std.log.info("Getting slice {s}", .{tensor_name});
     var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, file_name);
     defer registry.deinit();
@@ -380,7 +439,7 @@ pub fn getSlice(zml_handler: Zml_handler, file_name: []const u8, tensor_name: []
     defer extract_exe.deinit();
     var model_buffers = try model.load(zml_handler, &store, &shardings.all());
     defer TensorExtractor.unloadBuffers(&model_buffers);
-    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), .f32));
+    const slice: zml.Slice = try .alloc(zml_handler.allocator, .init(model.shape(), dtype));
     var buffer: zml.Buffer = try .fromSlice(zml_handler.io, zml_handler.platform, slice, shardings.all()[0]);
     defer buffer.deinit();
     var extract_args = try extract_exe.args(zml_handler.allocator);
