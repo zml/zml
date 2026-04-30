@@ -550,9 +550,9 @@ Execution-only (excluding compile and weight load time): Zig is **1.56× faster*
 (99.3s vs. 155.0s). 
 
 The largest gains are 
-* in Stage 1 (per-step 2.4s vs. 3.5s), 
-* in Stage 2 (per-step 3.6s vs. 6.0s),
-* in Video VAE Decode (11.0 vs. 21.6)
+* in Stage 1 (per-step 2.4s vs. 3.5s, **1.46× faster**), 
+* in Stage 2 (per-step 3.6s vs. 6.0s, **1.67× faster**),
+* in Video VAE Decode (11.0 vs. 21.6, **1.96× faster**)
 
 ### GPU profiling (per denoising step)
 
