@@ -1629,7 +1629,24 @@ fn runStage1(
     // ---- Denoising loop ----
     std.log.info("Starting {d}-step denoising loop (4-pass guidance)...", .{num_stage1_steps});
 
+    // Profile step 2 (step_idx == 1) to capture a single denoising step trace,
+    // skipping step 1 to avoid warmup effects.
+    var step_profiler = platform.profiler(allocator, io, .{
+        .repository_path = "/tmp/xprof",
+        .session_id = "stage1_step1",
+    }) catch |err| blk: {
+        std.log.warn("Could not create profiler: {}", .{err});
+        break :blk null;
+    };
+    defer if (step_profiler) |*p| p.deinit();
+
     for (0..num_stage1_steps) |step_idx| {
+        if (step_idx == 1) {
+            if (step_profiler) |*p| p.start() catch |err| {
+                std.log.warn("Could not start profiler: {}", .{err});
+            };
+        }
+
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = sigmas[step_idx];
         const sigma_next = sigmas[step_idx + 1];
@@ -2111,6 +2128,14 @@ fn runStage1(
         const step_ns = step_start.untilNow(io, .awake).nanoseconds;
         timer.recordStep(step_ns);
         std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx + 1, PhaseTimer.fmtSecs(step_ns) });
+
+        if (step_idx == 1) {
+            if (step_profiler) |*p| {
+                if (p.stop() catch null) |profile| {
+                    std.log.info("Profile dumped: {s}", .{profile.perfetto_path});
+                }
+            }
+        }
     }
     timer.addExec();
 
