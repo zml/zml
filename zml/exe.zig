@@ -43,6 +43,7 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
+        // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
         const input_sharding_values = try arena.allocator().alloc(Sharding, input_shardings.len);
         const input_shardings_copy = try arena.allocator().alloc(*const Sharding, input_shardings.len);
         for (input_shardings, 0..) |sharding, i| {
