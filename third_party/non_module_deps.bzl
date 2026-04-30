@@ -3,10 +3,10 @@ load("//third_party/cloud_accelerator_diagnostics:repo.bzl", cloud_accelerator_d
 load("//third_party/com_google_sentencepiece:repo.bzl", com_google_sentencepiece = "repo")
 load("//third_party/flashattn:repo.bzl", flashattn = "repo")
 load("//third_party/iree:repo.bzl", iree = "repo")
-load("//third_party/jax:repo.bzl", jax = "repo")
 load("//third_party/libvaxis:repo.bzl", libvaxis = "repo")
 load("//third_party/linenoise:repo.bzl", linenoise = "repo")
 load("//third_party/mnist:repo.bzl", mnist = "repo")
+load("//third_party/mosaic_tpu:repo.bzl", mosaic_tpu = "repo")
 load("//third_party/org_swig_swig:repo.bzl", org_swig_swig = "repo")
 load("//third_party/stb:repo.bzl", stb = "repo")
 load("//third_party/translate-c:repo.bzl", translate_c = "repo")
@@ -28,7 +28,7 @@ def _non_module_deps_impl(mctx):
     zigimg()
     uucode()
     libvaxis()
-    jax()
+    mosaic_tpu()
     iree()
 
     return mctx.extension_metadata(
