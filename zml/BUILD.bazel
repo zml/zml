@@ -33,6 +33,7 @@ zig_library(
         "attention.zig",
         "attention/attention.zig",
         "attention/flashattn.zig",
+        "attention/neuron_attention.zig",
         "attention/paged_attention.zig",
         "attention/tpu_attention.zig",
         "attention/triton.zig",
@@ -64,6 +65,9 @@ zig_library(
         "@platforms//os:macos": [],
         "//conditions:default": ["//zml/attention/triton:sandbox"],
     }),
+    extra_srcs = [
+        "attention/neuron_attention.py",
+    ],
     main = "zml.zig",
     visibility = ["//visibility:public"],
     zigopts = [
