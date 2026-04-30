@@ -4120,11 +4120,16 @@ pub const Tensor = struct {
     /// Only for debug purpose, it inserts device to host synchronization
     /// so it will slow down the program execution.
     pub fn print(input: Tensor, name: []const u8) void {
-        ops.manualComputation(input, {}, .{ .name = name }, (struct {
-            fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
-                ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
-            }
-        }).body);
+        switch (CompilationContext.current().platform.target) {
+            .cpu, .cuda, .rocm, .tpu => {
+                ops.manualComputation(input, {}, .{ .name = name }, (struct {
+                    fn body(ctx_: anytype, _: std.mem.Allocator, sharded_input: Tensor, _: void) void {
+                        ops.customCall("zml$print", sharded_input, {}, .{ .name = ctx_.name }, .{ .has_side_effect = true });
+                    }
+                }).body);
+            },
+            .neuron => {},
+        }
     }
 
     fn mlirCtx() *mlir.Context {
