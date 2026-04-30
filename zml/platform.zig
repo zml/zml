@@ -200,27 +200,8 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
-    replicated_sharding: *const zml.sharding.Sharding,
     physical_mesh: zml.sharding.PhysicalMesh,
     replicated_sharding: *const zml.sharding.Sharding,
-    triton_runtime: ?attention.triton.Runtime = null,
-    tpu_ir_runtime: ?attention.tpu.Runtime = null,
-
-    pub fn initBackend(self: *Platform, allocator: std.mem.Allocator, io: std.Io, backend: attention.paged_attention.Backend) !void {
-        switch (backend) {
-            .triton => {
-                if (self.triton_runtime == null) {
-                    self.triton_runtime = try zml.attention.triton.Runtime.init(allocator, io);
-                }
-            },
-            .mosaic_tpu => {
-                if (self.tpu_ir_runtime == null) {
-                    self.tpu_ir_runtime = try zml.attention.tpu.Runtime.init(allocator, io);
-                }
-            },
-            else => {},
-        }
-    }
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
