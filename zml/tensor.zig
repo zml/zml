@@ -966,6 +966,50 @@ pub const Tensor = struct {
         });
     }
 
+    /// Returns a Tensor containing the result of the 3D convolution of 'input' by 'kernel'.
+    /// Defaults values correspond to a (B, C_in, D, H, W) volume, (C_out, C_in, D, H, W) kernel weights and (B, C_out, D, H, W) output.
+    pub fn conv3d(
+        input: Tensor,
+        kernel: Tensor,
+        opts: struct {
+            window_strides: []const i64 = &.{ 1, 1, 1 },
+            padding: []const i64 = &.{ 0, 0, 0, 0, 0, 0 },
+            lhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            rhs_dilation: []const i64 = &.{ 1, 1, 1 },
+            window_reversal: []const bool = &.{ false, false, false },
+            input_batch_dimension: i64 = 0,
+            input_feature_dimension: i64 = 1,
+            input_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            kernel_input_feature_dimension: i64 = 1,
+            kernel_output_feature_dimension: i64 = 0,
+            kernel_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            output_batch_dimension: i64 = 0,
+            output_feature_dimension: i64 = 1,
+            output_spatial_dimensions: []const i64 = &.{ 2, 3, 4 },
+            feature_group_count: i64 = 1,
+            batch_group_count: i64 = 1,
+        },
+    ) Tensor {
+        return input.convolution(kernel, .{
+            .window_strides = opts.window_strides,
+            .pad_value = opts.padding,
+            .lhs_dilation = opts.lhs_dilation,
+            .rhs_dilation = opts.rhs_dilation,
+            .window_reversal = opts.window_reversal,
+            .input_batch_dimension = opts.input_batch_dimension,
+            .input_feature_dimension = opts.input_feature_dimension,
+            .input_spatial_dimensions = opts.input_spatial_dimensions,
+            .kernel_input_feature_dimension = opts.kernel_input_feature_dimension,
+            .kernel_output_feature_dimension = opts.kernel_output_feature_dimension,
+            .kernel_spatial_dimensions = opts.kernel_spatial_dimensions,
+            .output_batch_dimension = opts.output_batch_dimension,
+            .output_feature_dimension = opts.output_feature_dimension,
+            .output_spatial_dimensions = opts.output_spatial_dimensions,
+            .feature_group_count = opts.feature_group_count,
+            .batch_group_count = opts.batch_group_count,
+        });
+    }
+
     /// Returns a Tensor containing the element-wise addition of the input Tensors.
     pub fn add(self: Tensor, other: Tensor) Tensor {
         return binaryOp("add", dialects.stablehlo.add)(self, other);

@@ -278,7 +278,12 @@ pub const Exe = struct {
         if (opts.wait) {
             for (events_slice.?) |e| {
                 if (e) |ev| {
-                    ev.await(self.platform.pjrt_api, io.?) catch unreachable;
+                    defer ev.deinit(self.platform.pjrt_api);
+                    // Use awaitRaw (PJRT_Event_Await → cudaEventSynchronize)
+                    // instead of await() which short-circuits on isReady() —
+                    // the CUDA PJRT plugin reports events as "ready" before
+                    // the GPU has actually finished, defeating synchronization.
+                    ev.awaitRaw(self.platform.pjrt_api) catch unreachable;
                 }
             }
         }
