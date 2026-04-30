@@ -24,9 +24,8 @@ pub const CompilationParameters = struct {
         stdx.debug.assert(seqlen >= config.conv_L_cache, "seqlen ({}) must be at least conv_L_cache ({})", .{ seqlen, config.conv_L_cache });
         const attention_parameters: attention.Parameters = switch (backend) {
             // LFM reuses one decode executable across all token positions. The
-            // TKG kernel needs a static curr_sprior bucket, so use the masked
-            // single-call kernel for the dynamic-position decode contract.
-            .neuron => .init(.{ .neuron = .{ .kernel = .decode_inhouse } }),
+            // Neuron decode uses the masked single-call decode contract.
+            .neuron => .init(.{ .neuron = .{} }),
             else => .init(.fromBackend(backend)),
         };
         const cache: model.Cache = .{

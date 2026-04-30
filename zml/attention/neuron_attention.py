@@ -1,9 +1,5 @@
 import nki.isa as nisa
 import nki.language as nl
-from nkilib.core.attention.attention_tkg import attention_tkg as _attention_tkg
-from nkilib.core.attention.attention_tkg_utils import AttnTKGConfig
-from nkilib.core.utils.allocator import SbufManager
-from nkilib.core.utils.logging import get_logger
 
 _zml_orig_tensor_copy = nisa.tensor_copy
 
@@ -19,104 +15,85 @@ def _zml_tensor_copy_compat(dst, src, engine=None):
 nisa.tensor_copy = _zml_tensor_copy_compat
 
 
-def decode_tkg(q_hbm, k_active_hbm, v_active, k_prior, v_prior, mask_hbm, attn_mask):
-    bs = v_active.shape[0]
-    s_active = v_active.shape[2]
-    d_head = v_active.shape[3]
-    q_head = q_hbm.shape[1] // (bs * s_active)
-    full_sprior = k_prior.shape[3]
+def decode_tkg(q, k, v, token_index):
+    q_len = q.shape[0]
+    num_q_heads = q.shape[1]
+    d_head = q.shape[2]
+    seq_len = k.shape[0]
+    num_kv_heads = k.shape[1]
+    heads_per_kv = num_q_heads // num_kv_heads
+    scale = 1.0 / (d_head**0.5)
 
-    q_sb = nl.load(q_hbm)
-    k_active_sb = nl.load(k_active_hbm)
-    out = nl.ndarray(
-        (bs, q_head, d_head, s_active), dtype=q_hbm.dtype, buffer=nl.shared_hbm
+    assert q_len == 1
+    assert k.shape == v.shape
+    assert q.shape[2] == k.shape[2]
+    assert num_q_heads % num_kv_heads == 0
+
+    out = nl.ndarray((q_len, num_q_heads, d_head), dtype=q.dtype, buffer=nl.shared_hbm)
+    token = nl.load(token_index)[0, 0]
+
+    positions = nl.ndarray((q_len, seq_len), dtype=token_index.dtype, buffer=nl.sbuf)
+    nisa.iota(positions, [[1, seq_len]])
+    token_broad = nl.broadcast_to(token, positions.shape)
+    valid = nl.less_equal(positions, token_broad)
+    zero_mask = nl.zeros((q_len, seq_len), dtype=nl.float32, buffer=nl.sbuf)
+    neg_mask = nl.full(
+        (q_len, seq_len), -3.3895313892515355e38, dtype=nl.float32, buffer=nl.sbuf
     )
-    cfg = AttnTKGConfig(
-        bs=bs,
-        q_head=q_head,
-        s_active=s_active,
-        curr_sprior=full_sprior,
-        full_sprior=full_sprior,
-        d_head=d_head,
-        block_len=0,
-        tp_k_prior=False,
-        strided_mm1=True,
-        use_pos_id=False,
-        fuse_rope=False,
-        use_gpsimd_sb2sb=True,
-        qk_in_sb=True,
-        k_out_in_sb=False,
-        out_in_sb=False,
-        enable_fa_s_prior_tiling=True,
-    )
-    sbm = SbufManager(
-        0,
-        nl.tile_size.total_available_sbuf_size,
-        get_logger("decode_tkg"),
-        use_auto_alloc=True,
-    )
-    sbm.open_scope()
+    attn_mask = nl.where(valid, zero_mask, neg_mask, dtype=nl.float32)
 
-    out, _ = _attention_tkg(
-        q_sb,
-        k_active_sb,
-        v_active,
-        k_prior,
-        v_prior,
-        mask_hbm,
-        out,
-        cfg,
-        sbm,
-    )
-    sbm.close_scope()
-    return out
+    qk = nl.ndarray((heads_per_kv, seq_len), dtype=nl.float32, buffer=nl.psum)
+    qk_sbuf = nl.ndarray((heads_per_kv, seq_len), dtype=nl.float32, buffer=nl.sbuf)
+    row_max = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    norm_row = nl.ndarray((heads_per_kv, seq_len), dtype=nl.float32, buffer=nl.sbuf)
+    exp_row = nl.ndarray((heads_per_kv, seq_len), dtype=nl.float32, buffer=nl.sbuf)
+    sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    inverse_sum_row = nl.ndarray((heads_per_kv, 1), dtype=nl.float32, buffer=nl.sbuf)
+    exp_t_psum = nl.ndarray((seq_len, heads_per_kv), dtype=nl.float32, buffer=nl.psum)
+    exp_t = nl.ndarray((seq_len, heads_per_kv), dtype=nl.float32, buffer=nl.sbuf)
+    v_t_psum = nl.ndarray((seq_len, d_head), dtype=nl.float32, buffer=nl.psum)
+    v_t = nl.ndarray((seq_len, d_head), dtype=nl.float32, buffer=nl.sbuf)
+    attn_out_psum = nl.ndarray((heads_per_kv, d_head), dtype=nl.float32, buffer=nl.psum)
+    attn_out_sbuf = nl.ndarray((heads_per_kv, d_head), dtype=nl.float32, buffer=nl.sbuf)
 
+    for kv_head in nl.sequential_range(num_kv_heads):
+        q_head = kv_head * heads_per_kv
 
-def decode_inhouse(q_hbm, k_active_hbm, v_active, k_prior, v_prior, mask_hbm, attn_mask):
-    bs = v_active.shape[0]
-    s_active = v_active.shape[2]
-    d_head = v_active.shape[3]
-    q_head = q_hbm.shape[1] // (bs * s_active)
-    full_sprior = k_prior.shape[3]
+        q_sbuf = nl.load_transpose2d(
+            q[0, q_head : q_head + heads_per_kv, :], dtype=q.dtype
+        )
+        q_sbuf = nl.multiply(q_sbuf, scale, dtype=q.dtype)
+        k_sbuf = nl.load_transpose2d(k[:, kv_head, :], dtype=k.dtype)
+        v_sbuf = nl.load_transpose2d(v[:, kv_head, :], dtype=v.dtype)
 
-    assert s_active == 1
-    assert k_active_hbm.shape[0] == d_head
-    assert v_prior.shape[0] == bs
-    assert v_prior.shape[2] == full_sprior
-    assert v_prior.shape[3] == d_head
-    assert mask_hbm.shape == attn_mask.shape
+        nisa.nc_matmul(qk, q_sbuf, k_sbuf)
+        nisa.tensor_copy(qk_sbuf, qk)
+        qk_sbuf = nl.add(
+            qk_sbuf, nl.broadcast_to(attn_mask, qk_sbuf.shape), dtype=nl.float32
+        )
 
-    out = nl.ndarray(
-        (bs, q_head, d_head, s_active), dtype=q_hbm.dtype, buffer=nl.shared_hbm
-    )
-    qk = nl.ndarray((s_active, full_sprior), dtype=nl.float32, buffer=nl.psum)
-    qk_sbuf = nl.ndarray((s_active, full_sprior), dtype=nl.bfloat16, buffer=nl.sbuf)
-    out_sbuf = nl.ndarray((d_head, s_active), dtype=out.dtype, buffer=nl.sbuf)
+        nisa.tensor_reduce(dst=row_max, op=nl.maximum, data=qk_sbuf, axis=(1,))
+        nisa.tensor_scalar(
+            dst=norm_row, data=qk_sbuf, op0=nl.subtract, operand0=row_max
+        )
+        nisa.activation(dst=exp_row, op=nl.exp, data=norm_row)
+        nisa.tensor_reduce(dst=sum_row, op=nl.add, data=exp_row, axis=(1,))
+        nisa.reciprocal(dst=inverse_sum_row, data=sum_row)
 
-    for bs_i in nl.sequential_range(bs):
-        for qh_i in nl.sequential_range(q_head):
-            q_offset = bs_i * q_head + qh_i
-            q_sbuf = nl.load(q_hbm[:, q_offset : q_offset + 1])
-            k_sbuf = nl.load(k_prior[bs_i, 0, :, :])
-            v_sbuf = nl.load_transpose2d(v_prior[bs_i, 0, :, :])
-            mask_sbuf = nl.load_transpose2d(attn_mask[:, bs_i, qh_i, :])
+        nisa.nc_transpose(exp_t_psum, exp_row)
+        nisa.tensor_copy(exp_t, exp_t_psum)
+        nisa.nc_transpose(v_t_psum, v_sbuf)
+        nisa.tensor_copy(v_t, v_t_psum)
 
-            nisa.nc_matmul(qk, q_sbuf, k_sbuf)
-            nisa.tensor_copy(qk_sbuf, qk)
-            qk_sbuf = nl.add(qk_sbuf, mask_sbuf)
-            row_max = nl.broadcast_to(
-                nl.max(qk_sbuf, axis=1, keepdims=True), qk_sbuf.shape
-            )
-            norm_row = nl.subtract(qk_sbuf, row_max)
-            exp_row = nl.exp(norm_row)
-            sum_row = nl.broadcast_to(
-                nl.sum(exp_row, axis=1, keepdims=True), exp_row.shape
-            )
-            scores = nl.multiply(exp_row, nl.reciprocal(sum_row))
+        nisa.memset(attn_out_psum, 0.0)
+        nisa.nc_matmul(attn_out_psum, exp_t, v_t)
+        nisa.tensor_scalar(
+            dst=attn_out_sbuf,
+            data=attn_out_psum,
+            op0=nl.multiply,
+            operand0=inverse_sum_row,
+        )
 
-            weighted_v = nl.multiply(v_sbuf, nl.broadcast_to(scores, v_sbuf.shape))
-            reduced = nl.sum(weighted_v, axis=1, keepdims=True)
-            nisa.tensor_copy(out_sbuf, reduced)
-            nl.store(dst=out[bs_i, qh_i, :, :], value=out_sbuf)
+        nl.store(dst=out[0, q_head : q_head + heads_per_kv, :], value=attn_out_sbuf)
 
     return out

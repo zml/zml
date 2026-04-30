@@ -25,16 +25,14 @@ const llama_head_dim = 64;
 const decode_seq_len = 128;
 
 const Args = struct {
-    kernel: zml.attention.neuron.Kernel = .decode_tkg,
     token_index: u32 = decode_seq_len - 1,
     warmups: usize = 3,
     iterations: usize = 20,
 
     pub const help =
-        \\ neuron_nki attention --kernel=decode_tkg --iterations=20
+        \\ neuron_nki attention --iterations=20
         \\
         \\ Options:
-        \\   --kernel=<text>  Neuron attention kernel to test: decode_tkg or decode_inhouse.
         \\   --token-index=<n> Decode position inside the fixed 128-token cache.
         \\   --warmups=<n>    Untimed execution warmups for each program.
         \\   --iterations=<n> Timed execution iterations for each program.
@@ -62,16 +60,14 @@ const VanillaDecodeAttention = struct {
 };
 
 const NeuronAttention = struct {
-    kernel: zml.attention.neuron.Kernel,
-
-    fn forward(self: NeuronAttention, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
+    fn forward(_: NeuronAttention, q: zml.Tensor, k: zml.Tensor, v: zml.Tensor, token_index: zml.Tensor) zml.Tensor {
         return zml.attention.attention.attention(
             q,
             k,
             v,
             token_index,
             .{ .neuron = {} },
-            .{ .neuron = .{ .kernel = self.kernel } },
+            .{ .neuron = .{} },
         );
     }
 };
@@ -113,7 +109,7 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, 
     var vanilla_exe = try platform.compileFn(allocator, io, VanillaDecodeAttention.forward, .{ q, k, v, token_index }, .{ .shardings = &.{sharding} });
     defer vanilla_exe.deinit();
 
-    const neuron_attention: NeuronAttention = .{ .kernel = args.kernel };
+    const neuron_attention: NeuronAttention = .{};
     var neuron_exe = try platform.compileFn(allocator, io, NeuronAttention.forward, .{ neuron_attention, q, k, v, token_index }, .{ .shardings = &.{sharding} });
     defer neuron_exe.deinit();
 
@@ -155,9 +151,9 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, 
     defer neuron_bench.output.deinit();
 
     try zml.testing.expectClose(io, vanilla_bench.output, neuron_bench.output, .{
-        .absolute_tolerance = 1e-2,
-        .relative_tolerance = 1e-2,
-        .minimum_close_fraction = 0.9995,
+        .absolute_tolerance = 1e-3,
+        .relative_tolerance = 1e-3,
+        .minimum_close_fraction = 1.0,
     });
 
     std.log.info("Bench decode attention warmups={} iterations={} token_index={} seq_len={} heads={} kv_heads={} head_dim={}", .{
@@ -170,8 +166,8 @@ fn runDecode(allocator: std.mem.Allocator, io: std.Io, platform: *zml.Platform, 
         llama_head_dim,
     });
     std.log.info("Vanilla total={d:.3}ms avg={d:.3}ms", .{ nsToMs(vanilla_bench.total.ns), nsToMs(vanilla_bench.average.ns) });
-    std.log.info("Neuron kernel={} total={d:.3}ms avg={d:.3}ms vanilla_avg={d:.3}ms speedup={d:.3}x output={f}", .{
-        args.kernel,
+    std.log.info("Neuron kernel={s} total={d:.3}ms avg={d:.3}ms vanilla_avg={d:.3}ms speedup={d:.3}x output={f}", .{
+        "decode_tkg",
         nsToMs(neuron_bench.total.ns),
         nsToMs(neuron_bench.average.ns),
         nsToMs(vanilla_bench.average.ns),
