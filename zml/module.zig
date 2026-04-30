@@ -122,11 +122,11 @@ pub const CompilationContext = struct {
         // Ensure replicated sharding is always included as a fallback option.
         const shardings = shardings: {
             const needs_replicated = blk: {
-                 for (opts.shardings) |sharding| {
-                     if (sharding == platform.replicated_sharding) break :blk false;
-                 }
-                 break :blk true;
-             };
+                for (opts.shardings) |sharding| {
+                    if (sharding == platform.replicated_sharding) break :blk false;
+                }
+                break :blk true;
+            };
 
             const base_len = opts.shardings.len;
             const res = arena.allocator().alloc(*const Sharding, base_len + @intFromBool(needs_replicated)) catch unreachable;
