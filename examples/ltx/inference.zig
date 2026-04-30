@@ -707,6 +707,11 @@ pub fn main(init: std.process.Init) !void {
 
     // ---- Phase timers ----
     var timer_s1 = PhaseTimer.init("Stage 1", io);
+    var timer_s1_host_prep = PhaseTimer.init("  S1 Host Prep", io);
+    var timer_s1_text_emb = PhaseTimer.init("  S1 Text Emb", io);
+    var timer_s1_noise_gen = PhaseTimer.init("  S1 Noise Gen", io);
+    var timer_s1_noise_init = PhaseTimer.init("  S1 Noise Init", io);
+    var timer_s1_img_cond = PhaseTimer.init("  S1 Image Cond", io);
     var timer_bridge = PhaseTimer.init("Bridge", io);
     var timer_s2 = PhaseTimer.init("Stage 2", io);
     var timer_video_vae = PhaseTimer.init("Video VAE Decode", io);
@@ -744,6 +749,11 @@ pub fn main(init: std.process.Init) !void {
         args.mod_a,
         args.rescale_a,
         &timer_s1,
+        &timer_s1_host_prep,
+        &timer_s1_text_emb,
+        &timer_s1_noise_gen,
+        &timer_s1_noise_init,
+        &timer_s1_img_cond,
     );
 
     if (args.dump_intermediates) {
@@ -881,8 +891,17 @@ pub fn main(init: std.process.Init) !void {
     // Timing Summary
     // ========================================================================
     const all_timers = [_]*const PhaseTimer{
-        &timer_s1,        &timer_bridge,    &timer_s2,
-        &timer_video_vae, &timer_audio_vae, &timer_vocoder,
+        &timer_s1_host_prep,
+        &timer_s1_text_emb,
+        &timer_s1_noise_gen,
+        &timer_s1_noise_init,
+        &timer_s1_img_cond,
+        &timer_s1,
+        &timer_bridge,
+        &timer_s2,
+        &timer_video_vae,
+        &timer_audio_vae,
+        &timer_vocoder,
         &timer_mp4,
     };
     printTimingSummary(&all_timers);
@@ -918,8 +937,13 @@ fn runStage1(
     mod_a: f32,
     rescale_a: f32,
     timer: *PhaseTimer,
+    timer_host_prep: *PhaseTimer,
+    timer_text_emb: *PhaseTimer,
+    timer_noise_gen: *PhaseTimer,
+    timer_noise_init: *PhaseTimer,
+    timer_img_cond: *PhaseTimer,
 ) !Stage1Result {
-    timer.start();
+    timer_host_prep.start();
 
     // ---- Sigma schedule ----
     // sigmas is [MAX_STAGE1_STEPS + 1]f32; only entries [0..num_stage1_steps] are valid.
@@ -1029,9 +1053,11 @@ fn runStage1(
     // Text contexts — positive AND negative for Stage 1 guidance.
     // Positive contexts are kept alive and returned for Stage 2.
     // Compute from Gemma hidden states using the Zig EmbeddingsProcessor.
+    timer_host_prep.addOther();
+
     std.log.info("Computing text embeddings from Gemma hidden states...", .{});
 
-    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, gemma_hs_pos_path, gemma_hs_neg_path);
+    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, gemma_hs_pos_path, gemma_hs_neg_path, timer_text_emb);
     var v_context_pos_buf = emb_result.v_context_pos;
     var a_context_pos_buf = emb_result.a_context_pos;
     var v_context_neg_buf = emb_result.v_context_neg;
@@ -1040,6 +1066,7 @@ fn runStage1(
     defer a_context_neg_buf.deinit();
 
     // ---- Generate noise and run noise init ----
+    timer_noise_gen.start();
     std.log.info("Generating Stage 1 noise (seed={d})...", .{seed});
 
     var rng_buf = try zml.Tensor.Rng.initBuffer(io, platform, sharding, seed);
@@ -1103,6 +1130,7 @@ fn runStage1(
         try writeBuffer(allocator, io, v_noise_buf, output_dir, "s1_video_noise.bin");
         try writeBuffer(allocator, io, a_noise_buf, output_dir, "s1_audio_noise.bin");
     }
+    timer_noise_gen.addExec(); // compile+exec x2 (tiny graphs)
 
     // Compile noise init
     const sigma_scalar_shape = zml.Shape.init(.{}, .f32);
@@ -1113,6 +1141,7 @@ fn runStage1(
     var noise_scale_buf = try zml.Buffer.scalar(io, platform, noise_scale, .f32, sharding);
     defer noise_scale_buf.deinit();
 
+    timer_noise_init.start();
     // Video noise init
     var v_latent_buf = blk: {
         var exe = try platform.compileFn(
@@ -1165,8 +1194,10 @@ fn runStage1(
 
     std.log.info("  video_latent (noised): {any}", .{v_latent_buf.shape().dims()});
     std.log.info("  audio_latent (noised): {any}", .{a_latent_buf.shape().dims()});
+    timer_noise_init.addExec(); // compile+exec x2 (tiny graphs)
 
     // ---- Image conditioning (optional) ----
+    timer_img_cond.start();
     if (image_path) |img_path| {
         std.log.info("Applying image conditioning to Stage 1...", .{});
 
@@ -1211,7 +1242,9 @@ fn runStage1(
     }
 
     // ---- Compile executables ----
-    timer.addOther(); // host prep + text embeddings + noise gen/init + image cond
+    timer_img_cond.addExec(); // 0 if no image
+
+    timer.start();
 
     std.log.info("Compiling preprocessing exe...", .{});
     const preprocess_shape = model.initPreprocessParams(ckpt_store.view());
@@ -1734,7 +1767,7 @@ fn runStage1(
                         block_params_bufs[i],
                     });
                 }
-                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
                     cond_h_v.deinit();
@@ -1808,7 +1841,7 @@ fn runStage1(
                         block_params_bufs[i],
                     });
                 }
-                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_normal_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
                     neg_h_v.deinit();
@@ -1888,7 +1921,7 @@ fn runStage1(
                             block_params_bufs[i],
                         });
                     }
-                    block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = true });
+                    block_stg_exe.callOpts(io, blk_stg_args, &blk_stg_results, .{ .wait = false });
                     const out = blk_stg_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
                         ptb_h_v.deinit();
@@ -1938,7 +1971,7 @@ fn runStage1(
                             block_params_bufs[i],
                         });
                     }
-                    block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = true });
+                    block_normal_exe.callOpts(io, blk_normal_args, &blk_normal_results, .{ .wait = false });
                     const out = blk_normal_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                     if (i > 0) {
                         ptb_h_v.deinit();
@@ -2015,7 +2048,7 @@ fn runStage1(
                         block_params_bufs[i],
                     });
                 }
-                block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_iso_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
                     iso_h_v.deinit();
@@ -2866,7 +2899,23 @@ fn runStage2(
     const num_steps = stage2_sigmas.len - 1;
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
 
+    // Profile step 1 (step_idx == 0) to capture a single denoising step trace.
+    var s2_profiler = platform.profiler(allocator, io, .{
+        .repository_path = "/tmp/xprof",
+        .session_id = "stage2_step0",
+    }) catch |err| blk: {
+        std.log.warn("Could not create Stage 2 profiler: {}", .{err});
+        break :blk null;
+    };
+    defer if (s2_profiler) |*p| p.deinit();
+
     for (0..num_steps) |step_idx| {
+        if (step_idx == 0) {
+            if (s2_profiler) |*p| p.start() catch |err| {
+                std.log.warn("Could not start Stage 2 profiler: {}", .{err});
+            };
+        }
+
         const step_start: std.Io.Timestamp = .now(io, .awake);
         const sigma = stage2_sigmas[step_idx];
         const sigma_next = stage2_sigmas[step_idx + 1];
@@ -2952,7 +3001,7 @@ fn runStage2(
                         block_params_bufs[i],
                     });
                 }
-                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
@@ -3050,6 +3099,14 @@ fn runStage2(
         const step_ns = step_start.untilNow(io, .awake).nanoseconds;
         timer.recordStep(step_ns);
         std.log.info("  Step {d} complete ({d:.1}s).", .{ step_idx, PhaseTimer.fmtSecs(step_ns) });
+
+        if (step_idx == 0) {
+            if (s2_profiler) |*p| {
+                if (p.stop() catch null) |profile| {
+                    std.log.info("Stage 2 profile dumped: {s}", .{profile.perfetto_path});
+                }
+            }
+        }
     }
     timer.addExec();
 
@@ -3126,7 +3183,10 @@ fn computeTextEmbeddings(
     ckpt_store: *zml.io.TensorStore,
     pos_path: []const u8,
     neg_path: []const u8,
+    timer: *PhaseTimer,
 ) !TextEmbeddingsResult {
+    timer.start();
+
     // ---- Initialize processor params from checkpoint ----
     const proc_init = text_embeddings.EmbeddingsProcessor.initParams(ckpt_store.view());
     const processor = proc_init.processor;
@@ -3154,6 +3214,8 @@ fn computeTextEmbeddings(
     std.log.info("  pos stacked_hidden_states: {s} {any}", .{ @tagName(pos_hs_buf.shape().dtype()), pos_hs_buf.shape().dims() });
     std.log.info("  pos attention_mask:        {s} {any}", .{ @tagName(pos_mask_buf.shape().dtype()), pos_mask_buf.shape().dims() });
 
+    timer.addOther(); // load hidden states from safetensors
+
     // ---- Compile graph ----
     std.log.info("Compiling text embeddings processor...", .{});
     var exe = try platform.compileFn(
@@ -3169,6 +3231,8 @@ fn computeTextEmbeddings(
         .{ .shardings = &.{sharding} },
     );
     defer exe.deinit();
+
+    timer.addCompile();
 
     // ---- Load model weights ----
     std.log.info("Loading text embeddings weights...", .{});
@@ -3188,6 +3252,8 @@ fn computeTextEmbeddings(
     );
     defer text_embeddings.EmbeddingsProcessor.unloadBuffers(&weight_bufs);
 
+    timer.addLoad();
+
     // ---- Run on positive hidden states ----
     std.log.info("Running text embeddings on positive prompt...", .{});
     var exe_args = try exe.args(allocator);
@@ -3205,6 +3271,8 @@ fn computeTextEmbeddings(
 
     std.log.info("  v_context_pos: {s} {any}", .{ @tagName(v_context_pos.shape().dtype()), v_context_pos.shape().dims() });
     std.log.info("  a_context_pos: {s} {any}", .{ @tagName(a_context_pos.shape().dtype()), a_context_pos.shape().dims() });
+
+    timer.addExec();
 
     // ---- Run on negative hidden states ----
     var neg_hs_buf: zml.Buffer = undefined;
@@ -3259,6 +3327,8 @@ fn computeTextEmbeddings(
 
     std.log.info("  v_context_neg: {s} {any}", .{ @tagName(v_context_neg.shape().dtype()), v_context_neg.shape().dims() });
     std.log.info("  a_context_neg: {s} {any}", .{ @tagName(a_context_neg.shape().dtype()), a_context_neg.shape().dims() });
+
+    timer.addExec(); // neg load hs + exec
 
     return .{
         .v_context_pos = v_context_pos,
@@ -3486,6 +3556,20 @@ fn runVideoVaeDecode(
     timer.addCompile();
 
     std.log.info("Running VAE decode...", .{});
+
+    // Profile the VAE decode execution.
+    var vae_profiler = platform.profiler(allocator, io, .{
+        .repository_path = "/tmp/xprof",
+        .session_id = "video_vae_decode",
+    }) catch |err| blk: {
+        std.log.warn("Could not create VAE profiler: {}", .{err});
+        break :blk null;
+    };
+    defer if (vae_profiler) |*p| p.deinit();
+    if (vae_profiler) |*p| p.start() catch |err| {
+        std.log.warn("Could not start VAE profiler: {}", .{err});
+    };
+
     var vae_args = try vae_exe.args(allocator);
     defer vae_args.deinit(allocator);
     var vae_results = try vae_exe.results(allocator);
@@ -3495,6 +3579,13 @@ fn runVideoVaeDecode(
     v_latent_5d.deinit(); // Free GPU latent after VAE consumes it
     var decoded_video = vae_results.get(zml.Buffer); // [1, 3, F_out, H_out, W_out] bf16
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
+
+    if (vae_profiler) |*p| {
+        if (p.stop() catch null) |profile| {
+            std.log.info("VAE decode profile dumped: {s}", .{profile.perfetto_path});
+        }
+    }
+
     timer.addExec();
 
     defer decoded_video.deinit(); // Free GPU buffer after download to host
@@ -3574,6 +3665,16 @@ fn runVideoVaeDecodeTiled(
     var vae_results = try vae_exe.results(allocator);
     defer vae_results.deinit(allocator);
 
+    // Profile the first tile's VAE decode execution.
+    var vae_tile_profiler = platform.profiler(allocator, io, .{
+        .repository_path = "/tmp/xprof",
+        .session_id = "video_vae_tile0",
+    }) catch |err| blk: {
+        std.log.warn("Could not create VAE tile profiler: {}", .{err});
+        break :blk null;
+    };
+    defer if (vae_tile_profiler) |*p| p.deinit();
+
     for (0..tile_plan.count) |tile_idx| {
         const tile = tile_plan.tiles[tile_idx];
         const actual_lat_frames: usize = @intCast(tile.lat_actual_end - tile.lat_start);
@@ -3618,11 +3719,25 @@ fn runVideoVaeDecodeTiled(
         const tile_slice = zml.Slice.init(tile_latent_shape, tile_buf);
         var tile_gpu = try zml.Buffer.fromSlice(io, platform, tile_slice, sharding);
 
+        if (tile_idx == 0) {
+            if (vae_tile_profiler) |*p| p.start() catch |err| {
+                std.log.warn("Could not start VAE tile profiler: {}", .{err});
+            };
+        }
+
         // Run VAE decoder
         vae_args.set(.{ tile_gpu, stats_bufs, vae_bufs });
         vae_exe.callOpts(io, vae_args, &vae_results, .{ .wait = true });
         var decoded_tile = vae_results.get(zml.Buffer); // [1, 3, F_tile_px, H_px, W_px] bf16
         defer decoded_tile.deinit();
+
+        if (tile_idx == 0) {
+            if (vae_tile_profiler) |*p| {
+                if (p.stop() catch null) |profile| {
+                    std.log.info("VAE tile 0 profile dumped: {s}", .{profile.perfetto_path});
+                }
+            }
+        }
 
         // Free GPU tile input immediately
         tile_gpu.deinit();
