@@ -265,6 +265,9 @@ test "Backend.auto selects mosaic_tpu on TPU" {
         .devices = &[_]zml.platform.Device{},
         .memories = &[_]zml.platform.Memory{},
         .physical_mesh = undefined,
+        .replicated_sharding = undefined,
+        .triton_runtime = null,
+        .tpu_ir_runtime = null,
     };
 
     try std.testing.expectEqual(Backend.mosaic_tpu, Backend.auto(&platform));

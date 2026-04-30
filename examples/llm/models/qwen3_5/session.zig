@@ -30,12 +30,11 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const replicated_sharding = compiled_model.params.shardings.replicated;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, .{ .sharded = &compiled_model.params.shardings.model });
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, replicated_sharding, seed);
+        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         return .{
@@ -79,12 +78,10 @@ pub const Session = struct {
         @memset(prefill_tokens_slice.items(u32), 0);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const replicated_sharding = self.compiled_model.params.shardings.replicated;
-
-        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
+        var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
-        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32, replicated_sharding);
+        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32, .replicated);
         defer prefill_token_index_buffer.deinit();
 
         var args = try self.compiled_model.prefill_exe.args(self.allocator);
@@ -142,12 +139,10 @@ pub const Session = struct {
     fn runDecodeStep(self: *Session, token_id: u32, token_index: u32) !void {
         self.step_token_slice.items(u32)[0] = token_id;
 
-        const replicated_sharding = self.compiled_model.params.shardings.replicated;
-
-        var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, replicated_sharding);
+        var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, .replicated);
         defer token_buffer.deinit();
 
-        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32, replicated_sharding);
+        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32, .replicated);
         defer token_index_buffer.deinit();
 
         var args = try self.compiled_model.decode_exe.args(self.allocator);

@@ -27,15 +27,15 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        const shardings = compiled_model.params.shardings;
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, shardings.model);
+        const shardings = &compiled_model.params.shardings;
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, .{ .sharded = &shardings.model });
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
-        var attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, shardings.model);
+        var attention_metadata_buffers = try compiled_model.params.attention_metadata.initBuffer(io, platform, .{ .sharded = &shardings.model });
         errdefer zml.attention.attention.Metadata.deinitBuffer(&attention_metadata_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
-        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, shardings.replicated, seed);
+        var rng_buffers = try zml.Tensor.Rng.initBuffer(io, platform, .replicated, seed);
         errdefer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
         return .{
@@ -118,12 +118,10 @@ pub const Session = struct {
         defer prefill_tokens_slice.free(self.allocator);
         @memcpy(prefill_tokens_slice.items(u32)[0..all_tokens.len], all_tokens);
 
-        const replicated_sharding = try zml.sharding.replicatedSharding(self.platform);
-
-        var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, replicated_sharding);
+        var prefill_tokens_buffer: zml.Buffer = try .fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
-        var prefill_token_pos_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32, replicated_sharding);
+        var prefill_token_pos_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32, .replicated);
         defer prefill_token_pos_buffer.deinit();
 
         prefill_args.set(.{
@@ -157,10 +155,8 @@ pub const Session = struct {
         var decode_results = try self.compiled_model.decode_exe.results(self.allocator);
         defer decode_results.deinit(self.allocator);
 
-        const replicated_sharding = try zml.sharding.replicatedSharding(self.platform);
-
         var last_token_id: u32 = self.last_generated_token;
-        var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), replicated_sharding, @ptrCast(&last_token_id));
+        var current_token_buffer: zml.Buffer = try .fromBytes(self.io, self.platform, .init(.{ .s = 1 }, .u32), .replicated, @ptrCast(&last_token_id));
         defer current_token_buffer.deinit();
 
         generation: while (true) {
@@ -172,7 +168,7 @@ pub const Session = struct {
             try all_tokens.append(self.allocator, last_token_id);
             if (all_tokens.items.len >= self.seqlen) break :generation;
 
-            var token_pos_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32, replicated_sharding);
+            var token_pos_buffer: zml.Buffer = try .scalar(self.io, self.platform, all_tokens.items.len, .u32, .replicated);
             defer token_pos_buffer.deinit();
 
             decode_args.set(.{

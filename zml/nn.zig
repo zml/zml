@@ -127,10 +127,10 @@ test normalizeL2 {
 
     const input: zml.Tensor = .init(.{ 2, 2 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, normalizeL2, .{ input, 1e-12 }, platform, .{});
     defer exe.deinit();
 
-    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
+    var input_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ -0.9686, -1.0058, -1.7808, 0.6698 }));
     defer input_buffer.deinit();
 
     var res = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, normalizeL2, .{input_buffer});
@@ -616,7 +616,7 @@ test "real/img" {
         }
     };
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.interleaved}, platform, .{});
         defer exe.deinit();
 
         var d_interleaved = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -624,7 +624,7 @@ test "real/img" {
         try std.testing.expectEqual(20, try d_interleaved.getValue(i32, std.testing.io));
     }
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.sequential}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitMergeIsId, .{.sequential}, platform, .{});
         defer exe.deinit();
 
         var d_sequential = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitMergeIsId, {});
@@ -634,7 +634,7 @@ test "real/img" {
 
     // test the function that accepts 1 void argument
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeqVoid, .{{}}, platform, .{});
         defer exe.deinit();
 
         var d_split_seq_void = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeqVoid, {});
@@ -644,7 +644,7 @@ test "real/img" {
 
     // test the function that takes NO arguments
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitSeq, .{}, platform, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitSeq, {});
@@ -653,7 +653,7 @@ test "real/img" {
     }
 
     {
-        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+        var exe = try zml.module.compile(std.testing.allocator, std.testing.io, Fns.testSplitInterleaved, .{}, platform, .{});
         defer exe.deinit();
 
         var d_split_seq = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Fns.testSplitInterleaved, {});
@@ -687,13 +687,13 @@ test rope {
     // x is made such as the interleaved and sequential reps are the same.
     // So the two implementations should give the same results.
     const x: zml.Tensor = .init(.{ .b = 1, .s = 5, .hd = 4 }, .f32);
-    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe_interleaved = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .interleaved } }, platform, .{});
     defer exe_interleaved.deinit();
 
-    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe_sequential = try zml.module.compile(std.testing.allocator, std.testing.io, Local._fwd, .{ x, RopeOpts{ .layout = .sequential } }, platform, .{});
     defer exe_sequential.deinit();
 
-    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
+    var x_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, x.shape(), .replicated, std.mem.sliceAsBytes(&[_]f32{ 1.0, 0.1, -1.0, -0.5 } ** 5));
     defer x_buffer.deinit();
 
     var res1 = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_interleaved, Local._fwd, .{x_buffer});
@@ -772,7 +772,7 @@ test nearest {
             upsample,
             .{ input_3d_basic, .{ .scale_factor = &.{3}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{},
         );
         defer exe.deinit();
 
@@ -780,7 +780,7 @@ test nearest {
             std.testing.io,
             platform,
             input_3d_basic.shape(),
-            zml.testing.replicatedSharding(),
+            .replicated,
             std.mem.sliceAsBytes(&[1][1][2]i32{.{.{ 1, 2 }}}),
         );
         defer input_3d_basic_buffer.deinit();
@@ -802,11 +802,11 @@ test nearest {
             upsample,
             .{ input_3d_advanced, .{ .scale_factor = &.{2}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{},
         );
         defer exe.deinit();
 
-        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][3][4]i32{
+        var input_3d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_3d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][3][4]i32{
             .{ .{ 1, 2, 3, 4 }, .{ 5, 6, 7, 8 }, .{ 9, 10, 11, 12 } },
             .{ .{ 13, 14, 15, 16 }, .{ 17, 18, 19, 20 }, .{ 21, 22, 23, 24 } },
         }));
@@ -840,11 +840,11 @@ test nearest {
             upsample,
             .{ input_4d_basic, .{ .scale_factor = &.{ 3, 3 }, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{},
         );
         defer exe.deinit();
 
-        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_4d_basic_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_basic.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_4d_basic_buffer.deinit();
 
         var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_4d_basic_buffer});
@@ -870,11 +870,11 @@ test nearest {
             upsample,
             .{ input_4d_advanced, .{ .scale_factor = &.{ 2, 2 }, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{},
         );
         defer exe.deinit();
 
-        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
+        var input_4d_advanced_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_4d_advanced.shape(), .replicated, std.mem.sliceAsBytes(&[2][2][2][2]i32{ .{
             .{ .{ 1, 2 }, .{ 3, 4 } },
             .{ .{ 5, 6 }, .{ 7, 8 } },
         }, .{
@@ -928,11 +928,11 @@ test nearest {
             upsample,
             .{ input_5d, .{ .scale_factor = &.{2}, .mode = .nearest } },
             platform,
-            .{ .shardings = &.{zml.testing.replicatedSharding()} },
+            .{},
         );
         defer exe.deinit();
 
-        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
+        var input_5d_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, input_5d.shape(), .replicated, std.mem.sliceAsBytes(&[_]i32{ 1, 2, 3, 4 }));
         defer input_5d_buffer.deinit();
 
         var result = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, upsample, .{input_5d_buffer});
@@ -989,9 +989,9 @@ pub fn resizeBilinear(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Ten
 
 test resizeBilinear {
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1056,9 +1056,9 @@ pub fn resizeBicubic(image: Tensor, resized_axes: anytype, opt: ResizeOpts) Tens
 
 test resizeBicubic {
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
+
     // Only test shapes
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{replicated_sharding} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1406,7 +1406,6 @@ pub const GatedDeltaNet = struct {
 
 test "gated delta net" {
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
 
     const queries: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
     const keys: zml.Tensor = .init(.{ .s = 2, .h = 2, .k = 2 }, .f32);
@@ -1421,7 +1420,7 @@ test "gated delta net" {
         GatedDeltaNet.forward,
         .{ queries, keys, values, alphas, betas, GatedDeltaNet.State{ .s = initial_s } },
         platform,
-        .{ .shardings = &.{replicated_sharding} },
+        .{},
     );
     defer exe.deinit();
 
@@ -1429,7 +1428,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         queries.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
             .{ .{ 1.0, 1.0 }, .{ 1.0, -1.0 } },
@@ -1440,7 +1439,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         keys.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 2.0 }, .{ 0.0, 1.0 } },
             .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
@@ -1451,7 +1450,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         values.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 3.0, 1.0 }, .{ 2.0, 4.0 } },
             .{ .{ 1.0, 5.0 }, .{ 3.0, 0.0 } },
@@ -1462,7 +1461,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         alphas.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2]f32{
             .{ 0.5, 0.25 },
             .{ 0.8, 0.6 },
@@ -1473,7 +1472,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         betas.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2]f32{
             .{ 1.0, 0.5 },
             .{ 0.75, 1.0 },
@@ -1484,7 +1483,7 @@ test "gated delta net" {
         std.testing.io,
         platform,
         initial_s.shape(),
-        replicated_sharding,
+        .replicated,
         std.mem.sliceAsBytes(&[2][2][2]f32{
             .{ .{ 1.0, 0.0 }, .{ 0.0, 1.0 } },
             .{ .{ 2.0, 1.0 }, .{ 1.0, 0.0 } },
@@ -1566,15 +1565,14 @@ pub fn sampleTokens(activations: Tensor, opts: SamplingStrategy, rng: Tensor.Rng
 
 test sampleTokens {
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
 
     const rng: zml.Tensor.Rng = .init();
     const activations: zml.Tensor = .init(.{ .voc = 4 }, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{ .shardings = &.{replicated_sharding} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, sampleTokens, .{ activations, .{ .topk = 4, .temperature = 2.0 }, rng }, platform, .{});
     defer exe.deinit();
 
-    var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, replicated_sharding, 0xdeadbeef);
+    var rng_buffer = try zml.Tensor.Rng.initBuffer(std.testing.io, platform, .replicated, 0xdeadbeef);
     defer rng_buffer._state.deinit();
 
     const inf = std.math.inf(f32);
@@ -1586,7 +1584,7 @@ test sampleTokens {
     }) |logits_expected| {
         const logits, const expected: i32 = logits_expected;
 
-        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), replicated_sharding, std.mem.sliceAsBytes(&logits));
+        var activations_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, activations.shape(), .replicated, std.mem.sliceAsBytes(&logits));
         defer activations_buffer.deinit();
 
         var sampled, rng_buffer = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, sampleTokens, .{ activations_buffer, rng_buffer });
@@ -1625,7 +1623,7 @@ pub const DynamicSamplingStrategy = struct {
     pub fn makeBuffers(
         io: std.Io,
         platform: *const zml.Platform,
-        sharding: zml.sharding.Sharding,
+        sharding: zml.Buffer.ShardingSpec,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
@@ -1704,7 +1702,6 @@ fn fixupLogits(logits: Tensor, opts: DynamicSamplingStrategy) [2]Tensor {
 
 test sampleTokensDynamic {
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
 
     const ___ = -std.math.inf(f32);
     const logits_data = [_]f32{ @log(2.0), @log(1.0), @log(4.0), @log(3.0) };
@@ -1713,10 +1710,10 @@ test sampleTokensDynamic {
     const logits: zml.Tensor = .init(.{ .voc = logits_data.len }, .f32);
     const dynamic_sampling_strategy = DynamicSamplingStrategy.init(.f32, 0);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{ .shardings = &.{replicated_sharding} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits, dynamic_sampling_strategy }, platform, .{});
     defer exe.deinit();
 
-    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), replicated_sharding, std.mem.sliceAsBytes(&logits_data));
+    var logits_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits.shape(), .replicated, std.mem.sliceAsBytes(&logits_data));
     defer logits_buffer.deinit();
 
     const Args = struct { DynamicSamplingStrategy.Opts, [4]f32 };
@@ -1735,7 +1732,7 @@ test sampleTokensDynamic {
         .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
     }) |args_expected| {
         const args, const expected = args_expected;
-        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, replicated_sharding, .f32, args);
+        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .replicated, .f32, args);
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
         defer new_logits.deinit();
@@ -1750,15 +1747,15 @@ test sampleTokensDynamic {
 
         const logits_bf16: zml.Tensor = .init(.{ .voc = logits_data.len }, .bf16);
         const dynamic_sampling_strategy_bf16 = DynamicSamplingStrategy.init(.bf16, 0);
-        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{ .shardings = &.{replicated_sharding} });
+        var exe_bf16 = try zml.module.compile(std.testing.allocator, std.testing.io, fixupLogits, .{ logits_bf16, dynamic_sampling_strategy_bf16 }, platform, .{});
         defer exe_bf16.deinit();
 
         const boost = bf16.inf;
         const nerf = bf16.minus_inf;
 
-        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), replicated_sharding, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
+        var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), .replicated, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
         defer logits_bf16_buffer.deinit();
-        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, replicated_sharding, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
+        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .replicated, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
 
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });

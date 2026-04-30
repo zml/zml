@@ -44,18 +44,15 @@ pub fn main(init: std.process.Init) !void {
     defer repo_model.deinit(allocator);
 
     var progress = std.Progress.start(io, .{ .root_name = args.model });
-    const tp_mesh: zml.sharding.LogicalMesh = .init("tp_mesh", .{ .model = .high_bandwidth });
-    const tp_strategy: zml.sharding.Strategy = .suggest(tp_mesh, platform.physical_mesh);
     const shardings: common.Shardings = .{
-        .replicated = try zml.sharding.replicatedSharding(platform),
-        .model = try .initFromStrategy(platform, tp_mesh, tp_strategy),
+        .model = try .init(platform.physical_mesh, .init("tp_mesh", .{ .model = .high_bandwidth })),
     };
 
     var model_buffers = try repo_model.loadBuffers(allocator, io, platform, &store, &progress, shardings);
     defer repo_model.unloadBuffers(&model_buffers, allocator);
     progress.end();
 
-    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, shardings.replicated);
+    try run(allocator, io, platform, args.activations, repo_model.inner, &model_buffers, platform.replicated_sharding);
 }
 
 fn run(
@@ -65,7 +62,7 @@ fn run(
     activations_path: []const u8,
     mdl: model.Model,
     model_buffers: *model.Buffers,
-    sharding: zml.sharding.Sharding,
+    sharding: *const zml.sharding.Sharding,
 ) !void {
     var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, activations_path);
     defer registry.deinit();
@@ -97,7 +94,7 @@ fn testLayer(
     name: []const u8,
     layer: anytype,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    sharding: zml.sharding.Sharding,
+    sharding: *const zml.sharding.Sharding,
     opts: zml.testing.CompareOpts,
 ) !void {
     const in_key = try std.fmt.allocPrint(allocator, "{s}.in", .{name});
@@ -129,7 +126,7 @@ fn testLayer(
     try zml.testing.expectClose(io, out_result, out_buffer_expected, opts);
 }
 
-fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8, sharding: zml.sharding.Sharding) !zml.Buffer {
+fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: zml.io.TensorStore.View, key: []const u8, sharding: *const zml.sharding.Sharding) !zml.Buffer {
     const shape = store.getShape(key) orelse return error.NotFound;
 
     const host_bytes = try allocator.alloc(u8, shape.byteSize());
@@ -141,5 +138,5 @@ fn loadBufferFromStore(allocator: std.mem.Allocator, io: std.Io, platform: *cons
 
     _ = try reader.interface.readSliceAll(host_bytes);
 
-    return zml.Buffer.fromBytes(io, platform, shape, sharding, host_bytes);
+    return zml.Buffer.fromBytes(io, platform, shape, .{ .sharded = sharding }, host_bytes);
 }

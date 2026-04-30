@@ -140,7 +140,7 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Buffer.ShardingSpec,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -188,15 +188,12 @@ pub fn main(init: std.process.Init) !void {
     log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
     log.info("{f}", .{platform.physical_mesh});
 
-    const physical_mesh = platform.physical_mesh;
-    const mesh: zml.sharding.LogicalMesh = .init("demo_mesh", .{
+    const sharding: zml.sharding.Sharding = try .init(platform.physical_mesh, .init("demo_mesh", .{
         .data = .low_bandwidth,
         .model = .high_bandwidth,
-    });
-    const strategy: zml.sharding.Strategy = .suggest(mesh, physical_mesh);
-    const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
+    }));
 
-    log.info("{f}", .{mesh});
+    log.info("{f}", .{sharding.logical});
     log.info("{f}", .{sharding});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)
@@ -219,16 +216,16 @@ pub fn main(init: std.process.Init) !void {
         .{input},
         .{
             .partitioner = args.partitioner,
-            .shardings = &.{sharding},
+            .shardings = &.{&sharding},
         },
     );
     defer exe.deinit();
 
-    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, sharding, 0.0);
+    var w_buf = try createSequenceBuffer(allocator, io, platform, w_shape, .{ .sharded = &sharding }, 0.0);
     defer w_buf.deinit();
-    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, sharding, 100.0);
+    var b_buf = try createSequenceBuffer(allocator, io, platform, b_shape, .{ .sharded = &sharding }, 100.0);
     defer b_buf.deinit();
-    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, sharding, 1000.0);
+    var input_buf = try createSequenceBuffer(allocator, io, platform, input_shape, .{ .sharded = &sharding }, 1000.0);
     defer input_buf.deinit();
 
     log.info("input placement: {f}", .{input_buf.placement()});

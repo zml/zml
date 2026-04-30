@@ -552,7 +552,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.sharding.Sharding) !Buffer {
+    pub fn initBuffer(kv: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !Buffer {
         return .{
             .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
             .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),

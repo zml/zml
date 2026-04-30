@@ -392,7 +392,6 @@ pub const while_ = @"while";
 test @"while" {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
-    const replicated_sharding = zml.testing.replicatedSharding();
 
     const initial_i: zml.Tensor = .init(.{}, .i64);
     const initial_sum: zml.Tensor = .init(.{}, .i64);
@@ -422,13 +421,13 @@ test @"while" {
         Local.forward,
         .{ initial_i, initial_sum },
         platform,
-        .{ .shardings = &.{replicated_sharding} },
+        .{},
     );
     defer exe.deinit();
 
-    var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), replicated_sharding, std.mem.sliceAsBytes(&[1]i64{1}));
+    var i_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_i.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{1}));
     defer i_buffer.deinit();
-    var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), replicated_sharding, std.mem.sliceAsBytes(&[1]i64{0}));
+    var sum_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, initial_sum.shape(), .replicated, std.mem.sliceAsBytes(&[1]i64{0}));
     defer sum_buffer.deinit();
 
     var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, Local.forward, .{ i_buffer, sum_buffer });
@@ -550,12 +549,12 @@ test "triton" {
     const a: zml.Tensor = .init(.{}, .f32);
     const b: zml.Tensor = .init(.{}, .f32);
 
-    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var exe = try zml.module.compile(std.testing.allocator, std.testing.io, TritonMod.forward, .{ a, b }, platform, .{});
     defer exe.deinit();
 
-    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{1}));
+    var a_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, a.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{1}));
     defer a_buffer.deinit();
-    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), zml.testing.replicatedSharding(), std.mem.sliceAsBytes(&[1]f32{3}));
+    var b_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, b.shape(), .replicated, std.mem.sliceAsBytes(&[1]f32{3}));
     defer b_buffer.deinit();
 
     var results = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, TritonMod.forward, .{ a_buffer, b_buffer });
@@ -815,7 +814,7 @@ test scatterConfig {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();
@@ -1963,7 +1962,7 @@ test customCall {
     const zml = @import("zml.zig");
     const platform = zml.testing.env();
 
-    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{ .shardings = &.{zml.testing.replicatedSharding()} });
+    var comp = zml.module.CompilationContext.init(std.testing.allocator, std.testing.io, platform, .{});
     defer comp.deinit();
     comp.activate();
     defer comp.deactivate();

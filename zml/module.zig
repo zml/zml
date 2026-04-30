@@ -44,7 +44,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
     return mlir_global_registry.?;
 }
 pub const CompilationOptions = struct {
-    shardings: []const Sharding,
+    shardings: []const *const Sharding = &.{},
     // If null, will be initialized from the target
     partitioner: ?Partitioning.Partitioner = null,
     // Debugging options
@@ -98,6 +98,7 @@ pub const CompilationContext = struct {
     threadlocal var _current: ?*CompilationContext = null;
 
     pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, opts: CompilationOptions) CompilationContext {
+        var arena = std.heap.ArenaAllocator.init(allocator);
         const mlir_registry = mlirRegistry(io);
         var mlir_ctx = mlir.Context.init(.{ .registry = mlir_registry, .threading = false }) catch unreachable;
         mlir_ctx.loadAllAvailableDialects();
@@ -118,12 +119,28 @@ pub const CompilationContext = struct {
             }
         }
 
-        const partitioning = Partitioning.init(opts.partitioner orelse Partitioning.Partitioner.fromTarget(platform.target), opts.shardings) catch unreachable;
+        // Ensure replicated sharding is always included as a fallback option.
+        const shardings = shardings: {
+            const needs_replicated = blk: {
+                for (opts.shardings) |sharding| {
+                    if (sharding == platform.replicated_sharding) break :blk false;
+                }
+                break :blk true;
+            };
+
+            const base_len = opts.shardings.len;
+            const res = arena.allocator().alloc(*const Sharding, base_len + @intFromBool(needs_replicated)) catch unreachable;
+            @memcpy(res[0..base_len], opts.shardings);
+            if (needs_replicated) res[base_len] = platform.replicated_sharding;
+            break :shardings res;
+        };
+
+        const partitioning = Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings) catch unreachable;
 
         return .{
             .allocator = allocator,
             .io = io,
-            .arena = std.heap.ArenaAllocator.init(allocator),
+            .arena = arena,
             .mlir_registry = mlir_registry,
             .mlir_ctx = mlir_ctx,
             .mlir_pass_manager = pass_manager,
@@ -275,7 +292,7 @@ fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
 
 pub const OutputInfo = struct {
     shapes: []Shape,
-    shardings: []Sharding,
+    shardings: []*const Sharding,
     values: []*const mlir.Value,
     donations: []?usize,
     output_memory_kinds: []Memory.Kind,
@@ -292,7 +309,7 @@ pub const OutputInfo = struct {
 fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !OutputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
-        sharding_list: *std.array_list.Managed(Sharding),
+        sharding_list: *std.array_list.Managed(*const Sharding),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
         output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
@@ -301,7 +318,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
-    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    var sharding_list = std.array_list.Managed(*const Sharding).init(allocator);
     errdefer sharding_list.deinit();
     var value_list = std.array_list.Managed(*const mlir.Value).init(allocator);
     errdefer value_list.deinit();
@@ -340,7 +357,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v
 
 pub const InputInfo = struct {
     shapes: []Shape,
-    shardings: []Sharding,
+    shardings: []*const Sharding,
 
     pub fn deinit(self: InputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
@@ -351,14 +368,14 @@ pub const InputInfo = struct {
 fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !InputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
-        sharding_list: *std.array_list.Managed(Sharding),
+        sharding_list: *std.array_list.Managed(*const Sharding),
         partitioning: Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
 
-    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
+    var sharding_list = std.array_list.Managed(*const Sharding).init(allocator);
     errdefer sharding_list.deinit();
 
     var context: LocalContext = .{

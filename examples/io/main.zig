@@ -180,23 +180,17 @@ pub fn main(init: std.process.Init) !void {
             var load_count: usize = 0;
             while (registry_it.next()) |entry| : (load_count += 1) {
                 tensors[load_count] = switch (sharding_type) {
-                    .replicated => store.view().createTensor(entry.key_ptr.*, null, null),
+                    .replicated => store.view().createTensor(entry.key_ptr.*, null, .replicated),
                     .sharded => if (entry.value_ptr.shape.rank() > 0)
                         store.view().createTensor(entry.key_ptr.*, null, .{ ._0 = .model })
                     else
-                        store.view().createTensor(entry.key_ptr.*, null, null),
+                        store.view().createTensor(entry.key_ptr.*, null, .replicated),
                 };
             }
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            const replicated_sharding = try zml.sharding.replicatedSharding(platform);
-
-            const sharded_sharding: zml.sharding.Sharding = blk: {
-                const model_logical_mesh: zml.sharding.LogicalMesh = .init("playground_model", .{ .model = .high_bandwidth });
-                const model_strategy: zml.sharding.Strategy = .suggest(model_logical_mesh, platform.physical_mesh);
-                break :blk try .initFromStrategy(platform, model_logical_mesh, model_strategy);
-            };
+            const sharded_sharding: zml.sharding.Sharding = try .init(platform.physical_mesh, .init("playground_model", .{ .model = .high_bandwidth }));
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
             progress.increaseEstimatedTotalItems(load_count);
@@ -211,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
             }
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
-                .shardings = &.{ replicated_sharding, sharded_sharding },
+                .shardings = &.{&sharded_sharding},
                 .parallelism = 16,
                 .dma_chunks = 16,
                 .dma_chunk_size = 64 * zml.MiB,

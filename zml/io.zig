@@ -149,13 +149,17 @@ pub const TensorStore = struct {
                 }
             }
 
-            if (@TypeOf(partitioning) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(partitioning))) {
-                    .optional => if (partitioning) |p| {
-                        ptr.shape = ptr.shape.withPartitioning(p);
-                    },
-                    else => ptr.shape = ptr.shape.withPartitioning(partitioning),
-                }
+            if (@TypeOf(partitioning) == @TypeOf(null)) {
+                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
+            }
+
+            switch (@typeInfo(@TypeOf(partitioning))) {
+                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
+                .enum_literal => switch (partitioning) {
+                    .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                },
+                else => ptr.shape = ptr.shape.withPartitioning(partitioning),
             }
 
             const tensor: Tensor = .fromShape(ptr.shape);
@@ -294,7 +298,7 @@ pub const MemoryWriter = union(enum) {
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
         shape: Shape,
-        sharding: Sharding,
+        sharding: *const Sharding,
         buffer: *Buffer,
     ) !MemoryWriter {
         return switch (platform.target) {
@@ -329,11 +333,11 @@ pub const BufferedMemoryWriter = struct {
     io: std.Io,
     platform: *const Platform,
     shape: Shape,
-    sharding: Sharding,
+    sharding: *const Sharding,
     buffer: *Buffer,
     interface: std.Io.Writer,
 
-    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: Sharding, buffer: *Buffer) !BufferedMemoryWriter {
+    pub fn init(allocator: std.mem.Allocator, io: std.Io, platform: *const Platform, shape: Shape, sharding: *const Sharding, buffer: *Buffer) !BufferedMemoryWriter {
         return .{
             .io = io,
             .platform = platform,
@@ -364,7 +368,7 @@ pub const BufferedMemoryWriter = struct {
             self.io,
             self.platform,
             self.shape,
-            self.sharding,
+            .{ .sharded = self.sharding },
             @ptrCast(self.interface.buffer),
             .{ .wait = true },
         ) catch return std.Io.Writer.Error.WriteFailed;
@@ -783,7 +787,7 @@ pub const DirectMemoryWriter = struct {
         pools: []mem.DynamicBufferPool,
         dma_allocators: []const mem.DmaAllocator,
         shape: Shape,
-        sharding: Sharding,
+        sharding: *const Sharding,
         buffer: *Buffer,
     ) !DirectMemoryWriter {
         const placement = try Placement.init(sharding, shape);
@@ -808,7 +812,7 @@ pub const DirectMemoryWriter = struct {
             pjrt_buffers.appendAssumeCapacity(shard_writers[i].pjrt_buffer);
         }
 
-        buffer.* = Buffer.fromPjrtBuffers(platform, shape, sharding, pjrt_buffers.constSlice());
+        buffer.* = Buffer.fromPjrtBuffers(platform, shape, .{ .sharded = sharding }, pjrt_buffers.constSlice());
 
         var planner = StreamPlanner.init(allocator, shape, placement);
         defer planner.deinit();
@@ -1067,7 +1071,7 @@ pub const LoadOpts = struct {
     };
 
     parallelism: usize,
-    shardings: []const Sharding,
+    shardings: []const *const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
     dma_chunk_size: usize,
@@ -1101,8 +1105,6 @@ pub fn load(
         pool_.deinit(dma_allocators[i].allocator());
     };
 
-    const replicated_sharding = try sharding_.replicatedSharding(platform);
-
     const Ctx = struct {
         allocator: std.mem.Allocator,
         dma_allocators: []const mem.DmaAllocator,
@@ -1110,8 +1112,7 @@ pub fn load(
         io: std.Io,
         platform: *const Platform,
         buffers: []*Buffer,
-        shardings: []const Sharding,
-        replicated_sharding: Sharding,
+        shardings: []const *const Sharding,
         store: *const TensorStore,
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
@@ -1126,7 +1127,6 @@ pub fn load(
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
-        .replicated_sharding = replicated_sharding,
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
@@ -1150,10 +1150,9 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
-                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
-                    const sharding = if (select_sharding) |s| s else blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
-                        break :blk ctx_.replicated_sharding;
+                    const sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
+                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+                        break :blk ctx_.platform.replicated_sharding;
                     };
 
                     var writer = MemoryWriter.init(
@@ -1272,11 +1271,11 @@ const DirectMemoryWriterDeviceTest = struct {
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
-        const sharding: Sharding = try .initFromStrategy(platform, scenario.logical_mesh, scenario.strategy);
+        const sharding: Sharding = try .initFromStrategy(platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape,
-            sharding,
+            &sharding,
             scenario.write_mode,
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
@@ -1288,7 +1287,7 @@ const DirectMemoryWriterDeviceTest = struct {
         self: DirectMemoryWriterDeviceTest,
         platform: *const Platform,
         shape: Shape,
-        sharding: Sharding,
+        sharding: *const Sharding,
         write_mode: WriteMode,
         writable_slice_min_len: usize,
         pool_chunks: usize,
