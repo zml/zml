@@ -219,6 +219,7 @@ const CliArgs = struct {
     bf16_attn_stage2: bool,
     num_inference_steps: usize,
     dump_intermediates: bool,
+    profile: bool,
     image: ?[]const u8,
     gemma_hidden_states_pos: []const u8,
     gemma_hidden_states_neg: []const u8,
@@ -250,6 +251,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .bf16_attn_stage2 = false,
         .num_inference_steps = model.stage1_default_schedule.num_steps,
         .dump_intermediates = false,
+        .profile = false,
         .image = null,
         .gemma_hidden_states_pos = undefined,
         .gemma_hidden_states_neg = undefined,
@@ -301,6 +303,8 @@ fn parseArgs(it: anytype) !CliArgs {
             }
         } else if (std.mem.eql(u8, arg, "--dump-intermediates")) {
             args.dump_intermediates = true;
+        } else if (std.mem.eql(u8, arg, "--profile")) {
+            args.profile = true;
         } else if (std.mem.eql(u8, arg, "--image")) {
             args.image = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
@@ -356,7 +360,7 @@ fn parseArgs(it: anytype) !CliArgs {
                     "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
                     "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
                     "[--num-inference-steps <int>] [--meta <path>] [--seed <int>] [--image <path>] " ++
-                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates] " ++
+                    "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates] [--profile] " ++
                     "[--cfg-v <float>] [--stg-v <float>] [--mod-v <float>] [--rescale-v <float>] " ++
                     "[--cfg-a <float>] [--stg-a <float>] [--mod-a <float>] [--rescale-a <float>]",
                 .{},
@@ -754,6 +758,7 @@ pub fn main(init: std.process.Init) !void {
         &timer_s1_noise_gen,
         &timer_s1_noise_init,
         &timer_s1_img_cond,
+        args.profile,
     );
 
     if (args.dump_intermediates) {
@@ -793,7 +798,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 3: Stage 2 — {d}-step distilled denoising ===", .{stage2_sigmas.len - 1});
 
-    const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2);
+    const s2 = try runStage2(allocator, io, platform, sharding, args.stage2_ckpt, &bridge, args.bf16_attn_stage2, stage2_sigmas, &timer_s2, args.profile);
 
     // Free bridge-only buffers (positions, masks, clean latents, contexts).
     // The noised latents (v_latent, a_latent) were consumed by Stage 2's loop
@@ -823,7 +828,7 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("", .{});
     std.log.info("=== Phase 4: Video VAE Decode ===", .{});
 
-    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, &timer_video_vae);
+    var video_frames = try runVideoVaeDecode(allocator, io, platform, sharding, args.stage2_ckpt, s2.v_latent, pipe_meta, &timer_video_vae, args.profile);
     defer video_frames.deinit();
 
     if (args.dump_intermediates) {
@@ -942,6 +947,7 @@ fn runStage1(
     timer_noise_gen: *PhaseTimer,
     timer_noise_init: *PhaseTimer,
     timer_img_cond: *PhaseTimer,
+    profile: bool,
 ) !Stage1Result {
     timer_host_prep.start();
 
@@ -1664,13 +1670,13 @@ fn runStage1(
 
     // Profile step 2 (step_idx == 1) to capture a single denoising step trace,
     // skipping step 1 to avoid warmup effects.
-    var step_profiler = platform.profiler(allocator, io, .{
+    var step_profiler = if (profile) platform.profiler(allocator, io, .{
         .repository_path = "/tmp/xprof",
         .session_id = "stage1_step1",
     }) catch |err| blk: {
         std.log.warn("Could not create profiler: {}", .{err});
         break :blk null;
-    };
+    } else null;
     defer if (step_profiler) |*p| p.deinit();
 
     for (0..num_stage1_steps) |step_idx| {
@@ -2164,8 +2170,8 @@ fn runStage1(
 
         if (step_idx == 1) {
             if (step_profiler) |*p| {
-                if (p.stop() catch null) |profile| {
-                    std.log.info("Profile dumped: {s}", .{profile.perfetto_path});
+                if (p.stop() catch null) |prof| {
+                    std.log.info("Profile dumped: {s}", .{prof.perfetto_path});
                 }
             }
         }
@@ -2605,6 +2611,7 @@ fn runStage2(
     use_bf16_attn: bool,
     stage2_sigmas: []const f32,
     timer: *PhaseTimer,
+    profile: bool,
 ) !Stage2Result {
     timer.start();
     // ---- Open checkpoint store ----
@@ -2900,13 +2907,13 @@ fn runStage2(
     std.log.info("Starting {d}-step denoising loop...", .{num_steps});
 
     // Profile step 1 (step_idx == 0) to capture a single denoising step trace.
-    var s2_profiler = platform.profiler(allocator, io, .{
+    var s2_profiler = if (profile) platform.profiler(allocator, io, .{
         .repository_path = "/tmp/xprof",
         .session_id = "stage2_step0",
     }) catch |err| blk: {
         std.log.warn("Could not create Stage 2 profiler: {}", .{err});
         break :blk null;
-    };
+    } else null;
     defer if (s2_profiler) |*p| p.deinit();
 
     for (0..num_steps) |step_idx| {
@@ -3102,8 +3109,8 @@ fn runStage2(
 
         if (step_idx == 0) {
             if (s2_profiler) |*p| {
-                if (p.stop() catch null) |profile| {
-                    std.log.info("Stage 2 profile dumped: {s}", .{profile.perfetto_path});
+                if (p.stop() catch null) |prof| {
+                    std.log.info("Stage 2 profile dumped: {s}", .{prof.perfetto_path});
                 }
             }
         }
@@ -3382,6 +3389,7 @@ fn runVideoVaeDecode(
     v_latent_patchified: zml.Buffer,
     pipe_meta: PipelineMeta,
     timer: *PhaseTimer,
+    profile: bool,
 ) !VideoFrames {
     timer.start();
 
@@ -3534,6 +3542,7 @@ fn runVideoVaeDecode(
             W,
             tiling_config,
             timer,
+            profile,
         );
     }
 
@@ -3558,13 +3567,13 @@ fn runVideoVaeDecode(
     std.log.info("Running VAE decode...", .{});
 
     // Profile the VAE decode execution.
-    var vae_profiler = platform.profiler(allocator, io, .{
+    var vae_profiler = if (profile) platform.profiler(allocator, io, .{
         .repository_path = "/tmp/xprof",
         .session_id = "video_vae_decode",
     }) catch |err| blk: {
         std.log.warn("Could not create VAE profiler: {}", .{err});
         break :blk null;
-    };
+    } else null;
     defer if (vae_profiler) |*p| p.deinit();
     if (vae_profiler) |*p| p.start() catch |err| {
         std.log.warn("Could not start VAE profiler: {}", .{err});
@@ -3581,8 +3590,8 @@ fn runVideoVaeDecode(
     std.log.info("  Decoded video: {any}", .{decoded_video.shape().dims()});
 
     if (vae_profiler) |*p| {
-        if (p.stop() catch null) |profile| {
-            std.log.info("VAE decode profile dumped: {s}", .{profile.perfetto_path});
+        if (p.stop() catch null) |prof| {
+            std.log.info("VAE decode profile dumped: {s}", .{prof.perfetto_path});
         }
     }
 
@@ -3610,6 +3619,7 @@ fn runVideoVaeDecodeTiled(
     W: i64,
     config: video_vae.TemporalTilingConfig,
     timer: *PhaseTimer,
+    profile: bool,
 ) !VideoFrames {
     const C: i64 = 128;
 
@@ -3666,13 +3676,13 @@ fn runVideoVaeDecodeTiled(
     defer vae_results.deinit(allocator);
 
     // Profile the first tile's VAE decode execution.
-    var vae_tile_profiler = platform.profiler(allocator, io, .{
+    var vae_tile_profiler = if (profile) platform.profiler(allocator, io, .{
         .repository_path = "/tmp/xprof",
         .session_id = "video_vae_tile0",
     }) catch |err| blk: {
         std.log.warn("Could not create VAE tile profiler: {}", .{err});
         break :blk null;
-    };
+    } else null;
     defer if (vae_tile_profiler) |*p| p.deinit();
 
     for (0..tile_plan.count) |tile_idx| {
@@ -3733,8 +3743,8 @@ fn runVideoVaeDecodeTiled(
 
         if (tile_idx == 0) {
             if (vae_tile_profiler) |*p| {
-                if (p.stop() catch null) |profile| {
-                    std.log.info("VAE tile 0 profile dumped: {s}", .{profile.perfetto_path});
+                if (p.stop() catch null) |prof| {
+                    std.log.info("VAE tile 0 profile dumped: {s}", .{prof.perfetto_path});
                 }
             }
         }
