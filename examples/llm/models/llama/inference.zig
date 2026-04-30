@@ -15,11 +15,13 @@ pub const CompilationParameters = struct {
     kv_cache: model.KvCache,
     rng: zml.Tensor.Rng,
     attention_metadata: attention.Metadata,
-    attention_parameters: attention.Parameters,
+    prefill_attention_parameters: attention.Parameters,
+    decode_attention_parameters: attention.Parameters,
     seqlen: usize,
     shardings: common.Shardings,
 
     pub fn init(mdl: model.Model, config: model.Config, seqlen: u32, backend: attention.Backend, shardings: common.Shardings) CompilationParameters {
+        const head_dim = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads);
         return .{
             .prefill_tokens = .init(.{ .s = seqlen }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
@@ -28,11 +30,33 @@ pub const CompilationParameters = struct {
                 .layer = mdl.model.layers.len,
                 .k = seqlen,
                 .h = config.num_key_value_heads,
-                .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
+                .hd = head_dim,
             }, mdl.model.embed_tokens.weight.dtype())),
             .rng = .init(),
-            .attention_metadata = .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
-            .attention_parameters = .init(.fromBackend(backend)),
+            .attention_metadata = switch (backend) {
+                .attnd => .{ .attnd = .init() },
+                else => .init(.fromBackend(backend, @intCast(seqlen), @intCast(config.num_attention_heads))),
+            },
+            .prefill_attention_parameters = switch (backend) {
+                .attnd => .{ .attnd = .init(.{
+                    .model_id = .@"llama-3.1-8B",
+                    .head_dim = head_dim,
+                    .num_attention_heads = config.num_attention_heads,
+                    .num_kv_heads = @intCast(config.num_key_value_heads),
+                    .is_prefill = true,
+                }) },
+                else => .init(.fromBackend(backend)),
+            },
+            .decode_attention_parameters = switch (backend) {
+                .attnd => .{ .attnd = .init(.{
+                    .model_id = .@"llama-3.1-8B",
+                    .head_dim = head_dim,
+                    .num_attention_heads = config.num_attention_heads,
+                    .num_kv_heads = @intCast(config.num_key_value_heads),
+                    .is_prefill = false,
+                }) },
+                else => .init(.fromBackend(backend)),
+            },
             .seqlen = seqlen,
             .shardings = shardings,
         };
@@ -107,9 +131,11 @@ fn compileModel(
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
-                    parameters_.attention_parameters,
+                    parameters_.prefill_attention_parameters,
                 },
-                .{ .shardings = &shardings_ },
+                .{
+                    .shardings = &shardings_,
+                },
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
@@ -141,9 +167,11 @@ fn compileModel(
                     parameters_.kv_cache,
                     parameters_.rng,
                     parameters_.attention_metadata,
-                    parameters_.attention_parameters,
+                    parameters_.decode_attention_parameters,
                 },
-                .{ .shardings = &shardings_ },
+                .{
+                    .shardings = &shardings_,
+                },
             );
         }
     }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });

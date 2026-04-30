@@ -200,15 +200,16 @@ _UBUNTU_PACKAGES = {
     ],
 }
 
-PJRT_CUDA_RELEASE = "manual-2026-04-21T10-00-00Z"
+PJRT_CUDA_RELEASE = "manual-2026-04-29T12-00-00Z"
 
 _PJRT_CUDA_ASSETS = {
     "amd64": {
-        "sha256": "8e34f4ead657b697e1c670cb35acb562bee9f5ff31948411d1b8ad11416df417",
+        "sha256": "09b876a954fc8d9ffd1e3d4e28aea2d44256de5a6698079f15f971c5175cebe1",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-amd64.tar.gz",
+
     },
     "arm64": {
-        "sha256": "54da63a8342f848e42fb26ea1f854db5211b55f9abc753e93ad06ae2964bcb44",
+        "sha256": "af663c07cb09c8e39394020d730c31c9bc2898f4f3342bf9cb9936a7ac2fdca3",
         "url": "https://github.com/zml/pjrt-artifacts/releases/download/{release}/pjrt-cuda_linux-arm64.tar.gz",
     },
 }
@@ -338,12 +339,16 @@ def _cuda_impl(mctx):
         )
 
     for arch, arch_config in _PJRT_CUDA_ASSETS.items():
-        http_archive(
-            name = _repo_name("libpjrt_cuda", arch),
-            build_file = "libpjrt_cuda.BUILD.bazel",
-            url = arch_config["url"].format(release = PJRT_CUDA_RELEASE),
-            sha256 = arch_config["sha256"],
-        )
+        kwargs = {
+            "name": _repo_name("libpjrt_cuda", arch),
+            "build_file": "libpjrt_cuda.BUILD.bazel",
+        }
+        if "local_path" in arch_config:
+            kwargs["url"] = "file://" + arch_config["local_path"]
+        else:
+            kwargs["url"] = arch_config["url"].format(release = PJRT_CUDA_RELEASE)
+            kwargs["sha256"] = arch_config["sha256"]
+        http_archive(**kwargs)
 
     return mctx.extension_metadata(
         reproducible = True,

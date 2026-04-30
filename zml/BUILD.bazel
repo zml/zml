@@ -32,6 +32,7 @@ zig_library(
     srcs = [
         "attention.zig",
         "attention/attention.zig",
+        "attention/attnd.zig",
         "attention/flashattn.zig",
         "attention/mosaic_tpu_kernels/ragged_attention.zig",
         "attention/paged_attention.zig",
