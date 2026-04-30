@@ -1,0 +1,24 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "triton_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+    ],
+    import_name = "kernels/triton/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/ttir",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":triton_builder"],
+)

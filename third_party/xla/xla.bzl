@@ -1,10 +1,12 @@
 load("@xla//third_party:repo.bzl", "tf_http_archive", "tf_mirror_urls", "tf_vendored")
-load("@xla//third_party/farmhash:workspace.bzl", farmhash = "repo")
 load("@xla//third_party/eigen3:workspace.bzl", eigen3 = "repo")
+load("@xla//third_party/farmhash:workspace.bzl", farmhash = "repo")
+load("@xla//third_party/highwayhash:workspace.bzl", highwayhash = "repo")
+load("@xla//third_party/hwloc:workspace.bzl", hwloc = "repo")
 load("@xla//third_party/llvm:workspace.bzl", llvm = "repo")
 load("@xla//third_party/py/ml_dtypes:workspace.bzl", ml_dtypes = "repo")
-load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("@xla//third_party/shardy:workspace.bzl", shardy = "repo")
+load("@xla//third_party/stablehlo:workspace.bzl", stablehlo = "repo")
 load("@xla//third_party/triton:workspace.bzl", triton = "repo")
 
 _BZL_HELPERS = """\
@@ -193,6 +195,8 @@ def _xla_impl(mctx):
     shardy()
     triton()
     farmhash()
+    highwayhash()
+    hwloc()
     eigen3()
     ml_dtypes()
 
@@ -204,6 +208,14 @@ def _xla_impl(mctx):
         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.78.0.tar.gz"),
     )
     tf_vendored(name = "tsl", path = "third_party/tsl")
+
+    tf_http_archive(
+        name = "snappy",
+        build_file = "//third_party:snappy.BUILD",
+        sha256 = "736aeb64d86566d2236ddffa2865ee5d7a82d26c9016b36218fcc27ea4f09f86",
+        strip_prefix = "snappy-1.2.1",
+        urls = tf_mirror_urls("https://github.com/google/snappy/archive/refs/tags/1.2.1.tar.gz"),
+    )
 
     _dummy_repos(mctx)
 

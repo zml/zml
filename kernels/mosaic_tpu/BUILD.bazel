@@ -1,0 +1,24 @@
+load("@rules_zig//zig:defs.bzl", "zig_library", "zig_test")
+
+zig_library(
+    name = "mosaic_tpu_builder",
+    tags = ["manual"],
+    srcs = [
+        "dtype.zig",
+    ],
+    import_name = "kernels/mosaic_tpu/builder",
+    main = "builder.zig",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//kernels/common",
+        "//mlir",
+        "//mlir/dialects",
+        "//mlir/dialects/mosaic_tpu",
+        "//stdx",
+    ],
+)
+
+zig_test(
+    name = "test",
+    deps = [":mosaic_tpu_builder"],
+)

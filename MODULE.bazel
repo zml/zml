@@ -135,29 +135,6 @@ pip.parse(
 )
 use_repo(pip, "xprof_nightly")
 
-# For Triton generation
-pip.parse(
-    download_only = True,
-    hub_name = "triton_py_deps",
-    python_version = "3.12",
-    requirements_lock = "//zml/attention/triton:requirements.lock.txt",
-    target_platforms = [
-        "linux_x86_64",
-        "linux_arm64",
-    ],
-)
-use_repo(pip, "triton_py_deps")
-
-# For TPU IR generation
-pip.parse(
-    download_only = False,
-    hub_name = "tpu_py_deps",
-    python_version = "3.12",
-    requirements_lock = "//platforms/tpu:requirements.lock.txt",
-    target_platforms = ["linux_x86_64"],
-)
-use_repo(pip, "tpu_py_deps")
-
 cpu = use_extension("//platforms/cpu:cpu.bzl", "cpu_pjrt_plugin")
 use_repo(cpu, "libpjrt_cpu_darwin_amd64", "libpjrt_cpu_darwin_arm64", "libpjrt_cpu_linux_amd64")
 
@@ -179,7 +156,7 @@ use_repo(zls, "zls_toolchains")
 register_toolchains("@zls_toolchains//:all")
 
 non_module_deps = use_extension("//:third_party/non_module_deps.bzl", "non_module_deps")
-use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg")
+use_repo(non_module_deps, "arocc", "cloud_accelerator_diagnostics", "com_google_sentencepiece", "flashattn_linux_amd64", "flashattn_linux_arm64", "iree", "libvaxis", "linenoise", "mnist", "org_swig_swig", "stb", "translate-c", "uucode", "xla", "zigimg", "mosaic_tpu")
 
 xla = use_extension("//third_party/xla:xla.bzl", "xla")
 use_repo(
@@ -203,6 +180,9 @@ use_repo(
     "sycl_configure_ext",
     "triton",
     "tsl",
+    "highwayhash",
+    "snappy",
+    "hwloc",
 )
 
 llvm = use_extension("//third_party/xla:llvm.bzl", "llvm")

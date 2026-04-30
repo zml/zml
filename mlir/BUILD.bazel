@@ -8,11 +8,15 @@ cc_library(
     hdrs = ["mlir.h"],
     visibility = ["//mlir:__subpackages__"],
     deps = [
+        "@llvm-project//mlir:AffineDialect",
         "@llvm-project//mlir:CAPIArith",
+        "@llvm-project//mlir:CAPICF",
         "@llvm-project//mlir:CAPIIR",
         "@llvm-project//mlir:CAPIMath",
+        "@llvm-project//mlir:CAPIMemRef",
         "@llvm-project//mlir:CAPISCF",
         "@llvm-project//mlir:CAPITransforms",
+        "@llvm-project//mlir:CAPIVector",
         "@llvm-project//mlir:FuncExtensions",
     ],
 )
