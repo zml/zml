@@ -155,7 +155,7 @@ pub const TensorStore = struct {
 
             switch (@typeInfo(@TypeOf(partitioning))) {
                 .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
-                .@"enum_literal" => switch (partitioning) {
+                .enum_literal => switch (partitioning) {
                     .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
                     else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
                 },

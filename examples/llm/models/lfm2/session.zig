@@ -109,7 +109,6 @@ pub const Session = struct {
         @memset(tokens, self.config.pad_token_id);
         @memcpy(tokens[0..all_tokens.len], all_tokens);
 
-
         var tokens_buf: zml.Buffer = try .fromSlice(self.io, self.platform, tokens_slice, .replicated);
         defer tokens_buf.deinit();
 

@@ -22,7 +22,7 @@ pub const Shardings = struct {
     }
 
     pub fn all(self: *const Shardings) [1]*const zml.sharding.Sharding {
-        return .{ &self.model };
+        return .{&self.model};
     }
 };
 
