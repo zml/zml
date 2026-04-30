@@ -119,17 +119,19 @@ pub const CompilationContext = struct {
             }
         }
 
+        // Ensure replicated sharding is always included as a fallback option.
         const shardings = shardings: {
-            const has_replicated = for (opts.shardings) |sharding| {
-                if (sharding == platform.replicated_sharding) break true;
-            } else false;
+            const needs_replicated = blk: {
+                 for (opts.shardings) |sharding| {
+                     if (sharding == platform.replicated_sharding) break :blk false;
+                 }
+                 break :blk true;
+             };
 
-            const len = opts.shardings.len + @intFromBool(!has_replicated);
-            const res = arena.allocator().alloc(*const Sharding, len) catch unreachable;
-            @memcpy(res[0..opts.shardings.len], opts.shardings);
-            if (!has_replicated) {
-                res[opts.shardings.len] = platform.replicated_sharding;
-            }
+            const base_len = opts.shardings.len;
+            const res = arena.allocator().alloc(*const Sharding, base_len + @intFromBool(needs_replicated)) catch unreachable;
+            @memcpy(res[0..base_len], opts.shardings);
+            if (needs_replicated) res[base_len] = platform.replicated_sharding;
             break :shardings res;
         };
 
