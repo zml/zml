@@ -123,18 +123,9 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena.allocator());
 
     const build_workspace_directory = init.environ_map.get("BUILD_WORKSPACE_DIRECTORY").?;
-    const execution_root = if (init.environ_map.get("BAZEL_EXECUTION_ROOT")) |value|
-        value
-    else blk: {
-        const output_base_result = try std.process.run(arena.allocator(), init.io, .{
-            .argv = &.{
-                "bazel",
-                "info",
-                "execution_root",
-            },
-            .cwd = .{ .path = build_workspace_directory },
-        });
-        break :blk std.mem.trimEnd(u8, output_base_result.stdout, "\n");
+    const build_execroot = init.environ_map.get("BUILD_EXECROOT") orelse b: {
+        std.debug.print("=== BUILD_EXECROOT environment variable not found, using empty string as fallback ===\n", .{});
+        break :b "";
     };
 
     var output = try readBuildConfig(
@@ -154,8 +145,8 @@ pub fn main(init: std.process.Init) !void {
         u8,
         arena.allocator(),
         output,
-        "@@__BAZEL_EXECUTION_ROOT__@@",
-        execution_root,
+        "@@__BUILD_EXECROOT__@@",
+        build_execroot,
     );
 
     var stdout_buf: [4096]u8 = undefined;
