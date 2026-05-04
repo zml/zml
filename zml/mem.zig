@@ -366,6 +366,11 @@ fn bufferizeInner(allocator: std.mem.Allocator, model: anytype, bufferized_: *Bu
                 else => unreachable,
             }
         },
+        .array => {
+            for (model, bufferized_) |src, *dst| {
+                try bufferizeInner(allocator, src, dst);
+            }
+        },
         .void, .int, .@"enum", .bool, .enum_literal, .float, .vector => {},
         else => unreachable,
     }

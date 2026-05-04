@@ -27,6 +27,8 @@ zig-out/
 # Python slope
 .venv
 venv
+pyproject.toml
+uv.lock
 
 # Editor specific
 ## Neovim
@@ -42,3 +44,6 @@ devenv.local.yaml
 
 # pre-commit
 .pre-commit-config.yaml
+
+# Python
+__pycache__/

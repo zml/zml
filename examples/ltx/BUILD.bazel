@@ -1,0 +1,42 @@
+load("@bazel_skylib//rules:build_test.bzl", "build_test")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_test")
+
+zig_binary(
+    name = "inference",
+    main = "inference.zig",
+    srcs = [
+        "audio_vae.zig",
+        "conv_ops.zig",
+        "image_loading.zig",
+        "model.zig",
+        "text_embeddings.zig",
+        "upsampler.zig",
+        "video_vae.zig",
+        "video_vae_encoder.zig",
+        "vocoder.zig",
+    ],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//zml",
+        "@stb//:stb",
+    ],
+)
+
+build_test(
+    name = "test",
+    targets = [
+        ":inference",
+    ],
+)
+
+zig_test(
+    name = "video_vae_test",
+    main = "video_vae.zig",
+    srcs = [
+        "conv_ops.zig",
+        "upsampler.zig",
+    ],
+    deps = [
+        "//zml",
+    ],
+)
