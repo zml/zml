@@ -79,13 +79,15 @@ pub fn main(init: std.process.Init) !void {
 }
 
 pub fn runFullPipeline(zml_handler: Zml_handler) !void {
+
     const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
     
-    // text2music : think = false, initial latents initialized from noise
-    // cover : think = true, initial latents initialized from audio codes
+    // think = false : text2music mode, initial latents initialized from noise
+    // think = true  : cover mode     , initial latents initialized from audio codes
     const think = true;
-    // text2music, overrides the generated duration metadata
-    const target_duration: u32 = 12;
+    
+    // in text2music, overrides the generated duration metadata
+    const target_duration = "12";
     
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
@@ -95,14 +97,19 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     defer acellm.deinit(zml_handler.allocator);
 
     var audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    if (!think) audio_metadata.setDuration(12);
-    const actual_duration = std.fmt.parseUnsigned(u32, audio_metadata.duration, 10) catch target_duration;
+    if (!think) audio_metadata.setDuration(target_duration);
+    const actual_duration = try std.fmt.parseUnsigned(u32, audio_metadata.duration, 10);
     defer audio_metadata.deinit(zml_handler.allocator);
+
+    const cond, const uncond, const audioc = try acellm_.cfgSequenceLengths(zml_handler, audio_metadata);
+    var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, acellm, cond, uncond, audioc);
+    defer acecfg.deinit();
     
-    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acellm) else .empty();
+    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acecfg) else .empty();
     defer audio_codes.deinit(zml_handler.allocator);
 
     acellm.unloadBuffers();
+    acecfg.unloadBuffers();
         
     // ------------------------------------------------
     // The text inputs of the DiT need to be embedded

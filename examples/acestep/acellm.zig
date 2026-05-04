@@ -5,28 +5,26 @@ const zml = @import("zml");
 const stdx = zml.stdx;
 
 const main = @import("main.zig");
+const inference = @import("inference.zig");
 
 const hz_type = .f32;
 const cfg: f32 = 1.0;
 
 const dialects = @import("mlir/dialects");
 
+// TODO: same mechanism in phase 1 to avoid sampling on the full sequence than on phase 2
 
 pub const AceLlm_handler = struct {
     model: AceLlm,
-    params: Params,
+    params: LlmParams,
     config: Config,
     options: Options,
     phase: Phase,
     tokenizer: zml.tokenizer.Tokenizer,
     prefill_exe: zml.Exe,
     decode_exe: zml.Exe,
-    prefill_exe_cfg: zml.Exe,
-    decode_exe_cfg: zml.Exe,
     model_buffers: zml.Bufferized(AceLlm),
     kv_cache_buffers: zml.Bufferized(KvCache),
-    // this models supports CFG generation: two kv caches are used for conditional and unconditional generation
-    kv_cache_buffers_cfg: zml.Bufferized(KvCache),
     
     pub fn initFromFile(zml_handler: main.Zml_handler) !AceLlm_handler {
         const model_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//model.safetensors";
@@ -45,17 +43,19 @@ pub const AceLlm_handler = struct {
             .seq_len = 256,
         };
         std.log.info("5Hz parsed", .{});
+
+        const tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+        const phase = try buildTokenMasks(zml_handler.allocator, tokenizer, config.vocab_size);
         
         std.log.info("5Hz initialize model", .{});
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
         defer store.deinit();
-        const model: AceLlm = try .init(zml_handler.allocator, store.view().withPrefix("model"), config);
+        const model: AceLlm = try .init(zml_handler.allocator, store.view().withPrefix("model"), config, phase);
         std.log.info("5Hz initialized", .{});
     
         // Specify shapes of input arguments
         const dtype = model.embed_tokens.weight.dtype();
-        const voc_size: usize = @intCast(model.embed_tokens.weight.dim(.voc));
-        const params: Params = .{
+        const params: LlmParams = .{
             .prefill_tokens = .init(.{ .s = acellm_options.seq_len }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
             .token_index = .init(.{ .s = 1 }, .u32),
@@ -65,14 +65,11 @@ pub const AceLlm_handler = struct {
                 .h = config.num_key_value_heads,
                 .hd = config.head_dim orelse @divExact(config.hidden_size, config.num_attention_heads),
             }, dtype), zml_handler.io),
-            .phase_mask = .init( .{ .voc = voc_size }, .f32),
             .rng = .init(),
             .shardings = try .init(zml_handler.platform),
         };
         
         const prefill_exe, const decode_exe = try compileModel(zml_handler, model, params);
-        const tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
-        const phase = try buildTokenMasks(zml_handler.allocator, tokenizer, voc_size);
         
         std.log.info("5Hz load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
@@ -89,7 +86,6 @@ pub const AceLlm_handler = struct {
             .decode_exe = decode_exe,
             .model_buffers = model_buffers,
             .kv_cache_buffers = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.model),
-            .kv_cache_buffers_cfg = try params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.model),
         };
     }
     
@@ -107,35 +103,30 @@ pub const AceLlm_handler = struct {
         return parsed_config;
     }
     
-    pub fn compileModel(zml_handler: main.Zml_handler, model: AceLlm, params: Params) !struct { zml.Exe, zml.Exe } {
+    pub fn compileModel(zml_handler: main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings_arr,
         };
         // Compile the model twice, one for prefill, one for generation.
         std.log.info("5Hz compile prefill", .{});
-        const prefill_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{ params.prefill_tokens, params.token_index, params.kv_cache, params.rng, params.phase_mask }, opts);
+        const prefill_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
+           .{ params.prefill_tokens, params.token_index, params.kv_cache, params.rng }, opts);
         std.log.info("5Hz compile decode", .{});
-        const decode_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward, .{ params.decode_tokens, params.token_index, params.kv_cache, params.rng, params.phase_mask }, opts);
+        const decode_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
+           .{ params.decode_tokens, params.token_index, params.kv_cache, params.rng }, opts);
         std.log.info("5Hz compiled models", .{});
         return .{ prefill_exe, decode_exe };
-    }
-
-    pub fn resetKvCache(self: *AceLlm_handler, zml_handler: main.Zml_handler) !void {
-        KvCache.deinitBuffer(&self.kv_cache_buffers);
-        self.kv_cache_buffers = try self.params.kv_cache.initBuffer(zml_handler.io, zml_handler.platform, self.params.shardings.model);
     }
     
     pub fn unloadBuffers(self: *AceLlm_handler) void {
         AceLlm.unloadBuffers(&self.model_buffers);
         KvCache.deinitBuffer(&self.kv_cache_buffers);
-        KvCache.deinitBuffer(&self.kv_cache_buffers_cfg);
     }
     
     pub fn deinit(self: *AceLlm_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.phase.deinit(allocator);
         self.tokenizer.deinit();
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
@@ -144,24 +135,54 @@ pub const AceLlm_handler = struct {
 };
 
 pub const AceCfg_handler = struct {
-    model: AceLlm,
-    params: Params,
-    config: Config,
-    options: Options,
-    phase: Phase,
+    llm: AceLlm_handler,
+    params: CfgParams,
     prefill_exe: zml.Exe,
     decode_exe: zml.Exe,
-    model_buffers: zml.Bufferized(AceLlm),
-    kv_cache_buffers: zml.Bufferized(KvCache),
-    // this models supports CFG generation: two kv caches are used for conditional and unconditional generation
-    kv_cache_buffers_cfg: zml.Bufferized(KvCache),
+    cond_kv_cache_buffers: zml.Bufferized(KvCache),
+    uncond_kv_cache_buffers: zml.Bufferized(KvCache),
     
-    pub fn initFromLlm(acellm: AceLlm_handler) !AceCfg_handler {
+    pub fn initFromLlm(zml_handler: main.Zml_handler, acellm: AceLlm_handler, cont_tok: u32, uncond_tok: u32, audiocodes: u32) !AceCfg_handler {
+        const dtype = acellm.model.embed_tokens.weight.dtype();
+        const cond_seq_len = cont_tok + audiocodes;
+        const uncond_seq_len = uncond_tok + audiocodes;
+        const params: CfgParams = .{
+            .prefill_cond_tokens = .init(.{ .s = cond_seq_len }, .u32),
+            .prefill_uncond_tokens = .init(.{ .s = uncond_seq_len }, .u32),
+            .decode_cond_token = .init(.{ .s = 1 }, .u32),
+            .decode_uncond_token = .init(.{ .s = 1 }, .u32),
+            .cond_token_index = .init(.{ .s = 1 }, .u32),
+            .uncond_token_index = .init(.{ .s = 1 }, .u32),
+            .cond_next_token_index = .init(.{ .s = 1 }, .u32),
+            .uncond_next_token_index = .init(.{ .s = 1 }, .u32),
+            .cond_kv_cache = .init(zml.Shape.init(.{
+                .layer = acellm.model.layers.len,
+                .k = cond_seq_len,
+                .h = acellm.config.num_key_value_heads,
+                .hd = acellm.config.head_dim orelse @divExact(acellm.config.hidden_size, acellm.config.num_attention_heads),
+            }, dtype), zml_handler.io),
+            .uncond_kv_cache = .init(zml.Shape.init(.{
+                .layer = acellm.model.layers.len,
+                .k = uncond_seq_len,
+                .h = acellm.config.num_key_value_heads,
+                .hd = acellm.config.head_dim orelse @divExact(acellm.config.hidden_size, acellm.config.num_attention_heads),
+            }, dtype), zml_handler.io),
+            .rng = .init(),
+            .shardings = try .init(zml_handler.platform),
+        };
+        const prefill_exe, const decode_exe = try compileCfgModel(zml_handler, acellm.model, params);
         
+        return .{
+            .llm = acellm,
+            .params = params,
+            .prefill_exe = prefill_exe,
+            .decode_exe = decode_exe,
+            .cond_kv_cache_buffers = try params.cond_kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.model),
+            .uncond_kv_cache_buffers = try params.uncond_kv_cache.initBuffer(zml_handler.io, zml_handler.platform, params.shardings.model),
+        };
     }
-    
    
-    pub fn compileCfgModel(zml_handler: main.Zml_handler, model: AceLlm, params: Params) !struct { zml.Exe, zml.Exe } {
+    pub fn compileCfgModel(zml_handler: main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings_arr,
@@ -173,7 +194,13 @@ pub const AceCfg_handler = struct {
             zml_handler.io,
             model,
             .forwardCfg,
-            .{ params.prefill_tokens, params.token_index, params.kv_cache, params.rng, params.phase_mask },
+            .{
+                params.prefill_cond_tokens, params.prefill_uncond_tokens,
+                params.cond_token_index, params.uncond_token_index,
+                params.cond_next_token_index, params.uncond_next_token_index,
+                params.cond_kv_cache, params.uncond_kv_cache,
+                params.rng,
+            },
             opts,
         );
         std.log.info("5Hz compile cfg decode", .{});
@@ -182,40 +209,54 @@ pub const AceCfg_handler = struct {
             zml_handler.io,
             model,
             .forwardCfg,
-            .{ params.decode_tokens, params.token_index, params.kv_cache, params.rng, params.phase_mask },
+            .{
+                params.decode_cond_token, params.decode_uncond_token,
+                params.cond_token_index, params.uncond_token_index,
+                params.cond_next_token_index, params.uncond_next_token_index,
+                params.cond_kv_cache, params.uncond_kv_cache,
+                params.rng,
+            },
             opts,
         );
         std.log.info("5Hz compiled models", .{});
         return .{ prefill_exe, decode_exe };
     }
 
-    
-    pub fn unloadBuffers(self: *AceLlm_handler) void {
-        AceLlm.unloadBuffers(&self.model_buffers);
-        KvCache.deinitBuffer(&self.kv_cache_buffers);
-        KvCache.deinitBuffer(&self.kv_cache_buffers_cfg);
+    pub fn unloadBuffers(self: *AceCfg_handler) void {
+        KvCache.deinitBuffer(&self.cond_kv_cache_buffers);
+        KvCache.deinitBuffer(&self.uncond_kv_cache_buffers);
     }
     
-    pub fn deinit(self: *AceLlm_handler, allocator: std.mem.Allocator) void {
-        self.model.deinit(allocator);
-        self.config.deinit(allocator);
-        self.phase.deinit(allocator);
-        self.tokenizer.deinit();
+    pub fn deinit(self: *AceCfg_handler) void {
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
     }
+    
 };
 
 
-pub const Params = struct {
+pub const LlmParams = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
     kv_cache: KvCache,
-    phase_mask: zml.Tensor,
     rng: zml.Tensor.Rng,
     shardings: main.Shardings,
-    // cfg generation
+};
+
+pub const CfgParams = struct {
+    prefill_cond_tokens: zml.Tensor,
+    prefill_uncond_tokens: zml.Tensor,
+    decode_cond_token: zml.Tensor,
+    decode_uncond_token: zml.Tensor,
+    cond_token_index: zml.Tensor,
+    uncond_token_index: zml.Tensor,
+    cond_next_token_index: zml.Tensor,
+    uncond_next_token_index: zml.Tensor,
+    cond_kv_cache: KvCache,
+    uncond_kv_cache: KvCache,
+    rng: zml.Tensor.Rng,
+    shardings: main.Shardings,
 };
 
 pub const Config = struct {
@@ -234,7 +275,7 @@ pub const Config = struct {
     rms_norm_eps: f32,
     tie_word_embeddings: bool = false,
     rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
-    // todo vocab_size: u32,
+    vocab_size: u32,
 
     pub fn dupe(self: Config, allocator: std.mem.Allocator) !Config {
         return .{
@@ -253,6 +294,7 @@ pub const Config = struct {
             .rms_norm_eps = self.rms_norm_eps,
             .tie_word_embeddings = self.tie_word_embeddings,
             .rope_scaling = self.rope_scaling,
+            .vocab_size = self.vocab_size,
         };
     }
 
@@ -269,49 +311,55 @@ pub const Options = struct {
 };
 
 pub const Phase = struct {
-    phase1_mask: []f32,
-    phase2_mask: []f32,
-    eos_id: u32,
-
-    pub fn deinit(self: Phase, allocator: std.mem.Allocator) void {
-        allocator.free(self.phase1_mask);
-        allocator.free(self.phase2_mask);
-    }
+    text_voc_size: u32,
+    codes_voc_size: u32,
+    phase1_voc: zml.Tensor.Slice,
+    phase2_voc: zml.Tensor.Slice,
 };
 
 
 pub fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, voc_size: usize) !Phase {
     var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
-    var tokens_audio: std.ArrayList(f32) = try .initCapacity(allocator, voc_size);
-    var tokens_text: std.ArrayList(f32) = try .initCapacity(allocator, voc_size);
     const token_slice = try allocator.alloc(u32, 1);
     defer allocator.free(token_slice);
+    var text_voc_size: u32 = 0;
     for (0..voc_size) |i| {
-        token_slice[0] = @intCast(i);
+        const id: u32 = @intCast(i);
+        token_slice[0] = id;
         const chunk = try tokenizer_decoder.decode(token_slice);
         const l = chunk.len;
         if (l < 16) {
-            try tokens_audio.append(allocator, -1e10);
-            try tokens_text.append(allocator, 0.0);
+            continue;
         } else {
             if (std.mem.eql(u8, chunk[0..12], "<|audio_code")) {
-                try tokens_audio.append(allocator, 0.0);
-                try tokens_text.append(allocator, -1e10);
+                text_voc_size = @intCast(i);
+                break;
             } else {
-                try tokens_audio.append(allocator, -1e10);
-                try tokens_text.append(allocator, 0.0);
+                continue;
             }
         }
     }
-    const eos_id = tokenizer.tokenToId("<|im_end|>") orelse return error.NoSuchToken;
-    // in audio tokens mode, the eos is constrained at pos 5 * duration
-    tokens_audio.items[eos_id] = 1e-10;
     return .{
-        .phase1_mask = try tokens_text.toOwnedSlice(allocator),
-        .phase2_mask = try tokens_audio.toOwnedSlice(allocator),
-        .eos_id = eos_id,
+        .text_voc_size = text_voc_size,
+        .codes_voc_size = 64000,
+        .phase1_voc = .{ .start = 0, .end = text_voc_size },
+        .phase2_voc = .{ .start = text_voc_size, .end = text_voc_size + 64000 },
     };
+}
+
+pub fn cfgSequenceLengths(zml_handler: main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32, u32 } {
+    const token_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json";
+    var tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+    defer tokenizer.deinit();
+
+    const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, tokenizer, audio_metadata);
+    defer zml_handler.allocator.free(cond_tok);
+    defer zml_handler.allocator.free(uncond_tok);
+
+    const t = try std.fmt.parseUnsigned(u32, audio_metadata.duration, 10);
+    
+    return .{ @intCast(cond_tok.len), @intCast(uncond_tok.len), 5 * t };
 }
 
 
@@ -319,8 +367,9 @@ pub const AceLlm = struct {
     embed_tokens: zml.nn.TokenEmbedding,
     layers: []TransformerLayer,
     norm: RmsNorm,
+    phase: Phase,
  
-    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceLlm {
+    pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config, phase: Phase) !AceLlm {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
         for (layers, 0..) |*layer, i| {
@@ -334,6 +383,7 @@ pub const AceLlm = struct {
             ) },
             .layers = layers,
             .norm = .init(store.withPrefix("norm"), config),
+            .phase = phase,
         };
     }
 
@@ -358,38 +408,42 @@ pub const AceLlm = struct {
         RmsNorm.unloadBuffers(&self.norm);
     }
 
-    pub fn forward(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, rng: zml.Tensor.Rng, phase_mask: zml.Tensor) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache, phase_mask);
-        const next_tokens, const new_rng = sampleNucleus(logits, rng);
+    pub fn forward(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, rng: zml.Tensor.Rng) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
+        const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache);
+        const text_logits = logits.slice1d(.voc, self.phase.phase1_voc);
+        const next_tokens, const new_rng = sampleNucleus(text_logits, rng);
         return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache.reuseBuffer(kv_cache), new_rng };
     }
     
     pub fn forwardCfg(self: AceLlm,
         tokens_cond: zml.Tensor, tokens_uncond: zml.Tensor,
+        // this is the position in the generated sequence : 0 at prefill, prompt_length + i after i tokens generated
         token_index_cond: zml.Tensor, token_index_uncond: zml.Tensor,
+        // this is the position of the next generated token in the sequence : prompt_length - 1 at prefill, 0 at decode
+        pred_index_cond: zml.Tensor, pred_index_uncond: zml.Tensor,
         kv_cache_cond: KvCache, kv_cache_uncond: KvCache, 
         rng: zml.Tensor.Rng,
-        phase_mask: zml.Tensor
-    ) struct { zml.Tensor, KvCache, KvCache, zml.Tensor.Rng } {
-        const logits_cond, const updated_kv_cache_cond = self.computeLogits(tokens_cond, token_index_cond, kv_cache_cond, phase_mask);
-        const logits_uncond, const updated_kv_cache_uncond = self.computeLogits(tokens_uncond, token_index_uncond, kv_cache_uncond, phase_mask);
-        
-        // todo : use a tensor passed as argument to extract the right slice of logits
-        const next_logits_cond = logits_cond.choose1d(.s, tokens_cond.dim(.s) - 1);
-        const next_logits_uncond = logits_uncond.choose1d(.s, tokens_uncond.dim(.s) - 1);
-        
-        const next_logits = next_logits_uncond.add((next_logits_cond.sub(next_logits_uncond)).scale(cfg));
-        const next_tokens, const new_rng = sampleNucleus(next_logits, rng);
-        
+    ) struct { zml.Tensor, zml.Tensor, KvCache, KvCache, zml.Tensor.Rng } {
+        const logits_cond, const updated_kv_cache_cond = self.computeLogits(tokens_cond, token_index_cond, kv_cache_cond);
+        const logits_uncond, const updated_kv_cache_uncond = self.computeLogits(tokens_uncond, token_index_uncond, kv_cache_uncond);
+        const next_logits_cond = logits_cond.gather(.{ .s = pred_index_cond.rename(.{ .s = .pos }) }, .{}).rename(.{ .pos = .s  });
+        const next_logits_uncond = logits_uncond.gather(.{ .s = pred_index_uncond.rename(.{ .s = .pos }) }, .{}).rename(.{ .pos = .s });
+        const codes_logits_cond = next_logits_cond.slice1d(.voc, self.phase.phase2_voc);
+        const codes_logits_uncond = next_logits_uncond.slice1d(.voc, self.phase.phase2_voc);
+        const next_logits = codes_logits_uncond.add((codes_logits_cond.sub(codes_logits_uncond)).scale(cfg));
+        var next_token, const new_rng = sampleNucleus(next_logits, rng);
+        // next token is a position relative to the phase 2 voc slice, translate it back to the full voc slice
+        next_token = next_token.convert(tokens_cond.dtype()).addConstant(self.phase.text_voc_size);
         return .{
-            next_tokens.convert(tokens_cond.dtype()).reuseBuffer(tokens_cond),
+            next_token,
+            next_token,
             updated_kv_cache_cond.reuseBuffer(kv_cache_cond),
             updated_kv_cache_uncond.reuseBuffer(kv_cache_uncond),
             new_rng
         };
     }
     
-    pub fn computeLogits(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, phase_mask: zml.Tensor) struct { zml.Tensor, KvCache } {
+    pub fn computeLogits(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         const tok_id = token_index.squeeze(.s);
         var updated_kv_cache = kv_cache;
         // embbed input tokens
@@ -401,9 +455,7 @@ pub const AceLlm = struct {
         output = self.norm.forward(output);
         // compute logits for the output tokens
         const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).convert(hz_type).dot(output, .d);
-        // apply phase mask to select tokens from the valid subset
-        const masked_logits = logits.add(phase_mask.convert(hz_type).broad(logits.shape()));
-        return .{ masked_logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
+        return .{ logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
     }
     
     pub fn sampleNucleus(logits: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
