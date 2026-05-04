@@ -1,0 +1,53 @@
+diff --git a/third_party/grpc/bazel9_native_cc.patch b/third_party/grpc/bazel9_native_cc.patch
+new file mode 100644
+--- /dev/null
++++ b/third_party/grpc/bazel9_native_cc.patch
+@@ -0,0 +1,21 @@
++diff --git a/bazel/cc_grpc_library.bzl b/bazel/cc_grpc_library.bzl
++--- a/bazel/cc_grpc_library.bzl
+++++ b/bazel/cc_grpc_library.bzl
++@@ -14,7 +14,8 @@
++ """Generates and compiles C++ grpc stubs from proto_library rules."""
++ 
++ load("@com_google_protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+++load("@rules_cc//cc:cc_library.bzl", "cc_library")
++ load("@rules_proto//proto:defs.bzl", "proto_library")
++ load("//bazel:generate_cc.bzl", "generate_cc")
++ load("//bazel:protobuf.bzl", "well_known_proto_libs")
++ 
++@@ -114,7 +115,7 @@ def cc_grpc_library(
++             **kwargs
++         )
++ 
++-        native.cc_library(
+++        cc_library(
++             name = name,
++             srcs = [":" + codegen_grpc_target],
++             hdrs = [":" + codegen_grpc_target],
+diff --git a/MODULE.bazel b/MODULE.bazel
+--- a/MODULE.bazel
++++ b/MODULE.bazel
+@@ -54,5 +54,8 @@ single_version_override(
+ single_version_override(
+     module_name = "grpc",
+     patch_strip = 1,
+-    patches = ["//third_party/grpc:grpc.patch"],
++    patches = [
++        "//third_party/grpc:grpc.patch",
++        "//third_party/grpc:bazel9_native_cc.patch",
++    ],
+ )
+diff --git a/workspace2.bzl b/workspace2.bzl
+--- a/workspace2.bzl
++++ b/workspace2.bzl
+@@ -368,6 +368,9 @@ def workspace():
+         name = "com_github_grpc_grpc",
+         sha256 = "dd6a2fa311ba8441bbefd2764c55b99136ff10f7ea42954be96006a2723d33fc",
+         strip_prefix = "grpc-1.74.0",
+-        patch_file = ["//third_party/grpc:grpc.patch"],
++        patch_file = [
++            "//third_party/grpc:grpc.patch",
++            "//third_party/grpc:bazel9_native_cc.patch",
++        ],
+         urls = tf_mirror_urls("https://github.com/grpc/grpc/archive/refs/tags/v1.74.0.tar.gz"),
+     )

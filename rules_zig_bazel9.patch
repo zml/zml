@@ -1,0 +1,11 @@
+diff --git a/zig/private/bzlmod/cc_common_link.bzl b/zig/private/bzlmod/cc_common_link.bzl
+--- a/zig/private/bzlmod/cc_common_link.bzl
++++ b/zig/private/bzlmod/cc_common_link.bzl
+@@ -6,6 +6,7 @@ exports_files(["cc_common_link.bzl"])
+ """)
+     rctx.file("cc_common_link.bzl", """\
+ def cc_common_link(*args, **kwargs):
++    kwargs.pop("main_output", None)
+     return cc_common.link(*args, **kwargs)
+ """)
+ 

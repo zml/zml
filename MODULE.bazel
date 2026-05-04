@@ -20,7 +20,7 @@ single_version_override(
 
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
-bazel_dep(name = "rules_cc", version = "0.2.16")
+bazel_dep(name = "rules_cc", version = "0.2.17")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
@@ -32,14 +32,33 @@ bazel_dep(name = "rules_zig", version = "0.12.2")
 git_override(
     module_name = "rules_zig",
     commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
+    patch_strip = 1,
+    patches = ["//:rules_zig_bazel9.patch"],
     remote = "https://github.com/zml/rules_zig.git",
 )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
-bazel_dep(name = "llvm", version = "0.7.1")
+bazel_dep(name = "llvm", version = "0.7.3")
 bazel_dep(name = "jsoncpp", version = "1.9.6", repo_name = "jsoncpp_git")
+single_version_override(
+    module_name = "jsoncpp",
+    patch_strip = 1,
+    patches = ["//third_party/jsoncpp:bazel9_loads.patch"],
+    version = "1.9.6",
+)
+
 bazel_dep(name = "with_cfg.bzl", version = "0.14.4")
 bazel_dep(name = "grpc", version = "1.74.0")
+
+single_version_override(
+    module_name = "rules_foreign_cc",
+    version = "0.15.1",
+)
+
+single_version_override(
+    module_name = "rules_go",
+    version = "0.60.0",
+)
 
 bazel_dep(name = "buildifier_prebuilt", version = "8.5.1", dev_dependency = True)
 
@@ -60,7 +79,6 @@ use_repo(
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
-    translate_c = "@translate-c",
     zig_version = "0.16.0",
 )
 zig.mirrors(urls = [
@@ -139,7 +157,6 @@ use_repo(pip, "xprof_nightly")
 # For Triton generation
 pip.parse(
     download_only = True,
-    hub_name = "triton_py_deps",
     extra_pip_args = [
         "--abi=cp312",
         "--implementation=cp",
@@ -151,6 +168,7 @@ pip.parse(
         "--platform=manylinux_2_29_x86_64",
         "--platform=manylinux_2_37_x86_64",
     ],
+    hub_name = "triton_py_deps",
     python_version = "3.12",
     requirements_lock = "//zml/attention/triton:requirements.lock.txt",
     target_platforms = ["linux_x86_64"],
