@@ -18,17 +18,14 @@ pub const AceVae_handler = struct {
     model_buffers: zml.Bufferized(AceVae),
     shardings: main.Shardings,
 
-    pub fn initFromFile(zml_handler: main.Zml_handler, target_duration: u32) !AceVae_handler {
-        const model_path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//diffusion_pytorch_model.safetensors";
-        const config_path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//config.json";
-
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
-        
-        var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, model_path);
+    pub fn init(zml_handler: main.Zml_handler, target_duration: u32) !AceVae_handler {
+        std.log.info("VAE init", .{});
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, "diffusion_pytorch_model.safetensors");
         defer registry.deinit();
 
         std.log.info("VAE config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, config_path);
+        const parsed_config = try parseConfig(zml_handler, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("VAE parsed", .{});
@@ -59,7 +56,7 @@ pub const AceVae_handler = struct {
         std.log.info("VAE compiled models", .{});
         
         std.log.info("VAE load buffers", .{});
-        const model_buffers = try model.load(zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, &store, &shardings.all());
+        const model_buffers = try model.load(zml_handler, &store, &shardings.all());
         std.log.info("VAE loaded buffers", .{});
         
         return .{
@@ -73,6 +70,48 @@ pub const AceVae_handler = struct {
         };
     }
 
+    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
+        const parsed_config = blk: {
+            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
+            defer config_json_file.close(zml_handler.io);
+            var config_json_buffer: [256]u8 = undefined;
+            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
+            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
+            defer reader.deinit();
+            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
+        };
+        errdefer parsed_config.deinit();
+        return parsed_config;
+    }
+
+    pub fn compileDecodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings.all(),
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .decode,
+            .{ parameters.latents },
+            opts,
+        );
+    }
+    
+    pub fn compileEncodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings.all(),
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .encode,
+            .{ parameters.audio },
+            opts,
+        );
+    }
+    
     pub fn unloadBuffers(self: *AceVae_handler) void {
         AceVae.unloadBuffers(&self.model_buffers);
     }
@@ -118,50 +157,6 @@ pub const Config = struct {
     }
 };
 
-pub fn parseConfig(zml_handler: main.Zml_handler, path: []const u8) !std.json.Parsed(Config) {
-    const parsed_config = blk: {
-        const config_json_file = try std.Io.Dir.openFileAbsolute(zml_handler.io, path, .{});
-        defer config_json_file.close(zml_handler.io);
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-        var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-        defer reader.deinit();
-        break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{
-            .ignore_unknown_fields = true,
-        });
-    };
-    errdefer parsed_config.deinit();
-    return parsed_config;
-}
-
-pub fn compileDecodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings.all(),
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .decode,
-        .{ parameters.latents },
-        opts,
-    );
-}
-
-pub fn compileEncodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings.all(),
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .encode,
-        .{ parameters.audio },
-        opts,
-    );
-}
-
 
 pub const AceVae = struct {
     encoder: OobleckEncoder,
@@ -174,12 +169,15 @@ pub const AceVae = struct {
         };
     }
 
-    pub fn load(self: *const AceVae, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
-        return zml.io.load(AceVae, self, allocator, io, platform, store, .{
+    pub fn load(self: *const AceVae, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
+        var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
+        defer progress.end();
+        return zml.io.load(AceVae, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
         });
     }
 

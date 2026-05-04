@@ -19,16 +19,15 @@ pub const AceDit_handler = struct {
     model_buffers: zml.Bufferized(AceDit),
     shardings: main.Shardings,
     
-    pub fn initFromFile(zml_handler: main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
-        const model_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//model.safetensors";
-        const config_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//config.json";
-        var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, model_path);
+    pub fn init(zml_handler: main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
         
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
     
         std.log.info("DiT parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, config_path);
+        const parsed_config = try parseConfig(zml_handler, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("DiT parsed", .{});
@@ -66,6 +65,36 @@ pub const AceDit_handler = struct {
             .shardings = shardings,
         };
     }
+
+    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
+        const parsed_config = blk: {
+            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
+            defer config_json_file.close(zml_handler.io);
+            var config_json_buffer: [256]u8 = undefined;
+            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
+            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
+            defer reader.deinit();
+            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
+        };
+        errdefer parsed_config.deinit();
+        return parsed_config;
+    }
+
+    pub fn compileModel(zml_handler: main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !zml.Exe {
+        const shardings_arr = shardings.all();
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings_arr,
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .forward,
+            .{ params.t_curr, params.t_next, params.x, params.context_latents, params.y },
+            opts,
+        );
+    }
+
     
     pub fn unloadBuffers(self: *AceDit_handler) void {
         AceDit.unloadBuffers(&self.model_buffers);
@@ -188,35 +217,6 @@ pub const DecoderLayerType = enum {
     sliding_attention,
 };
 
-pub fn parseConfig(zml_handler: main.Zml_handler, path: []const u8) !std.json.Parsed(Config) {
-    const parsed_config = blk: {
-        const config_json_file = try std.Io.Dir.openFileAbsolute(zml_handler.io, path, .{});
-        defer config_json_file.close(zml_handler.io);
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-        var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-        defer reader.deinit();
-        break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
-    };
-    errdefer parsed_config.deinit();
-    return parsed_config;
-}
-
-pub fn compileModel(zml_handler: main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !zml.Exe {
-    const shardings_arr = shardings.all();
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings_arr,
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .forward,
-        .{ params.t_curr, params.t_next, params.x, params.context_latents, params.y },
-        opts,
-    );
-}
-
 
 pub const AceDit = struct {
     condition_embedder: zml.nn.Linear,
@@ -259,11 +259,14 @@ pub const AceDit = struct {
     }
 
     pub fn load(self: *const AceDit, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceDit) {
-        return zml.io.load(AceDit, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
+        var progress = zml_handler.progress.start("Load DiT weights", store.registry.tensors.count());
+        defer progress.end();
+        return zml.io.load(AceDit, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
         });
     }
     

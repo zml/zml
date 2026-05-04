@@ -11,25 +11,22 @@ const hz_type = .f32;
 
 pub const AceEmb_handler = struct {
     model: AceEmb,
-    params: AceEmbParams,
-    config: AceEmb.Config,
+    params: Params,
+    config: Config,
     tokenizer: zml.tokenizer.Tokenizer,
     partial_embed_exe: zml.Exe,
     full_embed_exe: zml.Exe,
     model_buffers: zml.Bufferized(AceEmb),
 
-    pub fn initFromFile(zml_handler: main.Zml_handler, full_seq_len: u32, embed_seq_len: u32) !AceEmb_handler {
-        const model_path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//model.safetensors";
-        const token_path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//tokenizer.json";
-        const config_path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//config.json";
-
-        var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, model_path);
+    pub fn init(zml_handler: main.Zml_handler, full_seq_len: u32, embed_seq_len: u32) !AceEmb_handler {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
         
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
 
         std.log.info("EMB parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, config_path);
+        const parsed_config = try parseConfig(zml_handler, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("EMB parsed", .{});
@@ -40,7 +37,7 @@ pub const AceEmb_handler = struct {
         const model: AceEmb = try .init(zml_handler.allocator, store.view(), config);
         std.log.info("EMB initialized", .{});
         
-        const params: AceEmbParams = .{
+        const params: Params = .{
             .full_embed_tokens = .init(.{ .s = full_seq_len }, .u32),
             .partial_embed_tokens = .init(.{ .s = embed_seq_len }, .u32),
             .shardings = try .init(zml_handler.platform),
@@ -51,10 +48,10 @@ pub const AceEmb_handler = struct {
         std.log.info("EMB compiled full model", .{});
         const partial_embed_exe = try compilePartialModel(zml_handler, model, params);
         std.log.info("EMB compiled partial model", .{});
-        const tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+        const tokenizer = try loadTokenizer(zml_handler, repo);
         
         std.log.info("EMB load buffers", .{});
-        const model_buffers = try model.load(zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, &store, &params.shardings.all());
+        const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
         std.log.info("EMB loaded", .{});
 
         return .{
@@ -66,6 +63,58 @@ pub const AceEmb_handler = struct {
             .partial_embed_exe = partial_embed_exe,
             .model_buffers = model_buffers,
         };
+    }
+
+    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
+        const parsed_config = blk: {
+            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
+            defer config_json_file.close(zml_handler.io);
+            var config_json_buffer: [256]u8 = undefined;
+            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
+            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
+            defer reader.deinit();
+            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
+        };
+        errdefer parsed_config.deinit();
+        return parsed_config;
+    }
+    
+    pub fn loadTokenizer(zml_handler: main.Zml_handler, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+        const tokenizer_json_file = try dir.openFile(zml_handler.io, "tokenizer.json", .{});
+        defer tokenizer_json_file.close(zml_handler.io);
+        var reader = tokenizer_json_file.reader(zml_handler.io, &.{});
+        const bytes = try reader.interface.readAlloc(zml_handler.allocator, try tokenizer_json_file.length(zml_handler.io));
+        defer zml_handler.allocator.free(bytes);
+        return try .fromBytes(zml_handler.allocator, zml_handler.io, bytes);
+    }
+    
+    pub fn compileFullModel(zml_handler: main.Zml_handler, model: AceEmb, parameters: Params) !zml.Exe {
+        const shardings_arr = parameters.shardings.all();
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings_arr,
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .forward,
+            .{ parameters.full_embed_tokens },
+            opts,
+        );
+    }
+    
+    pub fn compilePartialModel(zml_handler: main.Zml_handler, model: AceEmb, parameters: Params) !zml.Exe {
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &parameters.shardings.all(),
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .embed,
+            .{ parameters.partial_embed_tokens },
+            opts,
+        );
     }
 
     pub fn unloadBuffers(self: *AceEmb_handler) void {
@@ -81,59 +130,55 @@ pub const AceEmb_handler = struct {
     }
 };
 
-pub const AceEmbParams = struct {
+pub const Params = struct {
     full_embed_tokens: zml.Tensor,
     partial_embed_tokens: zml.Tensor,
     shardings: main.Shardings,
 };
 
+pub const Config = struct {
+    bos_token_id: u32,
+    eos_token_id: u32,
+    head_dim: ?u32 = null,
+    hidden_size: u32,
+    num_hidden_layers: u32,
+    num_attention_heads: u32,
+    num_key_value_heads: u32,
+    rope_theta: f32,
+    max_position_embeddings: u32,
+    rms_norm_eps: f32,
+    tie_word_embeddings: bool = true,
+    rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
+    vocab_size: u32,
 
-pub fn parseConfig(zml_handler: main.Zml_handler, path: []const u8) !std.json.Parsed(AceEmb.Config) {
-    const parsed_config = blk: {
-        const config_json_file = try std.Io.Dir.openFileAbsolute(zml_handler.io, path, .{});
-        defer config_json_file.close(zml_handler.io);
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-        var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-        defer reader.deinit();
-        break :blk try std.json.parseFromTokenSource(AceEmb.Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true, });
-    };
-    errdefer parsed_config.deinit();
-    return parsed_config;
-}
+    pub fn dupe(self: Config, allocator: std.mem.Allocator) !Config {
+        _ = allocator;
+        return .{
+            .bos_token_id = self.bos_token_id,
+            .eos_token_id = self.eos_token_id,
+            .head_dim = self.head_dim,
+            .hidden_size = self.hidden_size,
+            .num_hidden_layers = self.num_hidden_layers,
+            .num_attention_heads = self.num_attention_heads,
+            .num_key_value_heads = self.num_key_value_heads,
+            .rope_theta = self.rope_theta,
+            .max_position_embeddings = self.max_position_embeddings,
+            .rms_norm_eps = self.rms_norm_eps,
+            .tie_word_embeddings = self.tie_word_embeddings,
+            .rope_scaling = self.rope_scaling,
+            .vocab_size = self.vocab_size,
+        };
+    }
 
-pub fn compileFullModel(zml_handler: main.Zml_handler, model: AceEmb, parameters: AceEmbParams) !zml.Exe {
-    const shardings_arr = parameters.shardings.all();
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings_arr,
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .forward,
-        .{ parameters.full_embed_tokens },
-        opts,
-    );
-}
+    pub fn deinit(self: Config, _: std.mem.Allocator) void {
+        _ = self;
+    }
+};
 
-pub fn compilePartialModel(zml_handler: main.Zml_handler, model: AceEmb, parameters: AceEmbParams) !zml.Exe {
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &parameters.shardings.all(),
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .embed,
-        .{ parameters.partial_embed_tokens },
-        opts,
-    );
-}
 
 pub fn embeddingLengths(zml_handler: main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32 } {
-    const token_path = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B//tokenizer.json";
-    var tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
+    var tokenizer = try AceEmb_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
     
     const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata);
@@ -152,45 +197,6 @@ pub const AceEmb = struct {
     layers: []TransformerLayer,
     norm: RmsNorm,
 
-    pub const Config = struct {
-        bos_token_id: u32,
-        eos_token_id: u32,
-        head_dim: ?u32 = null,
-        hidden_size: u32,
-        num_hidden_layers: u32,
-        num_attention_heads: u32,
-        num_key_value_heads: u32,
-        rope_theta: f32,
-        max_position_embeddings: u32,
-        rms_norm_eps: f32,
-        tie_word_embeddings: bool = true,
-        rope_scaling: zml.nn.RopeOpts.Scaling = .{ .default = .{} },
-        vocab_size: u32,
-
-        pub fn dupe(self: Config, allocator: std.mem.Allocator) !Config {
-            _ = allocator;
-            return .{
-                .bos_token_id = self.bos_token_id,
-                .eos_token_id = self.eos_token_id,
-                .head_dim = self.head_dim,
-                .hidden_size = self.hidden_size,
-                .num_hidden_layers = self.num_hidden_layers,
-                .num_attention_heads = self.num_attention_heads,
-                .num_key_value_heads = self.num_key_value_heads,
-                .rope_theta = self.rope_theta,
-                .max_position_embeddings = self.max_position_embeddings,
-                .rms_norm_eps = self.rms_norm_eps,
-                .tie_word_embeddings = self.tie_word_embeddings,
-                .rope_scaling = self.rope_scaling,
-                .vocab_size = self.vocab_size,
-            };
-        }
-
-        pub fn deinit(self: Config, _: std.mem.Allocator) void {
-            _ = self;
-        }
-    };
-
     pub fn init(allocator: std.mem.Allocator, store: zml.io.TensorStore.View, config: Config) !AceEmb {
         const layers = try allocator.alloc(TransformerLayer, config.num_hidden_layers);
         errdefer allocator.free(layers);
@@ -208,19 +214,15 @@ pub const AceEmb = struct {
         };
     }
 
-    pub fn load(
-        self: *const AceEmb,
-        allocator: std.mem.Allocator,
-        io: std.Io,
-        platform: *const zml.Platform,
-        store: *const zml.io.TensorStore,
-        shardings: []const zml.sharding.Sharding,
-    ) !zml.Bufferized(AceEmb) {
-        return zml.io.load(AceEmb, self, allocator, io, platform, store, .{
+    pub fn load(self: *const AceEmb, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceEmb) {
+        var progress = zml_handler.progress.start("Load Emb weights", store.registry.tensors.count());
+        defer progress.end();
+        return zml.io.load(AceEmb, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
         });
     }
 
@@ -258,7 +260,7 @@ const TransformerLayer = struct {
     post_att_norm: RmsNorm,
     mlp_layer: MlpLayer,
 
-    pub fn init(id_: u32, store: zml.io.TensorStore.View, config: AceEmb.Config) !TransformerLayer {
+    pub fn init(id_: u32, store: zml.io.TensorStore.View, config: Config) !TransformerLayer {
         return .{
             .id = id_,
             .input_norm = .init(store.withPrefix("input_layernorm"), config),
@@ -305,7 +307,7 @@ const AttLayer = struct {
     num_kv_heads: i64 = 0,
     rope_opts: zml.nn.RopeOpts = undefined,
 
-    pub fn init(store: zml.io.TensorStore.View, config: AceEmb.Config) !AttLayer {
+    pub fn init(store: zml.io.TensorStore.View, config: Config) !AttLayer {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
@@ -406,7 +408,7 @@ const RmsNorm = struct {
     weights: zml.Tensor,
     eps: f32,
 
-    pub fn init(store: zml.io.TensorStore.View, config: AceEmb.Config) RmsNorm {
+    pub fn init(store: zml.io.TensorStore.View, config: Config) RmsNorm {
         return .{
             .weights = store.createTensor("weight", .{ .d_out }, null),
             .eps = config.rms_norm_eps,

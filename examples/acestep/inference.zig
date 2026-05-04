@@ -91,7 +91,7 @@ pub const AudioMetadata = struct {
         };
     }
     
-    pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: []const u8) void {
+    pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: []const u8) !void {
         allocator.free(self.duration);
         self.duration = try allocator.dupe(u8, duration);
     }
@@ -112,10 +112,10 @@ pub const AudioCodes = struct {
     token_id: []u32,
     string: []u8,
     
-    pub fn empty() AudioCodes {
+    pub fn empty(allocator: std.mem.Allocator) !AudioCodes {
         return .{
-            .token_id = .{},
-            .string = "",
+            .token_id = try allocator.alloc(u32, 0),
+            .string = try allocator.alloc(u8, 0),
         };
     }
     
@@ -472,6 +472,7 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var writer: *std.Io.Writer = &stdout.interface;
     generation: for (0..output_tokens_len + 1) |i| {
@@ -512,6 +513,8 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
         // extract the generated token from the buffer
         try token_buffer.toSlice(io, token_slice);
     }
+    try writer.writeAll("\n");
+    try writer.flush();
     std.log.info("5Hz done, generated {d} tokens", .{ num_tokens_generated });
     return result.toOwnedSlice(allocator);
 }
@@ -636,6 +639,8 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acecfg: *acellm_.AceCfg
         try cond_token_buffer.toSlice(io, cond_token_slice);
         try uncond_token_buffer.toSlice(io, uncond_token_slice);
     }
+    try writer.writeAll("\n");
+    try writer.flush();
     std.log.info("5Hz CFG done, generated {d} tokens", .{ result_tok.items.len });
     return .{ try result_tok.toOwnedSlice(allocator), try result_str.toOwnedSlice(allocator) };
 }

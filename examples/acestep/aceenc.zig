@@ -22,12 +22,12 @@ pub const AceEnc_handler = struct {
     silence_buffers: zml.Bufferized(SilenceGenerator),
     shardings: main.Shardings,
     
-    pub fn initFromFile(zml_handler: main.Zml_handler, text_len: u32, lyric_len: u32, target_duration: u32, audiocodes: usize) !AceEnc_handler {
-        const model_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//model.safetensors";
-        const silence_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//silence_latent.safetensors";
-        const config_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//config.json";
-        var registry_m: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, model_path);
+    pub fn init(zml_handler: main.Zml_handler, text_len: u32, lyric_len: u32, target_duration: u32, audiocodes: usize) !AceEnc_handler {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
+        var registry_m: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry_m.deinit();
+        
+        const silence_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//silence_latent.safetensors";
         var registry_s: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, silence_path);
         defer registry_s.deinit();
             
@@ -35,7 +35,7 @@ pub const AceEnc_handler = struct {
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, silence_path);
     
         std.log.info("ENC parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, config_path);
+        const parsed_config = try parseConfig(zml_handler, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("ENC parsed", .{});        
@@ -84,6 +84,51 @@ pub const AceEnc_handler = struct {
             .shardings = shardings,
         };
     }
+
+    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
+        const parsed_config = blk: {
+            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
+            defer config_json_file.close(zml_handler.io);
+            var config_json_buffer: [256]u8 = undefined;
+            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
+            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
+            defer reader.deinit();
+            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
+        };
+        errdefer parsed_config.deinit();
+        return parsed_config;
+    }
+    
+    pub fn compileModel(zml_handler: main.Zml_handler, model: AceEnc, params: Params, shardings: main.Shardings) !zml.Exe {
+        const shardings_arr = shardings.all();
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings_arr,
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .forward,
+            .{ params.text_emb, params.lyric_emb, params.timbre_latent, params.audio_codes, params.src_audio },
+            opts,
+        );
+    }
+    
+    pub fn compileSilence(zml_handler: main.Zml_handler, model: SilenceGenerator, shardings: main.Shardings) !zml.Exe {
+        const shardings_arr = shardings.all();
+        const opts: zml.module.CompilationOptions = .{
+            .shardings = &shardings_arr,
+        };
+        return zml_handler.platform.compile(
+            zml_handler.allocator,
+            zml_handler.io,
+            model,
+            .forward,
+            .{ },
+            opts,
+        );
+    }
+
     
     pub fn unloadBuffers(self: *AceEnc_handler) void {
         AceEnc.unloadBuffers(&self.model_buffers);
@@ -206,50 +251,6 @@ pub const LayerType = enum {
     sliding_attention,
 };
 
-pub fn parseConfig(zml_handler: main.Zml_handler, path: []const u8) !std.json.Parsed(Config) {
-    const parsed_config = blk: {
-        const config_json_file = try std.Io.Dir.openFileAbsolute(zml_handler.io, path, .{});
-        defer config_json_file.close(zml_handler.io);
-        var config_json_buffer: [256]u8 = undefined;
-        var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-        var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-        defer reader.deinit();
-        break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
-    };
-    errdefer parsed_config.deinit();
-    return parsed_config;
-}
-
-pub fn compileModel(zml_handler: main.Zml_handler, model: AceEnc, params: Params, shardings: main.Shardings) !zml.Exe {
-    const shardings_arr = shardings.all();
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings_arr,
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .forward,
-        .{ params.text_emb, params.lyric_emb, params.timbre_latent, params.audio_codes, params.src_audio },
-        opts,
-    );
-}
-
-pub fn compileSilence(zml_handler: main.Zml_handler, model: SilenceGenerator, shardings: main.Shardings) !zml.Exe {
-    const shardings_arr = shardings.all();
-    const opts: zml.module.CompilationOptions = .{
-        .shardings = &shardings_arr,
-    };
-    return zml_handler.platform.compile(
-        zml_handler.allocator,
-        zml_handler.io,
-        model,
-        .forward,
-        .{ },
-        opts,
-    );
-}
-
 
 pub const SilenceGenerator = struct {
     // dim = [1, 64, 15000] = [.b, .a, .t_25hz] where 15000 in 25hz is 600s the max audio output length
@@ -309,11 +310,14 @@ pub const AceEnc = struct {
     }
 
     pub fn load(self: *const AceEnc, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceEnc) {
-        return zml.io.load(AceEnc, self, zml_handler.arena.allocator(), zml_handler.io, zml_handler.platform, store, .{
+        var progress = zml_handler.progress.start("Load Enc weights", store.registry.tensors.count());
+        defer progress.end();
+        return zml.io.load(AceEnc, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
         });
     }
 
@@ -877,7 +881,8 @@ pub fn print(x: zml.Tensor, n: u8) void {
 }
 
 pub fn testModel(zml_handler: main.Zml_handler, aceenc: AceEnc_handler) !void {
-    const activations_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//activations.safetensors";
+    const activations_path = try std.fmt.allocPrint(zml_handler.allocator, "{s}/activations.safetensors", .{zml_handler.uris.acedit.root});
+    defer zml_handler.allocator.free(activations_path);
     
     try main.printSafetensors(zml_handler.allocator, zml_handler.io, activations_path);
 

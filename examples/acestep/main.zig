@@ -1,6 +1,5 @@
 const std = @import("std");
 const log = std.log;
-
 const zml = @import("zml");
 const stdx = zml.stdx;
 
@@ -38,24 +37,91 @@ pub const Zml_handler = struct {
     arena: *std.heap.ArenaAllocator,
     io: std.Io,
     platform: *zml.Platform,
-    
+
+    uris: Uri_handler,
+
+    http_client: std.http.Client,
+    vfs_file: zml.io.VFS.File,
+    hf_vfs: zml.io.VFS.HF,
+    vfs: zml.io.VFS,
+
+    progress: std.Progress.Node,
+
     pub fn fromInit(init: std.process.Init) !Zml_handler {
-        if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
-            var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
-            defer working_dir.close(init.io);
-            try std.process.setCurrentDir(init.io, working_dir);
-        }
-        
-        return .{
-            .arena = init.arena,
+        var http_client: std.http.Client = .{
             .allocator = init.gpa,
             .io = init.io,
-            .platform = try .auto(init.gpa, init.io, .{}),
+        };
+        try http_client.initDefaultProxies(init.gpa, init.environ_map);
+        errdefer http_client.deinit();
+
+        var vfs_file: zml.io.VFS.File = .init(init.gpa, init.io, .{});
+        errdefer vfs_file.deinit();
+
+        var hf_vfs: zml.io.VFS.HF = try .auto(init.gpa, init.io, &http_client, init.environ_map);
+        errdefer hf_vfs.deinit();
+
+        var vfs: zml.io.VFS = try .init(init.gpa, init.io);
+        errdefer vfs.deinit();
+
+        try vfs.register("file", vfs_file.io());
+        try vfs.register("hf", hf_vfs.io());
+
+        const io = vfs.io();
+        const platform = try zml.Platform.auto(init.gpa, io, .{});
+        errdefer platform.deinit(init.gpa);
+
+        return .{
+            .allocator = init.gpa,
+            .arena = init.arena,
+            .io = io,
+            .platform = platform,
+            .uris = .fromLocal(),
+            .http_client = http_client,
+            .vfs_file = vfs_file,
+            .hf_vfs = hf_vfs,
+            .vfs = vfs,
+            .progress = std.Progress.start(io, .{}),
         };
     }
-    
+
     pub fn deinit(self: *Zml_handler) void {
+        std.log.info("a1", .{});
         self.platform.deinit(self.allocator);
+        std.log.info("a2", .{});
+        self.vfs.deinit();
+        std.log.info("a3", .{});
+        self.hf_vfs.deinit();
+        std.log.info("a4", .{});
+        self.http_client.deinit();
+        std.log.info("a6", .{});
+        self.vfs_file.deinit();
+        std.log.info("a5", .{});
+    }
+};
+
+pub const Uri_handler = struct {
+    acellm: []const u8,
+    aceemb: []const u8,
+    acedit: []const u8,
+    acevae: []const u8,
+
+    pub fn fromLocal() Uri_handler {
+        return .{
+            .acellm = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B",
+            .aceemb = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B",
+            .acedit = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo",
+            .acevae = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae",
+        };
+    }
+
+    pub fn fromHf() Uri_handler {
+        return .{
+            .acellm = "hf://ACE-Step/acestep-5Hz-lm-0.6B",
+            .aceemb = "hf://ACE-Step/Ace-Step1.5/Qwen3-Embedding-0.6B",
+            .acedit = "hf://ACE-Step/Ace-Step1.5/acestep-v15-turbo",
+            .acevae = "hf://ACE-Step/Ace-Step1.5/vae/",
+        };
     }
 };
 
@@ -63,7 +129,7 @@ pub const Zml_handler = struct {
 pub fn main(init: std.process.Init) !void {
     var zml_handler: Zml_handler = try .fromInit(init);
     defer zml_handler.deinit();
-    
+
     //try test5Hz(zml_handler);
     //try testEmb(zml_handler);
     //try testEnc(zml_handler);
@@ -75,7 +141,8 @@ pub fn main(init: std.process.Init) !void {
     //try testDiffusion(zml_handler);
     
     try runFullPipeline(zml_handler);
-    
+
+    zml_handler.progress.end();
 }
 
 pub fn runFullPipeline(zml_handler: Zml_handler) !void {
@@ -84,20 +151,22 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     
     // think = false : text2music mode, initial latents initialized from noise
     // think = true  : cover mode     , initial latents initialized from audio codes
-    const think = true;
+    const think = false;
     
     // in text2music, overrides the generated duration metadata
-    const target_duration = "12";
+    const target_duration = "1";
     
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
     
-    var acellm = try acellm_.AceLlm_handler.initFromFile(zml_handler);
+    var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
 
+    if (2 + -2 >= -2) return;
+    
     var audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    if (!think) audio_metadata.setDuration(target_duration);
+    if (!think) try audio_metadata.setDuration(zml_handler.allocator, target_duration);
     const actual_duration = try std.fmt.parseUnsigned(u32, audio_metadata.duration, 10);
     defer audio_metadata.deinit(zml_handler.allocator);
 
@@ -105,7 +174,7 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, acellm, cond, uncond, audioc);
     defer acecfg.deinit();
     
-    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acecfg) else .empty();
+    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acecfg) else try .empty(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
 
     acellm.unloadBuffers();
@@ -117,7 +186,7 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     // ------------------------------------------------
 
     const full_emb, const partial_emb = try aceemb_.embeddingLengths(zml_handler, audio_metadata);
-    var aceemb = try aceemb_.AceEmb_handler.initFromFile(zml_handler, full_emb, partial_emb);
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, full_emb, partial_emb);
     defer aceemb.deinit(zml_handler.allocator);
 
     const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
@@ -133,7 +202,7 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
     defer zml_handler.allocator.free(int_codes);
     
-    var aceenc = try aceenc_.AceEnc_handler.initFromFile(zml_handler, text_emb.textLen(), text_emb.lyricLen(),  actual_duration, int_codes.len);
+    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler, text_emb.textLen(), text_emb.lyricLen(),  actual_duration, int_codes.len);
     defer aceenc.deinit(zml_handler.allocator);
     
     const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, actual_duration);
@@ -145,7 +214,7 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.initFromFile(zml_handler, actual_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, actual_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
 
     const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
@@ -158,7 +227,7 @@ pub fn runFullPipeline(zml_handler: Zml_handler) !void {
     // with the VAE model
     // ------------------------------------------------
 
-    var acevae = try acevae_.AceVae_handler.initFromFile(zml_handler, actual_duration);
+    var acevae = try acevae_.AceVae_handler.init(zml_handler, actual_duration);
     defer acevae.deinit(zml_handler.allocator);
 
     const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);

@@ -278,6 +278,15 @@ pub const TensorRegistry = struct {
         return try fetchRegistry(allocator, io, repo, entrypoint);
     }
 
+    pub fn fromRepoFile(
+        allocator: std.mem.Allocator,
+        io: std.Io,
+        repo: std.Io.Dir,
+        entrypoint_name: []const u8,
+    ) !TensorRegistry {
+        return try fetchRegistry(allocator, io, repo, try repo.openFile(io, entrypoint_name, .{ .mode = .read_only }));
+    }
+
     pub fn fromPath(
         allocator: std.mem.Allocator,
         io: std.Io,

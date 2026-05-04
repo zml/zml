@@ -26,17 +26,16 @@ pub const AceLlm_handler = struct {
     model_buffers: zml.Bufferized(AceLlm),
     kv_cache_buffers: zml.Bufferized(KvCache),
     
-    pub fn initFromFile(zml_handler: main.Zml_handler) !AceLlm_handler {
-        const model_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//model.safetensors";
-        const token_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json";
-        const config_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//config.json";
-        var registry: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, model_path);
+    pub fn init(zml_handler: main.Zml_handler) !AceLlm_handler {
+        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
+        defer repo.close(zml_handler.io);
+        var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
             
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
     
         std.log.info("5Hz parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, config_path);
+        const parsed_config = try parseConfig(zml_handler, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         const acellm_options: Options = .{
@@ -44,7 +43,7 @@ pub const AceLlm_handler = struct {
         };
         std.log.info("5Hz parsed", .{});
 
-        const tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+        const tokenizer = try loadTokenizer(zml_handler, repo);
         const phase = try buildTokenMasks(zml_handler.allocator, tokenizer, config.vocab_size);
         
         std.log.info("5Hz initialize model", .{});
@@ -89,9 +88,9 @@ pub const AceLlm_handler = struct {
         };
     }
     
-    pub fn parseConfig(zml_handler: main.Zml_handler, path: []const u8) !std.json.Parsed(Config) {
+    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
         const parsed_config = blk: {
-            const config_json_file = try std.Io.Dir.openFileAbsolute(zml_handler.io, path, .{});
+            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
             defer config_json_file.close(zml_handler.io);
             var config_json_buffer: [256]u8 = undefined;
             var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
@@ -101,6 +100,15 @@ pub const AceLlm_handler = struct {
         };
         errdefer parsed_config.deinit();
         return parsed_config;
+    }
+
+    pub fn loadTokenizer(zml_handler: main.Zml_handler, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+        const tokenizer_json_file = try dir.openFile(zml_handler.io, "tokenizer.json", .{});
+        defer tokenizer_json_file.close(zml_handler.io);
+        var reader = tokenizer_json_file.reader(zml_handler.io, &.{});
+        const bytes = try reader.interface.readAlloc(zml_handler.allocator, try tokenizer_json_file.length(zml_handler.io));
+        defer zml_handler.allocator.free(bytes);
+        return try .fromBytes(zml_handler.allocator, zml_handler.io, bytes);
     }
     
     pub fn compileModel(zml_handler: main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
@@ -228,6 +236,8 @@ pub const AceCfg_handler = struct {
     }
     
     pub fn deinit(self: *AceCfg_handler) void {
+        std.log.info("Acfdg", .{});
+
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
     }
@@ -349,8 +359,8 @@ pub fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.To
 }
 
 pub fn cfgSequenceLengths(zml_handler: main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32, u32 } {
-    const token_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B//tokenizer.json";
-    var tokenizer = try zml.tokenizer.Tokenizer.fromFile(zml_handler.allocator, zml_handler.io, token_path);
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
+    var tokenizer = try AceLlm_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
 
     const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, tokenizer, audio_metadata);
@@ -388,11 +398,14 @@ pub const AceLlm = struct {
     }
 
     pub fn load(self: *const AceLlm, zml_handler: main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
+        var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 1,
-            .dma_chunks = 1,
-            .dma_chunk_size = 128 * 1024 * 1024,
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+            .progress = &progress,
         });
     }
 
