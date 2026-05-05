@@ -4,7 +4,6 @@ const builtin = @import("builtin");
 const stdx = @import("stdx");
 
 const Platform = @import("platform.zig").Platform;
-const sharding = @import("sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const zml = @import("zml.zig");
 
@@ -21,10 +20,6 @@ pub fn env() *const Platform {
     }
 
     return _platform.?;
-}
-
-pub fn physicalMesh() sharding.PhysicalMesh {
-    return env().physical_mesh;
 }
 
 /// In neural network we generally care about the relative precision,
