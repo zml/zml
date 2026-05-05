@@ -190,7 +190,7 @@ pub fn main(init: std.process.Init) !void {
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            const sharded_sharding: zml.sharding.Sharding = try .init(platform.physical_mesh, .init("playground_model", .{ .model = .high_bandwidth }));
+            const sharded_sharding: zml.Sharding = try platform.registerSharding(.init("playground_model", .{ .model = .high_bandwidth }));
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
             progress.increaseEstimatedTotalItems(load_count);
@@ -205,7 +205,7 @@ pub fn main(init: std.process.Init) !void {
             }
 
             _ = try zml.io.load(AllTensorsModel, &model, init.arena.allocator(), io, platform, &store, .{
-                .shardings = &.{&sharded_sharding},
+                .shardings = &.{sharded_sharding},
                 .parallelism = 16,
                 .dma_chunks = 16,
                 .dma_chunk_size = 64 * zml.MiB,

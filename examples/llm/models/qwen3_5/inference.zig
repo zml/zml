@@ -85,7 +85,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             qwen_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]*const zml.sharding.Sharding,
+            shardings_: []const zml.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -106,10 +106,10 @@ fn compileModel(
                     parameters_.kv_cache,
                     parameters_.rng,
                 },
-                .{ .shardings = &shardings_ },
+                .{ .shardings = shardings_ },
             );
         }
-    }.call, .{ allocator, io, platform, qwen_model, parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, qwen_model, parameters, &all_shardings, progress });
     errdefer if (prefill_future.cancel(io)) |v| v.deinit() else |_| {};
 
     var decode_future = try io.concurrent(struct {
@@ -119,7 +119,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             qwen_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]*const zml.sharding.Sharding,
+            shardings_: []const zml.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -140,10 +140,10 @@ fn compileModel(
                     parameters_.kv_cache,
                     parameters_.rng,
                 },
-                .{ .shardings = &shardings_ },
+                .{ .shardings = shardings_ },
             );
         }
-    }.call, .{ allocator, io, platform, qwen_model, parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, qwen_model, parameters, &all_shardings, progress });
     errdefer if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
 
     const prefill_exe = try prefill_future.await(io);

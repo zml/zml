@@ -24,7 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    const benchmark_sharding: zml.sharding.Sharding = try .init(platform.physical_mesh, .init(
+    const benchmark_sharding: zml.Sharding = try platform.registerSharding(.init(
         "benchmark_mesh",
         .{ .m = .low_bandwidth, .n = .high_bandwidth },
     ));
@@ -43,16 +43,16 @@ pub fn main(init: std.process.Init) !void {
         log.info("⏱️ Compiling benchmark...", .{});
         const now: std.Io.Timestamp = .now(io, .awake);
         defer log.info("✅ Compiled benchmark [{f}]", .{now.untilNow(io, .awake)});
-        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{&benchmark_sharding} });
+        break :blk try platform.compileFn(allocator, io, benchmark, .{ a, b }, .{ .shardings = &.{benchmark_sharding} });
     };
     defer exe.deinit();
 
     var rng = std.Random.DefaultPrng.init(0);
     const random = rng.random();
 
-    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), .{ .sharded = &benchmark_sharding }, random);
+    var a_buffer = try createRandomBuffer(allocator, io, platform, a.shape(), benchmark_sharding, random);
     defer a_buffer.deinit();
-    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), .{ .sharded = &benchmark_sharding }, random);
+    var b_buffer = try createRandomBuffer(allocator, io, platform, b.shape(), benchmark_sharding, random);
     defer b_buffer.deinit();
 
     var exe_args = try exe.args(allocator);
@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !void {
     });
 }
 
-fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.Buffer.ShardingSpec, random: std.Random) !zml.Buffer {
+fn createRandomBuffer(allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, shape: zml.Shape, sharding: zml.Sharding, random: std.Random) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
     defer slice.free(allocator);
 

@@ -15,9 +15,8 @@ const mlirx = @import("mlirx.zig");
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const sharding_ = @import("sharding.zig");
-const Sharding = sharding_.Sharding;
-const Partitioning = sharding_.Partitioning;
+const Sharding = @import("Sharding.zig");
+const Partitioning = Sharding.Partitioning;
 const Tensor = @import("tensor.zig").Tensor;
 
 const log = std.log.scoped(.@"zml/module");
@@ -44,9 +43,9 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
     return mlir_global_registry.?;
 }
 pub const CompilationOptions = struct {
-    shardings: []const *const Sharding = &.{},
+    shardings: []const Sharding = &.{},
     // If null, will be initialized from the target
-    partitioner: ?Partitioning.Partitioner = null,
+    partitioner: ?Sharding.Partitioner = null,
     // Debugging options
     program_name: []const u8 = "zml",
     xla_dump_to: ?[]const u8 = null,
@@ -90,7 +89,7 @@ pub const CompilationContext = struct {
     mlir_pass_manager: *mlir.PassManager,
     module: *mlir.Module,
     platform: *const Platform,
-    partitioning: Partitioning,
+    partitioning: Sharding.Partitioning,
 
     scopes: stdx.BoundedArray(Scope, 16) = .empty,
     manual_computation_depth: usize = 0,
@@ -120,22 +119,15 @@ pub const CompilationContext = struct {
         }
 
         // Ensure replicated sharding is always included as a fallback option.
-        const shardings = shardings: {
-            const needs_replicated = blk: {
-                for (opts.shardings) |sharding| {
-                    if (sharding == platform.replicated_sharding) break :blk false;
-                }
-                break :blk true;
-            };
+        var shardings = std.ArrayList(Sharding).initCapacity(arena.allocator(), opts.shardings.len + 1) catch @panic("OOM");
+        var needs_replicated: bool = true;
+        for (opts.shardings) |sharding| {
+            if (sharding.data == platform.replicated_sharding.data) needs_replicated = false;
+            shardings.appendAssumeCapacity(sharding.resolve(platform));
+        }
+        if (needs_replicated) shardings.appendAssumeCapacity(platform.replicated_sharding);
 
-            const base_len = opts.shardings.len;
-            const res = arena.allocator().alloc(*const Sharding, base_len + @intFromBool(needs_replicated)) catch unreachable;
-            @memcpy(res[0..base_len], opts.shardings);
-            if (needs_replicated) res[base_len] = platform.replicated_sharding;
-            break :shardings res;
-        };
-
-        const partitioning = Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings) catch unreachable;
+        const partitioning = Sharding.Partitioning.init(opts.partitioner orelse .fromTarget(platform.target), shardings.items) catch @panic("OOM");
 
         return .{
             .allocator = allocator,
@@ -260,25 +252,26 @@ pub fn compile(
     return exe;
 }
 
-fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
-    const allocator = compilation_context.arena.allocator();
-    const mlir_ctx = compilation_context.mlir_ctx;
-    const module = compilation_context.module;
-    const partitioning = compilation_context.partitioning;
+fn addPartitionerOperations(ctx: *CompilationContext) !void {
+    const allocator = ctx.arena.allocator();
+    const mlir_ctx = ctx.mlir_ctx;
+    const module = ctx.module;
+    const partitioning = ctx.partitioning;
 
     switch (partitioning.partitioner) {
         .gspmd => {},
         .shardy => {
             for (partitioning.shardings) |sharding| {
-                const attr_str = try sharding.sdyMeshAttr(allocator);
+                const attr_str = try sharding.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
+                const name = sharding.data.logical.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{
                     .attributes = &.{
-                        .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, sharding.name())),
-                        .named(mlir_ctx, "mesh", @ptrCast(mesh_attr)),
+                        .named(mlir_ctx, "sym_name", mlir.stringAttribute(mlir_ctx, name)),
+                        .named(mlir_ctx, "mesh", mesh_attr),
                     },
                     .location = .unknown(mlir_ctx),
                     .verify = false,
@@ -292,7 +285,7 @@ fn addPartitionerOperations(compilation_context: *CompilationContext) !void {
 
 pub const OutputInfo = struct {
     shapes: []Shape,
-    shardings: []*const Sharding,
+    shardings: []Sharding,
     values: []*const mlir.Value,
     donations: []?usize,
     output_memory_kinds: []Memory.Kind,
@@ -306,19 +299,19 @@ pub const OutputInfo = struct {
     }
 };
 
-fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !OutputInfo {
+fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partitioning, v: anytype) !OutputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
-        sharding_list: *std.array_list.Managed(*const Sharding),
+        sharding_list: *std.array_list.Managed(Sharding),
         value_list: *std.array_list.Managed(*const mlir.Value),
         donation_list: *std.array_list.Managed(?usize),
         output_memory_kind_list: *std.array_list.Managed(Memory.Kind),
-        partitioning: Partitioning,
+        partitioning: Sharding.Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
-    var sharding_list = std.array_list.Managed(*const Sharding).init(allocator);
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
     errdefer sharding_list.deinit();
     var value_list = std.array_list.Managed(*const mlir.Value).init(allocator);
     errdefer value_list.deinit();
@@ -357,7 +350,7 @@ fn collectOutputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v
 
 pub const InputInfo = struct {
     shapes: []Shape,
-    shardings: []*const Sharding,
+    shardings: []Sharding,
 
     pub fn deinit(self: InputInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.shapes);
@@ -365,17 +358,17 @@ pub const InputInfo = struct {
     }
 };
 
-fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Partitioning, v: anytype) !InputInfo {
+fn collectInputInfo(allocator: std.mem.Allocator, partitioning: Sharding.Partitioning, v: anytype) !InputInfo {
     const LocalContext = struct {
         shape_list: *std.array_list.Managed(Shape),
-        sharding_list: *std.array_list.Managed(*const Sharding),
-        partitioning: Partitioning,
+        sharding_list: *std.array_list.Managed(Sharding),
+        partitioning: Sharding.Partitioning,
     };
 
     var shape_list = std.array_list.Managed(Shape).init(allocator);
     errdefer shape_list.deinit();
 
-    var sharding_list = std.array_list.Managed(*const Sharding).init(allocator);
+    var sharding_list = std.array_list.Managed(Sharding).init(allocator);
     errdefer sharding_list.deinit();
 
     var context: LocalContext = .{

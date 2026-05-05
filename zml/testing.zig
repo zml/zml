@@ -294,7 +294,7 @@ pub fn testLayer(
     activation_store: zml.io.TensorStore.View,
     name: []const u8,
     layer_weights: zml.Bufferized(@TypeOf(layer)),
-    shardings: []const *const zml.sharding.Sharding,
+    shardings: []const *const zml.Sharding,
     opts: CompareOpts,
 ) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);

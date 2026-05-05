@@ -1623,15 +1623,14 @@ pub const DynamicSamplingStrategy = struct {
     pub fn makeBuffers(
         io: std.Io,
         platform: *const zml.Platform,
-        sharding: zml.Buffer.ShardingSpec,
         dtype: zml.DataType,
         opts: Opts,
     ) !zml.Bufferized(DynamicSamplingStrategy) {
         return .{
-            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32, sharding),
-            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype, sharding),
-            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype, sharding),
-            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype, sharding),
+            .top_k = try zml.Buffer.scalar(io, platform, opts.top_k, .i32),
+            .temperature = try zml.Buffer.scalar(io, platform, opts.temperature, dtype),
+            .top_p = try zml.Buffer.scalar(io, platform, opts.top_p, dtype),
+            .min_p = try zml.Buffer.scalar(io, platform, opts.min_p, dtype),
         };
     }
 
@@ -1732,7 +1731,7 @@ test sampleTokensDynamic {
         .{ .{ .top_k = 4, .top_p = 0.901, .min_p = 0.6 }, [_]f32{ @log(4.0), @log(3.0), ___, ___ } },
     }) |args_expected| {
         const args, const expected = args_expected;
-        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .replicated, .f32, args);
+        var dynamic_sampling_strategy_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .f32, args);
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_buffers);
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe, fixupLogits, .{ logits_buffer, dynamic_sampling_strategy_buffers });
         defer new_logits.deinit();
@@ -1755,7 +1754,7 @@ test sampleTokensDynamic {
 
         var logits_bf16_buffer: zml.Buffer = try .fromBytes(std.testing.io, platform, logits_bf16.shape(), .replicated, std.mem.sliceAsBytes(&[4]bf16{ boost, boost, bf16.fromF32(2), nerf }));
         defer logits_bf16_buffer.deinit();
-        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .replicated, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
+        var dynamic_sampling_strategy_bf16_buffers = try DynamicSamplingStrategy.makeBuffers(std.testing.io, platform, .bf16, .{ .top_k = 4, .top_p = 0.9, .min_p = 0.1 });
         defer DynamicSamplingStrategy.deinitBuffers(&dynamic_sampling_strategy_bf16_buffers);
 
         var new_logits, var indices = try zml.testing.autoCall(std.testing.allocator, std.testing.io, &exe_bf16, fixupLogits, .{ logits_bf16_buffer, dynamic_sampling_strategy_bf16_buffers });

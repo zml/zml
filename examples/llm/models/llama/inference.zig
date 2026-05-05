@@ -89,7 +89,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             llama_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]*const zml.sharding.Sharding,
+            shardings_: [1]zml.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -123,7 +123,7 @@ fn compileModel(
             platform_: *const zml.Platform,
             llama_model_: model.Model,
             parameters_: CompilationParameters,
-            shardings_: [1]*const zml.sharding.Sharding,
+            shardings_: []const zml.Sharding,
             progress_: *std.Progress.Node,
         ) !zml.Exe {
             progress_.increaseEstimatedTotalItems(1);
@@ -143,10 +143,10 @@ fn compileModel(
                     parameters_.attention_metadata,
                     parameters_.attention_parameters,
                 },
-                .{ .shardings = &shardings_ },
+                .{ .shardings = shardings_ },
             );
         }
-    }.call, .{ allocator, io, platform, llama_model, parameters, all_shardings, progress });
+    }.call, .{ allocator, io, platform, llama_model, parameters, &all_shardings, progress });
     var decode_future_awaited = false;
     errdefer if (!decode_future_awaited) if (decode_future.cancel(io)) |v| v.deinit() else |_| {};
 

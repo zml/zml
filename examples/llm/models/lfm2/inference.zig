@@ -237,9 +237,9 @@ pub const ComposedKernelExe = struct {
         };
         defer hidden_buf.deinit();
 
-        var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, .replicated);
+        var conv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, 0, .u32);
         defer conv_cache_index_buf.deinit();
-        var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, @as(u32, 0), .u32, .replicated);
+        var kv_cache_index_buf: zml.Buffer = try .scalar(args.io, args.platform, 0, .u32);
         defer kv_cache_index_buf.deinit();
 
         for (args.model_buffers.layers) |layer_bufs| {

@@ -13,16 +13,16 @@ pub const GenerationOptions = struct {
 };
 
 pub const Shardings = struct {
-    model: zml.sharding.Sharding,
+    model: zml.Sharding,
 
     pub fn init(platform: *zml.Platform) !Shardings {
         return .{
-            .model = try .init(platform.physical_mesh, .init("model", .{ .model = .high_bandwidth })),
+            .model = try platform.registerSharding(.init("model", .{ .model = .high_bandwidth })),
         };
     }
 
-    pub fn all(self: *const Shardings) [1]*const zml.sharding.Sharding {
-        return .{&self.model};
+    pub fn all(self: Shardings) [1]zml.Sharding {
+        return .{self.model};
     }
 };
 

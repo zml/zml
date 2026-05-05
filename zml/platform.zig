@@ -10,6 +10,7 @@ const attention = @import("attention.zig");
 const Exe = @import("exe.zig").Exe;
 const pjrtx = @import("pjrtx.zig");
 const profiler_ = @import("profiler.zig");
+const Sharding = @import("Sharding.zig");
 const zml = @import("zml.zig");
 
 const log = std.log.scoped(.zml);
@@ -194,14 +195,15 @@ pub const Device = struct {
 };
 
 pub const Platform = struct {
-    arena_state: std.heap.ArenaAllocator.State,
+    arena: std.heap.ArenaAllocator,
     target: Target,
     pjrt_api: *const pjrt.Api,
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
     physical_mesh: zml.sharding.PhysicalMesh,
-    replicated_sharding: *const zml.sharding.Sharding,
+    replicated_sharding: zml.Sharding,
+    shardings: std.StringArrayHashMapUnmanaged(zml.Sharding.Data),
 
     pub const MAX_NUM_DEVICES: u16 = if (platforms.isEnabled(.tpu)) 64 else 32;
 
@@ -216,29 +218,36 @@ pub const Platform = struct {
             log.warn("platform {} got {} devices, but ZML only support up to {} devices. Some devices won't be used.", .{ target, pjrt_devices.len, MAX_NUM_DEVICES });
         }
 
-        var arena_state = std.heap.ArenaAllocator.init(allocator);
-        errdefer arena_state.deinit();
-        const arena = arena_state.allocator();
-
-        const devices = try arena.alloc(Device, pjrt_devices.len);
-
         const pjrt_memories = pjrt_client.addressableMemories(api);
-        const memories = try arena.alloc(Memory, pjrt_memories.len);
+        const platform: *Platform = platform: {
+            var initial_arena = std.heap.ArenaAllocator.init(allocator);
+            errdefer initial_arena.deinit();
+            var initial_allocator = initial_arena.allocator();
 
-        const platform = try arena.create(Platform);
-        platform.* = .{
-            .arena_state = undefined, // delayed to function exit so we capture the last state
-            .target = target,
-            .pjrt_api = api,
-            .pjrt_client = pjrt_client,
-            .devices = devices,
-            .memories = memories,
-            .physical_mesh = undefined, // set below
-            .replicated_sharding = undefined, // set below
+            const platform = try initial_allocator.create(Platform);
+            platform.* = .{
+                .arena = initial_arena, // move initial_arena ownership to platform
+                .target = target,
+                .pjrt_api = api,
+                .pjrt_client = pjrt_client,
+                .devices = undefined,
+                .memories = undefined,
+                .physical_mesh = undefined, // set below
+                .replicated_sharding = undefined, // set below
+                .shardings = .empty,
+            };
+            break :platform platform;
         };
-        defer platform.arena_state = arena_state.state;
+
+        const arena = platform.arena.allocator();
+        try platform.shardings.ensureTotalCapacity(arena, 16);
 
         {
+            const devices = try arena.alloc(Device, pjrt_devices.len);
+            platform.devices = devices;
+            const memories = try arena.alloc(Memory, pjrt_memories.len);
+            platform.memories = memories;
+
             // TODO: part of the complication here is that we layout the data in spaghetti mode,
             // where devices and memories point to each other and also point to the platform.
             for (pjrt_devices, devices) |pjrt_device, *platform_device| {
@@ -252,9 +261,7 @@ pub const Platform = struct {
                 .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
-            const replicated_sharding = try arena.create(zml.sharding.Sharding);
-            replicated_sharding.* = try .init(platform.physical_mesh, .replicated);
-            platform.replicated_sharding = replicated_sharding;
+            platform.replicated_sharding = try platform.registerSharding(.replicated);
         }
 
         switch (target) {
@@ -413,8 +420,9 @@ pub const Platform = struct {
 
     pub fn deinit(self: *Platform, allocator: std.mem.Allocator, io: std.Io) void {
         _ = io;
+        _ = allocator;
         self.pjrt_client.deinit(self.pjrt_api);
-        self.arena_state.promote(allocator).deinit();
+        self.arena.deinit();
     }
 
     pub fn compile(
@@ -499,6 +507,22 @@ pub const Platform = struct {
 
     pub fn profiler(self: *const Platform, allocator: std.mem.Allocator, io: std.Io, options: ProfilerOptions) !Profiler {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
+    }
+
+    pub fn registerSharding(platform: *Platform, logical: Sharding.LogicalMesh) !Sharding {
+        return platform.registerShardingWithStrategy(logical, .suggest(logical, platform.physical_mesh));
+    }
+
+    pub fn registerShardingWithStrategy(platform: *Platform, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+        const arena = platform.arena.allocator();
+        const entry = try platform.shardings.getOrPut(arena, logical.name);
+        if (entry.found_existing) {
+            std.debug.panic("Sharding already exists: {s}", .{logical.name});
+        }
+
+        entry.key_ptr.* = try arena.dupe(u8, logical.name);
+        entry.value_ptr.* = try .init(platform.physical_mesh, logical, strategy);
+        return .{ .data = entry.value_ptr };
     }
 };
 

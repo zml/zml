@@ -186,7 +186,7 @@ pub const Model = struct {
         io: std.Io,
         platform: *const zml.Platform,
         store: *zml.io.TensorStore,
-        shardings: []const zml.sharding.Sharding,
+        shardings: []const zml.Sharding,
         progress: *std.Progress.Node,
     ) !zml.Bufferized(Model) {
         progress.increaseEstimatedTotalItems(store.view().count());
@@ -882,7 +882,7 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(kv: SelfAttnCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !SelfAttnCache.Buffers {
+        pub fn initBuffer(kv: SelfAttnCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !SelfAttnCache.Buffers {
             return .{
                 .k = try zml.Buffer.uninitialized(io, platform, kv.k.shape(), sharding, .{}),
                 .v = try zml.Buffer.uninitialized(io, platform, kv.v.shape(), sharding, .{}),
@@ -968,7 +968,7 @@ pub const KvCache = struct {
             };
         }
 
-        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !GatedDeltaNetCache.Buffers {
+        pub fn initBuffer(self: GatedDeltaNetCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !GatedDeltaNetCache.Buffers {
             return .{
                 .conv_state = try zml.Buffer.uninitialized(io, platform, self.conv_state.shape(), sharding, .{}),
                 .recurrent_state = try zml.Buffer.uninitialized(io, platform, self.recurrent_state.shape(), sharding, .{}),
@@ -1047,7 +1047,7 @@ pub const KvCache = struct {
         };
     }
 
-    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !zml.Bufferized(KvCache) {
+    pub fn initBuffer(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
         return .{
             .self_attn = try self.self_attn.initBuffer(io, platform, sharding),
             .gated_delta_net = try self.gated_delta_net.initBuffer(io, platform, sharding),

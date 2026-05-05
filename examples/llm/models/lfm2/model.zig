@@ -94,12 +94,11 @@ pub const LoadedModel = struct {
             log.info("Loaded weights [{Bi:.2}, {f}, {Bi:.2}/s]", .{ total_bytes, took, bytes_per_sec });
         }
 
-        const all_shardings = shardings.all();
         return zml.io.load(Model, &self.inner, allocator, io, platform, store, .{
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
             .progress = progress,
-            .shardings = &all_shardings,
+            .shardings = &shardings.all(),
             .parallelism = 16,
             .total_bytes = &total_bytes,
         });
@@ -540,7 +539,7 @@ pub const Cache = struct {
     conv: ConvCache,
     kv: KvCache,
 
-    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !zml.Bufferized(Cache) {
+    pub fn initBuffers(self: Cache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(Cache) {
         return .{ .conv = try self.conv.initBuffers(allocator, io, platform, sharding), .kv = try self.kv.initBuffers(io, platform, sharding) };
     }
 
@@ -561,7 +560,7 @@ pub const ConvCache = struct {
         return .{ .state = .fromShape(shape) };
     }
 
-    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !zml.Bufferized(ConvCache) {
+    pub fn initBuffers(self: ConvCache, allocator: std.mem.Allocator, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(ConvCache) {
         const sh = self.state.shape();
         const host = try allocator.alloc(u8, sh.byteSize());
         defer allocator.free(host);
@@ -586,7 +585,7 @@ pub const KvCache = struct {
         return .{ .k = .fromShape(kv_shape), .v = .fromShape(kv_shape) };
     }
 
-    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Buffer.ShardingSpec) !zml.Bufferized(KvCache) {
+    pub fn initBuffers(self: KvCache, io: std.Io, platform: *const zml.Platform, sharding: zml.Sharding) !zml.Bufferized(KvCache) {
         return .{ .k = try zml.Buffer.uninitialized(io, platform, self.k.shape(), sharding, .{}), .v = try zml.Buffer.uninitialized(io, platform, self.v.shape(), sharding, .{}) };
     }
 

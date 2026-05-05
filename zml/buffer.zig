@@ -9,9 +9,7 @@ const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const sharding_ = @import("sharding.zig");
-const Sharding = sharding_.Sharding;
-const Placement = sharding_.Placement;
+const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
@@ -26,22 +24,11 @@ const log = std.log.scoped(.zml);
 pub const Buffer = struct {
     _platform: *const Platform,
     _shape: Shape,
-    _sharding: *const Sharding,
+    _sharding: Sharding,
     _shards: Shards,
 
     pub const MAX_NUM_SHARDS: u16 = Platform.MAX_NUM_DEVICES;
     pub const Shards = stdx.BoundedArray(*pjrt.Buffer, MAX_NUM_SHARDS);
-    pub const ShardingSpec = union(enum) {
-        replicated,
-        sharded: *const Sharding,
-
-        pub fn resolve(self: ShardingSpec, platform: *const Platform) *const Sharding {
-            return switch (self) {
-                .replicated => platform.replicated_sharding,
-                .sharded => |sharding| sharding,
-            };
-        }
-    };
 
     pub const Shard = struct {
         _platform: *const Platform,
@@ -104,7 +91,7 @@ pub const Buffer = struct {
         io: std.Io,
         platform: *const Platform,
         sh: Shape,
-        sharding: ShardingSpec,
+        sharding: Sharding,
         data_: []const u8,
         opts: FromOptions,
     ) !Buffer {
@@ -163,24 +150,24 @@ pub const Buffer = struct {
 
     /// Copies the given Zig bytes to the accelerator memory and
     /// return a Buffer with the given dimensions.
-    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: ShardingSpec, data: []const u8) !Buffer {
+    pub fn fromBytes(io: std.Io, platform: *const Platform, sh: Shape, sharding: Sharding, data: []const u8) !Buffer {
         return from(io, platform, sh, sharding, data, .{});
     }
 
     /// Copies the given zml.Slice to the accelerator memory and
     /// return a Buffer.
-    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: ShardingSpec) !Buffer {
+    pub fn fromSlice(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding) !Buffer {
         return fromSliceOpts(io, platform, slice, sharding, .{});
     }
 
-    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: ShardingSpec, opts: FromOptions) !Buffer {
+    pub fn fromSliceOpts(io: std.Io, platform: *const Platform, slice: Slice, sharding: Sharding, opts: FromOptions) !Buffer {
         return from(io, platform, slice.shape, sharding, std.mem.sliceAsBytes(slice.constData()), opts);
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: ShardingSpec) !Buffer {
+    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, .scalar(dtype_), sharding, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), .replicated, x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -197,7 +184,7 @@ pub const Buffer = struct {
         _: std.Io,
         platform: *const Platform,
         sh: Shape,
-        sharding: ShardingSpec,
+        sharding: Sharding,
         opts: UnitializedOptions,
     ) !Buffer {
         var res: Buffer = .{
@@ -244,14 +231,14 @@ pub const Buffer = struct {
     }
 
     /// Wraps pre-exisiting `pjrt.Buffer` shards into one `zml.Buffer`.
-    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: ShardingSpec, pjrt_buffers: []const *pjrt.Buffer) Buffer {
+    pub fn fromPjrtBuffers(platform: *const Platform, sh: Shape, sharding: Sharding, pjrt_buffers: []const *pjrt.Buffer) Buffer {
         stdx.debug.assert(pjrt_buffers.len <= MAX_NUM_SHARDS, "ZML doesn't support having more than {} shards. Received {} shards for one buffer.", .{ MAX_NUM_SHARDS, pjrt_buffers.len });
         stdx.debug.assert(pjrt_buffers.len > 0, "fromPjrtBuffers expects at least one buffer, got 0.", .{});
 
         return .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding.resolve(platform),
+            ._sharding = sharding,
             ._shards = Shards.fromSlice(pjrt_buffers) catch unreachable,
         };
     }
@@ -321,7 +308,7 @@ pub const Buffer = struct {
         return byte_size;
     }
 
-    pub fn placement(self: Buffer) Placement {
-        return Placement.init(self._sharding, self._shape) catch unreachable;
+    pub fn placement(self: Buffer) Sharding.Placement {
+        return Sharding.Placement.init(self._sharding, self._shape) catch unreachable;
     }
 };

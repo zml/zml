@@ -30,7 +30,7 @@ pub const Session = struct {
         compiled_model: *const inference.CompiledModel,
         model_buffers: *model.Buffers,
     ) !Session {
-        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, .{ .sharded = &compiled_model.params.shardings.model });
+        var kv_cache_buffers = try compiled_model.params.kv_cache.initBuffer(io, platform, compiled_model.params.shardings.model);
         errdefer model.KvCache.deinitBuffer(&kv_cache_buffers);
 
         const seed: u128 = @intCast(std.Io.Clock.now(.real, io).toNanoseconds());
@@ -81,7 +81,7 @@ pub const Session = struct {
         var prefill_tokens_buffer = try zml.Buffer.fromSlice(self.io, self.platform, prefill_tokens_slice, .replicated);
         defer prefill_tokens_buffer.deinit();
 
-        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, @as(u32, 0), .u32, .replicated);
+        var prefill_token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, 0, .u32);
         defer prefill_token_index_buffer.deinit();
 
         var args = try self.compiled_model.prefill_exe.args(self.allocator);
@@ -142,7 +142,7 @@ pub const Session = struct {
         var token_buffer = try zml.Buffer.fromSlice(self.io, self.platform, self.step_token_slice, .replicated);
         defer token_buffer.deinit();
 
-        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32, .replicated);
+        var token_index_buffer = try zml.Buffer.scalar(self.io, self.platform, token_index, .u32);
         defer token_index_buffer.deinit();
 
         var args = try self.compiled_model.decode_exe.args(self.allocator);

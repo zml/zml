@@ -5,7 +5,6 @@ const dialects = @import("mlir/dialects");
 const mlir = @import("mlir");
 const stdx = @import("stdx");
 
-const BufferShardingSpec = @import("buffer.zig").Buffer.ShardingSpec;
 const CompilationContext = @import("module.zig").CompilationContext;
 const constants = @import("constants.zig");
 const DataType = @import("dtype.zig").DataType;
@@ -16,7 +15,7 @@ const mlirx = @import("mlirx.zig");
 const ops = @import("ops.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("sharding.zig").Sharding;
+const Sharding = @import("Sharding.zig");
 
 pub const Tensor = struct {
     var current_id: std.atomic.Value(usize) = .{ .raw = 1 };
@@ -526,7 +525,7 @@ pub const Tensor = struct {
             return .{ ._state = .init(.{2}, .u64) };
         }
 
-        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: BufferShardingSpec, seed: u128) !Buffer {
+        pub fn initBuffer(io: std.Io, platform: *const Platform, sharding: Sharding, seed: u128) !Buffer {
             return .{
                 ._state = try .fromBytes(io, platform, Shape.init(.{2}, .u64), sharding, std.mem.asBytes(&seed)),
             };
