@@ -17,8 +17,10 @@ cc_library(
     deps = [
         "//ffi:cc",
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
+        "@xla//xla/tsl/profiler/convert:post_process_single_host_xplane",
         "@xla//xla/tsl/profiler/convert:trace_events_to_json",
         "@xla//xla/tsl/profiler/convert:xplane_to_trace_events",
+        "@xla//xla/tsl/profiler/utils:xplane_utils",
     ],
 )
 

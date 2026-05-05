@@ -142,6 +142,8 @@ pub const Profiler = struct {
     allocator: std.mem.Allocator,
     io: std.Io,
     inner: ?pjrt.Profiler,
+    start_timestamp_ns: ?u64,
+    stop_timestamp_ns: ?u64,
     session_dir: []const u8,
     profile: Profile,
 
@@ -170,6 +172,8 @@ pub const Profiler = struct {
             .allocator = allocator,
             .io = io,
             .inner = inner,
+            .start_timestamp_ns = null,
+            .stop_timestamp_ns = null,
             .session_dir = session_dir,
             .profile = .{
                 .protobuf_path = protobuf_path,
@@ -187,6 +191,7 @@ pub const Profiler = struct {
 
     pub fn start(self: *Profiler) !void {
         if (self.inner) |*inner| {
+            self.start_timestamp_ns = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
             try inner.start();
         }
     }
@@ -195,30 +200,41 @@ pub const Profiler = struct {
         var inner = self.inner orelse return null;
         self.inner = null;
         try inner.stop();
+        self.stop_timestamp_ns = @intCast(std.Io.Timestamp.now(self.io, .real).nanoseconds);
 
         const protobuf = try inner.collectData(self.arena.allocator());
+        var error_allocator = zffi.ZigAllocator.from(self.arena.allocator());
+        const normalization_error = c.zml_xspace_normalize_and_dump(
+            &error_allocator,
+            zffi.ZigSlice.from(protobuf),
+            self.start_timestamp_ns.?,
+            self.stop_timestamp_ns.?,
+            zffi.ZigSlice.from(self.profile.protobuf_path),
+        );
 
-        try self.writeFile(self.profile.protobuf_path, protobuf);
+        if (normalization_error.len != 0) {
+            log.err("Failed to normalize profile protobuf: {s}", .{zffi.ZigSlice.to(u8, normalization_error)});
+            return error.ProfileTraceNormalizationFailed;
+        }
+
+        const normalized_protobuf = try std.Io.Dir.cwd().readFileAlloc(
+            self.io,
+            self.profile.protobuf_path,
+            self.arena.allocator(),
+            .unlimited,
+        );
 
         const conversion_error = c.zml_xspace_to_perfetto_dump(
-            zffi.ZigSlice.from(protobuf),
+            &error_allocator,
+            zffi.ZigSlice.from(normalized_protobuf),
             zffi.ZigSlice.from(self.profile.perfetto_path),
         );
-        defer if (conversion_error.len != 0) {
-            c.zml_xspace_to_perfetto_str_free(conversion_error);
-        };
+
         if (conversion_error.len != 0) {
-            log.err("Failed to convert profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
+            log.err("Failed to convert normalized profile protobuf to Perfetto trace: {s}", .{zffi.ZigSlice.to(u8, conversion_error)});
             return error.ProfileTraceConversionFailed;
         }
 
         return self.profile;
-    }
-
-    fn writeFile(self: *const Profiler, path: []const u8, contents: []const u8) !void {
-        const file = try std.Io.Dir.createFile(.cwd(), self.io, path, .{});
-        defer file.close(self.io);
-
-        try file.writePositionalAll(self.io, contents, 0);
     }
 };
