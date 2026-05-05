@@ -112,9 +112,9 @@ fn buildMockMesh(
     allocator: std.mem.Allocator,
     target: zml.Target,
     devices: []const zml.platform.Device,
-) !zml.sharding.PhysicalMesh {
+) !zml.Sharding.PhysicalMesh {
     if (devices.len < 8) return error.NotEnoughDevicesForMockMesh;
-    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+    const topology: zml.Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
                 .device(devices[3]), .device(devices[1]),
@@ -132,7 +132,7 @@ fn buildMockMesh(
             }),
         }),
     });
-    return zml.sharding.PhysicalMesh.fromTree(allocator, target, topology);
+    return zml.Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 fn createSequenceBuffer(

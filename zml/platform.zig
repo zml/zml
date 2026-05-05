@@ -201,7 +201,7 @@ pub const Platform = struct {
     pjrt_client: *pjrt.Client,
     devices: []const Device,
     memories: []const Memory,
-    physical_mesh: zml.sharding.PhysicalMesh,
+    physical_mesh: zml.Sharding.PhysicalMesh,
     replicated_sharding: zml.Sharding,
     shardings: std.StringArrayHashMapUnmanaged(zml.Sharding.Data),
 
@@ -266,7 +266,7 @@ pub const Platform = struct {
             }
 
             platform.physical_mesh = try switch (options.physical_mesh) {
-                .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
+                .auto => zml.Sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
             platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
@@ -543,7 +543,7 @@ pub const CreateOptions = struct {
         allocator: std.mem.Allocator,
         target: Target,
         devices: []const Device,
-    ) anyerror!zml.sharding.PhysicalMesh;
+    ) anyerror!zml.Sharding.PhysicalMesh;
 
     pub const PhysicalMesh = union(enum) {
         auto,

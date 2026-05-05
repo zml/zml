@@ -1193,7 +1193,7 @@ fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
     devices: []const @import("platform.zig").Device,
-) anyerror!Sharding.PhysicalMesh {
+) !Sharding.PhysicalMesh {
     if (devices.len < 4) return error.NotEnoughDevices;
     const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
