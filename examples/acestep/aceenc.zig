@@ -116,8 +116,8 @@ pub const AceEnc_handler = struct {
     }
 
     
-    pub fn unloadBuffers(self: *AceEnc_handler) void {
-        AceEnc.unloadBuffers(&self.model_buffers);
+    pub fn unloadBuffers(self: *AceEnc_handler, allocator: std.mem.Allocator) void {
+        AceEnc.unloadBuffers(&self.model_buffers, allocator);
         SilenceGenerator.unloadBuffers(&self.silence_buffers);
     }
 
@@ -296,14 +296,14 @@ pub const AceEnc = struct {
     }
 
     pub fn load(self: *const AceEnc, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceEnc) {
-        //var progress = zml_handler.progress.start("Load Enc weights", store.registry.tensors.count());
-        //defer progress.end();
+        var progress = zml_handler.progress.start("Load Enc weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceEnc, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            //.progress = &progress,
+            .progress = &progress,
         });
     }
 
@@ -313,11 +313,11 @@ pub const AceEnc = struct {
         self.audiocode_encoder.deinit(allocator);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AceEnc)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(AceEnc), allocator: std.mem.Allocator) void {
          TextEncoder.unloadBuffers(&self.text_encoder);
-         LyricEncoder.unloadBuffers(&self.lyric_encoder);
-         TimbreEncoder.unloadBuffers(&self.timbre_encoder);
-         AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder);
+         LyricEncoder.unloadBuffers(&self.lyric_encoder, allocator);
+         TimbreEncoder.unloadBuffers(&self.timbre_encoder, allocator);
+         AudioCodeEncoder.unloadBuffers(&self.audiocode_encoder, allocator);
     }
 
     pub fn forward(self: AceEnc, text_emb: zml.Tensor, lyric_emb: zml.Tensor, timbre_latent: zml.Tensor, audio_codes: zml.Tensor, src_latent: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
@@ -433,12 +433,13 @@ pub const LyricEncoder = struct {
         allocator.free(self.lyric_layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(LyricEncoder)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(LyricEncoder), allocator: std.mem.Allocator) void {
         self.lyric_projector.weight.deinit();
         if (self.lyric_projector.bias) |*bias| bias.deinit();
         for (self.lyric_layers) |*layer| {
             EncoderLayer.unloadBuffers(layer);
         }
+        allocator.free(self.lyric_layers);
         RmsNorm.unloadBuffers(&self.lyric_norm);
     }
 
@@ -633,12 +634,13 @@ pub const TimbreEncoder = struct {
         allocator.free(self.timbre_layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(TimbreEncoder)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(TimbreEncoder), allocator: std.mem.Allocator) void {
         self.embed_timbre.weight.deinit();
         if (self.embed_timbre.bias) |*bias| bias.deinit();
         for (self.timbre_layers) |*layer| {
             EncoderLayer.unloadBuffers(layer);
         }
+        allocator.free(self.timbre_layers);
         self.special_tokens.deinit();
         RmsNorm.unloadBuffers(&self.timbre_norm);
     }
@@ -703,13 +705,14 @@ pub const AudioCodeEncoder = struct {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AudioCodeEncoder)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(AudioCodeEncoder), allocator: std.mem.Allocator) void {
         AudioCodeDequantizer.unloadBuffers(&self.dequantizer);
         self.embed_tokens.weight.deinit();
         if (self.embed_tokens.bias) |*bias| bias.deinit();
         for (self.layers) |*layer| {
             EncoderLayer.unloadBuffers(layer);
         }
+        allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
         self.proj_out.weight.deinit();
         if (self.proj_out.bias) |*bias| bias.deinit();

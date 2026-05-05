@@ -38,7 +38,7 @@ pub const Zml_handler = struct {
     platform: *zml.Platform,
     uris: Uri_handler,
     io: std.Io,
-    //progress: std.Progress.Node,
+    progress: std.Progress.Node,
 
     pub fn fromInit(init: std.process.Init, io: std.Io) !Zml_handler {
         const platform = try zml.Platform.auto(init.gpa, io, .{});
@@ -49,11 +49,12 @@ pub const Zml_handler = struct {
             .platform = platform,
             .uris = .fromHf(),
             .io = io,
-            //.progress = std.Progress.start(io, .{}),
+            .progress = std.Progress.start(io, .{}),
         };
     }
 
     pub fn deinit(self: *Zml_handler) void {
+        self.progress.end();
         self.platform.deinit(self.allocator);
     }
 };
@@ -105,15 +106,8 @@ pub fn main(init: std.process.Init) !void {
     
     var zml_handler: Zml_handler = try .fromInit(init, io);
     defer zml_handler.deinit();
-
-    var aceemb = try aceemb_.AceEmb_handler.init(&zml_handler, 10, 10);
-    defer aceemb.deinit(zml_handler.allocator);
-
-    aceemb.unloadBuffers();
     
-    //try runFullPipeline(&zml_handler);
-    
-    //zml_handler.progress.end();
+    try runFullPipeline(&zml_handler);
 }
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
@@ -146,7 +140,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acecfg) else try .empty(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
 
-    acellm.unloadBuffers();
+    acellm.unloadBuffers(zml_handler.allocator);
     acecfg.unloadBuffers();
 
     // ------------------------------------------------
@@ -161,7 +155,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
     defer text_emb.deinit(zml_handler.allocator);
 
-    aceemb.unloadBuffers();
+    aceemb.unloadBuffers(zml_handler.allocator);
 
     // ------------------------------------------------
     // Encoding phase : prepare input latents and
@@ -177,7 +171,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, actual_duration);
     defer diffuse_args.deinit(zml_handler.allocator);
 
-    aceenc.unloadBuffers();
+    aceenc.unloadBuffers(zml_handler.allocator);
 
     // ------------------------------------------------
     // Generation phase : diffusion with DiT model
@@ -189,7 +183,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
     defer diffused_latents.deinit(zml_handler.allocator);
 
-    acedit.unloadBuffers();
+    acedit.unloadBuffers(zml_handler.allocator);
 
     // ------------------------------------------------
     // Output latents of the DiT model are decoded
@@ -202,7 +196,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
     defer decoded_audio.deinit(zml_handler.allocator);
 
-    acevae.unloadBuffers();
+    acevae.unloadBuffers(zml_handler.allocator);
 
     // ------------------------------------------------
     // Export decoded audio as WAV

@@ -113,8 +113,8 @@ pub const AceLlm_handler = struct {
         return .{ prefill_exe, decode_exe };
     }
     
-    pub fn unloadBuffers(self: *AceLlm_handler) void {
-        AceLlm.unloadBuffers(&self.model_buffers);
+    pub fn unloadBuffers(self: *AceLlm_handler, allocator: std.mem.Allocator) void {
+        AceLlm.unloadBuffers(&self.model_buffers, allocator);
         KvCache.deinitBuffer(&self.kv_cache_buffers);
     }
     
@@ -383,14 +383,14 @@ pub const AceLlm = struct {
     }
 
     pub fn load(self: *const AceLlm, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
-        //var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
-        //defer progress.end();
+        var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            //.progress = &progress,
+            .progress = &progress,
         });
     }
 
@@ -398,11 +398,12 @@ pub const AceLlm = struct {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AceLlm)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(AceLlm), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
+        allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
     }
 

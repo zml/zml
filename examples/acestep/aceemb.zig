@@ -105,8 +105,8 @@ pub const AceEmb_handler = struct {
         );
     }
 
-    pub fn unloadBuffers(self: *AceEmb_handler) void {
-        AceEmb.unloadBuffers(&self.model_buffers);
+    pub fn unloadBuffers(self: *AceEmb_handler, allocator: std.mem.Allocator) void {
+        AceEmb.unloadBuffers(&self.model_buffers, allocator);
     }
 
     pub fn deinit(self: *AceEmb_handler, allocator: std.mem.Allocator) void {
@@ -203,14 +203,14 @@ pub const AceEmb = struct {
     }
 
     pub fn load(self: *const AceEmb, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceEmb) {
-        //var progress = zml_handler.progress.start("Load Emb weights", store.registry.tensors.count());
-        //defer progress.end();
+        var progress = zml_handler.progress.start("Load Emb weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceEmb, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            //.progress = &progress,
+            .progress = &progress,
         });
     }
 
@@ -218,11 +218,12 @@ pub const AceEmb = struct {
         allocator.free(self.layers);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AceEmb)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(AceEmb), allocator: std.mem.Allocator) void {
         self.embed_tokens.weight.deinit();
         for (self.layers) |*layer| {
             TransformerLayer.unloadBuffers(layer);
         }
+        allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm);
     }
 
@@ -240,6 +241,7 @@ pub const AceEmb = struct {
         return output;
     }
 };
+
 
 const TransformerLayer = struct {
     id: u32,

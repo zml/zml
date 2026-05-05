@@ -98,8 +98,8 @@ pub const AceVae_handler = struct {
         );
     }
     
-    pub fn unloadBuffers(self: *AceVae_handler) void {
-        AceVae.unloadBuffers(&self.model_buffers);
+    pub fn unloadBuffers(self: *AceVae_handler, allocator: std.mem.Allocator) void {
+        AceVae.unloadBuffers(&self.model_buffers, allocator);
     }
 
     pub fn deinit(self: *AceVae_handler, allocator: std.mem.Allocator) void {
@@ -156,14 +156,14 @@ pub const AceVae = struct {
     }
 
     pub fn load(self: *const AceVae, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
-        //var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
-        //defer progress.end();
+        var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceVae, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            //.progress = &progress,
+            .progress = &progress,
         });
     }
 
@@ -172,9 +172,9 @@ pub const AceVae = struct {
         self.decoder.deinit(allocator);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(AceVae)) void {
-        OobleckEncoder.unloadBuffers(&self.encoder);
-        OobleckDecoder.unloadBuffers(&self.decoder);
+    pub fn unloadBuffers(self: *zml.Bufferized(AceVae), allocator: std.mem.Allocator) void {
+        OobleckEncoder.unloadBuffers(&self.encoder, allocator);
+        OobleckDecoder.unloadBuffers(&self.decoder, allocator);
     }
 
     pub fn encode(self: AceVae, audio: zml.Tensor) zml.Tensor {
@@ -236,11 +236,12 @@ pub const OobleckEncoder = struct {
         allocator.free(self.block);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(OobleckEncoder)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(OobleckEncoder), allocator: std.mem.Allocator) void {
         Conv1D.unloadBuffers(&self.conv1);
         for (self.block) |*encoder_block| {
             EncoderBlock.unloadBuffers(encoder_block);
         }
+        allocator.free(self.block);
         Snake1D.unloadBuffers(&self.snake1);
         Conv1D.unloadBuffers(&self.conv2);
     }
@@ -350,11 +351,12 @@ pub const OobleckDecoder = struct {
         allocator.free(self.block);
     }
 
-    pub fn unloadBuffers(self: *zml.Bufferized(OobleckDecoder)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(OobleckDecoder), allocator: std.mem.Allocator) void {
         Conv1D.unloadBuffers(&self.conv1);
         for (self.block) |*decoder_block| {
             DecoderBlock.unloadBuffers(decoder_block);
         }
+        allocator.free(self.block);
         Snake1D.unloadBuffers(&self.snake1);
         Conv1D.unloadBuffers(&self.conv2);
     }

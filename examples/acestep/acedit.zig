@@ -80,10 +80,9 @@ pub const AceDit_handler = struct {
             opts,
         );
     }
-
     
-    pub fn unloadBuffers(self: *AceDit_handler) void {
-        AceDit.unloadBuffers(&self.model_buffers);
+    pub fn unloadBuffers(self: *AceDit_handler, allocator: std.mem.Allocator) void {
+        AceDit.unloadBuffers(&self.model_buffers, allocator);
     }
 
     pub fn deinit(self: *AceDit_handler, allocator: std.mem.Allocator) void {
@@ -245,18 +244,18 @@ pub const AceDit = struct {
     }
 
     pub fn load(self: *const AceDit, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceDit) {
-        //var progress = zml_handler.progress.start("Load DiT weights", store.registry.tensors.count());
-        //defer progress.end();
+        var progress = zml_handler.progress.start("Load DiT weights", store.registry.tensors.count());
+        defer progress.end();
         return zml.io.load(AceDit, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            //.progress = &progress,
+            .progress = &progress,
         });
     }
     
-    pub fn unloadBuffers(self: *zml.Bufferized(AceDit)) void {
+    pub fn unloadBuffers(self: *zml.Bufferized(AceDit), allocator: std.mem.Allocator) void {
         self.condition_embedder.weight.deinit();
         if (self.condition_embedder.bias) |*bias| bias.deinit();
         PatchIn.unloadBuffers(&self.proj_in);
@@ -266,6 +265,7 @@ pub const AceDit = struct {
         for (self.layers) |*layer| {
             DiTLayer.unloadBuffers(layer);
         }
+        allocator.free(self.layers);
         RmsNorm.unloadBuffers(&self.norm_out);
         self.scale_shift_table.deinit();
     }
