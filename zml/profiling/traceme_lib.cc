@@ -4,9 +4,11 @@
 #include <dlfcn.h>
 #include <string>
 
+#include "xla/tsl/profiler/convert/post_process_single_host_xplane.h"
 #include "xla/tsl/profiler/backends/cpu/host_tracer_utils.h"
 #include "xla/tsl/profiler/backends/cpu/traceme_recorder.h"
 #include "xla/tsl/profiler/utils/time_utils.h"
+#include "xla/tsl/profiler/utils/xplane_utils.h"
 #include "tsl/profiler/lib/traceme.h"
 #include "tsl/profiler/protobuf/xplane.pb.h"
 
@@ -229,6 +231,21 @@ extern "C" zig_slice zml_traceme_session_merge(zig_slice xspace) {
     }
   }
 
+  return CopyToOwnedSlice(space.SerializeAsString());
+}
+
+extern "C" zig_slice zml_traceme_session_postprocess(zig_slice xspace,
+                                                     uint64_t start_time_ns,
+                                                     uint64_t stop_time_ns) {
+  tensorflow::profiler::XSpace space;
+  if (xspace.len != 0 &&
+      !space.ParseFromArray(xspace.ptr, static_cast<int>(xspace.len))) {
+    return {};
+  }
+
+  tsl::profiler::SetXSpacePidIfNotSet(space, getpid());
+  tsl::profiler::PostProcessSingleHostXSpace(&space, start_time_ns,
+                                             stop_time_ns);
   return CopyToOwnedSlice(space.SerializeAsString());
 }
 

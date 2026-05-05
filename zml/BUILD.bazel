@@ -47,7 +47,9 @@ cc_library(
         "@tsl//tsl/profiler/protobuf:xplane_proto_cc",
         "@xla//xla/tsl/profiler/backends/cpu:host_tracer_utils",
         "@xla//xla/tsl/profiler/backends/cpu:traceme_recorder",
+        "@xla//xla/tsl/profiler/convert:post_process_single_host_xplane",
         "@xla//xla/tsl/profiler/utils:time_utils",
+        "@xla//xla/tsl/profiler/utils:xplane_utils",
     ] + select({
         "//platforms:cuda.enabled": [
             "//platforms/cuda:cuda_nvtx_headers",

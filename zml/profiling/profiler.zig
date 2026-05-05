@@ -239,12 +239,27 @@ pub const Profiler = struct {
             return null;
         }
 
-        try self.writeFile(self.profile.protobuf_path, final_protobuf);
+        const normalized_protobuf = c.zml_traceme_session_postprocess(
+            zffi.ZigSlice.from(final_protobuf),
+            self.start_timestamp_ns orelse self.stop_timestamp_ns.?,
+            self.stop_timestamp_ns.?,
+        );
+        defer if (normalized_protobuf.len != 0) {
+            c.zml_traceme_str_free(normalized_protobuf);
+        };
+        if (normalized_protobuf.len == 0) {
+            log.err("Failed to normalize profile protobuf", .{});
+            return error.ProfileTraceNormalizationFailed;
+        }
+
+        const final_normalized_protobuf = zffi.ZigSlice.to(u8, normalized_protobuf);
+
+        try self.writeFile(self.profile.protobuf_path, final_normalized_protobuf);
 
         xspace_to_perfetto.dumpXSpaceProtoToTraceJsonFile(
             self.allocator,
             self.io,
-            final_protobuf,
+            final_normalized_protobuf,
             self.profile.perfetto_path,
         ) catch |err| {
             log.err("Failed to convert profile protobuf to Perfetto trace: {}", .{err});

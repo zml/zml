@@ -87,15 +87,8 @@ pub const Chat = struct {
 
         try self.runPrefill(prompt_tokens, &stdout.interface);
         try self.runDecodeTurn(&stdout.interface);
-        const profile = if (profiler) |*p| try p.stop() else null;
+        _ = if (profiler) |*p| try p.stop() else null;
 
-        if (opts.profile) {
-            if (profile) |trace| {
-                try stdout.interface.print("\x1b[2mprofile: perfetto: {s} protobuf: {s})\x1b[0m\n\n", .{ trace.perfetto_path, trace.protobuf_path });
-            } else {
-                try stdout.interface.writeAll("\x1b[2mprofile: unavailable on this PJRT plugin\x1b[0m\n\n");
-            }
-        }
         try stdout.interface.flush();
     }
 
