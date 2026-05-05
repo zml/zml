@@ -8,7 +8,7 @@ const main = @import("main.zig");
 const inference = @import("inference.zig");
 
 const hz_type = main.hz_type;
-const cfg: f32 = 2.0;
+const cfg: f32 = 1.0;
 
 const dialects = @import("mlir/dialects");
 
@@ -429,10 +429,7 @@ pub const AceLlm = struct {
         const next_logits_uncond = logits_uncond.gather(.{ .s = pred_index_uncond.rename(.{ .s = .pos }) }, .{}).rename(.{ .pos = .s });
         const codes_logits_cond = next_logits_cond.slice1d(.voc, self.phase.phase2_voc);
         const codes_logits_uncond = next_logits_uncond.slice1d(.voc, self.phase.phase2_voc);
-        // convert logits to .f32 here because CFG can make them overflow
-        const cond_32 = codes_logits_cond.convert(.f32);
-        const uncond_32 = codes_logits_uncond.convert(.f32);
-        const next_logits = uncond_32.add((cond_32.sub(uncond_32)).scale(cfg));
+        const next_logits = codes_logits_uncond.add((codes_logits_cond.sub(codes_logits_uncond)).scale(cfg));
         var next_token, const new_rng = sampleNucleus(next_logits, rng);
         // next token is a position relative to the phase 2 voc slice, translate it back to the full voc slice
         next_token = next_token.convert(tokens_cond.dtype()).addConstant(self.phase.text_voc_size);
@@ -457,7 +454,7 @@ pub const AceLlm = struct {
         output = self.norm.forward(output);
         // compute logits for the output tokens
         const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).convert(hz_type).dot(output, .d);
-        return .{ logits, updated_kv_cache.reuseBuffer(kv_cache) };
+        return .{ logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
     }
     
     pub fn sampleNucleus(logits: zml.Tensor, rng: zml.Tensor.Rng) struct { zml.Tensor, zml.Tensor.Rng } {
@@ -479,15 +476,15 @@ pub const AceLlm = struct {
         const size_slice_s: zml.Tensor.Slice = .{ .start = 0, .end = logits.dim(.s) };
         const shifted_cum_probs = cumulative_probs.pad(0, .{ .voc = padding }).slice(&.{ size_slice_voc, size_slice_s });
 
-        const top_p_tensor = zml.Tensor.scalar(top_p, logits.dtype()).broad(probs.shape());
+        const top_p_tensor = zml.Tensor.scalar(top_p, .f32).broad(probs.shape());
         const is_in_top_p = shifted_cum_probs.cmp(.LE, top_p_tensor);
 
-        const zero = zml.Tensor.scalar(0.0, logits.dtype()).broad(probs.shape());
+        const zero = zml.Tensor.scalar(0.0, .f32).broad(probs.shape());
         const filtered_probs = is_in_top_p.select(probs, zero);
         const filtered_sum = filtered_probs.sum(.voc);
         const normalized_probs = filtered_probs.div(filtered_sum.broad(filtered_probs.shape()));
 
-        const next_rng, const uniform_sample = rng.uniform(zml.Shape.init(.{}, logits.dtype()), .{});
+        const next_rng, const uniform_sample = rng.uniform(zml.Shape.init(.{}, .f32), .{});
         const sample_threshold = uniform_sample.broad(normalized_probs.shape());
         const normalized_cdf = normalized_probs.cumulativeSum(.voc);
         // we compare the cumulative probas to the threshold: we get a tensor [0 0 ... 0 1 1 ... 1]
