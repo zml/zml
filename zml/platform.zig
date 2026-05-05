@@ -219,28 +219,36 @@ pub const Platform = struct {
         }
 
         const pjrt_memories = pjrt_client.addressableMemories(api);
+
+        // Note: Platform is a self-owning struct. It contains the arena that created it in the first place
+        // But it does mean we have to be careful to pass the arena state that contains the node
         const platform: *Platform = platform: {
             var initial_arena = std.heap.ArenaAllocator.init(allocator);
             errdefer initial_arena.deinit();
+
             var initial_allocator = initial_arena.allocator();
+            // Pre-heat the arena, to avoid fragmentation.
+            initial_allocator.free(try initial_allocator.alloc(u8, 8 * 1024));
 
             const platform = try initial_allocator.create(Platform);
             platform.* = .{
-                .arena = initial_arena, // move initial_arena ownership to platform
+                .arena = initial_arena,
                 .target = target,
                 .pjrt_api = api,
                 .pjrt_client = pjrt_client,
+                .shardings = .empty,
+                // set below
                 .devices = undefined,
                 .memories = undefined,
-                .physical_mesh = undefined, // set below
-                .replicated_sharding = undefined, // set below
-                .shardings = .empty,
+                .physical_mesh = undefined,
+                .replicated_sharding = undefined,
             };
             break :platform platform;
         };
 
         const arena = platform.arena.allocator();
-        try platform.shardings.ensureTotalCapacity(arena, 16);
+        errdefer platform.arena.deinit();
+        try platform.shardings.ensureTotalCapacity(arena, 8);
 
         {
             const devices = try arena.alloc(Device, pjrt_devices.len);
