@@ -114,13 +114,8 @@ pub fn main(init: std.process.Init) !void {
     
     var zml_handler: Zml_handler = try .fromInit(init, io);
     defer zml_handler.deinit();
-
-    var aceenc = try aceenc_.AceEnc_handler.init(&zml_handler, 10,10,10,0);
-    defer aceenc.deinit(zml_handler.allocator);
-
-    aceenc.unloadBuffers(zml_handler.allocator);
     
-    //try runFullPipeline(&zml_handler);
+    try runFullPipeline(&zml_handler);
 }
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
