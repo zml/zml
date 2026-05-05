@@ -356,8 +356,8 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     try assistant_cond_prompt.appendSlice(allocator, metadata.duration);
     try assistant_cond_prompt.appendSlice(allocator, "\nkeyscale: ");
     try assistant_cond_prompt.appendSlice(allocator, metadata.keyscale);
-    try assistant_cond_prompt.appendSlice(allocator, "\nlanguage: ");
-    try assistant_cond_prompt.appendSlice(allocator, metadata.language);
+    //try assistant_cond_prompt.appendSlice(allocator, "\nlanguage: ");
+    //try assistant_cond_prompt.appendSlice(allocator, metadata.language);
     try assistant_cond_prompt.appendSlice(allocator, "\ntimesignature: ");
     try assistant_cond_prompt.appendSlice(allocator, metadata.timesignature);
     try assistant_cond_prompt.appendSlice(allocator, "\n</think>\n\n");
@@ -397,10 +397,11 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     defer formatted_prompt.deinit(allocator);
     
     try formatted_prompt.appendSlice(allocator, "# Instruction\n");
-    try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
+    //try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
+    try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);
-    try formatted_prompt.appendSlice(allocator, "\n# Metas\n");
+    try formatted_prompt.appendSlice(allocator, "\n\n# Metas\n");
     try formatted_prompt.appendSlice(allocator, "- bmp: ");
     try formatted_prompt.appendSlice(allocator, metadata.bpm);
     try formatted_prompt.appendSlice(allocator, "\n- timesignature: ");
@@ -410,6 +411,8 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     try formatted_prompt.appendSlice(allocator, "\n- duration: ");
     try formatted_prompt.appendSlice(allocator, metadata.duration);
     try formatted_prompt.appendSlice(allocator, "\n<|endoftext|>\n");
+
+    std.log.info("text input\n{s}", .{formatted_prompt.items});
     
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
@@ -423,11 +426,13 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: zml.tokenize
     var formatted_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
     defer formatted_prompt.deinit(allocator);
     
-    try formatted_prompt.appendSlice(allocator, "# Language\n");
+    try formatted_prompt.appendSlice(allocator, "# Languages\n");
     try formatted_prompt.appendSlice(allocator, metadata.language);
-    try formatted_prompt.appendSlice(allocator, "\n\n# Lyrics\n");
+    try formatted_prompt.appendSlice(allocator, "\n\n# Lyric\n");
     try formatted_prompt.appendSlice(allocator, metadata.lyric);
     try formatted_prompt.appendSlice(allocator, "<|endoftext|>");
+
+    std.log.info("lyric input\n{s}", .{formatted_prompt.items});
     
     var tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     try tokens.appendSlice(allocator, try encoder.encode(formatted_prompt.items));
