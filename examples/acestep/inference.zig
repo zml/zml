@@ -397,12 +397,13 @@ pub fn tokenizeInputCaption(allocator: std.mem.Allocator, tokenizer: zml.tokeniz
     defer formatted_prompt.deinit(allocator);
     
     try formatted_prompt.appendSlice(allocator, "# Instruction\n");
+    // TODO
     //try formatted_prompt.appendSlice(allocator, "Fill the audio semantic mask based on the given conditions:\n\n");
     try formatted_prompt.appendSlice(allocator, "Generate audio semantic tokens based on the given conditions:\n\n");
     try formatted_prompt.appendSlice(allocator, "# Caption\n");
     try formatted_prompt.appendSlice(allocator, metadata.caption);
     try formatted_prompt.appendSlice(allocator, "\n\n# Metas\n");
-    try formatted_prompt.appendSlice(allocator, "- bmp: ");
+    try formatted_prompt.appendSlice(allocator, "- bpm: ");
     try formatted_prompt.appendSlice(allocator, metadata.bpm);
     try formatted_prompt.appendSlice(allocator, "\n- timesignature: ");
     try formatted_prompt.appendSlice(allocator, metadata.timesignature);

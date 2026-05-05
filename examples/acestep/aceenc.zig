@@ -333,9 +333,9 @@ pub const AceEnc = struct {
         const encoded_conditions = zml.Tensor.concatenate(&.{ encoded_lyric, encoded_timbre, encoded_text }, .s);
         
         // dim [a, t_25hz]
-        _ = audio_codes;
-        //const latent_source = self.audiocode_encoder.forward(audio_codes);
-        const latent_source = src_latent;
+        const latent_source = self.audiocode_encoder.forward(audio_codes);
+        _ = src_latent;
+        //const latent_source = if (audio_codes) |codes| self.audiocode_encoder.forward(codes) else src_latent;
         // dim [a, t_25hz]
         const latent_mask = zml.Tensor.constant(zml.DataType.constant(hz_type, 1)).broad(latent_source.shape());
         
