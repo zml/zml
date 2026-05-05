@@ -124,7 +124,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     // think = false : text2music mode, initial latents initialized from noise
     // think = true  : cover mode     , initial latents initialized from audio codes
-    const think = false;
+    const think = true;
 
     // in text2music, overrides the generated duration metadata
     const target_duration = "12";
