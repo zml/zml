@@ -509,19 +509,25 @@ pub const Platform = struct {
         return try profiler_.profiler(self.pjrt_api, allocator, io, options);
     }
 
+    /// Create a Sharding based on the given logical mesh and the default strategy.
+    /// Memory is owned by the platform, making it safe to copy around.
     pub fn registerSharding(platform: *Platform, logical: Sharding.LogicalMesh) !Sharding {
         return platform.registerShardingWithStrategy(logical, .suggest(logical, platform.physical_mesh));
     }
 
+    /// Create a Sharding based on the given logical mesh and a strategy.
+    /// Memory is owned by the platform, making it safe to copy around.
     pub fn registerShardingWithStrategy(platform: *Platform, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
         const arena = platform.arena.allocator();
         const entry = try platform.shardings.getOrPut(arena, logical.name);
         if (entry.found_existing) {
-            std.debug.panic("Sharding already exists: {s}", .{logical.name});
+            std.debug.panic("Another sharding already exists with this name: {s}", .{logical.name});
         }
 
-        entry.key_ptr.* = try arena.dupe(u8, logical.name);
-        entry.value_ptr.* = try .init(platform.physical_mesh, logical, strategy);
+        var logical_copy = logical;
+        logical_copy.name = try arena.dupe(u8, logical.name);
+        entry.key_ptr.* = logical_copy.name;
+        entry.value_ptr.* = try .init(platform.physical_mesh, logical_copy, strategy);
         return .{ .data = entry.value_ptr };
     }
 };
