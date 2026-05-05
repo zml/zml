@@ -122,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
-    const raw_prompt = "an energetic electric guitar solo\n\ninstrumental: true";
+    const raw_prompt = "an short but energetic electric guitar solo\n\ninstrumental: true";
 
     // think = false : text2music mode, initial latents initialized from noise
     // think = true  : cover mode     , initial latents initialized from audio codes
