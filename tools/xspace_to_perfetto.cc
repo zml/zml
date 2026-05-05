@@ -17,11 +17,11 @@ void PrintUsage(std::string_view argv0) {
   std::cerr << "Usage: " << argv0 << " <input_xspace.pb> [output_trace.json]\n";
 }
 
-void* MallocAlloc(const void*, size_t elem, size_t nelems, size_t) {
+void* Alloc(const void*, size_t elem, size_t nelems, size_t) {
   return std::malloc(elem * nelems);
 }
 
-void MallocFree(const void*, void* ptr, size_t, size_t, size_t) {
+void Free(const void*, void* ptr, size_t, size_t, size_t) {
   std::free(ptr);
 }
 
@@ -36,8 +36,8 @@ int main(int argc, char** argv) {
 
   zig_allocator error_allocator = {
       .ctx = nullptr,
-      .alloc = &MallocAlloc,
-      .free = &MallocFree,
+      .alloc = &Alloc,
+      .free = &Free,
   };
   zig_slice error = {.ptr = nullptr, .len = 0};
   if (!zml::tools::DumpXSpaceFileToTraceJsonFile(input_path, output_path,
