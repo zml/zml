@@ -12,7 +12,6 @@ const hz_type = main.hz_type;
 
 // TODO: clean the audiocodes vs silent source in cover/text2music mode
 
-
 pub const AceEnc_handler = struct {
     model: AceEnc,
     silence: SilenceGenerator,
@@ -132,6 +131,7 @@ pub const AceEnc_handler = struct {
     }
     
 };
+
 
 pub const Params = struct {
     // caption Enceddings, expected shape: [s_text, d_emb]

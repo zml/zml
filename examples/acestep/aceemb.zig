@@ -9,6 +9,7 @@ const inference = @import("inference.zig");
 
 const hz_type = main.hz_type;
 
+
 pub const AceEmb_handler = struct {
     model: AceEmb,
     params: Params,
@@ -117,6 +118,7 @@ pub const AceEmb_handler = struct {
         self.partial_embed_exe.deinit();
     }
 };
+
 
 pub const Params = struct {
     full_embed_tokens: zml.Tensor,
