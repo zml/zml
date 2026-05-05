@@ -324,56 +324,68 @@ pub fn tokenizeGenerationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tok
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
-    var prompt_before_cot: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-    defer prompt_before_cot.deinit(allocator);
-    try prompt_before_cot.appendSlice(allocator, "<|im_start|>system\n");
-    try prompt_before_cot.appendSlice(allocator, "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
-    try prompt_before_cot.appendSlice(allocator, "<|im_end|>\n");
-    try prompt_before_cot.appendSlice(allocator, "<|im_start|>user\n");
-    try prompt_before_cot.appendSlice(allocator, "# Caption\n");
-    try prompt_before_cot.appendSlice(allocator, metadata.caption);
-    try prompt_before_cot.appendSlice(allocator, "\n\n");
-    try prompt_before_cot.appendSlice(allocator, "# Lyric\n");
-    try prompt_before_cot.appendSlice(allocator, "[Instrumental]\n");
-    try prompt_before_cot.appendSlice(allocator, "<|im_end|>\n");
-    try prompt_before_cot.appendSlice(allocator, "<|im_start|>assistant\n");
-    try prompt_before_cot.appendSlice(allocator, "<think>");
-    
-    var prompt_cot: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-    defer prompt_cot.deinit(allocator);
-    try prompt_cot.appendSlice(allocator, "\nbpm: ");
-    try prompt_cot.appendSlice(allocator, metadata.bpm);
-    try prompt_cot.appendSlice(allocator, "\nduration: ");
-    try prompt_cot.appendSlice(allocator, metadata.duration);
-    try prompt_cot.appendSlice(allocator, "\nkeyscale: ");
-    try prompt_cot.appendSlice(allocator, metadata.keyscale);
-    try prompt_cot.appendSlice(allocator, "\nlanguage: ");
-    try prompt_cot.appendSlice(allocator, metadata.language);
-    try prompt_cot.appendSlice(allocator, "\ntimesignature: ");
-    try prompt_cot.appendSlice(allocator, metadata.timesignature);
-    
-    var prompt_empty_cot: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-    defer prompt_empty_cot.deinit(allocator);
-    try prompt_empty_cot.appendSlice(allocator, "\n");
-    
-    var prompt_after_cot: std.ArrayList(u8) = try .initCapacity(allocator, 0);
-    defer prompt_after_cot.deinit(allocator);
-    try prompt_after_cot.appendSlice(allocator, "\n</think>\n\n");
-    try prompt_after_cot.appendSlice(allocator, "<|im_end|>\n");
+    var system_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer system_prompt.deinit(allocator);
+    try system_prompt.appendSlice(allocator, "<|im_start|>system\n");
+    try system_prompt.appendSlice(allocator, "# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
+    try system_prompt.appendSlice(allocator, "<|im_end|>\n");
 
+    var user_cond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer user_cond_prompt.deinit(allocator);
+    try user_cond_prompt.appendSlice(allocator, "<|im_start|>user\n");
+    try user_cond_prompt.appendSlice(allocator, "# Caption\n");
+    try user_cond_prompt.appendSlice(allocator, metadata.caption);
+    try user_cond_prompt.appendSlice(allocator, "\n\n");
+    try user_cond_prompt.appendSlice(allocator, "# Lyric\n");
+    try user_cond_prompt.appendSlice(allocator, metadata.lyric);
+    try user_cond_prompt.appendSlice(allocator, "\n<|im_end|>\n");
+
+    var user_uncond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer user_uncond_prompt.deinit(allocator);
+    try user_uncond_prompt.appendSlice(allocator, "<|im_start|>user\n");
+    try user_uncond_prompt.appendSlice(allocator, "NO USER INPUT");
+    try user_uncond_prompt.appendSlice(allocator, "<|im_end|>\n");
+
+    var assistant_cond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer assistant_cond_prompt.deinit(allocator);
+    try assistant_cond_prompt.appendSlice(allocator, "<|im_start|>assistant\n");
+    try assistant_cond_prompt.appendSlice(allocator, "<think>");
+    try assistant_cond_prompt.appendSlice(allocator, "\nbpm: ");
+    try assistant_cond_prompt.appendSlice(allocator, metadata.bpm);
+    try assistant_cond_prompt.appendSlice(allocator, "\nduration: ");
+    try assistant_cond_prompt.appendSlice(allocator, metadata.duration);
+    try assistant_cond_prompt.appendSlice(allocator, "\nkeyscale: ");
+    try assistant_cond_prompt.appendSlice(allocator, metadata.keyscale);
+    try assistant_cond_prompt.appendSlice(allocator, "\nlanguage: ");
+    try assistant_cond_prompt.appendSlice(allocator, metadata.language);
+    try assistant_cond_prompt.appendSlice(allocator, "\ntimesignature: ");
+    try assistant_cond_prompt.appendSlice(allocator, metadata.timesignature);
+    try assistant_cond_prompt.appendSlice(allocator, "\n</think>\n\n");
+    
+    var assistant_uncond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer assistant_uncond_prompt.deinit(allocator);
+    try assistant_uncond_prompt.appendSlice(allocator, "<|im_start|>assistant\n");
+    try assistant_uncond_prompt.appendSlice(allocator, "<think>\n\n");
+    try assistant_uncond_prompt.appendSlice(allocator, "</think>\n\n");
+    
+    var cond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer cond_prompt.deinit(allocator);
+    try cond_prompt.appendSlice(allocator, system_prompt.items);
+    try cond_prompt.appendSlice(allocator, user_cond_prompt.items);
+    try cond_prompt.appendSlice(allocator, assistant_cond_prompt.items);
+
+    var uncond_prompt: std.ArrayList(u8) = try .initCapacity(allocator, 0);
+    defer uncond_prompt.deinit(allocator);
+    try uncond_prompt.appendSlice(allocator, system_prompt.items);
+    try uncond_prompt.appendSlice(allocator, user_uncond_prompt.items);
+    try uncond_prompt.appendSlice(allocator, assistant_uncond_prompt.items);
+    
     var cond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     var uncond_tokens: std.ArrayList(u32) = try .initCapacity(allocator, 0);
     
-    // same before
-    try cond_tokens.appendSlice(allocator, try encoder.encode(prompt_before_cot.items));
-    try uncond_tokens.appendSlice(allocator, try encoder.encode(prompt_before_cot.items));
-    // cond has CoT content, uncond has empty think block
-    try cond_tokens.appendSlice(allocator, try encoder.encode(prompt_cot.items));
-    try uncond_tokens.appendSlice(allocator, try encoder.encode(prompt_empty_cot.items));
-    // same after
-    try cond_tokens.appendSlice(allocator, try encoder.encode(prompt_after_cot.items));
-    try uncond_tokens.appendSlice(allocator, try encoder.encode(prompt_after_cot.items));
-    
+    try cond_tokens.appendSlice(allocator, try encoder.encode(cond_prompt.items));
+    try uncond_tokens.appendSlice(allocator, try encoder.encode(uncond_prompt.items));
+
     return .{ try cond_tokens.toOwnedSlice(allocator), try uncond_tokens.toOwnedSlice(allocator) };
 }
 
