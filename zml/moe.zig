@@ -2,6 +2,11 @@ const std = @import("std");
 const zml = @import("zml.zig");
 const triton = @import("moe/triton.zig");
 
+pub const Activation = enum {
+    silu_glu,
+    relu2,
+};
+
 pub const Backend = enum {
     // Could select a more specific name like "triton_sm90_bf16"
     triton,
@@ -105,6 +110,36 @@ pub fn forwardMoe(
     metadata: Metadata,
     parameters: Parameters,
 ) !zml.Tensor {
+    return forwardMoeEx(
+        input,
+        topk_ids,
+        topk_weights,
+        weights_gate_up,
+        scales_gate_up,
+        bias_gate_up,
+        weights_down,
+        scales_down,
+        bias_down,
+        metadata,
+        parameters,
+        .silu_glu,
+    );
+}
+
+pub fn forwardMoeEx(
+    input: zml.Tensor,
+    topk_ids: zml.Tensor,
+    topk_weights: zml.Tensor,
+    weights_gate_up: zml.Tensor,
+    scales_gate_up: ?zml.Tensor,
+    bias_gate_up: ?zml.Tensor,
+    weights_down: zml.Tensor,
+    scales_down: ?zml.Tensor,
+    bias_down: ?zml.Tensor,
+    metadata: Metadata,
+    parameters: Parameters,
+    activation: Activation,
+) !zml.Tensor {
     return switch (parameters) {
         .triton => b: {
             const triton_metadata = switch (metadata) {
@@ -119,6 +154,11 @@ pub fn forwardMoe(
                 topk_ids,
                 triton_metadata,
                 .{
+                    .activation = switch (activation) {
+                        .silu_glu => "silu",
+                        .relu2 => "relu2",
+                    },
+                    .activation_mode = activation,
                     .w1_scale = scales_gate_up,
                     .w2_scale = scales_down,
                     .w1_bias = bias_gate_up,

@@ -39,7 +39,6 @@ zig_library(
         "attention/triton_attention.zig",
         "attention/triton_kernels/unified_attention.zig",
         "kernel.zig",
-        "moe/moe.zig",
         "moe/triton.zig",
         "moe.zig",
         "triton/runtime.zig",

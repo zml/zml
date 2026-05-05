@@ -9,9 +9,6 @@ from triton.runtime.driver import driver as runtime_driver
 
 from fake_plugin.compiler import Backend as FakeCompilerBackend
 from fake_plugin.driver import Driver as FakeDriver
-
-# Import backend-specific compilers
-from attention_compile import compile_attention
 from moe_compile import compile_moe
 
 
@@ -32,9 +29,7 @@ def compile_request(request: dict) -> str:
     kernel = request["kernel"]
     config = request["config"]
 
-    if backend == "attention":
-        return compile_attention(kernel, config)
-    elif backend == "moe":
+    if backend == "moe":
         return compile_moe(kernel, config)
     else:
         raise ValueError(f"Unsupported backend: {backend}")

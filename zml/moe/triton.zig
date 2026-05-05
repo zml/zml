@@ -8,7 +8,7 @@ const ops = zml.ops;
 const bazel = @import("bazel");
 const bazel_builtin = @import("bazel_builtin");
 const stdx = @import("stdx");
-
+const Activation = @import("../moe.zig").Activation;
 const log = std.log.scoped(.moe_triton);
 
 pub fn fusedExpertsImpl(
@@ -36,7 +36,7 @@ pub fn fusedExpertsImpl(
     const weights = topk_weights.reshape(.{ .token = b * s, .in = topk_weights.dim(.top_expert) }).withTags(.{ .token, .topk });
     const ids = topk_ids.reshape(.{ .token = b * s, .in = topk_ids.dim(.top_expert) }).withTags(.{ .token, .topk });
 
-    try validateInputs(hidden, gate_up, down, weights, ids);
+    try validateInputsForActivation(hidden, gate_up, down, weights, ids, opts.activation_mode);
 
     const block_size_m = options.block_size_m;
     const num_experts = gate_up.dim(.expert);
@@ -109,11 +109,16 @@ pub fn fusedExpertsImpl(
         first_generation_config,
         max_num_tokens_padded,
         num_assignments,
-        Shape.init(.{ .token = num_assignments, .out = gate_up.dim(.out) }, .bf16),
+        Shape.init(.{ .token = num_assignments, .out = firstMatmulOutDim(gate_up, opts.activation_mode) }, .bf16),
     );
 
-    const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
-    const activated = gate.silu().mul(up);
+    const activated = switch (opts.activation_mode) {
+        .silu_glu => b: {
+            const gate, const up = zml.nn.splitRealImg(first_out, .sequential);
+            break :b gate.silu().mul(up);
+        },
+        .relu2 => first_out.relu().powByConst(2),
+    };
 
     var activated_quant = activated;
     a_scale = opts.a2_scale orelse Tensor.scalar(1.0, .f32);
@@ -641,6 +646,7 @@ fn generateTtir(
 pub const Options = struct {
     inplace: bool = false,
     activation: []const u8 = "silu",
+    activation_mode: Activation = .silu_glu,
     apply_router_weight_on_input: bool = false,
     use_fp8_w8a8: bool = false,
     use_int8_w8a8: bool = false,
@@ -783,7 +789,14 @@ fn fp8ActivationGroupSize(x: Tensor) i64 {
 
 fn validateOptions(opts: Options) !void {
     if (opts.inplace) return error.Unimplemented;
-    if (!std.mem.eql(u8, opts.activation, "silu")) return error.UnsupportedActivation;
+    switch (opts.activation_mode) {
+        .silu_glu => {
+            if (!std.mem.eql(u8, opts.activation, "silu")) return error.UnsupportedActivation;
+        },
+        .relu2 => {
+            if (!std.mem.eql(u8, opts.activation, "relu2")) return error.UnsupportedActivation;
+        },
+    }
     if (opts.apply_router_weight_on_input) return error.UnsupportedOption;
     if (opts.use_fp8_w8a8 or opts.use_int8_w8a8 or opts.use_int8_w8a16 or opts.use_int4_w4a16) return error.UnsupportedQuantization;
     if (opts.ocp_mx_scheme != null or opts.per_channel_quant) return error.UnsupportedOption;
@@ -795,15 +808,33 @@ fn validateOptions(opts: Options) !void {
 }
 
 fn validateInputs(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor) !void {
+    return validateInputsForActivation(hidden, gate_up, down, weights, ids, .silu_glu);
+}
+
+fn validateInputsForActivation(hidden: Tensor, gate_up: Tensor, down: Tensor, weights: Tensor, ids: Tensor, activation: Activation) !void {
     if (hidden.dtype() != .bf16) return error.UnsupportedType;
     if (gate_up.dtype() != .bf16 and gate_up.dtype() != .f8e4m3fn) return error.UnsupportedType;
     if (down.dtype() != .bf16 and down.dtype() != .f8e4m3fn) return error.UnsupportedType;
     if (weights.dtype() != .f32 and weights.dtype() != .bf16) return error.UnsupportedType;
     if (ids.dtype() != .i32) return error.UnsupportedType;
     if (hidden.dim(.in) != gate_up.dim(.in)) return error.InvalidShape;
-    if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
-    if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+    switch (activation) {
+        .silu_glu => {
+            if (@rem(gate_up.dim(.out), 2) != 0) return error.InvalidShape;
+            if (down.dim(.mid) != @divFloor(gate_up.dim(.out), 2)) return error.InvalidShape;
+        },
+        .relu2 => {
+            if (down.dim(.mid) != gate_up.dim(.out)) return error.InvalidShape;
+        },
+    }
     if (ids.dim(.token) != hidden.dim(.token) or weights.dim(.token) != hidden.dim(.token)) return error.InvalidShape;
     if (ids.dim(.topk) != weights.dim(.topk)) return error.InvalidShape;
     if (gate_up.dim(.expert) != down.dim(.expert)) return error.InvalidShape;
+}
+
+fn firstMatmulOutDim(gate_up: Tensor, activation: Activation) i64 {
+    return switch (activation) {
+        .silu_glu => @divFloor(gate_up.dim(.out), 2),
+        .relu2 => gate_up.dim(.out),
+    };
 }
