@@ -38,9 +38,15 @@ pub const Zml_handler = struct {
     platform: *zml.Platform,
     uris: Uri_handler,
     io: std.Io,
+    local_io: std.Io,
     progress: std.Progress.Node,
 
     pub fn fromInit(init: std.process.Init, io: std.Io) !Zml_handler {
+        if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
+            var working_dir = try std.Io.Dir.openDirAbsolute(init.io, build_working_directory, .{});
+            defer working_dir.close(init.io);
+            try std.process.setCurrentDir(init.io, working_dir);
+        }
         const platform = try zml.Platform.auto(init.gpa, io, .{});
         errdefer platform.deinit(init.gpa);
         return .{
@@ -49,6 +55,7 @@ pub const Zml_handler = struct {
             .platform = platform,
             .uris = .fromHf(),
             .io = io,
+            .local_io = init.io,
             .progress = std.Progress.start(io, .{}),
         };
     }
@@ -202,7 +209,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     // Export decoded audio as WAV
     // ------------------------------------------------
 
-     try exportDecodedAudioAsWav(zml_handler.io, decoded_audio, "decoded_audio.wav");
+     try exportDecodedAudioAsWav(zml_handler.local_io, decoded_audio, "decoded_audio.wav");
 }
 
 pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio, output_path: []const u8) !void {
