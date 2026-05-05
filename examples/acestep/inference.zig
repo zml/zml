@@ -250,7 +250,7 @@ pub const DecodedAudio = struct {
 };
 
 
-pub fn runPhase1(raw_prompt: []const u8, zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm_handler) !AudioMetadata {
+pub fn runPhase1(raw_prompt: []const u8, zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler) !AudioMetadata {
     std.log.info("5Hz phase I : inspiration from initial prompt", .{});
     //std.log.info("########### prompt start ###########:\n{s}", .{raw_prompt});
     //std.log.info("###########  prompt end  ###########", .{});
@@ -265,7 +265,7 @@ pub fn runPhase1(raw_prompt: []const u8, zml_handler: main.Zml_handler, acellm: 
     return metadata;
 }
 
-pub fn runPhase2(metadata: AudioMetadata, zml_handler: main.Zml_handler, acecfg: *acellm_.AceCfg_handler) !AudioCodes {
+pub fn runPhase2(metadata: AudioMetadata, zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCfg_handler) !AudioCodes {
     std.log.info("5hz phase II : audio codes generation", .{});
     const cond_tok, const uncond_tok = try tokenizeGenerationPrompt(zml_handler.allocator, acecfg.llm.tokenizer, metadata);
     defer zml_handler.allocator.free(cond_tok);
@@ -279,7 +279,7 @@ pub fn runPhase2(metadata: AudioMetadata, zml_handler: main.Zml_handler, acecfg:
     return .{ .token_id = audiocodes, .string = audiostr };
 }
 
-pub fn embedTextInputs(zml_handler: main.Zml_handler, audio_metadata: AudioMetadata, aceemb: *aceemb_.AceEmb_handler) !TextEmbedding {
+pub fn embedTextInputs(zml_handler: *main.Zml_handler, audio_metadata: AudioMetadata, aceemb: *aceemb_.AceEmb_handler) !TextEmbedding {
     std.log.info("EMB start Text Input Embedding", .{});
     
     const caption_tok = try tokenizeInputCaption(zml_handler.allocator, aceemb.tokenizer, audio_metadata);
@@ -423,7 +423,7 @@ pub fn tokenizeInputLyrics(allocator: std.mem.Allocator, tokenizer: zml.tokenize
 }
 
 
-pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.AceLlm_handler, prompt_tok: []const u32) ![]u8 {
+pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler, prompt_tok: []const u32) ![]u8 {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acellm.params.shardings.replicated;
@@ -519,7 +519,7 @@ pub fn generateInspirationText(zml_handler: main.Zml_handler, acellm: *acellm_.A
     return result.toOwnedSlice(allocator);
 }
 
-pub fn generateAudioCodes(zml_handler: main.Zml_handler, acecfg: *acellm_.AceCfg_handler, cond_tok: []const u32, uncond_tok: []const u32, metadata: AudioMetadata) !struct { []u32, []u8 } {
+pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCfg_handler, cond_tok: []const u32, uncond_tok: []const u32, metadata: AudioMetadata) !struct { []u32, []u8 } {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acecfg.params.shardings.replicated;
@@ -645,7 +645,7 @@ pub fn generateAudioCodes(zml_handler: main.Zml_handler, acecfg: *acellm_.AceCfg
     return .{ try result_tok.toOwnedSlice(allocator), try result_str.toOwnedSlice(allocator) };
 }
 
-pub fn generateTextEmbedding(zml_handler: main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokens: []const u32, token_embedding: bool) !zml.Slice {
+pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokens: []const u32, token_embedding: bool) !zml.Slice {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
@@ -688,7 +688,7 @@ pub fn generateTextEmbedding(zml_handler: main.Zml_handler, aceemb: *aceemb_.Ace
     return embedding_slice;
 }
 
-pub fn prepareLatents(zml_handler: main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32) !InitialLatents {
+pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_handler, text_emb: TextEmbedding, audio_codes: []u32, target_duration: u32) !InitialLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceenc.shardings.replicated;
@@ -773,7 +773,7 @@ pub fn prepareLatents(zml_handler: main.Zml_handler, aceenc: *aceenc_.AceEnc_han
     };
 }
 
-pub fn runDiffusion(zml_handler: main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents) !DiffusedLatents {
+pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_handler, latents: InitialLatents) !DiffusedLatents {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acedit.shardings.replicated;
@@ -819,7 +819,7 @@ pub fn runDiffusion(zml_handler: main.Zml_handler, acedit: *acedit_.AceDit_handl
     return .{ .x = result_slice };    
 }
 
-pub fn decodeAudioLatents(zml_handler: main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents) !DecodedAudio {
+pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVae_handler, latents: DiffusedLatents) !DecodedAudio {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acevae.shardings.replicated;

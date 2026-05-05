@@ -19,7 +19,7 @@ pub const AceDit_handler = struct {
     model_buffers: zml.Bufferized(AceDit),
     shardings: main.Shardings,
     
-    pub fn init(zml_handler: main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
+    pub fn init(zml_handler: *main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
@@ -27,7 +27,7 @@ pub const AceDit_handler = struct {
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
     
         std.log.info("DiT parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, repo);
+        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("DiT parsed", .{});
@@ -66,21 +66,7 @@ pub const AceDit_handler = struct {
         };
     }
 
-    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
-        const parsed_config = blk: {
-            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
-            defer config_json_file.close(zml_handler.io);
-            var config_json_buffer: [256]u8 = undefined;
-            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-            defer reader.deinit();
-            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
-        };
-        errdefer parsed_config.deinit();
-        return parsed_config;
-    }
-
-    pub fn compileModel(zml_handler: main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceDit, params: Params, shardings: main.Shardings) !zml.Exe {
         const shardings_arr = shardings.all();
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings_arr,
@@ -258,15 +244,15 @@ pub const AceDit = struct {
         allocator.free(self.layers);
     }
 
-    pub fn load(self: *const AceDit, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceDit) {
-        var progress = zml_handler.progress.start("Load DiT weights", store.registry.tensors.count());
-        defer progress.end();
+    pub fn load(self: *const AceDit, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceDit) {
+        //var progress = zml_handler.progress.start("Load DiT weights", store.registry.tensors.count());
+        //defer progress.end();
         return zml.io.load(AceDit, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = &progress,
+            //.progress = &progress,
         });
     }
     
@@ -1027,7 +1013,7 @@ pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
 }
 
 
-pub fn testModel(zml_handler: main.Zml_handler, acedit: AceDit_handler) !void {
+pub fn testModel(zml_handler: *main.Zml_handler, acedit: AceDit_handler) !void {
     const activations_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//activations.safetensors";
     
     try main.printSafetensors(zml_handler.allocator, zml_handler.io, activations_path);
@@ -1137,7 +1123,7 @@ pub fn testModel(zml_handler: main.Zml_handler, acedit: AceDit_handler) !void {
     try testLayer(w_dit, wb_dit, "model", zml_handler, activations_store.view(), &acedit.shardings.all());
 }
 
-pub fn testLayer(wrapper: anytype, buffers: anytype, layername: []const u8, zml_handler: main.Zml_handler, store: zml.io.TensorStore.View, shardings: []const zml.sharding.Sharding) !void {
+pub fn testLayer(wrapper: anytype, buffers: anytype, layername: []const u8, zml_handler: *main.Zml_handler, store: zml.io.TensorStore.View, shardings: []const zml.sharding.Sharding) !void {
     try zml.testing.testLayer(zml_handler.allocator, zml_handler.io, zml_handler.platform, wrapper, .forward, store, layername, buffers, shardings, .{});
 }
 

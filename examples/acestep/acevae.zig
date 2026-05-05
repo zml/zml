@@ -18,14 +18,14 @@ pub const AceVae_handler = struct {
     model_buffers: zml.Bufferized(AceVae),
     shardings: main.Shardings,
 
-    pub fn init(zml_handler: main.Zml_handler, target_duration: u32) !AceVae_handler {
+    pub fn init(zml_handler: *main.Zml_handler, target_duration: u32) !AceVae_handler {
         std.log.info("VAE init", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
         var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, "diffusion_pytorch_model.safetensors");
         defer registry.deinit();
 
         std.log.info("VAE config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, repo);
+        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("VAE parsed", .{});
@@ -70,21 +70,7 @@ pub const AceVae_handler = struct {
         };
     }
 
-    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
-        const parsed_config = blk: {
-            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
-            defer config_json_file.close(zml_handler.io);
-            var config_json_buffer: [256]u8 = undefined;
-            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-            defer reader.deinit();
-            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
-        };
-        errdefer parsed_config.deinit();
-        return parsed_config;
-    }
-
-    pub fn compileDecodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings.all(),
         };
@@ -98,7 +84,7 @@ pub const AceVae_handler = struct {
         );
     }
     
-    pub fn compileEncodeModel(zml_handler: main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings.all(),
         };
@@ -169,15 +155,15 @@ pub const AceVae = struct {
         };
     }
 
-    pub fn load(self: *const AceVae, zml_handler: main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
-        var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
-        defer progress.end();
+    pub fn load(self: *const AceVae, zml_handler: *main.Zml_handler, store: *zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceVae) {
+        //var progress = zml_handler.progress.start("Load VAE weights", store.registry.tensors.count());
+        //defer progress.end();
         return zml.io.load(AceVae, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = &progress,
+            //.progress = &progress,
         });
     }
 
@@ -649,7 +635,7 @@ pub fn print(x: zml.Tensor, n: u8) void {
     }
 }
 
-pub fn testModel(zml_handler: main.Zml_handler, acevae: AceVae_handler) !void {
+pub fn testModel(zml_handler: *main.Zml_handler, acevae: AceVae_handler) !void {
     const activations_path = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae//activations.safetensors";
     
     try main.printSafetensors(zml_handler.allocator, zml_handler.io, activations_path);

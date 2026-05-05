@@ -26,16 +26,16 @@ pub const AceLlm_handler = struct {
     model_buffers: zml.Bufferized(AceLlm),
     kv_cache_buffers: zml.Bufferized(KvCache),
     
-    pub fn init(zml_handler: main.Zml_handler) !AceLlm_handler {
+    pub fn init(zml_handler: *main.Zml_handler) !AceLlm_handler {
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
-        defer repo.close(zml_handler.io);
+        //defer repo.close(zml_handler.io);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
             
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
     
         std.log.info("5Hz parse config and safetensors", .{});
-        const parsed_config = try parseConfig(zml_handler, repo);
+        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         const acellm_options: Options = .{
@@ -88,21 +88,7 @@ pub const AceLlm_handler = struct {
         };
     }
     
-    pub fn parseConfig(zml_handler: main.Zml_handler, dir: std.Io.Dir) !std.json.Parsed(Config) {
-        const parsed_config = blk: {
-            const config_json_file = try dir.openFile(zml_handler.io, "config.json", .{});
-            defer config_json_file.close(zml_handler.io);
-            var config_json_buffer: [256]u8 = undefined;
-            var config_reader = config_json_file.reader(zml_handler.io, &config_json_buffer);
-            var reader = std.json.Reader.init(zml_handler.allocator, &config_reader.interface);
-            defer reader.deinit();
-            break :blk try std.json.parseFromTokenSource(Config, zml_handler.allocator, &reader, .{ .ignore_unknown_fields = true });
-        };
-        errdefer parsed_config.deinit();
-        return parsed_config;
-    }
-
-    pub fn loadTokenizer(zml_handler: main.Zml_handler, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
+    pub fn loadTokenizer(zml_handler: *main.Zml_handler, dir: std.Io.Dir) !zml.tokenizer.Tokenizer {
         const tokenizer_json_file = try dir.openFile(zml_handler.io, "tokenizer.json", .{});
         defer tokenizer_json_file.close(zml_handler.io);
         var reader = tokenizer_json_file.reader(zml_handler.io, &.{});
@@ -111,7 +97,7 @@ pub const AceLlm_handler = struct {
         return try .fromBytes(zml_handler.allocator, zml_handler.io, bytes);
     }
     
-    pub fn compileModel(zml_handler: main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
+    pub fn compileModel(zml_handler: *main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings_arr,
@@ -143,14 +129,14 @@ pub const AceLlm_handler = struct {
 };
 
 pub const AceCfg_handler = struct {
-    llm: AceLlm_handler,
+    llm: *AceLlm_handler,
     params: CfgParams,
     prefill_exe: zml.Exe,
     decode_exe: zml.Exe,
     cond_kv_cache_buffers: zml.Bufferized(KvCache),
     uncond_kv_cache_buffers: zml.Bufferized(KvCache),
     
-    pub fn initFromLlm(zml_handler: main.Zml_handler, acellm: AceLlm_handler, cont_tok: u32, uncond_tok: u32, audiocodes: u32) !AceCfg_handler {
+    pub fn initFromLlm(zml_handler: *main.Zml_handler, acellm: *AceLlm_handler, cont_tok: u32, uncond_tok: u32, audiocodes: u32) !AceCfg_handler {
         const dtype = acellm.model.embed_tokens.weight.dtype();
         const cond_seq_len = cont_tok + audiocodes;
         const uncond_seq_len = uncond_tok + audiocodes;
@@ -190,7 +176,7 @@ pub const AceCfg_handler = struct {
         };
     }
    
-    pub fn compileCfgModel(zml_handler: main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
+    pub fn compileCfgModel(zml_handler: *main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
         const shardings_arr = params.shardings.all();
         const opts: zml.module.CompilationOptions = .{
             .shardings = &shardings_arr,
@@ -236,8 +222,6 @@ pub const AceCfg_handler = struct {
     }
     
     pub fn deinit(self: *AceCfg_handler) void {
-        std.log.info("Acfdg", .{});
-
         self.prefill_exe.deinit();
         self.decode_exe.deinit();
     }
@@ -350,15 +334,16 @@ pub fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.To
             }
         }
     }
+    const codes_voc_size: u32 = 64000;
     return .{
         .text_voc_size = text_voc_size,
-        .codes_voc_size = 64000,
+        .codes_voc_size = codes_voc_size,
         .phase1_voc = .{ .start = 0, .end = text_voc_size },
-        .phase2_voc = .{ .start = text_voc_size, .end = text_voc_size + 64000 },
+        .phase2_voc = .{ .start = text_voc_size, .end = text_voc_size + codes_voc_size },
     };
 }
 
-pub fn cfgSequenceLengths(zml_handler: main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32, u32 } {
+pub fn cfgSequenceLengths(zml_handler: *main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32, u32 } {
     const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
     var tokenizer = try AceLlm_handler.loadTokenizer(zml_handler, repo);
     defer tokenizer.deinit();
@@ -397,15 +382,15 @@ pub const AceLlm = struct {
         };
     }
 
-    pub fn load(self: *const AceLlm, zml_handler: main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
-        var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
-        defer progress.end();
+    pub fn load(self: *const AceLlm, zml_handler: *main.Zml_handler, store: *const zml.io.TensorStore, shardings: []const zml.sharding.Sharding) !zml.Bufferized(AceLlm) {
+        //var progress = zml_handler.progress.start("Load 5Hz weights", store.registry.tensors.count());
+        //defer progress.end();
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
             .parallelism = 16,
             .dma_chunks = 32,
             .dma_chunk_size = 128 * zml.MiB,
-            .progress = &progress,
+            //.progress = &progress,
         });
     }
 
@@ -899,7 +884,7 @@ pub const KvCache = struct {
 };
 
 
-pub fn testModel(zml_handler: main.Zml_handler, acellm: AceLlm_handler) !void {
+pub fn testModel(zml_handler: *main.Zml_handler, acellm: AceLlm_handler) !void {
     const allocator = zml_handler.allocator;
     const io = zml_handler.io;
     const platform = zml_handler.platform;
