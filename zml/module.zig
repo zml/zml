@@ -265,7 +265,7 @@ fn addPartitionerOperations(ctx: *CompilationContext) !void {
                 const attr_str = try sharding.data.sdyMeshAttr(allocator);
                 defer allocator.free(attr_str);
 
-                const name = sharding.data.logical.name;
+                const name = sharding.data.name;
                 const mesh_attr = try mlir.Attribute.parse(mlir_ctx, attr_str);
 
                 const mesh_op = mlir.Operation.make(mlir_ctx, "sdy.mesh", .{

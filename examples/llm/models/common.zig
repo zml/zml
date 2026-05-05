@@ -17,7 +17,7 @@ pub const Shardings = struct {
 
     pub fn init(platform: *zml.Platform) !Shardings {
         return .{
-            .model = try platform.registerSharding(.init("model", .{ .model = .high_bandwidth })),
+            .model = try platform.registerSharding("model", .mesh(.{ .model = .high_bandwidth })),
         };
     }
 

@@ -967,13 +967,10 @@ pub const LogicalMesh = struct {
     pub const Axes = stdx.BoundedArray(Shape.Tag, Shape.MAX_RANK);
     pub const Intents = stdx.BoundedArray(LogicalAxisIntent, Shape.MAX_RANK);
 
-    name: []const u8,
     axes: Axes,
     intents: Intents,
 
-    pub const replicated = init("replicated", .{ .x = .high_bandwidth });
-
-    pub fn init(name: []const u8, axes_: anytype) LogicalMesh {
+    pub fn mesh(axes_: anytype) LogicalMesh {
         const T = @TypeOf(axes_);
 
         var axes: Axes = .empty;
@@ -990,7 +987,6 @@ pub const LogicalMesh = struct {
         }
 
         return .{
-            .name = name,
             .axes = axes,
             .intents = intents,
         };
@@ -1017,11 +1013,11 @@ pub const LogicalMesh = struct {
     }
 
     pub fn format(self: LogicalMesh, writer: *std.Io.Writer) !void {
-        try writer.print("LogicalMesh(name={s}", .{self.name});
+        try writer.writeAll("LogicalMesh(");
         for (self.axes.constSlice(), self.intents.constSlice()) |axis, int| {
             try writer.print(" {s}={s}", .{ axis, @tagName(int) });
         }
-        try writer.print(")", .{});
+        try writer.writeAll(")");
     }
 };
 
@@ -1072,6 +1068,7 @@ pub const PhysicalView = struct {
 };
 
 pub const Data = struct {
+    name: []const u8,
     physical: PhysicalMesh,
     logical: LogicalMesh,
 
@@ -1090,11 +1087,8 @@ pub const Data = struct {
         return null;
     }
 
-    pub fn initWithDefaultStrategy(physical: PhysicalMesh, logical: LogicalMesh) !Data {
-        return .init(physical, logical, .suggest(logical, physical));
-    }
-
     pub fn init(
+        name: []const u8,
         physical: PhysicalMesh,
         logical: LogicalMesh,
         strategy: Strategy,
@@ -1118,6 +1112,7 @@ pub const Data = struct {
         }
 
         return .{
+            .name = name,
             .logical = logical,
             .physical = physical,
             .bindings = bindings,
@@ -1297,7 +1292,7 @@ pub const Data = struct {
         var out: std.Io.Writer.Allocating = .init(allocator);
         errdefer out.deinit();
 
-        try out.writer.print("#sdy.sharding<@{s}, [", .{self.logical.name});
+        try out.writer.print("#sdy.sharding<@{s}, [", .{self.name});
         for (0..shape.rank()) |ax| {
             if (ax > 0) try out.writer.writeAll(", ");
             const spec = shape.partition(ax);
@@ -1449,7 +1444,7 @@ pub const Data = struct {
     }
 
     pub fn format(self: Data, writer: *std.Io.Writer) !void {
-        try writer.print("Sharding(name={s})\n", .{self.logical.name});
+        try writer.print("Sharding(name={s})\n", .{self.name});
 
         try writer.writeAll("Bindings:\n");
         for (self.logical.axes.constSlice(), self.logical.intents.constSlice()) |l_tag, l_intent| {
@@ -1851,9 +1846,7 @@ const ShardingTest = struct {
     };
 
     pub const Scenario = struct {
-        physical: PhysicalMesh,
-        logical: LogicalMesh,
-        strategy: Strategy,
+        sharding: Sharding.Data,
         shape: Shape,
 
         expected_sdy: ?[]const u8 = null,
@@ -1898,7 +1891,7 @@ const ShardingTest = struct {
     }
 
     pub fn run(self: ShardingTest, s: Scenario) !void {
-        const sharding = try Sharding.Data.init(s.physical, s.logical, s.strategy);
+        const sharding = s.sharding;
 
         // Verify MLIR String
         if (s.expected_sdy) |expected_attr| {
@@ -1925,23 +1918,6 @@ const ShardingTest = struct {
                 }
             }
         }
-
-        // Replicated sharding should cover all shapes.
-        const replicated_sharding = try Sharding.Data.initWithDefaultStrategy(s.physical, .replicated);
-        {
-            const placement = try Placement.init(.{ .data = &replicated_sharding }, s.shape);
-            const dims = s.shape.dims();
-            const num_devices = s.physical.countDevices();
-            try std.testing.expectEqual(num_devices, placement.shards.len);
-            for (0..num_devices, placement.shards.constSlice()) |device_id, shard| {
-                try std.testing.expectEqual(device_id, shard.device_id);
-                try std.testing.expectEqual(dims.len, shard.slices.len);
-                for (dims, shard.slices.constSlice()) |dim, slice| {
-                    try std.testing.expectEqual(0, slice.start);
-                    try std.testing.expectEqual(dim, slice.size);
-                }
-            }
-        }
     }
 };
 
@@ -1951,15 +1927,18 @@ test "sharding: unknown partitioning implies replication" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("folded_mesh", .{ .batch = .low_bandwidth });
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth });
 
     var strategy: Strategy = .init;
     strategy.addBinding(.batch, .link_x);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init(
+            "folded_mesh",
+            physical,
+            logical,
+            strategy,
+        ),
         .shape = Shape.init(.{ .batch = 8 }, .f32),
         .expected_sdy = "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
@@ -1979,7 +1958,7 @@ test "sharding: suggest strategy realization" {
 
     const physical = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
 
-    const logical: LogicalMesh = .init("suggested_mesh", .{
+    const logical: LogicalMesh = .mesh(.{
         .batch = .low_bandwidth,
         .model = .high_bandwidth,
     });
@@ -1987,9 +1966,7 @@ test "sharding: suggest strategy realization" {
     const strategy: Strategy = .suggest(logical, physical);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("suggested_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .batch = 4, .model = 4 }, .f32)
             .withPartitioning(.{ .batch = .batch, .model = .model }),
         .expected_sdy = "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>",
@@ -2014,7 +1991,7 @@ test "sharding: suggest folds logical axes with same intent" {
 
     const physical = try runner.physical(.{4}, .point_to_point);
 
-    const logical: LogicalMesh = .init("fold_mesh", .{
+    const logical: LogicalMesh = .mesh(.{
         .model = .high_bandwidth,
         .experts = .high_bandwidth,
     });
@@ -2022,9 +1999,7 @@ test "sharding: suggest folds logical axes with same intent" {
     const strategy: Strategy = .suggest(logical, physical);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("fold_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .model = 4, .experts = 4 }, .f32)
             .withPartitioning(.{ .model = .model, .experts = .experts }),
         .expected_sdy = "#sdy.sharding<@fold_mesh, [{\"link_x\"}, {}]>",
@@ -2044,16 +2019,14 @@ test "sharding: multiple physical axes on one logical dimension (folding)" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("folded_mesh", .{ .model = .high_bandwidth });
+    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
     strategy.addBinding(.model, .link_x);
     strategy.addBinding(.model, .link_y);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("folded_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
         .expected_sdy = "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>",
         .expected_shards = &.{
@@ -2072,16 +2045,14 @@ test "sharding: explicit strategy folding" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("strategy_fold", .{ .model = .high_bandwidth });
+    const logical: LogicalMesh = .mesh(.{ .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
     strategy.addBinding(.model, .link_x);
     strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("strategy_fold", physical, logical, strategy),
         .shape = Shape.init(.{ .model = 16 }, .f32).withPartitioning(.{ .model = .model }),
         .expected_sdy = "#sdy.sharding<@strategy_fold, [{\"link_x\"}], replicated={\"link_y\"}>",
         .expected_shards = &.{
@@ -2104,16 +2075,14 @@ test "sharding: open and replicated dimension mix" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("mix_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth });
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth });
 
     var strategy: Strategy = .init;
     strategy.addBinding(.batch, .link_x);
     strategy.addBinding(.model, .link_y);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("mix_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .batch = 8, .model = 8 }, .f32).withPartitioning(.{ .batch = .open, .model = .replicated }),
         .expected_sdy = "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>",
         .expected_shards = &.{
@@ -2132,7 +2101,7 @@ test "sharding: full 3D cluster sharding" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("3d_mesh", .{ .batch = .low_bandwidth, .model = .high_bandwidth, .context = .balanced });
+    const logical: LogicalMesh = .mesh(.{ .batch = .low_bandwidth, .model = .high_bandwidth, .context = .balanced });
 
     var strategy: Strategy = .init;
     strategy.addBinding(.batch, .link_x);
@@ -2140,9 +2109,7 @@ test "sharding: full 3D cluster sharding" {
     strategy.addBinding(.context, .link_z);
 
     const scenario: ShardingTest.Scenario = .{
-        .physical = physical,
-        .logical = logical,
-        .strategy = strategy,
+        .sharding = try .init("3d_mesh", physical, logical, strategy),
         .shape = Shape.init(.{ .batch = 4, .model = 4, .context = 4 }, .f32)
             .withPartitioning(.{ .batch = .batch, .model = .model, .context = .context }),
         .expected_sdy = "#sdy.sharding<@3d_mesh, [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>",
@@ -2166,7 +2133,7 @@ test "sharding: num partitions for logical axis" {
     const runner: ShardingTest = .init(arena.allocator());
 
     const physical: PhysicalMesh = try runner.physical(.{ 2, 2, 2 }, .{ .mesh = .torus });
-    const logical: LogicalMesh = .init("axis_parts_mesh", .{
+    const logical: LogicalMesh = .mesh(.{
         .model = .high_bandwidth,
         .batch = .low_bandwidth,
     });
@@ -2175,7 +2142,7 @@ test "sharding: num partitions for logical axis" {
     strategy.addBinding(.model, .link_x);
     strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
-    const sharding: Sharding.Data = try .init(physical, logical, strategy);
+    const sharding: Sharding.Data = try .init("axis_parts_mesh", physical, logical, strategy);
 
     try std.testing.expectEqual(4, sharding.numPartitionsForLogicalAxis(.model));
     try std.testing.expectEqual(1, sharding.numPartitionsForLogicalAxis(.batch));

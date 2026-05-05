@@ -190,7 +190,10 @@ pub fn main(init: std.process.Init) !void {
 
             const model: AllTensorsModel = .{ .tensors = tensors };
 
-            const sharded_sharding: zml.Sharding = try platform.registerSharding(.init("playground_model", .{ .model = .high_bandwidth }));
+            const sharded_sharding: zml.Sharding = try platform.registerSharding(
+                "playground_model",
+                .mesh(.{ .model = .high_bandwidth }),
+            );
 
             var progress = std.Progress.start(io, .{ .root_name = "zml.examples.load" });
             progress.increaseEstimatedTotalItems(load_count);

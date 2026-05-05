@@ -24,8 +24,7 @@ pub fn main(init: std.process.Init) !void {
     const platform: *zml.Platform = try .auto(allocator, io, .{});
     defer platform.deinit(allocator, io);
 
-    const benchmark_sharding: zml.Sharding = try platform.registerSharding(.init(
-        "benchmark_mesh",
+    const benchmark_sharding: zml.Sharding = try platform.registerSharding("benchmark_mesh", .mesh(
         .{ .m = .low_bandwidth, .n = .high_bandwidth },
     ));
 

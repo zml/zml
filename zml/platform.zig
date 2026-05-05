@@ -261,7 +261,7 @@ pub const Platform = struct {
                 .auto => zml.sharding.PhysicalMesh.auto(arena, target, devices),
                 .custom => |builder| builder(arena, target, devices),
             };
-            platform.replicated_sharding = try platform.registerSharding(.replicated);
+            platform.replicated_sharding = try platform.registerSharding("replicated", .mesh(.{ .x = .high_bandwidth }));
         }
 
         switch (target) {
@@ -511,23 +511,21 @@ pub const Platform = struct {
 
     /// Create a Sharding based on the given logical mesh and the default strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerSharding(platform: *Platform, logical: Sharding.LogicalMesh) !Sharding {
-        return platform.registerShardingWithStrategy(logical, .suggest(logical, platform.physical_mesh));
+    pub fn registerSharding(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh) !Sharding {
+        return platform.registerShardingWithStrategy(name, logical, .suggest(logical, platform.physical_mesh));
     }
 
     /// Create a Sharding based on the given logical mesh and a strategy.
     /// Memory is owned by the platform, making it safe to copy around.
-    pub fn registerShardingWithStrategy(platform: *Platform, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
+    pub fn registerShardingWithStrategy(platform: *Platform, name: []const u8, logical: Sharding.LogicalMesh, strategy: Sharding.Strategy) !Sharding {
         const arena = platform.arena.allocator();
-        const entry = try platform.shardings.getOrPut(arena, logical.name);
+        const entry = try platform.shardings.getOrPut(arena, name);
         if (entry.found_existing) {
-            std.debug.panic("Another sharding already exists with this name: {s}", .{logical.name});
+            std.debug.panic("Another sharding already exists with this name: {s}", .{name});
         }
 
-        var logical_copy = logical;
-        logical_copy.name = try arena.dupe(u8, logical.name);
-        entry.key_ptr.* = logical_copy.name;
-        entry.value_ptr.* = try .init(platform.physical_mesh, logical_copy, strategy);
+        entry.key_ptr.* = try arena.dupe(u8, name);
+        entry.value_ptr.* = try .init(name, platform.physical_mesh, logical, strategy);
         return .{ .data = entry.value_ptr };
     }
 };

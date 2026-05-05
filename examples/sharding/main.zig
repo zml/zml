@@ -188,10 +188,10 @@ pub fn main(init: std.process.Init) !void {
     log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
     log.info("{f}", .{platform.physical_mesh});
 
-    const sharding: zml.Sharding = try platform.registerSharding(.init("demo_mesh", .{
-        .data = .low_bandwidth,
-        .model = .high_bandwidth,
-    }));
+    const sharding: zml.Sharding = try platform.registerSharding(
+        "demo_mesh",
+        .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
+    );
 
     log.info("{f}", .{sharding.data.logical});
     log.info("{f}", .{sharding});
