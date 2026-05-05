@@ -10,6 +10,8 @@ const acedit_ = @import("acedit.zig");
 const acevae_ = @import("acevae.zig");
 const inference = @import("inference.zig");
 
+pub const hz_type = .bf16;
+
 pub const std_options: std.Options = .{
     .log_level = .info,
 };
@@ -120,7 +122,7 @@ pub fn main(init: std.process.Init) !void {
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
-    const raw_prompt = "a short electric guitar solo\n\ninstrumental: true";
+    const raw_prompt = "an energetic electric guitar solo\n\ninstrumental: true";
 
     // think = false : text2music mode, initial latents initialized from noise
     // think = true  : cover mode     , initial latents initialized from audio codes

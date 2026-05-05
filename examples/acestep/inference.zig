@@ -11,8 +11,7 @@ const aceenc_ = @import("aceenc.zig");
 const acedit_ = @import("acedit.zig");
 const acevae_ = @import("acevae.zig");
 
-const seed: u128 = 0;
-const hz_type = .f32;
+const hz_type = main.hz_type;
 
 // TODO : make inference instanciable, so we don't pass as many args,
 // and that we can store there all different structs of results to

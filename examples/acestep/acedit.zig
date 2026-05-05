@@ -8,7 +8,7 @@ const main = @import("main.zig");
 
 const dialects = @import("mlir/dialects");
 
-const hz_type = .f32;
+const hz_type = main.hz_type;
 
 
 pub const AceDit_handler = struct {

@@ -6,7 +6,7 @@ const stdx = zml.stdx;
 
 const main = @import("main.zig");
 
-const hz_type = .f32;
+const hz_type = main.hz_type;
 
 
 pub const AceVae_handler = struct {

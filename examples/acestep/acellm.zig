@@ -7,7 +7,7 @@ const stdx = zml.stdx;
 const main = @import("main.zig");
 const inference = @import("inference.zig");
 
-const hz_type = .f32;
+const hz_type = main.hz_type;
 const cfg: f32 = 2.0;
 
 const dialects = @import("mlir/dialects");
