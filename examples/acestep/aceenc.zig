@@ -29,7 +29,7 @@ pub const AceEnc_handler = struct {
         var registry_m: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo_m);
         defer registry_m.deinit();
 
-        var registry_s: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.local_io, repo_s, "silence_latent.safetensors");
+        var registry_s: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo_s, "silence_latent.safetensors");
         defer registry_s.deinit();
             
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
