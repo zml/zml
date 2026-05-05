@@ -23,19 +23,20 @@ pub const AceEnc_handler = struct {
     shardings: main.Shardings,
     
     pub fn init(zml_handler: *main.Zml_handler, text_len: u32, lyric_len: u32, target_duration: u32, audiocodes: usize) !AceEnc_handler {
-        const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
-        var registry_m: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
+        const repo_m = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
+        const repo_s = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.silence);
+
+        var registry_m: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo_m);
         defer registry_m.deinit();
-        
-        const silence_path = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo//silence_latent.safetensors";
-        var registry_s: zml.safetensors.TensorRegistry = try .fromPath(zml_handler.allocator, zml_handler.io, silence_path);
+
+        var registry_s: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.local_io, repo_s, "silence_latent.safetensors");
         defer registry_s.deinit();
             
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
         //try main.printSafetensors(zml_handler.allocator, zml_handler.io, silence_path);
     
         std.log.info("ENC parse config and safetensors", .{});
-        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
+        const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo_m);
         defer parsed_config.deinit();
         const config = try parsed_config.value.dupe(zml_handler.allocator);
         std.log.info("ENC parsed", .{});        
