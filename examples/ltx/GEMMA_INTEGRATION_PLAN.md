@@ -26,7 +26,9 @@ Replace the Python-based Gemma hidden state export with a native Zig Gemma-3 tex
   --gemma-ckpt → Tokenize prompt → Gemma-3 encoder → [B,S,3840,49] GPU buffers
   → FeatureExtractorV2 → Embeddings1DConnector → Stage 1
   → Bridge → Stage 2 → VAE → Vocoder
-  → ffmpeg (internal) → output.mp4
+  → raw RGB24 video (stdout) + f32le audio (file)
+  │
+  └──► pipe to ffmpeg externally
 ```
 
 ## Architecture Decisions
@@ -211,11 +213,23 @@ Add `gemma3_encoder.zig` to the `srcs` list of the `inference` target.
 
 ## Output Format & CLI Usage
 
-### Current usage (Gemma integrated, ffmpeg internal)
+### Raw output format
+
+| Stream | Format | Location |
+|--------|--------|----------|
+| Video | Raw RGB24, `width × height × 3` bytes per frame, `num_frames` frames | stdout |
+| Audio | Interleaved f32le stereo, 48kHz sample rate | `{output-dir}/audio.raw` |
+
+The binary prints the exact ffmpeg command (with resolved dimensions/fps/audio path) to stderr.
+
+### Usage: build + pipe to ffmpeg
 
 ```bash
-# Full pipeline: single binary, Gemma → LTX → MP4
-bazel run //examples/ltx:inference --config=release --@zml//platforms:cuda=true -- \
+# Build once
+bazel build //examples/ltx:inference --config=release --@zml//platforms:cuda=true
+
+# Run and pipe to ffmpeg
+./bazel-bin/examples/ltx/inference \
   --prompt "A cat sitting on a windowsill watching rain" \
   --negative-prompt "blurry, low quality" \
   --gemma-ckpt ~/models/gemma-3-12b-it \
@@ -225,8 +239,14 @@ bazel run //examples/ltx:inference --config=release --@zml//platforms:cuda=true 
   --output-dir ~/outputs/my_video \
   --height 1024 --width 1536 --num-frames 121 --fps 24 \
   --bf16-attn-stage1 --bf16-attn-stage2 \
-  --seed 42
+  --seed 42 \
+  | ffmpeg -y \
+    -f rawvideo -pix_fmt rgb24 -s 1536x1024 -r 24 -i pipe:0 \
+    -f f32le -ar 48000 -ac 2 -i ~/outputs/my_video/audio.raw \
+    -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest output.mp4
 ```
+
+**Note:** Use the built binary directly (not `bazel run`) since Bazel may interfere with stdout piping.
 
 ### Debug mode note
 
@@ -234,15 +254,8 @@ Debug mode overflows the default 8MB Linux stack (runStage1 is ~1300 lines).
 Use `ulimit -s unlimited` before the command:
 
 ```bash
-ulimit -s unlimited && bazel run //examples/ltx:inference --@zml//platforms:cuda=true -- [args...]
+ulimit -s unlimited && ./bazel-bin/examples/ltx/inference [args...]
 ```
-
-### Future: extract ffmpeg to external pipe
-
-| Stream | Format | Location |
-|--------|--------|----------|
-| Video | Raw RGB24, `width × height × 3` bytes per frame, `num_frames` frames | stdout |
-| Audio | Interleaved f32le stereo, 48kHz sample rate | `{output-dir}/audio.raw` |
 
 ## Validation Strategy
 
@@ -299,7 +312,7 @@ uv run examples/ltx/export_pipeline.py \
 2. ~~**Tokenizer validation**~~ ✅ BOS prepend confirmed, left-padding matches Python
 3. ~~**Hidden state validation**~~ ✅ Three prompts validated on GPU server (see results below)
 4. ~~**Wire into `inference.zig`**~~ ✅ Done — CLI changes + buffer handoff + Gemma phase added
-5. **Extract ffmpeg** — stdout video + file audio ← **NEXT**
+5. ~~**Extract ffmpeg**~~ ✅ Done — raw RGB24 video to stdout, f32le audio to `{output-dir}/audio.raw`, ffmpeg command printed to stderr
 6. ~~**End-to-end test**~~ ✅ Full pipeline validated (release mode, 3 prompts → MP4 output)
 
 ## Validation Results
@@ -329,7 +342,7 @@ Benign — LTX replaces padding positions with learnable registers downstream.
 | `examples/ltx/compare_gemma_outputs.py` | ✅ **Created** | Per-layer comparison tool (Zig raw bf16 vs Python safetensors) |
 | `examples/ltx/export_pipeline.py` | ✅ **Created** | Python reference generation (--text-only mode) |
 | `examples/ltx/BUILD.bazel` | ✅ **Modified** | Added gemma3_encoder.zig to srcs, gemma3_validate target |
-| `examples/ltx/inference.zig` | ✅ **Modified** | New CLI args (`--gemma-ckpt`, `--prompt`, `--negative-prompt`), Phase 0 Gemma encoding, buffer handoff to text embeddings, Gemma weight unloading after Stage 1 |
+| `examples/ltx/inference.zig` | ✅ **Modified** | New CLI args (`--gemma-ckpt`, `--prompt`, `--negative-prompt`), Phase 0 Gemma encoding, buffer handoff to text embeddings, Gemma weight unloading after Stage 1, ffmpeg extracted (raw video→stdout, audio→file) |
 
 ## Dependencies
 

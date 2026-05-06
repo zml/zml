@@ -7,13 +7,15 @@ a 7-phase pipeline orchestrated by a single binary. Each phase compiles ZML
 graph functions into XLA executables, loads weights, and runs on-device.
 
 ```
+Phase -1 runGemmaEncoding()  Gemma-3 text encoder: tokenize + forward → stacked hidden states
 Phase 0  (inside runStage1)  text embeddings: Gemma hidden states → context embeddings
 Phase 1  runStage1()         30-step guided denoising (4 passes/step × 48 blocks)
 Phase 2  runBridge()         unpatchify → 2× spatial upsample → patchify → noise init
 Phase 3  runStage2()         3-step distilled denoising (1 pass/step × 48 blocks)
 Phase 4  runVideoVaeDecode() video VAE decoder (latent → pixel frames)
 Phase 5  runAudioVaeDecode() audio VAE decoder (latent → mel spectrogram)
-Phase 6  runVocoderWithBWE() mel → 16kHz waveform → 48kHz stereo → MP4 mux
+Phase 6  runVocoderWithBWE() mel → 16kHz waveform → 48kHz stereo
+Final    writeRawOutputs()   raw RGB24 video → stdout, f32le audio → file
 ```
 
 [Mel spectrograms intro](https://huggingface.co/learn/audio-course/en/chapter1/audio_data#mel-spectrogram).
@@ -26,8 +28,9 @@ GPU buffers flow directly between phases — no disk I/O unless
 
 ### Runtime inputs
 
-Three categories:
+Four categories:
 
+- **Prompts:** `--prompt`, `--negative-prompt`, `--gemma-ckpt` (Gemma-3 model directory)
 - **Geometry:** `--height`, `--width`, `--num-frames`, `--fps` (or legacy `--meta`)
 - **Guidance:** `--cfg-v`, `--stg-v`, `--mod-v`, `--rescale-v`, `--cfg-a`, `--stg-a`, `--mod-a`, `--rescale-a`
 - **Options:** `--dump-intermediates`, `--image`, `--bf16-attn-stage1`, `--bf16-attn-stage2`, `--profile`
@@ -41,7 +44,8 @@ Multiples of 64 recommended for best Stage 1→2 alignment.
 
 | File | Role | Key exports |
 |------|------|-------------|
-| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, MP4 mux | `main`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE`, `computeTextEmbeddings` |
+| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, raw output | `main`, `runGemmaEncoding`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE`, `computeTextEmbeddings`, `writeRawOutputs` |
+| [gemma3_encoder.zig](gemma3_encoder.zig) | Gemma-3 text encoder (single-pass, no KV cache) | `Encoder`, `DecoderLayer`, `Attention`, `Mlp`, `RmsNorm`, `ScaledWordEmbedding` |
 | [model.zig](model.zig) | Transformer core + denoising math | `LTXModel`, `BasicAVTransformerBlock`, `FeedForward`, `Attention`, `forwardPreprocess`, `forwardBlock0Native*`, `forwardGenerateNoise`, `forwardNoiseInit`, `forwardGuiderCombine`, `forwardDenoisingStep*`, `computeSigmaSchedule` |
 | [text_embeddings.zig](text_embeddings.zig) | Gemma hidden states → context embeddings | `FeatureExtractorV2`, `Embeddings1DConnector`, `ConnectorBlock`, `EmbeddingsProcessor`, `forwardEmbeddingsProcessor` |
 | [conv_ops.zig](conv_ops.zig) | Shared conv/norm primitives | `Conv3dWeight`, `Conv2dWeight`, `GroupNormWeight`, `PerChannelStats`, `forwardPixelShuffle2d` |
@@ -51,7 +55,7 @@ Multiples of 64 recommended for best Stage 1→2 alignment.
 | [audio_vae.zig](audio_vae.zig) | Audio VAE decoder (2D causal conv) | `forwardAudioVaeDecode` |
 | [vocoder.zig](vocoder.zig) | BigVGAN + bandwidth extension (all f32) | `forwardVocoderWithBWE` |
 | [image_loading.zig](image_loading.zig) | stb_image load + resize + normalise | `loadAndPreprocess` |
-| [export_pipeline.py](export_pipeline.py) | Gemma export; optional full Python reference pipeline | `--text-only` mode |
+| [export_pipeline.py](export_pipeline.py) | Optional full Python reference pipeline | `--text-only` mode |
 
 ---
 
@@ -127,10 +131,19 @@ eagerly for memory optimisation.
 
 **Function:** [`runStage1()`](inference.zig#L951)
 
-### 5.1  Text Embeddings (Phase 0)
+### 5.1  Gemma Encoding (Phase -1) & Text Embeddings (Phase 0)
 
-Before denoising, `runStage1` calls
-[`computeTextEmbeddings()`](inference.zig#L3238) to convert Gemma-3-12B hidden
+Before denoising, two phases produce text context embeddings:
+
+**Phase -1: Gemma Encoding** — [`runGemmaEncoding()`](inference.zig) tokenizes
+the prompt (left-padded to 1024 tokens), runs the Gemma-3-12B text encoder
+(48-layer dense causal forward pass, no KV cache), and stacks all 49 hidden
+states (embedding + 48 layers) into `[1, 1024, 3840, 49]` GPU buffers.
+Implemented in [gemma3_encoder.zig](gemma3_encoder.zig). Gemma weights (~24GB)
+are unloaded after encoding to free VRAM for LTX.
+
+**Phase 0: Text Embeddings** — `runStage1` calls
+[`computeTextEmbeddings()`](inference.zig#L3238) to convert Gemma hidden
 states into context embeddings for cross-attention. Implemented in
 [text_embeddings.zig](text_embeddings.zig):
 

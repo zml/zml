@@ -5,20 +5,23 @@ text-to-video+audio pipeline, running on ZML (MLIR/XLA/PJRT).
 
 ## Pipeline
 
-Python runs only the Gemma-3 forward pass. Everything else runs in Zig on GPU:
+Everything runs in a single Zig binary on GPU — no Python needed:
 
 ```
-Python                         Zig (single binary)
-──────                         ──────────────────────────────────────────
-Gemma-3 forward ──→ hidden  ──→ Text embeddings (FeatureExtractor + Connector)
-                    states      Positions, masks, clean latents (from geometry)
-                                Noise generation (Box-Muller)
-                                Stage 1: 30 steps × 4 passes × 48 blocks
-                                Bridge: unpatchify → 2× upsample → re-noise
-                                Stage 2: 3 steps × 1 pass × 48 blocks (distilled)
-                                Video VAE decode → RGB frames
-                                Audio VAE decode → mel → vocoder+BWE → 48kHz stereo
-                                ffmpeg mux → output.mp4
+Single Zig binary
+──────────────────────────────────────────────────────────────────
+Gemma-3 text encoder (tokenize + 48-layer forward pass)
+  → hidden states [1, 1024, 3840, 49] (GPU buffers)
+Text embeddings (FeatureExtractor + Connector)
+Positions, masks, clean latents (from geometry)
+Noise generation (Box-Muller)
+Stage 1: 30 steps × 4 passes × 48 blocks
+Bridge: unpatchify → 2× upsample → re-noise
+Stage 2: 3 steps × 1 pass × 48 blocks (distilled)
+Video VAE decode → RGB frames
+Audio VAE decode → mel → vocoder+BWE → 48kHz stereo
+  → raw RGB24 video (stdout) + f32le audio (file)
+  → pipe to ffmpeg externally
 ```
 
 GPU buffers flow between phases directly — no files touch disk unless
@@ -31,7 +34,8 @@ via VAE encoding + per-token mask blending.
 
 | File | Purpose |
 |------|---------|
-| `inference.zig` | Pipeline orchestrator: CLI, all 7 phases, MP4 mux |
+| `inference.zig` | Pipeline orchestrator: CLI, all 7 phases, raw output |
+| `gemma3_encoder.zig` | Gemma-3 text encoder: tokenize → 48-layer forward → stacked hidden states |
 | `model.zig` | Transformer core (48-block), denoising math, guidance, noise gen, RoPE |
 | `text_embeddings.zig` | Gemma hidden states → context embeddings (FeatureExtractorV2 + 8-block Connector) |
 | `conv_ops.zig` | Shared Conv3d/Conv2d/GroupNorm/PixelShuffle primitives |
@@ -41,14 +45,13 @@ via VAE encoding + per-token mask blending.
 | `audio_vae.zig` | Audio VAE decoder (2D causal conv) |
 | `vocoder.zig` | BigVGAN vocoder + bandwidth extension (all f32) |
 | `image_loading.zig` | stb_image load → resize → center-crop → bf16 normalize |
-| `export_pipeline.py` | Gemma hidden-state export; optional full Python reference pipeline |
+| `export_pipeline.py` | Optional full Python reference pipeline |
 
 ### External inputs
 
-| File | Contents |
+| Path | Contents |
 |------|----------|
-| `pos_hidden_states.safetensors` | Gemma hidden states for positive prompt |
-| `neg_hidden_states.safetensors` | Gemma hidden states for negative prompt |
+| `--gemma-ckpt` directory | Gemma-3-12b-it model (safetensors shards + `config.json` + `tokenizer.json`) |
 
 ## Latent geometry
 
@@ -79,38 +82,39 @@ Text embeddings are computed in Zig from Gemma hidden states via
 - CUDA GPU with sufficient VRAM for the 22B model
 - Model weights (e.g. `~/models/ltx-2.3/`)
 - Gemma-3 model (e.g. `~/models/gemma-3-12b-it/`)
-- Python env with `ltx_core`, `ltx_pipelines` for the Gemma export step
+- `ffmpeg` installed for final MP4 encoding
 
-### Step 1: Export Gemma hidden states
+### Build
 
 ```bash
-cd /path/to/LTX-2
+bazel build --config=release --@zml//platforms:cuda=true //examples/ltx:inference
+```
 
-python examples/ltx/export_pipeline.py \
-  --text-only \
-  --output-dir $OUT \
+### Run inference
+
+The binary writes raw RGB24 video to stdout and f32le audio to `{output-dir}/audio.raw`.
+Pipe to ffmpeg for the final MP4:
+
+```bash
+./bazel-bin/examples/ltx/inference \
   --prompt "Someone walking by the beach at sunset" \
   --negative-prompt "blurry, out of focus" \
-  --gemma-root ~/models/gemma-3-12b-it
-```
-
-Produces `$OUT/pos_hidden_states.safetensors` and `$OUT/neg_hidden_states.safetensors`.
-
-### Step 2: Run inference
-
-```bash
-bazel run --config=release --@zml//platforms:cuda=true //examples/ltx:inference -- \
+  --gemma-ckpt ~/models/gemma-3-12b-it \
   --stage1-ckpt ~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
-  --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+  --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
   --upsampler-ckpt ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-  --gemma-hidden-states-pos $OUT/pos_hidden_states.safetensors \
-  --gemma-hidden-states-neg $OUT/neg_hidden_states.safetensors \
-  --output-dir $OUT/output \
+  --output-dir ~/outputs/my_video \
   --height 1024 --width 1536 --num-frames 121 --fps 24 \
-  --bf16-attn-stage1 --bf16-attn-stage2
+  --bf16-attn-stage1 --bf16-attn-stage2 \
+  | ffmpeg -y \
+    -f rawvideo -pix_fmt rgb24 -s 1536x1024 -r 24 -i pipe:0 \
+    -f f32le -ar 48000 -ac 2 -i ~/outputs/my_video/audio.raw \
+    -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest output.mp4
 ```
 
-Writes `$OUT/output/output.mp4`.
+The binary prints the exact ffmpeg command (with resolved dimensions) to stderr.
+
+**Note:** Use the built binary directly (not `bazel run`) since Bazel may interfere with stdout piping.
 
 ### Input constraints
 
@@ -121,12 +125,13 @@ Writes `$OUT/output/output.mp4`.
 
 | Flag | Default | Description |
 |------|---------|-------------|
+| `--prompt` | (required) | Text prompt for video generation |
+| `--negative-prompt` | `""` | Negative prompt for CFG guidance |
+| `--gemma-ckpt` | (required) | Path to Gemma-3-12b-it model directory |
 | `--stage1-ckpt` | (required) | Stage 1 model checkpoint |
 | `--stage2-ckpt` | (required) | Stage 2 (distilled) model checkpoint |
 | `--upsampler-ckpt` | (required) | Spatial upsampler checkpoint |
-| `--gemma-hidden-states-pos` | (required) | Gemma hidden states — positive prompt |
-| `--gemma-hidden-states-neg` | (required) | Gemma hidden states — negative prompt |
-| `--output-dir` | (required) | Output directory |
+| `--output-dir` | (required) | Output directory (audio.raw written here) |
 | `--height` | `1024` | Output height in pixels |
 | `--width` | `1536` | Output width in pixels |
 | `--num-frames` | `121` | Frame count (`8k + 1`) |
@@ -159,4 +164,4 @@ mask/clean-latent/noise for both Stage 1 and Stage 2.
 - **Noise init**: `noised = noise × mask × σ₀ + clean × (1 − mask × σ₀)`
 
 `export_pipeline.py --image` is only needed for Python reference artifacts, not
-for normal Zig inference.
+for normal Zig inference. The Zig binary handles Gemma encoding natively.
