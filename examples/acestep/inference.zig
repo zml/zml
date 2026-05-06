@@ -13,9 +13,6 @@ const acevae_ = @import("acevae.zig");
 
 const hz_type = main.hz_type;
 
-// TODO : make inference instanciable, so we don't pass as many args,
-// and that we can store there all different structs of results to
-// compute the prompts sizes and so on more cleanly (only one for eg)
 
 pub const AudioMetadata = struct {
     bpm: []const u8,
@@ -256,58 +253,6 @@ pub const DecodedAudio = struct {
 };
 
 
-pub fn runPhase1(zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler) !AudioMetadata {
-    std.log.info("5Hz phase I : inspiration from initial prompt", .{});
-    //std.log.info("########### prompt start ###########:\n{s}", .{raw_prompt});
-    //std.log.info("###########  prompt end  ###########", .{});
-    
-    const inspi_tokens = try tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
-    defer zml_handler.allocator.free(inspi_tokens);
-
-    const inspi_result = try generateInspirationText(zml_handler, acellm, inspi_tokens);
-    defer zml_handler.allocator.free(inspi_result);
-
-    const metadata: AudioMetadata = try .initFromString(zml_handler.allocator, inspi_result);
-    return metadata;
-}
-
-pub fn runPhase2(metadata: AudioMetadata, zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCfg_handler) !AudioCodes {
-    std.log.info("5hz phase II : audio codes generation", .{});
-    const cond_tok, const uncond_tok = try tokenizeGenerationPrompt(zml_handler.allocator, acecfg.llm.tokenizer, metadata);
-    defer zml_handler.allocator.free(cond_tok);
-    defer zml_handler.allocator.free(uncond_tok);
-
-    std.log.debug("5Hz conditional input tokens {any}", .{ cond_tok });
-    std.log.debug("5Hz unconditional input tokens {any}", .{ uncond_tok });
-    
-    const audiocodes, const audiostr = try generateAudioCodes(zml_handler, acecfg, cond_tok, uncond_tok, metadata);
-        
-    return .{ .token_id = audiocodes, .string = audiostr };
-}
-
-pub fn embedTextInputs(zml_handler: *main.Zml_handler, audio_metadata: AudioMetadata, aceemb: *aceemb_.AceEmb_handler) !TextEmbedding {
-    std.log.info("EMB start Text Input Embedding", .{});
-    
-    const caption_tok = try tokenizeInputCaption(zml_handler.allocator, aceemb.tokenizer, audio_metadata);
-    const lyric_tok = try tokenizeInputLyrics(zml_handler.allocator, aceemb.tokenizer, audio_metadata);
-    defer zml_handler.allocator.free(caption_tok);
-    defer zml_handler.allocator.free(lyric_tok);
-    
-    std.log.info("EMB caption tokens : {d}", .{ caption_tok.len });
-    std.log.info("EMB lyrics tokens : {d}", .{ lyric_tok.len} );
-
-    zml_handler.tic(&zml_handler.timers.emb.prefill);
-    const caption_emb = try generateTextEmbedding(zml_handler, aceemb, caption_tok, false);
-    zml_handler.toc(&zml_handler.timers.emb.prefill);
-    
-    zml_handler.tic(&zml_handler.timers.emb.decode);
-    const lyric_emb = try generateTextEmbedding(zml_handler, aceemb, lyric_tok, true);
-    zml_handler.toc(&zml_handler.timers.emb.decode);
-    
-    return .{ .caption_embedding = caption_emb, .lyric_embedding = lyric_emb };
-}
-
-
 pub fn tokenizeInspirationPrompt(zml_handler: *main.Zml_handler, tokenizer: zml.tokenizer.Tokenizer) ![]u32 {
     const allocator = zml_handler.allocator;
     var encoder = try tokenizer.encoder();
@@ -465,10 +410,6 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var tokenizer_decoder = try acellm.tokenizer.decoder();
     defer tokenizer_decoder.deinit();
 
-    //std.log.info("Call 5Hz model with formatted prompt", .{});
-    //std.log.info("########### prompt start ###########\n{s}", .{try tokenizer_decoder.decode(prompt_tok)});
-    //std.log.info("###########  prompt end  ###########", .{});
-
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
 
@@ -481,9 +422,18 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var decode_results = try acellm.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
+    // buffer and slice for a .s = 1, val = 0 tensor
+    var zero_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
+    defer zero_slice.free(allocator);
+    zero_slice.items(u32)[0] = 0;
+    var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
+    defer zero_buffer.deinit();
+
+    // a one token slice/buffer. it is used to pass the prompt length during prefill so .forward knows what position to
+    // use to predict the next token. then, it is used to get the generated token and pass it to the decode.
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-    token_slice.items(u32)[0] = 0;
+    token_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
     var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer token_buffer.deinit();
 
@@ -493,14 +443,13 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var prefill_tokens_buffer: zml.Buffer = try .fromSlice(io, platform, prefill_tokens_slice, sharding);
     defer prefill_tokens_buffer.deinit();
 
-    std.log.info("5Hz run prefill with sequence of {d} tokens", .{ prompt_tok.len });
+    std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ acellm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.llm.prefill);
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers });
-    acellm.prefill_exe.call(prefill_args, &prefill_results);
-    prefill_results.fill(.{ &prefill_tokens_buffer, &acellm.kv_cache_buffers, &rng_buffers });
+    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, zero_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers });
+    acellm.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
+    prefill_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers });
 
-    try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
-    token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
+    try token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.llm.prefill);    
 
     std.log.info("5Hz run decode", .{});
@@ -521,8 +470,6 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
         } else {
             std.log.info("ERROR could not decode token: {d}", .{ generated_token });
         }
-
-        // check for eos
         if (i == output_tokens_len) break :generation;
         switch (acellm.config.eos_token_id.value) {
             .int => |eos| if (generated_token == @as(u32, @intCast(eos))) break :generation,
@@ -533,18 +480,16 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
             },
         }
         
-        // token buffer was used to pass 0 as token_index to the prefill
-        // now it's used to pass the token we want to predict from to the decode
-        token_buffer.deinit();
-        token_buffer = try .fromSlice(io, platform, token_slice, sharding);
-        // we then need a new 1 token buffer to pass the token_index
-        token_slice.items(u32)[0] = @intCast(prompt_tok.len + i);
-        var decode_token_pos_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
-        defer decode_token_pos_buffer.deinit();
+        // we need a new 1 token buffer to pass the token_index
+        var pos_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
+        defer pos_slice.free(allocator);
+        pos_slice.items(u32)[0] = @intCast(prompt_tok.len + i);
+        var pos_buffer: zml.Buffer = try .fromSlice(io, platform, pos_slice, sharding);
+        defer pos_buffer.deinit();
 
         // call to generate the next token
-        decode_args.set(.{ acellm.model_buffers, token_buffer, decode_token_pos_buffer, acellm.kv_cache_buffers, rng_buffers });
-        acellm.decode_exe.call(decode_args, &decode_results);
+        decode_args.set(.{ acellm.model_buffers, token_buffer, pos_buffer, zero_buffer, acellm.kv_cache_buffers, rng_buffers });
+        acellm.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
         decode_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers });
         // extract the generated token from the buffer
         try token_buffer.toSlice(io, token_slice);
@@ -556,7 +501,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     return result.toOwnedSlice(allocator);
 }
 
-pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCfg_handler, cond_tok: []const u32, uncond_tok: []const u32, metadata: AudioMetadata) !struct { []u32, []u8 } {
+pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCfg_handler, cond_tok: []const u32, uncond_tok: []const u32, metadata: AudioMetadata) !AudioCodes {
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = acecfg.params.shardings.replicated;
@@ -571,13 +516,6 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     var result_tok: std.ArrayList(u32) = try .initCapacity(allocator, nb_audio_codes);
     var result_str: std.ArrayList(u8) = try .initCapacity(allocator, nb_audio_codes * 15);
-
-    //std.log.info("Call 5Hz model with formatted prompt : conditional", .{});
-    //std.log.info("########### prompt start ###########\n{s}", .{try tokenizer_decoder.decode(cond_tok)});
-    //std.log.info("###########  prompt end  ###########", .{});
-    //std.log.info("Call 5Hz model with formatted prompt : unconditional", .{});
-    //std.log.info("########### prompt start ###########\n{s}", .{try tokenizer_decoder.decode(uncond_tok)});
-    //std.log.info("###########  prompt end  ###########", .{});
 
     var rng_buffers = try zml.Tensor.Rng.initBuffer(platform, 0, io, sharding);
     defer zml.Tensor.Rng.deinitBuffer(&rng_buffers);
@@ -683,22 +621,26 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     try writer.flush();
     std.log.info("5Hz CFG done, generated {d} tokens", .{ result_tok.items.len });
     zml_handler.toc(&zml_handler.timers.cfg.decode);
-    return .{ try result_tok.toOwnedSlice(allocator), try result_str.toOwnedSlice(allocator) };
+    return .{ 
+        .token_id = try result_tok.toOwnedSlice(allocator),
+        .string = try result_str.toOwnedSlice(allocator),
+    };
 }
 
-pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokens: []const u32, token_embedding: bool) !zml.Slice {
+pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.AceEmb_handler, tokenizer: zml.tokenizer.Tokenizer, tokens: []const u32, token_embedding: bool) !zml.Slice {
+    if (token_embedding) {
+        zml_handler.tic(&zml_handler.timers.emb.decode);
+    } else {
+        zml_handler.tic(&zml_handler.timers.emb.prefill);
+    }
+
     const io = zml_handler.io;
     const allocator = zml_handler.allocator;
     const sharding = aceemb.params.shardings.replicated;
     const platform = zml_handler.platform;
     
-    var tokenizer_decoder = try aceemb.tokenizer.decoder();
+    var tokenizer_decoder = try tokenizer.decoder();
     defer tokenizer_decoder.deinit();
-
-    //std.log.info("Call Qwen Emb model with formatted prompt", .{});
-    //std.log.info("########### prompt start ###########\n{s}", .{try tokenizer_decoder.decode(tokens)});
-    //std.log.info("###########  prompt end  ###########", .{});
-    //std.log.info("Basic token embedding mode: {any}", .{token_embedding});
     
     const seq_len = tokens.len;
     const emb_dim = aceemb.config.hidden_size;
@@ -726,6 +668,13 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     std.log.info("EMB done embedding", .{});    
 
     try embedding_buffer.toSlice(io, embedding_slice);
+
+    if (token_embedding) {
+        zml_handler.toc(&zml_handler.timers.emb.decode);
+    } else {
+        zml_handler.toc(&zml_handler.timers.emb.prefill);
+    }
+    
     return embedding_slice;
 }
 
@@ -852,7 +801,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     zml_handler.tic(&zml_handler.timers.dit.decode);
     var dit_time: std.Io.Duration = .{ .nanoseconds = 0 };
     for (0..steps) |i| {
-        std.log.info("DiT ************* step {d}", .{ i });
+        std.log.info("DiT ************* step {d}/{d}", .{ i+1, steps });
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();

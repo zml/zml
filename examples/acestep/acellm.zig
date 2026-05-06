@@ -8,11 +8,10 @@ const main = @import("main.zig");
 const inference = @import("inference.zig");
 
 const hz_type = main.hz_type;
-const cfg: f32 = 1.0;
+const cfg: f32 = 2.0;
 
 const dialects = @import("mlir/dialects");
 
-// TODO: same mechanism in phase 1 to avoid sampling on the full sequence than on phase 2
 
 pub const AceLlm_handler = struct {
     model: AceLlm,
@@ -56,6 +55,7 @@ pub const AceLlm_handler = struct {
             .prefill_tokens = .init(.{ .s = acellm_options.seq_len }, .u32),
             .decode_tokens = .init(.{ .s = 1 }, .u32),
             .token_index = .init(.{ .s = 1 }, .u32),
+            .pred_index = .init(.{ .s = 1 }, .u32),
             .kv_cache = .init(zml.Shape.init(.{
                 .layer = model.layers.len,
                 .k = acellm_options.seq_len,
@@ -111,12 +111,43 @@ pub const AceLlm_handler = struct {
         // Compile the model twice, one for prefill, one for generation.
         std.log.info("5Hz compile prefill", .{});
         const prefill_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
-           .{ params.prefill_tokens, params.token_index, params.kv_cache, params.rng }, opts);
+           .{ params.prefill_tokens, params.token_index, params.pred_index, params.kv_cache, params.rng }, opts);
         std.log.info("5Hz compile decode", .{});
         const decode_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
-           .{ params.decode_tokens, params.token_index, params.kv_cache, params.rng }, opts);
+           .{ params.decode_tokens, params.token_index, params.pred_index, params.kv_cache, params.rng }, opts);
         std.log.info("5Hz compiled models", .{});
         return .{ prefill_exe, decode_exe };
+    }
+
+    pub fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, voc_size: usize) !Phase {
+        var tokenizer_decoder = try tokenizer.decoder();
+        defer tokenizer_decoder.deinit();
+        const token_slice = try allocator.alloc(u32, 1);
+        defer allocator.free(token_slice);
+        var text_voc_size: u32 = 0;
+        for (0..voc_size) |i| {
+            const id: u32 = @intCast(i);
+            token_slice[0] = id;
+            const chunk = try tokenizer_decoder.decode(token_slice);
+            const l = chunk.len;
+            if (l < 16) {
+                continue;
+            } else {
+                if (std.mem.eql(u8, chunk[0..12], "<|audio_code")) {
+                    text_voc_size = @intCast(i);
+                    break;
+                } else {
+                    continue;
+                }
+            }
+        }
+        const codes_voc_size: u32 = 64000;
+        return .{
+            .text_voc_size = text_voc_size,
+            .codes_voc_size = codes_voc_size,
+            .phase1_voc = .{ .start = 0, .end = text_voc_size },
+            .phase2_voc = .{ .start = text_voc_size, .end = text_voc_size + codes_voc_size },
+        };
     }
     
     pub fn unloadBuffers(self: *AceLlm_handler, allocator: std.mem.Allocator) void {
@@ -228,7 +259,7 @@ pub const AceCfg_handler = struct {
         std.log.info("5Hz compiled models", .{});
         return .{ prefill_exe, decode_exe };
     }
-
+    
     pub fn unloadBuffers(self: *AceCfg_handler) void {
         KvCache.deinitBuffer(&self.cond_kv_cache_buffers);
         KvCache.deinitBuffer(&self.uncond_kv_cache_buffers);
@@ -246,6 +277,7 @@ pub const LlmParams = struct {
     prefill_tokens: zml.Tensor,
     decode_tokens: zml.Tensor,
     token_index: zml.Tensor,
+    pred_index: zml.Tensor,
     kv_cache: KvCache,
     rng: zml.Tensor.Rng,
     shardings: main.Shardings,
@@ -324,51 +356,7 @@ pub const Phase = struct {
     phase2_voc: zml.Tensor.Slice,
 };
 
-
-pub fn buildTokenMasks(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, voc_size: usize) !Phase {
-    var tokenizer_decoder = try tokenizer.decoder();
-    defer tokenizer_decoder.deinit();
-    const token_slice = try allocator.alloc(u32, 1);
-    defer allocator.free(token_slice);
-    var text_voc_size: u32 = 0;
-    for (0..voc_size) |i| {
-        const id: u32 = @intCast(i);
-        token_slice[0] = id;
-        const chunk = try tokenizer_decoder.decode(token_slice);
-        const l = chunk.len;
-        if (l < 16) {
-            continue;
-        } else {
-            if (std.mem.eql(u8, chunk[0..12], "<|audio_code")) {
-                text_voc_size = @intCast(i);
-                break;
-            } else {
-                continue;
-            }
-        }
-    }
-    const codes_voc_size: u32 = 64000;
-    return .{
-        .text_voc_size = text_voc_size,
-        .codes_voc_size = codes_voc_size,
-        .phase1_voc = .{ .start = 0, .end = text_voc_size },
-        .phase2_voc = .{ .start = text_voc_size, .end = text_voc_size + codes_voc_size },
-    };
-}
-
-pub fn cfgSequenceLengths(zml_handler: *main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32, u32 } {
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
-    var tokenizer = try AceLlm_handler.loadTokenizer(zml_handler, repo);
-    defer tokenizer.deinit();
-
-    const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, tokenizer, audio_metadata);
-    defer zml_handler.allocator.free(cond_tok);
-    defer zml_handler.allocator.free(uncond_tok);
-
-    const t = try std.fmt.parseUnsigned(u32, audio_metadata.duration, 10);
-    
-    return .{ @intCast(cond_tok.len), @intCast(uncond_tok.len), 5 * t };
-}
+// TODO: use dynamic slices instead of gathers whenever possible
 
 
 pub const AceLlm = struct {
@@ -420,11 +408,13 @@ pub const AceLlm = struct {
         RmsNorm.unloadBuffers(&self.norm);
     }
 
-    pub fn forward(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache, rng: zml.Tensor.Rng) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
-        const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache);
-        const text_logits = logits.slice1d(.voc, self.phase.phase1_voc);
-        const next_tokens, const new_rng = sampleNucleus(text_logits, rng);
-        return .{ next_tokens.convert(tokens.dtype()).reuseBuffer(tokens), updated_kv_cache.reuseBuffer(kv_cache), new_rng };
+    pub fn forward(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, pred_index: zml.Tensor, kv_cache: KvCache, rng: zml.Tensor.Rng) struct { zml.Tensor, KvCache, zml.Tensor.Rng } {
+        const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache);        
+        const next_logits = logits.dynamicSlice1d(logits.axis(.s), .{ .start = pred_index.squeeze(.s), .len = 1 });
+        const text_logits = next_logits.slice1d(.voc, self.phase.phase1_voc);
+
+        const next_token, const new_rng = sampleNucleus(text_logits, rng);
+        return .{ next_token.convert(tokens.dtype()), updated_kv_cache.reuseBuffer(kv_cache), new_rng };
     }
     
     pub fn forwardCfg(self: AceLlm,
@@ -466,6 +456,7 @@ pub const AceLlm = struct {
         }
         output = self.norm.forward(output);
         // compute logits for the output tokens
+        // TODO: we could improve the perf by only computing the logits for the relevant voc slice
         const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).convert(hz_type).dot(output, .d);
         return .{ logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
     }
@@ -503,7 +494,7 @@ pub const AceLlm = struct {
         // we compare the cumulative probas to the threshold: we get a tensor [0 0 ... 0 1 1 ... 1]
         // and the sampled token is the position of the first 1. argMax returns the first max value
         const sampled_token = normalized_cdf.cmp(.GE, sample_threshold).argMax(.voc).indices;
-        const next_token = sorted.indices.gather(.{ .voc = sampled_token.squeeze(.voc) }, .{});
+        const next_token = sorted.indices.gather(.{ .voc = sampled_token.squeeze(.voc) }, .{});       
         return .{ next_token, next_rng };
     }
 };

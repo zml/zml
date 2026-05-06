@@ -237,25 +237,36 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
 
-    var audio_metadata: inference.AudioMetadata = try inference.runPhase1(zml_handler, &acellm);
+    const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
+    defer zml_handler.allocator.free(inspi_tokens);
+    
+    const inspi_result = try inference.generateInspirationText(zml_handler, &acellm, inspi_tokens);
+    defer zml_handler.allocator.free(inspi_result);
+    var audio_metadata: inference.AudioMetadata = try .initFromString(zml_handler.allocator, inspi_result);
     defer audio_metadata.deinit(zml_handler.allocator);
-
+    
     if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
     const duration = try audio_metadata.duration_s();
 
+    zml_handler.toc(&zml_handler.timers.llm.total);
+
     var audio_codes: inference.AudioCodes = try .empty(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
-
-    zml_handler.toc(&zml_handler.timers.llm.total);
     
     if (!zml_handler.args.skip_cfg) {
         zml_handler.tic(&zml_handler.timers.cfg.total);
-        const cond, const uncond, const audioc = try acellm_.cfgSequenceLengths(zml_handler, audio_metadata);
-        var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm, cond, uncond, audioc);
+        
+        const cond_tok, const uncond_tok = try inference.tokenizeGenerationPrompt(zml_handler.allocator, acellm.tokenizer, audio_metadata);
+        defer zml_handler.allocator.free(cond_tok);
+        defer zml_handler.allocator.free(uncond_tok);
+        
+        var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm, @intCast(cond_tok.len), @intCast(uncond_tok.len), 5 * duration);
         defer acecfg.deinit();
         defer acecfg.unloadBuffers();
+        
         audio_codes.deinit(zml_handler.allocator);
-        audio_codes = try inference.runPhase2(audio_metadata, zml_handler, &acecfg);
+        audio_codes = try inference.generateAudioCodes(zml_handler, &acecfg, cond_tok, uncond_tok, audio_metadata);
+
         zml_handler.toc(&zml_handler.timers.cfg.total);
     }
     
@@ -268,11 +279,22 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     zml_handler.tic(&zml_handler.timers.emb.total);
 
-    const full_emb, const partial_emb = try aceemb_.embeddingLengths(zml_handler, audio_metadata);
-    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, full_emb, partial_emb);
+    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
+    var tokenizer = try aceemb_.AceEmb_handler.loadTokenizer(zml_handler, repo);
+    defer tokenizer.deinit();
+
+    const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata);
+    const lyric_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
+    defer zml_handler.allocator.free(caption_tok);
+    defer zml_handler.allocator.free(lyric_tok);
+
+    var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, @intCast(caption_tok.len), @intCast(lyric_tok.len));
     defer aceemb.deinit(zml_handler.allocator);
 
-    const text_emb: inference.TextEmbedding = try inference.embedTextInputs(zml_handler, audio_metadata, &aceemb);
+    const text_emb: inference.TextEmbedding = .{
+        .caption_embedding = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, caption_tok, false),
+        .lyric_embedding = try inference.generateTextEmbedding(zml_handler, &aceemb, tokenizer, lyric_tok, true),
+    };
     defer text_emb.deinit(zml_handler.allocator);
 
     aceemb.unloadBuffers(zml_handler.allocator);

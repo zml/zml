@@ -14,7 +14,6 @@ pub const AceEmb_handler = struct {
     model: AceEmb,
     params: Params,
     config: Config,
-    tokenizer: zml.tokenizer.Tokenizer,
     partial_embed_exe: zml.Exe,
     full_embed_exe: zml.Exe,
     model_buffers: zml.Bufferized(AceEmb),
@@ -43,8 +42,6 @@ pub const AceEmb_handler = struct {
             .shardings = try .init(zml_handler.platform),
         };
 
-        const tokenizer = try loadTokenizer(zml_handler, repo);
-
         zml_handler.toc(&zml_handler.timers.emb.init);
         zml_handler.tic(&zml_handler.timers.emb.compile);
         
@@ -67,7 +64,6 @@ pub const AceEmb_handler = struct {
             .model = model,
             .params = params,
             .config = config,
-            .tokenizer = tokenizer,
             .full_embed_exe = full_embed_exe,
             .partial_embed_exe = partial_embed_exe,
             .model_buffers = model_buffers,
@@ -121,7 +117,6 @@ pub const AceEmb_handler = struct {
     pub fn deinit(self: *AceEmb_handler, allocator: std.mem.Allocator) void {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
-        self.tokenizer.deinit();
         self.full_embed_exe.deinit();
         self.partial_embed_exe.deinit();
     }
@@ -172,22 +167,6 @@ pub const Config = struct {
         _ = self;
     }
 };
-
-
-pub fn embeddingLengths(zml_handler: *main.Zml_handler, audio_metadata: inference.AudioMetadata) !struct { u32, u32 } {
-    const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
-    var tokenizer = try AceEmb_handler.loadTokenizer(zml_handler, repo);
-    defer tokenizer.deinit();
-    
-    const caption_tok = try inference.tokenizeInputCaption(zml_handler.allocator, tokenizer, audio_metadata);
-    const lyrics_tok = try inference.tokenizeInputLyrics(zml_handler.allocator, tokenizer, audio_metadata);
-    defer zml_handler.allocator.free(caption_tok);
-    defer zml_handler.allocator.free(lyrics_tok);
-    
-    const l1: u32 = @intCast(caption_tok.len);
-    const l2: u32 = @intCast(lyrics_tok.len);
-    return .{ l1, l2 };
-}
 
 
 pub const AceEmb = struct {
