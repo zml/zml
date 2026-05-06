@@ -730,7 +730,7 @@ pub fn main(init: std.process.Init) !void {
     var timer_video_vae = PhaseTimer.init("Video VAE Decode", io);
     var timer_audio_vae = PhaseTimer.init("Audio VAE Decode", io);
     var timer_vocoder = PhaseTimer.init("Vocoder + BWE", io);
-    var timer_mp4 = PhaseTimer.init("MP4 Encoding", io);
+    var timer_output = PhaseTimer.init("Raw Output", io);
 
     // ========================================================================
     // Phase 0: Gemma-3 text encoding
@@ -895,10 +895,10 @@ pub fn main(init: std.process.Init) !void {
     // s2.a_latent was already freed inside runAudioVaeDecode.
 
     // ========================================================================
-    // Final: Encode video + audio → output.mp4
+    // Final: Write raw video (stdout) + audio (file)
     // ========================================================================
     std.log.info("", .{});
-    std.log.info("=== Encoding output.mp4 (video + audio) ===", .{});
+    std.log.info("=== Writing raw outputs (video → stdout, audio → file) ===", .{});
 
     const waveform_slice = try waveform_buf.toSliceAlloc(allocator, io);
     defer waveform_slice.free(allocator);
@@ -922,9 +922,9 @@ pub fn main(init: std.process.Init) !void {
         try writeRawBytes(allocator, io, interleaved_bytes, args.output_dir, "waveform.bin");
     }
 
-    timer_mp4.start();
-    try encodeOutputMp4(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
-    timer_mp4.addExec();
+    timer_output.start();
+    try writeRawOutputs(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
+    timer_output.addExec();
 
     // ========================================================================
     // Timing Summary
@@ -941,7 +941,7 @@ pub fn main(init: std.process.Init) !void {
         &timer_video_vae,
         &timer_audio_vae,
         &timer_vocoder,
-        &timer_mp4,
+        &timer_output,
     };
     printTimingSummary(&all_timers);
 
@@ -4104,7 +4104,7 @@ fn postProcessDecodedVideo(
 ///
 /// Pipes raw RGB24 video frames to ffmpeg's stdin and writes interleaved f32le
 /// audio to a temp file (ffmpeg can't read two pipes). Output is H.264 + AAC.
-fn encodeOutputMp4(
+fn writeRawOutputs(
     allocator: std.mem.Allocator,
     io: std.Io,
     video: VideoFrames,
@@ -4113,12 +4113,8 @@ fn encodeOutputMp4(
     fps: f64,
     output_dir: []const u8,
 ) !void {
-    const output_path = try std.fs.path.join(allocator, &.{ output_dir, "output.mp4" });
-    defer allocator.free(output_path);
-
-    // Write interleaved audio to a temp file (ffmpeg reads video from stdin,
-    // audio from file — can't pipe both to stdin).
-    const audio_path = try std.fs.path.join(allocator, &.{ output_dir, "_audio_tmp.raw" });
+    // Write interleaved f32le audio to a permanent file.
+    const audio_path = try std.fs.path.join(allocator, &.{ output_dir, "audio.raw" });
     defer allocator.free(audio_path);
     {
         const audio_file = try std.Io.Dir.createFile(.cwd(), io, audio_path, .{});
@@ -4128,79 +4124,29 @@ fn encodeOutputMp4(
         try wr.interface.writeAll(audio_interleaved);
         try wr.interface.flush();
     }
-    // Clean up temp audio file on all exit paths (success and error).
-    defer std.Io.Dir.deleteFile(.cwd(), io, audio_path) catch {};
-
-    var size_buf: [32]u8 = undefined;
-    const size_str = std.fmt.bufPrint(&size_buf, "{d}x{d}", .{ video.width, video.height }) catch unreachable;
-
-    var fps_buf: [16]u8 = undefined;
-    const fps_str = std.fmt.bufPrint(&fps_buf, "{d:.0}", .{fps}) catch unreachable;
-
-    var ac_buf: [8]u8 = undefined;
-    const ac_str = std.fmt.bufPrint(&ac_buf, "{d}", .{audio_channels}) catch unreachable;
-
-    std.log.info("Encoding video+audio with ffmpeg → {s}", .{output_path});
-
-    var child = try std.process.spawn(io, .{
-        .argv = &.{
-            "ffmpeg",    "-y",
-            // Video input: raw RGB24 from stdin
-            "-f",        "rawvideo",
-            "-pix_fmt",  "rgb24",
-            "-s",        size_str,
-            "-r",        fps_str,
-            "-i",        "pipe:0",
-            // Audio input: interleaved f32le from file
-            "-f",        "f32le",
-            "-ar",       "48000",
-            "-ac",       ac_str,
-            "-i",        audio_path,
-            // Output encoding
-            "-c:v",      "libx264",
-            "-pix_fmt",  "yuv420p",
-            "-c:a",      "aac",
-            "-b:a",      "192k",
-            "-shortest", output_path,
-        },
-        .stdin = .pipe,
-        .stdout = .inherit,
-        .stderr = .inherit,
+    std.log.info("  Wrote {s} ({d} bytes, {d} channels, 48kHz f32le)", .{
+        audio_path, audio_interleaved.len, audio_channels,
     });
-    errdefer {
-        // Ensure ffmpeg is not orphaned on error: close stdin so it gets EOF, then reap.
-        if (child.stdin) |s| {
-            s.close(io);
-            child.stdin = null;
-        }
-        _ = child.wait(io) catch {};
-    }
 
-    // Write all frame data to ffmpeg's stdin
-    const stdin_file = child.stdin.?;
-    var write_buf: [64 * 1024]u8 = undefined;
-    var writer = stdin_file.writer(io, &write_buf);
-    try writer.interface.writeAll(video.data);
-    try writer.interface.flush();
-    stdin_file.close(io);
-    child.stdin = null;
+    // Write raw RGB24 video frames to stdout.
+    std.log.info("  Writing {d} raw RGB24 frames ({d}x{d}) to stdout ({d} bytes)...", .{
+        video.num_frames, video.width, video.height, video.data.len,
+    });
+    var stdout_buf: [64 * 1024]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
+    try stdout_writer.interface.writeAll(video.data);
+    try stdout_writer.interface.flush();
 
-    // Wait for ffmpeg to finish
-    const term = try child.wait(io);
-    switch (term) {
-        .exited => |code| {
-            if (code != 0) {
-                std.log.err("ffmpeg exited with code {d}", .{code});
-                return error.FfmpegFailed;
-            }
-        },
-        else => {
-            std.log.err("ffmpeg terminated abnormally", .{});
-            return error.FfmpegFailed;
-        },
-    }
-
-    std.log.info("  Wrote {s}", .{output_path});
+    // Print the ffmpeg command for the user (to stderr, so it doesn't pollute the pipe).
+    std.log.info("", .{});
+    std.log.info("Raw outputs written. To encode with ffmpeg, run:", .{});
+    std.log.info("  bazel-bin/examples/ltx/inference [args] \\", .{});
+    std.log.info("    | ffmpeg -y \\", .{});
+    std.log.info("      -f rawvideo -pix_fmt rgb24 -s {d}x{d} -r {d:.0} -i pipe:0 \\", .{
+        video.width, video.height, fps,
+    });
+    std.log.info("      -f f32le -ar 48000 -ac {d} -i {s} \\", .{ audio_channels, audio_path });
+    std.log.info("      -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest output.mp4", .{});
 }
 
 // Phase 5: Audio VAE Decode
