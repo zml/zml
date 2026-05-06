@@ -19,16 +19,14 @@ Replace the Python-based Gemma hidden state export with a native Zig Gemma-3 tex
                                             → ffmpeg (internal) → output.mp4
 ```
 
-### Target pipeline
+### Target pipeline (implemented)
 
 ```
 [Single Zig binary]
-  Tokenize prompt → Gemma-3 encoder → [B,S,3840,49] GPU buffers
+  --gemma-ckpt → Tokenize prompt → Gemma-3 encoder → [B,S,3840,49] GPU buffers
   → FeatureExtractorV2 → Embeddings1DConnector → Stage 1
   → Bridge → Stage 2 → VAE → Vocoder
-  → raw video (stdout) + raw audio (file)
-  │
-  └──► pipe to ffmpeg externally
+  → ffmpeg (internal) → output.mp4
 ```
 
 ## Architecture Decisions
@@ -195,9 +193,10 @@ Phase -1: Gemma Encoding
 ```
 
 **Modify `computeTextEmbeddings()`:**
-- Current signature: takes `pos_path: []const u8, neg_path: []const u8` (file paths)
-- New signature: takes `pos_hs_buf: zml.Buffer, pos_mask_buf: zml.Buffer, neg_hs_buf: zml.Buffer, neg_mask_buf: zml.Buffer`
-- Remove safetensors file loading (the `loadBuf` + `TensorRegistry` block)
+- ~~Current signature: takes `pos_path: []const u8, neg_path: []const u8` (file paths)~~
+- New signature: takes `pos_hs_buf: *const zml.Buffer, pos_mask_buf: *const zml.Buffer, neg_hs_buf: *const zml.Buffer, neg_mask_buf: *const zml.Buffer` (pointer params to avoid stack copies)
+- Removed safetensors file loading (the `loadBuf` + `TensorRegistry` block)
+- Large structs heap-allocated (`InitResult`, `weight_bufs`) to avoid debug-mode stack overflow
 - Everything else (compile, load FeatureExtractor weights, run) stays the same
 
 **Extract ffmpeg:**
@@ -212,28 +211,33 @@ Add `gemma3_encoder.zig` to the `srcs` list of the `inference` target.
 
 ## Output Format & CLI Usage
 
-### After implementation
+### Current usage (Gemma integrated, ffmpeg internal)
 
 ```bash
-# Full pipeline: Gemma + LTX + pipe to ffmpeg
-bazel run //examples/ltx:inference -- \
+# Full pipeline: single binary, Gemma → LTX → MP4
+bazel run //examples/ltx:inference --config=release --@zml//platforms:cuda=true -- \
   --prompt "A cat sitting on a windowsill watching rain" \
   --negative-prompt "blurry, low quality" \
   --gemma-ckpt ~/models/gemma-3-12b-it \
   --stage1-ckpt ~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
-  --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
+  --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
   --upsampler-ckpt ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-  --output-dir /tmp/ltx_out \
+  --output-dir ~/outputs/my_video \
   --height 1024 --width 1536 --num-frames 121 --fps 24 \
-  | ffmpeg -y \
-      -f rawvideo -pix_fmt rgb24 -s 1536x1024 -r 24 -i pipe:0 \
-      -f f32le -ar 48000 -ac 2 -i /tmp/ltx_out/audio.raw \
-      -c:v libx264 -pix_fmt yuv420p \
-      -c:a aac -b:a 192k \
-      -shortest output.mp4
+  --bf16-attn-stage1 --bf16-attn-stage2 \
+  --seed 42
 ```
 
-### Raw output format
+### Debug mode note
+
+Debug mode overflows the default 8MB Linux stack (runStage1 is ~1300 lines).
+Use `ulimit -s unlimited` before the command:
+
+```bash
+ulimit -s unlimited && bazel run //examples/ltx:inference --@zml//platforms:cuda=true -- [args...]
+```
+
+### Future: extract ffmpeg to external pipe
 
 | Stream | Format | Location |
 |--------|--------|----------|
@@ -291,39 +295,60 @@ uv run examples/ltx/export_pipeline.py \
 
 ## Execution Order
 
-1. **Write `gemma3_encoder.zig`** — core model, can compile locally, test on server
-2. **Tokenizer validation** — verify ZML tokenizer matches Python for Gemma prompts
-3. **Hidden state validation** — compare Zig encoder output against Python references on server
-4. **Wire into `inference.zig`** — CLI changes + buffer handoff + remove safetensors loading
-5. **Extract ffmpeg** — stdout video + file audio
-6. **End-to-end test** — full pipeline on server
+1. ~~**Write `gemma3_encoder.zig`**~~ ✅ Done (353 lines)
+2. ~~**Tokenizer validation**~~ ✅ BOS prepend confirmed, left-padding matches Python
+3. ~~**Hidden state validation**~~ ✅ Three prompts validated on GPU server (see results below)
+4. ~~**Wire into `inference.zig`**~~ ✅ Done — CLI changes + buffer handoff + Gemma phase added
+5. **Extract ffmpeg** — stdout video + file audio ← **NEXT**
+6. ~~**End-to-end test**~~ ✅ Full pipeline validated (release mode, 3 prompts → MP4 output)
+
+## Validation Results
+
+Validated on `ubuntu@dev-oboulant` across three prompts (7, 7, and 45 real tokens):
+
+| Layer | Cosine Sim | Real Token Max Err | Notes |
+|-------|-----------|-------------------|-------|
+| emb   | 1.0000    | 0.000             | Perfect match |
+| L1-L5 | >0.99999  | ≤8.0              | Sliding attention only |
+| L6-L12| >0.99999  | ≤64.0             | First full attention layers |
+| L24   | 0.99990   | —                 | |
+| L36   | 0.99110   | —                 | |
+| L47   | 0.95560   | —                 | Gradual bf16 drift, normal for cross-backend |
+| L48   | 0.89300   | **0.875**         | Normed output; real tokens excellent |
+
+**Padding positions**: Systematic dim-2975 offset (zig=10.75 vs ref=23.0) on all padding tokens.
+Root cause: different softmax-of-all-inf behavior between XLA and PyTorch backends.
+Benign — LTX replaces padding positions with learnable registers downstream.
 
 ## Files Changed
 
 | File | Action | Description |
 |------|--------|-------------|
-| `examples/ltx/gemma3_encoder.zig` | **Create** | Simplified Gemma-3 text encoder (~400 lines) |
-| `examples/ltx/inference.zig` | **Modify** | New CLI args, Gemma phase, buffer handoff, extract ffmpeg |
-| `examples/ltx/BUILD.bazel` | **Modify** | Add `gemma3_encoder.zig` to srcs |
+| `examples/ltx/gemma3_encoder.zig` | ✅ **Created** | Gemma-3 text encoder, single-pass mode (353 lines) |
+| `examples/ltx/gemma3_validate.zig` | ✅ **Created** | Standalone validation binary |
+| `examples/ltx/compare_gemma_outputs.py` | ✅ **Created** | Per-layer comparison tool (Zig raw bf16 vs Python safetensors) |
+| `examples/ltx/export_pipeline.py` | ✅ **Created** | Python reference generation (--text-only mode) |
+| `examples/ltx/BUILD.bazel` | ✅ **Modified** | Added gemma3_encoder.zig to srcs, gemma3_validate target |
+| `examples/ltx/inference.zig` | ✅ **Modified** | New CLI args (`--gemma-ckpt`, `--prompt`, `--negative-prompt`), Phase 0 Gemma encoding, buffer handoff to text embeddings, Gemma weight unloading after Stage 1 |
 
 ## Dependencies
 
 - No new Bazel dependencies. ZML already provides:
   - `zml.tokenizer` (IREE backend for HF tokenizer.json)
-  - `zml.nn` (Linear, TokenEmbedding, RoPE, RMS norm)
+  - `zml.nn` (Linear, TokenEmbedding, RoPE, sdpa, causalAttnMask)
   - `zml.io.TensorStore` (safetensors loading with shard index)
   - `zml.Buffer` (GPU buffer management)
   - `zml.Tensor` (graph construction)
   - `zml.safetensors` (multi-shard loading via index.json)
 
-## Risk Areas
+## Resolved Risk Areas
 
-1. **Attention mask semantics**: Dense causal attention with left-padding requires careful mask construction. The padding tokens must be masked in both the causal mask and the padding mask.
+1. ~~**Attention mask semantics**~~: ✅ Causal + KV-side-only padding mask, matching HuggingFace. Validated.
 
-2. **RoPE implementation**: Gemma-3 uses different theta values for sliding vs full attention layers, plus linear scaling (factor=8) for full attention. Must match HuggingFace's implementation exactly.
+2. ~~**RoPE implementation**~~: ✅ Sliding=theta 10k, full=theta 1M with linear scaling factor=8. Fixed after initial mismatch.
 
-3. **Sliding window attention**: For the fixed sequence length of 1024 with a window of 1024, sliding window is effectively full attention. However, the implementation should still be correct for shorter effective sequences.
+3. ~~**Sliding window attention**~~: ✅ Window=1024 with seq_len=1024 is effectively full attention. Correctly implemented via `causalAttnMask` with window parameter.
 
-4. **Weight key mapping**: HF Gemma-3 multimodal model stores text weights under `language_model.model.*`. The shard index must be parsed to find which shard contains which weights.
+4. ~~**Weight key mapping**~~: ✅ Prefix `language_model.model.*`, multi-shard via `model.safetensors.index.json`. Working.
 
-5. **bf16 accumulation drift**: 48 layers of bf16 computation may accumulate numerical differences vs Python (which may use tf32 or f32 intermediates). Validation tolerance needs to account for this.
+5. ~~**bf16 accumulation drift**~~: ✅ Gradual cosine degradation L1→L47 (1.0→0.956) is normal cross-backend bf16 drift. Real token accuracy on L48 is sub-1.0 max error.

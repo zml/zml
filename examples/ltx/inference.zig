@@ -12,8 +12,9 @@
 ///       --stage1-ckpt /root/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
 ///       --stage2-ckpt /root/models/ltx-2.3/ltx-2.3-22b-distilled.safetensors \
 ///       --upsampler-ckpt /root/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-///       --gemma-hidden-states-pos /root/e2e_demo/pos_hidden_states.safetensors \
-///       --gemma-hidden-states-neg /root/e2e_demo/neg_hidden_states.safetensors \
+///       --gemma-ckpt /root/models/gemma-3-12b-it \
+///       --prompt "A cat sitting on a windowsill watching rain" \
+///       --negative-prompt "blurry, low quality" \
 ///       --seed 42 \
 ///       --output-dir /root/e2e_demo/unified_out/ \
 ///       --height 1024 --width 1536 --num-frames 121 --fps 24 \
@@ -23,6 +24,7 @@ const zml = @import("zml");
 const model = @import("model.zig");
 const conv_ops = @import("conv_ops.zig");
 const image_loading = @import("image_loading.zig");
+const gemma3 = @import("gemma3_encoder.zig");
 const text_embeddings = @import("text_embeddings.zig");
 const upsampler = @import("upsampler.zig");
 const video_vae = @import("video_vae.zig");
@@ -34,7 +36,9 @@ comptime {
     @setEvalBranchQuota(200000);
 }
 
-pub const std_options: std.Options = .{ .log_level = .info };
+pub const std_options: std.Options = .{
+    .log_level = .info,
+};
 
 // ============================================================================
 // Phase timing
@@ -221,8 +225,9 @@ const CliArgs = struct {
     dump_intermediates: bool,
     profile: bool,
     image: ?[]const u8,
-    gemma_hidden_states_pos: []const u8,
-    gemma_hidden_states_neg: []const u8,
+    gemma_ckpt: []const u8,
+    prompt: []const u8,
+    negative_prompt: []const u8,
     // Generation params (used when --meta is not provided)
     height: u32,
     width: u32,
@@ -253,8 +258,9 @@ fn parseArgs(it: anytype) !CliArgs {
         .dump_intermediates = false,
         .profile = false,
         .image = null,
-        .gemma_hidden_states_pos = undefined,
-        .gemma_hidden_states_neg = undefined,
+        .gemma_ckpt = undefined,
+        .prompt = "A beautiful sunset over the ocean",
+        .negative_prompt = "blurry, out of focus",
         .height = 1024,
         .width = 1536,
         .num_frames = 121,
@@ -268,7 +274,7 @@ fn parseArgs(it: anytype) !CliArgs {
         .mod_a = 3.0,
         .rescale_a = 0.7,
     };
-    var have = [_]bool{false} ** 6;
+    var have = [_]bool{false} ** 5;
 
     _ = it.next(); // exe name
 
@@ -307,12 +313,13 @@ fn parseArgs(it: anytype) !CliArgs {
             args.profile = true;
         } else if (std.mem.eql(u8, arg, "--image")) {
             args.image = it.next() orelse return error.InvalidArgs;
-        } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-pos")) {
-            args.gemma_hidden_states_pos = it.next() orelse return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--gemma-ckpt")) {
+            args.gemma_ckpt = it.next() orelse return error.InvalidArgs;
             have[4] = true;
-        } else if (std.mem.eql(u8, arg, "--gemma-hidden-states-neg")) {
-            args.gemma_hidden_states_neg = it.next() orelse return error.InvalidArgs;
-            have[5] = true;
+        } else if (std.mem.eql(u8, arg, "--prompt")) {
+            args.prompt = it.next() orelse return error.InvalidArgs;
+        } else if (std.mem.eql(u8, arg, "--negative-prompt")) {
+            args.negative_prompt = it.next() orelse return error.InvalidArgs;
         } else if (std.mem.eql(u8, arg, "--height")) {
             const val = it.next() orelse return error.InvalidArgs;
             args.height = std.fmt.parseInt(u32, val, 10) catch return error.InvalidArgs;
@@ -357,7 +364,8 @@ fn parseArgs(it: anytype) !CliArgs {
             std.log.err(
                 "Usage: inference --stage1-ckpt <path> --stage2-ckpt <path> " ++
                     "--upsampler-ckpt <path> --output-dir <path> " ++
-                    "--gemma-hidden-states-pos <path> --gemma-hidden-states-neg <path> " ++
+                    "--gemma-ckpt <path> " ++
+                    "[--prompt <text>] [--negative-prompt <text>] " ++
                     "[--height <int>] [--width <int>] [--num-frames <int>] [--fps <float>] " ++
                     "[--num-inference-steps <int>] [--meta <path>] [--seed <int>] [--image <path>] " ++
                     "[--bf16-attn-stage1] [--bf16-attn-stage2] [--dump-intermediates] [--profile] " ++
@@ -669,8 +677,9 @@ pub fn main(init: std.process.Init) !void {
     std.log.info("  num-inference-steps: {d}", .{args.num_inference_steps});
     std.log.info("  dump-intermediates: {}", .{args.dump_intermediates});
     std.log.info("  image:             {s}", .{args.image orelse "(none)"});
-    std.log.info("  gemma-hs-pos:      {s}", .{args.gemma_hidden_states_pos});
-    std.log.info("  gemma-hs-neg:      {s}", .{args.gemma_hidden_states_neg});
+    std.log.info("  gemma-ckpt:        {s}", .{args.gemma_ckpt});
+    std.log.info("  prompt:            {s}", .{args.prompt});
+    std.log.info("  negative-prompt:   {s}", .{args.negative_prompt});
 
     // ---- Validate dimensions ----
     if (args.height % 32 != 0 or args.width % 32 != 0) {
@@ -724,6 +733,23 @@ pub fn main(init: std.process.Init) !void {
     var timer_mp4 = PhaseTimer.init("MP4 Encoding", io);
 
     // ========================================================================
+    // Phase 0: Gemma-3 text encoding
+    // ========================================================================
+    std.log.info("", .{});
+    std.log.info("=== Phase 0: Gemma-3 text encoding ===", .{});
+    const timer_gemma = try allocator.create(PhaseTimer);
+    defer allocator.destroy(timer_gemma);
+    timer_gemma.* = PhaseTimer.init("Gemma Encode", io);
+    timer_gemma.start();
+
+    const gemma = try allocator.create(GemmaEncodingResult);
+    defer allocator.destroy(gemma);
+    gemma.* = try runGemmaEncoding(allocator, io, platform, sharding, args.gemma_ckpt, args.prompt, args.negative_prompt);
+
+    timer_gemma.addExec();
+    timer_gemma.printRow();
+
+    // ========================================================================
     // Phase 1: Stage 1
     // ========================================================================
     std.log.info("", .{});
@@ -741,8 +767,10 @@ pub fn main(init: std.process.Init) !void {
         args.dump_intermediates,
         args.output_dir,
         args.seed,
-        args.gemma_hidden_states_pos,
-        args.gemma_hidden_states_neg,
+        &gemma.pos_hs,
+        &gemma.pos_mask,
+        &gemma.neg_hs,
+        &gemma.neg_mask,
         args.num_inference_steps,
         args.cfg_v,
         args.stg_v,
@@ -760,6 +788,12 @@ pub fn main(init: std.process.Init) !void {
         &timer_s1_img_cond,
         args.profile,
     );
+
+    // Free Gemma hidden states — no longer needed after text embeddings are computed.
+    gemma.pos_hs.deinit();
+    gemma.pos_mask.deinit();
+    gemma.neg_hs.deinit();
+    gemma.neg_mask.deinit();
 
     if (args.dump_intermediates) {
         try writeBuffer(allocator, io, s1.v_latent, args.output_dir, "stage1_video_latent.bin");
@@ -960,8 +994,10 @@ fn runStage1(
     dump_intermediates: bool,
     output_dir: []const u8,
     seed: u64,
-    gemma_hs_pos_path: []const u8,
-    gemma_hs_neg_path: []const u8,
+    pos_hs_buf: *const zml.Buffer,
+    pos_mask_buf: *const zml.Buffer,
+    neg_hs_buf: *const zml.Buffer,
+    neg_mask_buf: *const zml.Buffer,
     num_stage1_steps: usize,
     cfg_v: f32,
     stg_v: f32,
@@ -1093,7 +1129,7 @@ fn runStage1(
 
     std.log.info("Computing text embeddings from Gemma hidden states...", .{});
 
-    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, gemma_hs_pos_path, gemma_hs_neg_path, timer_text_emb);
+    const emb_result = try computeTextEmbeddings(allocator, io, platform, sharding, &ckpt_store, pos_hs_buf, pos_mask_buf, neg_hs_buf, neg_mask_buf, timer_text_emb);
     var v_context_pos_buf = emb_result.v_context_pos;
     var a_context_pos_buf = emb_result.a_context_pos;
     var v_context_neg_buf = emb_result.v_context_neg;
@@ -3225,6 +3261,153 @@ fn runToDenoised(
 // Text Embeddings from Gemma Hidden States
 // ============================================================================
 
+const GemmaEncodingResult = struct {
+    pos_hs: zml.Buffer,
+    pos_mask: zml.Buffer,
+    neg_hs: zml.Buffer,
+    neg_mask: zml.Buffer,
+};
+
+/// Wrapper forward function that calls the Gemma encoder and prepends a batch dim.
+/// Output: [b=1, s, d, layer] bf16 (matches LTX text embeddings processor expectation).
+fn forwardGemmaEncoder(encoder: *const gemma3.Encoder, input_ids: zml.Tensor, attention_mask: zml.Tensor) zml.Tensor {
+    const stacked = encoder.forward(input_ids, attention_mask);
+    return stacked.insertAxes(0, .{.b});
+}
+
+/// Run Gemma-3 text encoder on both positive and negative prompts.
+/// Returns stacked hidden states [b=1, s=1024, d=3840, layer=49] bf16 and
+/// attention masks [b=1, s=1024] i64 as GPU buffers.
+/// Gemma weights are loaded and freed within this function.
+fn runGemmaEncoding(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    platform: *zml.Platform,
+    sharding: zml.sharding.Sharding,
+    gemma_ckpt: []const u8,
+    prompt: []const u8,
+    negative_prompt: []const u8,
+) !GemmaEncodingResult {
+    // ---- Load tokenizer ----
+    std.log.info("Loading Gemma tokenizer...", .{});
+    const tokenizer_path = try std.fmt.allocPrint(allocator, "{s}/tokenizer.json", .{gemma_ckpt});
+    defer allocator.free(tokenizer_path);
+
+    var tokenizer = try zml.tokenizer.Tokenizer.fromFile(allocator, io, tokenizer_path);
+    defer tokenizer.deinit();
+
+    // ---- Tokenize both prompts ----
+    std.log.info("Tokenizing prompts...", .{});
+    const pos_tok = try gemma3.tokenizeAndPad(allocator, &tokenizer, prompt);
+    const neg_tok = try gemma3.tokenizeAndPad(allocator, &tokenizer, negative_prompt);
+    std.log.info("  positive: {d} real tokens", .{pos_tok.real_token_count});
+    std.log.info("  negative: {d} real tokens", .{neg_tok.real_token_count});
+
+    // ---- Open weight store ----
+    std.log.info("Opening Gemma weight store...", .{});
+    const index_path = try std.fmt.allocPrint(allocator, "{s}/model.safetensors.index.json", .{gemma_ckpt});
+    defer allocator.free(index_path);
+
+    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, index_path);
+    defer registry.deinit();
+    var store: zml.io.TensorStore = .fromRegistry(allocator, &registry);
+    defer store.deinit();
+
+    // ---- Init encoder ----
+    std.log.info("Initializing Gemma encoder...", .{});
+    const config: gemma3.Config = .{};
+    var encoder = try gemma3.Encoder.init(allocator, store.view(), config);
+    defer encoder.deinit(allocator);
+
+    // ---- Compile (with batch dim wrapper) ----
+    std.log.info("Compiling Gemma encoder...", .{});
+    const input_ids_t: zml.Tensor = .init(.{ .s = gemma3.MAX_SEQ_LEN }, .u32);
+    const attn_mask_t: zml.Tensor = .init(.{ .s = gemma3.MAX_SEQ_LEN }, .u32);
+
+    var exe = try platform.compileFn(
+        allocator,
+        io,
+        forwardGemmaEncoder,
+        .{ &encoder, input_ids_t, attn_mask_t },
+        .{ .shardings = &.{sharding} },
+    );
+    defer exe.deinit();
+
+    // ---- Load weights ----
+    std.log.info("Loading Gemma weights...", .{});
+    var weight_bufs = try zml.io.load(
+        gemma3.Encoder,
+        &encoder,
+        allocator,
+        io,
+        platform,
+        &store,
+        .{
+            .shardings = &.{sharding},
+            .parallelism = 16,
+            .dma_chunks = 32,
+            .dma_chunk_size = 128 * zml.MiB,
+        },
+    );
+    defer gemma3.Encoder.unloadBuffers(&weight_bufs, allocator);
+
+    // ---- Prepare input buffers ----
+    const ids_shape: zml.Shape = .init(.{ .s = gemma3.MAX_SEQ_LEN }, .u32);
+    const mask_shape: zml.Shape = .init(.{ .s = gemma3.MAX_SEQ_LEN }, .u32);
+
+    // ---- Run positive prompt ----
+    std.log.info("Running Gemma on positive prompt...", .{});
+    var pos_ids_buf: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(ids_shape, std.mem.sliceAsBytes(&pos_tok.input_ids)), sharding);
+    defer pos_ids_buf.deinit();
+    var pos_mask_input_buf: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(mask_shape, std.mem.sliceAsBytes(&pos_tok.attention_mask)), sharding);
+    defer pos_mask_input_buf.deinit();
+
+    var exe_args = try exe.args(allocator);
+    defer exe_args.deinit(allocator);
+    var results = try exe.results(allocator);
+    defer results.deinit(allocator);
+
+    exe_args.set(.{ weight_bufs, pos_ids_buf, pos_mask_input_buf });
+    exe.callOpts(io, exe_args, &results, .{ .wait = true });
+    const pos_hs: zml.Buffer = results.get(zml.Buffer);
+
+    std.log.info("  pos hidden states: {s} {any}", .{ @tagName(pos_hs.shape().dtype()), pos_hs.shape().dims() });
+
+    // ---- Run negative prompt ----
+    std.log.info("Running Gemma on negative prompt...", .{});
+    var neg_ids_buf: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(ids_shape, std.mem.sliceAsBytes(&neg_tok.input_ids)), sharding);
+    defer neg_ids_buf.deinit();
+    var neg_mask_input_buf: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(mask_shape, std.mem.sliceAsBytes(&neg_tok.attention_mask)), sharding);
+    defer neg_mask_input_buf.deinit();
+
+    exe_args.set(.{ weight_bufs, neg_ids_buf, neg_mask_input_buf });
+    exe.callOpts(io, exe_args, &results, .{ .wait = true });
+    const neg_hs: zml.Buffer = results.get(zml.Buffer);
+
+    std.log.info("  neg hidden states: {s} {any}", .{ @tagName(neg_hs.shape().dtype()), neg_hs.shape().dims() });
+
+    // ---- Build attention masks for LTX text embeddings processor ----
+    // Expected shape: [b=1, s=1024] i64 (binary: 1=real, 0=pad).
+    const attn_mask_shape: zml.Shape = .init(.{ .b = 1, .s = gemma3.MAX_SEQ_LEN }, .i64);
+    var pos_mask_i64: [gemma3.MAX_SEQ_LEN]i64 = undefined;
+    var neg_mask_i64: [gemma3.MAX_SEQ_LEN]i64 = undefined;
+    for (0..gemma3.MAX_SEQ_LEN) |i| {
+        pos_mask_i64[i] = if (pos_tok.attention_mask[i] == 1) 1 else 0;
+        neg_mask_i64[i] = if (neg_tok.attention_mask[i] == 1) 1 else 0;
+    }
+    const pos_mask: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(attn_mask_shape, std.mem.sliceAsBytes(&pos_mask_i64)), sharding);
+    const neg_mask: zml.Buffer = try .fromSlice(io, platform, zml.Slice.init(attn_mask_shape, std.mem.sliceAsBytes(&neg_mask_i64)), sharding);
+
+    std.log.info("Gemma encoding complete.", .{});
+
+    return .{
+        .pos_hs = pos_hs,
+        .pos_mask = pos_mask,
+        .neg_hs = neg_hs,
+        .neg_mask = neg_mask,
+    };
+}
+
 const TextEmbeddingsResult = struct {
     v_context_pos: zml.Buffer,
     a_context_pos: zml.Buffer,
@@ -3241,40 +3424,21 @@ fn computeTextEmbeddings(
     platform: *zml.Platform,
     sharding: zml.sharding.Sharding,
     ckpt_store: *zml.io.TensorStore,
-    pos_path: []const u8,
-    neg_path: []const u8,
+    pos_hs_buf: *const zml.Buffer,
+    pos_mask_buf: *const zml.Buffer,
+    neg_hs_buf: *const zml.Buffer,
+    neg_mask_buf: *const zml.Buffer,
     timer: *PhaseTimer,
 ) !TextEmbeddingsResult {
     timer.start();
 
     // ---- Initialize processor params from checkpoint ----
-    const proc_init = text_embeddings.EmbeddingsProcessor.initParams(ckpt_store.view());
-    const processor = proc_init.processor;
-    const proc_params = proc_init.params;
+    const InitResult = @TypeOf(text_embeddings.EmbeddingsProcessor.initParams(undefined));
+    const proc_init = try allocator.create(InitResult);
+    defer allocator.destroy(proc_init);
+    proc_init.* = text_embeddings.EmbeddingsProcessor.initParams(ckpt_store.view());
 
-    // ---- Open pos hidden states to get shapes for compilation ----
-    var pos_hs_buf: zml.Buffer = undefined;
-    var pos_mask_buf: zml.Buffer = undefined;
-    {
-        var pos_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, pos_path) catch |err| {
-            std.log.err("Failed to open pos hidden states: {s}", .{pos_path});
-            return err;
-        };
-        defer pos_reg.deinit();
-        var pos_store: zml.io.TensorStore = .fromRegistry(allocator, &pos_reg);
-        defer pos_store.deinit();
-
-        pos_hs_buf = try loadBuf(allocator, io, platform, &pos_store, "stacked_hidden_states", sharding);
-        errdefer pos_hs_buf.deinit();
-        pos_mask_buf = try loadBuf(allocator, io, platform, &pos_store, "attention_mask", sharding);
-    }
-    defer pos_hs_buf.deinit();
-    defer pos_mask_buf.deinit();
-
-    std.log.info("  pos stacked_hidden_states: {s} {any}", .{ @tagName(pos_hs_buf.shape().dtype()), pos_hs_buf.shape().dims() });
-    std.log.info("  pos attention_mask:        {s} {any}", .{ @tagName(pos_mask_buf.shape().dtype()), pos_mask_buf.shape().dims() });
-
-    timer.addOther(); // load hidden states from safetensors
+    timer.addOther();
 
     // ---- Compile graph ----
     std.log.info("Compiling text embeddings processor...", .{});
@@ -3283,10 +3447,10 @@ fn computeTextEmbeddings(
         io,
         text_embeddings.forwardEmbeddingsProcessor,
         .{
-            &processor,
+            &proc_init.processor,
             zml.Tensor.fromShape(pos_hs_buf.shape()),
             zml.Tensor.fromShape(pos_mask_buf.shape()),
-            proc_params,
+            proc_init.params,
         },
         .{ .shardings = &.{sharding} },
     );
@@ -3296,9 +3460,14 @@ fn computeTextEmbeddings(
 
     // ---- Load model weights ----
     std.log.info("Loading text embeddings weights...", .{});
-    var weight_bufs = try zml.io.load(
+    const weight_bufs = try allocator.create(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Params));
+    defer {
+        text_embeddings.EmbeddingsProcessor.unloadBuffers(weight_bufs);
+        allocator.destroy(weight_bufs);
+    }
+    weight_bufs.* = try zml.io.load(
         text_embeddings.EmbeddingsProcessor.Params,
-        &proc_params,
+        &proc_init.params,
         allocator,
         io,
         platform,
@@ -3310,7 +3479,6 @@ fn computeTextEmbeddings(
             .dma_chunk_size = 16 * zml.MiB,
         },
     );
-    defer text_embeddings.EmbeddingsProcessor.unloadBuffers(&weight_bufs);
 
     timer.addLoad();
 
@@ -3321,7 +3489,7 @@ fn computeTextEmbeddings(
     var results = try exe.results(allocator);
     defer results.deinit(allocator);
 
-    exe_args.set(.{ pos_hs_buf, pos_mask_buf, weight_bufs });
+    exe_args.set(.{ pos_hs_buf.*, pos_mask_buf.*, weight_bufs.* });
     exe.callOpts(io, exe_args, &results, .{ .wait = true });
 
     var pos_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
@@ -3335,26 +3503,9 @@ fn computeTextEmbeddings(
     timer.addExec();
 
     // ---- Run on negative hidden states ----
-    var neg_hs_buf: zml.Buffer = undefined;
-    var neg_mask_buf: zml.Buffer = undefined;
-    {
-        std.log.info("Running text embeddings on negative prompt...", .{});
-        var neg_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, neg_path) catch |err| {
-            std.log.err("Failed to open neg hidden states: {s}", .{neg_path});
-            return err;
-        };
-        defer neg_reg.deinit();
-        var neg_store: zml.io.TensorStore = .fromRegistry(allocator, &neg_reg);
-        defer neg_store.deinit();
+    std.log.info("Running text embeddings on negative prompt...", .{});
 
-        neg_hs_buf = try loadBuf(allocator, io, platform, &neg_store, "stacked_hidden_states", sharding);
-        errdefer neg_hs_buf.deinit();
-        neg_mask_buf = try loadBuf(allocator, io, platform, &neg_store, "attention_mask", sharding);
-    }
-    defer neg_hs_buf.deinit();
-    defer neg_mask_buf.deinit();
-
-    // Reuse the same compiled exe — validate that neg shapes match pos (both must be S=1024).
+    // Validate that neg shapes match pos (both must be S=1024).
     if (!neg_hs_buf.shape().eql(pos_hs_buf.shape())) {
         std.log.err(
             "Negative hidden states shape {any} ({s}) does not match positive {any} ({s}). " ++
@@ -3377,7 +3528,7 @@ fn computeTextEmbeddings(
         );
         return error.ShapeMismatch;
     }
-    exe_args.set(.{ neg_hs_buf, neg_mask_buf, weight_bufs });
+    exe_args.set(.{ neg_hs_buf.*, neg_mask_buf.*, weight_bufs.* });
     exe.callOpts(io, exe_args, &results, .{ .wait = true });
 
     var neg_out = results.get(zml.Bufferized(text_embeddings.EmbeddingsProcessor.Result));
@@ -3388,7 +3539,7 @@ fn computeTextEmbeddings(
     std.log.info("  v_context_neg: {s} {any}", .{ @tagName(v_context_neg.shape().dtype()), v_context_neg.shape().dims() });
     std.log.info("  a_context_neg: {s} {any}", .{ @tagName(a_context_neg.shape().dtype()), a_context_neg.shape().dims() });
 
-    timer.addExec(); // neg load hs + exec
+    timer.addExec(); // neg exec
 
     return .{
         .v_context_pos = v_context_pos,
@@ -4258,7 +4409,6 @@ fn runVocoderWithBWE(
     errdefer ckpt_store.deinit();
 
     // ---- Load vocoder weights (split: main 667, BWE pipeline 559) ----
-    // Heap-allocate param structs — too large for the stack
     std.log.info("Loading main vocoder weights...", .{});
     const main_voc_params = try allocator.create(vocoder.MainVocoderParams);
     defer allocator.destroy(main_voc_params);

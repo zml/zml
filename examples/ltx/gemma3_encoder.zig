@@ -60,6 +60,10 @@ pub const RmsNorm = struct {
         return .{ .weight = store.createTensor("weight", .{.d}, .{}), .eps = eps };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(RmsNorm)) void {
+        self.weight.deinit();
+    }
+
     /// Gemma-3 variant: normalize(x) * (weight + 1), computed in f32.
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const x = input.convert(.f32);
@@ -79,6 +83,15 @@ pub const Mlp = struct {
             .up_proj = .init(store.withPrefix("up_proj").createTensor("weight", .{ .dout, .d }, .{}), null, .d),
             .down_proj = .init(store.withPrefix("down_proj").createTensor("weight", .{ .dout, .d }, .{}), null, .d),
         };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Mlp)) void {
+        self.gate_proj.weight.deinit();
+        if (self.gate_proj.bias) |*bias| bias.deinit();
+        self.up_proj.weight.deinit();
+        if (self.up_proj.bias) |*bias| bias.deinit();
+        self.down_proj.weight.deinit();
+        if (self.down_proj.bias) |*bias| bias.deinit();
     }
 
     pub fn forward(self: Mlp, x: zml.Tensor) zml.Tensor {
@@ -118,6 +131,19 @@ pub const Attention = struct {
             .head_dim = config.head_dim,
             .rope_opts = config.ropeOpts(layer_type),
         };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(Attention)) void {
+        self.q_proj.weight.deinit();
+        if (self.q_proj.bias) |*bias| bias.deinit();
+        self.k_proj.weight.deinit();
+        if (self.k_proj.bias) |*bias| bias.deinit();
+        self.v_proj.weight.deinit();
+        if (self.v_proj.bias) |*bias| bias.deinit();
+        self.o_proj.weight.deinit();
+        if (self.o_proj.bias) |*bias| bias.deinit();
+        RmsNorm.unloadBuffers(&self.q_norm);
+        RmsNorm.unloadBuffers(&self.k_norm);
     }
 
     pub fn forward(self: Attention, x: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
@@ -162,6 +188,15 @@ pub const DecoderLayer = struct {
         };
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(DecoderLayer)) void {
+        RmsNorm.unloadBuffers(&self.input_layernorm);
+        Attention.unloadBuffers(&self.self_attn);
+        RmsNorm.unloadBuffers(&self.post_attention_layernorm);
+        RmsNorm.unloadBuffers(&self.pre_feedforward_layernorm);
+        RmsNorm.unloadBuffers(&self.post_feedforward_layernorm);
+        Mlp.unloadBuffers(&self.mlp);
+    }
+
     pub fn forward(self: DecoderLayer, hidden_states: zml.Tensor, attn_mask: zml.Tensor) zml.Tensor {
         var residual = hidden_states;
         var x = self.input_layernorm.forward(hidden_states);
@@ -186,6 +221,10 @@ pub const ScaledWordEmbedding = struct {
             .embed_tokens = .{ .weight = store.createTensor("weight", .{ .voc, .d }, .{}) },
             .scale = @sqrt(@as(f32, @floatFromInt(config.hidden_size))),
         };
+    }
+
+    pub fn unloadBuffers(self: *zml.Bufferized(ScaledWordEmbedding)) void {
+        self.embed_tokens.weight.deinit();
     }
 
     pub fn forward(self: ScaledWordEmbedding, tokens: zml.Tensor) zml.Tensor {
@@ -221,6 +260,15 @@ pub const Encoder = struct {
         self.layers = &.{};
     }
 
+    pub fn unloadBuffers(self: *zml.Bufferized(Encoder), allocator: std.mem.Allocator) void {
+        ScaledWordEmbedding.unloadBuffers(&self.embed_tokens);
+        for (self.layers) |*layer| {
+            DecoderLayer.unloadBuffers(layer);
+        }
+        allocator.free(self.layers);
+        RmsNorm.unloadBuffers(&self.norm);
+    }
+
     /// Causal + padding attention mask. Padding masks KV side only (matching HuggingFace).
     /// Returns bf16 [q, k] with 0 for attend, -inf for masked.
     fn buildAttnMask(attention_mask: zml.Tensor, layer_type: LayerType, sliding_window: u32) zml.Tensor {
@@ -230,10 +278,13 @@ pub const Encoder = struct {
 
         // attention_mask: 1=real, 0=pad → 0=real, -inf=pad on KV axis.
         const m = attention_mask.convert(.f32);
+        const one = zml.Tensor.constant(zml.DataType.f32.constant(1.0)).broad(m.shape());
+        const zero = zml.Tensor.constant(zml.DataType.f32.zero()).broad(m.shape());
+        const neg_inf = zml.Tensor.constant(zml.DataType.f32.minValue()).broad(m.shape());
         const pad_mask = zml.Tensor.select(
-            m.cmp(.EQ, .constant(zml.DataType.f32.constant(1.0)).broad(m.shape())),
-            .constant(zml.DataType.f32.zero()).broad(m.shape()),
-            .constant(zml.DataType.f32.minValue()).broad(m.shape()),
+            m.cmp(.EQ, one),
+            zero,
+            neg_inf,
         ).rename(.{ .s = .k });
 
         return causal.add(pad_mask.broad(causal.shape())).convert(.bf16);
