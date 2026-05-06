@@ -27,13 +27,11 @@ pub const AceLlm_handler = struct {
     kv_cache_buffers: zml.Bufferized(KvCache),
     
     pub fn init(zml_handler: *main.Zml_handler) !AceLlm_handler {
+        zml_handler.tic(&zml_handler.timers.llm.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acellm);
-        //defer repo.close(zml_handler.io);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
             
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
-    
         std.log.info("5Hz parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
@@ -67,12 +65,20 @@ pub const AceLlm_handler = struct {
             .rng = .init(),
             .shardings = try .init(zml_handler.platform),
         };
+
+        zml_handler.toc(&zml_handler.timers.llm.init);
+        zml_handler.tic(&zml_handler.timers.llm.compile);
         
         const prefill_exe, const decode_exe = try compileModel(zml_handler, model, params);
+
+        zml_handler.toc(&zml_handler.timers.llm.compile);
+        zml_handler.tic(&zml_handler.timers.llm.load);
         
         std.log.info("5Hz load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
         std.log.info("5Hz model loaded", .{});
+
+        zml_handler.toc(&zml_handler.timers.llm.load);
         
         return .{
             .model = model,
@@ -137,6 +143,7 @@ pub const AceCfg_handler = struct {
     uncond_kv_cache_buffers: zml.Bufferized(KvCache),
     
     pub fn initFromLlm(zml_handler: *main.Zml_handler, acellm: *AceLlm_handler, cont_tok: u32, uncond_tok: u32, audiocodes: u32) !AceCfg_handler {
+        zml_handler.tic(&zml_handler.timers.cfg.init);
         const dtype = acellm.model.embed_tokens.weight.dtype();
         const cond_seq_len = cont_tok + audiocodes;
         const uncond_seq_len = uncond_tok + audiocodes;
@@ -164,7 +171,13 @@ pub const AceCfg_handler = struct {
             .rng = .init(),
             .shardings = try .init(zml_handler.platform),
         };
+
+        zml_handler.toc(&zml_handler.timers.cfg.init);
+        zml_handler.tic(&zml_handler.timers.cfg.compile);
+        
         const prefill_exe, const decode_exe = try compileCfgModel(zml_handler, acellm.model, params);
+
+        zml_handler.toc(&zml_handler.timers.cfg.compile);
         
         return .{
             .llm = acellm,

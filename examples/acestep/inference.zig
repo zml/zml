@@ -90,11 +90,18 @@ pub const AudioMetadata = struct {
         };
     }
     
-    pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: []const u8) !void {
+    pub fn setDuration(self: *AudioMetadata, allocator: std.mem.Allocator, duration: i64) !void {
+        const max_len = 20;
+        var buf: [max_len]u8 = undefined;
+        const numAsString = try std.fmt.bufPrint(&buf, "{}", .{ duration });
         allocator.free(self.duration);
-        self.duration = try allocator.dupe(u8, duration);
+        self.duration = try allocator.dupe(u8, numAsString);
     }
 
+    pub fn duration_s(self: *AudioMetadata) !u32 {
+        return try std.fmt.parseUnsigned(u32, self.duration, 10);
+    }
+    
     pub fn deinit(self: AudioMetadata, allocator: std.mem.Allocator) void {
         allocator.free(self.bpm);
         allocator.free(self.caption);
@@ -249,12 +256,12 @@ pub const DecodedAudio = struct {
 };
 
 
-pub fn runPhase1(raw_prompt: []const u8, zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler) !AudioMetadata {
+pub fn runPhase1(zml_handler: *main.Zml_handler, acellm: *acellm_.AceLlm_handler) !AudioMetadata {
     std.log.info("5Hz phase I : inspiration from initial prompt", .{});
     //std.log.info("########### prompt start ###########:\n{s}", .{raw_prompt});
     //std.log.info("###########  prompt end  ###########", .{});
     
-    const inspi_tokens = try tokenizeInspirationPrompt(zml_handler.allocator, acellm.tokenizer, raw_prompt);
+    const inspi_tokens = try tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
 
     const inspi_result = try generateInspirationText(zml_handler, acellm, inspi_tokens);
@@ -288,15 +295,21 @@ pub fn embedTextInputs(zml_handler: *main.Zml_handler, audio_metadata: AudioMeta
     
     std.log.info("EMB caption tokens : {d}", .{ caption_tok.len });
     std.log.info("EMB lyrics tokens : {d}", .{ lyric_tok.len} );
-    
+
+    zml_handler.tic(&zml_handler.timers.emb.prefill);
     const caption_emb = try generateTextEmbedding(zml_handler, aceemb, caption_tok, false);
+    zml_handler.toc(&zml_handler.timers.emb.prefill);
+    
+    zml_handler.tic(&zml_handler.timers.emb.decode);
     const lyric_emb = try generateTextEmbedding(zml_handler, aceemb, lyric_tok, true);
+    zml_handler.toc(&zml_handler.timers.emb.decode);
     
     return .{ .caption_embedding = caption_emb, .lyric_embedding = lyric_emb };
 }
 
 
-pub fn tokenizeInspirationPrompt(allocator: std.mem.Allocator, tokenizer: zml.tokenizer.Tokenizer, prompt: []const u8) ![]u32 {
+pub fn tokenizeInspirationPrompt(zml_handler: *main.Zml_handler, tokenizer: zml.tokenizer.Tokenizer) ![]u32 {
+    const allocator = zml_handler.allocator;
     var encoder = try tokenizer.encoder();
     defer encoder.deinit();
 
@@ -308,7 +321,10 @@ pub fn tokenizeInspirationPrompt(allocator: std.mem.Allocator, tokenizer: zml.to
     try formatted_prompt.appendSlice(allocator, "<|im_end|>");
 
     try formatted_prompt.appendSlice(allocator, "\n<|im_start|>user\n");
-    try formatted_prompt.appendSlice(allocator, prompt);
+    try formatted_prompt.appendSlice(allocator, zml_handler.args.prompt);
+    if (zml_handler.args.instru) {
+        try formatted_prompt.appendSlice(allocator, "\n\ninstrumental=true");
+    }
     try formatted_prompt.appendSlice(allocator, "<|im_end|>\n");
 
     try formatted_prompt.appendSlice(allocator, "<|im_start|>assistant\n\n");
@@ -478,14 +494,17 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     defer prefill_tokens_buffer.deinit();
 
     std.log.info("5Hz run prefill with sequence of {d} tokens", .{ prompt_tok.len });
+    zml_handler.tic(&zml_handler.timers.llm.prefill);
     prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers });
     acellm.prefill_exe.call(prefill_args, &prefill_results);
     prefill_results.fill(.{ &prefill_tokens_buffer, &acellm.kv_cache_buffers, &rng_buffers });
 
     try prefill_tokens_buffer.toSlice(io, prefill_tokens_slice);
     token_slice.items(u32)[0] = prefill_tokens_slice.items(u32)[prompt_tok.len - 1];
+    zml_handler.toc(&zml_handler.timers.llm.prefill);    
 
     std.log.info("5Hz run decode", .{});
+    zml_handler.tic(&zml_handler.timers.llm.decode);    
     const output_tokens_len = acellm.options.seq_len - prompt_tok.len - 1;
     var num_tokens_generated: usize = 0;
     var result: std.ArrayList(u8) = try .initCapacity(allocator, 0);
@@ -533,6 +552,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     try writer.writeAll("\n");
     try writer.flush();
     std.log.info("5Hz done, generated {d} tokens", .{ num_tokens_generated });
+    zml_handler.toc(&zml_handler.timers.llm.decode);    
     return result.toOwnedSlice(allocator);
 }
 
@@ -603,6 +623,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     defer uncond_prefill_tokens_buffer.deinit();
 
     std.log.info("5Hz run CFG prefill with sequence of {d}/{d} tokens", .{ cond_tot, uncond_tot });
+    zml_handler.tic(&zml_handler.timers.cfg.prefill);
     prefill_args.set(.{
         acecfg.llm.model_buffers,
         cond_prefill_tokens_buffer, uncond_prefill_tokens_buffer,
@@ -616,8 +637,10 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
 
     try cond_token_buffer.toSlice(io, cond_token_slice);
     try uncond_token_buffer.toSlice(io, uncond_token_slice);
+    zml_handler.toc(&zml_handler.timers.cfg.prefill);
     
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
+    zml_handler.tic(&zml_handler.timers.cfg.decode);
     var stdout = std.Io.File.stdout().writer(io, &.{});
     var writer: *std.Io.Writer = &stdout.interface;
     for (0..nb_audio_codes) |i| {
@@ -659,6 +682,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     try writer.writeAll("\n");
     try writer.flush();
     std.log.info("5Hz CFG done, generated {d} tokens", .{ result_tok.items.len });
+    zml_handler.toc(&zml_handler.timers.cfg.decode);
     return .{ try result_tok.toOwnedSlice(allocator), try result_str.toOwnedSlice(allocator) };
 }
 
@@ -769,6 +793,8 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     @memcpy(audio_codes_slice.items(u32)[0..audio_codes.len], audio_codes);
     var audio_codes_buffer: zml.Buffer = try .fromSlice(io, platform, audio_codes_slice, sharding);
     defer audio_codes_buffer.deinit();
+
+    zml_handler.tic(&zml_handler.timers.enc.prefill);
     
     var encode_args = try aceenc.encode_exe.args(allocator);
     defer encode_args.deinit(allocator);
@@ -782,7 +808,9 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     try x_buffer.toSlice(io, x_slice);
     try context_latents_buffer.toSlice(io, context_latents_slice);
     try encoded_conditions_buffer.toSlice(io, encoded_conditions_slice);
-        
+
+    zml_handler.toc(&zml_handler.timers.enc.prefill);
+    
     return .{
         .x = x_slice,
         .context_latents = context_latents_slice,
@@ -821,16 +849,23 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     // the full forward pass on the dit model is one iteration of the denoising
     const timestamps: [9]f32 = .{ 1.0, 0.9545454545454546, 0.9, 0.8333333333333334, 0.75, 0.6428571428571429, 0.5, 0.3, 0.0 };
     const steps = timestamps.len - 1;
+    zml_handler.tic(&zml_handler.timers.dit.decode);
+    var dit_time: std.Io.Duration = .{ .nanoseconds = 0 };
     for (0..steps) |i| {
         std.log.info("DiT ************* step {d}", .{ i });
         var t_curr: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i], .f32, sharding);
         var t_next: zml.Buffer = try zml.Buffer.scalar(io, platform, timestamps[i + 1], .f32, sharding);
         defer t_curr.deinit();
         defer t_next.deinit();
+        zml_handler.tic(&zml_handler.timers.dit.prefill);
         diffuse_args.set(.{ acedit.model_buffers, t_curr, t_next, x_buffer, context_latents_buffer, encoded_conditions_buffer });
         acedit.diffuse_exe.callOpts(io, diffuse_args, &diffuse_results, .{ .wait = true });
         diffuse_results.fill(.{ &x_buffer, &result_buffer });
+        zml_handler.toc(&zml_handler.timers.dit.prefill);
+        dit_time.nanoseconds += zml_handler.timers.dit.prefill.nanoseconds;
     }
+    zml_handler.timers.dit.prefill.nanoseconds = dit_time.nanoseconds;
+    zml_handler.toc(&zml_handler.timers.dit.decode);
     
     try result_buffer.toSlice(io, result_slice);
     return .{ .x = result_slice };    
@@ -863,12 +898,25 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
     defer decode_args.deinit(allocator);
     var decode_results = try acevae.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
+
+    zml_handler.tic(&zml_handler.timers.vae.prefill);
+    
     decode_args.set(.{ acevae.model_buffers, latent_buffer });
     acevae.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
     decode_results.fill(.{ &audio_buffer });
     std.log.info("VAE done decoding, output shape : {d}x{d}", .{ 2, t_48khz });
     
     try audio_buffer.toSlice(io, audio_slice);
-        
+
+    zml_handler.toc(&zml_handler.timers.vae.prefill);
+    
     return .{ .audio = audio_slice };
+}
+
+
+fn tokensPerSecond(duration: std.Io.Duration, tokens: u64) f64 {
+    if (tokens == 0) return 0;
+    const seconds = @as(f64, @floatFromInt(duration.toNanoseconds())) / 1e9;
+    if (seconds <= 0) return 0;
+    return @as(f64, @floatFromInt(tokens)) / seconds;
 }

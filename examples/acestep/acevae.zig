@@ -19,6 +19,7 @@ pub const AceVae_handler = struct {
     shardings: main.Shardings,
 
     pub fn init(zml_handler: *main.Zml_handler, target_duration: u32) !AceVae_handler {
+        zml_handler.tic(&zml_handler.timers.vae.init);        
         std.log.info("VAE init", .{});
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acevae);
         var registry: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo, "diffusion_pytorch_model.safetensors");
@@ -49,15 +50,23 @@ pub const AceVae_handler = struct {
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
 
+        zml_handler.toc(&zml_handler.timers.vae.init);
+        zml_handler.tic(&zml_handler.timers.vae.compile);
+        
         std.log.info("VAE compile decoder", .{});
         const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
         std.log.info("VAE compile encoder", .{});
         const encode_exe = try compileEncodeModel(zml_handler, model, params, shardings);
         std.log.info("VAE compiled models", .{});
         
+        zml_handler.toc(&zml_handler.timers.vae.compile);
+        zml_handler.tic(&zml_handler.timers.vae.load);
+        
         std.log.info("VAE load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &shardings.all());
         std.log.info("VAE loaded buffers", .{});
+        
+        zml_handler.toc(&zml_handler.timers.vae.load);
         
         return .{
             .model = model,

@@ -20,12 +20,11 @@ pub const AceDit_handler = struct {
     shardings: main.Shardings,
     
     pub fn init(zml_handler: *main.Zml_handler, target_duration: u32, conditions_len: i64) !AceDit_handler {
+        zml_handler.tic(&zml_handler.timers.dit.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
-        
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
-    
+            
         std.log.info("DiT parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
@@ -47,14 +46,22 @@ pub const AceDit_handler = struct {
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
+
+        zml_handler.toc(&zml_handler.timers.dit.init);
+        zml_handler.tic(&zml_handler.timers.dit.compile);
         
         std.log.info("DiT compile model", .{});
         const diffuse_exe = try compileModel(zml_handler, model, params, shardings);
         std.log.info("DiT compiled", .{});
+
+        zml_handler.toc(&zml_handler.timers.dit.compile);
+        zml_handler.tic(&zml_handler.timers.dit.load);
         
         std.log.info("DiT load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &shardings.all());
         std.log.info("DiT loaded", .{});
+
+        zml_handler.toc(&zml_handler.timers.dit.load);
         
         return .{
             .model = model,

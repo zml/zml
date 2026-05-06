@@ -24,6 +24,7 @@ pub const AceEnc_handler = struct {
     shardings: main.Shardings,
     
     pub fn init(zml_handler: *main.Zml_handler, text_len: u32, lyric_len: u32, target_duration: u32, audiocodes: usize) !AceEnc_handler {
+        zml_handler.tic(&zml_handler.timers.enc.init);
         const repo_m = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.acedit);
         const repo_s = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.silence);
 
@@ -32,10 +33,7 @@ pub const AceEnc_handler = struct {
 
         var registry_s: zml.safetensors.TensorRegistry = try .fromRepoFile(zml_handler.allocator, zml_handler.io, repo_s, "silence_latent.safetensors");
         defer registry_s.deinit();
-            
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, silence_path);
-    
+        
         std.log.info("ENC parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo_m);
         defer parsed_config.deinit();
@@ -61,18 +59,26 @@ pub const AceEnc_handler = struct {
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
+
+        zml_handler.toc(&zml_handler.timers.enc.init);
+        zml_handler.tic(&zml_handler.timers.enc.compile);
         
         std.log.info("ENC compile models", .{});
         const encode_exe = try compileModel(zml_handler, model, params, shardings);
         std.log.info("ENC compiled encoder", .{});
         const silence_exe = try compileSilence(zml_handler, silence, shardings);
         std.log.info("ENC compiled silence", .{});
+
+        zml_handler.toc(&zml_handler.timers.enc.compile);
+        zml_handler.tic(&zml_handler.timers.enc.load);
         
         std.log.info("ENC load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store_m, &shardings.all());
         std.log.info("ENC loaded encoder buffers", .{});
         const silence_buffers = try silence.load(zml_handler, &store_s, &shardings.all());
         std.log.info("ENC loaded silence buffers", .{});
+        
+        zml_handler.toc(&zml_handler.timers.enc.load);
         
         return .{
             .model = model,

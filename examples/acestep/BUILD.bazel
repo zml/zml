@@ -2,7 +2,6 @@ load("@rules_zig//zig:defs.bzl", "zig_binary")
 
 zig_binary(
     name = "acestep",
-    args = [],
     main = "main.zig",
     srcs = [
         "main.zig",

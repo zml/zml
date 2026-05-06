@@ -20,12 +20,11 @@ pub const AceEmb_handler = struct {
     model_buffers: zml.Bufferized(AceEmb),
 
     pub fn init(zml_handler: *main.Zml_handler, full_seq_len: u32, embed_seq_len: u32) !AceEmb_handler {
+        zml_handler.tic(&zml_handler.timers.emb.init);
         const repo = try zml.safetensors.resolveModelRepo(zml_handler.io, zml_handler.uris.aceemb);
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
         
-        //try main.printSafetensors(zml_handler.allocator, zml_handler.io, model_path);
-
         std.log.info("EMB parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
         defer parsed_config.deinit();
@@ -44,17 +43,26 @@ pub const AceEmb_handler = struct {
             .shardings = try .init(zml_handler.platform),
         };
 
+        const tokenizer = try loadTokenizer(zml_handler, repo);
+
+        zml_handler.toc(&zml_handler.timers.emb.init);
+        zml_handler.tic(&zml_handler.timers.emb.compile);
+        
         std.log.info("EMB compile models", .{});
         const full_embed_exe = try compileFullModel(zml_handler, model, params);
         std.log.info("EMB compiled full model", .{});
         const partial_embed_exe = try compilePartialModel(zml_handler, model, params);
         std.log.info("EMB compiled partial model", .{});
-        const tokenizer = try loadTokenizer(zml_handler, repo);
+
+        zml_handler.toc(&zml_handler.timers.emb.compile);
+        zml_handler.tic(&zml_handler.timers.emb.load);
         
         std.log.info("EMB load buffers", .{});
         const model_buffers = try model.load(zml_handler, &store, &params.shardings.all());
         std.log.info("EMB loaded", .{});
 
+        zml_handler.toc(&zml_handler.timers.emb.load);
+        
         return .{
             .model = model,
             .params = params,

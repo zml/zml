@@ -42,6 +42,8 @@ pub const Zml_handler = struct {
     io: std.Io,
     local_io: std.Io,
     progress: std.Progress.Node,
+    args: Args,
+    timers: Timing_handler,
 
     pub fn fromInit(init: std.process.Init, io: std.Io) !Zml_handler {
         if (init.environ_map.get("BUILD_WORKING_DIRECTORY")) |build_working_directory| {
@@ -51,14 +53,19 @@ pub const Zml_handler = struct {
         }
         const platform = try zml.Platform.auto(init.gpa, io, .{});
         errdefer platform.deinit(init.gpa);
+
+        const args = stdx.flags.parse(init.minimal.args, Args);
+        
         return .{
             .allocator = init.gpa,
             .arena = init.arena,
             .platform = platform,
-            .uris = .fromHf(),
+            .uris = if (args.local_files) .fromLocal(args) else .fromHf(args),
             .io = io,
             .local_io = init.io,
             .progress = std.Progress.start(io, .{}),
+            .args = args,
+            .timers = .{},
         };
     }
 
@@ -66,6 +73,18 @@ pub const Zml_handler = struct {
         self.progress.end();
         self.platform.deinit(self.allocator);
     }
+
+    pub fn tic(self: *Zml_handler, target: *std.Io.Timestamp) void {
+        target.* = std.Io.Timestamp.now(self.io, .awake);
+    }
+    
+    pub fn toc(self: *Zml_handler, target: *std.Io.Timestamp) void {
+        const end = std.Io.Timestamp.now(self.io, .awake);
+        const start: std.Io.Timestamp = target.*;
+        const duration = std.Io.Timestamp.durationTo(start, end);
+        target.* = .{ .nanoseconds = duration.nanoseconds };
+    }
+    
 };
 
 pub const Uri_handler = struct {
@@ -75,24 +94,105 @@ pub const Uri_handler = struct {
     acevae: []const u8,
     silence: []const u8 = "file://acestep//models//acestep-v15-turbo",
 
-    pub fn fromLocal() Uri_handler {
+    pub fn fromLocal(args: Args) Uri_handler {
         return .{
-            .acellm = "//Users//sboulmier//zml//examples//acestep//models//acestep-5Hz-lm-0.6B",
-            .aceemb = "//Users//sboulmier//zml//examples//acestep//models//Qwen3-Embedding-0.6B",
-            .acedit = "//Users//sboulmier//zml//examples//acestep//models//acestep-v15-turbo",
-            .acevae = "//Users//sboulmier//zml//examples//acestep//models//Oobleck-vae",
+            .acellm = if (args.llm_size == 0) "file://acestep//models//acestep-5Hz-lm-0.6B"
+                             else if (args.llm_size == 1) "file://acestep//models//acestep-5Hz-lm-1.7B"
+                                                     else "file://acestep//models//acestep-5Hz-lm-4B",
+            .aceemb = "file://acestep//models//Qwen3-Embedding-0.6B",
+            .acedit = if (args.dit_size == 0) "file://acestep//models//acestep-v15-turbo"
+                                                     else "file://acestep//models//acestep-v15-turbo-xl",
+            .acevae = "file://acestep//models//Oobleck-vae",
         };
     }
 
-    pub fn fromHf() Uri_handler {
+    pub fn fromHf(args: Args) Uri_handler {
+        // official default models are in hf://ACE-Step/Ace-Step1.5/
+        // additional models are in hf://ACE-Step/
         return .{
-            .acellm = "hf://ACE-Step/acestep-5Hz-lm-0.6B",
+            .acellm = if (args.llm_size == 0) "hf://ACE-Step/acestep-5Hz-lm-0.6B"
+                             else if (args.llm_size == 1) "hf://ACE-Step/Ace-Step1.5/acestep-5Hz-lm-1.7B"
+                                                     else "hf://ACE-Step/acestep-5Hz-lm-4B",
             .aceemb = "hf://ACE-Step/Ace-Step1.5/Qwen3-Embedding-0.6B",
-            .acedit = "hf://ACE-Step/Ace-Step1.5/acestep-v15-turbo",
+            .acedit = if (args.dit_size == 0) "hf://ACE-Step/Ace-Step1.5/acestep-v15-turbo"
+                                                     else "hf://ACE-Step/acestep-v15-turbo-xl",
             .acevae = "hf://ACE-Step/Ace-Step1.5/vae/",
         };
     }
 
+};
+
+pub const Timing_handler = struct {
+    
+    pub const Module_timer = struct {
+        init: std.Io.Timestamp = std.Io.Timestamp.zero,
+        load: std.Io.Timestamp = std.Io.Timestamp.zero,
+        compile: std.Io.Timestamp = std.Io.Timestamp.zero,
+        prefill: std.Io.Timestamp = std.Io.Timestamp.zero,
+        decode: std.Io.Timestamp = std.Io.Timestamp.zero,
+        total: std.Io.Timestamp = std.Io.Timestamp.zero,
+        
+        pub fn print(self: Module_timer, name: []const u8) void {
+            std.log.info("{s}  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s  {d:>6.2}s", .{
+                name,
+                @as(f64, @floatFromInt(self.init.nanoseconds)) / 1e9,
+                @as(f64, @floatFromInt(self.compile.nanoseconds)) / 1e9,
+                @as(f64, @floatFromInt(self.load.nanoseconds)) / 1e9,
+                @as(f64, @floatFromInt(self.prefill.nanoseconds)) / 1e9,
+                @as(f64, @floatFromInt(self.decode.nanoseconds)) / 1e9,
+                @as(f64, @floatFromInt(self.total.nanoseconds)) / 1e9,
+            });
+        }
+    };
+    
+    llm: Module_timer = .{},
+    cfg: Module_timer = .{},
+    emb: Module_timer = .{},
+    enc: Module_timer = .{},
+    dit: Module_timer = .{},
+    vae: Module_timer = .{},
+
+    wav: std.Io.Timestamp = std.Io.Timestamp.zero,
+    total: std.Io.Timestamp = std.Io.Timestamp.zero,
+
+    pub fn print(self: Timing_handler) void {
+        std.log.info("Module    init  compile     load  prefill   decode    total", .{});
+        self.llm.print("  llm");
+        self.cfg.print("  cfg");
+        self.emb.print("  emb");
+        self.enc.print("  enc");
+        self.dit.print("  dit");
+        self.vae.print("  vae");
+        std.log.info("  wav                                               {d:>6.2}s", .{@as(f64, @floatFromInt(self.wav.nanoseconds)) / 1e9});
+        std.log.info("total                                               {d:>6.2}s", .{@as(f64, @floatFromInt(self.total.nanoseconds)) / 1e9});
+    }
+};
+
+
+const Args = struct {
+    prompt: []const u8,
+    instru: bool = false,
+    local_files: bool = false,
+    llm_size: u8 = 0,
+    dit_size: u8 = 0,
+    skip_cfg: bool = false,
+    duration: i64 = -1,
+
+    pub const help =
+        \\ Use acestep --prompt=<...> [options]
+        \\
+        \\ Run audio generation with the selected models.
+        \\
+        \\ Options:
+        \\   --prompt=<string>     Prompt to use for generation (required)
+        \\   --instru              Ask for an instrumental audio
+        \\   --local-files         Optional, use local model paths, see README to setup
+        \\   --llm_size=<int>      Size of the 5Hz LLM (0/1/2 for 0.6B/1.7B/4B, default: 0)
+        \\   --dit_size=<int>      Size of the DiT model (0/1 for turbo/turbo-xl, default: 0)
+        \\   --skip-cfg            Optional, disable CFG phase
+        \\   --duration=<number>   Constrains the duration in seconds (required if CFG is disabled, default: -1)
+        \\
+    ;
 };
 
 
@@ -113,50 +213,60 @@ pub fn main(init: std.process.Init) !void {
     try vfs.register("hf", hf_vfs.io());
 
     const io = vfs.io();
-    
+
     var zml_handler: Zml_handler = try .fromInit(init, io);
     defer zml_handler.deinit();
-    
+
+    try printZmlLogo(zml_handler.io);
+
+    zml_handler.tic(&zml_handler.timers.total);
     try runFullPipeline(&zml_handler);
+    zml_handler.toc(&zml_handler.timers.total);
+
+    zml_handler.timers.print();
 }
 
 pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
-
-    const raw_prompt = "an short but energetic electric guitar solo\n\ninstrumental: true";
-
-    // think = false : text2music mode, initial latents initialized from noise
-    // think = true  : cover mode     , initial latents initialized from audio codes
-    const think = true;
-
-    // in text2music, overrides the generated duration metadata
-    const target_duration = "12";
-
+    
     // ------------------------------------------------
     // Thinking/Inspiration phase : 5Hz LLM model
     // ------------------------------------------------
 
+    zml_handler.tic(&zml_handler.timers.llm.total);
+    
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
 
-    var audio_metadata: inference.AudioMetadata = try inference.runPhase1(raw_prompt, zml_handler, &acellm);
-    if (!think) try audio_metadata.setDuration(zml_handler.allocator, target_duration);
-    const actual_duration = try std.fmt.parseUnsigned(u32, audio_metadata.duration, 10);
+    var audio_metadata: inference.AudioMetadata = try inference.runPhase1(zml_handler, &acellm);
     defer audio_metadata.deinit(zml_handler.allocator);
 
-    const cond, const uncond, const audioc = try acellm_.cfgSequenceLengths(zml_handler, audio_metadata);
-    var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm, cond, uncond, audioc);
-    defer acecfg.deinit();
+    if (zml_handler.args.duration > 0) try audio_metadata.setDuration(zml_handler.allocator, zml_handler.args.duration);
+    const duration = try audio_metadata.duration_s();
 
-    const audio_codes: inference.AudioCodes = if (think) try inference.runPhase2(audio_metadata, zml_handler, &acecfg) else try .empty(zml_handler.allocator);
+    var audio_codes: inference.AudioCodes = try .empty(zml_handler.allocator);
     defer audio_codes.deinit(zml_handler.allocator);
 
+    zml_handler.toc(&zml_handler.timers.llm.total);
+    
+    if (!zml_handler.args.skip_cfg) {
+        zml_handler.tic(&zml_handler.timers.cfg.total);
+        const cond, const uncond, const audioc = try acellm_.cfgSequenceLengths(zml_handler, audio_metadata);
+        var acecfg = try acellm_.AceCfg_handler.initFromLlm(zml_handler, &acellm, cond, uncond, audioc);
+        defer acecfg.deinit();
+        defer acecfg.unloadBuffers();
+        audio_codes.deinit(zml_handler.allocator);
+        audio_codes = try inference.runPhase2(audio_metadata, zml_handler, &acecfg);
+        zml_handler.toc(&zml_handler.timers.cfg.total);
+    }
+    
     acellm.unloadBuffers(zml_handler.allocator);
-    acecfg.unloadBuffers();
 
     // ------------------------------------------------
     // The text inputs of the DiT need to be embedded
     // using the AceEmb model embedding, not 5Hz
     // ------------------------------------------------
+
+    zml_handler.tic(&zml_handler.timers.emb.total);
 
     const full_emb, const partial_emb = try aceemb_.embeddingLengths(zml_handler, audio_metadata);
     var aceemb = try aceemb_.AceEmb_handler.init(zml_handler, full_emb, partial_emb);
@@ -167,27 +277,35 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     aceemb.unloadBuffers(zml_handler.allocator);
 
+    zml_handler.toc(&zml_handler.timers.emb.total);
+
     // ------------------------------------------------
     // Encoding phase : prepare input latents and
     // encoded conditions for diffusion
     // ------------------------------------------------
 
+    zml_handler.tic(&zml_handler.timers.enc.total);
+    
     const int_codes = try audio_codes.getIntCodes(zml_handler.allocator);
     defer zml_handler.allocator.free(int_codes);
 
-    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler, text_emb.textLen(), text_emb.lyricLen(),  actual_duration, int_codes.len);
+    var aceenc = try aceenc_.AceEnc_handler.init(zml_handler, text_emb.textLen(), text_emb.lyricLen(), duration, int_codes.len);
     defer aceenc.deinit(zml_handler.allocator);
 
-    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, actual_duration);
+    const diffuse_args: inference.InitialLatents = try inference.prepareLatents(zml_handler, &aceenc, text_emb, int_codes, duration);
     defer diffuse_args.deinit(zml_handler.allocator);
 
     aceenc.unloadBuffers(zml_handler.allocator);
+
+    zml_handler.toc(&zml_handler.timers.enc.total);
 
     // ------------------------------------------------
     // Generation phase : diffusion with DiT model
     // ------------------------------------------------
 
-    var acedit = try acedit_.AceDit_handler.init(zml_handler, actual_duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
+    zml_handler.tic(&zml_handler.timers.dit.total);
+    
+    var acedit = try acedit_.AceDit_handler.init(zml_handler, duration, diffuse_args.encoder_conditions.shape.dim(.s_enc));
     defer acedit.deinit(zml_handler.allocator);
 
     const diffused_latents: inference.DiffusedLatents = try inference.runDiffusion(zml_handler, &acedit, diffuse_args);
@@ -195,12 +313,16 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     acedit.unloadBuffers(zml_handler.allocator);
 
+    zml_handler.toc(&zml_handler.timers.dit.total);
+    
     // ------------------------------------------------
     // Output latents of the DiT model are decoded
     // with the VAE model
     // ------------------------------------------------
 
-    var acevae = try acevae_.AceVae_handler.init(zml_handler, actual_duration);
+    zml_handler.tic(&zml_handler.timers.vae.total);
+
+    var acevae = try acevae_.AceVae_handler.init(zml_handler, duration);
     defer acevae.deinit(zml_handler.allocator);
 
     const decoded_audio: inference.DecodedAudio = try inference.decodeAudioLatents(zml_handler, &acevae, diffused_latents);
@@ -208,11 +330,17 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
 
     acevae.unloadBuffers(zml_handler.allocator);
 
+    zml_handler.toc(&zml_handler.timers.vae.total);
+
     // ------------------------------------------------
     // Export decoded audio as WAV
     // ------------------------------------------------
 
+     zml_handler.tic(&zml_handler.timers.wav);
+     
      try exportDecodedAudioAsWav(zml_handler.local_io, decoded_audio, "decoded_audio.wav");
+
+     zml_handler.toc(&zml_handler.timers.wav);
 }
 
 pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio, output_path: []const u8) !void {
@@ -540,3 +668,23 @@ const TensorExtractor = struct {
         return self.tensor;
     }
 };
+
+
+pub fn printZmlLogo(io: std.Io) !void {
+    const LOGO =
+        \\
+        \\
+        \\ ███████╗███╗   ███╗██╗
+        \\ ╚══███╔╝████╗ ████║██║
+        \\   ███╔╝ ██╔████╔██║██║
+        \\  ███╔╝  ██║╚██╔╝██║██║  .ai
+        \\ ███████╗██║ ╚═╝ ██║███████╗
+        \\ ╚══════╝╚═╝     ╚═╝╚══════╝
+        \\
+        \\
+        \\
+    ;
+    var writer = std.Io.File.stdout().writer(io, &.{});
+    try writer.interface.writeAll(LOGO);
+    try writer.interface.flush();
+}
