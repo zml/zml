@@ -1917,6 +1917,70 @@ pub fn forwardBlock0NativeBf16Attn(
     }, params);
 }
 
+/// Same as forwardBlock0NativeBf16Attn but without FA3 scratch buffers.
+/// Uses sdpaNoF32Upcast for bf16-native attention — works on any platform (ROCm, CPU, etc).
+pub fn forwardBlock0NativeBf16AttnNoFA3(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
 /// STG block variant: identical interface to forwardBlock0Native, but both video and audio
 /// self-attention use V-passthrough (to_out(to_v(x))). Used for block 28 (0-indexed) during
 /// Pass 3 (STG perturbation) in Stage 1 denoising.
@@ -2068,6 +2132,71 @@ pub fn forwardBlock0NativeSTGBf16Attn(
         .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
     }, params);
 }
+
+/// Same as forwardBlock0NativeSTGBf16Attn but without FA3 scratch buffers.
+/// Uses sdpaNoF32Upcast for bf16-native attention — works on any platform (ROCm, CPU, etc).
+pub fn forwardBlock0NativeSTGBf16AttnNoFA3(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeSTGBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+    }, params);
+}
+
 /// Isolated modality block variant: accepts explicit AV cross-attention masks.
 ///
 /// Used during Pass 4 (isolated/modality guidance) in Stage 1 denoising, where
@@ -2226,6 +2355,74 @@ pub fn forwardBlock0NativeWithAVMasksBf16Attn(
             .scheduler_metadata = a_fa3_scheduler_metadata,
         } },
         .attn_params = .{ .cuda_fa3 = .{ .is_causal = false } },
+    }, params);
+}
+
+/// Same as forwardBlock0NativeWithAVMasksBf16Attn but without FA3 scratch buffers.
+/// Uses sdpaNoF32Upcast for bf16-native attention — works on any platform (ROCm, CPU, etc).
+pub fn forwardBlock0NativeWithAVMasksBf16AttnNoFA3(
+    vx_in: Tensor,
+    ax_in: Tensor,
+    video_timesteps: Tensor,
+    audio_timesteps: Tensor,
+    video_timesteps_zero: Tensor,
+    audio_timesteps_zero: Tensor,
+    v_denoise_mask: Tensor,
+    a_denoise_mask: Tensor,
+    v_prompt_timestep: Tensor,
+    a_prompt_timestep: Tensor,
+    v_pe_cos: Tensor,
+    v_pe_sin: Tensor,
+    a_pe_cos: Tensor,
+    a_pe_sin: Tensor,
+    v_text_ctx: Tensor,
+    a_text_ctx: Tensor,
+    v_cross_ss_ts: Tensor,
+    v_cross_gate_ts: Tensor,
+    a_cross_ss_ts: Tensor,
+    a_cross_gate_ts: Tensor,
+    a2v_pe_cos: Tensor,
+    a2v_pe_sin: Tensor,
+    a2v_k_pe_cos: Tensor,
+    a2v_k_pe_sin: Tensor,
+    a2v_mask: Tensor,
+    v2a_pe_cos: Tensor,
+    v2a_pe_sin: Tensor,
+    v2a_k_pe_cos: Tensor,
+    v2a_k_pe_sin: Tensor,
+    v2a_mask: Tensor,
+    params: Block0FullParams,
+) BasicAVTransformerBlock.FullOutputs {
+    const block = BasicAVTransformerBlock.init();
+    return block.forwardNativeBf16Attn(vx_in, ax_in, .{
+        .video_timesteps = video_timesteps,
+        .audio_timesteps = audio_timesteps,
+        .video_timesteps_zero = video_timesteps_zero,
+        .audio_timesteps_zero = audio_timesteps_zero,
+        .v_denoise_mask = v_denoise_mask,
+        .a_denoise_mask = a_denoise_mask,
+        .v_prompt_timestep = v_prompt_timestep,
+        .a_prompt_timestep = a_prompt_timestep,
+        .v_pe_cos = v_pe_cos,
+        .v_pe_sin = v_pe_sin,
+        .a_pe_cos = a_pe_cos,
+        .a_pe_sin = a_pe_sin,
+        .v_text_ctx = v_text_ctx,
+        .a_text_ctx = a_text_ctx,
+        .v_cross_ss_ts = v_cross_ss_ts,
+        .v_cross_gate_ts = v_cross_gate_ts,
+        .a_cross_ss_ts = a_cross_ss_ts,
+        .a_cross_gate_ts = a_cross_gate_ts,
+        .a2v_pe_cos = a2v_pe_cos,
+        .a2v_pe_sin = a2v_pe_sin,
+        .a2v_k_pe_cos = a2v_k_pe_cos,
+        .a2v_k_pe_sin = a2v_k_pe_sin,
+        .a2v_mask = a2v_mask,
+        .v2a_pe_cos = v2a_pe_cos,
+        .v2a_pe_sin = v2a_pe_sin,
+        .v2a_k_pe_cos = v2a_k_pe_cos,
+        .v2a_k_pe_sin = v2a_k_pe_sin,
+        .v2a_mask = v2a_mask,
     }, params);
 }
 

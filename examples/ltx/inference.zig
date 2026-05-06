@@ -1420,6 +1420,10 @@ fn runStage1(
     const block_compile_args = block_compile_args_base ++ .{block_params_shape.blocks[0]};
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
+    // FA3 is only available on CUDA (Flash Attention 3 uses NVIDIA-specific custom kernels).
+    // On other platforms (ROCm, CPU), bf16 attention falls back to sdpaNoF32Upcast.
+    const use_fa3 = platform.target == .cuda;
+
     // FA3 metadata shapes (sized by Q seqlen for each attention group).
     const video_seqlen: i64 = init_pre_out.vx.shape().dim(.t);
     const audio_seqlen: i64 = init_pre_out.ax.shape().dim(.t);
@@ -1427,7 +1431,7 @@ fn runStage1(
     const video_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, video_seqlen, num_heads, 128, .replicated));
     const audio_attn_meta = model.AttnMetadata.init(.fromBackendWithPartitioning(.cuda_fa3, audio_seqlen, num_heads, 128, .replicated));
 
-    // Compile args for bf16 variants include FA3 scratch buffer shapes.
+    // Compile args for bf16 variants include FA3 scratch buffer shapes (CUDA only).
     const block_compile_args_bf16 = block_compile_args_base ++ .{
         // video FA3 metadata
         video_attn_meta.cuda_fa3.softmax_lse,
@@ -1442,16 +1446,20 @@ fn runStage1(
         block_params_shape.blocks[0],
     };
 
-    std.log.info("Compiling block exe (normal, bf16_attn={})...", .{use_bf16_attn});
-    var block_normal_exe = if (use_bf16_attn)
+    std.log.info("Compiling block exe (normal, bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
+    var block_normal_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_normal_exe.deinit();
 
-    std.log.info("Compiling block exe (STG, bf16_attn={})...", .{use_bf16_attn});
-    var block_stg_exe = if (use_bf16_attn)
+    std.log.info("Compiling block exe (STG, bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
+    var block_stg_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeSTGBf16AttnNoFA3, block_compile_args, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0NativeSTG, block_compile_args, compile_opts);
     defer block_stg_exe.deinit();
@@ -1504,8 +1512,10 @@ fn runStage1(
         audio_attn_meta.cuda_fa3.scheduler_metadata,
         block_params_shape.blocks[0],
     };
-    var block_iso_exe = if (use_bf16_attn)
+    var block_iso_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16Attn, iso_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasksBf16AttnNoFA3, iso_compile_args, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0NativeWithAVMasks, iso_compile_args, compile_opts);
     defer block_iso_exe.deinit();
@@ -1719,14 +1729,14 @@ fn runStage1(
     var rescale_a_buf = try zml.Buffer.scalar(io, platform, rescale_a, .f32, sharding);
     defer rescale_a_buf.deinit();
 
-    // ---- FA3 scratch buffers (allocated once, reused every step) ----
+    // ---- FA3 scratch buffers (allocated once, reused every step — CUDA only) ----
     var v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     var a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    if (use_bf16_attn) {
+    if (use_bf16_attn and use_fa3) {
         v_attn_meta_bufs = try video_attn_meta.initBuffer(io, platform, sharding);
         a_attn_meta_bufs = try audio_attn_meta.initBuffer(io, platform, sharding);
     }
-    defer if (use_bf16_attn) {
+    defer if (use_bf16_attn and use_fa3) {
         model.AttnMetadata.deinitBuffer(&v_attn_meta_bufs);
         model.AttnMetadata.deinitBuffer(&a_attn_meta_bufs);
     };
@@ -1798,7 +1808,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn) {
+                if (use_bf16_attn and use_fa3) {
                     blk_args.set(.{
                         cond_h_v,                              cond_h_a,
                         pre_out.video_timesteps,               pre_out.audio_timesteps,
@@ -1872,7 +1882,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn) {
+                if (use_bf16_attn and use_fa3) {
                     blk_args.set(.{
                         neg_h_v,                               neg_h_a,
                         pre_out.video_timesteps,               pre_out.audio_timesteps,
@@ -1952,7 +1962,7 @@ fn runStage1(
             for (0..model.num_transformer_blocks) |i| {
                 // Special handling for the STG block, which has additional inputs/outputs and a different forward fn.
                 if (i == STG_BLOCK_IDX) {
-                    if (use_bf16_attn) {
+                    if (use_bf16_attn and use_fa3) {
                         blk_stg_args.set(.{
                             ptb_h_v,                               ptb_h_a,
                             pre_out.video_timesteps,               pre_out.audio_timesteps,
@@ -2002,7 +2012,7 @@ fn runStage1(
                     ptb_h_v = out.vx_out;
                     ptb_h_a = out.ax_out;
                 } else {
-                    if (use_bf16_attn) {
+                    if (use_bf16_attn and use_fa3) {
                         blk_normal_args.set(.{
                             ptb_h_v,                               ptb_h_a,
                             pre_out.video_timesteps,               pre_out.audio_timesteps,
@@ -2077,7 +2087,7 @@ fn runStage1(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn) {
+                if (use_bf16_attn and use_fa3) {
                     blk_args.set(.{
                         iso_h_v,                               iso_h_a,
                         pre_out.video_timesteps,               pre_out.audio_timesteps,
@@ -2703,6 +2713,8 @@ fn runStage2(
     profile: bool,
 ) !Stage2Result {
     timer.start();
+    const use_fa3 = platform.target == .cuda;
+
     // ---- Open checkpoint store ----
     var ckpt_reg = zml.safetensors.TensorRegistry.fromPath(allocator, io, ckpt_path) catch |err| {
         std.log.err("Failed to open checkpoint: {s}", .{ckpt_path});
@@ -2784,7 +2796,7 @@ fn runStage2(
     var init_pre_out = pre_results_init.get(zml.Bufferized(model.PreprocessOutput));
 
     // ---- Compile block exe ----
-    std.log.info("Compiling Stage 2 block exe (bf16_attn={})...", .{use_bf16_attn});
+    std.log.info("Compiling Stage 2 block exe (bf16_attn={}, fa3={})...", .{ use_bf16_attn, use_fa3 });
     var block_params_shape = try allocator.create(model.FullStepParams);
     defer allocator.destroy(block_params_shape);
     block_params_shape.* = model.initFullStepParams(ckpt_store.view());
@@ -2842,8 +2854,10 @@ fn runStage2(
 
     const compile_opts: zml.module.CompilationOptions = .{ .shardings = &.{sharding} };
 
-    var block_exe = if (use_bf16_attn)
+    var block_exe = if (use_bf16_attn and use_fa3)
         try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16Attn, block_compile_args_bf16, compile_opts)
+    else if (use_bf16_attn)
+        try platform.compileFn(allocator, io, model.forwardBlock0NativeBf16AttnNoFA3, block_compile_args, compile_opts)
     else
         try platform.compileFn(allocator, io, model.forwardBlock0Native, block_compile_args, compile_opts);
     defer block_exe.deinit();
@@ -2979,14 +2993,14 @@ fn runStage2(
     std.log.info("All Stage 2 weights loaded.", .{});
     timer.addLoad();
 
-    // ---- FA3 scratch buffers for Stage 2 ----
+    // ---- FA3 scratch buffers for Stage 2 (CUDA only) ----
     var s2_v_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
     var s2_a_attn_meta_bufs: zml.Bufferized(model.AttnMetadata) = undefined;
-    if (use_bf16_attn) {
+    if (use_bf16_attn and use_fa3) {
         s2_v_attn_meta_bufs = try s2_video_fa3_meta.initBuffer(io, platform, sharding);
         s2_a_attn_meta_bufs = try s2_audio_fa3_meta.initBuffer(io, platform, sharding);
     }
-    defer if (use_bf16_attn) {
+    defer if (use_bf16_attn and use_fa3) {
         model.AttnMetadata.deinitBuffer(&s2_v_attn_meta_bufs);
         model.AttnMetadata.deinitBuffer(&s2_a_attn_meta_bufs);
     };
@@ -3056,7 +3070,7 @@ fn runStage2(
             defer blk_results.deinit(allocator);
 
             for (0..model.num_transformer_blocks) |i| {
-                if (use_bf16_attn) {
+                if (use_bf16_attn and use_fa3) {
                     blk_args.set(.{
                         h_v,                                      h_a,
                         pre_out.video_timesteps,                  pre_out.audio_timesteps,
@@ -3097,7 +3111,8 @@ fn runStage2(
                         block_params_bufs[i],
                     });
                 }
-                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = false });
+                // ROCm requires synchronous execution here; async causes segfault at address 0x8.
+                block_exe.callOpts(io, blk_args, &blk_results, .{ .wait = true });
 
                 const out = blk_results.get(zml.Bufferized(model.BasicAVTransformerBlock.FullOutputs));
                 if (i > 0) {
