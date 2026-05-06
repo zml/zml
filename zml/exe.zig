@@ -7,7 +7,7 @@ const Buffer = @import("buffer.zig").Buffer;
 const meta = @import("meta.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const Sharding = @import("sharding.zig").Sharding;
+const Sharding = @import("Sharding.zig");
 
 pub const Exe = struct {
     platform: *const Platform,
@@ -43,6 +43,7 @@ pub const Exe = struct {
         const input_shapes_copy = try arena.allocator().dupe(Shape, input_shapes);
         const output_shapes_copy = try arena.allocator().dupe(Shape, output_shapes);
 
+        // Re-home sharding pointers into arena-owned values so exe doesn't depend on caller lifetimes.
         const input_shardings_copy = try arena.allocator().dupe(Sharding, input_shardings);
         const output_shardings_copy = try arena.allocator().dupe(Sharding, output_shardings);
 
@@ -237,19 +238,19 @@ pub const Exe = struct {
 
         pub fn fill(self: *Results, v: anytype) void {
             const LocalContext = struct {
-                self: *Results,
+                results: *Results,
                 current_index: usize = 0,
             };
-            var context: LocalContext = .{ .self = self, .current_index = 0 };
+            var context: LocalContext = .{ .results = self, .current_index = 0 };
             meta.visit(struct {
-                fn cb(context_: *LocalContext, buffer: *Buffer) void {
-                    //stdx.debug.assert(context_.self.expected_shapes[context_.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ context_.current_index, context_.self.expected_shapes[context_.current_index], buffer.shape() });
+                fn cb(ctx: *LocalContext, buffer: *Buffer) void {
+                    //stdx.debug.assert(ctx.results.expected_shapes[ctx.current_index].eql(buffer.shape()), "Expected result {} to have shape {f}, got {f}", .{ ctx.current_index, ctx.results.expected_shapes[ctx.current_index], buffer.shape() });
                     var shards: Buffer.Shards = .empty;
-                    for (0..context_.self.flat_buffers.num_devices) |device_index| {
-                        shards.appendAssumeCapacity(context_.self.flat_buffers.buffers[device_index][context_.current_index]);
+                    for (0..ctx.results.flat_buffers.num_devices) |device_index| {
+                        shards.appendAssumeCapacity(ctx.results.flat_buffers.buffers[device_index][ctx.current_index]);
                     }
-                    buffer.* = Buffer.fromPjrtBuffers(context_.self.platform, context_.self.expected_shapes[context_.current_index], context_.self.shardings[context_.current_index], shards.constSlice());
-                    context_.current_index += 1;
+                    buffer.* = Buffer.fromPjrtBuffers(ctx.results.platform, ctx.results.expected_shapes[ctx.current_index], ctx.results.shardings[ctx.current_index], shards.constSlice());
+                    ctx.current_index += 1;
                 }
             }.cb, &context, &v);
         }

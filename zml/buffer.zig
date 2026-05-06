@@ -9,9 +9,7 @@ const Memory = @import("platform.zig").Memory;
 const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const Shape = @import("shape.zig").Shape;
-const sharding_ = @import("sharding.zig");
-const Sharding = sharding_.Sharding;
-const Placement = sharding_.Placement;
+const Sharding = @import("Sharding.zig");
 const Slice = @import("slice.zig").Slice;
 const Target = @import("platform.zig").Target;
 const testing = @import("testing.zig");
@@ -100,7 +98,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding,
+            ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
 
@@ -167,9 +165,9 @@ pub const Buffer = struct {
     }
 
     /// Creates a Buffer with a single element.
-    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType, sharding: Sharding) !Buffer {
+    pub fn scalar(io: std.Io, platform: *const Platform, val: anytype, dtype_: DataType) !Buffer {
         const x = dtype_.constant(val);
-        return fromBytes(io, platform, .scalar(dtype_), sharding, x.asBytes());
+        return fromBytes(io, platform, .scalar(dtype_), .replicated, x.asBytes());
     }
 
     pub fn await(self: Buffer, io: std.Io) !void {
@@ -192,7 +190,7 @@ pub const Buffer = struct {
         var res: Buffer = .{
             ._platform = platform,
             ._shape = sh,
-            ._sharding = sharding,
+            ._sharding = sharding.resolve(platform),
             ._shards = .empty,
         };
         errdefer for (res._shards.slice()) |shard| {
@@ -310,7 +308,7 @@ pub const Buffer = struct {
         return byte_size;
     }
 
-    pub fn placement(self: Buffer) Placement {
-        return Placement.init(self._sharding, self._shape) catch unreachable;
+    pub fn placement(self: Buffer) Sharding.Placement {
+        return Sharding.Placement.init(self._sharding, self._shape) catch unreachable;
     }
 };

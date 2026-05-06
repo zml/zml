@@ -17,7 +17,7 @@ const CliMesh = enum {
 };
 
 const CliArgs = struct {
-    partitioner: zml.sharding.Partitioning.Partitioner = .shardy,
+    partitioner: zml.Sharding.Partitioner = .shardy,
     mesh: CliMesh = .auto,
 };
 
@@ -112,9 +112,9 @@ fn buildMockMesh(
     allocator: std.mem.Allocator,
     target: zml.Target,
     devices: []const zml.platform.Device,
-) !zml.sharding.PhysicalMesh {
+) !zml.Sharding.PhysicalMesh {
     if (devices.len < 8) return error.NotEnoughDevicesForMockMesh;
-    const topology: zml.sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+    const topology: zml.Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
                 .device(devices[3]), .device(devices[1]),
@@ -132,7 +132,7 @@ fn buildMockMesh(
             }),
         }),
     });
-    return zml.sharding.PhysicalMesh.fromTree(allocator, target, topology);
+    return zml.Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 fn createSequenceBuffer(
@@ -140,7 +140,7 @@ fn createSequenceBuffer(
     io: std.Io,
     platform: *const zml.Platform,
     shape: zml.Shape,
-    sharding: zml.sharding.Sharding,
+    sharding: zml.Sharding,
     start: f32,
 ) !zml.Buffer {
     const slice = try zml.Slice.alloc(allocator, shape);
@@ -188,15 +188,12 @@ pub fn main(init: std.process.Init) !void {
     log.info("Partitioner: {s}", .{@tagName(args.partitioner)});
     log.info("{f}", .{platform.physical_mesh});
 
-    const physical_mesh = platform.physical_mesh;
-    const mesh: zml.sharding.LogicalMesh = .init("demo_mesh", .{
-        .data = .low_bandwidth,
-        .model = .high_bandwidth,
-    });
-    const strategy: zml.sharding.Strategy = .suggest(mesh, physical_mesh);
-    const sharding: zml.sharding.Sharding = try .initFromStrategy(platform, mesh, strategy);
+    const sharding: zml.Sharding = try platform.registerSharding(
+        "demo_mesh",
+        .mesh(.{ .data = .low_bandwidth, .model = .high_bandwidth }),
+    );
 
-    log.info("{f}", .{mesh});
+    log.info("{f}", .{sharding.data.logical});
     log.info("{f}", .{sharding});
 
     const input_shape = zml.Shape.init(.{ .batch = 16, .feature = 32 }, .f32)

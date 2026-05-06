@@ -50,7 +50,7 @@ zig_library(
         "mlirx.zig",
         "module.zig",
         "nn.zig",
-        "sharding.zig",
+        "Sharding.zig",
         "ops.zig",
         "pjrtx.zig",
         "platform.zig",

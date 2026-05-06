@@ -14,11 +14,8 @@ const pjrtx = @import("pjrtx.zig");
 const Platform = @import("platform.zig").Platform;
 const safetensors = @import("safetensors.zig");
 const Shape = @import("shape.zig").Shape;
-const sharding_ = @import("sharding.zig");
-const Partitioner = sharding_.Partitioner;
-const Partitioning = sharding_.Partitioning;
-const Placement = sharding_.Placement;
-const Sharding = sharding_.Sharding;
+const Sharding = @import("Sharding.zig");
+const Placement = Sharding.Placement;
 const Slice = @import("slice.zig").Slice;
 const Tensor = @import("tensor.zig").Tensor;
 
@@ -149,13 +146,17 @@ pub const TensorStore = struct {
                 }
             }
 
-            if (@TypeOf(partitioning) != @TypeOf(null)) {
-                switch (@typeInfo(@TypeOf(partitioning))) {
-                    .optional => if (partitioning) |p| {
-                        ptr.shape = ptr.shape.withPartitioning(p);
-                    },
-                    else => ptr.shape = ptr.shape.withPartitioning(partitioning),
-                }
+            if (@TypeOf(partitioning) == @TypeOf(null)) {
+                @compileError("TensorStore.View.createTensor partitioning cannot be null; pass .replicated or an explicit partitioning");
+            }
+
+            switch (@typeInfo(@TypeOf(partitioning))) {
+                .optional => @compileError("TensorStore.View.createTensor partitioning cannot be optional; pass .replicated or an explicit partitioning"),
+                .enum_literal => switch (partitioning) {
+                    .replicated => ptr.shape = ptr.shape.withReplicatedPartitioning(),
+                    else => @compileError("Only .replicated is supported as a standalone partitioning enum literal"),
+                },
+                else => ptr.shape = ptr.shape.withPartitioning(partitioning),
             }
 
             const tensor: Tensor = .fromShape(ptr.shape);
@@ -591,9 +592,9 @@ pub const DirectMemoryWriter = struct {
         allocator: std.mem.Allocator,
         shape: Shape,
         placement: Placement,
-        raw_segments: std.ArrayListUnmanaged(RawSegment) = .empty,
-        segments: std.ArrayListUnmanaged(StreamSegment) = .empty,
-        mirrors: std.ArrayListUnmanaged(usize) = .empty,
+        raw_segments: std.ArrayList(RawSegment) = .empty,
+        segments: std.ArrayList(StreamSegment) = .empty,
+        mirrors: std.ArrayList(usize) = .empty,
 
         fn init(allocator: std.mem.Allocator, shape: Shape, placement: Placement) StreamPlanner {
             return .{
@@ -1067,7 +1068,7 @@ pub const LoadOpts = struct {
     };
 
     parallelism: usize,
-    shardings: []const Sharding,
+    shardings: []const Sharding = &.{},
     progress: ?*std.Progress.Node = null,
     dma_chunks: usize,
     dma_chunk_size: usize,
@@ -1101,8 +1102,6 @@ pub fn load(
         pool_.deinit(dma_allocators[i].allocator());
     };
 
-    const replicated_sharding = try sharding_.replicatedSharding(platform);
-
     const Ctx = struct {
         allocator: std.mem.Allocator,
         dma_allocators: []const mem.DmaAllocator,
@@ -1111,7 +1110,6 @@ pub fn load(
         platform: *const Platform,
         buffers: []*Buffer,
         shardings: []const Sharding,
-        replicated_sharding: Sharding,
         store: *const TensorStore,
         group: stdx.Io.LimitedGroup,
         total: std.atomic.Value(usize) = .init(0),
@@ -1126,7 +1124,6 @@ pub fn load(
         .pinned_buffer_pools = buffer_pools,
         .io = io,
         .shardings = opts.shardings,
-        .replicated_sharding = replicated_sharding,
         .progress = opts.progress,
         .group = .init(opts.parallelism),
     };
@@ -1150,10 +1147,9 @@ pub fn load(
                     defer reader.deinit();
 
                     const shape = reader.tensor.shape;
-                    const select_sharding = sharding_.pickSharding(ctx_.shardings, shape, .explicit_axis_binding);
-                    const sharding = if (select_sharding) |s| s else blk: {
-                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding:\n {f}", .{ reader.tensor.name, shape, ctx_.replicated_sharding });
-                        break :blk ctx_.replicated_sharding;
+                    const sharding = Sharding.pickSharding(ctx_.shardings, shape, .explicit_axis_binding) orelse blk: {
+                        log.debug("No sharding strategy found for tensor {s} with shape {f}, using replicated sharding", .{ reader.tensor.name, shape });
+                        break :blk ctx_.platform.replicated_sharding;
                     };
 
                     var writer = MemoryWriter.init(
@@ -1197,9 +1193,9 @@ fn buildMesh2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
     devices: []const @import("platform.zig").Device,
-) !sharding_.PhysicalMesh {
+) !Sharding.PhysicalMesh {
     if (devices.len < 4) return error.NotEnoughDevices;
-    const topology: sharding_.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .device(devices[0]),
             .device(devices[1]),
@@ -1210,16 +1206,16 @@ fn buildMesh2x2(
         }),
     });
 
-    return sharding_.PhysicalMesh.fromTree(allocator, target, topology);
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 fn buildMesh2x2x2(
     allocator: std.mem.Allocator,
     target: @import("platform.zig").Target,
     devices: []const @import("platform.zig").Device,
-) !sharding_.PhysicalMesh {
+) !Sharding.PhysicalMesh {
     if (devices.len < 8) return error.NotEnoughDevices;
-    const topology: sharding_.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
+    const topology: Sharding.PhysicalMesh.Tree = .axis(.link_x, .{ .mesh = .torus }, &.{
         .axis(.link_y, .{ .mesh = .torus }, &.{
             .axis(.link_z, .{ .mesh = .torus }, &.{
                 .device(devices[0]),
@@ -1242,7 +1238,7 @@ fn buildMesh2x2x2(
         }),
     });
 
-    return sharding_.PhysicalMesh.fromTree(allocator, target, topology);
+    return Sharding.PhysicalMesh.fromTree(allocator, target, topology);
 }
 
 const DirectMemoryWriterDeviceTest = struct {
@@ -1255,8 +1251,8 @@ const DirectMemoryWriterDeviceTest = struct {
         name: []const u8,
         create_options: CreateOptions,
         shape: Shape,
-        logical_mesh: sharding_.LogicalMesh,
-        strategy: sharding_.Strategy,
+        logical_mesh: Sharding.LogicalMesh,
+        strategy: Sharding.Strategy,
         write_mode: WriteMode = .stream_remaining,
         writable_slice_min_len: usize = 128,
         pool_chunks: usize = 4,
@@ -1267,16 +1263,14 @@ const DirectMemoryWriterDeviceTest = struct {
     io: std.Io,
 
     fn run(self: DirectMemoryWriterDeviceTest, scenario: Scenario) !void {
-        _ = scenario.name;
-
         var platform = Platform.auto(self.allocator, self.io, scenario.create_options) catch return error.SkipZigTest;
         defer platform.deinit(self.allocator, self.io);
 
-        const sharding: Sharding = try .initFromStrategy(platform, scenario.logical_mesh, scenario.strategy);
+        const sharding: Sharding.Data = try .init(scenario.name, platform.physical_mesh, scenario.logical_mesh, scenario.strategy);
         try self.runDirectMemoryWriter(
             platform,
             scenario.shape,
-            sharding,
+            .{ .data = &sharding },
             scenario.write_mode,
             scenario.writable_slice_min_len,
             scenario.pool_chunks,
@@ -1374,9 +1368,9 @@ test "DirectMemoryWriter: replicated with auto topology" {
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 128 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .replicated }),
-        .logical_mesh = .init("replicated_cpu", .{ .x = .high_bandwidth }),
+        .logical_mesh = .mesh(.{ .x = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.x, .link_x);
 
             break :blk strategy;
@@ -1398,9 +1392,9 @@ test "DirectMemoryWriter: 1D model split with 2x2 physical mesh" {
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .init("model_cpu", .{ .model = .high_bandwidth }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.model, .link_x);
 
             break :blk strategy;
@@ -1422,12 +1416,12 @@ test "DirectMemoryWriter: 2D batch/model split with 2x2 physical mesh" {
         },
         .shape = Shape.init(.{ .batch = 8, .model = 1024 }, .f32)
             .withPartitioning(.{ .batch = .batch, .model = .model }),
-        .logical_mesh = .init("batch_model_cpu", .{
+        .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.batch, .link_x);
             strategy.addBinding(.model, .link_y);
 
@@ -1449,9 +1443,9 @@ test "DirectMemoryWriter: folded model sharding with 2x2 physical mesh" {
             .cpu = .{ .device_count = 4 },
         },
         .shape = Shape.init(.{ .model = 4096 }, .f32).withPartitioning(.{ .model = .model }),
-        .logical_mesh = .init("model_folded_cpu", .{ .model = .high_bandwidth }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.model, .link_x);
             strategy.addFold(.link_x, &.{ .link_x, .link_y });
 
@@ -1474,9 +1468,9 @@ test "DirectMemoryWriter: writableSliceGreedy with mirrored shards" {
         },
         .shape = Shape.init(.{ .rows = 8, .cols = 1024 }, .f32)
             .withPartitioning(.{ .rows = .replicated, .cols = .model }),
-        .logical_mesh = .init("model_cpu_greedy", .{ .model = .high_bandwidth }),
+        .logical_mesh = .mesh(.{ .model = .high_bandwidth }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.model, .link_x);
 
             break :blk strategy;
@@ -1501,12 +1495,12 @@ test "DirectMemoryWriter: 3D topology folded model + replicated batch" {
         },
         .shape = Shape.init(.{ .batch = 16, .model = 4096 }, .f32)
             .withPartitioning(.{ .batch = .replicated, .model = .model }),
-        .logical_mesh = .init("topology_3d_folded_model_mesh", .{
+        .logical_mesh = .mesh(.{
             .batch = .low_bandwidth,
             .model = .high_bandwidth,
         }),
         .strategy = blk: {
-            var strategy: sharding_.Strategy = .init;
+            var strategy: Sharding.Strategy = .init;
             strategy.addBinding(.model, .link_x);
             strategy.addFold(.link_x, &.{ .link_x, .link_z });
 
