@@ -3,11 +3,13 @@ load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
 zig_library(
     name = "c_builtins",
     main = "lib/c_builtins.zig",
+    visibility = ["//visibility:public"],
 )
 
 zig_library(
     name = "helpers",
     main = "lib/helpers.zig",
+    visibility = ["//visibility:public"],
 )
 
 zig_binary(
@@ -15,7 +17,6 @@ zig_binary(
     data = glob(["lib/**/*.zig"]),
     srcs = glob(["src/**/*.zig"]),
     main = "src/main.zig",
-    linkopts = ["-lc"],
     deps = [
         ":c_builtins",
         ":helpers",

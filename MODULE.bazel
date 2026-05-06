@@ -59,7 +59,6 @@ use_repo(
 zig = use_extension("@rules_zig//zig:extensions.bzl", "zig")
 zig.index(file = "//bazel:zig_index.json")
 zig.toolchain(
-    translate_c = "@translate-c",
     zig_version = "0.16.0",
 )
 zig.mirrors(urls = [
@@ -83,6 +82,8 @@ use_repo(zig, "zig_toolchains")
 register_toolchains("@rules_zig//zig/target:all")
 
 register_toolchains("@zig_toolchains//:all")
+
+register_toolchains("//:translate_c_toolchain")
 ###
 
 ### LLVM Bootstrapped toolchains

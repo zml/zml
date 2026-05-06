@@ -1,8 +1,26 @@
+load("@rules_zig//zig/translate-c:toolchain.bzl", "translate_c_toolchain")
 load("//third_party/zls:zls_completion.bzl", "zls_completion")
 
 alias(
     name = "translate-c",
     actual = "@translate-c//:translate-c",
+    visibility = ["//visibility:public"],
+)
+
+translate_c_toolchain(
+    name = "translate_c_toolchain_impl",
+    runtime_modules = [
+        "@translate-c//:c_builtins",
+        "@translate-c//:helpers",
+    ],
+    translate_c = "@translate-c//:translate-c",
+)
+
+toolchain(
+    name = "translate_c_toolchain",
+    target_settings = ["@rules_zig//zig/settings:translate_c_enabled"],
+    toolchain = ":translate_c_toolchain_impl",
+    toolchain_type = "@rules_zig//zig/translate-c:toolchain_type",
     visibility = ["//visibility:public"],
 )
 
