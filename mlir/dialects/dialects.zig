@@ -11,6 +11,7 @@ pub const func = @import("func.zig");
 pub const math = @import("math.zig");
 pub const memref = @import("memref.zig");
 pub const scf = @import("scf.zig");
+pub const shardy = @import("shardy.zig");
 pub const vector = @import("vector.zig");
 
 test {

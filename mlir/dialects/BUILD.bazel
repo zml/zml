@@ -10,6 +10,7 @@ zig_library(
         "func.zig",
         "math.zig",
         "memref.zig",
+        "shardy.zig",
         "scf.zig",
         "vector.zig",
     ],
