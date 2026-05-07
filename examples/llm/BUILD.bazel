@@ -29,6 +29,13 @@ zig_binary(
     deps = ["//zml"],
 )
 
+zig_binary(
+    name = "step3_5flash",
+    srcs = glob(["**/*.zig"]),
+    main = "models/step3_5flash.zig",
+    deps = ["//zml"],
+)
+
 build_test(
     name = "test",
     targets = [":llm"],
