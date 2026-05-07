@@ -281,7 +281,7 @@ pub const SilenceGenerator = struct {
         const timbre_slice = self.silence_latent.squeeze(.batch).slice(&.{ full_audio_slice, target_timbre_slice });
         const audio_slice = self.silence_latent.squeeze(.batch).slice(&.{ full_audio_slice, target_time_slice });
         
-        return .{ timbre_slice, audio_slice };
+        return .{ timbre_slice.convert(.bf16), audio_slice.convert(.bf16) };
     }
 };
 
@@ -332,7 +332,7 @@ pub const AceEnc = struct {
         // dim [s_lyric, d_emb_cond]
         const encoded_lyric = self.lyric_encoder.forward(lyric_emb);
         // dim [1, d_emb_cond]
-        const encoded_timbre = self.timbre_encoder.forward(timbre_latent.convert(.bf16));
+        const encoded_timbre = self.timbre_encoder.forward(timbre_latent);
         
         // dim [s_text + s_lyric + 1, d_emb_cond]
         const encoded_conditions = zml.Tensor.concatenate(&.{ encoded_lyric, encoded_timbre, encoded_text }, .s);
