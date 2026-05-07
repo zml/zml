@@ -19,6 +19,7 @@ zig_library(
     visibility = ["//visibility:public"],
     deps = [
         "//mlir",
+        "//mlir:c",
         "//mlir/dialects/mosaic_tpu",
         "//mlir/dialects/stablehlo",
         "//mlir/dialects/ttir",
