@@ -12,7 +12,7 @@ pub const AceVae_handler = struct {
     params: Params,
     config: Config,
     decode_exe: zml.Exe,
-    encode_exe: zml.Exe,
+    //encode_exe: zml.Exe,
     model_buffers: zml.Bufferized(AceVae),
     shardings: main.Shardings,
 
@@ -43,7 +43,7 @@ pub const AceVae_handler = struct {
         }
         const params: Params = .{
             .latents = .init(.{ .c = config.decoder_input_channels, .t = t_25hz }, .bf16),
-            .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .bf16),
+            .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .f32),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -51,7 +51,8 @@ pub const AceVae_handler = struct {
         zml_handler.toc(&zml_handler.timers.vae.init);
         zml_handler.tic(&zml_handler.timers.vae.compile);
 
-        const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
+        const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
+        //const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
         
         zml_handler.toc(&zml_handler.timers.vae.compile);
         zml_handler.tic(&zml_handler.timers.vae.load);
@@ -67,7 +68,7 @@ pub const AceVae_handler = struct {
             .params = params,
             .config = config,
             .decode_exe = decode_exe,
-            .encode_exe = encode_exe,
+            //.encode_exe = encode_exe,
             .model_buffers = model_buffers,
             .shardings = shardings,
         };
@@ -129,7 +130,7 @@ pub const AceVae_handler = struct {
         self.model.deinit(allocator);
         self.config.deinit(allocator);
         self.decode_exe.deinit();
-        self.encode_exe.deinit();
+        //self.encode_exe.deinit();
     }
 };
 
@@ -201,7 +202,7 @@ pub const AceVae = struct {
     }
 
     pub fn encode(self: AceVae, audio: zml.Tensor) zml.Tensor {
-        return self.encoder.forward(audio);
+        return self.encoder.forward(audio.convert(.bf16));
     }
 
     pub fn decode(self: AceVae, latents: zml.Tensor) zml.Tensor {
