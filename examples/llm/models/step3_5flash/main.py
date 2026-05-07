@@ -16,6 +16,7 @@ def main():
             "torch_dtype": torch.float16,
             "device_map": "auto",
             "low_cpu_mem_usage": True,
+            "trust_remote_code": True,
         },
     )
 
