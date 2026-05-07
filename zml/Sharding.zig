@@ -112,15 +112,15 @@ pub const Partitioning = struct {
         return sharding.data.numPartitionsForLogicalAxis(logical_axis);
     }
 
-    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const mlir.Attribute {
+    pub fn sdyPerValueShardingAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, shapes: []const Shape) !*const dialects.shardy.TensorShardingPerValueAttribute {
         stdx.debug.assert(self.partitioner == .shardy, "sdyPerValueShardingAttr requires shardy partitioner", .{});
 
-        const shardings = try allocator.alloc(*const mlir.Attribute, shapes.len);
+        const shardings = try allocator.alloc(*const dialects.shardy.TensorShardingAttribute, shapes.len);
         for (shapes, 0..) |shape, i| {
             const sharding = try self.selectSharding(shape);
-            shardings[i] = (try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape)).asAttr();
+            shardings[i] = try sharding.data.sdyShardingAttrForShape(allocator, ctx, shape);
         }
-        return dialects.shardy.TensorShardingPerValueAttribute.get(ctx, shardings).asAttr();
+        return .init(ctx, shardings);
     }
 
     pub fn sdyManualAxesAttr(self: Partitioning, allocator: std.mem.Allocator, ctx: *mlir.Context, in_shapes: []const Shape, out_shapes: []const Shape) !*const dialects.shardy.ManualAxesAttribute {
@@ -170,7 +170,7 @@ pub const Partitioning = struct {
             axes[i] = mlir.StringAttribute.init(ctx, axis_name);
         }
 
-        return dialects.shardy.ManualAxesAttribute.get(ctx, axes);
+        return dialects.shardy.ManualAxesAttribute.init(ctx, axes);
     }
 
     pub fn selectSharding(self: Partitioning, shape: Shape) !Sharding {
