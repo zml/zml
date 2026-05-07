@@ -1282,11 +1282,14 @@ pub const Data = struct {
     }
 
     pub fn sdyShardingAttrForShape(
-        self: *const Data,
-        allocator: std.mem.Allocator,
+        data: *const Data,
+        parent_allocator: std.mem.Allocator,
         ctx: *mlir.Context,
         shape: Shape,
     ) !*const dialects.shardy.TensorShardingAttribute {
+        var arena = try stdx.arenaWithCapacity(parent_allocator, 1024);
+        defer arena.deinit();
+        const allocator = arena.allocator();
         var any_explicit = false;
         for (0..shape.rank()) |ax| {
             if (shape.partition(ax) != .unknown) {
@@ -1296,56 +1299,39 @@ pub const Data = struct {
         }
         const all_replicated = !any_explicit;
 
-        const mapping = self.getDimMapping(shape);
-        const dimensions = try allocator.alloc(dialects.shardy.Dimension, shape.rank());
-        defer allocator.free(dimensions);
-        const dimension_axes = try allocator.alloc(?[]dialects.shardy.Axis, shape.rank());
-        defer {
-            for (dimension_axes) |axes| {
-                if (axes) |slice| allocator.free(slice);
-            }
-            allocator.free(dimension_axes);
-        }
-        @memset(dimension_axes, null);
+        const mapping = data.getDimMapping(shape);
+        const dimensions = try allocator.alloc(*const dialects.shardy.DimensionShardingAttribute, shape.rank());
 
-        for (0..shape.rank()) |ax| {
+        for (0.., dimensions) |ax, *d| {
             const spec = shape.partition(ax);
-            switch (spec) {
-                .axis => |logical_tag| {
-                    if (self.binding(logical_tag)) |_| {
+            d.* = switch (spec) {
+                .axis => |logical_tag| d: {
+                    if (data.binding(logical_tag)) |_| {
                         const dim_phys_indices = mapping.axes_per_dim.get(ax);
                         if (dim_phys_indices.len == 0) {
-                            dimensions[ax] = .replicated;
+                            break :d .replicated(ctx);
                         } else {
-                            const axes = try allocator.alloc(dialects.shardy.Axis, dim_phys_indices.len);
-                            dimension_axes[ax] = axes;
+                            const axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, dim_phys_indices.len);
                             for (dim_phys_indices.constSlice(), 0..) |p_idx, i| {
-                                axes[i] = .named_(@tagName(mapping.view.axes.get(p_idx).tag));
+                                axes[i] = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
                             }
-                            dimensions[ax] = .closed(axes);
+                            break :d .closed(ctx, axes);
                         }
                     } else {
-                        dimensions[ax] = .open(&.{});
+                        break :d .open(ctx, &.{});
                     }
                 },
-                .replicated => dimensions[ax] = .replicated,
-                .open, .unknown => {
-                    dimensions[ax] = if (all_replicated) .replicated else .open(&.{});
-                },
-            }
+                .replicated => .replicated(ctx),
+                .open, .unknown => if (all_replicated) .replicated(ctx) else .open(ctx, &.{}),
+            };
         }
 
-        const replicated_axes = try allocator.alloc(dialects.shardy.Axis, mapping.replicated_axes.len);
-        defer allocator.free(replicated_axes);
-        for (mapping.replicated_axes.constSlice(), 0..) |p_idx, i| {
-            replicated_axes[i] = .named_(@tagName(mapping.view.axes.get(p_idx).tag));
+        const replicated_axes = try allocator.alloc(*const dialects.shardy.AxisRefAttribute, mapping.replicated_axes.len);
+        for (replicated_axes, mapping.replicated_axes.constSlice()) |*r, p_idx| {
+            r.* = .named(ctx, @tagName(mapping.view.axes.get(p_idx).tag));
         }
 
-        return dialects.shardy.TensorShardingAttribute.init(allocator, ctx, .{
-            .mesh = self.name,
-            .dimensions = dimensions,
-            .replicated_axes = replicated_axes,
-        });
+        return .init(ctx, .{ .mesh = data.name, .dimensions = dimensions, .replicated_axes = replicated_axes });
     }
 
     pub fn gspmdShardingAttrForShape(self: *const Data, allocator: std.mem.Allocator, shape: Shape) ![]const u8 {
