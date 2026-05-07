@@ -31,6 +31,7 @@ const video_vae = @import("video_vae.zig");
 const video_vae_encoder = @import("video_vae_encoder.zig");
 const audio_vae = @import("audio_vae.zig");
 const vocoder = @import("vocoder.zig");
+const nut_muxer = @import("nut_muxer.zig");
 
 comptime {
     @setEvalBranchQuota(200000);
@@ -898,7 +899,7 @@ pub fn main(init: std.process.Init) !void {
     // Final: Write raw video (stdout) + audio (file)
     // ========================================================================
     std.log.info("", .{});
-    std.log.info("=== Writing raw outputs (video → stdout, audio → file) ===", .{});
+    std.log.info("=== Muxing NUT stream to stdout (video + audio) ===", .{});
 
     const waveform_slice = try waveform_buf.toSliceAlloc(allocator, io);
     defer waveform_slice.free(allocator);
@@ -923,7 +924,7 @@ pub fn main(init: std.process.Init) !void {
     }
 
     timer_output.start();
-    try writeRawOutputs(allocator, io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate, args.output_dir);
+    try writeRawOutputs(io, video_frames, interleaved_bytes, num_channels, pipe_meta.frame_rate);
     timer_output.addExec();
 
     // ========================================================================
@@ -4115,53 +4116,39 @@ fn postProcessDecodedVideo(
     };
 }
 
-/// Encode video + audio frames to an MP4 file using ffmpeg.
+/// Mux video + audio into NUT container on stdout for piping to ffmpeg.
 ///
-/// Pipes raw RGB24 video frames to ffmpeg's stdin and writes interleaved f32le
-/// audio to a temp file (ffmpeg can't read two pipes). Output is H.264 + AAC.
+/// Usage: inference [args] | ffmpeg -y -i pipe:0 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k output.mp4
 fn writeRawOutputs(
-    allocator: std.mem.Allocator,
     io: std.Io,
     video: VideoFrames,
     audio_interleaved: []const u8,
     audio_channels: usize,
     fps: f64,
-    output_dir: []const u8,
 ) !void {
-    // Write interleaved f32le audio to a permanent file.
-    const audio_path = try std.fs.path.join(allocator, &.{ output_dir, "audio.raw" });
-    defer allocator.free(audio_path);
-    {
-        const audio_file = try std.Io.Dir.createFile(.cwd(), io, audio_path, .{});
-        defer audio_file.close(io);
-        var wr_buf: [64 * 1024]u8 = undefined;
-        var wr = audio_file.writer(io, &wr_buf);
-        try wr.interface.writeAll(audio_interleaved);
-        try wr.interface.flush();
-    }
-    std.log.info("  Wrote {s} ({d} bytes, {d} channels, 48kHz f32le)", .{
-        audio_path, audio_interleaved.len, audio_channels,
-    });
+    const fps_num: u32 = @intFromFloat(@round(fps * 1000.0));
+    const fps_den: u32 = 1000;
 
-    // Write raw RGB24 video frames to stdout.
-    std.log.info("  Writing {d} raw RGB24 frames ({d}x{d}) to stdout ({d} bytes)...", .{
-        video.num_frames, video.width, video.height, video.data.len,
-    });
     var stdout_buf: [64 * 1024]u8 = undefined;
     var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buf);
-    try stdout_writer.interface.writeAll(video.data);
+
+    var muxer = nut_muxer.NutMuxer.init(
+        &stdout_writer.interface,
+        @intCast(video.width),
+        @intCast(video.height),
+        fps_num,
+        fps_den,
+        @intCast(audio_channels),
+        48000,
+    );
+    try muxer.writeHeaders();
+    try muxer.mux(video.data, video.num_frames, video.width, video.height, audio_interleaved, audio_channels);
     try stdout_writer.interface.flush();
 
-    // Print the ffmpeg command for the user (to stderr, so it doesn't pollute the pipe).
-    std.log.info("", .{});
-    std.log.info("Raw outputs written. To encode with ffmpeg, run:", .{});
-    std.log.info("  bazel-bin/examples/ltx/inference [args] \\", .{});
-    std.log.info("    | ffmpeg -y \\", .{});
-    std.log.info("      -f rawvideo -pix_fmt rgb24 -s {d}x{d} -r {d:.0} -i pipe:0 \\", .{
-        video.width, video.height, fps,
+    std.log.info("  NUT stream written to stdout ({d} video frames + {d} bytes audio)", .{
+        video.num_frames, audio_interleaved.len,
     });
-    std.log.info("      -f f32le -ar 48000 -ac {d} -i {s} \\", .{ audio_channels, audio_path });
-    std.log.info("      -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest output.mp4", .{});
+    std.log.info("  Pipe to ffmpeg: inference [args] | ffmpeg -y -i pipe:0 -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k output.mp4", .{});
 }
 
 // Phase 5: Audio VAE Decode

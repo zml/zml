@@ -15,7 +15,7 @@ Phase 3  runStage2()         3-step distilled denoising (1 pass/step × 48 block
 Phase 4  runVideoVaeDecode() video VAE decoder (latent → pixel frames)
 Phase 5  runAudioVaeDecode() audio VAE decoder (latent → mel spectrogram)
 Phase 6  runVocoderWithBWE() mel → 16kHz waveform → 48kHz stereo
-Final    writeRawOutputs()   raw RGB24 video → stdout, f32le audio → file
+Final    writeRawOutputs()   NUT mux (video + audio) → stdout for piping to ffmpeg
 ```
 
 [Mel spectrograms intro](https://huggingface.co/learn/audio-course/en/chapter1/audio_data#mel-spectrogram).
@@ -44,7 +44,8 @@ Multiples of 64 recommended for best Stage 1→2 alignment.
 
 | File | Role | Key exports |
 |------|------|-------------|
-| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, raw output | `main`, `runGemmaEncoding`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE`, `computeTextEmbeddings`, `writeRawOutputs` |
+| [inference.zig](inference.zig) | Pipeline orchestrator — CLI, phase runners, NUT output | `main`, `runGemmaEncoding`, `runStage1`, `runBridge`, `runStage2`, `runVideoVaeDecode`, `runAudioVaeDecode`, `runVocoderWithBWE`, `computeTextEmbeddings`, `writeRawOutputs` |
+| [nut_muxer.zig](nut_muxer.zig) | Minimal NUT container muxer (PIPE mode, v4) | `NutMuxer` |
 | [gemma3_encoder.zig](gemma3_encoder.zig) | Gemma-3 text encoder (single-pass, no KV cache) | `Encoder`, `DecoderLayer`, `Attention`, `Mlp`, `RmsNorm`, `ScaledWordEmbedding` |
 | [model.zig](model.zig) | Transformer core + denoising math | `LTXModel`, `BasicAVTransformerBlock`, `FeedForward`, `Attention`, `forwardPreprocess`, `forwardBlock0Native*`, `forwardGenerateNoise`, `forwardNoiseInit`, `forwardGuiderCombine`, `forwardDenoisingStep*`, `computeSigmaSchedule` |
 | [text_embeddings.zig](text_embeddings.zig) | Gemma hidden states → context embeddings | `FeatureExtractorV2`, `Embeddings1DConnector`, `ConnectorBlock`, `EmbeddingsProcessor`, `forwardEmbeddingsProcessor` |

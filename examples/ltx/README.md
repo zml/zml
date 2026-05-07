@@ -20,7 +20,7 @@ Bridge: unpatchify → 2× upsample → re-noise
 Stage 2: 3 steps × 1 pass × 48 blocks (distilled)
 Video VAE decode → RGB frames
 Audio VAE decode → mel → vocoder+BWE → 48kHz stereo
-  → raw RGB24 video (stdout) + f32le audio (file)
+  → NUT mux (video + audio) → stdout
   → pipe to ffmpeg externally
 ```
 
@@ -34,7 +34,7 @@ via VAE encoding + per-token mask blending.
 
 | File | Purpose |
 |------|---------|
-| `inference.zig` | Pipeline orchestrator: CLI, all 7 phases, raw output |
+| `inference.zig` | Pipeline orchestrator: CLI, all 7 phases, NUT output |
 | `gemma3_encoder.zig` | Gemma-3 text encoder: tokenize → 48-layer forward → stacked hidden states |
 | `model.zig` | Transformer core (48-block), denoising math, guidance, noise gen, RoPE |
 | `text_embeddings.zig` | Gemma hidden states → context embeddings (FeatureExtractorV2 + 8-block Connector) |
@@ -45,6 +45,7 @@ via VAE encoding + per-token mask blending.
 | `audio_vae.zig` | Audio VAE decoder (2D causal conv) |
 | `vocoder.zig` | BigVGAN vocoder + bandwidth extension (all f32) |
 | `image_loading.zig` | stb_image load → resize → center-crop → bf16 normalize |
+| `nut_muxer.zig` | Minimal NUT container muxer for piping video+audio to ffmpeg |
 | `export_pipeline.py` | Optional full Python reference pipeline |
 
 ### External inputs
@@ -92,8 +93,8 @@ bazel build --config=release --@zml//platforms:cuda=true //examples/ltx:inferenc
 
 ### Run inference
 
-The binary writes raw RGB24 video to stdout and f32le audio to `{output-dir}/audio.raw`.
-Pipe to ffmpeg for the final MP4:
+The binary muxes raw RGB24 video and PCM f32le audio into a NUT container on
+stdout. Pipe to ffmpeg for the final MP4:
 
 ```bash
 ./bazel-bin/examples/ltx/inference \
@@ -103,16 +104,11 @@ Pipe to ffmpeg for the final MP4:
   --stage1-ckpt ~/models/ltx-2.3/ltx-2.3-22b-dev.safetensors \
   --stage2-ckpt ~/models/ltx-2.3/ltx-2.3-22b-distilled-1.1.safetensors \
   --upsampler-ckpt ~/models/ltx-2.3/ltx-2.3-spatial-upscaler-x2-1.1.safetensors \
-  --output-dir ~/outputs/my_video \
   --height 1024 --width 1536 --num-frames 121 --fps 24 \
   --bf16-attn-stage1 --bf16-attn-stage2 \
-  | ffmpeg -y \
-    -f rawvideo -pix_fmt rgb24 -s 1536x1024 -r 24 -i pipe:0 \
-    -f f32le -ar 48000 -ac 2 -i ~/outputs/my_video/audio.raw \
-    -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k -shortest output.mp4
+  | ffmpeg -y -i pipe:0 \
+    -c:v libx264 -pix_fmt yuv420p -c:a aac -b:a 192k output.mp4
 ```
-
-The binary prints the exact ffmpeg command (with resolved dimensions) to stderr.
 
 **Note:** Use the built binary directly (not `bazel run`) since Bazel may interfere with stdout piping.
 
@@ -131,7 +127,7 @@ The binary prints the exact ffmpeg command (with resolved dimensions) to stderr.
 | `--stage1-ckpt` | (required) | Stage 1 model checkpoint |
 | `--stage2-ckpt` | (required) | Stage 2 (distilled) model checkpoint |
 | `--upsampler-ckpt` | (required) | Spatial upsampler checkpoint |
-| `--output-dir` | (required) | Output directory (audio.raw written here) |
+| `--output-dir` | `"."` | Output directory (used by `--dump-intermediates`) |
 | `--height` | `1024` | Output height in pixels |
 | `--width` | `1536` | Output width in pixels |
 | `--num-frames` | `121` | Frame count (`8k + 1`) |
