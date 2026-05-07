@@ -422,18 +422,13 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
     var decode_results = try acellm.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
-    // buffer and slice for a .s = 1, val = 0 tensor
-    var zero_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer zero_slice.free(allocator);
-    zero_slice.items(u32)[0] = 0;
-    var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
+    var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
+    var prompt_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len - 1, .u32, sharding);
+    defer prompt_buffer.deinit();
 
-    // a one token slice/buffer. it is used to pass the prompt length during prefill so .forward knows what position to
-    // use to predict the next token. then, it is used to get the generated token and pass it to the decode.
     var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer token_slice.free(allocator);
-    token_slice.items(u32)[0] = @intCast(prompt_tok.len - 1);
     var token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer token_buffer.deinit();
 
@@ -445,7 +440,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
 
     std.log.info("5Hz run prefill with seq_len/prompt_len of {d}/{d} tokens", .{ acellm.options.seq_len, prompt_tok.len });
     zml_handler.tic(&zml_handler.timers.llm.prefill);
-    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, zero_buffer, token_buffer, acellm.kv_cache_buffers, rng_buffers });
+    prefill_args.set(.{ acellm.model_buffers, prefill_tokens_buffer, zero_buffer, prompt_buffer, acellm.kv_cache_buffers, rng_buffers });
     acellm.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
     prefill_results.fill(.{ &token_buffer, &acellm.kv_cache_buffers, &rng_buffers });
 
@@ -481,10 +476,7 @@ pub fn generateInspirationText(zml_handler: *main.Zml_handler, acellm: *acellm_.
         }
         
         // we need a new 1 token buffer to pass the token_index
-        var pos_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-        defer pos_slice.free(allocator);
-        pos_slice.items(u32)[0] = @intCast(prompt_tok.len + i);
-        var pos_buffer: zml.Buffer = try .fromSlice(io, platform, pos_slice, sharding);
+        var pos_buffer: zml.Buffer = try .scalar(io, platform, prompt_tok.len + i, .u32, sharding);
         defer pos_buffer.deinit();
 
         // call to generate the next token
@@ -529,21 +521,17 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var decode_results = try acecfg.decode_exe.results(allocator);
     defer decode_results.deinit(allocator);
 
-    // buffer and slice for a .s = 1, val = 0 tensor
-    var zero_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer zero_slice.free(allocator);
-    zero_slice.items(u32)[0] = 0;
-    var zero_buffer: zml.Buffer = try .fromSlice(io, platform, zero_slice, sharding);
+    var zero_buffer: zml.Buffer = try .scalar(io, platform, 0, .u32, sharding);
     defer zero_buffer.deinit();
+    var cond_prompt_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len - 1, .u32, sharding);
+    defer cond_prompt_buffer.deinit();
+    var uncond_prompt_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len - 1, .u32, sharding);
+    defer uncond_prompt_buffer.deinit();
     
-    // in prefill, we need to pass the prompt length to the .forward to it knows which logits to use to compute next token
-    // this will also be used to get the generated token and pass it to .forward during decode
     var cond_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     var uncond_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
     defer cond_token_slice.free(allocator);
     defer uncond_token_slice.free(allocator);
-    cond_token_slice.items(u32)[0] = @intCast(cond_tok.len - 1);
-    uncond_token_slice.items(u32)[0] = @intCast(uncond_tok.len - 1);
     var cond_token_buffer: zml.Buffer = try .fromSlice(io, platform, cond_token_slice, sharding);
     var uncond_token_buffer: zml.Buffer = try .fromSlice(io, platform, uncond_token_slice, sharding);
     defer cond_token_buffer.deinit();
@@ -566,7 +554,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         acecfg.llm.model_buffers,
         cond_prefill_tokens_buffer, uncond_prefill_tokens_buffer,
         zero_buffer, zero_buffer,
-        cond_token_buffer, uncond_token_buffer,
+        cond_prompt_buffer, uncond_prompt_buffer,
         acecfg.cond_kv_cache_buffers, acecfg.uncond_kv_cache_buffers,
         rng_buffers,
     });
@@ -591,15 +579,8 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         try writer.flush();
         if (result_tok.items.len == nb_audio_codes) break;
 
-        // in decode, we need to pass the position of the last generated token to the .forward
-        var cond_pos_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-        var uncond_pos_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-        defer cond_pos_slice.free(allocator);
-        defer uncond_pos_slice.free(allocator);
-        cond_pos_slice.items(u32)[0] = @intCast(cond_tok.len + i);
-        uncond_pos_slice.items(u32)[0] = @intCast(uncond_tok.len + i);
-        var cond_pos_buffer: zml.Buffer = try .fromSlice(io, platform, cond_pos_slice, sharding);
-        var uncond_pos_buffer: zml.Buffer = try .fromSlice(io, platform, uncond_pos_slice, sharding);
+        var cond_pos_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len + i, .u32, sharding);
+        var uncond_pos_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len + i, .u32, sharding);
         defer cond_pos_buffer.deinit();
         defer uncond_pos_buffer.deinit();
         

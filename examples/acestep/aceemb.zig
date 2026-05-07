@@ -181,11 +181,7 @@ pub const AceEmb = struct {
             layer.* = try .init(@intCast(i), store.withPrefix("layers").withLayer(i), config);
         }
         return .{
-            .embed_tokens = .{ .weight = store.createTensor(
-                    "embed_tokens.weight",
-                    .{ .voc, .d },
-                    .{ .voc = .replicated, .d = .model },
-                )},
+            .embed_tokens = .{ .weight = store.createTensor("embed_tokens.weight", .{ .voc, .d }, null) },
             .layers = layers,
             .norm = .init(store.withPrefix("norm"), config),
         };
@@ -257,20 +253,11 @@ const TransformerLayer = struct {
     }
 
     pub fn forward(self: TransformerLayer, x0: zml.Tensor) zml.Tensor {
-        std.log.debug("FWD : embedding transformer layer {d}", .{self.id});
-
-        // Keep the residual stream replicated to avoid repeated gathers before q/k/v.
-        const x0_replicated = x0.withPartitioning(.{ .d = .replicated });
-        const x0_normalized = self.input_norm.forward(x0_replicated);
+        const x0_normalized = self.input_norm.forward(x0);
         const delta0 = self.att_layer.forward(x0_normalized);
-
-        const x1 = x0_replicated.add(delta0).withPartitioning(.{ .d = .replicated });
+        const x1 = x0.add(delta0);
         const x1_normalized = self.post_att_norm.forward(x1);
-        const x2 = self.mlp_layer.forward(x1_normalized)
-            .withPartitioning(.{ .d = .replicated })
-            .add(x1)
-            .withPartitioning(.{ .d = .replicated });
-
+        const x2 = self.mlp_layer.forward(x1_normalized).add(x1);
         return x2.reuseBuffer(x0);
     }
 };
@@ -290,10 +277,10 @@ const AttLayer = struct {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, .{ .d = .model }), null, .d),
+            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, null), null, .d),
             .q_norm = .init(store.withPrefix("q_norm"), config),
             .k_norm = .init(store.withPrefix("k_norm"), config),
             .num_heads = @intCast(config.num_attention_heads),
@@ -314,19 +301,13 @@ const AttLayer = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    /// Full-sequence self-attention without KV cache.
+    /// Full-sequence causal self-attention without KV cache.
     pub fn forward(self: AttLayer, x: zml.Tensor) zml.Tensor {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
-        const x_qkv = x.withPartitioning(.{ .d = .replicated });
-
-        var q = self.q_proj.convert(hz_type).forward(x_qkv).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.convert(hz_type).forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = self.v_proj.convert(hz_type).forward(x_qkv).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-
-        q = q.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .s = .replicated, .h = .model, .hd = .replicated });
+        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
 
         const pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, .u32).withTags(.{ .s });
 
@@ -340,17 +321,11 @@ const AttLayer = struct {
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
 
-        q = q.withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
-        k = k.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-        v = v.withPartitioning(.{ .k = .replicated, .h = .model, .hd = .replicated });
-
         const attn_mask = zml.nn.causalAttnMask(.{ .q = x.dim(.s), .k = x.dim(.s) }, q.dtype(), null);
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true }).withPartitioning(.{ .q = .replicated, .h = .model, .hd = .replicated });
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        
         const delta = self.o_proj.convert(hz_type).forward(attn_output);
-        
-        return delta.rename(.{ .d_out = .d }).withPartitioning(.{ .d = .replicated });
+        return delta.rename(.{ .d_out = .d });
     }
 };
 
@@ -361,9 +336,9 @@ const MlpLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View) !MlpLayer {
         return .{
-            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, .{ .d = .model }),
+            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, null),
+            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, null),
+            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, null),
         };
     }
 
@@ -374,7 +349,6 @@ const MlpLayer = struct {
     }
 
     pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
-        std.log.debug("FWD : embedding mlp", .{});
         const up_projection = input.dot(self.up_proj.convert(hz_type), .d);
         const gate_projection = input.dot(self.gate_proj.convert(hz_type), .d);
         const activation = gate_projection.silu().mul(up_projection);

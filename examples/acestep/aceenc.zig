@@ -123,7 +123,6 @@ pub const AceEnc_handler = struct {
         );
     }
 
-    
     pub fn unloadBuffers(self: *AceEnc_handler, allocator: std.mem.Allocator) void {
         AceEnc.unloadBuffers(&self.model_buffers, allocator);
         SilenceGenerator.unloadBuffers(&self.silence_buffers);
@@ -514,10 +513,10 @@ pub const SelfAttention = struct {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, .{ .d = .model }), null, .d),
+            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, null), null, .d),
             .q_norm = .init(store.withPrefix("q_norm"), config.rms_norm_eps),
             .k_norm = .init(store.withPrefix("k_norm"), config.rms_norm_eps),
             .num_heads = @intCast(config.num_attention_heads),
@@ -539,7 +538,7 @@ pub const SelfAttention = struct {
         RmsNorm.unloadBuffers(&self.k_norm);
     }
 
-    // full bidirectional self attention, no kv caching
+    // full/window bidirectional self attention, no kv caching. the attn_mask is precomputed
     pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
         var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
@@ -571,9 +570,9 @@ pub const MlpLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View) !MlpLayer {
         return .{
-            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, .{ .d = .model }),
+            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, null),
+            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, null),
+            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, null),
         };
     }
 
@@ -617,7 +616,6 @@ pub const TimbreEncoder = struct {
     embed_timbre: zml.nn.Linear,
     timbre_layers: []EncoderLayer,
     timbre_norm: RmsNorm,
-    // TODO: again, in python we have self.special_token = nn.Parameter(torch.randn(1, 1, config.hidden_size))
     special_tokens: zml.Tensor,
     sliding_window: u32,
     

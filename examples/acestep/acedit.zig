@@ -231,7 +231,7 @@ pub const AceDit = struct {
 
         return .{
             .condition_embedder = .init(
-                store.createTensor("condition_embedder.weight", .{ .d_out, .d }, .{ .d_out = .model }),
+                store.createTensor("condition_embedder.weight", .{ .d_out, .d }, null),
                 store.createTensor("condition_embedder.bias", .{ .d_out }, null),
                 .d,
             ),
@@ -750,10 +750,10 @@ pub const SelfAttention = struct {
         var rope_scaling = config.rope_scaling;
         rope_scaling.setRopeTheta(config.rope_theta);
         return .{
-            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }), null, .d),
-            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, .{ .d = .model }), null, .d),
+            .q_proj = .init(store.createTensor("q_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .k_proj = .init(store.createTensor("k_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .v_proj = .init(store.createTensor("v_proj.weight", .{ .d_out, .d }, null), null, .d),
+            .o_proj = .init(store.createTensor("o_proj.weight", .{ .d_out, .d }, null), null, .d),
             .q_norm = .init(store.withPrefix("q_norm"), config.rms_norm_eps),
             .k_norm = .init(store.withPrefix("k_norm"), config.rms_norm_eps),
             .num_heads = @intCast(config.num_attention_heads),
@@ -776,17 +776,6 @@ pub const SelfAttention = struct {
 
     // full bidirectional self attention, no kv caching
     pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
-        const q, const k, const v = self.preAttn(x);
-        
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
-        const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
-        
-        return delta.rename(.{ .d_out = .d });
-    }
-    
-    pub fn preAttn(self: SelfAttention, x: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
         var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
         var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
@@ -802,9 +791,13 @@ pub const SelfAttention = struct {
         q = q.rename(.{ .s = .q });
         k = k.rename(.{ .s = .k });
         v = v.rename(.{ .s = .k });
-
-        return .{ q, k, v };
+        
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
+        const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        return delta.rename(.{ .d_out = .d });
     }
+    
 };
 
 pub const CrossAttention = struct {
@@ -853,16 +846,6 @@ pub const CrossAttention = struct {
     // - keys/values on the y space (encoder_hidden_states in embedded conditions space)
     // - cross attention doesn't use rope
     pub fn forward(self: CrossAttention, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
-        const q, const k, const v = self.preAttn(x, y);
-        
-        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = null, .allow_cudnn = true });
-        const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
-        return delta.rename(.{ .d_out = .d });
-    }
-    
-    pub fn preAttn(self: CrossAttention, x: zml.Tensor, y: zml.Tensor) struct { zml.Tensor, zml.Tensor, zml.Tensor } {
         var k = self.k_proj.convert(hz_type).forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         var v = self.v_proj.convert(hz_type).forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
         var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
@@ -874,8 +857,13 @@ pub const CrossAttention = struct {
         v = v.rename(.{ .s = .k });
         q = q.rename(.{ .s = .q });
         
-        return .{ q, k, v };
+        const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = null, .allow_cudnn = true });
+        const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
+
+        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        return delta.rename(.{ .d_out = .d });
     }
+
 };
 
 pub const PatchIn = struct {
@@ -915,7 +903,7 @@ pub const PatchOut = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) PatchOut {
         return .{
-            .weight = store.createTensor("1.weight", .{ .d_in, .c_out, .patch }, .{ .d_in = .model }),
+            .weight = store.createTensor("1.weight", .{ .d_in, .c_out, .patch }, null),
             .bias = store.createTensor("1.bias", .{ .d }, null),
             .config = config,
         };
@@ -959,9 +947,9 @@ pub const MlpLayer = struct {
 
     pub fn init(store: zml.io.TensorStore.View) !MlpLayer {
         return .{
-            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, .{ .d_out = .model }),
-            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, .{ .d = .model }),
+            .up_proj = store.createTensor("up_proj.weight", .{ .d_out, .d }, null),
+            .gate_proj = store.createTensor("gate_proj.weight", .{ .d_out, .d }, null),
+            .down_proj = store.createTensor("down_proj.weight", .{ .d, .d_out }, null),
         };
     }
 
