@@ -31,7 +31,7 @@ pub const AceLlm_handler = struct {
         var registry: zml.safetensors.TensorRegistry = try .fromRepo(zml_handler.allocator, zml_handler.io, repo);
         defer registry.deinit();
 
-        try main.printSafetensors(registry);
+        //try main.printSafetensors(registry);
         
         std.log.info("5Hz parse config and safetensors", .{});
         const parsed_config = try main.parseConfig(Config, zml_handler.allocator, zml_handler.io, repo);
@@ -48,7 +48,8 @@ pub const AceLlm_handler = struct {
         std.log.info("5Hz initialize model", .{});
         var store: zml.io.TensorStore = .fromRegistry(zml_handler.allocator, &registry);
         defer store.deinit();
-        const model: AceLlm = try .init(zml_handler.allocator, store.view().withPrefix("model"), config, phase);
+        const view = if (store.view().hasKey("model")) store.view().withPrefix("model") else store.view();
+        const model: AceLlm = try .init(zml_handler.allocator, view, config, phase);
         std.log.info("5Hz initialized", .{});
     
         // Specify shapes of input arguments
@@ -706,7 +707,7 @@ const RmsNorm = struct {
 
     pub fn init(store: zml.io.TensorStore.View, config: Config) RmsNorm {
         return .{
-            .weights = store.createTensor("weight", .{.d_out }, null),
+            .weights = store.createTensor("weight", .{ .d_out }, null),
             .eps = config.rms_norm_eps,
         };
     }
