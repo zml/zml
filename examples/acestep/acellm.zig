@@ -388,9 +388,9 @@ pub const AceLlm = struct {
         defer progress.end();
         return zml.io.load(AceLlm, self, zml_handler.allocator, zml_handler.io, zml_handler.platform, store, .{
             .shardings = shardings,
-            .parallelism = 8,
-            .dma_chunks = 8,
-            .dma_chunk_size = 64 * zml.MiB,
+            .parallelism = 24,
+            .dma_chunks = 48,
+            .dma_chunk_size = 128 * zml.MiB,
             .progress = &progress,
         });
     }
