@@ -49,11 +49,11 @@ pub const AceEnc_handler = struct {
         std.log.info("ENC silence initialized", .{});
         
         const params: Params = .{
-            .text_emb = .init(.{ .s = text_len, .d = config.text_hidden_dim }, .f32),
-            .lyric_emb = .init(.{ .s = lyric_len, .d = config.text_hidden_dim }, .f32),
-            .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .f32),
+            .text_emb = .init(.{ .s = text_len, .d = config.text_hidden_dim }, .bf16),
+            .lyric_emb = .init(.{ .s = lyric_len, .d = config.text_hidden_dim }, .bf16),
+            .timbre_latent = .init(.{ .a = config.timbre_hidden_dim, .t = config.timbre_fix_frame }, .bf16),
             .audio_codes = .init(.{ .s = audiocodes }, .u32),
-            .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .f32),
+            .src_audio = .init(.{ .a = config.audio_acoustic_hidden_dim, .t = target_duration * 25 }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);

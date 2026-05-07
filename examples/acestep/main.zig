@@ -192,7 +192,7 @@ const Args = struct {
         \\
     ;
 };
-
+// 117s 184 585
 // 4090 (104s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
@@ -207,6 +207,11 @@ const Args = struct {
 
 // TODO: découper modèles en sous modèles pour compiler en parallèle plus vite
 // TODO: compiler prefill/compiler decode/load model all in parallel
+// TODO: improve CFG decode
+
+// TODO: several outputs (either tiled or batched)
+// TODO: reference audio
+// TODO: reference timbre
 
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
