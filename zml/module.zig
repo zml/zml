@@ -475,22 +475,20 @@ fn emitMlir(compilation_context: *CompilationContext, comptime func: anytype, ar
     _ = dialects.func.returns(compilation_context.mlir_ctx, output_info.values, .unknown(compilation_context.mlir_ctx)).appendTo(compilation_context.currentScope().block);
 
     for (input_info.shapes, input_info.shardings, 0..) |shape, sharding, i| {
-        const attr_str = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding);
-
-        const name, const attr = switch (compilation_context.partitioning.partitioner) {
-            .gspmd => .{ "mhlo.sharding", mlir.stringAttribute(compilation_context.mlir_ctx, attr_str) },
-            .shardy => .{ "sdy.sharding", try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str) },
+        const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
+        const name = switch (compilation_context.partitioning.partitioner) {
+            .gspmd => "mhlo.sharding",
+            .shardy => "sdy.sharding",
         };
 
         input_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));
     }
 
     for (output_info.shapes, output_info.shardings, 0..) |shape, sharding, i| {
-        const attr_str = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), shape, sharding);
-
-        const name, const attr = switch (compilation_context.partitioning.partitioner) {
-            .gspmd => .{ "mhlo.sharding", mlir.stringAttribute(compilation_context.mlir_ctx, attr_str) },
-            .shardy => .{ "sdy.sharding", try mlir.Attribute.parse(compilation_context.mlir_ctx, attr_str) },
+        const attr = try compilation_context.partitioning.tensorShardingAttr(compilation_context.arena.allocator(), compilation_context.mlir_ctx, shape, sharding);
+        const name = switch (compilation_context.partitioning.partitioner) {
+            .gspmd => "mhlo.sharding",
+            .shardy => "sdy.sharding",
         };
 
         output_attributes[i].appendAssumeCapacity(.named(compilation_context.mlir_ctx, name, attr));

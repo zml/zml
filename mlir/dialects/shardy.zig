@@ -409,3 +409,113 @@ test TensorShardingAttribute {
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>", w.written());
     }
 }
+
+pub const TensorShardingPerValueAttribute = opaque {
+    const M = mlir.Methods(TensorShardingPerValueAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.sdyAttributeIsATensorShardingPerValueAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, shardings: []const *const TensorShardingAttribute) *const TensorShardingPerValueAttribute {
+        const attrs: []const c.struct_MlirAttribute = @ptrCast(shardings);
+        return @ptrCast(c.sdyTensorShardingPerValueAttrGet(ctx.ptr(), @intCast(attrs.len), attrs.ptr).ptr);
+    }
+
+    pub fn asAttr(self: *const TensorShardingPerValueAttribute) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+};
+
+test TensorShardingPerValueAttribute {
+    const registry: *mlir.DialectRegistry = try .init();
+    defer registry.deinit();
+    registry.registerDialect("sdy");
+    mlir.registerFuncExtensions(registry);
+
+    var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+
+    const shardings: [2]*const TensorShardingAttribute = .{
+        try .init(std.testing.allocator, ctx, .{
+            .mesh = "mesh",
+            .dimensions = &.{.closed(&.{.link_x})},
+        }),
+        try .init(std.testing.allocator, ctx, .{
+            .mesh = "mesh",
+            .dimensions = &.{.replicated},
+            .replicated_axes = &.{.link_y},
+        }),
+    };
+
+    const per_value = TensorShardingPerValueAttribute.get(ctx, &shardings);
+
+    var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer w.deinit();
+
+    try per_value.asAttr().format(&w.writer);
+    try std.testing.expectEqualSlices(
+        u8,
+        "#sdy.sharding_per_value<[<@mesh, [{\"link_x\"}]>, <@mesh, [{}], replicated={\"link_y\"}>]>",
+        w.written(),
+    );
+}
+
+pub const ManualAxesAttribute = opaque {
+    const M = mlir.Methods(ManualAxesAttribute, c.MlirAttribute);
+
+    pub const isAFn = c.sdyAttributeIsAManualAxesAttr;
+    pub const ptr = M.ptr;
+    pub const eql = M.eql(c.mlirAttributeEqual);
+    pub const format = M.format(c.mlirAttributePrint);
+    pub const isA = M.isA;
+
+    pub fn get(ctx: *mlir.Context, axes: []const *const mlir.StringAttribute) *const ManualAxesAttribute {
+        comptime std.debug.assert(@sizeOf(c.struct_MlirAttribute) == @sizeOf(*const mlir.StringAttribute));
+        const attrs: []const c.struct_MlirAttribute = @ptrCast(axes);
+        return @ptrCast(c.sdyManualAxesAttrGet(ctx.ptr(), @intCast(attrs.len), attrs.ptr).ptr);
+    }
+
+    pub fn asAttr(self: *const ManualAxesAttribute) *const mlir.Attribute {
+        return @ptrCast(self);
+    }
+
+    pub fn numAxes(self: *const ManualAxesAttribute) usize {
+        return @intCast(c.sdyManualAxesAttrGetAxesSize(self.ptr()));
+    }
+
+    pub fn axis(self: *const ManualAxesAttribute, index: usize) []const u8 {
+        return mlir.string(c.sdyManualAxesAttrGetAxesElem(self.ptr(), @intCast(index)));
+    }
+};
+
+test ManualAxesAttribute {
+    const registry: *mlir.DialectRegistry = try .init();
+    defer registry.deinit();
+    registry.registerDialect("sdy");
+    mlir.registerFuncExtensions(registry);
+
+    var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
+    defer ctx.deinit();
+    ctx.loadAllAvailableDialects();
+
+    const axes: [2]*const mlir.StringAttribute = .{
+        @ptrCast(mlir.StringAttribute.init(ctx, "link_x")),
+        @ptrCast(mlir.StringAttribute.init(ctx, "link_y")),
+    };
+
+    const manual_axes = ManualAxesAttribute.get(ctx, &axes);
+
+    try std.testing.expectEqual(@as(usize, 2), manual_axes.numAxes());
+    try std.testing.expectEqualStrings("link_x", manual_axes.axis(0));
+    try std.testing.expectEqualStrings("link_y", manual_axes.axis(1));
+
+    var w: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer w.deinit();
+
+    try manual_axes.asAttr().format(&w.writer);
+    try std.testing.expectEqualSlices(u8, "#sdy<manual_axes{\"link_x\", \"link_y\"}>", w.written());
+}

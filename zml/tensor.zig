@@ -146,8 +146,7 @@ pub const Tensor = struct {
         const ctx = CompilationContext.current();
         const partitioned_shape = self._shape.withPartitioning(axes_);
 
-        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, partitioned_shape, null) catch unreachable;
-        defer ctx.allocator.free(attr);
+        const attr = ctx.partitioning.tensorShardingAttr(ctx.allocator, ctx.mlir_ctx, partitioned_shape, null) catch unreachable;
 
         const op_result = switch (ctx.partitioning.partitioner) {
             .shardy => blk: {
@@ -155,7 +154,7 @@ pub const Tensor = struct {
                     .operands = .{ .flat = &.{self.value()} },
                     .results = .{ .flat = &.{self.value().type_()} },
                     .attributes = &.{
-                        .named(ctx.mlir_ctx, "sharding", mlir.Attribute.parse(ctx.mlir_ctx, attr) catch unreachable),
+                        .named(ctx.mlir_ctx, "sharding", attr),
                     },
                 }).appendTo(currentBlock());
                 break :blk op.result(0);
@@ -170,7 +169,7 @@ pub const Tensor = struct {
                         .has_side_effect = false,
                         .backend_config = .{ .original = "" },
                         .additional_attributes = &.{
-                            .named(ctx.mlir_ctx, "mhlo.sharding", mlir.stringAttribute(ctx.mlir_ctx, attr)),
+                            .named(ctx.mlir_ctx, "mhlo.sharding", attr),
                         },
                     },
                     .unknown(ctx.mlir_ctx),
