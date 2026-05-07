@@ -528,12 +528,10 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var uncond_prompt_buffer: zml.Buffer = try .scalar(io, platform, uncond_tok.len - 1, .u32, sharding);
     defer uncond_prompt_buffer.deinit();
     
-    var cond_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    var uncond_token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
-    defer cond_token_slice.free(allocator);
-    defer uncond_token_slice.free(allocator);
-    var cond_token_buffer: zml.Buffer = try .fromSlice(io, platform, cond_token_slice, sharding);
-    var uncond_token_buffer: zml.Buffer = try .fromSlice(io, platform, uncond_token_slice, sharding);
+    var token_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = 1 }, .u32));
+    defer token_slice.free(allocator);
+    var cond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
+    var uncond_token_buffer: zml.Buffer = try .fromSlice(io, platform, token_slice, sharding);
     defer cond_token_buffer.deinit();
     defer uncond_token_buffer.deinit();
 
@@ -561,8 +559,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     acecfg.prefill_exe.callOpts(io, prefill_args, &prefill_results, .{ .wait = true });
     prefill_results.fill(.{ &cond_token_buffer, &uncond_token_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers, &rng_buffers });
 
-    try cond_token_buffer.toSlice(io, cond_token_slice);
-    try uncond_token_buffer.toSlice(io, uncond_token_slice);
+    try cond_token_buffer.toSlice(io, token_slice);
     zml_handler.toc(&zml_handler.timers.cfg.prefill);
     
     std.log.info("5Hz run decode CFG, need {d} audio codes", .{ nb_audio_codes });
@@ -571,12 +568,11 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
     var writer: *std.Io.Writer = &stdout.interface;
     for (0..nb_audio_codes) |i| {
         // collect and print generated sequence
-        const generated_token = cond_token_slice.items(u32)[0];
+        const generated_token = token_slice.items(u32)[0];
         const chunk = try tokenizer_decoder.decode(&.{ generated_token });
         try result_tok.append(allocator, generated_token);
         try result_str.appendSlice(allocator, chunk);
         try writer.writeAll(chunk);
-        try writer.flush();
         if (result_tok.items.len == nb_audio_codes) break;
 
         var cond_pos_buffer: zml.Buffer = try .scalar(io, platform, cond_tok.len + i, .u32, sharding);
@@ -595,8 +591,7 @@ pub fn generateAudioCodes(zml_handler: *main.Zml_handler, acecfg: *acellm_.AceCf
         acecfg.decode_exe.callOpts(io, decode_args, &decode_results, .{ .wait = true });
         decode_results.fill(.{ &cond_token_buffer, &uncond_token_buffer, &acecfg.cond_kv_cache_buffers, &acecfg.uncond_kv_cache_buffers, &rng_buffers });
         
-        try cond_token_buffer.toSlice(io, cond_token_slice);
-        try uncond_token_buffer.toSlice(io, uncond_token_slice);
+        try cond_token_buffer.toSlice(io, token_slice);
     }
     try writer.writeAll("\n");
     try writer.flush();

@@ -195,17 +195,17 @@ const Args = struct {
     ;
 };
 
-// 4090
-// bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --local-files --instru --llm-size=0
+// 4090 (104s audio)
+// bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total
-// info:   llm    0.36s   12.75s    1.60s    0.07s    0.75s   15.53s
-// info:   cfg    0.00s   26.74s    0.00s    0.03s    2.06s   28.84s
-// info:   emb    0.01s    2.52s    1.42s    0.01s    0.00s    4.16s
-// info:   enc    0.01s    5.18s    1.35s    0.17s    0.00s    6.72s
-// info:   dit    0.00s    4.78s    1.39s    0.37s    0.38s    6.55s
-// info:   vae    0.01s   11.11s    1.18s    0.22s    0.00s   12.53s
-// info:   wav                                                 1.58s
-// info: total                                                75.97s
+// info:   llm    0.27s   12.15s    1.26s    0.07s    1.46s   15.22s
+// info:   cfg    0.00s   27.17s    0.00s    0.09s   11.49s   38.76s
+// info:   emb    0.00s    2.39s    1.12s    0.01s    0.00s    3.72s
+// info:   enc    0.01s    5.08s    1.25s    0.18s    0.00s    6.52s
+// info:   dit    0.00s    5.21s    1.31s    0.63s    0.63s    7.16s
+// info:   vae    0.01s   17.65s    1.10s    0.36s    0.00s   19.15s
+// info:   wav                                                 1.87s
+// info: total                                                92.44s
 
 // TODO: découper modèles en sous modèles pour compiler en parallèle plus vite
 // TODO: compiler prefill/compiler decode/load model all in parallel
