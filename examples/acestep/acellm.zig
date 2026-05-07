@@ -412,7 +412,6 @@ pub const AceLlm = struct {
         const logits, const updated_kv_cache = self.computeLogits(tokens, token_index, kv_cache);        
         const next_logits = logits.dynamicSlice1d(logits.axis(.s), .{ .start = pred_index.squeeze(.s), .len = 1 });
         const text_logits = next_logits.slice1d(.voc, self.phase.phase1_voc);
-
         const next_token, const new_rng = sampleNucleus(text_logits, rng);
         return .{ next_token.convert(tokens.dtype()), updated_kv_cache.reuseBuffer(kv_cache), new_rng };
     }
