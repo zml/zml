@@ -20,7 +20,7 @@ single_version_override(
 
 bazel_dep(name = "pybind11_bazel", version = "2.13.6")
 bazel_dep(name = "re2", version = "2025-11-05", repo_name = "com_googlesource_code_re2")
-bazel_dep(name = "rules_cc", version = "0.2.16")
+bazel_dep(name = "rules_cc", version = "0.2.18")
 bazel_dep(name = "rules_distroless", version = "0.6.2")
 bazel_dep(name = "rules_license", version = "1.0.0")
 bazel_dep(name = "rules_oci", version = "2.2.7")
@@ -33,6 +33,10 @@ git_override(
     commit = "b65a2bb460b9dbcbcc3231ba648c3c1a266c4eb5",
     remote = "https://github.com/zml/rules_zig.git",
 )
+# local_path_override(
+#     module_name = "rules_zig",
+#     path = "../rules_zig",
+# )
 
 bazel_dep(name = "tar.bzl", version = "0.9.0")
 bazel_dep(name = "llvm", version = "0.7.3")
@@ -79,6 +83,37 @@ zig.mirrors(urls = [
     "https://ziglang.org/builds/",
 ])
 use_repo(zig, "zig_toolchains")
+
+register_toolchains("//zig/toolchain:all")
+register_toolchains("@rules_zig//zig/target:all")
+register_toolchains("@zig_toolchains//:all")
+###
+
+llvm_21_kvx = use_extension("//third_party/llvm-21-kvx:repos.bzl", "llvm_21_kvx")
+use_repo(
+    llvm_21_kvx,
+    **{
+        "llvm-21-kvx-raw": "llvm-raw",
+        "llvm-21-kvx-zlib": "llvm_zlib",
+        "llvm-21-kvx-zstd": "llvm_zstd",
+    }
+)
+
+zig_source = use_extension("//:third_party/zig.bzl", "zig")
+
+inject_repo(
+    zig_source,
+    "rules_python",
+    "rules_cc",
+    "rules_shell",
+    **{
+        "llvm-raw": "llvm-21-kvx-raw",
+        "llvm_zlib": "llvm-21-kvx-zlib",
+        "llvm_zstd": "llvm-21-kvx-zstd",
+    }
+)
+
+use_repo(zig_source, "zig")
 
 register_toolchains("@rules_zig//zig/target:all")
 

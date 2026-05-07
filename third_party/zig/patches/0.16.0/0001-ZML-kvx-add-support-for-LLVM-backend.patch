@@ -1,0 +1,134 @@
+diff --git a/lib/std/Target/kvx.zig b/lib/std/Target/kvx.zig
+index a5cb7a24..7e3303e6 100644
+--- a/lib/std/Target/kvx.zig
++++ b/lib/std/Target/kvx.zig
+@@ -49,14 +49,14 @@ pub const all_features = blk: {
+ pub const cpu = struct {
+     pub const coolidge_v1: CpuModel = .{
+         .name = "coolidge_v1",
+-        .llvm_name = null,
++        .llvm_name = "kv3-1",
+         .features = featureSet(&[_]Feature{
+             .v3_1,
+         }),
+     };
+     pub const coolidge_v2: CpuModel = .{
+         .name = "coolidge_v2",
+-        .llvm_name = null,
++        .llvm_name = "kv3-2",
+         .features = featureSet(&[_]Feature{
+             .v3_2,
+         }),
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index 1ba3b272..e20af823 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -65,6 +65,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
+         .bpfel => "bpfel",
+         .bpfeb => "bpfeb",
+         .csky => "csky",
++        .kvx => "kvx",
+         .hexagon => "hexagon",
+         .loongarch32 => "loongarch32",
+         .loongarch64 => "loongarch64",
+@@ -110,7 +111,6 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
+         .hppa,
+         .hppa64,
+         .kalimba,
+-        .kvx,
+         .microblaze,
+         .microblazeel,
+         .or1k,
+@@ -366,6 +366,7 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
+         .avr => "e-P1-p:16:8-i8:8-i16:8-i32:8-i64:8-f32:8-f64:8-n8-a:8",
+         .bpfeb => "E-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
+         .bpfel => "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
++        .kvx => "e-S256-p:64:64-i1:8-i8:8-i16:16-i32:32-i64:64-v64:64-v128:128-v256:256-v512:256-v1024:256-f16:16-f32:32-f64:64-a:0:64-m:e-n32:64",
+         .msp430 => "e-m:e-p:16:16-i32:16-i64:16-f32:16-f64:16-a:8-n8:16-S16",
+         .mips => "E-m:m-p:32:32-i8:8:32-i16:16:32-i64:64-n32-S64",
+         .mipsel => "e-m:m-p:32:32-i8:8:32-i16:16:32-i64:64-n32-S64",
+@@ -476,7 +477,6 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
+         .hppa,
+         .hppa64,
+         .kalimba,
+-        .kvx,
+         .microblaze,
+         .microblazeel,
+         .or1k,
+@@ -4899,6 +4899,12 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
+             bindings.LLVMInitializeSPIRVTargetMC();
+             bindings.LLVMInitializeSPIRVAsmPrinter();
+         },
++        .kvx => {
++            bindings.LLVMInitializeKVXTarget();
++            bindings.LLVMInitializeKVXTargetInfo();
++            bindings.LLVMInitializeKVXTargetMC();
++            bindings.LLVMInitializeKVXAsmPrinter();
++        },
+ 
+         // LLVM does does not have a backend for these.
+         .alpha,
+@@ -4906,7 +4912,6 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
+         .hppa,
+         .hppa64,
+         .kalimba,
+-        .kvx,
+         .microblaze,
+         .microblazeel,
+         .or1k,
+diff --git a/src/codegen/llvm/bindings.zig b/src/codegen/llvm/bindings.zig
+index 2baabe99..e83af2e5 100644
+--- a/src/codegen/llvm/bindings.zig
++++ b/src/codegen/llvm/bindings.zig
+@@ -214,6 +214,7 @@ pub extern fn LLVMInitializeVETargetInfo() void;
+ pub extern fn LLVMInitializeARCTargetInfo() void;
+ pub extern fn LLVMInitializeLoongArchTargetInfo() void;
+ pub extern fn LLVMInitializeSPIRVTargetInfo() void;
++pub extern fn LLVMInitializeKVXTargetInfo() void;
+ 
+ pub extern fn LLVMInitializeAArch64Target() void;
+ pub extern fn LLVMInitializeAMDGPUTarget() void;
+@@ -239,6 +240,7 @@ pub extern fn LLVMInitializeCSKYTarget() void;
+ pub extern fn LLVMInitializeARCTarget() void;
+ pub extern fn LLVMInitializeLoongArchTarget() void;
+ pub extern fn LLVMInitializeSPIRVTarget() void;
++pub extern fn LLVMInitializeKVXTarget() void;
+ 
+ pub extern fn LLVMInitializeAArch64TargetMC() void;
+ pub extern fn LLVMInitializeAMDGPUTargetMC() void;
+@@ -264,6 +266,7 @@ pub extern fn LLVMInitializeVETargetMC() void;
+ pub extern fn LLVMInitializeARCTargetMC() void;
+ pub extern fn LLVMInitializeLoongArchTargetMC() void;
+ pub extern fn LLVMInitializeSPIRVTargetMC() void;
++pub extern fn LLVMInitializeKVXTargetMC() void;
+ 
+ pub extern fn LLVMInitializeAArch64AsmPrinter() void;
+ pub extern fn LLVMInitializeAMDGPUAsmPrinter() void;
+@@ -287,6 +290,7 @@ pub extern fn LLVMInitializeVEAsmPrinter() void;
+ pub extern fn LLVMInitializeARCAsmPrinter() void;
+ pub extern fn LLVMInitializeLoongArchAsmPrinter() void;
+ pub extern fn LLVMInitializeSPIRVAsmPrinter() void;
++pub extern fn LLVMInitializeKVXAsmPrinter() void;
+ 
+ pub extern fn LLVMInitializeAArch64AsmParser() void;
+ pub extern fn LLVMInitializeAMDGPUAsmParser() void;
+diff --git a/src/target.zig b/src/target.zig
+index 3d04c06f..cb1169c0 100644
+--- a/src/target.zig
++++ b/src/target.zig
+@@ -194,6 +194,7 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat)
+         .bpfel,
+         .bpfeb,
+         .hexagon,
++        .kvx,
+         .loongarch32,
+         .loongarch64,
+         .m68k,
+@@ -240,7 +241,6 @@ pub fn hasLlvmSupport(target: *const std.Target, ofmt: std.Target.ObjectFormat)
+         .hppa,
+         .hppa64,
+         .kalimba,
+-        .kvx,
+         .microblaze,
+         .microblazeel,
+         .or1k,

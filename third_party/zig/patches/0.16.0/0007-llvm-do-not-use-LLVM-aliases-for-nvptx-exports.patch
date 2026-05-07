@@ -1,0 +1,126 @@
+From 9ab698128f89a4fd7a00dbcdb5c4e6f6bf000b08 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Thu, 23 Apr 2026 09:23:20 +0000
+Subject: [PATCH 1/3] llvm: do not use LLVM aliases for nvptx exports
+
+---
+ src/codegen/llvm.zig  | 50 +++++++++++++++++++++++++++----------------
+ test/llvm_targets.zig |  8 +++++++
+ 2 files changed, 40 insertions(+), 18 deletions(-)
+
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index 1ba3b272da..1e253dadbc 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -1761,7 +1761,14 @@ pub const Object = struct {
+ 
+         const llvm_global_ty = global_index.typeOf(&o.builder);
+ 
+-        // All exports are represented as aliases to the original global.
++        const direct_export_global =
++            zcu.getTarget().cpu.arch.isNvptx() and
++            ty.zigTypeTag(zcu) == .@"fn" and
++            export_indices.len == 1;
++
++        // All exports are represented as aliases to the original global, except that NVPTX
++        // exported functions cannot use aliases so the single-export case renames the function
++        // global directly.
+ 
+         // TODO: we currently do not delete old exports. To do that we'll need to track which
+         // globals actually *are* exports.
+@@ -1776,8 +1783,12 @@ pub const Object = struct {
+             //
+             // The name, aliasee, and type will be set within this block. Other properties of the
+             // alias will be set below.
+-            const alias_global: Builder.Global.Index = global: {
++            const export_global: Builder.Global.Index = global: {
+                 const existing_global = o.builder.getGlobal(exp_name) orelse {
++                    if (direct_export_global) {
++                        try global_index.rename(exp_name, &o.builder);
++                        break :global global_index;
++                    }
+                     // There is no existing global with this name, so make a new alias.
+                     const alias = try o.builder.addAlias(
+                         exp_name,
+@@ -1791,19 +1802,21 @@ pub const Object = struct {
+                 // need to figure out what to do with the existing global instead.
+                 switch (existing_global.ptrConst(&o.builder).kind) {
+                     .alias => |alias| {
++                        if (direct_export_global) unreachable;
+                         // We can just repurpose the existing alias.
+                         alias.setAliasee(global_index.toConst(), &o.builder);
+                         alias.ptrConst(&o.builder).global.ptr(&o.builder).type = global_index.typeOf(&o.builder);
+                         break :global existing_global;
+                     },
+                     .variable, .function => {
+-                        // This must be an extern, which is no good to us---we need an alias. The
+-                        // extern should refer to the value we're exporting, so replace it with the
+-                        // exported value. That will free up the name for us to create a new alias.
+-                        // We need to make a new global which is an alias. Replace this existing one
+-                        // with the target global, making the name available and fixing references
+-                        // to this global to point to the target.
++                        // This must be an extern. Replace it with the target global, making the
++                        // name available and fixing references to this global to point to the
++                        // target.
+                         try existing_global.replace(global_index, &o.builder);
++                        if (direct_export_global) {
++                            try global_index.rename(exp_name, &o.builder);
++                            break :global global_index;
++                        }
+                         // The name is now free, so create an alias.
+                         const alias = try o.builder.addAlias(
+                             exp_name,
+@@ -1817,21 +1830,22 @@ pub const Object = struct {
+                 }
+             };
+ 
+-            // Now for a bit of setup which
+-
+-            // We need the alias to *not* be `unnamed_addr` to ensure that the alias address equals
+-            // the address of the original global.
+-            alias_global.setUnnamedAddr(.default, &o.builder);
++            // We need exported globals to *not* be `unnamed_addr` to ensure that the exported
++            // symbol address equals the address of the original global.
++            export_global.setUnnamedAddr(.default, &o.builder);
+ 
+-            if (comp.config.dll_export_fns and exp.opts.visibility != .hidden)
+-                alias_global.setDllStorageClass(.dllexport, &o.builder);
+-            alias_global.setLinkage(switch (exp.opts.linkage) {
+-                .internal => if (o.builder.strip) .private else .internal, // we still did useful work in replacing an existing symbol if there was one
++            if (comp.config.dll_export_fns and exp.opts.visibility != .hidden) {
++                export_global.setDllStorageClass(.dllexport, &o.builder);
++            } else {
++                export_global.setDllStorageClass(.default, &o.builder);
++            }
++            export_global.setLinkage(switch (exp.opts.linkage) {
++                .internal => if (o.builder.strip) .private else .internal,
+                 .strong => .external,
+                 .weak => .weak_odr,
+                 .link_once => .linkonce_odr,
+             }, &o.builder);
+-            alias_global.setVisibility(switch (exp.opts.visibility) {
++            export_global.setVisibility(switch (exp.opts.visibility) {
+                 .default => .default,
+                 .hidden => .hidden,
+                 .protected => .protected,
+diff --git a/test/llvm_targets.zig b/test/llvm_targets.zig
+index 140f4ab185..c565fd1843 100644
+--- a/test/llvm_targets.zig
++++ b/test/llvm_targets.zig
+@@ -362,5 +362,13 @@ pub fn addCases(
+         };
+         var case = ctx.addObjLlvm("llvm_targets", b.resolveTargetQuery(target_query));
+         case.addCompile("");
++        if (target_query.cpu_arch) |arch| {
++            if (arch.isNvptx()) {
++                case = ctx.addObjLlvm("llvm_targets_nvptx_export_kernel", b.resolveTargetQuery(target_query));
++                case.addCompile(
++                    \\export fn entry() callconv(.kernel) void {}
++                );
++            }
++        }
+     }
+ }
+-- 
+2.48.1
+

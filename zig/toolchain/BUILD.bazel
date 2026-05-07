@@ -1,0 +1,14 @@
+load("@rules_zig//zig:toolchain.bzl", "zig_toolchain")
+load(":toolchains.bzl", "declare_toolchains")
+
+zig_toolchain(
+    name = "zig_from_source",
+    zig_cache = "/var/tmp/zig-cache",
+    zig_exe = "@zig//:zig",
+    zig_h = "@zig//:zig_h",
+    zig_lib = "@zig//:lib_dir",
+    zig_version = "0.16.0",
+    translate_c = "@zml//:translate-c",
+)
+
+declare_toolchains()

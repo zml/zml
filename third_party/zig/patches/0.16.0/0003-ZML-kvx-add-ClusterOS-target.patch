@@ -1,0 +1,80 @@
+diff --git a/lib/std/Target.zig b/lib/std/Target.zig
+index 03ca4a77..1b837922 100644
+--- a/lib/std/Target.zig
++++ b/lib/std/Target.zig
+@@ -67,6 +67,7 @@ pub const Os = struct {
+         opencl,
+         opengl,
+         vulkan,
++        cos,
+ 
+         // LLVM tags deliberately omitted:
+         // - bridgeos
+@@ -170,6 +171,7 @@ pub const Os = struct {
+                 .emscripten,
+ 
+                 .mesa3d,
++                .cos,
+                 => .none,
+ 
+                 .contiki,
+@@ -399,6 +401,7 @@ pub const Os = struct {
+                 .emscripten,
+ 
+                 .mesa3d,
++                .cos,
+                 => .{ .none = {} },
+ 
+                 .contiki => .{
+@@ -942,6 +945,7 @@ pub const Abi = enum {
+             .opencl,
+             .opengl,
+             .vulkan,
++            .cos,
+             => .none,
+         };
+     }
+@@ -2198,6 +2202,7 @@ pub fn requiresLibC(target: *const Target) bool {
+         .dragonfly,
+         .haiku,
+         .serenity,
++        .cos,
+         => true,
+ 
+         // Android API levels prior to 29 did not have native TLS support. For these API levels, TLS
+@@ -2362,6 +2367,7 @@ pub const DynamicLinker = struct {
+             .tvos,
+             .visionos,
+             .watchos,
++            .cos,
+             => .arch_os,
+             .hurd,
+             .linux,
+@@ -2815,6 +2821,7 @@ pub const DynamicLinker = struct {
+             .opencl,
+             .opengl,
+             .vulkan,
++            .cos,
+             => none,
+ 
+             // TODO go over each item in this list and either move it to the above list, or
+@@ -3151,6 +3158,7 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
+         .hurd,
+         .illumos,
+         .linux,
++        .cos,
+         .plan9,
+         .rtems,
+         .serenity,
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index 1ba3b272..e9c9d6aa 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -235,6 +235,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
+         .serenity => "serenity",
+         .vulkan => "vulkan",
+         .managarm => "managarm",
++        .cos => "cos",
+ 
+         .@"3ds",
+         .contiki,

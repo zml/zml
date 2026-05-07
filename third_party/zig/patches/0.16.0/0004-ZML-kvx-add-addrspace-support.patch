@@ -1,0 +1,110 @@
+From 69bc2934261058022396b9cb45c08d072bffef0d Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Wed, 14 Jan 2026 09:16:24 +0000
+Subject: [PATCH 4/5] [ZML] kvx: add addrspace support
+
+---
+ lib/std/Target.zig           |  4 +++-
+ lib/std/builtin.zig          |  6 ++++++
+ lib/std/zig/llvm/Builder.zig | 12 ++++++++++++
+ src/codegen/llvm.zig         | 10 ++++++++++
+ src/codegen/spirv/Module.zig |  4 ++++
+ 5 files changed, 35 insertions(+), 1 deletion(-)
+
+diff --git a/lib/std/Target.zig b/lib/std/Target.zig
+index 81ee01e419..d4b1b62d39 100644
+--- a/lib/std/Target.zig
++++ b/lib/std/Target.zig
+@@ -2270,10 +2270,12 @@ pub fn supportsAddressSpace(
+         .cog, .hub => arch == .propeller,
+         .lut => arch == .propeller and std.Target.propeller.featureSetHas(target.cpu.features, .p2),
+ 
+-        .global, .local, .shared => is_gpu,
++        .global, .local => is_gpu or arch == .kvx,
++        .shared => is_gpu,
+         .constant => is_gpu and (context == null or context == .constant),
+         .param => is_nvptx,
+         .input, .output, .uniform, .push_constant, .storage_buffer, .physical_storage_buffer => is_spirv,
++        .bypass, .preload, .speculate, .scall => arch == .kvx,
+     };
+ }
+ 
+diff --git a/lib/std/builtin.zig b/lib/std/builtin.zig
+index 00ae6199d1..c5565ceeb5 100644
+--- a/lib/std/builtin.zig
++++ b/lib/std/builtin.zig
+@@ -529,6 +529,12 @@ pub const AddressSpace = enum(u5) {
+ 
+     /// This address space only addresses the "lookup" ram
+     lut,
++
++    // KVX address spaces.
++    bypass,
++    preload,
++    speculate,
++    scall,
+ };
+ 
+ /// This data structure is used by the Zig language code generation and
+diff --git a/lib/std/zig/llvm/Builder.zig b/lib/std/zig/llvm/Builder.zig
+index 5001a0c375..878d0f6271 100644
+--- a/lib/std/zig/llvm/Builder.zig
++++ b/lib/std/zig/llvm/Builder.zig
+@@ -1989,6 +1989,18 @@ pub const AddrSpace = enum(u24) {
+         pub const funcref: AddrSpace = @enumFromInt(20);
+     };
+ 
++    // See llvm/include/llvm/Target/KVX/KVXCommon.h
++    pub const kvx = struct {
++        pub const normal: AddrSpace = @enumFromInt(0);
++        pub const ocl_global: AddrSpace = @enumFromInt(1);
++        pub const ocl_constant: AddrSpace = @enumFromInt(2);
++        pub const ocl_local: AddrSpace = @enumFromInt(3);
++        pub const bypass: AddrSpace = @enumFromInt(256);
++        pub const preload: AddrSpace = @enumFromInt(257);
++        pub const speculate: AddrSpace = @enumFromInt(258);
++        pub const scall: AddrSpace = @enumFromInt(259);
++    };
++
+     pub fn format(addr_space: AddrSpace, w: *Writer) Writer.Error!void {
+         return Prefixed.format(.{ .addr_space = addr_space, .prefix = "" }, w);
+     }
+diff --git a/src/codegen/llvm.zig b/src/codegen/llvm.zig
+index 6f23268322..adb27770ee 100644
+--- a/src/codegen/llvm.zig
++++ b/src/codegen/llvm.zig
+@@ -11779,6 +11779,16 @@ fn llvmAddrSpaceInfo(target: *const std.Target) []const AddrSpaceInfo {
+         .m68k => &.{
+             .{ .zig = .generic, .llvm = .default, .abi = 16, .pref = 32 },
+         },
++        .kvx => &.{
++            .{ .zig = .generic, .llvm = Builder.AddrSpace.kvx.normal, .size = 64, .abi = 64 },
++            .{ .zig = .global, .llvm = Builder.AddrSpace.kvx.ocl_global, .size = 64, .abi = 64 },
++            .{ .zig = .constant, .llvm = Builder.AddrSpace.kvx.ocl_constant, .size = 64, .abi = 64 },
++            .{ .zig = .local, .llvm = Builder.AddrSpace.kvx.ocl_local, .size = 64, .abi = 64 },
++            .{ .zig = .bypass, .llvm = Builder.AddrSpace.kvx.bypass, .size = 64, .abi = 64 },
++            .{ .zig = .preload, .llvm = Builder.AddrSpace.kvx.preload, .size = 64, .abi = 64 },
++            .{ .zig = .speculate, .llvm = Builder.AddrSpace.kvx.speculate, .size = 64, .abi = 64 },
++            .{ .zig = .scall, .llvm = Builder.AddrSpace.kvx.scall, .size = 64, .abi = 64 },
++        },
+         else => &.{
+             .{ .zig = .generic, .llvm = .default },
+         },
+diff --git a/src/codegen/spirv/Module.zig b/src/codegen/spirv/Module.zig
+index 6b6c1f0ab3..e412711963 100644
+--- a/src/codegen/spirv/Module.zig
++++ b/src/codegen/spirv/Module.zig
+@@ -949,6 +949,10 @@ pub fn storageClass(module: *Module, as: std.builtin.AddressSpace) spec.StorageC
+         .cog,
+         .lut,
+         .hub,
++        .bypass,
++        .preload,
++        .speculate,
++        .scall,
+         => unreachable,
+     };
+ }
+-- 
+2.50.1 (Apple Git-155)
+

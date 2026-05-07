@@ -1,0 +1,7 @@
+load("@rules_zig//zig:defs.bzl", "zig_library")
+
+zig_library(
+    name = "build_options",
+    main = "build_options.zig",
+    visibility = ["//visibility:public"],
+)

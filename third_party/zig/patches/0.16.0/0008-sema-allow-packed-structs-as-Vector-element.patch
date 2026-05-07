@@ -1,0 +1,24 @@
+From 4dcb58dade124dc7d1b1f4a9bb0ac89cf01a71e7 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Sun, 26 Apr 2026 21:55:28 +0000
+Subject: [PATCH 2/3] sema: allow packed structs as @Vector element
+
+---
+ src/Sema.zig | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/src/Sema.zig b/src/Sema.zig
+index 9851c0e02c..23fb31c179 100644
+--- a/src/Sema.zig
++++ b/src/Sema.zig
+@@ -22425,6 +22425,7 @@ fn checkVectorElemType(
+     switch (ty.zigTypeTag(zcu)) {
+         .int, .float, .bool => return,
+         .optional, .pointer => if (ty.isPtrAtRuntime(zcu)) return,
++        .@"struct" => if (ty.containerLayout(zcu) == .@"packed") return,
+         else => {},
+     }
+     return sema.fail(block, ty_src, "expected integer, float, bool, or pointer for the vector element type; found '{f}'", .{ty.fmt(pt)});
+-- 
+2.48.1
+

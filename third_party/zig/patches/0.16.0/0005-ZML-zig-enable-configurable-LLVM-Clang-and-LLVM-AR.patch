@@ -1,0 +1,35 @@
+From 9a703c5acc5f8d4c983300e898205b2d15e4d713 Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Wed, 11 Mar 2026 17:25:37 +0100
+Subject: [PATCH 5/5] [ZML] zig: enable configurable LLVM Clang and LLVM AR
+
+This prevents building them as we don't need it.
+---
+ src/main.zig | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/src/main.zig b/src/main.zig
+index 7167cae4e2..a86e87de3e 100644
+--- a/src/main.zig
++++ b/src/main.zig
+@@ -5942,7 +5942,7 @@ fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
+ }
+ 
+ pub fn clangMain(alloc: Allocator, args: []const []const u8) error{OutOfMemory}!u8 {
+-    if (!build_options.have_llvm)
++    if (!build_options.have_llvm_clang)
+         fatal("`zig cc` and `zig c++` unavailable: compiler built without LLVM extensions", .{});
+ 
+     var arena_instance = std.heap.ArenaAllocator.init(alloc);
+@@ -5956,7 +5956,7 @@ pub fn clangMain(alloc: Allocator, args: []const []const u8) error{OutOfMemory}!
+ }
+ 
+ pub fn llvmArMain(alloc: Allocator, args: []const []const u8) error{OutOfMemory}!u8 {
+-    if (!build_options.have_llvm)
++    if (!build_options.have_llvm_ar)
+         fatal("`zig ar`, `zig dlltool`, `zig ranlib', and `zig lib` unavailable: compiler built without LLVM extensions", .{});
+ 
+     var arena_instance = std.heap.ArenaAllocator.init(alloc);
+-- 
+2.50.1 (Apple Git-155)
+

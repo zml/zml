@@ -1,0 +1,34 @@
+From d9d91a6f2c7c55d50cc1ebb3de3d1e88b2796fe6 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Tue, 14 Apr 2026 17:36:00 +0200
+Subject: [PATCH 6/6] [ZML] zig: adapt to LLVM OptBisect API change
+
+LLVM removed `OptBisect::setLimit` in favor of interval-based configuration.
+Translate Zig's `-fopt-bisect-limit=N` knob to the new API while preserving
+the previous semantics for `N == 0`.
+---
+ src/zig_llvm.cpp | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/src/zig_llvm.cpp b/src/zig_llvm.cpp
+index 5f3d95f510..a2ec6e7e48 100644
+--- a/src/zig_llvm.cpp
++++ b/src/zig_llvm.cpp
+@@ -439,7 +439,13 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
+ 
+ void ZigLLVMSetOptBisectLimit(LLVMContextRef context_ref, int limit) {
+     static OptBisect opt_bisect;
+-    opt_bisect.setLimit(limit);
++    if (limit == 0) {
++        opt_bisect.setIntervals({{0, 0}});
++    } else if (limit > 0) {
++        opt_bisect.setIntervals({{1, limit}});
++    } else {
++        opt_bisect.clearIntervals();
++    }
+     unwrap(context_ref)->setOptPassGate(opt_bisect);
+ }
+ 
+ struct ZigDiagnosticHandler : public DiagnosticHandler {
+-- 
+2.50.1 (Apple Git-155)

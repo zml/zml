@@ -1,0 +1,39 @@
+From b340133ab426f664619b2cb17e597b015899324b Mon Sep 17 00:00:00 2001
+From: Steeve Morin <steeve@zml.ai>
+Date: Wed, 11 Mar 2026 17:50:35 +0100
+Subject: [PATCH 2/5] [ZML] sema,target: authorize Zig types in kvx callconv
+
+it's so that we can use intrinsics
+---
+ src/Type.zig   | 2 +-
+ src/target.zig | 1 +
+ 2 files changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/src/Type.zig b/src/Type.zig
+index 841ca38b0e..0794db5219 100644
+--- a/src/Type.zig
++++ b/src/Type.zig
+@@ -3223,7 +3223,7 @@ fn validateExternCallconv(cc: std.builtin.CallingConvention) bool {
+     return switch (cc) {
+         // For now we want to authorize PTX kernel to use zig objects, even if we end up exposing the ABI.
+         // The goal is to experiment with more integrated CPU/GPU code.
+-        .nvptx_kernel => true,
++        .nvptx_kernel, .kvx_lp64, .kvx_ilp32 => true,
+         else => !target_util.fnCallConvAllowsZigTypes(cc),
+     };
+ }
+diff --git a/src/target.zig b/src/target.zig
+index e62d91459e..01412da66c 100644
+--- a/src/target.zig
++++ b/src/target.zig
+@@ -875,6 +875,7 @@ pub fn fnCallConvAllowsZigTypes(cc: std.builtin.CallingConvention) bool {
+         // we end up exposing the ABI. The goal is to experiment with more
+         // integrated CPU/GPU code.
+         .nvptx_kernel => true,
++        .kvx_lp64, .kvx_ilp32 => true,
+         else => false,
+     };
+ }
+-- 
+2.50.1 (Apple Git-155)
+

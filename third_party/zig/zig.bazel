@@ -1,0 +1,87 @@
+load("@rules_cc//cc:defs.bzl", "cc_library")
+load("@rules_zig//zig:defs.bzl", "zig_binary", "zig_library")
+
+zig_library(
+    name = "aro",
+    srcs = glob(["lib/compiler/aro/**/*.zig"]),
+    extra_srcs = glob(
+        include = ["lib/compiler/aro/**"],
+        exclude = ["lib/compiler/aro/**/*.zig"],
+    ),
+    main = "lib/compiler/aro/aro.zig",
+)
+
+zig_library(
+    name = "compiler_mod",
+    srcs = glob(["src/**/*.zig"]),
+    extra_srcs = glob(
+        include = ["src/**"],
+        exclude = [
+            "src/**/*.zig",
+            "lib/compiler/aro/**",
+        ],
+    ),
+    main = "src/main.zig",
+    deps = [
+        ":aro",
+        ":zig_llvm",
+        ":std",
+        "@@//third_party/zig:build_options",
+    ],
+)
+
+cc_library(
+    name = "zig_llvm",
+    srcs = [
+        "src/zig_llvm.cpp",
+        "src/zig_llvm.h",
+    ],
+    copts = ["-std=c++17"],
+    linkopts = [
+        # Mandatory if we link with zig and not cc_common.link
+        "-lc++",
+    ],
+    defines = ["LLVM_BUILD_STATIC"],
+    deps = [
+        "@llvm-project//lld:COFF",
+        "@llvm-project//lld:Common",
+        "@llvm-project//lld:ELF",
+        "@llvm-project//lld:Wasm",
+        "@llvm-project//llvm:Analysis",
+        "@llvm-project//llvm:BitWriter",
+        "@llvm-project//llvm:IPO",
+        "@llvm-project//llvm:Instrumentation",
+        "@llvm-project//llvm:MC",
+        "@llvm-project//llvm:Object",
+        "@llvm-project//llvm:Passes",
+        "@llvm-project//llvm:Scalar",
+        "@llvm-project//llvm:Support",
+        "@llvm-project//llvm:Target",
+        "@llvm-project//llvm:TransformUtils",
+        "@llvm-project//llvm:ir_headers",
+    ],
+)
+
+zig_library(
+    name = "std",
+    srcs = glob(["lib/std/**/*.zig"]),
+    main = "lib/std/std.zig",
+)
+
+filegroup(
+    name = "lib_dir",
+    srcs = ["lib"],
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "zig_h",
+    srcs = ["lib/zig.h"],
+    visibility = ["//visibility:public"],
+)
+
+zig_binary(
+    name = "zig",
+    deps = [":compiler_mod"],
+    visibility = ["//visibility:public"],
+)
