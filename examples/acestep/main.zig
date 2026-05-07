@@ -10,8 +10,6 @@ const acedit_ = @import("acedit.zig");
 const acevae_ = @import("acevae.zig");
 const inference = @import("inference.zig");
 
-pub const hz_type = .f32;
-
 pub const std_options: std.Options = .{
     .log_level = .info,
 };

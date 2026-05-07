@@ -11,9 +11,6 @@ const aceenc_ = @import("aceenc.zig");
 const acedit_ = @import("acedit.zig");
 const acevae_ = @import("acevae.zig");
 
-const hz_type = main.hz_type;
-
-
 pub const AudioMetadata = struct {
     bpm: []const u8,
     caption: []const u8,
@@ -622,7 +619,7 @@ pub fn generateTextEmbedding(zml_handler: *main.Zml_handler, aceemb: *aceemb_.Ac
     const emb_dim = aceemb.config.hidden_size;
     
     // the result embeddings we return
-    const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, hz_type));
+    const embedding_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s = seq_len, .d = emb_dim }, .bf16));
     var embedding_buffer: zml.Buffer = try .fromSlice(io, platform, embedding_slice, sharding);
     defer embedding_buffer.deinit();
 
@@ -698,9 +695,9 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     });
     
     // the result latents we return
-    const x_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, hz_type));
-    const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, hz_type));
-    const encoded_conditions_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s_enc = s_enc, .d = emb_dim }, hz_type));
+    const x_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = audio_dim }, .bf16));
+    const context_latents_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .t = t_25hz, .a = 2 * audio_dim }, .bf16));
+    const encoded_conditions_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .s_enc = s_enc, .d = emb_dim }, .bf16));
     var x_buffer: zml.Buffer = try .fromSlice(io, platform, x_slice, sharding);
     var context_latents_buffer: zml.Buffer = try .fromSlice(io, platform, context_latents_slice, sharding);
     var encoded_conditions_buffer: zml.Buffer = try .fromSlice(io, platform, encoded_conditions_slice, sharding);
@@ -812,7 +809,7 @@ pub fn decodeAudioLatents(zml_handler: *main.Zml_handler, acevae: *acevae_.AceVa
     std.log.info("VAE call decode with input size : {d}x{d}", .{ audio_dim, t_25hz });
     
     // the result latents we return
-    const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, hz_type));
+    const audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = 2, .t = t_48khz }, .bf16));
     var audio_buffer: zml.Buffer = try .fromSlice(io, platform, audio_slice, sharding);
     defer audio_buffer.deinit();
     

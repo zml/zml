@@ -8,8 +8,6 @@ const main = @import("main.zig");
 
 const dialects = @import("mlir/dialects");
 
-const hz_type = main.hz_type;
-
 // TODO: clean the audiocodes vs silent source in cover/text2music mode
 
 pub const AceEnc_handler = struct {
@@ -344,7 +342,7 @@ pub const AceEnc = struct {
         _ = src_latent;
         //const latent_source = if (audio_codes) |codes| self.audiocode_encoder.forward(codes) else src_latent;
         // dim [a, t_25hz]
-        const latent_mask = zml.Tensor.constant(zml.DataType.constant(hz_type, 1)).broad(latent_source.shape());
+        const latent_mask = zml.Tensor.constant(zml.DataType.constant(.bf16, 1)).broad(latent_source.shape());
         
         // dim [t_25hz, 2 * a]
         const context_latents = zml.Tensor.concatenate(&.{ latent_source, latent_mask }, .a).transpose(.{ .t, .a });
@@ -352,7 +350,7 @@ pub const AceEnc = struct {
         // x is initialized with random gaussian noise
         const d_time = latent_source.dim(.t);
         const d_audio = latent_source.dim(.a);
-        const x_shape = zml.Shape.init(.{ .t = d_time, .a = d_audio}, hz_type);
+        const x_shape = zml.Shape.init(.{ .t = d_time, .a = d_audio}, .bf16);
         const x = zml.Tensor.Rng.normal(x_shape, .{}); // TODO: we can't seed the normal distribution ?
         
         return .{ x, context_latents, encoded_conditions };
@@ -410,7 +408,7 @@ pub const TextEncoder = struct {
     }
 
     pub fn forward(self: TextEncoder, text_emb: zml.Tensor) zml.Tensor {
-        const text_proj = self.text_projector.convert(hz_type).forward(text_emb.withTags(.{ .s_text, .d }));
+        const text_proj = self.text_projector.forward(text_emb.withTags(.{ .s_text, .d }));
         return text_proj.rename(.{ .d_out = .d }).rename(.{ .s_text = .s });
     }
 };
@@ -452,7 +450,7 @@ pub const LyricEncoder = struct {
     }
 
     pub fn forward(self: LyricEncoder, lyric_emb: zml.Tensor) zml.Tensor {
-        var lyric_proj = self.lyric_projector.convert(hz_type).forward(lyric_emb);
+        var lyric_proj = self.lyric_projector.forward(lyric_emb);
         lyric_proj = lyric_proj.rename(.{ .d_out = .d });
         for (self.lyric_layers) |layer| {
             // lyrics use full bidirectionnal attention : no masking
@@ -540,9 +538,9 @@ pub const SelfAttention = struct {
 
     // full/window bidirectional self attention, no kv caching. the attn_mask is precomputed
     pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
-        var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
-        var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
-        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
+        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
         
         const pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, .u32).withTags(.{ .s });
         
@@ -558,7 +556,7 @@ pub const SelfAttention = struct {
         
         const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        const delta = self.o_proj.forward(attn_output);
         return delta.rename(.{ .d_out = .d });
     }
 };
@@ -583,10 +581,10 @@ pub const MlpLayer = struct {
     }
 
     pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
-        const up_projection = input.dot(self.up_proj.convert(hz_type), .d);
-        const gate_projection = input.dot(self.gate_proj.convert(hz_type), .d);
+        const up_projection = input.dot(self.up_proj, .d);
+        const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.silu().mul(up_projection);
-        return activation.dot(self.down_proj.convert(hz_type), .d_out);
+        return activation.dot(self.down_proj, .d_out);
     }
 };
 
@@ -607,7 +605,7 @@ pub const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const normalized = zml.nn.rmsNorm(input, .d, self.eps);
-        return normalized.mul(self.weights.convert(hz_type).withTags(.{ .d }).broad(input.shape()));
+        return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
     }
 };
 
@@ -653,7 +651,7 @@ pub const TimbreEncoder = struct {
     }
 
     pub fn forward(self: TimbreEncoder, timbre_latent: zml.Tensor) zml.Tensor {
-        var timbre_emb = self.embed_timbre.convert(hz_type).forward(timbre_latent);
+        var timbre_emb = self.embed_timbre.forward(timbre_latent);
         // the special tokens appending is commented in the python reference
         // inputs_embeds = torch.cat([self.special_token.expand(inputs_embeds.shape[0], 1, -1), inputs_embeds], dim=1)
         // the encoder layers assume sequence length to be tagged with s
@@ -729,7 +727,7 @@ pub const AudioCodeEncoder = struct {
     pub fn forward(self: AudioCodeEncoder, audio_codes_int: zml.Tensor) zml.Tensor {
         const x = self.dequantizer.dequantize(audio_codes_int);
         // Expected input: [t_code, d]
-        var hidden_states = self.embed_tokens.convert(hz_type).forward(x.withTags(.{ .t_code, .d }));
+        var hidden_states = self.embed_tokens.forward(x.withTags(.{ .t_code, .d }));
         hidden_states = hidden_states.rename(.{ .t_code = .t });
         hidden_states = hidden_states.rename(.{ .d_out = .d });
         // expand each token into pool_window_size patches
@@ -739,7 +737,7 @@ pub const AudioCodeEncoder = struct {
         // add special tokens
         // TODO: in python these seem to be initialized at random instead of from the tensor file
         // special_tokens = nn.Parameter(torch.randn(1, config.pool_window_size, config.hidden_size) * 0.02)
-        const special_tokens = self.special_tokens.squeeze(.b).convert(hz_type).broad(hidden_states.shape());
+        const special_tokens = self.special_tokens.squeeze(.b).broad(hidden_states.shape());
         hidden_states = hidden_states.add(special_tokens);
         // encoder layers process tensors of dim [b, s, d]
         hidden_states = hidden_states.rename(.{ .t = .b, .p = .s });
@@ -752,7 +750,7 @@ pub const AudioCodeEncoder = struct {
         }
         hidden_states = self.norm.forward(hidden_states);
         // project from encoder hidden dim into input audio channel dimension (d -> a, 2048 -> 64)
-        hidden_states = self.proj_out.convert(hz_type).forward(hidden_states);
+        hidden_states = self.proj_out.forward(hidden_states);
         // rename back to [t, p, d], with d now being the audio dimension
         hidden_states = hidden_states.rename(.{ .d_out = .a, .s = .p, .b = .t });
         
@@ -832,20 +830,21 @@ pub const AudioCodeDequantizer = struct {
         const summed = fsq_features;
         
         // out projection 
-        return self.project_out.convert(hz_type).forward(summed).rename(.{ .d_out = .d });
+        return self.project_out.forward(summed).rename(.{ .d_out = .d });
     }
     
     fn normalizeQuantLevel(x: zml.Tensor, level: u32) zml.Tensor {
-        const xf = x.convert(hz_type);
+        // NUM
+        const xf = x;
         const denom = @as(f32, @floatFromInt(@max(level - 1, 1)));
-        return xf.div(zml.Tensor.scalar(denom, hz_type).broad(xf.shape())).scale(2.0).addConstant(-1.0);
+        return xf.div(zml.Tensor.scalar(denom, .bf16).broad(xf.shape())).scale(2.0).addConstant(-1.0);
     }
 
 };
 
 
 pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
-     const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, hz_type);
+     const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16);
      const window = zml.DataType.constant(.i32, window_len);
      
     // tokens at pos i attend to tokens at pos [i - w, i + w] ie pos j st. |i - j| <= w
@@ -857,7 +856,7 @@ pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
 
     const zeros = zml.Tensor.zeroes(attn_shape);
     const minf = zml.floats.Float32.minus_inf;
-    const minus_inf = zml.Tensor.constant(zml.DataType.constant(hz_type, zml.floats.Float32.toF32(minf))).broad(attn_shape);
+    const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, zml.floats.Float32.toF32(minf))).broad(attn_shape);
 
     return zml.Tensor.select(is_in_window, zeros, minus_inf);
 }

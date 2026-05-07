@@ -8,8 +8,6 @@ const main = @import("main.zig");
 
 const dialects = @import("mlir/dialects");
 
-const hz_type = main.hz_type;
-
 
 pub const AceDit_handler = struct {
     model: AceDit,
@@ -40,9 +38,9 @@ pub const AceDit_handler = struct {
         const params: Params = .{
             .t_curr = .init(.{}, .f32),
             .t_next = .init(.{}, .f32),
-            .x = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, hz_type),
-            .context_latents = .init(.{ .t = 25 * target_duration, .a = 2 * config.timbre_hidden_dim }, hz_type),
-            .y = .init(.{ .s = conditions_len, .d = config.hidden_size }, hz_type),
+            .x = .init(.{ .t = 25 * target_duration, .a = config.timbre_hidden_dim }, .bf16),
+            .context_latents = .init(.{ .t = 25 * target_duration, .a = 2 * config.timbre_hidden_dim }, .bf16),
+            .y = .init(.{ .s = conditions_len, .d = config.hidden_size }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);
@@ -281,7 +279,7 @@ pub const AceDit = struct {
     // conditioned on the encoder hidden states y. we also return it's transposate, as it's relatively small, because on the last
     // step of diffusion, the final latent must be in transposed shape for the decoder.
     pub fn forward(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        var y = self.condition_embedder.convert(hz_type).forward(y_enc.withTags(.{ .s, .d }));
+        var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
         y = y.rename(.{ .d_out = .d });
         
         // embed timesteps
@@ -326,7 +324,7 @@ pub const AceDit = struct {
     }
     
     pub fn forwardNoIter(self: AceDit, t_curr: zml.Tensor, t_next: zml.Tensor, x: zml.Tensor, context_latents: zml.Tensor, y_enc: zml.Tensor) zml.Tensor {
-        var y = self.condition_embedder.convert(hz_type).forward(y_enc.withTags(.{ .s, .d }));
+        var y = self.condition_embedder.forward(y_enc.withTags(.{ .s, .d }));
         y = y.rename(.{ .d_out = .d });
         
         // embed timesteps
@@ -389,7 +387,7 @@ pub const AceDit = struct {
     
     pub fn scale_shift(self: AceDit, hidden_states: zml.Tensor, temb: zml.Tensor) zml.Tensor {
         // scale shift parameters for adaptive output normalization
-        const out_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(temb.insertAxes(0, .{ .n2 }).broad(self.scale_shift_table.squeeze(.n1).shape()));
+        const out_mod = self.scale_shift_table.squeeze(.n1).add(temb.insertAxes(0, .{ .n2 }).broad(self.scale_shift_table.squeeze(.n1).shape()));
         const shift = out_mod.choose1d(.n2, 0);
         const scale = out_mod.choose1d(.n2, 1);
 
@@ -623,25 +621,26 @@ pub const TimestepEmbedding = struct {
 
     pub fn forward(self: TimestepEmbedding, timestep: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
         const t256 = timeEmbedding(timestep);
-        var temb = self.linear_1.convert(hz_type).forward(t256);
+        var temb = self.linear_1.forward(t256);
         temb = temb.silu();
-        temb = self.linear_2.convert(hz_type).forward(temb).rename(.{ .d_emb_out = .d_emb });
+        temb = self.linear_2.forward(temb).rename(.{ .d_emb_out = .d_emb });
 
-        var timestep_proj = temb.silu().dot(self.time_proj_weight.convert(hz_type), .d_emb);
-        timestep_proj = timestep_proj.add(self.time_proj_bias.convert(hz_type).broad(timestep_proj.shape()));
+        var timestep_proj = temb.silu().dot(self.time_proj_weight, .d_emb);
+        timestep_proj = timestep_proj.add(self.time_proj_bias.broad(timestep_proj.shape()));
         timestep_proj = timestep_proj.splitAxis(.d_emb_6, .{ .n2 = 6, .d_emb = self.config.hidden_size });
 
         return .{ temb, timestep_proj };
     }
     
     fn timeEmbedding(timestep: zml.Tensor) zml.Tensor {
+        // NUM
         // timestep is a scalar tensor containing the value of the current timestep in [0, 1]
         const d: u32 = 128;
         const s: f32 = - 0.07195578415; // -ln(10000) / d
-        const idx = zml.Tensor.arange(.{ .end = d }, hz_type).withTags(.{ .d128 });
-        const scale = zml.Tensor.scalar(s, hz_type);
+        const idx = zml.Tensor.arange(.{ .end = d }, .bf16).withTags(.{ .d128 });
+        const scale = zml.Tensor.scalar(s, .bf16);
         const freqs = idx.mul(scale.broad(idx.shape())).exp(); // [exp(-s*i)] i = 0..d128-1
-        const t = timestep.mul(zml.Tensor.scalar(1000.0, hz_type)).appendAxes(.{ .d128 });
+        const t = timestep.mul(zml.Tensor.scalar(1000.0, .bf16)).appendAxes(.{ .d128 });
         const args = freqs.mul(t.broad(freqs.shape()));
         const cos = args.cos();
         const sin = args.sin();
@@ -689,7 +688,7 @@ pub const DiTLayer = struct {
         const delta_self = self.self_attn.forward(x_norm, attn_mask);
         
         // gated residual connection: x = x + attn_output * gate
-        const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
+        const layer_mod = self.scale_shift_table.squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
         const gate_msa = layer_mod.choose1d(.n2, 2);
         // gated residual connection: x = x + attn_output * gate
         const x1 = x.add(delta_self.mul(gate_msa.broad(delta_self.shape())));
@@ -705,7 +704,7 @@ pub const DiTLayer = struct {
     
     pub fn scaleShift(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
         // extract scale-shift parameters for adaptive layer norm from timestep embeddings
-        const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
+        const layer_mod = self.scale_shift_table.squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
         const shift_msa = layer_mod.choose1d(.n2, 0);
         const scale_msa = layer_mod.choose1d(.n2, 1);
         
@@ -719,7 +718,7 @@ pub const DiTLayer = struct {
     }
   
     pub fn mlpAln(self: DiTLayer, x: zml.Tensor, time_emb: zml.Tensor) zml.Tensor {
-        const layer_mod = self.scale_shift_table.convert(hz_type).squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
+        const layer_mod = self.scale_shift_table.squeeze(.n1).add(time_emb.rename(.{ .d_emb = .d }));
         const c_gate_msa = layer_mod.choose1d(.n2, 5);
         const c_scale_msa = layer_mod.choose1d(.n2, 4);
         const c_shift_msa = layer_mod.choose1d(.n2, 3);
@@ -772,9 +771,9 @@ pub const SelfAttention = struct {
 
     // full bidirectional self attention, no kv caching
     pub fn forward(self: SelfAttention, x: zml.Tensor, attn_mask: ?zml.Tensor) zml.Tensor {
-        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
-        var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
+        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = .auto });
         
         const pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, .u32).withTags(.{ .s });
 
@@ -790,7 +789,7 @@ pub const SelfAttention = struct {
         
         const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        const delta = self.o_proj.forward(attn_output);
         return delta.rename(.{ .d_out = .d });
     }
     
@@ -842,9 +841,9 @@ pub const CrossAttention = struct {
     // - keys/values on the y space (encoder_hidden_states in embedded conditions space)
     // - cross attention doesn't use rope
     pub fn forward(self: CrossAttention, x: zml.Tensor, y: zml.Tensor) zml.Tensor {
-        var k = self.k_proj.convert(hz_type).forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
-        var v = self.v_proj.convert(hz_type).forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
-        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
+        var k = self.k_proj.forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        var v = self.v_proj.forward(y).splitAxis(-1, .{ .h = self.num_kv_heads, .hd = self.head_dim });
+        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = self.head_dim });
         
         k = self.k_norm.forward(k.rename(.{ .hd = .d })).rename(.{ .d = .hd });
         q = self.q_norm.forward(q.rename(.{ .hd = .d })).rename(.{ .d = .hd });
@@ -856,7 +855,7 @@ pub const CrossAttention = struct {
         const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = null, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
 
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        const delta = self.o_proj.forward(attn_output);
         return delta.rename(.{ .d_out = .d });
     }
 
@@ -884,10 +883,10 @@ pub const PatchIn = struct {
         var x_bct = x.insertAxes(0, .{ .b }).withTags(.{ .b, .t, .d });
         x_bct = x_bct.transpose(.{ .b, .d, .t });
         var out = x_bct.conv1d(
-            self.weight.convert(hz_type),
+            self.weight,
             .{ .window_strides = self.config.patch_size },
         );
-        out = out.add(self.bias.convert(hz_type).broad(out.shape()));
+        out = out.add(self.bias.broad(out.shape()));
         return out.transpose(.{ .b, .t, .d }).squeeze(.b);
     }
 };
@@ -927,11 +926,11 @@ pub const PatchOut = struct {
         const expanded = x_bct.pad(0, paddings);
         // flip weights instead of using window_reversal = true because using
         // window_reversal = true is very slow
-        const flipped_weight = self.weight.convert(hz_type).reverse(.{ .patch });
+        const flipped_weight = self.weight.reverse(.{ .patch });
         // transpose convolution : reverse kernel output dimensions
         var out = expanded.conv1d(flipped_weight, .{  .kernel_output_feature_dimension = 1, .kernel_input_feature_dimension = 0 });
         out = out.squeeze(.b).transpose(.{ .t, .d });
-        out = out.add(self.bias.convert(hz_type).broad(out.shape()));
+        out = out.add(self.bias.broad(out.shape()));
         return out;
     }
 };
@@ -956,10 +955,10 @@ pub const MlpLayer = struct {
     }
 
     pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
-        const up_projection = input.dot(self.up_proj.convert(hz_type), .d);
-        const gate_projection = input.dot(self.gate_proj.convert(hz_type), .d);
+        const up_projection = input.dot(self.up_proj, .d);
+        const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.silu().mul(up_projection);
-        return activation.dot(self.down_proj.convert(hz_type), .d_out);
+        return activation.dot(self.down_proj, .d_out);
     }
 };
 
@@ -980,13 +979,13 @@ pub const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const normalized = zml.nn.rmsNorm(input, .d, self.eps);
-        return normalized.mul(self.weights.convert(hz_type).withTags(.{ .d }).broad(input.shape()));
+        return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
     }
 };
 
 
 pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
-     const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, hz_type);
+     const attn_shape = zml.Shape.init(.{ .q = seq_len, .k = seq_len }, .bf16);
      const window = zml.DataType.constant(.i32, window_len);
      
     // tokens at pos i attend to tokens at pos [i - w, i + w] ie pos j st. |i - j| <= w
@@ -998,7 +997,7 @@ pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
 
     const zeros = zml.Tensor.zeroes(attn_shape);
     const minf = zml.floats.Float32.minus_inf;
-    const minus_inf = zml.Tensor.constant(zml.DataType.constant(hz_type, zml.floats.Float32.toF32(minf))).broad(attn_shape);
+    const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, zml.floats.Float32.toF32(minf))).broad(attn_shape);
 
     return zml.Tensor.select(is_in_window, zeros, minus_inf);
 }

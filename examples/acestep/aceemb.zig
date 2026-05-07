@@ -7,8 +7,6 @@ const stdx = zml.stdx;
 const main = @import("main.zig");
 const inference = @import("inference.zig");
 
-const hz_type = main.hz_type;
-
 
 pub const AceEmb_handler = struct {
     model: AceEmb,
@@ -213,7 +211,7 @@ pub const AceEmb = struct {
     }
 
     pub fn forward(self: AceEmb, tokens: zml.Tensor) zml.Tensor {
-        var output = self.embed_tokens.convert(hz_type).forward(tokens).withPartialTags(.{ .d });
+        var output = self.embed_tokens.forward(tokens).withPartialTags(.{ .d });
         for (self.layers) |layer| {
             output = layer.forward(output);
         }
@@ -222,7 +220,7 @@ pub const AceEmb = struct {
     }
     
     pub fn embed(self: AceEmb, tokens: zml.Tensor) zml.Tensor {
-        const output = self.embed_tokens.convert(hz_type).forward(tokens).withPartialTags(.{ .d });
+        const output = self.embed_tokens.forward(tokens).withPartialTags(.{ .d });
         return output;
     }
 };
@@ -305,9 +303,9 @@ const AttLayer = struct {
     pub fn forward(self: AttLayer, x: zml.Tensor) zml.Tensor {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
-        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
 
         const pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, .u32).withTags(.{ .s });
 
@@ -324,7 +322,7 @@ const AttLayer = struct {
         const attn_mask = zml.nn.causalAttnMask(.{ .q = x.dim(.s), .k = x.dim(.s) }, q.dtype(), null);
         const attn_heads_output = zml.nn.sdpa(q, k, v, .{ .attn_mask = attn_mask, .allow_cudnn = true });
         const attn_output = attn_heads_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.convert(hz_type).forward(attn_output);
+        const delta = self.o_proj.forward(attn_output);
         return delta.rename(.{ .d_out = .d });
     }
 };
@@ -349,10 +347,10 @@ const MlpLayer = struct {
     }
 
     pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
-        const up_projection = input.dot(self.up_proj.convert(hz_type), .d);
-        const gate_projection = input.dot(self.gate_proj.convert(hz_type), .d);
+        const up_projection = input.dot(self.up_proj, .d);
+        const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.silu().mul(up_projection);
-        const output = activation.dot(self.down_proj.convert(hz_type), .d_out);
+        const output = activation.dot(self.down_proj, .d_out);
         return output;
     }
 };
@@ -374,6 +372,6 @@ const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const normalized = zml.nn.rmsNorm(input, .d, self.eps);
-        return normalized.mul(self.weights.convert(hz_type).withTags(.{ .d }).broad(input.shape()));
+        return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
     }
 };

@@ -6,8 +6,6 @@ const stdx = zml.stdx;
 
 const main = @import("main.zig");
 
-const hz_type = main.hz_type;
-
 
 pub const AceVae_handler = struct {
     model: AceVae,
@@ -494,8 +492,8 @@ pub const Snake1D = struct {
     }
 
     pub fn forward(self: Snake1D, x: zml.Tensor) zml.Tensor {
-        const a = self.alpha.squeeze(.b).squeeze(.t).convert(hz_type);
-        const b = self.beta.squeeze(.b).squeeze(.t).convert(hz_type);
+        const a = self.alpha.squeeze(.b).squeeze(.t);
+        const b = self.beta.squeeze(.b).squeeze(.t);
         const alpha = a.exp().broad(x.shape());
         const beta = b.exp().addConstant(1e-9).broad(x.shape());
         const sinusoid = alpha.mul(x).sin().powByConst(2);
@@ -545,8 +543,8 @@ pub const Conv1D = struct {
     pub fn forward(self: Conv1D, x0: zml.Tensor) zml.Tensor {
         var x = x0.insertAxes(0, . { .b }).withTags(.{ .b, .c, .t });
 
-        const weight_v = self.weight_v.convert(hz_type);
-        const weight_g = self.weight_g.convert(hz_type);
+        const weight_v = self.weight_v;
+        const weight_g = self.weight_g;
         const v_norm = weight_v.powByConst(2).sum(.c_in).sum(.w).sqrt();
         const weight = weight_v.mul(weight_g.div(v_norm.broad(weight_g.shape())).broad(weight_v.shape()));
         
@@ -559,7 +557,7 @@ pub const Conv1D = struct {
             },
         );
         if (self.bias) |bias| {
-            y = y.add(bias.convert(hz_type).broad(y.shape()));
+            y = y.add(bias.broad(y.shape()));
         }
         return y.squeeze(.b);
     }
@@ -604,8 +602,8 @@ pub const ConvTranspose1D = struct {
     pub fn forward(self: ConvTranspose1D, x0: zml.Tensor) zml.Tensor {
         var x = x0.insertAxes(0, . { .b }).withTags(.{ .b, .c, .t });
     
-        const weight_v = self.weight_v.convert(hz_type);
-        const weight_g = self.weight_g.convert(hz_type);
+        const weight_v = self.weight_v;
+        const weight_g = self.weight_g;
         const v_norm = weight_v.powByConst(2).sum(.c_out).sum(.w).sqrt();
         const weight = weight_v.mul(weight_g.div(v_norm.broad(weight_g.shape())).broad(weight_v.shape()));
             
@@ -623,7 +621,7 @@ pub const ConvTranspose1D = struct {
         );
     
         if (self.bias) |bias| {
-            y = y.add(bias.convert(hz_type).broad(y.shape()));
+            y = y.add(bias.broad(y.shape()));
         }
     
         return y.squeeze(.b);

@@ -7,7 +7,6 @@ const stdx = zml.stdx;
 const main = @import("main.zig");
 const inference = @import("inference.zig");
 
-const hz_type = main.hz_type;
 const cfg: f32 = 2.0;
 
 const dialects = @import("mlir/dialects");
@@ -444,7 +443,7 @@ pub const AceLlm = struct {
     pub fn computeLogits(self: AceLlm, tokens: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         var updated_kv_cache = kv_cache;
         // embbed input tokens
-        var output = self.embed_tokens.convert(hz_type).forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
+        var output = self.embed_tokens.forward(tokens.withPartialTags(.{ .s })).withPartialTags(.{ .d });
         // forward pass on the neural network layers
         for (self.layers, 0..) |layer, i| {
             output, updated_kv_cache = layer.forward(output, token_index, updated_kv_cache.atLayer(i));
@@ -452,7 +451,7 @@ pub const AceLlm = struct {
         output = self.norm.forward(output);
         // compute logits for the output tokens
         // TODO: we could improve the perf by only computing the logits for the relevant voc slice
-        const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).convert(hz_type).dot(output, .d);
+        const logits = self.embed_tokens.weight.withTags(.{ .voc, .d }).dot(output, .d);
         return .{ logits.convert(.f32), updated_kv_cache.reuseBuffer(kv_cache) };
     }
     
@@ -500,7 +499,7 @@ const EmbedWrapper = struct {
 
     pub fn forward(wrapper: EmbedWrapper, input: zml.Tensor) zml.Tensor {
         const tagged_input = input.withTags(.{ .b, .s }).squeeze(.b);
-        const output = wrapper.embed.convert(hz_type).forward(tagged_input).withPartialTags(.{.d});
+        const output = wrapper.embed.forward(tagged_input).withPartialTags(.{.d});
         return output.insertAxes(0, .{ .b });
     }
 };
@@ -597,9 +596,9 @@ const AttLayer = struct {
     pub fn forward(self: AttLayer, x: zml.Tensor, token_index: zml.Tensor, kv_cache: KvCache) struct { zml.Tensor, KvCache } {
         const num_kv_heads = if (self.num_kv_heads > 0) self.num_kv_heads else self.num_heads;
 
-        var q = self.q_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
-        var k = self.k_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
-        var v = self.v_proj.convert(hz_type).forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var q = self.q_proj.forward(x).splitAxis(-1, .{ .h = self.num_heads, .hd = .auto });
+        var k = self.k_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
+        var v = self.v_proj.forward(x).splitAxis(-1, .{ .h = num_kv_heads, .hd = .auto });
 
         var pos_index = zml.Tensor.arange(.{ .end = x.dim(.s) }, token_index.dtype()).withTags(.{ .s });
         pos_index = pos_index.add(token_index.broad(pos_index.shape()));
@@ -622,7 +621,7 @@ const AttLayer = struct {
         const attn_output = zml.attention.attention.attention(q, k, v, token_index, .vanilla, .vanilla);
 
         const attn = attn_output.merge(.{ .d = .{ .h, .hd } }).rename(.{ .q = .s });
-        const delta = self.o_proj.convert(hz_type).forward(attn).rename(.{ .d_out = .d });
+        const delta = self.o_proj.forward(attn).rename(.{ .d_out = .d });
         return .{ delta, new_kv_cache };
     }
 };
@@ -663,10 +662,10 @@ const MlpLayer = struct {
     }
 
     pub fn forward(self: MlpLayer, input: zml.Tensor) zml.Tensor {
-        const up_projection = input.dot(self.up_proj.convert(hz_type), .d);
-        const gate_projection = input.dot(self.gate_proj.convert(hz_type), .d);
+        const up_projection = input.dot(self.up_proj, .d);
+        const gate_projection = input.dot(self.gate_proj, .d);
         const activation = gate_projection.silu().mul(up_projection);
-        const output = activation.dot(self.down_proj.convert(hz_type), .d_out);
+        const output = activation.dot(self.down_proj, .d_out);
         return output;
     }
 };
@@ -686,7 +685,7 @@ const TensorWrapper = struct {
 
     pub fn forward(wrapper: TensorWrapper, input: zml.Tensor) zml.Tensor {
         const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = tagged_input.dot(wrapper.tensor.convert(hz_type), .d);
+        const output = tagged_input.dot(wrapper.tensor, .d);
         return output.insertAxes(0, .{ .b });
     }
 };
@@ -696,7 +695,7 @@ const TensorWrapperI = struct {
 
     pub fn forward(wrapper: TensorWrapperI, input: zml.Tensor) zml.Tensor {
         const tagged_input = input.withTags(.{ .b, .s, .d_out }).squeeze(.b);
-        const output = tagged_input.dot(wrapper.tensor.convert(hz_type), .d_out);
+        const output = tagged_input.dot(wrapper.tensor, .d_out);
         return output.insertAxes(0, .{ .b });
     }
 };
@@ -718,7 +717,7 @@ const RmsNorm = struct {
 
     pub fn forward(self: RmsNorm, input: zml.Tensor) zml.Tensor {
         const normalized = zml.nn.rmsNorm(input, .d, self.eps);
-        return normalized.mul(self.weights.convert(hz_type).withTags(.{ .d }).broad(input.shape()));
+        return normalized.mul(self.weights.withTags(.{ .d }).broad(input.shape()));
     }
 };
 
@@ -747,7 +746,7 @@ pub const ProjWrapper = struct {
 
     pub fn forward(wrapper: ProjWrapper, input: zml.Tensor) zml.Tensor {
         const tagged_input = input.withTags(.{ .b, .s, .d }).squeeze(.b);
-        const output = wrapper.proj.convert(hz_type).forward(tagged_input);
+        const output = wrapper.proj.forward(tagged_input);
         return output.insertAxes(0, .{ .b });
     }
 };
