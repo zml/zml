@@ -195,10 +195,20 @@ const Args = struct {
     ;
 };
 
-// TODO: état des lieux de la perf
+// 4090
+// bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --local-files --instru --llm-size=0
+// info: Module    init  compile     load  prefill   decode    total
+// info:   llm    0.36s   12.75s    1.60s    0.07s    0.75s   15.53s
+// info:   cfg    0.00s   26.74s    0.00s    0.03s    2.06s   28.84s
+// info:   emb    0.01s    2.52s    1.42s    0.01s    0.00s    4.16s
+// info:   enc    0.01s    5.18s    1.35s    0.17s    0.00s    6.72s
+// info:   dit    0.00s    4.78s    1.39s    0.37s    0.38s    6.55s
+// info:   vae    0.01s   11.11s    1.18s    0.22s    0.00s   12.53s
+// info:   wav                                                 1.58s
+// info: total                                                75.97s
+
+// TODO: découper modèles en sous modèles pour compiler en parallèle plus vite
 // TODO: compiler prefill/compiler decode/load model all in parallel
-// TODO: comprendre et remettre du sharding là où il faut comme il faut
-// TODO: test and choose best attention backend for performance
 
 pub fn main(init: std.process.Init) !void {
     var http_client: std.http.Client = .{ .allocator = init.gpa, .io = init.io };
@@ -436,13 +446,7 @@ pub fn exportDecodedAudioAsWav(io: std.Io, decoded_audio: inference.DecodedAudio
 }
 
 
-pub fn printSafetensors(allocator: std.mem.Allocator, io: std.Io, fpath: []const u8) !void {
-    // Read model shapes.
-    var registry: zml.safetensors.TensorRegistry = try .fromPath(allocator, io, fpath);
-    defer registry.deinit();
-    std.log.info("Found {d} activations in {s}", .{ registry.tensors.count(), fpath });
-
-    // Print model shapes
+pub fn printSafetensors(registry: zml.safetensors.TensorRegistry) !void {
     const tensors: zml.safetensors.Tensors = registry.tensors;
     const data = tensors.entries;
     for (0..data.len) |i| {
