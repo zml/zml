@@ -15,17 +15,6 @@ pub fn registerDialect(registry: *mlir.DialectRegistry) void {
     dialectHandle().insertDialect(registry);
 }
 
-fn allocNativeAttrs(allocator: std.mem.Allocator, attrs: anytype) ![]c.MlirAttribute {
-    const native_attrs = try allocator.alloc(c.MlirAttribute, attrs.len);
-    errdefer allocator.free(native_attrs);
-
-    for (attrs, 0..) |attr, i| {
-        native_attrs[i] = attr.ptr();
-    }
-
-    return native_attrs;
-}
-
 pub const MeshAxisAttribute = opaque {
     const M = mlir.Methods(MeshAxisAttribute, c.MlirAttribute);
 
@@ -61,21 +50,19 @@ pub const MeshAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub const GetArgs = struct {
+    pub const Mesh = struct {
         axes: []const *const MeshAxisAttribute,
         device_ids: []const i64 = &.{},
     };
 
-    pub fn get(allocator: std.mem.Allocator, ctx: *mlir.Context, args: GetArgs) !*const MeshAttribute {
-        const native_axes = try allocNativeAttrs(allocator, args.axes);
-        defer allocator.free(native_axes);
-
+    pub fn get(ctx: *mlir.Context, mesh: Mesh) *const MeshAttribute {
+        const axes: []const c.struct_MlirAttribute = @ptrCast(mesh.axes);
         return @ptrCast(c.sdyMeshAttrGet(
             ctx.ptr(),
-            @intCast(native_axes.len),
-            native_axes.ptr,
-            @intCast(args.device_ids.len),
-            args.device_ids.ptr,
+            @intCast(axes.len),
+            axes.ptr,
+            @intCast(mesh.device_ids.len),
+            mesh.device_ids.ptr,
         ).ptr);
     }
 
@@ -133,16 +120,6 @@ pub const Axis = union(enum) {
             .size = size,
         } };
     }
-
-    fn toAttr(self: Axis, ctx: *mlir.Context) *const AxisRefAttribute {
-        return switch (self) {
-            .named => |name| AxisRefAttribute.get(ctx, .{ .name = name }),
-            .sub_axis => |sub_axis| AxisRefAttribute.get(ctx, .{
-                .name = sub_axis.name,
-                .sub_axis_info = SubAxisInfoAttribute.get(ctx, sub_axis.pre_size, sub_axis.size),
-            }),
-        };
-    }
 };
 
 pub const AxisRefAttribute = opaque {
@@ -154,18 +131,19 @@ pub const AxisRefAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub const GetArgs = struct {
-        name: []const u8,
-        sub_axis_info: ?*const SubAxisInfoAttribute = null,
-    };
-
-    pub fn get(ctx: *mlir.Context, args: GetArgs) *const AxisRefAttribute {
-        const sub_axis_info = if (args.sub_axis_info) |info| info.ptr() else c.MlirAttribute{ .ptr = null };
-        return @ptrCast(c.sdyAxisRefAttrGet(
-            ctx.ptr(),
-            mlir.stringRef(args.name),
-            sub_axis_info,
-        ).ptr);
+    pub fn get(ctx: *mlir.Context, axis: Axis) *const AxisRefAttribute {
+        return switch (axis) {
+            .named => |axis_name| @ptrCast(c.sdyAxisRefAttrGet(
+                ctx.ptr(),
+                mlir.stringRef(axis_name),
+                c.MlirAttribute{ .ptr = null },
+            ).ptr),
+            .sub_axis => |sub_axis| @ptrCast(c.sdyAxisRefAttrGet(
+                ctx.ptr(),
+                mlir.stringRef(sub_axis.name),
+                SubAxisInfoAttribute.get(ctx, sub_axis.pre_size, sub_axis.size).ptr(),
+            ).ptr),
+        };
     }
 
     pub fn asAttr(self: *const AxisRefAttribute) *const mlir.Attribute {
@@ -207,20 +185,16 @@ pub const DimensionShardingAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub const GetArgs = struct {
+    pub fn get(ctx: *mlir.Context, args: struct {
         axes: []const *const AxisRefAttribute = &.{},
         is_closed: bool = true,
         priority: ?i64 = null,
-    };
-
-    pub fn get(allocator: std.mem.Allocator, ctx: *mlir.Context, args: GetArgs) !*const DimensionShardingAttribute {
-        const native_axes = try allocNativeAttrs(allocator, args.axes);
-        defer allocator.free(native_axes);
-
+    }) *const DimensionShardingAttribute {
+        const axes: []const c.struct_MlirAttribute = @ptrCast(args.axes);
         return @ptrCast(c.sdyDimensionShardingAttrGet(
             ctx.ptr(),
-            @intCast(native_axes.len),
-            native_axes.ptr,
+            @intCast(axes.len),
+            axes.ptr,
             args.is_closed,
             args.priority orelse -1,
         ).ptr);
@@ -248,6 +222,13 @@ pub const DimensionShardingAttribute = opaque {
     }
 };
 
+pub const Sharding = struct {
+    mesh: []const u8,
+    dimensions: []const Dimension,
+    replicated_axes: []const Axis = &.{},
+    unreduced_axes: []const Axis = &.{},
+};
+
 pub const TensorShardingAttribute = opaque {
     const M = mlir.Methods(TensorShardingAttribute, c.MlirAttribute);
 
@@ -257,43 +238,30 @@ pub const TensorShardingAttribute = opaque {
     pub const format = M.format(c.mlirAttributePrint);
     pub const isA = M.isA;
 
-    pub const GetArgs = struct {
+    pub fn get(
+        ctx: *mlir.Context,
         mesh_or_ref: *const mlir.Attribute,
         dim_shardings: []const *const DimensionShardingAttribute,
-        replicated_axes: []const *const AxisRefAttribute = &.{},
-        unreduced_axes: []const *const AxisRefAttribute = &.{},
-    };
-
-    pub const InitArgs = struct {
-        mesh: []const u8,
-        dimensions: []const Dimension,
-        replicated_axes: []const Axis = &.{},
-        unreduced_axes: []const Axis = &.{},
-    };
-
-    pub fn get(allocator: std.mem.Allocator, ctx: *mlir.Context, args: GetArgs) !*const TensorShardingAttribute {
-        const native_dim_shardings = try allocNativeAttrs(allocator, args.dim_shardings);
-        defer allocator.free(native_dim_shardings);
-
-        const native_replicated_axes = try allocNativeAttrs(allocator, args.replicated_axes);
-        defer allocator.free(native_replicated_axes);
-
-        const native_unreduced_axes = try allocNativeAttrs(allocator, args.unreduced_axes);
-        defer allocator.free(native_unreduced_axes);
-
+        replicated_axes: []const *const AxisRefAttribute,
+        unreduced_axes: []const *const AxisRefAttribute,
+    ) *const TensorShardingAttribute {
+        comptime std.debug.assert(@sizeOf(c.struct_MlirAttribute) == @sizeOf(*const mlir.Attribute));
+        const dimensions: []const c.struct_MlirAttribute = @ptrCast(dim_shardings);
+        const replicated: []const c.struct_MlirAttribute = @ptrCast(replicated_axes);
+        const unreduced: []const c.struct_MlirAttribute = @ptrCast(unreduced_axes);
         return @ptrCast(c.sdyTensorShardingAttrGet(
             ctx.ptr(),
-            args.mesh_or_ref.ptr(),
-            @intCast(native_dim_shardings.len),
-            native_dim_shardings.ptr,
-            @intCast(native_replicated_axes.len),
-            native_replicated_axes.ptr,
-            @intCast(native_unreduced_axes.len),
-            native_unreduced_axes.ptr,
+            mesh_or_ref.ptr(),
+            @intCast(dimensions.len),
+            dimensions.ptr,
+            @intCast(replicated.len),
+            replicated.ptr,
+            @intCast(unreduced.len),
+            unreduced.ptr,
         ).ptr);
     }
 
-    pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context, args: InitArgs) !*const TensorShardingAttribute {
+    pub fn init(allocator: std.mem.Allocator, ctx: *mlir.Context, args: Sharding) !*const TensorShardingAttribute {
         const dim_shardings = try allocator.alloc(*const DimensionShardingAttribute, args.dimensions.len);
         defer allocator.free(dim_shardings);
 
@@ -302,10 +270,10 @@ pub const TensorShardingAttribute = opaque {
             defer allocator.free(axis_attrs);
 
             for (dim_spec.axes, 0..) |axis, j| {
-                axis_attrs[j] = axis.toAttr(ctx);
+                axis_attrs[j] = AxisRefAttribute.get(ctx, axis);
             }
 
-            dim_shardings[i] = try DimensionShardingAttribute.get(allocator, ctx, .{
+            dim_shardings[i] = DimensionShardingAttribute.get(ctx, .{
                 .axes = axis_attrs,
                 .is_closed = dim_spec.is_closed,
                 .priority = dim_spec.priority,
@@ -315,21 +283,16 @@ pub const TensorShardingAttribute = opaque {
         const replicated_axes = try allocator.alloc(*const AxisRefAttribute, args.replicated_axes.len);
         defer allocator.free(replicated_axes);
         for (args.replicated_axes, 0..) |axis, i| {
-            replicated_axes[i] = axis.toAttr(ctx);
+            replicated_axes[i] = AxisRefAttribute.get(ctx, axis);
         }
 
         const unreduced_axes = try allocator.alloc(*const AxisRefAttribute, args.unreduced_axes.len);
         defer allocator.free(unreduced_axes);
         for (args.unreduced_axes, 0..) |axis, i| {
-            unreduced_axes[i] = axis.toAttr(ctx);
+            unreduced_axes[i] = AxisRefAttribute.get(ctx, axis);
         }
 
-        return get(allocator, ctx, .{
-            .mesh_or_ref = mlir.flatSymbolRefAttribute(ctx, args.mesh),
-            .dim_shardings = dim_shardings,
-            .replicated_axes = replicated_axes,
-            .unreduced_axes = unreduced_axes,
-        });
+        return get(ctx, mlir.flatSymbolRefAttribute(ctx, args.mesh), dim_shardings, replicated_axes, unreduced_axes);
     }
 
     pub fn asAttr(self: *const TensorShardingAttribute) *const mlir.Attribute {
@@ -365,9 +328,7 @@ pub const TensorShardingAttribute = opaque {
     }
 };
 
-test {
-    const Sharding = TensorShardingAttribute;
-
+test TensorShardingAttribute {
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
     registry.registerDialect("sdy");
@@ -382,7 +343,7 @@ test {
 
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "folded_mesh",
             .dimensions = &.{.replicated},
             .replicated_axes = &.{ .link_x, .link_y },
@@ -392,12 +353,9 @@ test {
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "suggested_mesh",
-            .dimensions = &.{
-                .closed(&.{.link_z}),
-                .closed(&.{.link_x}),
-            },
+            .dimensions = &.{ .closed(&.{.link_z}), .closed(&.{.link_x}) },
             .replicated_axes = &.{.link_y},
         });
         try sharding.asAttr().format(&w.writer);
@@ -405,34 +363,27 @@ test {
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "fold_mesh",
-            .dimensions = &.{
-                .closed(&.{.link_x}),
-                .replicated,
-            },
+            .dimensions = &.{ .closed(&.{.link_x}), .replicated },
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@fold_mesh, [{\"link_x\"}, {}]>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "folded_mesh",
-            .dimensions = &.{
-                .closed(&.{ .link_x, .link_y }),
-            },
+            .dimensions = &.{.closed(&.{ .link_x, .link_y })},
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@folded_mesh, [{\"link_x\", \"link_y\"}]>", w.written());
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "strategy_fold",
-            .dimensions = &.{
-                .closed(&.{.link_x}),
-            },
+            .dimensions = &.{.closed(&.{.link_x})},
             .replicated_axes = &.{.link_y},
         });
         try sharding.asAttr().format(&w.writer);
@@ -440,12 +391,9 @@ test {
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "mix_mesh",
-            .dimensions = &.{
-                Dimension.open(&.{}),
-                .replicated,
-            },
+            .dimensions = &.{ .open(&.{}), .replicated },
             .replicated_axes = &.{ .link_x, .link_y },
         });
         try sharding.asAttr().format(&w.writer);
@@ -453,13 +401,9 @@ test {
     }
     {
         defer w.clearRetainingCapacity();
-        const sharding = try Sharding.init(std.testing.allocator, ctx, .{
+        const sharding = try TensorShardingAttribute.init(std.testing.allocator, ctx, .{
             .mesh = "3d_mesh",
-            .dimensions = &.{
-                .closed(&.{.link_x}),
-                .closed(&.{.link_y}),
-                .closed(&.{.link_z}),
-            },
+            .dimensions = &.{ .closed(&.{.link_x}), .closed(&.{.link_y}), .closed(&.{.link_z}) },
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@\"3d_mesh\", [{\"link_x\"}, {\"link_y\"}, {\"link_z\"}]>", w.written());
