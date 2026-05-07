@@ -15,7 +15,7 @@ def main():
         model_kwargs={
             "torch_dtype": torch.float16,
             "device_map": "auto",
-            "low_cpu_mem_usage"=True,
+            "low_cpu_mem_usage": True,
         },
     )
 
