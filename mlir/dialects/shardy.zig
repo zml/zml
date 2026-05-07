@@ -118,9 +118,9 @@ pub const Axis = union(enum) {
         size: i64,
     },
 
-    pub const link_x = .{ .named = "link_x" };
-    pub const link_y = .{ .named = "link_y" };
-    pub const link_z = .{ .named = "link_z" };
+    pub const link_x: Axis = .{ .named = "link_x" };
+    pub const link_y: Axis = .{ .named = "link_y" };
+    pub const link_z: Axis = .{ .named = "link_z" };
 
     pub fn named_(name: []const u8) Axis {
         return .{ .named = name };
@@ -370,7 +370,7 @@ test {
 
     const registry: *mlir.DialectRegistry = try .init();
     defer registry.deinit();
-    registerDialect(registry);
+    registry.registerDialect("sdy");
     mlir.registerFuncExtensions(registry);
 
     var ctx: *mlir.Context = try .init(.{ .registry = registry, .threading = false });
@@ -385,7 +385,7 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "folded_mesh",
             .dimensions = &.{.replicated},
-            .replicated_axes = &.{ Axis.named_("link_x"), Axis.named_("link_y") },
+            .replicated_axes = &.{ .link_x, .link_y },
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@folded_mesh, [{}], replicated={\"link_x\", \"link_y\"}>", w.written());
@@ -395,10 +395,10 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "suggested_mesh",
             .dimensions = &.{
-                Dimension.closed(&.{Axis.named_("link_z")}),
-                Dimension.closed(&.{Axis.named_("link_x")}),
+                .closed(&.{.link_z}),
+                .closed(&.{.link_x}),
             },
-            .replicated_axes = &.{Axis.named_("link_y")},
+            .replicated_axes = &.{.link_y},
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@suggested_mesh, [{\"link_z\"}, {\"link_x\"}], replicated={\"link_y\"}>", w.written());
@@ -408,7 +408,7 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "fold_mesh",
             .dimensions = &.{
-                Dimension.closed(&.{Axis.named_("link_x")}),
+                .closed(&.{.link_x}),
                 .replicated,
             },
         });
@@ -420,7 +420,7 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "folded_mesh",
             .dimensions = &.{
-                Dimension.closed(&.{ Axis.named_("link_x"), Axis.named_("link_y") }),
+                .closed(&.{ .link_x, .link_y }),
             },
         });
         try sharding.asAttr().format(&w.writer);
@@ -431,9 +431,9 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "strategy_fold",
             .dimensions = &.{
-                Dimension.closed(&.{Axis.named_("link_x")}),
+                .closed(&.{.link_x}),
             },
-            .replicated_axes = &.{Axis.named_("link_y")},
+            .replicated_axes = &.{.link_y},
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@strategy_fold, [{\"link_x\"}], replicated={\"link_y\"}>", w.written());
@@ -446,7 +446,7 @@ test {
                 Dimension.open(&.{}),
                 .replicated,
             },
-            .replicated_axes = &.{ Axis.named_("link_x"), Axis.named_("link_y") },
+            .replicated_axes = &.{ .link_x, .link_y },
         });
         try sharding.asAttr().format(&w.writer);
         try std.testing.expectEqualSlices(u8, "#sdy.sharding<@mix_mesh, [{?}, {}], replicated={\"link_x\", \"link_y\"}>", w.written());
@@ -456,9 +456,9 @@ test {
         const sharding = try Sharding.init(std.testing.allocator, ctx, .{
             .mesh = "3d_mesh",
             .dimensions = &.{
-                Dimension.closed(&.{Axis.named_("link_x")}),
-                Dimension.closed(&.{Axis.named_("link_y")}),
-                Dimension.closed(&.{Axis.named_("link_z")}),
+                .closed(&.{.link_x}),
+                .closed(&.{.link_y}),
+                .closed(&.{.link_z}),
             },
         });
         try sharding.asAttr().format(&w.writer);
