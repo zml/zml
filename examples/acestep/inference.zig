@@ -667,12 +667,12 @@ pub fn prepareLatents(zml_handler: *main.Zml_handler, aceenc: *aceenc_.AceEnc_ha
     
     std.log.info("ENC generate timbre reference of length {d} and {d} from silence latent", .{ t_timbre, t_25hz });
     
-    const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre }, .f32));
+    const timbre_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_timbre }, .bf16));
     defer timbre_slice.free(allocator);
     var timbre_buffer: zml.Buffer = try .fromSlice(io, platform, timbre_slice, sharding);
     defer timbre_buffer.deinit();
     
-    const src_audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .f32));
+    const src_audio_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
     defer src_audio_slice.free(allocator);
     var src_audio_buffer: zml.Buffer = try .fromSlice(io, platform, src_audio_slice, sharding);
     defer src_audio_buffer.deinit();
@@ -764,7 +764,7 @@ pub fn runDiffusion(zml_handler: *main.Zml_handler, acedit: *acedit_.AceDit_hand
     defer context_latents_buffer.deinit();
     defer encoded_conditions_buffer.deinit();
     
-    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .f32));
+    const result_slice: zml.Slice = try .alloc(allocator, zml.Shape.init(.{ .a = audio_dim, .t = t_25hz }, .bf16));
     var result_buffer: zml.Buffer = try .fromSlice(io, platform, result_slice, sharding);
     defer result_buffer.deinit();
     

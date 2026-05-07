@@ -42,8 +42,8 @@ pub const AceVae_handler = struct {
             t_48khz *= ratio;
         }
         const params: Params = .{
-            .latents = .init(.{ .c = config.decoder_input_channels, .t = t_25hz }, .f32),
-            .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .f32),
+            .latents = .init(.{ .c = config.decoder_input_channels, .t = t_25hz }, .bf16),
+            .audio = .init(.{ .c = config.audio_channels, .t = t_48khz }, .bf16),
         };
         
         const shardings: main.Shardings = try .init(zml_handler.platform);

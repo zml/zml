@@ -834,10 +834,9 @@ pub const AudioCodeDequantizer = struct {
     }
     
     fn normalizeQuantLevel(x: zml.Tensor, level: u32) zml.Tensor {
-        // NUM
         const xf = x;
         const denom = @as(f32, @floatFromInt(@max(level - 1, 1)));
-        return xf.div(zml.Tensor.scalar(denom, .bf16).broad(xf.shape())).scale(2.0).addConstant(-1.0);
+        return xf.div(zml.Tensor.scalar(denom, .f32).broad(xf.shape())).scale(2.0).addConstant(-1.0);
     }
 
 };

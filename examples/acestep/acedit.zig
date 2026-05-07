@@ -620,27 +620,25 @@ pub const TimestepEmbedding = struct {
     }
 
     pub fn forward(self: TimestepEmbedding, timestep: zml.Tensor) struct { zml.Tensor, zml.Tensor } {
-        const t256 = timeEmbedding(timestep);
+        const t256 = timeEmbedding(timestep).convert(.bf16);
         var temb = self.linear_1.forward(t256);
         temb = temb.silu();
         temb = self.linear_2.forward(temb).rename(.{ .d_emb_out = .d_emb });
-
         var timestep_proj = temb.silu().dot(self.time_proj_weight, .d_emb);
         timestep_proj = timestep_proj.add(self.time_proj_bias.broad(timestep_proj.shape()));
         timestep_proj = timestep_proj.splitAxis(.d_emb_6, .{ .n2 = 6, .d_emb = self.config.hidden_size });
-
         return .{ temb, timestep_proj };
     }
     
     fn timeEmbedding(timestep: zml.Tensor) zml.Tensor {
-        // NUM
+        // NUM : this step if performed in f32 precision, then converted to bf16
         // timestep is a scalar tensor containing the value of the current timestep in [0, 1]
         const d: u32 = 128;
         const s: f32 = - 0.07195578415; // -ln(10000) / d
-        const idx = zml.Tensor.arange(.{ .end = d }, .bf16).withTags(.{ .d128 });
-        const scale = zml.Tensor.scalar(s, .bf16);
+        const idx = zml.Tensor.arange(.{ .end = d }, .f32).withTags(.{ .d128 });
+        const scale = zml.Tensor.scalar(s, .f32);
         const freqs = idx.mul(scale.broad(idx.shape())).exp(); // [exp(-s*i)] i = 0..d128-1
-        const t = timestep.mul(zml.Tensor.scalar(1000.0, .bf16)).appendAxes(.{ .d128 });
+        const t = timestep.mul(zml.Tensor.scalar(1000.0, .f32)).appendAxes(.{ .d128 });
         const args = freqs.mul(t.broad(freqs.shape()));
         const cos = args.cos();
         const sin = args.sin();
