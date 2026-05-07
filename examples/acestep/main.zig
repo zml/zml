@@ -193,7 +193,7 @@ const Args = struct {
     ;
 };
 
-// 117s 184 585
+// 
 // 4090 (104s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
 // info: Module    init  compile     load  prefill   decode    total

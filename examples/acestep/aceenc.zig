@@ -332,7 +332,7 @@ pub const AceEnc = struct {
         // dim [s_lyric, d_emb_cond]
         const encoded_lyric = self.lyric_encoder.forward(lyric_emb);
         // dim [1, d_emb_cond]
-        const encoded_timbre = self.timbre_encoder.forward(timbre_latent);
+        const encoded_timbre = self.timbre_encoder.forward(timbre_latent.convert(.bf16));
         
         // dim [s_text + s_lyric + 1, d_emb_cond]
         const encoded_conditions = zml.Tensor.concatenate(&.{ encoded_lyric, encoded_timbre, encoded_text }, .s);

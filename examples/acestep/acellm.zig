@@ -291,6 +291,62 @@ pub const AceCfg_handler = struct {
         std.log.info("5Hz compiled models", .{});
         return .{ prefill_exe, decode_exe };
     }
+
+    pub fn compileCfgModelParallel(zml_handler: *main.Zml_handler, model: AceLlm, params: CfgParams) !struct { zml.Exe, zml.Exe } {
+        const shardings_arr = params.shardings.all();
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+        std.log.info("5Hz compile CFG prefill/decode", .{});
+    
+        var prefill_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: CfgParams, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(
+                    zml_handler_.allocator,
+                    zml_handler_.io,
+                    model_,
+                    .forwardCfg,
+                    .{
+                        params_.prefill_cond_tokens, params_.prefill_uncond_tokens,
+                        params_.cond_token_index, params_.uncond_token_index,
+                        params_.cond_next_token_index, params_.uncond_next_token_index,
+                        params_.cond_kv_cache, params_.uncond_kv_cache,
+                        params_.rng,
+                    },
+                    opts_,
+                );
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var prefill_future_awaited = false;
+        errdefer if (!prefill_future_awaited) if (prefill_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var decode_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: CfgParams, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(
+                    zml_handler_.allocator,
+                    zml_handler_.io,
+                    model_,
+                    .forwardCfg,
+                    .{
+                        params_.decode_cond_tokens, params_.decode_uncond_tokens,
+                        params_.cond_token_index, params_.uncond_token_index,
+                        params_.cond_next_token_index, params_.uncond_next_token_index,
+                        params_.cond_kv_cache, params_.uncond_kv_cache,
+                        params_.rng,
+                    },
+                    opts_,
+                );
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var decode_future_awaited = false;
+        errdefer if (!decode_future_awaited) if (decode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+    
+        const prefill_exe = try prefill_future.await(zml_handler.io);
+        prefill_future_awaited = true;
+    
+        const decode_exe = try decode_future.await(zml_handler.io);
+        decode_future_awaited = true;
+    
+        return .{ prefill_exe, decode_exe };
+    }
     
     pub fn unloadBuffers(self: *AceCfg_handler) void {
         KvCache.deinitBuffer(&self.cond_kv_cache_buffers);

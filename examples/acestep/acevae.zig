@@ -50,12 +50,8 @@ pub const AceVae_handler = struct {
 
         zml_handler.toc(&zml_handler.timers.vae.init);
         zml_handler.tic(&zml_handler.timers.vae.compile);
-        
-        std.log.info("VAE compile decoder", .{});
-        const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
-        std.log.info("VAE compile encoder", .{});
-        const encode_exe = try compileEncodeModel(zml_handler, model, params, shardings);
-        std.log.info("VAE compiled models", .{});
+
+        const encode_exe, const decode_exe = try compileModels(zml_handler, model, params, shardings);
         
         zml_handler.toc(&zml_handler.timers.vae.compile);
         zml_handler.tic(&zml_handler.timers.vae.load);
@@ -77,32 +73,52 @@ pub const AceVae_handler = struct {
         };
     }
 
-    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings.all(),
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .decode,
-            .{ parameters.latents },
-            opts,
-        );
+    pub fn compileModels(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
+        std.log.info("VAE compile encoder", .{});
+        const encode_exe = try compileEncodeModel(zml_handler, model, params, shardings);
+        std.log.info("VAE compile decoder", .{});
+        const decode_exe = try compileDecodeModel(zml_handler, model, params, shardings);
+        std.log.info("VAE compiled models", .{});
+        return .{ encode_exe, decode_exe };
+    }
+
+    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
+        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .encode, .{ parameters.audio }, opts);
     }
     
-    pub fn compileEncodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings.all(),
-        };
-        return zml_handler.platform.compile(
-            zml_handler.allocator,
-            zml_handler.io,
-            model,
-            .encode,
-            .{ parameters.audio },
-            opts,
-        );
+    pub fn compileDecodeModel(zml_handler: *main.Zml_handler, model: AceVae, parameters: Params, shardings: main.Shardings) !zml.Exe {
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
+        return zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .decode, .{ parameters.latents }, opts);
+    }
+
+    pub fn compileModelParallel(zml_handler: *main.Zml_handler, model: AceVae, params: Params, shardings: main.Shardings) !struct { zml.Exe, zml.Exe } {
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings.all() };
+        std.log.info("VAE compile encode/decode", .{});
+    
+        var encode_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceVae, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .encode, .{ params_.audio }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var encode_future_awaited = false;
+        errdefer if (!encode_future_awaited) if (encode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var dencode_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceVae, params_: Params, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .dencode, .{ params_.latents }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var dencode_future_awaited = false;
+        errdefer if (!dencode_future_awaited) if (dencode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+    
+        const encode_exe = try encode_future.await(zml_handler.io);
+        encode_future_awaited = true;
+    
+        const decode_exe = try dencode_future.await(zml_handler.io);
+        dencode_future_awaited = true;
+    
+        return .{ encode_exe, decode_exe };
     }
     
     pub fn unloadBuffers(self: *AceVae_handler, allocator: std.mem.Allocator) void {
