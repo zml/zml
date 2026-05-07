@@ -32,7 +32,7 @@ fn mlirRegistry(io: std.Io) *mlir.DialectRegistry {
         mlir.registerPasses("Transforms");
 
         const mlir_registry = mlir.DialectRegistry.init() catch unreachable;
-        inline for (.{ "func", "stablehlo", "sdy", "arith", "scf", "math", "tt", "affine", "memref", "vector", "tpu", "cf" }) |d| {
+        inline for (.{ "func", "stablehlo", "sdy", "arith", "scf", "math", "tt", "affine", "memref", "vector", "tpu", "cf", "llvm" }) |d| {
             mlir.DialectHandle.fromString(d).insertDialect(mlir_registry);
         }
         mlir.registerFuncExtensions(mlir_registry);
