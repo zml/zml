@@ -317,7 +317,7 @@ pub const AceDit = struct {
         const v = hidden_states.slice1d(.t, .{ .start = 0, .end = x.dim(.t) });
         
         // update noised latent x with one step of flow matching
-        const dt = t_next.sub(t_curr).broad(x.shape());
+        const dt = t_next.sub(t_curr).broad(x.shape()).convert(.bf16);
         const x_next = x.add(v.mul(dt));
      
         return .{ x_next, x_next.withTags(.{ .t, .a }).transpose(.{ .a, .t }) };
