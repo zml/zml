@@ -995,8 +995,8 @@ pub fn createBidirectionalWindowMask(seq_len: i64, window_len: u32) zml.Tensor {
 
     const zeros = zml.Tensor.zeroes(attn_shape);
     const minf = zml.floats.Float32.toF32(zml.floats.Float32.minus_inf);
-    const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, zml.floats.BFloat16.fromF32(minf))).broad(attn_shape);
-
+    const minus_inf = zml.Tensor.constant(zml.DataType.constant(.bf16, minf)).broad(attn_shape);
+        
     return zml.Tensor.select(is_in_window, zeros, minus_inf);
 }
 
