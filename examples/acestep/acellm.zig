@@ -107,9 +107,7 @@ pub const AceLlm_handler = struct {
     
     pub fn compileModel(zml_handler: *main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
         const shardings_arr = params.shardings.all();
-        const opts: zml.module.CompilationOptions = .{
-            .shardings = &shardings_arr,
-        };
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
         // Compile the model twice, one for prefill, one for generation.
         std.log.info("5Hz compile prefill", .{});
         const prefill_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
@@ -118,6 +116,38 @@ pub const AceLlm_handler = struct {
         const decode_exe = try zml_handler.platform.compile(zml_handler.allocator, zml_handler.io, model, .forward,
            .{ params.decode_tokens, params.token_index, params.pred_index, params.kv_cache, params.rng }, opts);
         std.log.info("5Hz compiled models", .{});
+        return .{ prefill_exe, decode_exe };
+    }
+
+    pub fn compileModelParallel(zml_handler: *main.Zml_handler, model: AceLlm, params: LlmParams) !struct { zml.Exe, zml.Exe } {
+        const shardings_arr = params.shardings.all();
+        const opts: zml.module.CompilationOptions = .{ .shardings = &shardings_arr };
+        std.log.info("5Hz compile prefill/decode", .{});
+    
+        var prefill_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.prefill_tokens, params_.token_index, params_.pred_index, params_.kv_cache, params_.rng }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var prefill_future_awaited = false;
+        errdefer if (!prefill_future_awaited) if (prefill_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+
+        var decode_future = try zml_handler.io.concurrent(struct {
+            fn call(zml_handler_: *main.Zml_handler, model_: AceLlm, params_: LlmParams, opts_: zml.module.CompilationOptions) !zml.Exe {
+                return zml_handler_.platform.compile(zml_handler_.allocator, zml_handler_.io, model_, .forward, .{
+                        params_.decode_tokens, params_.token_index, params_.pred_index, params_.kv_cache, params_.rng }, opts_);
+            }
+        }.call, .{ zml_handler, model, params, opts });
+        var decode_future_awaited = false;
+        errdefer if (!decode_future_awaited) if (decode_future.cancel(zml_handler.io)) |v| v.deinit() else |_| {};
+    
+        const prefill_exe = try prefill_future.await(zml_handler.io);
+        prefill_future_awaited = true;
+    
+        const decode_exe = try decode_future.await(zml_handler.io);
+        decode_future_awaited = true;
+    
         return .{ prefill_exe, decode_exe };
     }
 

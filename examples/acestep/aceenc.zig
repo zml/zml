@@ -827,14 +827,14 @@ pub const AudioCodeDequantizer = struct {
         // - only q = 0 is present
         // - scale = 1 for every FSQ dimension
         // - summation over quantizers is therefore identity
-        const summed = fsq_features;
+        const summed = fsq_features.convert(.bf16); // NUM
         
         // out projection 
         return self.project_out.forward(summed).rename(.{ .d_out = .d });
     }
     
     fn normalizeQuantLevel(x: zml.Tensor, level: u32) zml.Tensor {
-        const xf = x;
+        const xf = x.convert(.f32);
         const denom = @as(f32, @floatFromInt(@max(level - 1, 1)));
         return xf.div(zml.Tensor.scalar(denom, .f32).broad(xf.shape())).scale(2.0).addConstant(-1.0);
     }

@@ -192,6 +192,7 @@ const Args = struct {
         \\
     ;
 };
+
 // 117s 184 585
 // 4090 (104s audio)
 // bazel run --config=release acestep --//platforms:cuda=true -- --prompt='a chill piano melody' --llm-size=1 --instru --local-files
@@ -253,7 +254,7 @@ pub fn runFullPipeline(zml_handler: *Zml_handler) !void {
     
     var acellm = try acellm_.AceLlm_handler.init(zml_handler);
     defer acellm.deinit(zml_handler.allocator);
-
+    
     const inspi_tokens = try inference.tokenizeInspirationPrompt(zml_handler, acellm.tokenizer);
     defer zml_handler.allocator.free(inspi_tokens);
     
